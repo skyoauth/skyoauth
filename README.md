@@ -36,8 +36,10 @@ npm run coverage   # fails if any coverage metric is below 85%
 npm run build
 ```
 
-TypeScript is pinned to 6.0.x because `typescript-eslint` does not yet support
-7.x.
+Linting uses [oxlint](https://oxc.rs) with type-aware rules
+(`oxlint-tsgolint`), configured in `clients/typescript/.oxlintrc.json`. It is
+used instead of ESLint because `typescript-eslint` does not yet support
+TypeScript 7.
 
 ## CI
 

@@ -18,8 +18,9 @@ describe("SkyOAuthClient", () => {
         status: "ok",
         version: "0.1.0",
       });
-      expect((fetch.mock.calls[0]?.[0] as URL).href).toBe(
-        "https://example.com/api/healthz",
+      expect(fetch).toHaveBeenCalledWith(
+        new URL("https://example.com/api/healthz"),
+        {},
       );
     },
   );
@@ -54,7 +55,7 @@ describe("SkyOAuthClient", () => {
 
     const error: unknown = await client.health().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(SkyOAuthError);
-    expect((error as SkyOAuthError).status).toBe(503);
+    expect(error).toMatchObject({ status: 503 });
   });
 
   it.each([
