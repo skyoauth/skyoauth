@@ -47,6 +47,7 @@ export class SkyOAuthClient {
       await response.body?.cancel().catch(() => undefined);
       throw new SkyOAuthError(response.status, response.statusText);
     }
-    return (await response.json()) as Health;
+    const health: Health = await response.json();
+    return health;
   }
 }
