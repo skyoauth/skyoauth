@@ -43,6 +43,8 @@ export class SkyOAuthClient {
       signal ? { signal } : {},
     );
     if (!response.ok) {
+      // Release the connection; an unread body keeps it occupied.
+      await response.body?.cancel().catch(() => undefined);
       throw new SkyOAuthError(response.status, response.statusText);
     }
     return (await response.json()) as Health;

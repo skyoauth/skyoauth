@@ -57,6 +57,30 @@ describe("SkyOAuthClient", () => {
     expect((error as SkyOAuthError).status).toBe(503);
   });
 
+  it.each([
+    ["resolves", () => Promise.resolve()],
+    ["rejects", () => Promise.reject(new Error("cancel failed"))],
+  ])(
+    "cancels the error body before throwing when cancel %s",
+    async (_name, cancel) => {
+      const cancelSpy = vi.fn(cancel);
+      const body = new ReadableStream<Uint8Array>({ cancel: cancelSpy });
+      const fetch = vi.fn<typeof globalThis.fetch>(() =>
+        Promise.resolve(new Response(body, { status: 503 })),
+      );
+      const client = new SkyOAuthClient({
+        baseUrl: "https://example.com",
+        fetch,
+      });
+
+      await expect(client.health()).rejects.toMatchObject({
+        name: "SkyOAuthError",
+        status: 503,
+      });
+      expect(cancelSpy).toHaveBeenCalledOnce();
+    },
+  );
+
   it("defaults to the global fetch", async () => {
     const spy = vi
       .spyOn(globalThis, "fetch")
