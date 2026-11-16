@@ -1,0 +1,256 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Decides whether this change needs the build and test jobs. When every
+  # changed file is documentation (scripts/ci/docs-only.sh), they are
+  # skipped. Manual dispatches, and pushes whose previous tip cannot be
+  # fetched, run everything.
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A pull request is checked out as its merge commit, whose first
+          # parent is the tip of the base branch.
+          fetch-depth: 2
+
+      - name: Classify
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base=
+          case "$EVENT" in
+            pull_request) base=HEAD^1 ;;
+            push) if git fetch -q --depth=1 origin "$BEFORE"; then base=$BEFORE; fi ;;
+          esac
+          if [ -n "$base" ] && sh scripts/ci/docs-only.sh "$base" HEAD; then
+            echo "Only documentation changed; skipping the build and test jobs."
+            echo code=false >> "$GITHUB_OUTPUT"
+          else
+            echo code=true >> "$GITHUB_OUTPUT"
+          fi
+
+  rust:
+    name: Rust format, lint, test, docs (${{ matrix.arch }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add --toolchain stable rustfmt clippy
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --workspace --all-targets --all-features
+
+      - name: Run doctests
+        run: cargo test --locked --workspace --doc --all-features
+
+      - name: Build docs
+        run: cargo doc --locked --workspace --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Line coverage gate. The threshold lives in the `coverage` alias in
+  # .cargo/config.toml. Reports are uploaded even when the gate fails.
+  rust-coverage:
+    name: Rust coverage
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add --toolchain stable llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Check coverage threshold
+        run: |
+          mkdir -p target/coverage
+          cargo coverage --locked --lcov --output-path target/coverage/lcov.info
+
+      - name: Coverage summary
+        if: always()
+        run: cargo llvm-cov report --summary-only --ignore-filename-regex 'main\.rs' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rust-coverage
+          path: target/coverage/
+          if-no-files-found: warn
+
+  msrv:
+    name: Minimum supported Rust version
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the `rust-version` toolchain from Cargo.toml
+        run: |
+          msrv="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)"
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+
+      - name: Check
+        run: cargo check --locked --workspace --all-targets --all-features
+
+  typescript:
+    name: TypeScript lint, test, build (Node ${{ matrix.node }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+
+      - run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # Coverage gate. The thresholds live in vitest.config.ts. Reports are
+  # uploaded even when the gate fails.
+  typescript-coverage:
+    name: TypeScript coverage
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+
+      - run: npm ci
+
+      - name: Check coverage thresholds
+        run: npm run coverage
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f coverage/coverage-summary.json ]; then
+            jq -r '.total | "| Lines | Statements | Functions | Branches |\n|---|---|---|---|\n| \(.lines.pct)% | \(.statements.pct)% | \(.functions.pct)% | \(.branches.pct)% |"' \
+              coverage/coverage-summary.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: typescript-coverage
+          path: clients/typescript/coverage/
+          if-no-files-found: warn
+
+  # The one check to require in branch protection. A job skipped for a
+  # docs-only change satisfies a required check, except a matrix job: it
+  # reports under its unexpanded name, so requiring one would never
+  # arrive. This job passes when every job it needs passed or was skipped.
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs:
+      - changes
+      - rust
+      - rust-coverage
+      - msrv
+      - typescript
+      - typescript-coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *) exit 1 ;;
+            esac
+          done

@@ -1,0 +1,6 @@
+[alias]
+# Line coverage gate: `cargo coverage` fails if line coverage is below the
+# threshold. CI runs the same alias. Requires `cargo-llvm-cov` and the
+# `llvm-tools-preview` rustup component. `main.rs` is the process entry
+# point (socket binding and signal handling) and is excluded.
+coverage = "llvm-cov --workspace --all-features --ignore-filename-regex main\\.rs --fail-under-lines 85"
