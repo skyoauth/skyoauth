@@ -26,7 +26,13 @@ export class SkyOAuthClient {
   readonly #fetch: typeof globalThis.fetch;
 
   constructor(options: ClientOptions) {
-    this.#baseUrl = new URL(options.baseUrl);
+    const baseUrl = new URL(options.baseUrl);
+    // A base path without a trailing slash would otherwise lose its last
+    // segment when endpoint paths are resolved against it.
+    if (!baseUrl.pathname.endsWith("/")) {
+      baseUrl.pathname += "/";
+    }
+    this.#baseUrl = baseUrl;
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 

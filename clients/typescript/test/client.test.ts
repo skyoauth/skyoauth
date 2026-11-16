@@ -6,23 +6,23 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
 }
 
 describe("SkyOAuthClient", () => {
-  it("fetches health from the base URL, keeping a path prefix", async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>(() =>
-      Promise.resolve(jsonResponse({ status: "ok", version: "0.1.0" })),
-    );
-    const client = new SkyOAuthClient({
-      baseUrl: "https://example.com/api/",
-      fetch,
-    });
+  it.each(["https://example.com/api/", "https://example.com/api"])(
+    "fetches health from %s, keeping the path prefix",
+    async (baseUrl) => {
+      const fetch = vi.fn<typeof globalThis.fetch>(() =>
+        Promise.resolve(jsonResponse({ status: "ok", version: "0.1.0" })),
+      );
+      const client = new SkyOAuthClient({ baseUrl, fetch });
 
-    await expect(client.health()).resolves.toEqual({
-      status: "ok",
-      version: "0.1.0",
-    });
-    expect((fetch.mock.calls[0]?.[0] as URL).href).toBe(
-      "https://example.com/api/healthz",
-    );
-  });
+      await expect(client.health()).resolves.toEqual({
+        status: "ok",
+        version: "0.1.0",
+      });
+      expect((fetch.mock.calls[0]?.[0] as URL).href).toBe(
+        "https://example.com/api/healthz",
+      );
+    },
+  );
 
   it("forwards the abort signal", async () => {
     const fetch = vi.fn<typeof globalThis.fetch>(() =>
