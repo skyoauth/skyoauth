@@ -144,7 +144,7 @@ Require one generated source ID, generated grant ID and exact registered audienc
 
 Direct RFC exchange accepts subject_token/type=jwt and a direct grant, returns workload sub, rejects actor_token. The private service-delegation grant accepts actor_token/type=jwt and a delegated grant, returns configured service sub plus workload act, rejects subject_token. No requested subject/target/mode override or dynamic verifier selection.
 
-Omitted scope uses only explicit nonempty allowed default_scopes; otherwise invalid_scope. Explicit empty/excessive scopes, unsupported resource/requested token types, duplicates or profile mismatch deny. Return access_token, Bearer token_type, expires_in, explicit scope and issued_token_type=access_token, no-store, never WIF refresh. The design's exported example uses **post-create generated IDs**, not operator-chosen global identifiers.
+Omitted scope uses only explicit nonempty allowed default_scopes; otherwise invalid_scope. Explicit empty/excessive scopes, unsupported resource/requested token types, duplicates or profile mismatch deny. Return access_token, Bearer token_type, expires_in, explicit scope and `issued_token_type=urn:ietf:params:oauth:token-type:access_token`, no-store, never WIF refresh. The design's exported example uses **post-create generated IDs**, not operator-chosen global identifiers.
 
 ## 3. Data model and persistence (M1)
 
