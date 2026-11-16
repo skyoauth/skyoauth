@@ -1,6 +1,6 @@
 # SkyOAuth — Detailed design, implementation tasks, and release gates
 
-> **Status:** proposed implementation plan, 2026-11-15; revised for both PR #1 review rounds and PR #2 bootstrap. Paired with [skyoauth-design.md](skyoauth-design.md). All authentication checkboxes remain **unchecked**. The landed service/health-client scaffold is not an implementation of these security contracts.
+> **Status:** proposed implementation plan, 2026-11-15; revised through PR #1 round three; repository bootstrap retained. Paired with [skyoauth-design.md](skyoauth-design.md). All authentication checkboxes remain **unchecked**. The landed service/health-client scaffold is not an implementation of these security contracts.
 
 ## 0. Delivery principles
 
@@ -10,21 +10,24 @@ The central outcomes are **secretless GitHub Actions → protected cluster API W
 - Envoy is the application data plane. SkyOAuth processes bounded authentication/authorization metadata, never uploads, downloads or stream bodies.
 - The stable issuer and signing keys are independent of the human IdP. Explicit private credential profiles separate WIF access, human CLI access and gateway-only human-session assertions.
 - Instance-owned resource-server/audience authority bounds tenant policy; services a workload acts as are not resource servers or policy-check callers. Canonical backend tenant mapping and RBAC remain mandatory.
-- Direct workload and attributed service delegation are required. True impersonation is conditional; unsupported records are accepted only disabled and require fresh explicit approval if support later ships.
+- Direct workload and attributed service delegation are required. Active true impersonation is outside v0.1; retain only disabled/reapproval-required policy preservation. Its future activation subsystem is deferred, not a release prerequisite.
 - Standard RFC 8693 direct exchange and the single-proof service-delegation extension are distinguished. No incomplete RFC 9068 `at+jwt` claim: use the private types defined in design §6.
 - The only active-provider write path is an authorized switch transaction with epoch invalidation. PATCH/import/config reload cannot bypass it.
 - Operator/recovery/reviewer keys are privileged operational trust anchors, not static application API secrets. No SPIRE/sidecar/cloud STS dependency is required.
 - Both client profiles have package, real-runtime and migration tests. Share wire/error fixtures, not browser-unsafe token APIs or server dependencies.
+- Required M4 native refresh keeps access credentials at a maximum 300-second lifetime without a browser prompt on every renewal; persistent refresh remains a sensitive revocable credential, not a static API key.
 - Every security requirement needs positive and negative tests; the tasks below do not claim they are already implemented.
+
+**Workload-first sequence:** specify the complete logical model in M0, implement workload authority in **M1a**, and let **M2 WIF proceed after M1a**. Human authority/state is **M1b**, parallelizable with M2 but required before M3. Do not require human tables, browser/native UX or a tenant-management UI before the first usable workload slice. Full v0.1 still requires both libraries, human migration and all applicable security gates; explicit tenant/audience isolation is retained. Design §1.3 records this scope decision.
 
 ## 1. Repository layout and bootstrap integration
 
 PR #2 landed in `main` at `8f81df23efd4c4a0cfe522f711a9ca56f294aab1`, establishing `service/`, a Cargo workspace, `clients/typescript/` and CI. Retain these homes. This documentation-only PR neither moves bootstrap files nor creates empty crates. The following is a target layout; most auth modules are planned, not present.
 
 ~~~text
-Cargo.toml            Existing service member; add clients/rust and cli with code
+Cargo.toml            Existing service member; add operator, clients/rust, cli with code
 service/              Existing skyoauth-service (Axum/Tokio)
-  src/main.rs         Process/listener wiring; M1 local operator subcommands
+  src/main.rs         Process/listener wiring; M1a local bootstrap/recovery verifier
   src/lib.rs          Service composition
   src/core/           Proposed tenant/principal/profile/decision types
   src/config/         Validated configuration and reloads
@@ -48,6 +51,7 @@ clients/
   rust/               Planned Cargo skyoauth-client reusable library
     src/              WIF M2; native PKCE M4; redacted credential/provider APIs
     tests/            Protocol, feature, transport and native-platform tests
+operator/             M1a skyoauth-operator workstation client; Linux/macOS/Windows
 cli/                  Planned skyoauth-cli: thin application-library consumer M4
 crates/               Only extracted shared/server libraries when justified
 examples/
@@ -70,7 +74,7 @@ docs/
 
 Server boundaries can start as modules; extract crates for dependency isolation or reuse, not directory count. The Rust client must not depend on the service, PostgreSQL, operator internals or frontend assets. npm `@skyoauth/client` and Cargo `skyoauth-client` are intentionally parallel names in different registries; Rust imports `skyoauth_client`. Documentation and examples identify the language/distribution explicitly.
 
-M1 operator commands live in **the existing service binary's operator/bootstrap subcommands**, including local recovery and private operator-client plumbing. They do not depend on the M4 native OAuth library/CLI. `cli/` is the later application/reference consumer, not the bootstrap prerequisite. T13 supplies a complete operator write path before M2.
+**M1a `operator/` publishes `skyoauth-operator`**, a portable Linux/macOS/Windows private mTLS client and recovery-challenge signer, independent of server/database dependencies and M4 native OAuth. The existing service binary retains only the deployment-local bootstrap/recovery verifier. Recovery challenges cross an independently authorized local channel; private operator/recovery keys remain on the workstation or hardware signer, never copied into a pod. M1b adds human provisioning/transition commands to the same operator client. `cli/` remains the separate M4 application/reference consumer.
 
 The existing TypeScript arbitrary-baseUrl `health()` helper is unauthenticated bootstrap functionality. It cannot define the future authenticated session transport's origin boundary. Keep `@skyoauth/client` as the browser core rather than creating competing `packages/browser` or `crates/client` homes. Future TypeScript workload helpers are additional nonbrowser surfaces.
 
@@ -80,22 +84,23 @@ Implementation PRs adding/moving modules, workspace members or package entry poi
 
 ### T00 — Protocol and threat model (M0)
 
-- [ ] **T00.1** Freeze public issuer/token/JWKS, app-origin auth routes, issuer-native callback/confirmation, private gateway/live-check and operator boundaries.
+- [ ] **T00.1** Freeze public issuer/token/JWKS, app-origin auth, issuer-native callback/confirmation/refresh/revoke, private gateway/live-check/session-recheck/internal-key and operator boundaries.
 - [ ] **T00.2** Version errors, 401/403/429/503 semantics, no-store/caching, cancellation, bounded retries and non-enumerating failures. No automatic replay of mutations.
 - [ ] **T00.3** Specify exact protected types `skyoauth-access+jwt` and `skyoauth-internal+jwt`, signed profile/version and required WIF/human_cli/human_session claim sets. Reject profile/ingress mismatches and ID tokens; do not advertise RFC 9068 compliance or emit `at+jwt`.
 - [ ] **T00.4** Freeze issuer, audience registry, principal kinds, scopes, claim namespace and constraints. WIF uses explicit allowlists; human profiles explicitly use backend_rbac mode with mandatory canonical tenant/scope/RBAC checks. Persist action-to-scope/profile/resource rules; unknown modes/fields/versions deny.
-- [ ] **T00.5** Specify original bearer versus gateway-only signed human assertion transport, request binding, header sanitization, no dual credentials and separate cookie Origin/CSRF semantics.
-- [ ] **T00.6** Specify session idle/absolute expiry, conservative coalescing, flow-cookie/code lifetimes, auth epochs, JWT/skew caps, logout, rotation and restore quarantine.
+- [ ] **T00.5** Specify original bearer versus gateway-only signed human evidence, ApplicationRoute audience selection and exact request-binding v1 tuple (design §4.1). Forbid rewrites/rematching on human_session routes; define independent internal-key trust and bounded stream continuation, not expired-assertion acceptance.
+- [ ] **T00.6** Specify session idle/absolute expiry, conservative coalescing, flow/code lifetimes, auth epochs, 300-second access cap, required rotating native refresh family (12-hour absolute/1-hour idle defaults), 30-second internal assertions and 15-second/1-hour stream lease/deadline ceilings. Policies may shorten caps; rotation/restore never revives state.
 - [ ] **T00.7** Threat model malicious CI, issuer/cluster/key confusion, audience/tenant escalation, subject/resource-server confusion, profile substitution, replay, **login CSRF, OIDC callback abuse, redirect URI confusion, identity-linking confusion**, native-client impersonation, generic-provider-write bypass, operator recovery and runtime/database compromise.
-- [ ] **T00.8** Ratify signer/key isolation, provider vault/delegation, native confirmation, signed internal assertion and conditional impersonation ADRs. Explicitly scope device/refresh features.
+- [ ] **T00.8** Ratify distinct public/internal signer isolation, native comparison/required refresh, signed internal evidence and minimal dormant-policy preservation. Device flow, provider vault/exchange and active impersonation remain separately scoped future features.
 - [ ] **T00.9** Specify RFC 8693 direct subject exchange versus private service-delegation actor grant, selector/proof roles, grant-directed binding evaluation, narrow scope defaults, errors and unsupported two-token delegation. Private grant URI is not claimed IANA-registered.
-- [ ] **T00.10** Ratify independent adm identities, mTLS registration/local role checks, complete tenant/client/principal provisioning, private endpoints, local bootstrap and bounded offline recovery. Upstream claims cannot assign operator rights.
+- [ ] **T00.10** Ratify independent adm identities, local roles, portable M1a workstation client, deployment-local verifier and offline-key custody. Split workload provisioning M1a from human provisioning M1b; upstream claims cannot assign operator rights.
 - [ ] **T00.11** Define tenant ownership/composite references, instance audience assignment and canonical-origin ownership, nonunique issuer strings and same-issuer cross-tenant/cluster fixtures.
 - [ ] **T00.12** Define matcher omission and source-capability replay semantics: required production claims cannot be omitted; reusable default; single-use only verified on-demand JWTs, never projected Kubernetes/TokenReview sources.
 - [ ] **T00.13** ADR-017: both client library contracts, package/crate identities, supported browser/native environments, typed errors and migration fixtures; no SPA OAuth-token API or required server dependency in the Rust crate.
 - [ ] **T00.14** Adopt the bootstrap-aware layout in §1, distinguish existing health scaffold from proposed auth, and specify manifest/CI/packaged-consumer gates.
 - [ ] **T00.15** Ratify ResourceServer/AudienceTenantAssignment/ResourceAction/checker ownership and explicit HumanAccessPolicy/credential profile sources; no free-string self-assignment or subject-prefix exemption.
-- [ ] **T00.16** Freeze registered-origin tenant resolution, app versus issuer-native flow cookies/callbacks, exclusive provider transition primitive, generated-ID create/reference lifecycle and dormant-mode activation approval.
+- [ ] **T00.16** Freeze origin/route tenant-audience resolution, app/native flow cookies, enrollment policy/hold, exclusive provider semantic transitions versus credential-only rotation, generated-ID lifecycle and disabled-only impersonation preservation.
+- [ ] **T00.17** Freeze request-comparison encoding/vectors, required refresh concurrency/reuse behavior, established-stream continuation schema/race bounds and M1a/M1b release dependency map. Preserve security invariants while deferring active impersonation and optional UX/subsystems.
 
 **Gate M0:** reviewed schema/profile/wire examples and threat matrix; no client requires an upstream issuer. Both client profiles, browser binding, audience authority, admin writes, scope omission, binding overlap and replay behavior have fixed expected results.
 
@@ -111,12 +116,14 @@ Implementation PRs adding/moving modules, workspace members or package entry poi
 | GET | Issuer `/.well-known/jwks.json` | Verifiers | Public signer overlap, M2 |
 | GET | Issuer `/oauth/authorize` | Native public client via browser | Resolve registered client/tenant, validate redirect/PKCE/audience/scopes; set issuer-native flow cookie |
 | GET | Issuer `/oauth/callback` | Upstream via initiating native-flow browser | Require native flow cookie + state/transcript; bind verified human and rotate cookie before confirmation |
-| GET / POST | Issuer `/oauth/confirm` | Browser with completed native transaction and rotated issuer cookie | Explicit approve/deny, exact Origin/CSRF/anti-framing; transaction ID or app cookie alone insufficient |
+| GET / POST | Issuer `/oauth/confirm` | Browser with completed native transaction and rotated issuer cookie | Show server-derived CLI comparison/port/session duration; explicit match/approve/deny, exact Origin/CSRF/anti-framing; transaction ID/app cookie alone insufficient |
 | POST | Issuer `/oauth/token` | CLI/WIF | Supported grants/proof roles, registered audience assignment, profile-specific credentials |
-| POST | Issuer `/oauth/revoke` | CLI if refresh supported | Revoke local credential/family per profile |
+| POST | Issuer `/oauth/revoke` | Registered native client with its refresh credential | Required M4; revoke matching local family, non-enumerating response |
 | gRPC | `envoy.service.auth.v3.Authorization/Check` | Private authenticated Envoy | M2 bearer; M3 session/CSRF and internal assertion; fail closed |
 | GET | Private `/internal/auth/check` | Trusted ForwardAuth | Optional equivalent typed decision adapter, never public |
-| POST | Private `/internal/v1/policy/check` | Registered resource-server checker | Exact audience/tenant/action/profile/resource checks, independent of token subject |
+| POST | Private `/internal/v1/policy/check` | Registered resource-server checker | Exact profile/action/resource checks; optional stream admission only from unexpired human_session evidence |
+| POST | Private `/internal/v1/policy/recheck-session` | Same registered checker as established stream | Bound continuation ID/nonce/context, live state/RBAC, bounded lease; not a new request credential |
+| GET | Private `/internal/v1/assertion-jwks` | Authenticated checker/gateway trust consumer | Dedicated internal key set, separate from public issuer JWKS and rooted in deployment trust |
 | POST | App `/_skyoauth/oidc/backchannel-logout` | Configured upstream IdP | Optional signed logout/replay verification and indexed session targeting |
 | GET / POST / PATCH | `/admin/v1/tenants` | Instance security_admin | Create/disable tenants, generated IDs, no implicit role inheritance |
 | GET / POST / PATCH | `/admin/v1/resource-servers` | Instance security_admin | Globally unique exact audience and allowed profile/scope/schema registry |
@@ -126,17 +133,20 @@ Implementation PRs adding/moving modules, workspace members or package entry poi
 | GET / POST / PATCH | `/admin/v1/tenants/{tenant}/trust-sources`, `/keysets`, `/bindings`, `/grants` | Tenant trust_admin | Same-tenant IDs, registered audience ceilings, typed verifiers, disable/revisions and explicit widening approval |
 | GET / POST / PATCH | `/admin/v1/tenants/{tenant}/oauth-clients`, `/human-access-policies` | Tenant client_admin | Registered native clients/generated client IDs and bounded human issuance policy |
 | GET / PATCH | `/admin/v1/tenants/{tenant}/application-origins/{id}` | Tenant client_admin | Configure assigned-origin return paths/audience references; cannot change canonical origin/tenant |
+| GET / POST / PATCH | `/admin/v1/tenants/{tenant}/application-origins/{id}/routes` | Tenant client_admin | Exact/segment-prefix method mapping to one assigned audience/profile set; deterministic precedence, no human-session rewrites |
 | GET / POST / PATCH | `/admin/v1/tenants/{tenant}/human-providers`, `/human-links` | Tenant provider_admin | Inactive provider configuration/testing and controlled verified human enrollment/linking; active-state writes rejected |
-| GET | `/admin/v1/tenants/{tenant}/login-state` | Authorized scoped operator | Read-only active provider/generation/revision |
+| GET | `/admin/v1/tenants/{tenant}/login-state` | Authorized scoped operator | Read-only active provider/generation/enrollment hold/revision |
+| GET / PATCH | `/admin/v1/tenants/{tenant}/human-enrollment-policy` | Tenant provider_admin | preprovisioned default or explicit auto_create; cannot clear migration hold |
+| POST | `/admin/v1/tenants/{tenant}/human-enrollment-policy/resume` | Tenant provider_admin | Explicit audited reconciliation acknowledgement, expected provider/generation/revision; clear hold only for current state |
+| POST | `/admin/v1/tenants/{tenant}/human-providers/{id}/credential-rotations` | Tenant provider_admin | Same issuer/client_id/auth method/callback/assurance; versioned credential reference only, no epoch advance |
 | POST | `/admin/v1/tenants/{tenant}/human-provider-switches` and `/{plan}/commit`, `/{plan}/rollback` | Tenant provider_admin | Exclusive plan/dry-run/commit transition, including initial activation; epoch invalidation and expected revisions |
 | POST | `/admin/v1/tenants/{tenant}/imports` | Every role required by all included sections | Whole-plan role validation; reject unauthorized sections/active-pointer mutation, no partial apply |
-| POST | `/admin/v1/grant-activation-approvals` | Instance security_admin | Conditional high-risk approval bound to exact grant/capability revision, separate from scoped activator |
-| POST | `/admin/v1/tenants/{tenant}/grants/{id}/activate` | Tenant trust_admin | Supported mode, valid separate approval where required; generic PATCH cannot activate dormant impersonation |
 | GET / POST / PATCH | `/admin/v1/operators`, `/operator-roles` | Instance security_admin | Independent operator enrollment/disable and explicit scoped roles |
 | GET | `/admin/v1/tenants/{tenant}/audit` | Tenant auditor | Redacted scoped audit; instance events separately authorized |
-| Local command / Unix socket | Service operator/bootstrap/recovery subcommands | Deployment operator + independent proof | M1; no public enrollment/recovery; durable challenge/audit; no native M4 dependency |
+| Local command / Unix socket | Service bootstrap/recovery verifier | Deployment operator + independent signed proof | M1a; challenge bound to instance/operation/revision, no public recovery or private keys in pod |
+| Workstation command | `skyoauth-operator` | Independent operator/recovery key | M1a three-platform mTLS client/offline signer; human commands M1b; no native OAuth dependency |
 
-Grouped sibling paths share the full prefix preceding them. Private listeners are never public gateway routes. All writes use validation, optimistic revision checks and audit. Device endpoints are added only if the explicitly reviewed profile ships. Native upstream callbacks are not app callbacks or loopback callbacks: the browser returns upstream -> issuer, confirms there, then receives a SkyOAuth code at its CLI loopback.
+Grouped sibling paths share the full prefix preceding them. Private listeners are never public gateway routes. All writes use validation, optimistic revision checks and audit. Device and impersonation-activation endpoints are absent in v0.1; adding them requires a later reviewed feature contract. Native upstream callbacks are not app callbacks or loopback callbacks: the browser returns upstream -> issuer, confirms there, then receives a SkyOAuth code at its CLI loopback.
 
 ### Exchange selection and scope
 
@@ -146,9 +156,9 @@ Direct RFC exchange accepts subject_token/type=jwt and a direct grant, returns w
 
 Omitted scope uses only explicit nonempty allowed default_scopes; otherwise invalid_scope. Explicit empty/excessive scopes, unsupported resource/requested token types, duplicates or profile mismatch deny. Return access_token, Bearer token_type, expires_in, explicit scope and `issued_token_type=urn:ietf:params:oauth:token-type:access_token`, no-store, never WIF refresh. The design's exported example uses **post-create generated IDs**, not operator-chosen global identifiers.
 
-## 3. Data model and persistence (M1)
+## 3. Logical data model and staged persistence (M1a/M1b)
 
-Define the complete logical schema before later handlers. Stable authority survives provider changes; affected human flow/auth state is invalidated. Instance-owned registration and tenant-owned configuration are distinct; redacted exports and encrypted database backups are different artifacts.
+Approve the complete logical model in M0, but implement tables/handlers in their dependency slice. **M1a** includes workload Tenant/Principal, resource-server/assignment/checker/action authority, trust/keyset/binding/service/grant/policy, replay, operator/recovery/audit and public signing metadata. **M1b** includes origin/route/client/human policy, provider/login/enrollment/link state, browser/native/authentication/session/continuation/refresh state and internal-key metadata, before M3. Optional/future feature tables are not a prerequisite. Stable authority survives provider changes; affected human flow/auth state is invalidated. Instance versus tenant authority and redacted export versus encrypted backup remain distinct.
 
 ~~~text
 Tenant(id, name, status, created_at)
@@ -161,19 +171,27 @@ ResourceServerChecker(id, resource_server_id, public_mtls_identity,
                       allowed_tenant_ids, status, revision)
 ResourceAction(id, resource_server_id, action_name, required_scopes,
                accepted_profiles, required_resource_dimensions,
-               live_check_required, status, revision)
+               live_check_required, stream_capable, max_stream_duration_seconds?,
+               status, revision)
 ApplicationOrigin(id, tenant_id, canonical_origin, callback_uri,
                   allowed_return_paths, resource_server_ids, status, revision)
+ApplicationRoute(id, tenant_id, application_origin_id, match_kind, path, methods,
+                 resource_server_id, allowed_profiles, max_stream_duration_seconds,
+                 status, revision)
 OAuthClient(id, tenant_id, client_id, name, display_name, redirect_rules,
             resource_server_ids, allowed_scopes, status, revision)
 HumanAccessPolicy(id, tenant_id, resource_server_id, oauth_client_id?,
                   application_origin_id?, allowed_scopes, max_ttl,
-                  required_authentication, status, revision)
-HumanProvider(id, tenant_id, name, issuer, metadata, app_callback_config,
+                  required_authentication, refresh_absolute_limit_seconds?,
+                  refresh_idle_timeout_seconds?, status, revision)
+HumanProvider(id, tenant_id, name, issuer, upstream_client_id, client_auth_method,
+              credential_ref, credential_revision, metadata, app_callback_config,
               native_callback_uri, auth_epoch, status, revision)
-TenantLoginState(tenant_id, active_provider_id?, auth_generation, revision)
+TenantLoginState(tenant_id, active_provider_id?, auth_generation, enrollment_hold,
+                 revision)
+HumanEnrollmentPolicy(tenant_id, mode, revision)
 HumanSubjectLink(tenant_id, provider_id, issuer, upstream_sub, principal_id,
-                 verified_by, verification_operation_id)
+                 verified_by, verification_operation_id, status, revision)
 BrowserFlowBinding(id_hash, tenant_id, flow_kind, canonical_origin,
                    application_origin_id?, created_at, expires_at, consumed_at?)
 HumanAuthentication(id, tenant_id, principal_id, provider_id,
@@ -183,6 +201,13 @@ Session(id_hash, internal_ref, tenant_id, application_origin_id, principal_id,
         human_authentication_id, provider_id, upstream_sub, upstream_sid?,
         created_at, last_seen_at, idle_timeout_seconds, idle_expires_at,
         absolute_expires_at, revoked_at?, csrf_verifier)
+SessionContinuation(id, checker_id, tenant_id, resource_server_id, principal_id,
+                    session_ref, human_authentication_id, application_origin_id,
+                    application_route_id, route_revision, policy_revision_id,
+                    action_id, action_revision,
+                    canonical_resource, request_binding, stream_nonce,
+                    admitting_assertion_jti_digest, admitting_internal_kid,
+                    created_at, absolute_expires_at, authorized_until, closed_at?)
 OIDCTransaction(state_hash, tenant_id, flow_kind, browser_flow_hash,
                 provider_id, provider_auth_epoch, tenant_auth_generation,
                 expected_issuer, expected_callback_uri, application_origin_id?,
@@ -199,9 +224,12 @@ OAuthAuthorizationCode(code_hash, tenant_id, request_id, oauth_client_id,
                        principal_id, human_authentication_id, redirect_uri,
                        pkce_challenge, pkce_method, resource_server_id, scopes,
                        human_access_policy_id, issued_at, expires_at, consumed_at?)
-CLIRefreshCredential(token_hash, tenant_id, family_id, parent_id?, oauth_client_id,
-                     principal_id, human_authentication_id, resource_server_id,
-                     scopes, issued_at, expires_at, consumed_at?, revoked_at?)
+CLIRefreshFamily(id, tenant_id, oauth_client_id, principal_id,
+                 human_authentication_id, resource_server_id, approved_scopes,
+                 created_at, absolute_expires_at, idle_timeout_seconds,
+                 idle_expires_at, current_generation, revoked_at?)
+CLIRefreshCredential(token_hash, tenant_id, family_id, generation, parent_id?,
+                     scopes, issued_at, expires_at, consumed_at?)
 TrustSource(id, tenant_id, name, kind, exact_issuer, discovery_url?, jwks_keyset_id?,
             cluster_id?, token_review_endpoint?, ca_bundle_ref?, ca_fingerprint?,
             reviewer_credential_ref?, review_timeout_ms?, audiences, algorithms?,
@@ -216,10 +244,7 @@ ServiceIdentity(id, tenant_id, name, resource_server_ids, max_scopes,
 ServiceGrant(id, tenant_id, name, actor_principal_id, allowed_binding_ids,
              target_service_id?, mode, resource_server_ids, scopes,
              default_scopes?, resource_constraints, max_ttl, valid_until?,
-             status, activation_state, activation_approval_id?, revision)
-GrantActivationApproval(id, tenant_id, grant_id, grant_revision,
-                        capability_revision, approved_by, expires_at,
-                        consumed_at?, audit_id)
+             status, activation_state, revision)
 PolicyRevision(id, tenant_id, profile, resource_server_id, dependency_revisions,
                selected_binding_id?, grant_id?, human_access_policy_id?,
                effective_scopes, effective_constraints, created_at, invalidated_at?)
@@ -234,25 +259,31 @@ AdministrativeOperation(id, tenant_id?, actor_id, kind, request_digest,
                         expected_revision, immutable_plan, challenge_hash?,
                         expires_at?, consumed_at?, outcome, audit_id)
 IssuerKeyVersion(kid, algorithm, public_key, signing_key_reference, validity)
+InternalAssertionKeyVersion(kid, replica_identity, algorithm, public_key,
+                            internal_key_reference, validity, status, revision)
 AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
            previous_revision, new_revision, outcome)
 ~~~
 
-**Ownership:** ResourceServer/audience namespace, ResourceServerChecker/Action and origin ownership enrollment are instance authority; AudienceTenantAssignment grants named tenants bounded issuance rights. Composite same-tenant references protect all tenant-owned objects. ServiceIdentity.id references a svc principal and contains no checker credentials. Direct grants require null target; delegated grants require a same-tenant service. ApplicationOrigin has globally unique canonical origin, assigned rather than claimed by tenant admins. OAuth client_id is globally unique and generated, so issuer-native authorization deterministically resolves its tenant. HumanAccessPolicy has exactly one client/origin consumer and one registered audience, unique per consumer/audience.
+**Ownership:** ResourceServer/audience namespace, ResourceServerChecker/Action and origin ownership enrollment are instance authority; AudienceTenantAssignment grants named tenants bounded issuance rights. Composite same-tenant references protect all tenant-owned objects. ServiceIdentity.id references a svc principal and contains no checker credentials. Direct grants require null target; delegated grants require a same-tenant service. ApplicationOrigin has globally unique canonical origin, assigned rather than claimed by tenant admins. OAuth client_id is globally unique and generated, so issuer-native authorization deterministically resolves its tenant. HumanAccessPolicy has exactly one client/origin consumer and one registered audience, unique per consumer/audience. ApplicationRoute resolves a cookie request to one receiver within that origin/assignment; exact paths beat longest segment-prefix paths for the method, ties reject and disabled winners deny rather than falling back. Canonical request/route matching and no-rewrite rules are normative in design §4.1.
 
 **IDs/names:** server-generated opaque IDs, including client_id, are immutable selectors; names are tenant-local labels, not exchange identifiers. Initial create omits ID and returns it. GitOps may use tenant-local typed manifest references, resolved by an authorized plan that returns a persistent ID mapping. Updates require ID/tenant/revision; ordinary tenant imports cannot claim missing global IDs. Privileged restore preserves IDs only into the intended restored authority with ownership/provenance validation. Two tenants' identically named sources/clients/grants coexist without global-name probing.
 
 **Verifier union:** discovery requires approved metadata; upload requires same-tenant keyset; TokenReview requires cluster/endpoint/CA/reviewer/audience/timeout and reusable replay. Reject contradictory fields and unsupported evidence requirements. Keyset versions reference a stable parent; overlapping keys have explicit validity and no conflicting live kid/key pair. Single-use additionally requires locally verified on-demand JWT evidence and fresh-assertion capability; reject it for projected-service-account profiles even with local verification.
 
-**Policy revisions:** dependency_revisions is a typed immutable set of entity-kind/ID/revision references. WIF snapshots tenant/resource registration/assignment, chosen source/binding, grant and optional target service. Human snapshots tenant/resource assignment, HumanAccessPolicy and client/origin registration. Current action rules are evaluated at live check. Human authentication/provider epochs and session validity are separately checked live; no fake WIF grant for a human. Missing/contradictory dependency/profile fields deny.
+**Policy revisions:** dependency_revisions is a typed immutable set of entity-kind/ID/revision references. WIF snapshots tenant/resource registration/assignment, chosen source/binding, grant and optional target service. Human snapshots tenant/resource assignment, HumanAccessPolicy and client/origin registration; human_session also snapshots ApplicationRoute ID/revision. Current action rules are evaluated at live check. Human authentication/provider epochs, session validity or native refresh-family validity are separately checked live; no fake WIF grant for a human. Missing/contradictory dependency/profile fields deny.
 
-**One-time state:** store keyed hashes of flow cookies/session tickets/codes/refresh tokens, not secrets. Distinct app/native browser bindings include exact origin and flow kind. Indexed session provider/subject/sid supports verified logout. HumanAuthentication links pending native codes/refresh and sessions to monotonic provider/tenant epochs. Replay key uniqueness spans grants/replicas through exp plus skew and digest-key rotation. Restore must preserve consumed state or quarantine issuance until outstanding lifetimes expire; config import does not restore consumption.
+**One-time state:** store keyed hashes of flow cookies/session tickets/codes/refresh tokens, not secrets. Distinct app/native bindings include origin and flow kind; HumanAuthentication links credentials to monotonic provider/tenant epochs. A native authentication/client/audience tuple has at most one refresh family, resolved by live check from signed authentication/client_id/audience and required to be live. HumanAccessPolicy refresh limit fields apply only to native clients and can shorten the fixed defaults. Required refresh families have immutable absolute and bounded idle deadlines, unique generation/hash, atomic consume/replace and whole-family replay revocation; HumanAuthentication expires at the approved assurance/family bound, not the access token's 300-second bound. No rotation extends auth_time/absolute lifetime. Replay uniqueness spans grants/replicas through exp plus skew and digest-key rotation. Restore preserves consumption or quarantines issuance; config import does not restore it.
 
-**Provider pointer:** only TenantLoginState is authoritative; HumanProvider has no writable active flag. A restricted provider-transition command is the sole pointer/epoch writer. Generic CRUD/import rejects active-pointer or active-authentication-semantics changes. Initial activation uses the same command from null. M1 implements this primitive; M5 adds full migration tooling/exercises, avoiding a dependency from M3 initial login on unfinished M5 work.
+**Provider pointer/enrollment:** TenantLoginState is authoritative; HumanProvider has no writable active flag. M1b's guarded transition is the sole pointer/epoch writer and atomically sets enrollment_hold for switch/rollback. A callback rechecks generation, hold and HumanEnrollmentPolicy in the principal/link transaction. preprovisioned is default; explicit auto_create creates one new zero-privilege principal/link for a previously unseen exact subject, never email-merges or replaces disabled identities. Only explicit provider/generation/revision-bound enrollment-resume clears a migration hold. Credential-only rotation of the unchanged semantic provider/client tuple has a separate revision-checked path and does not advance auth epochs.
+
+**Stream state:** SessionContinuation is created only from a still-valid internal assertion for a stream-capable action. Uniqueness of admitting assertion jti prevents multiple contexts; exact same-checker retry can return the existing context without lease extension. It binds all fields listed above and the current action/route/policy revisions; it is not a bearer capability. Rechecks require the same authenticated checker and exact context/nonce, current session/epochs/authorization and backend RBAC. A renewal after the last authorized_until denies, even if the session remains live. A successful lease lasts at most 15 seconds, within a nonrenewable one-hour context cap and current session/authentication deadlines. No idle touch, new request, resource change or post-expiry resurrection. Delete/expire on close; restart requires fresh admission. Internal key disable also invalidates dependent contexts.
+
+**Key separation:** public access keys and internal assertion keys have disjoint kid namespaces/trust sets. Internal private keys remain local to purpose-scoped auth replicas, not remote public-signing permissions. Internal public keys are distributed only on the authenticated private key endpoint; retired internal keys need only the 30-second assertion window plus skew. Continuation validation reads recorded key status rather than revalidating an expired assertion.
 
 ### T10 — Schema and migration safety
 
-- [ ] **T10.1** Implement migrations/indexes, generated IDs, typed unions, composite tenant references, soft disable and immutable revisions. No cascading provider deletion into WIF/audience/client/operator objects; one TenantLoginState per tenant.
+- [ ] **T10.1** Implement staged migrations/indexes from the approved logical schema: workload M1a, human M1b before handlers. Generated IDs, typed unions, tenant references, soft disable/immutable revisions; no provider cascade into WIF/audience/client/operator authority.
 - [ ] **T10.2** Implement server-generated opaque create IDs/client_id and tenant-local name uniqueness; create responses return IDs/revisions, and exports retain them. No user-chosen global ID on normal create.
 - [ ] **T10.3** Hash browser-flow/session/code/refresh secrets; protect CSRF/PKCE and normalize expiry/revocation. Do not store raw replay assertions or expose cookie hashes as backend session references.
 - [ ] **T10.4** Complete immutable typed policy dependencies and atomic audit/optimistic concurrency; no mutable reinterpretation of issued credentials.
@@ -260,9 +291,9 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 - [ ] **T10.6** Separate encrypted DB/key disaster recovery; preserve bootstrap-closed and one-time/replay state or quarantine. Rollback never revives credentials or resets monotonic generations.
 - [ ] **T10.7** GitOps precedence and full-plan role checks; no wiping omitted objects or partially applying unauthorized sections. Active-provider state is observation-only and proposed mutation rejects.
 - [ ] **T10.8** Property tests for same-name tenants/sources, same-issuer clusters, cross-tenant object/audience/origin references, deterministic generated-ID resolution, grant-bound matching and privilege ceilings.
-- [ ] **T10.9** M1 durable OAuth client/request/code, browser-flow, HumanAuthentication, optional refresh-family and replay tables; atomic consumption across replicas before later handlers ship.
+- [ ] **T10.9** M1a delivers durable WIF replay/operator one-time state. M1b delivers OAuth/client/code/browser-flow/authentication/required refresh-family and stream-continuation state before M3/M4 handlers. Atomic consumption across replicas; human tables are not M2 prerequisites.
 - [ ] **T10.10** Session idle/absolute and authentication epoch relationships; coalesced writes cannot revive/extend expired sessions. Index verified provider/subject/sid logout and switch invalidation.
-- [ ] **T10.11** Persist dormant impersonation only disabled/reapproval-required through public operator API; approval/activation history is durable, capability upgrades do not change status.
+- [ ] **T10.11** Store dormant impersonation only disabled/reapproval-required in the existing grant record and preserve it unchanged. No v0.1 activation-approval entity/endpoints; reject enablement, issuance and active unsupported import/startup without silent data deletion.
 
 ### T11 — Trust registry and key lifecycle
 
@@ -284,49 +315,53 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 - [ ] **T12.2** AND predicates; configured missing claims deny, optional omitted predicates are unconstrained. Required production GitHub owner/repo/event/ref/environment/workflow fields cannot be omitted; deleting one is reviewed widening.
 - [ ] **T12.3** Load selected grant, verify proof at selected same-tenant source, then filter matching bindings by grant actor and allowed_binding_ids. Require a match; other actors' overlaps do not deny or authorize. Deterministic matching evidence, no permission union or first-global-match fallback.
 - [ ] **T12.4** Direct workload sub versus delegated service sub/workload act; audit source/run provenance without treating GitHub actor as human authentication.
-- [ ] **T12.5** Required direct/delegation and conditional impersonation remain distinct; no unsupported-mode fallback. Apply §5.6 design dormant write/activation lifecycle.
+- [ ] **T12.5** Required direct/delegation remain distinct. Active impersonation is excluded from v0.1; unsupported-mode issuance never falls back, minimal disabled-policy preservation follows design §5.6.
 - [ ] **T12.6** Snapshot full WIF or human policy dependencies; include resource-server assignment and client/origin policy as appropriate. Live checks deny invalidated/superseded revisions without broadening old credentials.
 - [ ] **T12.7** Deny wrong owner/repo/subject/event/workflow, no eligible binding, wrong actor/tenant/audience assignment, disabled records and escalation. A matching binding for another actor is ignored, not an ambiguity denial; configuration with cross-actor allowed binding references rejects.
 - [ ] **T12.8** Scope omission uses explicit nonempty defaults only. Validate defaults/requests against all ceilings; direct grants have no service target, profile/mode mismatch denies.
 - [ ] **T12.9** WIF allowlists and explicit human backend_rbac schema, action/profile mapping and canonical tenant requirements have verifier fixtures; missing required/unknown fields fail closed by profile.
-- [ ] **T12.10** Accept unsupported impersonation create/import only disabled with requires_reapproval; reject enabled input. Supported activation needs separate security-admin approval bound to revision/capability and a distinct scoped activator. Generic PATCH/import/upgrade cannot activate; edits invalidate approval.
+- [ ] **T12.10** Test disabled-only impersonation create/import/export and attempted enablement denial using normal APIs. Defer active approval/activation machinery and its feature-specific tests to a later ADR; do not make future activation a v0.1 prerequisite.
 
 ### T13 — Independent operator authority, provisioning and recovery
 
 - [ ] **T13.1** Independent adm identities, registered mTLS public keys and active local credential/role check on every request; no OIDC/session/WIF/email promotion.
 - [ ] **T13.2** Implement explicit instance security_admin and tenant trust_admin/client_admin/provider_admin/auditor roles. No inheritance; all reads/writes/imports enforce resource scope and per-field authority.
-- [ ] **T13.3** Private operator API and **M1 service operator subcommands** for configuration/bootstrap/recovery, revisions, diff/dry-run and audit. Native application CLI is M4 and not a dependency.
+- [ ] **T13.3** M1a private operator API, portable operator/ workstation binary and service-local bootstrap/recovery verifier, with revisions/diff/dry-run/audit. M1b adds human commands. Neither remote client nor local verifier depends on M4 native OAuth or copying private operator keys into pods.
 - [ ] **T13.4** Atomic one-time local bootstrap enrolls security_admin public credential and separate offline recovery key, audits and durably closes enrollment; restart/config omission cannot reopen it.
-- [ ] **T13.5** Local recovery verifies expiring one-time operation/arguments/revision challenge, allows bounded operator restoration or the guarded provider transition, never arbitrary WIF/audience edits or token minting. Consume, audit/alert and rotate recovery key after use.
+- [ ] **T13.5** Local recovery verifier emits an expiring challenge bound to instance/operation/arguments/revision; portable workstation signs with independent offline key. Only signed responses cross the separately authorized deployment-local channel. M1a permits operator restoration; M1b also permits guarded provider transitions. No arbitrary WIF/audience edits or token minting; consume/audit/alert and rotate recovery material.
 - [ ] **T13.6** Deny forged upstream roles, compromised-IdP sessions, scope crossover, revoked keys, replayed recovery, concurrent bootstrap and missing store/audit.
-- [ ] **T13.7** Rehearse operator restoration without human IdP; hardware/offline custody and independent database/signer recovery limitations documented.
-- [ ] **T13.8** Complete provisioning chain: security_admin creates tenant/audience assignment/origin ownership and explicit scoped roles; trust_admin creates workload/service principals; client_admin creates OAuth clients/human policies; provider_admin performs controlled human enrollment/links. Test from an empty installation without SQL edits.
-- [ ] **T13.9** Implement the exclusive provider-transition primitive in M1: plan/dry-run/commit with expected login/config revisions, initial null activation, switch/disable/rollback, atomic epoch advance and audit. Generic PATCH/import/reload, active-provider delete/disable and auth-critical issuer/client/callback changes outside this primitive reject. T51 builds full migration orchestration on it.
+- [ ] **T13.7** Rehearse workstation-held operator/recovery credentials with IdP unavailable on Linux/macOS/Windows; document/test TLS-key and hardware/OS signer support per platform. Unsupported adapters fail explicitly, no key-export fallback or requirement to run the remote client inside the cluster.
+- [ ] **T13.8** M1a provisioning: security_admin tenant/audience/checker/actions/explicit roles, trust_admin workload/service/source/binding/grant. M1b adds origin/route/client/human policy/enrollment/provider/link provisioning and initial activation. Each slice works from its predecessor without SQL edits; a single explicit tenant/operator is a valid small deployment, not an implicit-tenant protocol.
+- [ ] **T13.9** M1b sole provider-transition primitive: immutable plan/dry-run/commit, expected login/config revisions, initial activation, switch/disable/rollback, atomic epoch advance/enrollment hold and audit. Generic pointer/auth-semantic mutation rejects. Credential-only rotation is separately constrained by T30.9. T51 builds orchestration, not an alternate writer.
+- [ ] **T13.10** Package/build/test skyoauth-operator independently of server/DB and native application SDK on Linux/macOS/Windows in M1a. Test remote mTLS configuration and offline challenge signing/verification, instance binding and redaction; operator key remains outside the pod.
 
 ### T14 — Resource servers, audience assignments and application registrations
 
 - [ ] **T14.1** Instance-owned globally unique exact audience registry and explicit tenant/profile/scope/schema assignments; scoped tenant admins cannot self-assign or shadow another audience.
 - [ ] **T14.2** Refuse service/grant/client/origin/human-policy references outside active same-tenant assignment at write and issuance; recheck on live authorization. Backends map canonical resource ownership to signed SkyOAuth tenant and deny absent/mismatched mappings.
 - [ ] **T14.3** Register resource-server mTLS checker identities with explicit audience/tenant scope independently of ServiceIdentity/token subjects. Direct grants with null target work; a delegated service principal cannot become a checker by allowed_audiences alone.
-- [ ] **T14.4** Persist action registry: required scopes, accepted credential profiles, canonical resource dimensions and live-check requirement. Unknown action denies; tenant grant editors cannot weaken action rules.
-- [ ] **T14.5** Enroll globally unique canonical ApplicationOrigin under instance ownership; client_admin may configure permitted return paths/audiences without reassigning origin/tenant. Pin callbacks, trusted ingress authority and exact normalized return-path rules.
-- [ ] **T14.6** HumanAccessPolicy for exactly one registered OAuth client or application origin per audience; scope/TTL/authentication ceilings bounded by assignment, provider-independent and stable through migration.
-- [ ] **T14.7** Deterministic issuer-native client_id -> tenant and app authority -> origin/tenant routing; deny unknown/spoofed/ambiguous authority before redirects. Do not use free tenant query/forwarded header to select a provider.
+- [ ] **T14.4** Persist action scopes/profiles/resource dimensions/live-check requirement in M1a. M1b adds stream capability/max-duration schema; only designated actions can create continuations. Unknown actions deny and grant editors cannot weaken receiver rules.
+- [ ] **T14.5** M1b enrolls canonical ApplicationOrigin under instance ownership; client_admin configures return paths/assigned audiences/routes without reassigning origin/tenant. Pin callbacks, trusted ingress authority and return-path rules.
+- [ ] **T14.6** M1b HumanAccessPolicy for one client/origin per audience, within assignment scope/TTL/assurance ceilings; native refresh defaults/caps and no auto-granted backend membership. Provider-independent configuration remains stable through migration.
+- [ ] **T14.7** M1b deterministic client_id -> tenant and authority -> origin/tenant; cookie ApplicationRoute -> one resource server/HumanAccessPolicy. Deny unknown/spoofed authority or client-selected tenant/audience before authorization.
 - [ ] **T14.8** Document create-then-reference and authorized import manifest references, return/generated ID mapping and same-instance reconciliation. Test identical labels in different tenants, unauthorized IDs and restore provenance; public exchange accepts generated IDs only.
+- [ ] **T14.9** M1b ApplicationRoute schema/operator CRUD: exact/segment-prefix path, method allowlist, one audience, accepted profiles, stream bound and revision. Reject equal-precedence conflicts and assignment escapes; disabled winner denies. Test billing/deploy audiences on one origin and alignment with actual gateway routing.
 
-**Gate M1:** complete authorized provisioning from bootstrap through tenant/audience/client/origin/principal/trust/grant creation and initial provider activation, without M4 or manual DB insertion. Typed schemas, scoped writes, protected restore, policy ownership and one-time-state invariants pass. Human-provider operations cannot mutate WIF/audience/client/operator authority. Signer/JWKS remains M2.
+**Gate M1a (M2 prerequisite):** workload tenant/audience/checker/action/principal/trust/grant provisioning, portable operator/local recovery, replay/restore/isolation and public-key metadata pass without human tables, M4 or manual SQL. Tenant/audience checks are not deferred. Signer/public JWKS is M2.
+
+**Gate M1b (M3 prerequisite; may run alongside M2):** complete human origin/route/client/enrollment/provider provisioning, browser/native/refresh/continuation persistence and guarded provider transition are ready before human handlers. Full one-time/hold/restore invariants and independent human administration pass. Internal assertion signer itself is M3.
 
 ## 4. WIF, issuer and bearer gateway (M2)
 
 ### T20 — JWT issuer and profile verification
 
 - [ ] **T20.1** Stable issuer/JWKS and explicit private token-profile metadata; no upstream-issued pretense or implicit RFC 9068 claim.
-- [ ] **T20.2** Asymmetric protected signer/kid/overlap, bounded iat/nbf/exp, unique jti and exact private access/internal types. M2 issues WIF access; human issuers arrive with M3/M4.
+- [ ] **T20.2** M2 public asymmetric signer/JWKS uses protected public-access key/kid/overlap, access TTL <=300 seconds and unique jti/private type. M3 internal assertions use a different locally held key and private verification set (T32.14), never the public issuer key.
 - [ ] **T20.3** WIF requires signed tenant, profile/version/mode, grant, complete effective policy revision and allowlist constraints; delegation requires act. Standard core claims and profile selection are shared, not subject-prefix heuristics.
 - [ ] **T20.4** Verifier fixtures for issuer/audience/assignment/type/signature/time/key/profile errors, unknown schemas, missing WIF allowlists, contradictory human/WIF claims and canonical resource tenant mismatch.
 - [ ] **T20.5** WIF receives no refresh credential; provider renewal gets fresh on-demand assertion or reuses a valid projected token according to source capabilities.
 - [ ] **T20.6** Audit source/binding/grant/revision/run/audience decisions with safe metrics, never JWT/key bytes.
-- [ ] **T20.7** Document offline residual TTL, bounded internal assertion lifetime, TokenReview propagation and critical live checks; no promise of undoing in-flight work.
+- [ ] **T20.7** Document 300-second offline access cap, 30-second internal evidence lifetime, separate bounded session-stream leases and TokenReview propagation. No claim that old credentials/continuations authorize new requests or can undo in-flight work.
 - [ ] **T20.8** Publish private-profile validation rules and reject at+jwt/ID-token/internal-header substitution. Native client_id is actual registration; WIF does not invent an OAuth client ID from a source/actor. Cite RFC 9068 to explain the distinction.
 
 ### T21 — Exchange and reusable Rust workload library
@@ -379,13 +414,13 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 ### T26 — Private live operation check
 
 - [ ] **T26.1** Private POST /internal/v1/policy/check authenticates **ResourceServerChecker**, not delegated ServiceIdentity; bind exact resource-server audience and permitted tenant set. A public app/WIF credential is not checker-client authentication.
-- [ ] **T26.2** Request has exactly one access credential or internal assertion plus canonical action and resource coordinates; bounded metadata, no bodies/token logs, no caller-supplied replacement grant/profile.
+- [ ] **T26.2** Ordinary check takes one access JWT/internal assertion plus canonical action/resource and retained request binding. M3 may additionally request stream admission with fresh backend nonce using unexpired human_session evidence; expired JWTs/session refs alone cannot open a continuation. Bound metadata, no bodies/token logs.
 - [ ] **T26.3** Validate full profile/current typed policy dependencies and registered action required scopes/profiles/dimensions. WIF checks chosen binding/grant/source/optional service; direct null service valid. Human branches later check HumanAccessPolicy/client-or-origin/authentication/session/provider epochs. Superseded revision denies.
-- [ ] **T26.4** Return exact-request allow/deny/revision/decision ID, no-store; no reusable capability or positive cache for critical calls. Backend still checks canonical ownership and RBAC.
+- [ ] **T26.4** Ordinary response is exact-request allow/deny/revision/decision ID, no-store, no blanket capability or critical positive cache. M3 stream admission is the narrow T32.12 exception returning an opaque checker-bound continuation and lease, not a bearer token. Backend always enforces canonical ownership/RBAC.
 - [ ] **T26.5** Deny checks started after committed revocation, unknown actions/callers/resources, wrong audience/tenant, changed assignment/revision and store outage. Test direct and delegated access through the same registered receiver identity.
-- [ ] **T26.6** Backend integration for destructive calls and bounded streams; race boundary documented. M2 delivers WIF; M3/T32.11 adds human-session and M4/T40.13 human-CLI checks before those profiles ship.
+- [ ] **T26.6** M2 WIF critical checks and bearer expiry/reconnect boundary; M3/T32.11–T32.12 human-session checks/continuations; M4/T40.13 human-CLI checks including refresh-family revocation. Never use an expired internal assertion as a live stream proof.
 
-**Gate M2:** actual GitHub/k3s calls pass through Envoy to registered APIs without human IdP/static application secrets. Signer/JWKS, both exchange profiles, independently consumable Rust WIF crate, signed WIF constraints, audience assignments and receiver-authorized action checks work. Fixed replay tests include reusable projected-token renewal and atomic on-demand single-use. Dependencies are M0–M2, not M3/M4.
+**Gate M2:** actual GitHub/k3s calls pass through Envoy to registered APIs without human IdP/static application secrets. Signer/JWKS, both exchange profiles, independently consumable Rust WIF crate, signed WIF constraints, audience assignments and receiver-authorized action checks work. Fixed replay tests include reusable projected-token renewal and atomic on-demand single-use. Dependencies are M0 + M1a + M2, not M1b/M3/M4.
 
 ## 5. Human OIDC, sessions and TypeScript SPA (M3)
 
@@ -394,10 +429,12 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 - [ ] **T30.1** Standards-based Zitadel adapter with fixed registered app/native callbacks, expected issuer/client configuration and complete ID-token verification; capabilities explicit.
 - [ ] **T30.2** Resolve app tenant/provider from registered canonical origin; create app flow cookie and BrowserFlowBinding, state/nonce/S256 transaction with exact origin/callback/provider/epoch/validated return. State alone is insufficient.
 - [ ] **T30.3** SSRF-safe discovery, bounded timeouts/no token logging, provider outage fails closed. Ingress authority/forwarded metadata must come from trusted route/transport.
-- [ ] **T30.4** Verified subject -> stable human principal/HumanAuthentication, controlled enrollment/explicit linking; no email-only link or operator promotion. Link requests also bind initiating browser and require appropriate current/fresh identity proof.
+- [ ] **T30.4** Use exact verified subject links and shared browser/native HumanEnrollmentPolicy. preprovisioned default denies unlinked subjects; explicit auto_create creates a fresh zero-backend-privilege principal/link atomically. Existing disabled identities deny, no email-link/role promotion; migration enrollment hold always overrides auto-create. Linking remains browser-bound with explicit proof.
 - [ ] **T30.5** Optional encrypted provider-token vault only behind explicit feature; default discard upstream tokens.
 - [ ] **T30.6** Optional back-channel logout verifies issuer/audience/signature/events/time/replay then indexes provider/subject/sid; no arbitrary claim/context lookup.
 - [ ] **T30.7** Restore explicit login-CSRF/callback-injection/mix-up/redirect-confusion/linking tests: attacker callback loaded in victim browser, missing/wrong cookie, other origin/tenant/provider/flow kind, tampered return path and stale concurrent tab all deny without replacing victim session. Baseline top-level GET/query callback; alternative response mode needs reviewed cookie policy.
+- [ ] **T30.8** Implement enrollment hold/resume and concurrency tests: unique subject tuple, no duplicate principals, no auto-create across concurrent provider switch/rollback, no hold clearing by import/restart/policy edit. Reconciliation acknowledgement/resume binds current provider/generation/revision. Test native and SPA first-login parity.
+- [ ] **T30.9** Implement audited versioned credential-only rotation for unchanged issuer/upstream client_id/auth method/callback/assurance; advance credential/admin revisions, not auth epochs. Bounded configured overlap; existing session/refresh/identity transcripts survive. Reject mixed semantic edits; compromise-triggered epoch invalidation remains a separate deliberate transition.
 
 ### T31 — Opaque sessions and human authentication context
 
@@ -407,52 +444,57 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 - [ ] **T31.4** Exact Origin/CSRF on unsafe calls including Connect POST; no bearer+cookie ambiguity.
 - [ ] **T31.5** Fixation/login callback replay/cookie confusion/CSRF, independent expiry, concurrent updates, revocation/switch/store outage and session-origin crossover tests.
 - [ ] **T31.6** Local versus upstream logout distinguished; human auth context/session revocation and verified sid selection are explicit.
-- [ ] **T31.7** Session consumers use approved ApplicationOrigin/HumanAccessPolicy/audience mapping, not browser scope/tenant headers; missing canonical backend tenant/RBAC membership denies.
+- [ ] **T31.7** Session consumers use registered origin plus deterministic ApplicationRoute-selected HumanAccessPolicy/audience, never browser scope/tenant headers. Live validity checks include route revision; missing canonical backend tenant or RBAC membership denies.
 
 ### T32 — Browser gateway and explicit human-session profile
 
 - [ ] **T32.1** Extend existing T25 with session support, not defer bearer implementation. Live validate session/auth context/provider epoch/origin before minting internal evidence.
-- [ ] **T32.2** Emit private signed `skyoauth-internal+jwt` + human_session/version profile, human sub, signed tenant/audience/scope/policy revision, explicit backend_rbac constraints, auth_time, opaque origin/authentication/session refs and method/authority/path-query binding. No WIF grant, invented client_id or subject-prefix exemption; TTL <=30s and session deadline.
-- [ ] **T32.3** Route app login/callback/session and protected browser RPC/events/downloads with registered-origin enforcement; no sensitive-route bypass.
+- [ ] **T32.2** Emit purpose-key-signed skyoauth-internal+jwt/human_session/version with human sub, signed tenant/audience/scope/policy revision, explicit backend_rbac constraints, auth_time, opaque origin/auth/session refs, route ID/revision and exact request v1 tuple (design §4.1). TTL <=30 seconds and current session deadline; no WIF grant, fake client_id or subject-prefix exemption.
+- [ ] **T32.3** Route auth and protected browser traffic with registered-origin/ApplicationRoute selection and actual receiver alignment. No route/audience selection from caller headers; reject ambiguous/missing/disabled mapping and human-session rewrites before deployment.
 - [ ] **T32.4** Strip client assertion/identity headers; backend accepts internal assertion only from authenticated gateway on bound request, never public bearer. Re-run header-spoof/direct-backend/profile-substitution tests.
 - [ ] **T32.5** Validate profile-specific claim schemas and backend canonical tenant/RBAC, preserving bearer behavior. Any future gateway JWT optimization must preserve all profile/assignment/revocation controls.
 - [ ] **T32.6** Structured 401/403, no HTML redirects for RPC; TypeScript initiates explicit top-level login.
 - [ ] **T32.7** Unary/server streams/SSE/large downloads go Envoy -> backend; cancellation/reconnect/idle/body-nonbuffering tests.
-- [ ] **T32.8** Resource authorization per workflow/artifact; bounded stream duration/rechecks/cancellation and critical operation policy checks.
+- [ ] **T32.8** Authorize workflow/artifact resources and long-response transmission via T32.12 admission/recheck leases, including download/SSE/RPC cancellation. Recheck backend RBAC; expired evidence cannot authorize a new request or continue past the last lease.
 - [ ] **T32.9** Optional private ForwardAuth preserves typed evidence, trusted forwarded chain and decision semantics, never plain public-client identity headers.
 - [ ] **T32.10** Cloudflare Tunnel versus Access/WAF/rate limits documented separately.
-- [ ] **T32.11** Extend T26 for human_session: check HumanAccessPolicy, origin, current HumanAuthentication/session/epochs and action registry, with canonical resource tenant and backend RBAC still mandatory. Token has no WIF grant and is not rejected merely for that absence.
+- [ ] **T32.11** Human_session live check validates HumanAccessPolicy/origin/route, current session/authentication/epochs, receiver action registry and evidence consistency with records. Backend canonical tenant/RBAC still mandatory; no WIF grant is required for the explicit human profile.
+- [ ] **T32.12** Implement design §6.1.1 SessionContinuation admission from unexpired evidence, same-checker/nonce/action/resource/route/request/revision binding and atomic assertion-jti uniqueness. Separate recheck-session uses stored refs after assertion expiry, not expired JWT acceptance. Lease <=15s, absolute context <=1h and current session/auth bounds; no idle touch/fail-open grace or lease resurrection; local deadline is capped at recheck request-start +15s and any earlier bound. Same retry returns existing admission without extending lease; close/timeout/restart require fresh admission. Test logout at >30s, checker outage, key disable, resource/checker/nonce substitution and new-connection misuse; backend RBAC rechecks remain mandatory.
+- [ ] **T32.13** Implement shared request-binding v1 vectors and deployment checks: raw ASCII target/query exactness, method/HTTPS/registered authority, ingress rejection of traversal/encoded separators/bad escapes and no post-auth rewrite/rematch. Compare before framework decoding, preserving duplicate/query order/escape spelling; mismatches deny, not trusted X-Original-header fallbacks. Test actual Envoy prefix/host/query rewrite rejection and two APIs under one origin.
+- [ ] **T32.14** Separate per-replica local internal signing key/kid and private authenticated assertion-jwks trust set; no public-key signing permission or per-request remote KMS baseline. Rotation/disable and profile-key substitution tests include continuation key provenance. Benchmark signing CPU, batched store calls, p50/p95/p99 latency/throughput at stated hardware/load; publish measured budget, fail closed on signer/store failure, no invented latency guarantee.
 
 ### T33 — Required TypeScript SPA library
 
 - [ ] **T33.1** Evolve clients/typescript / @skyoauth/client: framework-neutral session/principal, login/logout/CSRF, bounded memory/cancellation, no token getter/persistent credential storage. Unauthenticated health helper remains separate.
 - [ ] **T33.2** /react entry point has explicit loading/authenticated/unauthenticated/unavailable states; React optional peer excluded from core.
-- [ ] **T33.3** /connect entry point handles CSRF, gateway versus Connect auth/stream errors and cancellation; optional peers excluded from core, no mutation auto-replay.
+- [ ] **T33.3** /connect entry point handles CSRF, gateway versus Connect auth/stream errors, cancellation and explicit reconnect after continuation expiry. Optional peers stay outside core; safe resumable streams may use application-owned resume cursors, never automatic mutation replay or expired credential reuse.
 - [ ] **T33.4** Runtime/declaration exports and versioned wire/errors align, no upstream-specific imports/config, no Node built-ins/polyfills in browser core; tested browser support documented.
 - [ ] **T33.5** Real-browser E2E login/logout/reload/expiry/cross-tab invalidation, CSRF, ConnectRPC/cancel/unavailable states and browser-bound callback attacks; Node mocks alone insufficient.
 - [ ] **T33.6** Same-origin HTTPS/no-userinfo targets, Fetch same-origin mode/credentials, API redirect rejection; forbid caller overrides or bearer mixing. Explicit top-level login follows OIDC; loopback development mode narrowly scoped.
 - [ ] **T33.7** Negative off-origin health/auth reuse, Request/options/redirect/downgrade manipulation, CSRF leakage, logout/account cache and credential-free cross-tab signals. Injected fetch is trusted code, not exemption from URL/header checks.
 - [ ] **T33.8** Pack npm artifact and install in independent examples/spa; verify declarations/exports/browser bundle without Node/React/Connect in core, adapter peers separately. Add CI package/browser checks when code lands.
 
-**Gate M3:** the packed TypeScript library works in a real SPA with opaque cookie/CSRF only; registered origin resolves tenant/provider, login-CSRF defenses hold, explicit human_session profile passes correct backend/live checks without WIF exemptions. No Node/framework dependencies in core, no payload proxying and no bearer regression.
+**Gate M3:** the packed TypeScript library works in a real SPA with opaque cookie/CSRF only; registered origin resolves tenant/provider, login-CSRF defenses hold, explicit human_session profile passes correct backend/live checks without WIF exemptions. Route-audience/canonical-target, >30-second stream rechecks, enrollment-hold and isolated-signing tests pass. No Node/framework dependencies in core, no payload proxying and no bearer regression.
 
 ## 6. Native OAuth and reusable Rust CLI library (M4)
 
 ### T40 — Native server flow and client crate
 
 - [ ] **T40.1** Stable metadata/endpoints and registered generated OAuth client IDs; client_admin provisioning and instance audience assignment precede auth. Exact IP-loopback redirect rules and supported grants.
-- [ ] **T40.2** Fresh SkyOAuth confirmation for each transaction showing client/account/audience/scopes/loopback and public-client identity caveat; SSO/prior consent cannot auto-approve.
+- [ ] **T40.2** Fresh confirmation shows client/account/audience/scopes/session duration, exact loopback URI/port and server-derived comparison value. Rust caller displays descriptor before browser launch; user explicitly confirms it matches their CLI. Prior SSO/consent never auto-approves, conflicting tabs show superseded-login rather than redirecting to a replacement.
 - [ ] **T40.3** Bind approval/code to client, redirect, S256 challenge, audience/scopes, verified human authentication, browser flow and epoch. Exact-Origin/CSRF/anti-framing POST, one-time cross-replica code use, native state validation; denial/expiry yields no code.
 - [ ] **T40.4** Only scoped SkyOAuth credentials to CLI; no upstream tokens. Malicious local process with its own PKCE/loopback cannot silently receive a code via existing SSO.
-- [ ] **T40.5** Interactive-only or explicitly included rotating hashed refresh families in OS keychain, auth epoch/reuse detection/revocation; never call persistent refresh secretless or silently fall back to plaintext files.
+- [ ] **T40.5** Required rotating refresh families, keyed hashes, client/audience/authentication/epoch/scope binding and atomic generation replacement. Access <=300s; family defaults 12h absolute/1h idle, policies may shorten, no absolute/auth_time extension. Current-policy/assurance checks, reuse revokes whole family, required revoke endpoint. OS credential store for persistent CLI login; explicit memory-only mode, never plaintext fallback. Design §5.2.2 fixes wire/retry/concurrency semantics.
 - [ ] **T40.6** Device flow conditional: user-code verification/explicit approval pages, expiry/polling/abuse tests, no interaction bypass.
 - [ ] **T40.7** Reusable clients/rust native API, thin cli/ reference and independent examples/rust-cli package consumer. Protocol logic in crate, terminal UX in executable; no server/DB/frontend dependency.
 - [ ] **T40.8** Silent SSO, altered confirmation, denial/expiry/concurrent code redemption, stale-provider requests/codes/refresh and browser-cookie transplantation tests.
 - [ ] **T40.9** External system browser, ephemeral IP-loopback-only listener, bounded callback path/state/lifetime and exact chosen redirect at redemption. Invalid callback/cancel/timeout cleanup; no login webview/password/secret fallback.
-- [ ] **T40.10** Publish/test MSRV/TLS/runtime/features and Linux/macOS/Windows support, minimal/default builds and optional keychain/GitHub/K8s adapters separately, not all-features alone.
+- [ ] **T40.10** Publish/test MSRV/TLS/runtime/features and Linux/macOS/Windows native support, minimal/default builds, required refresh protocol and optional OS-storage/GitHub/K8s adapters. Reference CLI persistence uses supported secure storage; minimal library can explicitly use memory-only refresh.
 - [ ] **T40.11** Redacted credentials/errors, memory cache, explicitly scoped HTTPS origin/audience transport; no cross-origin forwarding or automatic mutation replay. Package and compile independent consumer without private workspace paths.
 - [ ] **T40.12** Implement issuer /oauth/callback and __Host-skyoauth_native cookie distinct from app flow. Authorize creates browser-bound request; callback verifies full transcript/cookie/epoch, records human and rotates cookie; confirm requires rotated binding plus CSRF. App cookie/transaction ID alone never authenticates confirmation. Expire/consume on completion, denial or new conflicting flow.
-- [ ] **T40.13** Issue `skyoauth-access+jwt` / human_cli with actual client_id, human sub, tenant/audience/scope, auth_time, opaque authentication ref, HumanAccessPolicy revision and explicit backend_rbac constraints. No WIF grant/act. Extend T26 with human auth/epoch/client/policy checks and profile-specific backend fixtures before shipping.
+- [ ] **T40.13** Issue private human_cli access with actual client_id, human sub, tenant/audience/scope, auth_time, opaque authentication ref, HumanAccessPolicy revision and backend_rbac constraints. Required refresh family links that authentication/context; T26 checks its revocation/epochs alongside client/policy. No WIF grant/act or access lifetime above 300s.
+- [ ] **T40.14** Implement design §5.2.1 length-prefixed SHA-256/80-bit Base32 comparison v1 with shared server/Rust vectors; expose descriptor before launch, never PKCE verifier. Test changes to client/redirect/challenge/audience/scopes/state, concurrent local authorization, copied challenge, acknowledgement tampering and superseded cookie slots. State user-assisted/social-engineering limits, not phishing resistance.
+- [ ] **T40.15** Ten-minute command and subsequent commands renew without browser approval within family limits. Test cross-process single-flight/atomic keychain replace, concurrent/reused credential revocation, ambiguous lost response requiring reauth instead of blind retry, idle/absolute expiry, policy narrowing, logout and switch/rollback. Credential-only provider rotation must not invalidate the family. No mutation auto-replay or refresh for WIF.
 
 ### T41 — Upstream adapter/exchange
 
@@ -462,7 +504,7 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 - [ ] **T41.4** Never return upstream admin token through generalized delegation; separate restricted adapter if needed.
 - [ ] **T41.5** Replacement-provider tests preserve TypeScript/Rust contracts, metadata/profile/constraints/gateway transport and registered clients/origins.
 
-**Gate M4:** an independent CLI uses the packaged Rust crate and issuer-local browser-confirmed OAuth flow. Human_cli is explicitly verifiable without WIF claims; native feature/platform/transport tests pass. Provider migration requires reauth only. A working repository-local executable alone does not satisfy the gate.
+**Gate M4:** an independent CLI uses the packaged Rust crate, issuer-local confirmation/comparison and required rotating refresh. A ten-minute session renews 300-second access without another browser prompt; family expiry/reuse/revocation requires reauth. Human_cli is explicitly verifiable without WIF claims; platform/feature/secure-storage/transport tests pass. Provider migration requires reauth only. A repository-local executable alone does not satisfy the gate.
 
 ## 7. Operational safety, deployment and migration (M5)
 
@@ -470,7 +512,7 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 
 - [ ] **T50.1** Chart public/private gateway-policy/operator listeners, non-root/read-only context, service accounts, probes/resources/NetworkPolicies/disruption settings.
 - [ ] **T50.2** PostgreSQL migrations/backup/restore, multi-replica atomic state and quarantine/rollback instructions.
-- [ ] **T50.3** Isolate signer/reviewer/operator/recovery/upstream-admin credentials; independent recovery/rotation boundaries.
+- [ ] **T50.3** Isolate public/internal signers and trust sets, reviewer/upstream service credentials and workstation-held operator/recovery keys; independent recovery/rotation boundaries and measured internal-signing cost.
 - [ ] **T50.4** Route smoke tests reject newly exposed sensitive routes, spoofed origin and public internal/operator endpoints.
 - [ ] **T50.5** Bound requests/token/claim sizes and cache churn; rate-limit exchange/login/native confirmation/discovery/admin with no privilege-expanding fallback.
 - [ ] **T50.6** Safe latency/denial/audit metrics, no PII/token labels or secret-bearing logs.
@@ -479,28 +521,28 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 
 ### T51 — Exclusive provider migration without resets
 
-- [ ] **T51.1** Build full migration operator tooling/runbook on **T13.9's M1 sole transition primitive**. Immutable plan/dry-run/commit/rollback, expected login/config revisions and audited provider-only write boundary; no new alternate pointer writer.
-- [ ] **T51.2** Snapshot stable tenants/principals/audience registrations/assignments/actions/checker public metadata, origins/clients/human policies, all source/cluster/CA/reviewer/keyset configs, bindings/grants/defaults/activation state and issuer/operator metadata. Record replay preservation without exposing proof secrets. Enumerate human flow/auth/session/code/refresh state for invalidation, not equality.
+- [ ] **T51.1** Build full migration operator tooling/runbook on **T13.9's M1b sole transition primitive**. Immutable plan/dry-run/commit/rollback, expected login/config revisions and audited provider-only write boundary; no new alternate pointer writer.
+- [ ] **T51.2** Snapshot stable tenants/principals/audience registrations/assignments/actions/checker public metadata, origins/routes/clients/human policies/enrollment config and hold, all source/cluster/CA/reviewer/keyset configs, bindings/grants/defaults/activation state and issuer/operator metadata. Record replay preservation without exposing proof secrets. Enumerate human flow/auth/session/code/refresh state for invalidation, not equality.
 - [ ] **T51.3** Test inactive replacement and verified links; plan rejects WIF/audience/client/origin/operator/gateway/signer mutation. Independent operator access requires no upstream-admin linking. Concurrent relevant configuration changes require replan.
-- [ ] **T51.4** Atomically change only human login/mapping state and advance monotonic generations/epochs. Invalidate affected app/native flow bindings, HumanAuthentication/sessions, pending requests/codes and optional refresh families. Preserve WIF consumption and registration; document residual offline human JWT TTL and immediate live-check denial.
+- [ ] **T51.4** Atomically update human login/mapping state and monotonic epochs; set enrollment hold, invalidate app/native flows/authentication/sessions/pending codes/required refresh families and dependent continuations. Preserve WIF/registrations. Offline access residual <=300s, live checks deny and existing stream leases expire within 15s; no claim of instantaneous in-flight cancellation.
 - [ ] **T51.5** Reuse prebuilt TypeScript SPA and independent Rust CLI with recorded artifact hashes after reauth; no SDK upgrade/rebuild/env/callback/client registration/deployment change.
-- [ ] **T51.6** Existing GitHub, uploaded-key workload and two independently keyed shared-issuer K8s clusters work with unchanged workflow/source/CA/reviewer/grant/audience config. Direct/delegated and human profiles remain correct; active impersonation only if included, dormant records always unchanged.
+- [ ] **T51.6** Unchanged GitHub/uploaded-key/two shared-issuer K8s callers, direct/delegated profiles and human clients. Dormant impersonation remains disabled; active impersonation is not a v0.1 subcase. Include required native refresh reauth after switch and browser continuation denial; no source/CA/reviewer/grant/audience edits.
 - [ ] **T51.7** Compare pre/post allowed/denied policy fixtures and revisions. Single-use uses fresh proofs and consumed ones remain denied; projected Kubernetes proves reusable renewal. Both library wire/error fixtures stay compatible.
 - [ ] **T51.8** Rollback through the same primitive with fresh epochs, never whole-DB restore over independent WIF/audience changes or resurrection of consumed human/proof state.
-- [ ] **T51.9** Schema upgrade/restore preserves full stable/one-time models and dormant-mode activation guard; ordinary config import never substitutes for authoritative replay restore.
+- [ ] **T51.9** Schema/restore preserves stable IDs, one-time state and disabled-policy markers; ordinary import is not a replay restore. Continuations are not restored as live streams; reconnect requires fresh admission. Required refresh consumed/revoked state cannot resurrect.
 - [ ] **T51.10** No client/gateway/backend redeploy or issuer/certificate rotation solely for a human provider change.
-- [ ] **T51.11** Switch/rollback with IdP unavailable/unlinked admin using independent credentials and separately exercised audited recovery. Forged upstream admin roles cannot edit policy/registrations; generic PATCH/import/reload pointer attempts deny without partial effects.
+- [ ] **T51.11** Switch/rollback during IdP outage using portable independent operator and local recovery verifier; no upstream-admin link. Generic pointer/semantic writes deny; credential-only rotation keeps epochs; enrollment hold prevents accidental migrated-user recreation until explicit reconciliation/resume.
 
 ### T52 — Security conformance
 
 - [ ] **T52.1** Malformed JWT/header/claim/key corpus, profile/type substitution, issuer/algorithm confusion, key URLs/private upload and rollover.
 - [ ] **T52.2** WIF owner/repo/event/ref/env/workflow/cluster/tenant/audience/actor/binding/grant/scope/resource negatives and fixed capability/replay outcomes.
 - [ ] **T52.3** **Login CSRF, OIDC callback abuse, redirect URI confusion, identity-linking confusion**, mix-up/state/nonce/PKCE/code replay, app/native flow-cookie crossover, silent SSO/confirmation attack, fixation and epoch rollback tests. Victim browser cannot acquire attacker's session by loading an attacker-initiated callback.
-- [ ] **T52.4** Header/assertion spoofing, direct backend/private listener, fail-closed auth, oversized headers and proxy normalization/smuggling/origin routing.
-- [ ] **T52.5** Signer/operator/recovery compromise drills, retired key overlap, suspicious issuance, audit integrity/redaction and exclusive provider-write authorization.
-- [ ] **T52.6** Backend canonical tenant/resource isolation, human RBAC versus WIF allowlists, destructive workflows/artifacts/streams and implemented profile-specific T26 checks versus offline TTL.
+- [ ] **T52.4** Spoofed identity/route/assertion/original-target headers, direct backend/private listeners, fail-closed auth, exact canonicalization, disabled-route fallback and prohibited post-auth rewrites/rematching; verify both supported and rejected real gateway configurations.
+- [ ] **T52.5** Public/internal signer-key separation, rotation/disable and continuation provenance; workstation/hardware operator/recovery drills, provider credential-only rotation versus semantic transition, suspicious issuance, audit and redaction.
+- [ ] **T52.6** Canonical tenant/resources, human RBAC versus WIF allowlists, destructive workflows and >30-second streams/downloads through actual T26/T32.12 checks. Test exact lease deadlines/outage stop, no idle extension or context reuse on a new request, alongside offline access TTL.
 - [ ] **T52.7** Fuzz token/policy/metadata/confirmation/import parsers; k3s/Envoy load tests with concurrent login/code/proof consumption and revision changes.
-- [ ] **T52.8** Independent security review including complete provisioning, audience/checker/action boundary, browser/native transports, dormant activation and honest RFC-versus-private profile claims.
+- [ ] **T52.8** Independent review of staged provisioning/isolation, audience/routes/checkers, enrollment/identity continuity, browser/native comparison/refresh, separate signers and minimal dormant preservation. Do not treat deferred activation machinery or an admin UI as implemented requirements.
 
 **Gate M5 / v0.1:** C01–C10, real WIF, both required libraries and every unconditional conformance row pass. Migration changes neither client artifacts nor WIF/audience/client authority, cannot bypass human invalidation and cannot promote upstream identities to operators. Optional subcases are conditional only where explicitly stated.
 
@@ -523,7 +565,7 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 | A13 | Valid credential outside canonical resource tenant or WIF allowlist/human RBAC | Backend denies; names alone do not identify tenant ownership |
 | A14 | Provider change with existing TypeScript SPA and independent Rust CLI | Same artifact hashes/endpoints/config, human reauth only |
 | A15 | Migration with discovery/uploaded keys/two shared-issuer TokenReview clusters | Stable configs/CA/reviewer/keyset IDs and effective decisions |
-| A16 | Migration with direct/delegation bindings/grants and dormant impersonation | IDs/modes/defaults/constraints/revisions preserved; dormant remains disabled. Active impersonation subcases conditional on supported mode. |
+| A16 | Migration with direct/delegation bindings/grants and dormant impersonation | IDs/modes/defaults/constraints/revisions preserved; dormant remains disabled. No active-impersonation gate in v0.1. |
 | A17 | Rollback after independent policy/audience change | Those changes untouched; fresh human epochs, no resurrected state |
 | A18 | Spoofed identity/assertion headers | Removed/overwritten, no profile substitution or lost constraints |
 | A19 | Independent issuer-key rotation | Verification through overlap without client/backend config change |
@@ -541,7 +583,7 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 | A31 | Wrong checker/audience/tenant/action, superseded revision or checker outage | Denied, no positive cache or RBAC replacement |
 | A32 | Concurrent/reopened bootstrap, forged IdP admin, revoked operator/replayed recovery | One enrollment only, no elevation/replay, audited independent restoration |
 | A33 | Idle/absolute/session-origin and provider/sid targeting | Either expiry denies; no revival/absolute extension; only correctly selected sessions revoked |
-| A34 | Concurrent native code/optional refresh reuse and human switch/rollback | One-time across replicas; affected human state invalid, registrations unchanged |
+| A34 | Concurrent native code/required refresh reuse and human switch/rollback | One-time across replicas; affected human state invalid, registrations unchanged |
 | A35 | Provider switch/restore after proof consumption | Consumed stays consumed through config/digest-key changes or quarantine |
 | A36 | Real GitHub/k3s -> M2 Envoy -> API; spoof/outage/direct-backend attacks | Positive bearer path works before M3, bypasses deny |
 | A37 | Production predicate omitted or optional predicate removed | Required omissions reject; optional omission semantics explicit, removal reviewed as widening |
@@ -555,16 +597,25 @@ AuditEvent(id, tenant_id?, timestamp, actor, action, object_id,
 | A45 | Direct grant with no target service and registered backend checker/action | Live check works; delegated subject is not checker authority; unknown action or another audience's checker denies |
 | A46 | Two registered origins/tenants with different human providers; spoofed Host/Forwarded or tenant query | Correct provider/session tenant per registered trusted origin; unknown/crossed/spoofed origins deny before redirect |
 | A47 | Active provider changed by PATCH/import/reload/delete/auth-critical edit; initial activation/switch/rollback via plan | Generic writes reject atomically, epochs unchanged on denial; only guarded commit advances pointer and epochs |
-| A48 | Empty installation -> tenant/audience/origin/client/principal/source/grant and initial provider via M1 operator tools | Complete independently authorized path without SQL edits or M4 native CLI; missing roles deny |
+| A48 | Empty installation -> tenant/audience/origin/client/principal/source/grant and initial provider via staged operator tools | Workload chain M1a, human chain M1b; portable operator/local verifier, no SQL or M4 dependency; missing roles deny |
 | A49 | Identical operator labels in two tenants and create/export/reapply | Distinct generated IDs, deterministic authorized mapping, no global-name collision/probe; exchange names instead of IDs reject |
 | A50 | Repo-wide and deployment binding map different actors; selected grant owns one | Matching eligible binding for grant actor succeeds; other actor overlap irrelevant. No eligible match denies; multiple same-actor matches deterministic with no union. |
 | A51 | Attacker-initiated app login callback loaded by victim; redirect/linking/mix-up attacks | Missing/wrong browser flow binding denies without creating/replacing/linking victim session; PKCE/state/nonce plus exact transcript enforced |
 | A52 | Native issuer callback/confirm with no app cookie, correct native binding; stolen transaction ID/wrong cookie | Correct issuer flow succeeds with explicit approval; transaction ID/app cookie/foreign browser alone denies; rotated binding consumed |
-| A53 | Unsupported impersonation create/import, then capability upgrade and activation attempts | Disabled/reapproval record round-trips normally; enabled unsupported input rejects; upgrade/PATCH/import cannot activate, dedicated fresh approved commit required |
+| A53 | Unsupported impersonation create/import, then capability upgrade and activation attempts | Disabled/reapproval record round-trips normally; enabled unsupported input rejects; upgrade/PATCH/import cannot activate, future reviewed activation required; no activation operation ships in v0.1 |
 | A54 | TokenReview/projected token reused before rotation, then rotated; single_use configuration requested | Reusable renewal works both times with fresh validation; single_use enrollment/import denied even with local keys; no verified-jti assumption |
 | A55 | Private access/internal types versus at+jwt/ID token/profile confusion | Only exact implemented private type/profile/ingress pairs accepted; WIF does not invent client_id; actual CLI client_id required |
+| A56 | Browser stream beyond 30s; logout, key disable, outage, substituted checker/nonce/resource or new connection | Stored-context recheck works after admission assertion expires; live denial or last lease stops bytes within <=15s; no expired-proof admission, idle extension or handle reuse; context <=1h |
+| A57 | Ten-minute native session with 300s access, later commands, refresh reuse/lost reply/expiry/logout/switch | Rotation renews without browser inside family bounds; replay/revocation/expiry requires reauth, cross-process serialization, no blind retry/plaintext fallback or access-lifetime increase |
+| A58 | One origin with billing/deploy routes, wrong/missing method/route, ties, disabled winner or client-supplied audience | Correct single registered audience/policy; ties reject at write, disabled winner/no mapping denies without broad fallback; actual gateway receiver agrees |
+| A59 | Legitimate CLI plus concurrent malicious native request; comparison-field changes and superseded tab | Server/Rust v1 descriptor agrees only for exact request; CLI displays port/code, page requires matching acknowledgement; no silent replacement; PKCE/state remain required |
+| A60 | First browser/native login in default/auto-create mode, concurrent callback, disabled user, switch/rollback hold | Default denies; opt-in creates one zero-privilege exact-subject principal; no email merge or disabled replacement; migration hold prevents recreation until explicit reconciliation/resume |
+| A61 | Raw request/query differences, encoded path attacks, Envoy prefix/host/query rewrite or route-cache mutation | Exact v1 tuple comparison, order/duplicates/escape spelling retained; unsupported ambiguous/rewrite configuration rejected, runtime mismatch denies without original-header bypass |
+| A62 | Internal versus public key substitution, private key-set access, rotation/disable and signing load | Disjoint trust/permissions, private distribution, no public-key use by auth replica; dependent continuation denies disabled key; measured latency/CPU/store budget, failure denies |
+| A63 | Active provider secret/key-reference rotation versus changed issuer/client_id/auth method/callback/assurance | Credential-only audited revision advances preserve epochs/session/refresh; mixed semantic changes require guarded transition; no arbitrary fallback or exported secret |
+| A64 | macOS/Windows/Linux workstation operator and offline recovery against Linux service | Private keys remain on workstation/hardware; scoped remote writes and instance-bound challenge response work without server/DB/M4 dependency or key export into pod |
 
-All unconditional rows block release. Optional refresh/device/active-impersonation subcases are conditional on reviewed feature scope; rejection of unsupported issuance and normal disabled-policy storage/preservation are unconditional. Neither client library, direct/delegated WIF, native confirmation, operator recovery nor profile-appropriate live checking is optional.
+All unconditional rows block full v0.1. Optional device-flow subcases apply only to a later explicitly included profile; unsupported device issuance and disabled-only impersonation preservation/rejection remain unconditional. Required native refresh is **not optional**. Active impersonation, approval tables/endpoints and two-person activation tests are deferred to its future ADR. Neither client library, direct/delegated WIF, native confirmation, operator recovery nor profile-appropriate live checking is optional. M2 is an earlier usable milestone, not a claim that the full v0.1 suite has run.
 
 ## 9. Delivery dependencies and issue boundaries
 
@@ -572,13 +623,16 @@ All unconditional rows block release. Optional refresh/device/active-impersonati
 | --- | --- | --- | --- |
 | 0 | Bootstrap PR #2, landed | None | Service, TypeScript health helper, workspace/CI only |
 | 1 | M0 / T00 | Inspect bootstrap | Reviewed public/operator/client/security contracts |
-| 2 | M1 / T10–T14 | M0 | Full authority/state schema, audience/origin/client provisioning, trust/policy, local operator recovery and sole provider-transition primitive |
-| 3 | M2 / T20–T26 | M1 | Signer/JWKS/WIF, Rust workload library, bearer Envoy and receiver-authorized WIF action checks |
-| 4 | M3 / T30–T33 | M1, M2 | Browser-bound human OIDC/session/internal profile, human-session checks and TypeScript SPA package |
-| 5 | M4 / T40–T41 | M2, M3, M1 OAuth state | Issuer-native callback/confirmation, human CLI profile/checks, reusable Rust native library/reference CLI |
+| 2a | M1a / workload parts of T10–T14 | M0 | Workload authority/replay, tenant/audience/checker/actions, portable operator and local bootstrap/recovery |
+| 2b | M1b / human parts of T10–T14 | M1a; parallel with M2 | Enrollment/hold, origin/routes/client/provider policy, browser/native/refresh/continuation state and sole provider transition |
+| 3 | M2 / T20–T26 | M1a, not M1b | Signer/JWKS/WIF, Rust workload library, bearer Envoy and receiver-authorized WIF action checks |
+| 4 | M3 / T30–T33 | M1b, M2 | Enrollment-safe OIDC, route-bound evidence/private signer, bounded session streams and TypeScript SPA package |
+| 5 | M4 / T40–T41 | M2, M3, M1b OAuth state | Native callback/comparison/confirmation, required rotating refresh, reusable Rust library/reference CLI |
 | 6 | M5 / T50–T52 | Above | Deployment/CI audit, full switch runbook/invariance/recovery and unchanged-artifact conformance |
 
-Reviewable implementation slices: schema/registry; independent operator and complete provisioning; verifiers/keysets; selected-grant policy; signer/profile verifiers; exchange/Rust WIF/GitHub; TokenReview; bearer ext_authz/live check; browser-bound OIDC/session/origin routing; human internal assertion and TypeScript package; issuer-native server flow/Rust library; provider adapter; deployment/migration/security tests. Include each new package's CI/consumer tests with its implementation, not as a later optional step. Docs-only and runtime PRs remain separate.
+**Slice assignment:** T10/T12 are implemented first for workload authority/replay in M1a, then for human state/policy in M1b; logical type definitions are reviewed together. T13.1–T13.7/T13.10 provide operator/local recovery in M1a, T13.8 splits provisioning and T13.9 is M1b. T14.1–T14.4 provide audience/checker/WIF action authority in M1a (human/stream fields before M3); T14.5–T14.7/T14.9 are M1b; T14.8 applies to each slice's objects. M2 needs no browser/provider/refresh/continuation handlers or tables. Model/restore invariants become blocking when their slice first lands; all are exercised before full v0.1.
+
+Reviewable implementation slices: workload schema/operator/trust/policy; signer/exchange/Rust WIF; TokenReview/bearer gateway/live checks; parallel human registry/state; browser-bound OIDC/enrollment/route assertions/stream continuation and TypeScript package; native comparison/refresh/Rust library; deployment/migration. Keep tenant/isolation tests and independent audience authority even in one-tenant deployments. Defer admin UI, self-service tenant onboarding, invitations, device flow, vault/provider exchange, alternate gateways and active impersonation. New package CI/consumer tests land with code. Keep pure main-integration merges separate from ordinary content commits; do not rewrite shared history merely to clean up an earlier merge.
 
 ## 10. Definitions of done
 
@@ -586,17 +640,17 @@ Reviewable implementation slices: schema/registry; independent operator and comp
 
 **WIF:** authorized discovery/uploaded-key/TokenReview enrollment, generated stable selectors and direct/delegated service access within instance audience assignments. Secretless GitHub/K8s API calls and correct renewal modes; impersonation not required.
 
-**Gateway:** authenticated fail-closed bearer path in M2; origin/session/CSRF plus signed private human evidence in M3. Bytes go directly to backend, which verifies profile/audience/canonical tenant/RBAC; no public internal endpoint or spoofed identity.
+**Gateway:** fail-closed bearer M2; M3 exact origin/route/audience/request binding, dedicated local internal signer/private trust and bounded stream continuation. Actual receiver routing agrees; protected human routes forbid rewrites/rematching. Bytes bypass SkyOAuth; backend canonical tenant/RBAC always applies.
 
 **TypeScript SPA:** packaged @skyoauth/client is browser/framework-neutral, not just Node health/workload code; memory-only session/CSRF and strict same-origin transport, no OAuth-token getter, core without Node/framework dependencies, real-browser/package/type/adapter tests.
 
-**Rust CLI:** packaged reusable skyoauth-client works in an independent CLI with PKCE/external browser/loopback/explicit confirmation, typed/redacted transport and tested native features/platforms. Reference executable uses that API; no service/database dependency or unsafe storage fallback.
+**Rust CLI:** reusable packaged skyoauth-client works in an independent CLI with PKCE/system browser/loopback, request comparison/explicit approval and required rotating refresh under the 300-second access cap. Test multiple renewals, family/reuse/revocation and secure persistent or explicit memory-only storage on supported platforms. Thin reference executable, no server/database dependency or unsafe fallback.
 
-**Administration:** bootstrap to tenant/audience/origin/client/principal/policy registration is completely authorized and executable in M1. Independent roles/recovery, read-only generic active state, exclusive transition commit and dormant-mode approval cannot be bypassed by upstream identities/imports.
+**Administration:** M1a workload provisioning via portable workstation operator/local verifier precedes M2; M1b human provisioning/transition precedes M3. Independent key custody/roles/recovery, exclusive semantic transitions, safe credential rotation and enrollment holds cannot be bypassed by upstream identities/imports. Disabled-only impersonation preservation does not require active-mode machinery.
 
 **Migration:** only affected human configuration/authentication state changes through guarded commits. Prebuilt client artifacts, audiences/actions/checkers, origins/clients/human policies, all WIF sources/keysets/bindings/grants/dormant status, issuer keys and effective WIF decisions stay stable; consumed state never revives.
 
-**Security:** every credential traces to an explicit verified profile and complete policy/authentication provenance, canonical resource tenant and backend RBAC. Revocation/race limits are honest. All unconditional A01–A55 are demonstrable, including restoration of login-CSRF/redirect/linking defenses.
+**Security:** every credential traces to an explicit verified profile and complete policy/authentication provenance, canonical resource tenant and backend RBAC. Revocation/race limits are honest. All unconditional A01–A64 are demonstrable, including restoration of login-CSRF/redirect/linking defenses.
 
 ## 11. ADR decisions to ratify
 
@@ -605,18 +659,18 @@ These are proposed starting decisions, not claims of implementation or automatic
 | ADR | Decision | Proposed baseline |
 | --- | --- | --- |
 | ADR-001 | Issuer/discovery | One stable canonical HTTPS issuer independent of human providers |
-| ADR-002 | Signer/recovery | Asymmetric isolated kid/overlap; implementation M2 |
+| ADR-002 | Signer/recovery | Public signer/JWKS M2; separate local internal-purpose keys/private verifier set M3, measured hot-path cost |
 | ADR-003 | Sessions/state | PostgreSQL keyed hashes, explicit deadlines/origin/authentication epochs and browser flow bindings |
-| ADR-004 | Native OAuth | Reusable Rust PKCE, external browser, issuer-local callback/cookie and fresh confirmation; optional refresh/device scoped |
+| ADR-004 | Native OAuth | Reusable Rust PKCE, external browser, issuer-local callback/cookie and comparison/fresh confirmation and required rotating refresh; device deferred |
 | ADR-005 | WIF adapters | Three source kinds, fixed source selector/cluster config and keyset parent; reusable projected tokens |
-| ADR-006 | Modes | Required direct/delegation; unsupported impersonation stored disabled, capability-independent fresh activation approval |
-| ADR-007 | Backend identity | Original typed bearer or signed gateway-only human assertion; authenticated channels and canonical tenant checks |
+| ADR-006 | Modes | Required direct/delegation; retain disabled impersonation policy only, active subsystem/approval machinery deferred |
+| ADR-007 | Backend identity | Original bearer or purpose-key-signed human evidence; deterministic audience/route and exact raw tuple, no human-session rewrites |
 | ADR-008 | Policy writes | Revisioned role-scoped DB/GitOps, full-plan authorization and explicit widening/deletion approval |
 | ADR-009 | Upstream exchange | Optional compatible provider operation server-side, normalize downstream credential |
-| ADR-010 | Live revocation | Short offline TTL plus resource-server-authenticated action check; WIF M2/human M3–M4 |
+| ADR-010 | Live revocation | Access <=300s, internal evidence <=30s; live action checks plus same-checker stream continuation leases <=15s/context <=1h |
 | ADR-011 | Cluster/authority | One bridge issuer, registered source IDs disambiguate clusters, not issuer alone |
 | ADR-012 | Migration | Sole provider transition with monotonic auth invalidation; WIF/audience/client/operator state preserved |
-| ADR-013 | Operator trust/provisioning | Independent keys/local roles, complete tenant/client/principal endpoints, M1 service operator subcommands and offline recovery |
+| ADR-013 | Operator trust/provisioning | Independent keys/local roles, complete tenant/client/principal endpoints, M1a portable workstation client + local verifier, M1b human commands and offline-key custody |
 | ADR-014 | Tenant scope | Composite references, instance audience/origin assignment, same-tenant trust/grants and mandatory backend resource mapping |
 | ADR-015 | Exchange semantics | RFC direct subject exchange versus private actor mapping; explicit generated selectors and grant-directed bindings |
 | ADR-016 | Replay/constraints | Reusable default/projected tokens; single-use only verified on-demand capability; profile-specific signed constraints/revisions |
@@ -624,8 +678,10 @@ These are proposed starting decisions, not claims of implementation or automatic
 | ADR-018 | Resource servers | Instance audience registry/tenant assignments, separate receiver checker identities and persisted action rules |
 | ADR-019 | Human credentials/private types | Explicit human_cli/human_session versus WIF; complete human policy provenance/backend_rbac mode, private JWT types rather than partial RFC 9068 |
 | ADR-020 | Browser routing/binding | Globally assigned origin -> tenant/provider, distinct app/native flow cookies/callbacks, no transaction-ID-only authentication |
-| ADR-021 | Exclusive provider writes | Read-only active observations, generic mutation/import rejection, sole revision-checked epoch-advancing commit primitive in M1 |
+| ADR-021 | Exclusive provider writes | Read-only active observations, generic mutation/import rejection, sole epoch-advancing semantic transition M1b; separate audited credential-only rotation preserves epochs |
 | ADR-022 | Identifier and binding lifecycle | Generated opaque IDs + tenant-local names/create-reference mapping; selected grant's actor/approved binding set filters evidence |
+| ADR-023 | Enrollment and continuity | preprovisioned default, explicit zero-privilege auto-create; switch/rollback hold and deliberate generation-bound resume |
+| ADR-024 | Delivery scope | M1a -> usable M2; parallel M1b before M3; full v0.1 still both clients/migration/isolation, active impersonation machinery deferred |
 
 ## 12. References
 
@@ -633,6 +689,8 @@ These are proposed starting decisions, not claims of implementation or automatic
 - [Bootstrap PR #2](https://github.com/skyoauth/skyoauth/pull/2) and [landed tree](https://github.com/skyoauth/skyoauth/tree/8f81df23efd4c4a0cfe522f711a9ca56f294aab1)
 - [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693.html): subject/actor roles and act
 - [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html): browser-bound OAuth transactions, CSRF/redirect/mix-up protection
+- [RFC 6749 §6](https://www.rfc-editor.org/rfc/rfc6749.html#section-6) and [RFC 7009](https://www.rfc-editor.org/rfc/rfc7009.html): native refresh/revocation
+- [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html): Base32 comparison-display encoding; correlation protocol is project-specific
 - [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html): external browser, loopback and native interaction
 - [RFC 8725](https://www.rfc-editor.org/rfc/rfc8725.html): JWT profile separation
 - [RFC 9068](https://www.rfc-editor.org/rfc/rfc9068.html): at+jwt/client_id requirements, contrasted with the chosen private profile
@@ -640,3 +698,5 @@ These are proposed starting decisions, not claims of implementation or automatic
 - [GitHub OIDC](https://docs.github.com/en/actions/reference/security/oidc)
 - [Kubernetes TokenReview](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/) and [projected token rotation](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/)
 - [Envoy Gateway extAuth](https://gateway.envoyproxy.io/docs/tasks/security/ext-auth/)
+
+- [Envoy route configuration](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto) and [ext_authz filter](https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_authz/v3/ext_authz.proto): verify deployed route normalization/mutation behavior
