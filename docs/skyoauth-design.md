@@ -1,84 +1,81 @@
 # SkyOAuth — Architecture, security model, and roadmap
 
-> **Status:** proposed design for review (2026-11-15; revised for PR #1 review). This document is normative for project goals, not evidence that an implementation exists. See [skyoauth-tasks.md](skyoauth-tasks.md) for detailed interfaces, dependencies, milestones, and acceptance tests.
+> **Status:** proposed design for review (2026-11-15; revised for both PR #1 review rounds and the PR #2 repository bootstrap). This document specifies project requirements, not implemented authentication. The bootstrap supplies a Rust service and a TypeScript health client. See [skyoauth-tasks.md](skyoauth-tasks.md) for interfaces, schema, milestones and release tests.
 
 ## 1. Executive summary
 
-SkyOAuth is a small, self-hostable **identity bridge** for public-facing applications and private APIs. It eliminates application-managed, long-lived client credentials by accepting *existing* human and workload identities, applying administrator-owned trust and authorization policies, and presenting stable SkyOAuth credentials to protected services.
+SkyOAuth is a small, self-hostable **identity bridge** for public-facing applications and private APIs. It accepts existing human and workload identities, applies administrator-owned trust and authorization policies, and presents stable SkyOAuth credentials to protected services without application-managed static API secrets.
 
-SkyOAuth is **not** a substitute for an upstream human identity provider, a service mesh, or an application traffic proxy:
+SkyOAuth is not an upstream human identity provider, service mesh or application traffic proxy:
 
-- **Browser:** OIDC SSO with Zitadel (or another upstream provider) establishes an opaque, Secure/HttpOnly, server-side session. The browser never receives OAuth access or refresh tokens.
-- **CLI:** a stable SkyOAuth native OAuth interface brokers interactive upstream OIDC sign-in (Authorization Code + PKCE; device flow if implemented). CLIs receive short-lived SkyOAuth API access tokens rather than upstream-provider-specific credentials. SkyOAuth requires its own transaction-bound native-client confirmation.
-- **Workloads:** GitHub Actions OIDC, Kubernetes projected service-account tokens, and registered third-party OIDC/JWT issuers can be verified and exchanged into short-lived, audience-bound SkyOAuth access tokens. Direct workload exchange uses RFC 8693; policy-mapped service delegation uses an explicitly separate SkyOAuth extension (§5.7). **GitHub Actions → our k3s APIs is a first-class, mandatory use case.**
-- **Gateway:** Envoy Gateway queries SkyOAuth's out-of-band gRPC `ext_authz` implementation for opaque browser sessions and, initially, bearer tokens. The minimal bearer path ships in M2; browser support extends it in M3. Envoy routes ConnectRPC calls, streams, and large downloads **directly** to the application; SkyOAuth never proxies their bodies. HTTP ForwardAuth adapters can support other gateways.
-- **Backend:** protected APIs enforce tenant/project/workflow permissions and operation-specific authorization; the identity bridge only establishes principal identity and scoped grants.
+- **Browser:** upstream OIDC establishes an opaque, Secure/HttpOnly server-side session. A required **TypeScript SPA library** manages browser-safe session state and CSRF; JavaScript never receives OAuth access or refresh tokens.
+- **CLI:** a required, reusable **Rust client crate** uses SkyOAuth's stable public-client Authorization Code + PKCE interface and transaction-specific confirmation. It receives short-lived SkyOAuth API credentials, not upstream-provider tokens. A reference CLI consumes this library rather than implementing a second protocol stack.
+- **Workloads:** GitHub Actions OIDC, projected Kubernetes service-account tokens and registered external JWTs become scoped SkyOAuth access tokens. Direct exchange uses RFC 8693; single-proof service delegation is an explicitly separate extension (§5.7). **GitHub Actions → our k3s APIs is mandatory.**
+- **Gateway:** Envoy Gateway calls a private, out-of-band gRPC `ext_authz` service. Minimal bearer support ships in M2; cookie/session support in M3. ConnectRPC calls, streams and downloads flow **directly from Envoy to the application**, never through SkyOAuth.
+- **Backend:** the application remains authoritative for resource RBAC. It validates the signed credential profile, its own registered audience, canonical tenant/resource ownership and operation permissions. Audience registration and service identity are different objects.
 
-**Non-negotiable compatibility goal:** replacing Zitadel or any other *upstream human IdP* must require **zero changes, rebuilds, reconfiguration, or redeployments of browser/CLI/agent clients or protected services**. Reauthentication of human users is acceptable. The migration must **also leave all WIF registrations (discovery URLs, uploaded JWKS, or per-cluster TokenReview configuration), external-claim → principal mappings, supported service grants, audiences/scopes, and policy decisions intact**, without administrators resetting them. Stored impersonation policy must also survive without being implicitly enabled, even when that mode is not shipped.
+**Non-negotiable migration goal:** replacing the upstream human IdP requires **zero changes, rebuilds, reconfiguration or redeployments of browser/CLI/agent clients or protected services**. Human reauthentication is acceptable. WIF registrations, discovery URLs, uploaded JWKS, per-cluster TokenReview configuration, subject bindings, supported service grants, audiences/scopes, resource constraints and effective policy decisions survive without administrative reset. Unsupported impersonation policy remains disabled, including after a capability upgrade.
 
-The public SkyOAuth issuer and its signing keys, trust registry, internal principals, administrator authority, and policy database are **SkyOAuth-owned**, not upstream-IdP-owned.
+SkyOAuth owns its public issuer/signing keys, tenants, audience authority, clients/application origins, principals, trust/policy database and independent operator authority. These are not owned by the replaceable human IdP.
 
 ### 1.1 Goals
 
-1. Remove static API keys, personal access tokens, and secret bootstrap credentials from browser frontends, CI jobs, and workload/agent applications.
-2. Provide a stable, standards-oriented HTTP/OAuth contract and small client SDKs across upstream human IdP changes; explicitly identify project-specific extensions.
-3. Support GitHub Actions OIDC → scoped access to user-owned cluster backends, without cloud STS, SPIRE, sidecars, or an application-layer reverse proxy.
-4. Maintain persistent administrator-managed discovery/JWKS/TokenReview trust sources, subject bindings, and service policy mappings, regardless of human IdP migration or normal application upgrades.
-5. Be usable with k3s/Kubernetes, Envoy Gateway, Cloudflare Tunnel, ConnectRPC, and optional alternate gateways.
-6. Keep a narrow, auditable Rust service and an explicit separation between authentication, token issuance, and resource authorization.
+1. Remove static application API keys/PATs/bootstrap secrets from SPAs, CLI applications, CI jobs and workload agents.
+2. Provide **both** a TypeScript SPA library and a reusable Rust CLI library with stable, versioned contracts across human IdP migration. Their credential APIs are intentionally different.
+3. Support GitHub Actions → protected cluster APIs without cloud STS, SPIRE, sidecars or an auth-service data-plane hop.
+4. Preserve independently administered WIF sources, keysets, bindings, service policies, audience assignments and client registrations across migrations/upgrades.
+5. Work with k3s/Kubernetes, Envoy Gateway, ConnectRPC and optional Cloudflare Tunnel/alternate gateways.
+6. Keep the Rust service narrow and auditable; separate authentication, issuance, independent operator authority and application resource authorization.
 
 ### 1.2 Non-goals
 
-- Directory/user provisioning, end-user MFA/password management, upstream consent management, and organizational identity governance (upstream IdP responsibilities). **SkyOAuth's own minimal native-client confirmation is in scope**; a device user-code verification/confirmation page is required if device flow ships. Independent operator credentials (§7.2) are also in scope.
-- SPIRE/SPIFFE or a mandatory cluster agent/sidecar; support direct Kubernetes service-account federation.
-- Proxying ConnectRPC requests, downloads, SSE, or streaming payloads.
-- General AWS/GCP/Azure credential brokerage or cloud role assumption in the initial release. **WIF for authenticating to SkyOAuth-protected APIs is required**, independently of cloud WIF.
-- A universal ABAC engine for application resources, Temporal operations, or cloud permissions.
-- Converting arbitrary external tokens into an upstream provider's administrator tokens or allowing public impersonation of its users.
-- A general-purpose user-configurable URL/JWKS fetcher; external trust is administrator-controlled.
+- Passwords, end-user MFA, directory provisioning, upstream consent management and organizational identity governance. **SkyOAuth's native-client confirmation and independent operator credentials are in scope.** Device verification/confirmation is required if that optional flow ships.
+- A mandatory service mesh, SPIRE/SPIFFE, cluster sidecar or node agent.
+- Proxying application bodies, streaming payloads, downloads or SSE through SkyOAuth.
+- General cloud credential brokerage in v0.1; this does not make WIF for SkyOAuth-protected APIs optional.
+- Replacing backend resource RBAC with a universal application ABAC engine.
+- Public access to upstream administrator tokens, arbitrary impersonation, or token-controlled URL/JWKS discovery.
+- Identical secret-handling APIs across browsers and native apps; a Node-only client or reference executable alone does not satisfy the two library requirements.
 
 ## 2. Stable compatibility contract (MUST)
 
-These are versioned public/project contracts; provider-specific details MUST NOT leak across them.
-
 | ID | Invariant |
 | --- | --- |
-| C01 | Stable SkyOAuth issuer URL, discovery/JWKS endpoints and published signing-key rotation contract. |
-| C02 | Stable native-client authorization/token endpoints, exchange profiles including source/grant selectors, browser-session endpoints and client SDK APIs. |
-| C03 | Stable API audiences, normalized principal IDs, versioned token/constraint semantics, gateway/authentication contracts, and ConnectRPC caller identity contract. |
-| C04 | Human IdP changes may invalidate human browser/CLI sessions but require no client or backend redeployment/configuration changes. Registered SkyOAuth OAuth clients remain unchanged. |
-| C05 | Tenant-owned external registrations survive unchanged: stable source ID, exact `iss`, discovery URL or uploaded public JWKS/keyset versions or TokenReview cluster ID/endpoint/CA/reviewer-credential reference, accepted audiences, verification/replay policy and lifecycle metadata. |
-| C06 | External subject/claim → workload principal bindings and service grants, scope/audience ceilings, tenant/resource constraints, modes and policy IDs survive unchanged. Unsupported impersonation records remain inactive, not deleted or activated. |
-| C07 | Already permitted WIF sources continue to exchange tokens with identical effective policy outcomes, apart from independently triggered trust or policy changes. Replay-consumption state is not reset. |
-| C08 | SkyOAuth-issued credentials have an issuer distinct from upstream human IdPs; backends do not need to trust Zitadel, GitHub, or other upstream issuers directly. |
-| C09 | Authentication never bypasses application-level resource authorization. Cookie or JWT proof alone never implies permission to operate on a project, Temporal workflow, tenant, or cloud account. |
-| C10 | Policy changes and upstream migrations are separate, explicit administrative operations with audit, dry-run, and rollback. Administrator authority/recovery is independent of the active human IdP. |
+| C01 | Stable SkyOAuth issuer, discovery/JWKS and signing-key rotation contract. |
+| C02 | Stable native OAuth, WIF exchange, browser-session and TypeScript SPA/Rust CLI library interfaces, including generated source/grant selectors. |
+| C03 | Stable audience registrations, tenant/principal IDs, credential profiles, constraint semantics and gateway/backend identity contract. |
+| C04 | Human migration may invalidate human auth state, but requires no client/backend redeployment or reconfiguration. OAuth clients, application origins and human access policies remain stable. |
+| C05 | All external source configurations survive: IDs, exact issuer, discovery or uploaded keysets or TokenReview endpoint/cluster/CA/reviewer references, audiences, verifier/replay policy and lifecycle metadata. |
+| C06 | Bindings, direct/delegation grants, target/service ceilings, approved binding sets, scopes/defaults and resource constraints survive. Unsupported impersonation records remain unchanged and inactive. |
+| C07 | Valid WIF exchanges retain identical effective policy outcomes unless an independent trust/policy change occurs. Consumed-proof state is not reset. |
+| C08 | SkyOAuth's issuer is distinct from upstream IdPs; protected services need not trust GitHub, Kubernetes or Zitadel directly. |
+| C09 | Credential validity never bypasses canonical tenant checks or backend RBAC. A matching project name, scope or audience alone is insufficient. |
+| C10 | Provider switch/rollback and policy administration are separate audited operations. Only the switch transaction changes the active-provider pointer; authority/recovery is independent of the human IdP. |
 
-**Scope of guarantee:** a human IdP migration is not an external issuer's own key compromise/rotation, its protocol outage, or a requested WIF-policy change. Those events may legitimately require explicit administrator action. It is also not a promise that every provider supports identical MFA or user claims. Identity linking must be explicitly verified; equal email addresses do not prove account continuity. Normal independent TokenReview reviewer-credential rotation remains possible; a human provider switch neither rotates it nor rewrites its reference.
+A human migration is not an external issuer's compromise/rotation/outage or a requested WIF-policy change. Those can require independent operator action. Equal emails do not prove identity continuity. The replacement provider must meet the configured human-authentication requirements. TokenReview reviewer rotation, audience administration and signer rotation remain independent operations, never implicit migration side effects.
 
-## 3. Logical architecture and trust boundaries
+## 3. Architecture and trust boundaries
 
 ~~~mermaid
 flowchart TB
   subgraph Clients
-    B[Browser / React + Vite]
-    C[CLI / human]
+    B[Browser / TypeScript SPA library]
+    C[CLI / Rust client crate]
     G[GitHub Actions / CI]
-    K[Kubernetes or external agent]
+    K[Kubernetes / external agent]
   end
   subgraph Identity["SkyOAuth identity control plane — Rust"]
     PUB[Public OAuth / OIDC broker / session endpoints]
-    EXT[gRPC ext_authz / HTTP ForwardAuth]
-    EX[Policy-aware exchange + local JWT issuer]
-    ADM[Private operator API / recovery]
-    DB[(PostgreSQL: sessions, trust, grants, keys metadata)]
+    EXT[Private gRPC ext_authz]
+    EX[Exchange / policy checks / local issuer]
+    ADM[Independent operator API / recovery]
+    DB[(PostgreSQL: identity, audiences, trust, policy, transactions)]
   end
-  U[Upstream human OIDC: Zitadel or replacement]
-  J[Configured external issuers and Kubernetes TokenReview]
-  O[Independent operator credentials]
-  EDGE[Cloudflare Tunnel optional -> Envoy Gateway]
-  API[ConnectRPC / REST control-plane API]
-  TP[Temporal / cloud execution backends]
+  U[Replaceable human OIDC provider]
+  J[Registered external verifiers / TokenReview]
+  O[Independent operator keys]
+  EDGE[Optional Cloudflare Tunnel -> Envoy]
+  API[Registered resource server / ConnectRPC API]
   B --> EDGE
   C --> PUB
   G --> EX
@@ -86,372 +83,440 @@ flowchart TB
   O --> ADM
   ADM --> DB
   PUB <--> U
-  EX <--> J
   PUB --> DB
+  EX <--> J
   EX --> DB
-  EDGE -. auth check only .-> EXT
+  EDGE -. metadata-only auth check .-> EXT
   EXT --> DB
-  EDGE -->|authorized request / response bytes| API
-  API -. private live grant check .-> EX
-  API --> TP
+  EDGE -->|application request and response bytes| API
+  API -. private operation check .-> EX
 ~~~
 
-The diagram separates *logical* control-plane calls; browser login/session paths are routed by Envoy to SkyOAuth on the **same application origin**, while API traffic goes from Envoy directly to the backend. External clients can reach the public token endpoint but **not** the private ext_authz, policy-check, or operator listeners.
+Browser auth routes are served on the registered application origin. Native authorization and its upstream callback are on the canonical issuer origin. External clients cannot reach private authorization, live-policy or operator listeners.
 
-### 3.1 Four security boundaries
+### 3.1 Four boundaries
 
-1. **External issuers are untrusted until explicitly registered.** A JWT is not authoritative because it has an `iss` or `kid` claim; a selected registered source fixes issuer, verifier, audience, maximum age, and claim policy. Request selectors are not credentials.
-2. **SkyOAuth owns session, token, and administrative authority.** Stable internal principal IDs (`usr_*`, `wld_*`, `svc_*`) are independent of upstream subject IDs. Separate `adm_*` operator identities cannot be obtained through upstream roles, email, or WIF. SkyOAuth signing keys are not Zitadel keys.
-3. **Envoy is the transport gate, not application policy.** A protected route must have a fail-closed SecurityPolicy; a backend must never trust arbitrary user identity headers supplied by a public client.
-4. **Application/resource authorization remains in the API.** The API validates an authenticated principal and signed grant constraints before workflow start/cancel/terminate, cloud mutation, and artifact access. A live grant check does not replace backend RBAC.
+1. **External proof is untrusted until verified by the selected registered source.** An `iss`, `kid`, source ID or grant ID is not authority to choose a verifier URL, tenant or subject.
+2. **SkyOAuth owns issuance and administrative trust.** Stable local human/workload/service principals are distinct from upstream subjects. Independent `adm_*` identities cannot be acquired through OIDC claims or WIF. Instance-owned audience assignments bound tenant issuance.
+3. **Envoy authenticates transport, not application permissions.** Protected routes fail closed; client identity headers are stripped; the backend is not directly accessible to untrusted callers.
+4. **The API checks the exact credential profile and canonical resource tenant, then RBAC.** An explicit human `backend_rbac` constraint mode is not a WIF exemption or an automatic allow.
 
-The token-signing function is privileged. Separate its key material/permissions from public session handling, and make the issuer signing component independently deployable if the operational threat model demands it.
+Isolate signer keys/permissions from public handlers and operator/reviewer credentials. The signer can be separately deployed when required by the threat model. No client library replaces server-side enforcement.
 
-## 4. Deployment and traffic paths
+## 4. Deployment, origins and traffic paths
 
-Recommended deployment: Rust/Axum + Tokio service with a public HTTP listener (via Envoy), a separate private gRPC `envoy.service.auth.v3.Authorization/Check` listener, and authenticated private control-plane listeners; PostgreSQL authoritative store; 2+ stateless SkyOAuth replicas; Envoy Gateway data plane and Gateway API HTTPRoutes; Cloudflare Tunnel optional. Valkey is an *optional* bounded-lifetime cache, not a required security dependency.
+Baseline: Rust/Axum + Tokio, PostgreSQL, two or more stateless replicas, public HTTP via Envoy, separate authenticated private gateway/policy/operator listeners. Valkey is an optional bounded cache, not a required security dependency. Gateway API HTTPRoutes and SecurityPolicy protect every sensitive route.
 
-Example origin layout (deployment-specific hostnames, stable to clients):
-
-| Entry point | Example | Access |
+| Entry point | Example | Boundary |
 | --- | --- | --- |
-| SkyOAuth issuer/exchange | `https://identity.example.com/oauth/token` and `/.well-known/jwks.json` | Public, strongly rate limited |
-| Same-origin browser auth | `https://app.example.com/_skyoauth/login`, `/callback`, `/session`, `/logout` | Public; route to SkyOAuth |
-| App RPC | `https://app.example.com/rpc/...` | Envoy -> ext_authz -> API |
-| Downloads/events | `https://app.example.com/downloads/...`, `/events/...` | Envoy -> ext_authz -> API, no auth-service data hop |
-| Private auth checks | gRPC ext_authz port inside cluster | Gateway only, authenticated transport |
-| Live grant check | `POST /internal/v1/policy/check` on private listener | Authenticated, audience-authorized backend only |
-| Operator API | `/admin/v1/...` on separate private listener | Independent operator mTLS identity + local role check |
+| Issuer/token/JWKS | `https://identity.example.com/oauth/token`, `/.well-known/jwks.json` | Public, TLS, rate limited |
+| App auth | `https://app.example.com/_skyoauth/login`, `/callback`, `/session`, `/logout` | Registered ApplicationOrigin; app-local cookie |
+| Native flow | Issuer `/oauth/authorize`, `/oauth/callback`, `/oauth/confirm` | Issuer-local transaction cookie; no app-cookie sharing |
+| App RPC/streams/downloads | App `/rpc/...`, `/events/...`, `/downloads/...` | Envoy -> backend, no SkyOAuth payload hop |
+| Auth checks | `envoy.service.auth.v3.Authorization/Check` | Authenticated private Envoy caller |
+| Live policy check | `POST /internal/v1/policy/check` | Registered resource-server checker identity |
+| Operator API | `/admin/v1/...` | Separate private mTLS authority and local roles |
 
-For browser cookies use a host-only `__Host-` cookie per application origin. The gateway routes the auth endpoints on the application host; do not broaden cookie scope to `.example.com` for convenience. The stable issuer may be a separate hostname: this does **not** imply sharing that hostname's cookies with the SPA.
+`ApplicationOrigin` binds one canonical HTTPS origin to one tenant, callback URI, allowed relative return paths and approved API audience IDs. Its global origin ownership is enrolled by instance `security_admin`; a tenant cannot claim another tenant's host. A scoped `client_admin` can narrow permitted routes/audiences but cannot reassign the host/tenant. v0.1 does not implicitly multiplex tenants on the same origin. Multi-tenant applications may serve multiple application organizations inside their one explicitly mapped SkyOAuth tenant; any different mapping needs a separate reviewed protocol.
 
-**Envoy integration:** gRPC ext_authz sees a minimal header/method/authority/path context (never upload bodies); returns Allow/Deny and narrowly defined verified identity material. Enforce header sanitization, gateway-to-backend network restriction, and TLS/mTLS or an audience-bound, signed internal identity assertion. Preserve the entire verified constraint envelope, not just `sub`/scope. Return 401 for RPC auth failures (not OIDC HTML redirects); browser SDK initiates top-level login navigation. Fail closed on auth-service/database outages. Explicitly reject ambiguous requests carrying a session cookie and a bearer credential.
+Resolve browser tenant/provider from the registered origin and `TenantLoginState`, **not** a free `tenant` query or an untrusted forwarded header. At the public ingress, require an allowlisted authority/SNI/route match; SkyOAuth accepts canonical authority only from its authenticated trusted gateway chain. Unknown/ambiguous origin, spoofed Host/Forwarded values or disabled origin denies before redirect. Return locations are normalized same-origin relative paths validated against the stored allowlist; reject protocol-relative URLs, backslashes, traversal and prefix-confusion tricks.
 
-**Cloudflare:** Tunnel provides origin connectivity, not a substitute for per-route authentication; WAF/rate-limit/Access features must be configured separately. Avoid trusting arbitrary `CF-*` or `X-Forwarded-*` headers outside a trusted proxy chain. Layered rate limits should work without moving application bytes through SkyOAuth.
+Use host-only `__Host-` cookies with Secure, HttpOnly and Path=/; do not broaden Domain for convenience. An issuer host distinct from the app host does not imply sharing their cookies. The active-provider switch preserves origin and callback registrations.
+
+**Backend identity transport:** bearer calls carry their original SkyOAuth access JWT; cookie calls cause SkyOAuth to return a short-lived signed internal human-session assertion to Envoy for a private, overwritten backend header (§6). Both internal links are authenticated and the backend rejects mixed credentials. RPC failures return structured 401/403, never an IdP HTML redirect; the SPA explicitly navigates to login. An alternative header adapter must preserve the same typed identity semantics and authenticated transport, not infer profiles from a subject prefix.
+
+Cloudflare Tunnel supplies connectivity, not per-route authorization. WAF, rate limits and Cloudflare Access remain separately configured. Do not trust arbitrary `CF-*` or `X-Forwarded-*` outside the configured proxy chain.
 
 ## 5. Identity and credential flows
 
-### 5.1 Browser: opaque server-side session
+### 5.1 Browser login, login CSRF and opaque session
 
-1. Unauthenticated navigation follows a SkyOAuth-managed login entrypoint on the app origin with a validated relative return location.
-2. SkyOAuth starts upstream OIDC Authorization Code + PKCE S256, per-transaction state/nonce, strict callback URI and issuer binding; all remote discovery HTTP must enforce SSRF-safe egress restrictions.
-3. On callback, verify issuer, ID token signature, audience, nonce, expiry, and appropriate `auth_time`/MFA requirements; look up a stable human principal through a verified provider-subject binding.
-4. Generate a new CSPRNG session ticket. Store only its keyed hash plus tenant/principal, provider ID/subject and optional upstream `sid`, provider authentication epoch, creation/last-seen timestamps, separate idle/absolute deadlines, revocation state, and a CSRF verifier in PostgreSQL. Index provider/session selectors for provider switches and verified back-channel logout.
-5. Set `__Host-skyoauth_session` with `Secure; HttpOnly; Path=/; SameSite=Lax` and no Domain; this is **not** an OAuth token cookie. Local logout revokes the session. Upstream logout notifications may revoke mapped sessions after fully verifying the logout token.
-6. `GET /_skyoauth/session` returns only browser-safe principal/session and a session-bound CSRF token with `Cache-Control: no-store`. Unsafe cookie-authenticated calls must pass exact-origin and CSRF checks; SameSite alone is not the defense.
-7. For multi-org products, the API resolves and authorizes actual organization/project membership; any UI-selected org is an untrusted request parameter.
+1. Resolve the registered `ApplicationOrigin`, its tenant and active provider. Validate the relative return location from that registration.
+2. Generate state, nonce, PKCE S256 and a server-generated browser-flow secret. Set short-lived `__Host-skyoauth_login` (Secure; HttpOnly; Path=/; SameSite=Lax; no Domain); store only its keyed hash in a `BrowserFlowBinding`. Bind the OIDC transaction to that hash, flow kind, origin, tenant, provider/epoch, exact callback and return path.
+3. Redirect to the fixed upstream authorization endpoint. The baseline uses a top-level GET/query callback; a provider requiring another response mode needs an explicit tested profile, not a weaker cookie fallback.
+4. At `/_skyoauth/callback`, require **both** correct one-time state and the initiating browser's matching flow cookie, exact registered origin/callback, provider epoch, PKCE and verified ID-token issuer/audience/signature/nonce/time/authentication requirements. A state or transaction ID alone is not browser authentication. Wrong or missing browser binding denies without creating, replacing or linking a session.
+5. Resolve a verified provider-subject link to a stable local human principal. Create a `HumanAuthentication` record and a fresh CSPRNG opaque session ticket; persist only its keyed hash, origin/tenant/principal/authentication reference, provider/subject/optional sid, idle/absolute expiry and CSRF verifier. Atomically consume the login transaction and expire its flow binding. Starting a new flow for the same flow-cookie slot invalidates the old one; stale tabs restart rather than bypass binding.
+6. Set `__Host-skyoauth_session` with Secure; HttpOnly; Path=/; SameSite=Lax, no Domain. It is not an OAuth token. `GET /_skyoauth/session` returns only safe principal/session metadata and a session-bound CSRF token with no-store.
+7. Unsafe cookie calls, including Connect unary POST and logout, require exact Origin plus CSRF. Local logout revokes the session/authentication context. Optional back-channel logout verifies signature/issuer/audience/events/time/replay and uses indexed provider/subject/sid selectors.
 
-A session is usable only before **both** deadlines and while its provider epoch is current. Throttled last-seen writes must be conservative across replicas: never revive an idle-expired session or extend the absolute deadline. The maximum early idle expiry caused by write coalescing must be documented and tested.
+A session is usable only before **both** idle and absolute deadlines, on its registered origin/tenant, with live principal/authentication/provider epoch. Throttled last-seen writes must not revive an expired session or extend absolute lifetime; document bounded early idle expiry from coalescing. Verified account linking also requires an initiating-browser-bound transaction and explicit proof/approval; never email-only merging or attacker-supplied callback account reassignment.
 
-**Default**: discard upstream access/refresh tokens after authentication. When Zitadel RFC 8693 delegation or an upstream API call is required, encrypted, server-side retention becomes an explicit opt-in credential vault feature. Reauthentication after human IdP migration is permitted. Sessions should not be coupled to upstream token rotation or force browser cookie rotation on every ext_authz check.
+Login CSRF, callback injection, redirect URI confusion, OIDC mix-up, session fixation and identity-linking confusion are explicit release threats/tests. PKCE/state/nonce are not sufficient when their transaction is not bound to the initiating browser; see RFC 9700 §§2.1 and 4.7.
 
-### 5.2 CLI: brokered OAuth, not provider-specific URLs
+Default: discard upstream access/refresh tokens after login. An encrypted server-side provider-token vault is an explicit opt-in for authorized upstream operations; tokens never reach SPA JavaScript. Do not rotate the browser cookie on every ext_authz check or couple normal session lifetime to upstream token rotation.
 
-The CLI is an OAuth public client of **SkyOAuth** using a stable bridge-owned `/oauth/authorize` and `/oauth/token` contract, Authorization Code + PKCE, loopback redirect URI per native-app guidance; device authorization is an additional profile for headless environments. SkyOAuth forwards the *human authentication step* to the currently active upstream IdP, then issues short-lived SkyOAuth API tokens. Changing Zitadel does not change CLI configuration. Never put upstream refresh tokens on the CLI. Persistent CLI login is an explicit product decision: either interactive reauth or a revocable SkyOAuth refresh credential in OS keychain, not a static API key.
+### 5.2 Native OAuth and issuer-origin confirmation
 
-**Native-client confirmation is mandatory for every new loopback authorization transaction.** After upstream authentication, SkyOAuth displays the registered client name, signed-in account, requested audience/scopes and loopback destination, with explicit approve/deny controls. State plainly that a public client ID does not authenticate the local program. Bind approval to the exact client, redirect, PKCE challenge, audience/scopes, principal and expiring single-use transaction; CSRF-protect the confirmation POST and prohibit framing. Existing SSO or an earlier approval for the same client ID must not auto-approve a new transaction. Denial/expiry produces no code. This is SkyOAuth authorization, not the upstream IdP's consent to SkyOAuth's confidential client; see RFC 8252 §8.6. It reduces silent local-client impersonation, not all social engineering.
+The Rust CLI is a public client of SkyOAuth, not Zitadel. It uses stable issuer `/oauth/authorize` and `/oauth/token`, a registered generated `client_id`, S256 PKCE and an IP-loopback redirect. Client ID identifies configuration/tenant but does not authenticate a local process. Persistent login is either interactive reauth or an explicitly supported rotating SkyOAuth refresh credential in an OS keychain, never an upstream refresh token or static API key.
 
-If device flow ships, its user-code verification and confirmation pages must provide equivalent account/client/scope disclosure, explicit approval, expiry and polling/abuse controls. It is not an automatic fallback that bypasses confirmation.
+**Issuer-origin browser flow:** `/oauth/authorize` resolves the globally unique registered client and its tenant, validates redirect/audience/scopes against registration and audience assignment, creates `OAuthAuthorizationRequest`, and sets `__Host-skyoauth_native` on the **issuer origin** with the same secure host-only attributes and a short transaction lifetime. Its keyed hash binds the native request and upstream OIDC transaction. Upstream authentication returns to the fixed **issuer `/oauth/callback`**, registered on that tenant's HumanProvider, not the app-origin callback. Native and app flow cookies/transaction kinds are never interchangeable.
 
-Implementing a public-client OAuth frontend is a real authorization-server obligation: transactional authorization codes shared across replicas, registered client IDs and redirects, PKCE, token response semantics, issuer metadata, throttling, revocation, and replay prevention. Do **not** claim CLI compatibility until this profile passes conformance tests.
+The issuer callback checks state, the native flow cookie, expected issuer/client/callback, PKCE/nonce, epoch and ID token before storing the verified human principal/authentication on the native request. Rotate the issuer-local flow secret and bind the replacement to that request before confirmation. `/oauth/confirm` requires this bound cookie and completed server-side authentication; a transaction ID, app cookie, URL principal or live upstream SSO alone cannot approve a request. A new native start invalidates the previous native cookie slot; stale/conflicting tabs fail closed and restart.
 
-### 5.3 GitHub Actions WIF (required)
+**Every new loopback authorization requires explicit SkyOAuth approval.** Show the registered client name, account, audience/scopes and exact loopback destination, with approve/deny and a warning that the public client ID does not prove the local program's identity. The confirmation POST requires exact issuer Origin, CSRF, anti-framing, matching rotated flow binding, request digest, principal and unexpired provider epoch. Bind the resulting one-time code to the exact client/redirect/PKCE/audience/scopes/authentication. Only after approval redirect that SkyOAuth code to the loopback listener. Denial/expiry creates no code; consume confirmation state and clear its cookie. Prior consent or existing SSO never auto-approves a new request (RFC 8252 §8.6).
 
-1. GitHub Actions job has `permissions: id-token: write` and asks GitHub's OIDC service for a JWT with the administrator-configured SkyOAuth exchange audience.
-2. Client posts to SkyOAuth `/oauth/token` over TLS with stable source/grant selectors and one explicit API audience. Use the RFC 8693 direct-workload profile or the service-delegation extension in §5.7; do not silently reinterpret one as the other.
-3. SkyOAuth selects a **registered** source, verifies GitHub issuer/signature/exact audience/time claims against discovery/JWKS, and matches immutable repo owner/repo IDs plus event, branch/environment, workflow/job-workflow identity constraints.
-4. It resolves the **stable internal workload principal**, checks the specifically selected immutable-versioned grant, and issues a short-lived SkyOAuth access JWT containing approved audience, scopes, tenant/resource constraints, policy revision and actor attribution. Verified GitHub run provenance is retained for auditing.
-5. The client calls ConnectRPC via Envoy using `Authorization: Bearer ...`. The protected API checks the full token/constraint profile and operation-specific resource permissions. The SDK reacquires a GitHub assertion and exchanges again on expiry; never logs or persists the tokens.
+The native client separately checks its own OAuth state and exact callback path, redeems using its PKCE verifier, and closes the loopback listener after success/cancellation/timeout. Codes are transactional and single-use across replicas. Device flow is conditional and requires user-code verification plus equivalent explicit approval/abuse controls; it cannot bypass this interaction. Do not claim native compatibility until conformance passes.
 
-A successful GitHub JWT does **not** grant any operation by itself. Production grants must not be satisfied by arbitrary PR code or untrusted `pull_request_target` execution. `ref` and workflow context are not substitutes for an explicit `event_name` restriction. The production GitHub binding profile requires nonempty exact owner/repository IDs, event allowlist, ref, environment and workflow identity (plus reusable-workflow identity when used); reject incomplete configurations before activation. The example below permits **push only**.
+### 5.3 GitHub WIF and proof replay
 
-**Matcher semantics:** listed predicates are ANDed; a configured claim missing from the verified token is a non-match. An omitted optional predicate means **unconstrained for that claim**, not implicit denial. Therefore security-required predicates cannot be omitted, and deleting a predicate is privilege widening subject to explicit approval. No automatic wildcard or regex matching is implied by a string.
+A GitHub Actions job with `permissions: id-token: write` requests the configured exchange audience, then uses the stable generated source/grant IDs at `/oauth/token`. SkyOAuth verifies that selected source, evaluates the selected grant's eligible bindings, and issues only its bounded direct or delegated credential. The Rust workload provider renews with a fresh assertion; it never logs/persists workload tokens or receives WIF refresh credentials.
 
-**Token replay:** the source's `replay_mode` is explicit. Default `reusable` accepts an otherwise valid assertion again within its validity window, after fresh policy evaluation/rate limits, and issues a new token with a new `jti`; there is no idempotent-response guarantee. High-assurance sources may select `single_use`: require a verified nonempty source `jti` and atomically consume `(tenant, trust_source_id, exact_issuer, jti)` across all replicas and grants before issuance. Exactly one concurrent exchange may succeed; subsequent attempts deny. Persist only a keyed digest of this replay key until source `exp` plus allowed skew; missing `jti` or store failure denies. A crash after consumption may burn the assertion, so retry with a fresh one. Provider switches/rollback never clear this state. A cancelled job may leave an issued JWT usable until expiration; critical APIs use §6.1.
+Production bindings require immutable owner/repository IDs, explicit `event_name`, ref, environment and workflow identity, plus reusable-workflow identity when used. A default-branch ref/workflow does not establish a safe event. The example is **push-only**, rejecting otherwise-matching `pull_request_target`, `workflow_dispatch`, `issue_comment` and `workflow_run` assertions. GitHub's human `actor` is audit provenance, not a human SkyOAuth login.
 
-### 5.4 Kubernetes and generic external WIF
+Matcher predicates are ANDed. A configured claim absent from verified evidence is a non-match. Omitted optional predicates are unconstrained; required production predicates cannot be omitted, and deleting a predicate is explicit privilege widening. Strings are exact matches, not implicit regex/wildcards.
 
-For k3s, use projected, rotated, *audience-bound* service-account tokens, re-reading the token file. The default Kubernetes adapter is **`kubernetes_token_review`**, not OIDC discovery disguised as a cluster verifier. Each administrator-approved source persists a stable cluster ID, exact expected issuer, fixed HTTPS API server endpoint, trusted CA bundle/fingerprint, reviewer-credential reference, intended review audiences, timeouts, status and revision. Reviewer credentials are narrowly scoped to TokenReview creation and stored/rotated outside ordinary exports. No SPIRE, sidecar, or node agent is required.
+**Replay policy is a source capability, not a universal toggle.** Default `reusable` permits another otherwise-valid proof exchange inside its lifetime only after fresh policy evaluation/rate limits, producing a new output `jti`. `single_use` is permitted only for locally signature-verified discovery/uploaded-JWKS sources enrolled with an **on-demand assertion** profile and a client/issuer capable of obtaining a fresh signed nonempty `jti` per exchange. Consume a keyed digest of `(tenant, source_id, exact_issuer, verified_jti)` atomically across replicas/grants; exactly one attempt may issue. Missing jti/store failure/replay denies, and a crash may burn the proof. Retain consumption through exp plus skew and digest-key rotation; provider switch/rollback never resets it.
 
-The request's required `skyoauth_trust_source` selects one preconfigured source ID; its tenant and verifier configuration come from the registry. It is an untrusted routing selector, never proof of cluster identity. Multiple clusters may share the same `iss`, so **issuer is not a unique registry key**. Never probe every cluster until one accepts, infer a cluster from an unverified claim, or let request content supply an API URL/CA/credential. Verify only at the selected endpoint and deny on failure. Shared signing authorities can defeat cluster separation; do not claim isolation between clusters intentionally sharing token trust.
+**Kubernetes projected tokens, including TokenReview sources, must use `reusable` in v0.1.** Enrollment/import rejects `single_use` for `kubernetes_token_review` or any projected-service-account assertion profile, even when keys could also be verified locally. Rereading a projected file does not promise a fresh token/JTI on demand; do not force an agent to wait for kubelet rotation after its short-lived SkyOAuth token expires. Generic JWT sources require an explicit tested renewal capability before opting into single-use. A canceled job can leave an issued bearer credential valid until expiry; critical operations use §6.1.
 
-Set TokenReview `spec.audiences` explicitly; require `status.authenticated=true`, no error, and a compatible nonempty `status.audiences`. Bind the returned authenticated SA name/UID and required bound-Pod identity to that source/cluster. Test identical issuer strings across two independently keyed clusters. Private cluster endpoints are allowed only through the preapproved TokenReview egress profile with TLS CA/hostname validation, no redirects and bounded requests, not the public discovery fetcher.
+### 5.4 Kubernetes and generic external sources
 
-Other source kinds are:
+Use rotated, audience-bound projected service-account tokens, rereading the file on renewal. A `kubernetes_token_review` source stores a stable cluster ID, configured expected issuer metadata, fixed HTTPS API endpoint, versioned CA/fingerprint, narrowly scoped reviewer-credential reference, requested audiences and timeout. Reviewer secrets are externally managed, not plaintext exports. Its fixed private-egress profile permits only the approved endpoint with TLS hostname/CA verification and no redirects.
 
-- **`oidc_discovery`:** explicitly approved exact issuer and OIDC discovery/JWKS URL, pinned accepted algorithms/audiences and bounded refresh/stale-cache rules.
-- **`uploaded_jwks`:** exact expected issuer, accepted audiences/algorithms, a stable `TrustKeyset` parent and administrator-uploaded **public** keyset versions with explicit rotation overlap. Versions attach to the keyset, not circularly back to a source pointer. Several versions may be active simultaneously.
+The required source ID selects exactly one registered verifier. It is not proof of a tenant or cluster. Multiple clusters may share an issuer, so issuer is not a unique lookup key; do not probe clusters until one accepts, use unverified claims to select a server or accept client-supplied endpoint/CA/credentials. Shared signing authorities cannot provide independent cluster isolation.
 
-Local JWT verification for Kubernetes is a separately configured discovery/uploaded-JWKS source with a documented stale-revocation tradeoff, never an automatic fallback from failed TokenReview. Disallow unregistered sources, remote `jku`/`x5u` header-driven key resolution, `alg=none`, weak algorithm substitution, private JWK upload and implicit trust of arbitrary URL redirects. Bound token size, claim complexity, clocks and public-key refresh. A trust-source change is **not** part of a human IdP migration.
+TokenReview sends explicit `spec.audiences` and requires authenticated success, no error and compatible nonempty returned audiences. Bind returned SA identity/UID and supported bound-Pod evidence to the selected cluster/source. TokenReview returns authenticated user/audience evidence, **not a general claim set or guaranteed verified jti**. Never invent a jti from decoded input for replay enforcement. Policies requiring evidence the adapter cannot attest are rejected; parsed token fields can narrow checks but cannot supply missing positive authorization evidence. Document the supported cluster's time/object-revocation behavior rather than claiming instantaneous revocation. Tests must renew using the same still-valid projected token before rotation, then the rotated token.
 
-### 5.5 Upstream RFC 8693 delegation to Zitadel
+Other source kinds:
 
-Zitadel is the first *human IdP adapter*, not the canonical issuer of our APIs. Where Zitadel supports a compatible exchange of **Zitadel-issued** tokens, SkyOAuth may delegate the upstream exchange after verifying the grant and available audiences/scopes. Provider-specific capabilities/restrictions must be verified against the deployed version; do not assume arbitrary GitHub assertion → Zitadel token exchange or access to Zitadel's own administrative APIs works.
+- `oidc_discovery`: exact issuer, explicitly approved discovery/JWKS egress, algorithm/audience allowlists, bounded refresh/cache/staleness.
+- `uploaded_jwks`: exact issuer/audiences/algorithms and a stable tenant-owned `TrustKeyset` parent with public-only versioned keysets and explicit overlap. Multiple versions may be active; conflicting live kid/key combinations deny.
 
-**Always normalize the downstream API credential to SkyOAuth's public contract.** Zitadel token pass-through directly to protected APIs is **not** the default; it would break the zero-client/backend-change migration goal. An upstream exchange result may be retained server-side for an explicitly approved provider operation, or be validated and converted to a bounded SkyOAuth JWT.
+Kubernetes local JWT validation is a separately enrolled mode with explicit stale-object-revocation limits, not fallback from failed TokenReview. Reject unregistered sources, token `jku`/`x5u`/embedded-key trust, `alg=none`, weak substitution, private-key uploads and arbitrary redirects. Bound input sizes, claim complexity, clocks and key refresh. None of these source configurations belongs to a human provider switch.
 
-Zitadel administrative operations must use a separately isolated, restricted server-side service identity/adapter, with audit and no client exposure. This identity is not SkyOAuth's operator authority, and neither public WIF profile may mint its credentials.
+### 5.5 Upstream provider exchange
 
-### 5.6 Delegation versus impersonation
+Zitadel is the first human adapter, not the canonical API issuer. Compatible, authorized exchange of Zitadel-issued tokens may run server-side after checking actual deployed provider capabilities and subject/actor/audience/scope restrictions. Do not assume arbitrary GitHub/K8s assertions can be exchanged into Zitadel administrator credentials.
 
-Federation trust maps *verified source claims* to a stable actor (`wld_*`). A **ServiceGrant** explicitly chooses one mode:
+Normalize downstream credentials to SkyOAuth's public profile. An upstream token may be retained in the explicit encrypted vault for an approved upstream operation, never passed through as the default application credential. Upstream administration uses a separately isolated, restricted service adapter; it is neither SkyOAuth operator authority nor a target of public WIF delegation.
 
-- **Delegation (required):** `sub` represents the approved service (`svc_*`), while the RFC 8693 `act` claim records the original workload actor. Include grant/policy provenance and retain verified source run/job attribution in audit. The policy-mapped request is the extension defined in §5.7, not generic RFC 8693 delegation.
-- **Direct workload (required):** `sub` is the stable workload principal; the selected grant has no target service and still supplies explicit audience/scope/resource ceilings.
-- **True impersonation (conditional):** distinct high-risk mode that can omit target-visible actor identity. Disabled by default and **not required for v0.1**; ADR-006 must explicitly include it before implementation/activation. If included, separate approval, strict target ceilings, issuance attribution and tests are mandatory. Unsupported stored records remain inert through migrations; they never degrade into delegation or direct access.
+### 5.6 Grant modes and dormant impersonation
 
-Effective access is the **intersection** of verified identity binding, selected actor grant, target service ceiling (when applicable), requested audience/scopes and resource constraints. Missing required identity/policy fields deny rather than widen. Optional scope omission has the explicit narrow rule in §5.7. GitHub's human `actor` claim is audit context, not proof of a human SkyOAuth session.
+- **Direct workload (required):** the grant's workload actor becomes `sub`; target service is null; audience/scope/resource ceilings still apply.
+- **Delegation (required):** the preapproved service becomes `sub`, workload becomes RFC 8693 `act.sub`; retain source/run provenance and effective revision in audit. The single-proof request is the explicit extension in §5.7.
+- **True impersonation (conditional):** high-risk mode omitting target-visible actor; not required for v0.1 and never a fallback for another mode.
 
-Example proposed policy (not yet a released configuration schema; referenced principals/services belong to this tenant):
+An unsupported impersonation grant has a defined write path: authorized create/import accepts it **only with `status: disabled` and `activation_state: requires_reapproval`**. Reject an enabled/approved unsupported record rather than silently activating or pretending it is delegation. This permits preservation tests through normal APIs, not direct database inserts. Store its full desired constraints/provenance. A release gaining the capability leaves that record disabled and requiring approval; feature availability, import, ordinary PATCH or provider migration cannot enable it.
+
+Activation, only after ADR-006 includes the mode, is a dedicated operation requiring enabled capability, a separate instance-security approval bound to the exact grant revision/target/ceilings, and a tenant `trust_admin` activation commit. The approving operator must differ from the activating operator. Edits invalidate approval; upgrades/downgrades cannot reuse an approval for a different capability/policy revision. An unsupported binary must refuse active impersonation configuration at deployment preflight until an explicit disable operation has occurred. No migration changes dormant records.
+
+### 5.7 Exchange selection, overlapping bindings and scope
+
+Both form-encoded profiles require exactly one `skyoauth_trust_source`, `skyoauth_grant_id` and API `audience`, with optional `scope`. The two selectors are nonsecret SkyOAuth extensions containing **generated immutable IDs**, never tenant-local display names (§7.4).
+
+1. Load the selected source and grant as untrusted candidate records, require the same tenant and expected grant mode; reveal no cross-tenant existence details on failure.
+2. Verify the assertion only at that source. The grant determines the candidate actor/target, but an ID does not prove that actor.
+3. Evaluate enabled bindings for that source **that map to the selected grant's actor and are explicitly in its `allowed_binding_ids`**. At least one must match verified evidence. Matching bindings for other actors do not make the request ambiguous or authorize this grant.
+4. Bindings in v0.1 are identity predicates, not independent resource grants. If several eligible bindings match the same actor, use stable ID ordering to select one for provenance; their permissions are not unioned. Invalid cross-actor references are rejected at configuration time. The grant, target ceiling, audience assignment and requested scope/resources determine authorization.
+5. Validate current tenant/principal/source/binding/grant/service status, registered audience assignment and all ceilings. Emit the selected binding and complete immutable decision dependencies in the policy revision/audit.
+
+This permits repo-wide and deployment-specific bindings to coexist without an accidental denial or an unauthorized actor fallback. Grant selection never accepts arbitrary subject, target, tenant or mode overrides.
+
+| Profile | Grant type | Input proof | Output identity |
+| --- | --- | --- | --- |
+| Direct | `urn:ietf:params:oauth:grant-type:token-exchange` | `subject_token`, type `urn:ietf:params:oauth:token-type:jwt` | Verified workload `sub`; no `actor_token` accepted |
+| Delegation | `urn:skyoauth:params:oauth:grant-type:service-delegation` | `actor_token`, type `urn:ietf:params:oauth:token-type:jwt` | Grant's service `sub` and workload `act`; no `subject_token` accepted |
+
+RFC 8693 distinguishes subject and actor proofs (§2.1/Appendix A). A single workload assertion is not a service subject token. The private extension uses administrator-owned target authorization and is **not advertised as standard two-token delegation** or an IANA-registered grant. The upstream exchange adapter is separate.
+
+Omitted scope uses only the grant's explicit nonempty `default_scopes`, a subset of all applicable ceilings; otherwise `invalid_scope`. Explicit empty/excessive scopes deny rather than silently broaden or trim. Duplicate parameters, missing selectors, profile mismatch, unsupported resource or requested token type deny. Initially support one exact registered API audience per credential. Success returns access_token, Bearer token_type, expires_in, explicit scope and issued_token_type=access_token, no-store and no WIF refresh token.
+
+The following is a **post-create export fragment**, not initial create input. IDs illustrate generated persisted values; readable names are tenant-local labels. The referenced tenant, audience assignment, workload and service already exist. Provider state is deliberately absent: this is a WIF-role document, not a combined provider/WIF import.
 
 ~~~yaml
-tenant_id: tenant_platform
-issuer:
-  url: https://identity.example.com
-human_providers:
-  active: zitadel
-  entries:
-    zitadel:
-      issuer: https://zitadel.example.com
-federation:
-  trust_sources:
-    - id: trust_github
-      kind: oidc_discovery
-      issuer: https://token.actions.githubusercontent.com
-      audiences: [https://identity.example.com]
-      allowed_algs: [RS256]
-      replay_mode: single_use
-    - id: trust_partner
-      kind: uploaded_jwks
-      issuer: https://ci.partner.example
-      keyset_id: partner-production
-      audiences: [https://identity.example.com]
-      allowed_algs: [ES256]
-      replay_mode: reusable
-    - id: trust_k3s_production
-      kind: kubernetes_token_review
-      issuer: https://kubernetes.default.svc.cluster.local
-      cluster_id: cluster_production
-      api_server: https://k3s-api.internal.example:6443
-      ca_bundle_ref: ca_k3s_production
-      reviewer_credential_ref: secretref_k3s_reviewer
-      audiences: [https://identity.example.com]
-      replay_mode: reusable
-  keysets:
-    - id: partner-production
-      versions:
-        - id: partner-v1
-          public_jwks_ref: public-jwks/partner-v1.json
-  bindings:
-    - id: binding_release_pipeline
-      source: trust_github
-      profile: github_production
-      match:
-        repository_owner_id: "123456"
-        repository_id: "456789"
-        event_name: push
-        ref: refs/heads/main
-        environment: production
-        workflow_ref: acme/platform/.github/workflows/deploy.yml@refs/heads/main
-      principal: wld_release_pipeline
-  grants:
-    - id: grant_release
-      actor: wld_release_pipeline
-      act_as: svc_deployment_controller
-      mode: delegation
-      audience: control-plane-api
-      scopes: [deployments.create, workflows.read]
-      default_scopes: [workflows.read]
-      constraints:
-        projects: [platform-production]
-        environments: [production]
-      max_lifetime_seconds: 300
+tenant_id: ten_018f31a6d2094aa4b28c119be13b0472
+trust_sources:
+  - id: trust_81dbec63208c4a88aef72b5c05d68419
+    name: github-production
+    kind: oidc_discovery
+    issuer: https://token.actions.githubusercontent.com
+    audiences: [https://identity.example.com]
+    allowed_algs: [RS256]
+    assertion_profile: on_demand_jwt
+    replay_mode: single_use
+  - id: trust_39e7e4e62011420cab93e513277cae9b
+    name: partner-production
+    kind: uploaded_jwks
+    issuer: https://ci.partner.example
+    keyset_id: keyset_18a134a4f12047d8ba5d27914b2406dc
+    audiences: [https://identity.example.com]
+    allowed_algs: [ES256]
+    assertion_profile: reusable_jwt
+    replay_mode: reusable
+  - id: trust_53ca1d3069b64d10b4e247591fa72163
+    name: k3s-production
+    kind: kubernetes_token_review
+    issuer: https://kubernetes.default.svc.cluster.local
+    cluster_id: cluster_40ef5317f4b74fa3bd25763b9d90a8c1
+    api_server: https://k3s-api.internal.example:6443
+    ca_bundle_ref: ca_k3s_production
+    reviewer_credential_ref: secretref_k3s_reviewer
+    audiences: [https://identity.example.com]
+    assertion_profile: projected_service_account
+    replay_mode: reusable
+keysets:
+  - id: keyset_18a134a4f12047d8ba5d27914b2406dc
+    name: partner-production
+    versions:
+      - id: keyver_5101ab993e8c439dbfca9456bd9053b2
+        public_jwks_ref: public-jwks/partner-v1.json
+bindings:
+  - id: binding_a89023ed51e549c99928b83663528e52
+    name: release-pipeline
+    source_id: trust_81dbec63208c4a88aef72b5c05d68419
+    profile: github_production
+    match:
+      repository_owner_id: "123456"
+      repository_id: "456789"
+      event_name: push
+      ref: refs/heads/main
+      environment: production
+      workflow_ref: acme/platform/.github/workflows/deploy.yml@refs/heads/main
+    principal_id: wld_206f380172eb482783d6dfbe9c0ae418
+grants:
+  - id: grant_d50e0a3bd52e4f26a3ad452017d64f09
+    name: release
+    actor: wld_206f380172eb482783d6dfbe9c0ae418
+    allowed_binding_ids: [binding_a89023ed51e549c99928b83663528e52]
+    act_as: svc_43738ce105c748278cd73d1b30617fc8
+    mode: delegation
+    audience: control-plane-api
+    scopes: [deployments.create, workflows.read]
+    default_scopes: [workflows.read]
+    constraints:
+      version: 1
+      authorization: allowlist
+      projects: [platform-production]
+      environments: [production]
+    max_lifetime_seconds: 300
 ~~~
 
-The schema is declarative **and** backed by persistent stable IDs. Public-JWKS/CA references in this illustration must resolve to validated, versioned contents during enrollment; clients cannot supply them. External URLs are verification attributes, not foreign keys to upstream human providers. A GitOps importer must refuse accidental deletes or privilege widening without explicit approval.
-
-### 5.7 Exchange request profile and grant selection
-
-Both profiles use form-encoded `POST /oauth/token`, require exactly one `audience`, `skyoauth_trust_source` and `skyoauth_grant_id`, and accept optional `scope`. The two `skyoauth_*` parameters are **nonsecret SkyOAuth extensions**, not standard RFC parameters. Resolve the selected source, verify its proof, resolve its binding, then require that the selected grant belongs to the same tenant and verified actor. A grant ID selects its preapproved mode/target; it grants no authority by itself. Never choose the first matching grant or accept arbitrary requested `sub`, `act_as`, tenant, mode or target-service overrides. Different grants for the same audience are therefore unambiguous.
-
-| Profile | Grant type | Proof parameters | Issued identity |
-| --- | --- | --- | --- |
-| Direct workload | `urn:ietf:params:oauth:grant-type:token-exchange` | External assertion in `subject_token`; `subject_token_type=urn:ietf:params:oauth:token-type:jwt` | Verified workload mapped to stable `sub`; selected grant must be `direct` |
-| Service delegation | `urn:skyoauth:params:oauth:grant-type:service-delegation` (proposed private extension) | External assertion in `actor_token`; `actor_token_type=urn:ietf:params:oauth:token-type:jwt` | Grant's service as `sub`, verified workload as `act.sub`; selected grant must be `delegation` |
-
-RFC 8693 distinguishes the subject represented by `subject_token` from the acting party represented by `actor_token` (§2.1 and Appendix A). A workload assertion alone is not a target-service subject token. SkyOAuth therefore **does not advertise the single-proof service-mapping operation as standard RFC 8693 delegation** or silently move an RFC subject into `act`. The private extension uses administrator-owned target authorization instead of a subject token. Its URI is a proposed project identifier, not an IANA-registered grant. Generic two-token RFC delegation is outside v0.1; the upstream Zitadel adapter remains separate. T00.9 must freeze/document these interoperability limits before publishing SDKs.
-
-`scope` omission uses only the selected grant's explicit, nonempty `default_scopes`, which must be a subset of its allowed scopes and all current ceilings. Without such defaults, return `invalid_scope`; never infer all allowed scopes. An explicitly empty or excessive scope request is rejected, not silently widened. Requesting any unapproved scope denies the request. Missing required selectors, duplicate parameters, unsupported proof combinations, or grant/profile mismatch deny. The direct profile rejects `actor_token`; the extension rejects `subject_token`. Only one target audience is supported initially; unsupported `resource` or requested token types are rejected rather than ignored.
-
-A conceptual delegation request (displayed decoded; the client form-encodes values):
+Public-JWKS/CA references resolve to validated versioned contents at enrollment, never client-selected fetches. The instance resource-server registry must already authorize this tenant for `control-plane-api`. The wire request uses the IDs returned by creation/export, form-encoded (shown decoded here):
 
 ~~~text
 grant_type=urn:skyoauth:params:oauth:grant-type:service-delegation
 actor_token=<fresh GitHub assertion>
 actor_token_type=urn:ietf:params:oauth:token-type:jwt
-skyoauth_trust_source=trust_github
-skyoauth_grant_id=grant_release
+skyoauth_trust_source=trust_81dbec63208c4a88aef72b5c05d68419
+skyoauth_grant_id=grant_d50e0a3bd52e4f26a3ad452017d64f09
 audience=control-plane-api
 scope=deployments.create workflows.read
 ~~~
 
-Success uses an OAuth token response with `access_token`, `token_type=Bearer`, `expires_in`, explicit granted `scope`, and `issued_token_type=urn:ietf:params:oauth:token-type:access_token`; no WIF refresh token. Use standard OAuth errors, non-enumerating authorization failures, no redirects and `Cache-Control: no-store`. The extension's response intentionally follows this shape without claiming the grant itself is standard.
+## 6. Explicit credential profiles and backend verification
 
-## 6. Token contract and verification
+SkyOAuth uses a **private, versioned JWT profile**, not an incomplete RFC 9068 claim. Access JWTs have protected header `typ=skyoauth-access+jwt`; internal gateway assertions use `typ=skyoauth-internal+jwt`. These are proposed private identifiers, not registered media types. Do not emit/accept `at+jwt` as a SkyOAuth profile: RFC 9068 requires, among other fields, client_id, which WIF does not invent from a source ID. Native tokens do carry their actual registered client_id for local attribution. Any future RFC 9068 support needs a separate complete conformance profile.
 
-SkyOAuth-issued API JWTs use a dedicated stable `iss`, stable API `aud`, immutable local `sub`, bounded `iat/nbf/exp`, unique `jti`, explicit token type (`typ=at+jwt` in the protected header), and (for delegation) RFC 8693 `act`. Protected services must check the complete profile, not accept arbitrary ID tokens as API tokens or turn untrusted claim keys into authorization headers.
+All credentials require a verified signature/allowed algorithm/kid, exact issuer and **one registered audience**, iat/nbf/exp with bounded TTL/skew, unique jti, explicit scope, signed `skyoauth_tenant`, `skyoauth_profile`, `skyoauth_profile_version=1`, `skyoauth_policy_revision` and `skyoauth_constraints`. The protected typ, signed profile and expected ingress route jointly select validation rules. Never infer a profile from a `usr_` prefix, missing grant, presence of `act` or an untrusted request header. Reject unknown versions, contradictory claim sets and a profile not allowed by the resource-server registration.
 
-The **WIF profile requires** a signed tenant ID, grant ID, immutable effective-policy revision and versioned resource constraints. `skyoauth_policy_revision` identifies the decision snapshot covering source, binding, grant and target-service ceilings; it is not merely the mutable grant's name. Resource restrictions are carried **in the token**, so offline verifiers do not need a grant lookup to discover them. For a gateway-generated internal assertion, preserve the same effective constraints and cap its lifetime to the original credential.
+| Signed profile | Protected typ / ingress | Required identity and authorization evidence |
+| --- | --- | --- |
+| `wif` | `skyoauth-access+jwt`, bearer path | Workload or delegated service sub, grant ID, direct/delegation mode, binding-backed policy revision, `authorization: allowlist` constraints; delegation additionally requires workload act |
+| `human_cli` | `skyoauth-access+jwt`, bearer path | Human sub, actual OAuth client_id, opaque `skyoauth_authentication` reference, auth_time, HumanAccessPolicy revision and explicit `authorization: backend_rbac` constraints; no WIF grant/mode/act |
+| `human_session` | `skyoauth-internal+jwt`, authenticated gateway-only assertion header | Human sub, application-origin ID, opaque authentication and session references, auth_time, HumanAccessPolicy revision and `authorization: backend_rbac` constraints; request binding; no WIF grant/mode/act or invented client_id |
 
-A conceptual delegated access JWT (matching the explicit scope request above):
+`HumanAccessPolicy` is a tenant/audience-scoped, provider-independent record for exactly one OAuth client or ApplicationOrigin. A scoped `client_admin` sets its scope/TTL/authentication ceilings within the instance audience assignment. Issuance snapshots those records plus client/origin registration and relevant revisions; a `HumanAuthentication` record links the verified login to provider/epoch without requiring clients to know a provider ID. CLI scopes intersect approved requested scopes, client policy and audience assignment. Browser scopes derive from the registered origin's policy and selected route audience, never browser-supplied identity/scope headers.
+
+**Human resource authorization is explicit, not an omitted claim.** Human profiles carry `{"version":1,"authorization":"backend_rbac"}`; they make no project/environment membership claim. The backend must resolve the resource's SkyOAuth tenant, match signed tenant/audience, check scope, then evaluate its current human membership/RBAC. No membership or missing tenant mapping denies. These profiles are accepted only on routes registered to support them. The WIF profile cannot use backend_rbac mode or omit allowlists; a human token cannot masquerade as delegated WIF.
+
+A conceptual delegated WIF payload, with protected `typ=skyoauth-access+jwt`:
 
 ~~~json
 {
   "iss": "https://identity.example.com",
-  "sub": "svc_deployment_controller",
-  "act": {
-    "iss": "https://identity.example.com",
-    "sub": "wld_release_pipeline"
-  },
+  "sub": "svc_43738ce105c748278cd73d1b30617fc8",
+  "act": {"iss": "https://identity.example.com", "sub": "wld_206f380172eb482783d6dfbe9c0ae418"},
   "aud": "control-plane-api",
   "scope": "deployments.create workflows.read",
-  "skyoauth_tenant": "tenant_platform",
-  "skyoauth_grant": "grant_release",
-  "skyoauth_policy_revision": "policy_release_7",
-  "skyoauth_constraints": {
-    "version": 1,
-    "projects": ["platform-production"],
-    "environments": ["production"]
-  },
+  "skyoauth_tenant": "ten_018f31a6d2094aa4b28c119be13b0472",
+  "skyoauth_profile": "wif",
+  "skyoauth_profile_version": 1,
+  "skyoauth_mode": "delegation",
+  "skyoauth_grant": "grant_d50e0a3bd52e4f26a3ad452017d64f09",
+  "skyoauth_policy_revision": "polrev_8526ec2d468e4adc94c9343608ee873f",
+  "skyoauth_constraints": {"version": 1, "authorization": "allowlist", "projects": ["platform-production"], "environments": ["production"]},
   "iat": 1794780000,
   "nbf": 1794780000,
   "exp": 1794780300,
-  "jti": "token-instance-id"
+  "jti": "jti_d8139a27124d4ea3a4835a4cd30a09de"
 }
 ~~~
 
-Constraint version 1 uses exact identifier allowlists. Values within a list are alternatives; different dimensions are ANDed with tenant, audience, scope and backend RBAC. Missing/empty required dimensions, unknown constraint fields or unsupported schema versions fail closed; omission is never `*`. The API resolves canonical tenant/project/environment from its own resource state, not from caller headers, and rejects resources outside the signed envelope. T00.4 freezes this schema and operation-to-required-dimension mapping before clients/backends ship. A token containing only a grant ID is insufficient.
+A conceptual CLI human payload with the same private access typ, but a different mandatory profile:
 
-Keys: asymmetric signer, bridge-owned JWKS with `kid`, versioned/overlapping rotation and private material outside source control. Prefer KMS/HSM support or encrypted-at-rest private keys with isolated access; never use an upstream IdP's signing keys. Retain retired public keys for maximum issued lifetime plus clock skew. Signer key rotation is independent of human IdP changes. Signer and JWKS implementation are **M2 / T20**; M1 only defines their persistence model.
+~~~json
+{
+  "iss": "https://identity.example.com",
+  "sub": "usr_f81b224cda9548b382541b16f823ac5e",
+  "aud": "control-plane-api",
+  "client_id": "client_6e94e21f46ba4eb1b8bd5bec24070f14",
+  "scope": "workflows.read",
+  "skyoauth_tenant": "ten_018f31a6d2094aa4b28c119be13b0472",
+  "skyoauth_profile": "human_cli",
+  "skyoauth_profile_version": 1,
+  "skyoauth_authentication": "hauth_594948a2cc4b4ca19c5ca2d52bc7536d",
+  "skyoauth_policy_revision": "polrev_97fc45cb6fe84d9d8df13c2981f9ca3e",
+  "skyoauth_constraints": {"version": 1, "authorization": "backend_rbac"},
+  "auth_time": 1794780000,
+  "iat": 1794780000,
+  "nbf": 1794780000,
+  "exp": 1794780300,
+  "jti": "jti_43ff5f1289c94db49dcb50d0e7a53375"
+}
+~~~
 
-### 6.1 Revocation and private live grant check
+A human-session assertion has the common claims and human constraints above, `skyoauth_profile=human_session`, `skyoauth_application_origin`, `skyoauth_authentication`, `skyoauth_session` (opaque internal references, never cookie hashes/tickets), and `skyoauth_request` binding method, canonical authority and normalized path/query. It omits client_id and is minted only by SkyOAuth after the live session/Origin/CSRF check. TTL is at most 30 seconds and cannot exceed session/authentication deadlines. Envoy removes client-supplied assertion headers; the backend accepts it only on the authenticated gateway channel for the bound request. Public bearer ingress rejects internal assertions. This is not a signature over the application body and does not remove backend operation/resource validation. The assertion is never returned to SPA JavaScript.
 
-Short-lived local JWTs can verify without DB lookup, so disabling a WIF grant does not invalidate an already-issued token on an **offline** path before expiry. Use a short default (e.g. at most five minutes). Browser cookies are server-revocable. Do not claim uniform revocation semantics or guaranteed instantaneous Kubernetes object revocation beyond the selected verifier's documented behavior.
+For WIF allowlists, values within a dimension are alternatives and different dimensions are ANDed with tenant/audience/scope/RBAC. Missing/empty required dimensions, unknown constraint fields/versions or wrong authorization mode deny. A grant ID alone is insufficient. Human backends use the explicitly different schema above, not an undocumented exemption from A30.
 
-The mandatory M2 / T26 private `POST /internal/v1/policy/check` supports critical operations. An mTLS-authenticated backend, authorized for the token's audience/tenant, sends the presented access token plus the canonical action and resource coordinates it has resolved. SkyOAuth verifies the token, current principal/source/binding/grant/service status, applicable expirations, the effective policy revision, and the action's scope/resource ceilings. Any invalidated or superseded revision denies and requires a new token; it must not silently reinterpret an old token under broader policy. Return a request-bound allow/deny, checked revision and decision ID with no-store. Do not return a new token or a blanket authorization capability.
+Signing keys are asymmetric, bridge-owned, isolated and versioned with kid/overlap. Retain retired public keys through maximum issued TTL plus skew; no upstream signing keys and no plaintext key export. M1 defines metadata, **M2/T20 implements signer/JWKS**. Provider migration does not rotate keys.
 
-The backend must still perform its own resource RBAC and use the result only for the exact operation just checked; no positive caching for critical calls. Unknown caller/action/resource, database failure or unavailable checker fails closed. Revocation blocks checks started after the committed revocation, but cannot undo an already authorized operation; long-lived streams need bounded duration or rechecks/cancellation. No application payload crosses this endpoint. The task plan defines authentication, schema, endpoint, implementation and release tests rather than deferring this to an unspecified future introspection feature.
+### 6.1 Revocation and private live operation check
 
-## 7. Persistent data ownership and policy
+Offline short-lived access JWTs retain residual validity until expiry after a grant/policy/session change; default maximum access TTL is five minutes. Browser authentication is checked live at the gateway; an already-issued internal assertion has only its bounded residual lifetime. Do not promise cancellation of previously authorized operations or instantaneous Kubernetes object revocation.
 
-PostgreSQL is authoritative for:
+`POST /internal/v1/policy/check` is private. Authenticate the caller against **ResourceServerChecker**, bound to the registered resource-server audience and explicit tenant set, not against the token's delegated subject/service. Direct workload credentials with no target service are fully supported. The caller sends exactly one access JWT or internal assertion plus canonical action/resource coordinates; request binding is retained for internal assertions. Input is bounded and never logged as token material or application payload.
 
-| Aggregate | Stable ownership |
+Look up the persisted `ResourceAction` for that resource server: required scopes, supported profiles, required resource dimensions and whether live checking is mandatory. Verify the complete profile, audience/tenant assignment, current principal and immutable decision dependencies. WIF checks source, chosen binding, grant and optional target service; human checks HumanAccessPolicy, client/origin, authentication/provider epoch and session where applicable. Superseded/invalidated authorization revisions deny and require renewed credentials; never reinterpret an old token under broader policy. Unknown action/resource/caller, wrong tenant/audience or store/checker outage denies. A resource server cannot use another audience's checker identity.
+
+Return request-bound allow/deny, checked revision and decision ID with no-store, not a new token or reusable blanket permission. The backend still applies canonical resource ownership and RBAC, with no positive caching for critical calls. Checks begun after committed revocation deny; a subsequent revocation cannot undo already-authorized work. Streams require bounded duration, periodic checks or cancellation. M2/T26 delivers WIF support; M3 adds human-session checks and M4 human CLI checks before those profiles ship.
+
+## 7. Persistence, ownership and administrative writes
+
+PostgreSQL is authoritative for all stable authority and one-time state. WIF, audience, client/origin and operator records cannot cascade-delete through HumanProvider. Use immutable history, optimistic concurrency, atomic audit and conservative cache invalidation. Store failures never expand privilege. Encrypted database backups differ from redacted configuration exports; neither ordinary YAML nor logs may expose private keys, reviewer/operator secrets, cookies, proof tokens or refresh credentials.
+
+### 7.1 Tenant partition and instance-owned audience authority
+
+`Tenant` is the administrative policy partition, explicitly mapped to application organization/resource ownership. Stable generated IDs are globally unique; composite tenant/object foreign keys prevent cross-tenant references. Sources/keysets/bindings/services/grants/clients/origins/human policies are tenant-owned. External issuer strings are not unique: different tenants can register GitHub, and independently keyed clusters can share one issuer. A source selector chooses only a candidate verifier; verified evidence plus the selected same-tenant grant establishes authority.
+
+**Audience strings are not tenant-controlled free namespaces.** Instance `security_admin` creates a `ResourceServer` with one globally unique exact audience and explicitly grants tenants access through `AudienceTenantAssignment` records specifying allowed profiles/scopes and constraint schema. Tenants may not self-assign an existing audience or create a competing registration. Service ceilings, WIF grants, OAuth clients, ApplicationOrigins and HumanAccessPolicies reference registered audience IDs and are refused if no active same-tenant assignment exists. Recheck at issuance and live policy checks; a tenant admin cannot mint for another tenant's API merely by spelling its audience/project name.
+
+The resource server separately owns checker identities and action-to-scope/resource/profile mappings, administered through instance-scoped endpoints. `ServiceIdentity` is a possible **token subject**, not the API receiver. Multiple actors or direct-mode tokens can call the same resource server without becoming its checker authority.
+
+For a shared multi-tenant audience, every backend resource is mapped to a canonical SkyOAuth tenant. The backend must compare that owner with the signed tenant before scopes/resources/RBAC; missing mapping denies. Instance assignment is defense in depth, not permission to omit tenant verification. Audience assignments/actions/checker identities and client/origin policy are stable through a human provider switch and included in snapshots.
+
+### 7.2 Independent operator roles, provisioning and recovery
+
+Operator authentication uses independent `adm_*` identities and registered mTLS public credentials rooted in deployment trust. Check the active local credential and role on every call; a certificate alone is insufficient. OIDC roles/groups/emails, human sessions and WIF credentials never grant operator authority. Operator keys are operational trust anchors, not application API secrets.
+
+| Role | Explicit rights |
 | --- | --- |
-| `tenant` / `principal` / `service_identity` | Policy ownership boundary and stable human/workload/service IDs |
-| `human_provider` / `human_subject_link` | Replaceable human connections, monotonic auth epoch and verified user mappings |
-| `session` / `oidc_transaction` | Provider-indexed sessions, separate idle/absolute deadlines, revocation and one-time login state |
-| `oauth_client` / `oauth_authorization_request` / `oauth_authorization_code` | Stable client registration, transaction-bound confirmation, single-use codes |
-| `cli_refresh_credential` | Optional rotating, hashed refresh families and provider-epoch revocation |
-| `trust_source` / `trust_keyset` / `trust_keyset_version` | Three verifier kinds, per-cluster configuration and owned public-JWKS versions |
-| `principal_binding` / `service_grant` / `policy_revision` | Source-bound identities, mode/target/scope/resource ceilings, immutable effective decisions |
-| `consumed_assertion` | Durable source-scoped single-use proof consumption across replicas |
-| `admin_identity` / `admin_credential` / `admin_role_binding` / `recovery_state` | Independent operator trust, tenant-scoped roles, bootstrap/recovery lifecycle |
-| `signing_key_version` / `audit_event` | Bridge-owned signing metadata, issuance/policy/migration/administrative audit |
+| Instance `security_admin` | Create/disable tenants; enroll operators and scoped roles; register/assign resource-server audiences, checker identities/action registries and canonical application-origin ownership; manage signer/recovery policy; approve conditional high-risk activation. No implicit tenant role inheritance. |
+| Tenant `trust_admin` | Create workload/service principals and service identities atomically; manage source/keyset/binding/grant policy within instance audience ceilings; activate an approved supported grant. Cannot create human principals or self-assign API audiences. |
+| Tenant `client_admin` | Create/update registered public OAuth clients, assigned-origin return/audience configuration and HumanAccessPolicies within assignments. Cannot reassign origin ownership or change active providers/WIF grants. |
+| Tenant `provider_admin` | Configure/test inactive human providers; controlled human enrollment/verified subject links; switch/rollback plans. Cannot edit WIF, audience assignments, clients or operator roles. |
+| Tenant `auditor` | Redacted tenant configuration/audit reads; separate instance audit authority where explicitly granted. |
 
-No WIF or administrator object may depend through a cascading foreign key on `human_provider`. Policy writes need optimistic version checks, validation, immutable history and auditable actor identity. Exports/backups include all three source kinds, uploaded public JWKS and provenance, grants, client registrations, operator public trust metadata and signing-key recovery strategy; **never export private signing keys, operator keys, reviewer secrets, tokens or live session material as ordinary plaintext YAML**. Encrypted database backups have separate access/recovery controls.
+Bootstrap is a deployment-local command/Unix socket operation, never public enrollment. Atomically enroll an initial security_admin public credential and separate offline recovery public key, audit, then durably close bootstrap. Restart or an empty config cannot reopen it. M1 commands live under the existing **service binary's operator/bootstrap subcommands**, independent of the M4 application CLI; an authenticated private operator client can perform configuration writes without native human OAuth.
 
-Auth checks must fail closed on store failure. Favor simple PostgreSQL first; only introduce an optional cache with explicit revocation bounds and no privilege-expanding fallback.
+The first operator can then create a tenant, enroll/assign its scoped operators, register an API audience and tenant assignment, create/assign an application origin, register a CLI client and human policy, create workload/service principals, and configure providers/sources/bindings/grants. A single operator may hold multiple explicitly assigned roles for a small deployment, but no role implicitly inherits another. Initial human-provider activation uses the same switch operation from a null pointer. This provides a complete post-bootstrap write path with no manual database inserts.
 
-### 7.1 Tenant ownership and source uniqueness
+Break-glass uses the restricted local interface plus the independent recovery key over a short-lived, single-use challenge bound to operation/arguments/expected revision. Permit bounded operator restoration or the same validated provider-switch/rollback operation only, not arbitrary WIF edits, audience reassignment or token minting. Consume challenges durably, audit/alert and rotate recovery keys after use. Rehearse while the human IdP is down or account linking is broken. Database/signer disaster recovery remains separate. Restore procedures preserve bootstrap-closed and consumed state or quarantine issuance until outstanding state can no longer be replayed.
 
-A `Tenant` is SkyOAuth's administrative policy partition; its relationship to application organizations is explicit, not inferred from an upstream email domain. Human providers/links, principals, clients, sessions, trust sources, keysets, bindings, services, grants and policy revisions carry `tenant_id`. Globally unique opaque object IDs enable lookup, but composite tenant/object foreign keys enforce **same-tenant** relationships. Cross-tenant bindings, grants and keyset references are forbidden in v0.1. The bridge issuer/signing keys are instance-owned; admin role bindings specify tenant scope or explicit instance scope.
+### 7.3 Provider changes cannot bypass the switch transaction
 
-`exact_issuer` is a verification attribute, **not globally or tenant-wide unique**. Two tenants may register GitHub independently; one tenant may register multiple Kubernetes clusters with an identical issuer. Sources have unique stable IDs and tenant-local names; keyset ownership and cluster IDs are explicit. The source selector determines the candidate tenant/verifier, then the verified source and same-tenant binding/grant determine authority. Neither an untrusted tenant claim nor a request parameter can switch this boundary. Audit, exports and operator reads/writes enforce the same ownership.
+`TenantLoginState.active_provider_id` is the sole active-provider pointer. HumanProvider has no independently writable active flag. All GET/export representations of active state are **read-only observations**. Ordinary provider PATCH, deletion/disable of the active provider, GitOps imports and config reloads must reject attempts to change the pointer, auth epochs or active-provider issuer/client/callback/authentication semantics. Creating/testing inactive candidates is permitted. A plan may cover such authentication-critical changes, activation from null, switch, disable or rollback; only its authorized commit transaction updates login state and advances epochs atomically.
 
-### 7.2 Administrator authentication, bootstrap and recovery
+Rollback uses the same guarded transaction with fresh monotonic epochs. No import, including one submitted by an operator holding every role, can replace it. Auth state is never retained accidentally because a generic active flag changed.
 
-The v0.1 baseline is a **private operator API/CLI**, not an end-user admin role automatically imported from OIDC. Independent `adm_*` identities authenticate with registered operator public-key credentials over mTLS, rooted in deployment-owned trust and checked against local credential status on each request. A valid certificate alone is insufficient without an enabled local identity/role binding. Upstream roles, group claims, email and application/WIF access tokens never confer operator rights. Operator private keys (preferably hardware-backed) are privileged operational trust anchors, not static application API secrets.
+GitOps documents are role-scoped. A combined bundle is accepted only when the actor has **every** role needed for every mutation and its plan passes the same validation; otherwise reject the whole bundle, never partially apply or ignore unauthorized sections. Active-provider observations are not writable fields and a proposed change is always rejected in an ordinary import. Separate provider, client and WIF documents are recommended; the example in §5.7 is WIF-only.
 
-Roles are explicit: tenant-scoped `trust_admin` manages sources/keysets/bindings/services/grants; `provider_admin` manages human connections, verified links and provider switch/rollback; `auditor` reads redacted configuration/audit; instance `security_admin` manages operator enrollment/roles, issuer-key administration and recovery controls. Roles do not implicitly include one another. A provider administrator cannot mutate WIF policy, and no IdP-controlled enrollment flow can assign an operator role. GitOps import uses an independently authenticated, scoped operator identity with the same validation/approval rules.
+### 7.4 Generated selectors and create-then-reference workflow
 
-Initial bootstrap runs only through a deployment-local, access-controlled command/Unix socket, never a public HTTP enrollment route. An atomic, durable bootstrap transaction enrolls the initial operator public credential and a separately held offline recovery public key, records audit, and irreversibly closes normal bootstrap mode. Restarts and an empty-looking config file must not reopen it. Public credentials/role state and the bootstrap-closed marker are included in protected restore procedures; private keys are not ordinary exports.
+All object IDs and public OAuth client IDs are server-generated opaque random identifiers. Tenant-local `name` is a human label unique only within its entity type/tenant, never an exchange selector or globally reserved name. The prefixes in examples indicate type, not authority. A client cannot choose a global ID on initial create or probe another tenant through an import collision.
 
-Break-glass also uses the restricted local command/socket and possession of the pre-enrolled **independent recovery key**, with a short-lived single-use challenge bound to operation, arguments and expected revision. Permit only bounded recovery operations: restore an operator credential/role or execute a validated human-provider switch/rollback. No generic WIF grant editing, token minting or policy-check bypass. Consume challenges durably, audit and alert on use, rotate recovery material after use, and rehearse recovery while the human IdP is unavailable or its administrator mappings are broken. This cannot recover an unavailable database/signing subsystem without their separate disaster-recovery process.
+Creation omits ID and supplies a tenant-scoped name; the authorized API returns the generated ID/revision. Provision in dependency order (tenant/audience assignment, principals/source/keyset, binding, grant/client policy), or use a validated importer with tenant-local manifest references that resolves to generated IDs and returns a persistent mapping. Export that mapping and place returned source/grant IDs in job/client configuration. Creating two tenants' `github-production` sources yields different IDs without name collision.
 
-Operator endpoints are private, tenant-scoped and revision-checked. They cover trust/keyset/binding/service/grant CRUD, validated GitOps import, human-provider configuration/linking and distinct `human-provider-switches` dry-run/commit/rollback operations. Provider switches have a database write boundary excluding WIF/operator objects. ADR-013 and T00.10/T13 must approve and implement these controls before WIF configuration or migration tooling ships; expanding an admin UI does not defer authentication/recovery.
+Updates specify the existing ID and expected revision within the authorized tenant. Redacted exports preserve IDs on same-instance reconciliation; privileged full restore preserves them only into the intended empty/restored authority after ownership/provenance validation. Ordinary tenant import cannot claim an arbitrary missing global ID or rebind it. Reapplication is tenant-local reconciliation, not recreation. Once deployed, clients retain their IDs across provider migration; the one-time create-then-reference step does not violate the zero-reconfiguration goal.
 
-## 8. Migration contract and runbook
+## 8. Human-provider migration runbook
 
-Human provider swap is a *targeted, reversible* administrative operation, not a recreation of SkyOAuth:
+1. Authenticate independently. Snapshot issuer metadata, tenant/resource-server/audience assignments/actions/checker identities, client/origin/human-policy registrations, all verifier configurations/keysets, principals/bindings/grants/activation state, policy decision fixtures, public key metadata and replay invariants. Do not export proof/secret material.
+2. Register/test an inactive replacement provider with fixed app and issuer-native callbacks; prepare verified account linkage and prove operator/recovery availability independently of upstream admin accounts.
+3. Create an immutable provider-switch dry-run plan against expected login/config revisions. Reject any attempted WIF/audience/client/origin/operator/gateway/signer mutation; concurrent relevant changes require replan. A generic PATCH/import is not an alternate route.
+4. Commit only provider login/mapping configuration and fresh human auth epochs atomically. Invalidate affected browser/native flow bindings, sessions/authentication contexts, pending requests/codes and optional refresh families. Preserve WIF configuration and consumed assertions. Offline human JWTs retain only their documented short TTL; live checks reject invalidated contexts.
+5. Reauthenticate humans with stable principal/RBAC mappings where explicitly verified; unmatched users require controlled enrollment. Existing client_id, origin, audience and library configuration remain unchanged.
+6. Reuse prebuilt **TypeScript SPA and independent Rust CLI artifacts** (record hashes), existing GitHub job, uploaded-JWKS workload and two independently keyed shared-issuer Kubernetes clusters. No rebuild/package upgrade/YAML/CA/reviewer/source/grant/audience change. Exercise direct/delegated profiles, human profile verification and both supported replay modes; projected Kubernetes renewal stays reusable.
+7. Compare pre/post allowed and denied decisions, IDs/revisions and audit. Roll back through the guarded plan with fresh epochs, never whole-DB rollback over independent policy changes or resurrection of consumed credentials. Unsupported impersonation stays disabled; single-use tests obtain fresh proofs, never require a consumed one to become valid.
 
-1. Using independent operator authority, snapshot stable public metadata, tenant/source IDs, all three verifier configurations, keyset versions/fingerprints, workload bindings, grants/modes/default scopes/constraints, effective policy fixtures, client registrations, signing/operator public metadata and audit revision. Record replay-state invariants without exporting proof/token material.
-2. Register/test the replacement human IdP with fixed issuer/client/callback configuration on the server. Prepare verified human linkage (never email matching alone). Confirm the independent operator/recovery path still works; it does not depend on linking an upstream admin account.
-3. Dry-run the switch. Assert **no WIF source, TokenReview config, public JWKS, binding, grant, API audience, OAuth client registration, signing key, operator role or gateway policy is mutated**. Reject a plan attempting those changes.
-4. Atomically switch the tenant's active human provider/mapping configuration and advance the affected provider authentication epochs. Invalidate affected human sessions, pending OIDC/native authorization transactions, unredeemed authorization codes and optional CLI refresh families. Do not alter WIF principals, policy or consumed assertions. Already-issued offline human JWTs retain only their documented short lifetime; never claim they were retroactively erased.
-5. Reauthenticate humans. Verify stable internal user IDs and unchanged application RBAC where explicit linkage exists; unmatched users require controlled enrollment.
-6. Re-run GitHub, **both shared-issuer Kubernetes cluster fixtures**, and uploaded-JWKS exchanges and negative tests **without changing job YAML, client packages/binaries, secrets, API settings or service deployments**. Exercise direct and delegated profiles and both replay modes.
-7. Compare pre/post policy decisions and audit invariants. Roll back only human configuration when needed, with fresh epoch invalidation; do not restore a whole database snapshot over independently changed WIF policy or resurrect consumed codes/refresh tokens/assertions. Epochs are monotonic even on rollback.
-
-Repeat migration conformance tests after DB schema, chart, protocol and SDK upgrades—not just IdP switches. Human-provider downtime may affect human reauthentication but must not block valid WIF exchanges or independent operator recovery except where the shared SkyOAuth infrastructure is unavailable. Valid single-use tests obtain fresh assertions; invariance does not require a consumed assertion to become reusable.
+Repeat conformance after schema/chart/protocol/SDK upgrades. Human-provider downtime can block fresh human login but not valid independent WIF or operator recovery, except where shared SkyOAuth infrastructure is unavailable.
 
 ## 9. Security and abuse model
 
-Main threats: compromised CI workflows; forgery/issuer or cluster confusion; JWKS misconfiguration; token replay; policy escalation; signer/operator compromise; session fixation; CSRF/XSS; silent native-client impersonation; unauthenticated gateway/admin routes; header spoofing; discovery SSRF; cross-tenant configuration/resource access; migrations that orphan trust or revive credentials; stale grants and long-lived streams; stolen runner credentials.
+Threats include compromised workflows/runners, issuer/key/cluster confusion, assertion theft/replay, cross-tenant audience issuance, subject-versus-resource-server confusion, profile substitution, signer/operator compromise, login CSRF and callback injection, OIDC mix-up, redirect URI confusion, identity-linking confusion, native-client impersonation, session fixation, CSRF/XSS, unprotected routes, header spoofing, SSRF, generic-provider-write bypass, credential resurrection and stale streams.
 
-Baseline mitigations:
+Mitigations are explicit: instance audience assignments plus canonical backend tenant/RBAC checks; typed signed profiles with distinct human/WIF schemas; grant-directed source-bound evidence; restricted verifier egress; browser-bound state/nonce/PKCE and separate issuer-native confirmation cookies; one-time codes/consumption across replicas; scoped independent operator writes and exclusive switch commits; no token logging; fail-closed stores/private endpoints; short TTLs with critical live action checks and bounded streams. Every claim has positive and negative release fixtures in the task plan.
 
-- Deny-by-default for source/binding/selected grant; exact issuer/audience/algorithm and required claims; explicit GitHub event; tenant-safe references and independent admin approval.
-- Short-lived typed JWTs with signed versioned constraints; bounded input; source-scoped replay policy; deterministic revisions and no arbitrary requested `sub`.
-- Fail-closed ext_authz, authenticated internal transport, sanitized identity headers and blocked direct API access; private audience-authorized live grant checks for critical operations.
-- PKCE/state/nonce and narrow callback URIs; per-transaction native confirmation; host-only sessions, separate idle/absolute deadlines, CSRF and CSP; no browser token exposure.
-- Distinct cookie and bearer profiles, rejecting dual credentials; no cookie/Origin assumptions in machine JWT validation.
-- SSRF-safe discovery; explicitly configured TokenReview egress/CA/credential; never trust JWT-controlled key URLs or select clusters by issuer alone.
-- Bounded stream authorization, rechecks/cancellation and backend resource permission checks for every operation.
-- Auditable, revision-checked policy/provider changes and isolated operator recovery; no IdP role promotion; no tokens, raw cookies or private keys in logs.
+Residual limits: zero static application secrets does not mean zero privileged keys. SkyOAuth signer/operator/recovery trust and reviewer/upstream service credentials need protection. Compromised human IdPs can impersonate mapped application users, but not independently rewrite WIF/operator/audience authority. HttpOnly limits token extraction, not authenticated actions by same-origin malicious JavaScript. Root/runtime/database compromise remains separate high-impact risk. Authorization cannot retroactively undo an already accepted operation.
 
-**Residual limits:** zero *client-side static application secrets* does not mean zero trust anchors. SkyOAuth holds signing keys and independent operator/recovery trust; upstream OIDC may require confidential client credentials; TokenReview requires narrowly scoped cluster access; identity can be stolen during a valid job/session. A compromised human IdP can still impersonate mapped application users; it must not thereby gain authority to rewrite WIF or operator policy. Runtime/database/operator compromise remains a separate high-impact threat.
+## 10. Required clients and repository layout
 
-## 10. SDKs and developer experience
+### 10.1 Two first-class libraries
 
-- `@skyoauth/browser`: same-origin session fetch, top-level login/logout, CSRF retrieval, browser-safe principal, no access-token getter or persistent JS token storage.
-- `@skyoauth/react`: small React provider/hook with explicit loading/unauthenticated/authenticated states, stable across IdP migration.
-- `@skyoauth/connect`: browser ConnectRPC interceptor for CSRF and auth errors; never auto-replay non-idempotent mutations.
-- **Required Rust `skyoauth-client` in `crates/client`:** shared typed source/grant selectors, direct/delegated exchange, in-memory bearer caching, GitHub runner OIDC and Kubernetes projected-file providers (M2); native PKCE/confirmation flow and optional keychain refresh support (M4).
-- **Required reference `skyoauth-cli` in `crates/cli`:** exercises the Rust client against stable SkyOAuth endpoints; distinguishes application login from separately authenticated operator commands. CLI auth is not an optional TypeScript package.
-- `packages/agent`: optional additional TypeScript workload bindings; not a substitute for the required Rust client/CLI deliverables.
-- Gateway examples: Envoy SecurityPolicy and protected routes (minimal bearer M2; browser/streams M3), optional ForwardAuth, k3s chart and Cloudflare topology.
+| Deliverable | Package / home | Primary consumer | Gate |
+| --- | --- | --- | --- |
+| TypeScript SPA library | npm `@skyoauth/client`, `clients/typescript/` | Framework-neutral SPAs; React/Connect adapters | M3 |
+| Rust client library | Cargo `skyoauth-client`, Rust import `skyoauth_client`, `clients/rust/` | User-owned CLIs; workload tooling | WIF M2; native M4 |
+| Reference Rust CLI | `skyoauth-cli`, `cli/` | Thin consumer of the Rust library | Native M4 |
+| Deployment operator commands | Existing `skyoauth-service` binary subcommands | Local bootstrap/recovery and private operator configuration | M1, no M4 dependency |
 
-Clients and policy configurations reference **SkyOAuth** issuer/audience/subject and stable source/grant IDs, not Zitadel identities. A provider migration does not change those selectors or published client registrations.
+The similarly named npm and Cargo libraries are intentional language-specific distributions in separate registries, not competing packages or interchangeable imports. Both are required. Browser code never gets a token getter, native listener or operator key. Rust consumers do not depend on React, a JS runtime, frontend assets, service internals or PostgreSQL.
 
-## 11. Milestone roadmap
+### 10.2 TypeScript: SPA-first
 
-| Stage | Deliverable | Release gate |
+Evolve the existing package instead of adding a second browser core. Provide session/principal state, top-level login, CSRF-protected logout, cancellation and authenticated transport. `@skyoauth/client/react` and `/connect` are explicit entry points with optional peer dependencies excluded from the framework-neutral core. Runtime/type exports agree; the core bundles without Node built-ins/polyfills.
+
+Authenticated targets are configured same-application-origin HTTPS routes with no URL userinfo. Validate before attaching CSRF; use Fetch same-origin mode/credentials and reject redirects for authenticated API fetches. Caller options cannot override these boundaries or add bearer authentication. Only explicit top-level login follows server-managed upstream redirects. Narrow explicit loopback development settings must not weaken production. Injected fetch is trusted integration code, not permission to bypass URL/header checks.
+
+Keep CSRF/session metadata in bounded memory, clear on logout/account change/invalidation, and send only credential-free cross-tab invalidation signals. No access/refresh tokens in localStorage, sessionStorage or IndexedDB. Distinguish unavailable/cancelled/forbidden from unauthenticated; no automatic mutation replay on 401 or after login. Streaming/download cancellation remains end-to-end without SkyOAuth buffering bodies.
+
+The bootstrap arbitrary-baseUrl `health()` helper is unauthenticated utility code, not permission to attach session capabilities to that URL. Test that an off-origin health base cannot become an authenticated target. Future TypeScript workload support is a separate nonbrowser surface and not a substitute for the SPA library. Validate packed npm artifacts in an actual browser, not only Node fetch mocks.
+
+### 10.3 Rust: reusable CLI library
+
+`clients/rust` is a planned Cargo member publishing `skyoauth-client`, consumed by `cli/` and an independent example. Expose typed configuration/errors, redacted credential wrappers, cancellation/timeouts and provider traits. Document feature boundaries for native OAuth, system-browser launch, loopback, optional keychain and GitHub/Kubernetes integration; test minimal/default feature sets, not just all-features.
+
+Use an external system browser, S256 PKCE/state and §5.2 confirmation. Bind an ephemeral listener only to an IP loopback address; choose the port before authorization and match the exact chosen redirect on redemption. Bound callback lifetime/path, reject wrong state and clean up on cancel/timeout. No embedded login webview, password or static-client-secret fallback.
+
+Attach credentials only to configured HTTPS API origins/audiences; never log or forward them across origin redirects. Access-token cache is memory-only. Optional rotating refresh uses the OS credential store; unavailable secure storage cannot silently fall back to plaintext. Workload renewal reacquires fresh on-demand proofs or rereads reusable projected tokens and never gets WIF refresh credentials. Library owns protocol; CLI owns terminal UX/exit codes.
+
+Test the native crate/consumer on Linux, macOS and Windows, including loopback/cancellation and supported keychain adapters where included. Publish MSRV, TLS/runtime/features/platform policy separately from Linux server deployment support. Package and compile an independent consumer without private workspace-path assumptions.
+
+### 10.4 Preserve the landed bootstrap
+
+PR #2 at `8f81df23efd4c4a0cfe522f711a9ca56f294aab1` established `service/`, the root Cargo workspace, `clients/typescript/` and CI. Retain them. Add `clients/rust`/`cli` when implemented; start server trust/policy/issuer/etc. as modules under `service/src`, extracting `crates/` only for justified reuse/isolation. Do not duplicate a service under `crates/server` or keep stale `packages/*` paths as another authoritative layout.
+
+Preserve bootstrap tests/coverage and docs-only behavior. Each implementation adding/moving a member, entry point or package updates manifests, exports, lockfiles, CI paths/jobs, packed-consumer tests and README together. This docs-only PR neither moves bootstrap code nor claims empty crates/auth handlers exist. M1 operator subcommands do not require M4 native auth. Versioned profile fixtures and unchanged prebuilt SPA/Rust consumers prove migration compatibility without conflating credential models.
+
+## 11. Roadmap
+
+| Stage | Deliverable | Gate |
 | --- | --- | --- |
-| **M0 — Specification and threat model** | Public profiles, tenant/source/grant semantics, confirmation/admin/recovery ADRs, tests | Reviewable protocol/schema examples and threat matrix |
-| **M1 — Persistent identity core** | Schema including later CLI/replay state, tenant ownership, trust/keyset/cluster registry, bindings/grants, policy evaluator, independent operator API/bootstrap/recovery | No human-IdP coupling; restores preserve IDs and consumption state; operator isolation proven |
-| **M2 — Mandatory WIF and bearer gateway** | Signer/JWKS (T20), exchange profiles, GitHub/K8s/generic WIF, Rust workload client, minimal bearer ext_authz (T25), live grant check (T26) | GitHub/k3s → Envoy → ConnectRPC without static application secrets or human IdP; reusable replay accepted when valid, single-use replay denied |
-| **M3 — Human auth and browser gateway** | Zitadel OIDC, opaque sessions, cookie/CSRF extension to M2 gateway, same-origin routes, browser/React/Connect libraries | Unary/stream/download works with no SkyOAuth payload proxying |
-| **M4 — Stable CLI and provider delegation** | Bridge public-client PKCE + explicit confirmation, Rust native client/CLI, optional compatible upstream exchange | Existing CLI survives provider swap after reauth; silent authorization denied |
-| **M5 — Migration and hardening** | Switch/runbook tooling, all-source WIF invariance, operator outage recovery, telemetry, K8s packaging and release process | **No client change AND no WIF trust/policy reset**, same effective grants |
-| **v0.1 release** | M0–M5 and mandatory direct/delegation gates; conditional modes only if explicitly included | Versioned contract and published conformance suite |
-| **Later / conditional** | Device flow, true impersonation, other issuers/gateways, expanded admin UI, token binding, cloud STS | Separately scoped; not substitutes for required WIF, confirmation or operator controls |
+| Bootstrap, landed separately | Rust service, TypeScript health helper, workspace/CI | Foundation, not authentication completion |
+| M0 — Contracts | Profiles, audience/origin/admin ownership, source/grant/ID semantics, client ADRs, threat/test matrix | No unresolved security semantics in examples |
+| M1 — Persistent authority | Full schema, resource-server/action/tenant assignments, client/origin provisioning, trust/grants, independent operator writes/bootstrap/recovery | Complete authorized create path, ownership and restore/one-time-state tests |
+| M2 — WIF/bearer | Signer/JWKS, direct/delegated exchange, Rust workload library, bearer Envoy, WIF live action checks | GitHub/k3s → Envoy → API without human IdP/static app secrets; fixed replay outcomes |
+| M3 — Browser | Origin-resolved browser-bound OIDC, sessions/internal human profile, human-session live checks, required TypeScript SPA/adapters | Packed browser library, login-CSRF/profile/transport tests, no payload hop |
+| M4 — Native | Issuer-local callback/confirmation, reusable Rust native crate/reference CLI, human CLI profile/live checks, optional upstream exchange | Independent native consumers/platforms; no silent approval, stable migration |
+| M5 — Migration/hardening | Exclusive switch tooling, all-source invariance, unchanged client artifacts, recovery/deployment/release process | No client change and no WIF/audience/client reset; all mandatory tests |
+| v0.1 | M0–M5 and both client libraries, direct and attributed delegation | Versioned contracts and conformance suite |
+| Conditional/later | Device/refresh options, true impersonation, other gateways/issuers, expanded admin UI, cloud STS, TypeScript workload helpers | Separately approved; not substitutes for required controls |
 
-Detailed tasks, API shapes, state machines, dependencies, and acceptance criteria are in [skyoauth-tasks.md](skyoauth-tasks.md).
+## 12. Decisions requiring ADR ratification
 
-## 12. Open design decisions
-
-ADRs must ratify the proposed defaults before implementation: exact native authorization implementation and optional device/refresh scope; upstream token-vault retention; header/assertion transport; signing algorithm/key-management backend; private admin credential tooling/recovery ceremonies; source/grant extension identifiers and errors; exact constraint schema/action registry; and whether true impersonation is included at all. The proposed baseline already requires per-transaction native confirmation, independent operator authority, a private live grant checker, explicit tenancy/source selection and signed resource constraints; these are not optional gaps to defer to a later UI.
-
-Security-critical behavior must be **explicit and tested**, not inferred from framework defaults. A change to these defaults requires a reviewed ADR plus synchronized examples, tasks and release gates.
+The proposed defaults now explicitly specify audience authority/resource-server identity, human versus WIF profiles/private token typing, application-origin routing, browser-bound native callbacks, exclusive provider-switch writes, complete operator provisioning, generated-ID lifecycle, grant-directed binding selection, dormant impersonation activation and source-capability replay restrictions. ADRs also ratify signer/backend transport details, optional device/refresh/vault support and exact packaged client feature matrices. Changing a decision requires synchronized schema/examples/tasks/tests, not an implementation shortcut.
 
 ## 13. References
 
-- [RFC 8693 — OAuth 2.0 Token Exchange](https://www.rfc-editor.org/rfc/rfc8693.html) (§2.1 and Appendix A: subject/actor request semantics; §4.1: `act`)
-- [RFC 9700 — OAuth 2.0 Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700.html)
-- [RFC 8252 — OAuth 2.0 for Native Apps](https://www.rfc-editor.org/rfc/rfc8252.html) (§8.6: client impersonation and interaction)
-- [RFC 8725 — JWT Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725.html)
-- [Zitadel token exchange guide](https://zitadel.com/docs/guides/integrate/token-exchange) (verify provider/version-specific capabilities)
-- [GitHub Actions OIDC reference](https://docs.github.com/en/actions/reference/security/oidc) and [reusable workflow identity](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows)
+- [Architecture tasks and release gates](skyoauth-tasks.md)
+- [Bootstrap PR #2](https://github.com/skyoauth/skyoauth/pull/2) and [landed tree](https://github.com/skyoauth/skyoauth/tree/8f81df23efd4c4a0cfe522f711a9ca56f294aab1)
+- [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693.html): subject/actor exchange semantics and act claim
+- [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html): OAuth security, browser-bound transactions, mix-up/redirect/CSRF defenses
+- [RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html): external browser, loopback and native-client interaction
+- [RFC 8725](https://www.rfc-editor.org/rfc/rfc8725.html): explicit JWT typing and validation separation
+- [RFC 9068](https://www.rfc-editor.org/rfc/rfc9068.html): at+jwt/client_id requirements; SkyOAuth instead specifies a private profile above
+- [Fetch Standard](https://fetch.spec.whatwg.org/): mode, credentials and redirects; SPA policy applies stricter target/header rules
+- [GitHub OIDC reference](https://docs.github.com/en/actions/reference/security/oidc) and [reusable workflow identity](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows)
+- [Kubernetes TokenReview](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/) and [projected service-account rotation](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/)
 - [Envoy Gateway external authorization](https://gateway.envoyproxy.io/docs/tasks/security/ext-auth/)
-- [Kubernetes projected service-account tokens](https://kubernetes.io/docs/concepts/security/service-accounts/) and [TokenReview](https://kubernetes.io/docs/reference/kubernetes-api/authentication-resources/token-review-v1/)
+- [Zitadel token exchange](https://zitadel.com/docs/guides/integrate/token-exchange): verify deployed provider/version capabilities
