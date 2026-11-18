@@ -536,7 +536,7 @@ Only confirmed old-UID absence permits retired and exception removal; transport 
 - [ ] **T21.5** Requested/default scopes fit assignment/grant/service ceilings; encode profile-appropriate narrowed constraints and full revision, not just an audit ID.
 - [ ] **T21.6** Reusable accepts otherwise valid repeat proof after fresh evaluation/new output jti. Eligible on-demand single-use atomically consumes source-scoped verified-jti digest; replay/missing jti/store failure denies, crash may burn proof, retry needs fresh assertion. Reject single-use on projected/TokenReview sources at enrollment and request validation.
 - [ ] **T21.7** Fuzz parser/selector/profile roles; test two same-audience grants, overlapping bindings to different actors, multiple eligible same-actor bindings, no-match, scope defaults/escalation and non-enumerating errors.
-- [ ] **T21.8** Consumption survives digest-key rotation, provider switch/rollback, failover/restore and all grant choices until proof exp plus skew; no cached-token idempotency claim.
+- [ ] **T21.8** Consumption survives digest-key rotation, provider switch/rollback, failover/restore and all grant choices until proof exp plus skew. Replay checks still apply on retry. Test digest-key rotation, failover/restore and all grant choices in M2. Run the switch and rollback cases with T51.7–T51.8 using the T13.9 provider transition.
 - [ ] **T21.9** Add clients/rust Cargo library with typed exchange/profile/selector config, redacted credentials, memory cache and bounded/cancellable transport. No service/DB dependency, off-origin credential forwarding or mutation replay. Package/test independently of reference CLI.
 
 ### T22 — Mandatory GitHub Actions
@@ -557,7 +557,7 @@ Only confirmed old-UID absence permits retired and exception removal; transport 
 - [ ] **T23.4** Deny wrong cluster/SA/audience, expired proof/deleted-bound-object under documented semantics. Independently keyed shared-issuer clusters cannot be selected interchangeably.
 - [ ] **T23.5** Rust provider rereads file and caches only bridge token in memory. **Renew using the same valid projected token before kubelet rotation**, then use rotated token; reusable mode required, no new client secret.
 - [ ] **T23.6** Separate local-JWT enrollment states stale object-revocation tradeoff; projected-token profile still rejects single-use. Never degrade from failed review to local validation.
-- [ ] **T23.7** Provider switch preserves cluster/endpoint/CA/reviewer references, binding IDs and reusable behavior; independent reviewer rotation is not a new source.
+- [ ] **T23.7** Test that independent reviewer rotation preserves the source identity in M2. With T51, verify that a provider switch preserves cluster/endpoint/CA/reviewer references, binding IDs and reusable behavior.
 
 ### T24 — Generic issuer and uploaded keysets
 
@@ -666,7 +666,7 @@ Only confirmed old-UID absence permits retired and exception removal; transport 
 ### T41 — Upstream adapter/exchange
 
 - [ ] **T41.1** Human-login/optional-provider-exchange trait with explicit deployed capability checks, independent of operator authority.
-- [ ] **T41.2** Authorized compatible Zitadel-issued exchange stays server-side, respecting real subject/actor semantics and normalizing downstream credential/profile.
+- [ ] **T41.2** Deferred until a release explicitly includes ADR-009 upstream exchange. Keep authorized compatible Zitadel-issued exchange server-side, respecting real subject/actor semantics and normalizing downstream credential/profile.
 - [ ] **T41.3** Do not assume arbitrary GitHub/K8s exchange or administrative audiences; local WIF required independently.
 - [ ] **T41.4** Never return upstream admin token through generalized delegation; separate restricted adapter if needed.
 - [ ] **T41.5** Replacement-provider tests preserve TypeScript/Rust contracts, metadata/profile/constraints/gateway transport and registered clients/origins.
@@ -842,8 +842,8 @@ flowchart TD
 ~~~mermaid
 flowchart TD
     M1A_GATE["M1a gate"] --> SIGNER["T20 · public signer, JWKS and WIF profile"]
-    M1A_GATE --> SOURCES["T22.1–T22.2, T22.5, T23.1–T23.4, T23.6–T23.7, T24<br/>GitHub, Kubernetes and generic source verification"]
-    SIGNER --> EXCHANGE["T21.1–T21.8 · exchange, grant selection and replay"]
+    M1A_GATE --> SOURCES["T22.1–T22.2, T22.5, T23.1–T23.4, T23.6–T23.7 (M2), T24<br/>GitHub, Kubernetes and generic source verification"]
+    SIGNER --> EXCHANGE["T21.1–T21.8 · M2 exchange, grant selection and replay"]
     SOURCES --> EXCHANGE
     EXCHANGE --> WIF_CLIENT["T21.9, T22.3–T22.4, T22.7, T23.5<br/>Packaged Rust WIF client and renewal examples"]
     SIGNER --> BEARER["T25.1–T25.4 · bearer Envoy and receiver"]
@@ -854,15 +854,15 @@ flowchart TD
     ACTIONS --> M2_GATE
 ~~~
 
-Run the provider-switch preservation case in T23.7 with T51 using the deployed human transition.
+Test T21.8's digest-key rotation, failover/restore and grant-choice cases in M2. Run its provider switch and rollback cases and T23.7's provider-switch preservation case with T51 using the T13.9 transition.
 
 #### Browser sessions and SPA (M3)
 
 ~~~mermaid
 flowchart TD
-    INPUT["M1b and M2 gates"] --> SESSIONS["T30–T31 · OIDC, enrollment and cookie sessions"]
-    INPUT --> ROUTES["T32.3, T32.10 · route controller, guards and deployment boundaries"]
-    INPUT --> INTERNAL_KEYS["T32.14 · internal signer and standby"]
+    INPUT["M1b and M2 gates"] --> SESSIONS["T30–T31 · implement OIDC, enrollment and sessions"]
+    INPUT --> ROUTES["T32.3, T32.10 · implement route control and guards<br/>Document deployment boundaries"]
+    INPUT --> INTERNAL_KEYS["T32.14 · implement internal signer and standby"]
     INPUT --> SPA["T33.1–T33.4, T33.6–T33.8 · TypeScript package and independent consumer"]
     SESSIONS --> BROWSER_GATEWAY["T32.1–T32.2, T32.4–T32.5, T32.13<br/>Browser gateway, credential containment and request binding"]
     ROUTES --> BROWSER_GATEWAY
@@ -870,8 +870,16 @@ flowchart TD
     BROWSER_GATEWAY --> STREAMS["T32.6–T32.8, T32.11–T32.12 · live checks, leases and typed errors"]
     SPA --> BROWSER_TEST["T33.5 · real-browser tests with the packed SPA library"]
     STREAMS --> BROWSER_TEST
+    STREAMS --> INTEGRATION["T31.6, T32.3, T32.14 · integrated acceptance tests"]
     BROWSER_TEST --> M3_GATE["M3 gate · browser path and bearer regression"]
+    INTEGRATION --> M3_GATE
 ~~~
+
+Hand off the session, route and signer implementations to the browser gateway once their interfaces and local checks are ready. Run the remaining acceptance cases after the gateway, live checks and leases are integrated. Record these results against the original tasks before closing M3.
+
+- T31.6 verifies that cleanup works during planned apply or exhausted observation budget without minting forwarding evidence.
+- T32.3 verifies cleanup during gating, 503s on new calls, unavailable rechecks without lease renewal, and terminal rechecks. Test contexts during TLS renewal and confirm that recovery cannot revive closed or expired contexts.
+- T32.14 verifies that the standby tripwire denies and alerts at check, admission and recheck, and benchmarks signing and 10,000 idle continuations.
 
 If the optional T32.9 ForwardAuth path is included, verify its equivalent deployment enforcement alongside the browser gateway.
 
@@ -881,13 +889,13 @@ If the optional T32.9 ForwardAuth path is included, verify its equivalent deploy
 flowchart TD
     INPUT["M1b OAuth state, M2 and M3 gates"] --> NATIVE_SERVER["T40.1–T40.5, T40.12–T40.14<br/>Native callback, comparison, confirmation and refresh"]
     INPUT --> NATIVE_CLIENT["T40.7, T40.9–T40.11 · Rust library, reference CLI and packaging"]
-    INPUT --> PROVIDER["T41.1–T41.4 · provider capability and adapter boundaries"]
+    INPUT --> PROVIDER["T41.1, T41.3–T41.4 · provider capability and adapter boundaries"]
     NATIVE_SERVER --> NATIVE_TEST["T40.8, T40.15, T41.5, T26.6 (native)<br/>Independent CLI, generic refresh and provider compatibility"]
     NATIVE_CLIENT --> NATIVE_TEST
     PROVIDER --> NATIVE_TEST
     NATIVE_TEST --> M4_GATE["M4 gate · packaged native client and refresh"]
     M4_GATE --> DEPLOY["T50 · deployment and package audit"]
-    M4_GATE --> MIGRATION["T51 · switch and rollback through T13.9"]
+    M4_GATE --> MIGRATION["T51 · switch and rollback through T13.9<br/>Includes T21.8 and T23.7 migration cases"]
     M4_GATE --> SECURITY["T52 · security conformance and review"]
     DEPLOY -->|Deployed topology| MIGRATION
     DEPLOY -->|Deployed topology| SECURITY
@@ -896,7 +904,7 @@ flowchart TD
     SECURITY --> RELEASE
 ~~~
 
-T40.6 applies only if the device-flow profile is included. Carry the packed TypeScript and Rust artifacts into T51 so the provider-switch rehearsal can compare the same builds before and after reauthentication.
+T40.6 applies only if the device-flow profile is included. T41.2 is deferred to a release that explicitly includes the optional ADR-009 upstream exchange. Carry the packed TypeScript and Rust artifacts into T51 so the provider-switch rehearsal can compare the same builds before and after reauthentication.
 
 ## 10. Definitions of done
 
