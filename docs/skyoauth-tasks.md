@@ -801,6 +801,103 @@ All unconditional rows block full v0.1. Optional device-flow subcases apply only
 
 Reviewable implementation slices: workload schema/operator/trust/policy; signer/exchange/Rust WIF; TokenReview/bearer gateway/live checks; parallel human registry/state; browser-bound OIDC/enrollment/route enforcement/assertions/stream continuation and TypeScript package; native comparison/refresh/Rust library; deployment/migration. Keep tenant/isolation tests and independent audience authority even in one-tenant deployments. Defer admin UI, self-service tenant onboarding, invitations, device flow, vault/provider exchange, alternate gateways and active impersonation. New package CI/consumer tests land with code.
 
+### Task DAG for orchestrator agents
+
+An arrow points from a prerequisite to the work that consumes it. A node with several incoming arrows needs all of those inputs. The milestone diagram shows gate order. In the task-group diagrams, agents can implement against agreed interfaces and fixtures in parallel, then integrate when the inputs land. For each assignment, record the task IDs, shared files that need a single owner, and the acceptance evidence to return. Track workload and human portions of shared tasks separately. Apply optional subcases only where their task calls for them.
+
+#### Milestone gates
+
+~~~mermaid
+flowchart TD
+    BOOTSTRAP["Bootstrap PR #2 · landed"] --> M0["M0 · T00 contracts and threat model"]
+    M0 --> M1A["M1a · workload authority and replay"]
+    M1A --> M1B["M1b · human authority and state"]
+    M1A --> M2["M2 · usable WIF and bearer gateway"]
+    M1B --> M3["M3 · browser sessions and TypeScript SPA"]
+    M2 --> M3
+    M3 --> M4["M4 · native OAuth and reusable Rust CLI library"]
+    M4 --> M5["M5 · deployment, migration and v0.1"]
+~~~
+
+Dispatch M1b and M2 independently once M1a passes. M4 also consumes the M1b OAuth state and the M2 Rust workload crate and bearer path through the prerequisites shown above.
+
+#### Workload and human authority (M1a and M1b)
+
+~~~mermaid
+flowchart TD
+    CONTRACT["M0 · reviewed contracts"] --> WORKLOAD["T10–T12, T14.1–T14.4, T14.8 · workload slices<br/>Schema, trust, policy, replay and audience authority"]
+    CONTRACT --> OPERATOR["T13.1–T13.7, T13.10 · M1a slices<br/>Operator identity, workstation client and local recovery"]
+    WORKLOAD --> PROVISION_WIF["T13.8 · workload provisioning"]
+    OPERATOR --> PROVISION_WIF
+    PROVISION_WIF --> M1A_GATE["M1a gate · hand off to M2 and M1b"]
+    M1A_GATE --> HUMAN_STATE["T10 · human slice<br/>OAuth, browser, refresh and continuation state"]
+    M1A_GATE --> HUMAN_POLICY["T12, T14 · human slices<br/>Origins, routes, bundles, policy and limits"]
+    HUMAN_STATE --> PROVISION_HUMAN["T13.3, T13.5, T13.8, T13.9 · M1b slices<br/>Human provisioning and guarded provider transition"]
+    HUMAN_POLICY --> PROVISION_HUMAN
+    PROVISION_HUMAN --> M1B_GATE["M1b gate · hand off to M3"]
+~~~
+
+#### Workload federation (M2)
+
+~~~mermaid
+flowchart TD
+    M1A_GATE["M1a gate"] --> SIGNER["T20 · public signer, JWKS and WIF profile"]
+    M1A_GATE --> SOURCES["T22.1–T22.2, T22.5, T23.1–T23.4, T23.6–T23.7, T24<br/>GitHub, Kubernetes and generic source verification"]
+    SIGNER --> EXCHANGE["T21.1–T21.8 · exchange, grant selection and replay"]
+    SOURCES --> EXCHANGE
+    EXCHANGE --> WIF_CLIENT["T21.9, T22.3–T22.4, T22.7, T23.5<br/>Packaged Rust WIF client and renewal examples"]
+    SIGNER --> BEARER["T25.1–T25.4 · bearer Envoy and receiver"]
+    SIGNER --> ACTIONS["T26.1–T26.5 · WIF receiver live checks"]
+    WIF_CLIENT --> WIF_TEST["T22.6, T25.5, T26.6 (WIF)<br/>Real GitHub and k3s calls through Envoy"]
+    BEARER --> WIF_TEST
+    WIF_TEST --> M2_GATE["M2 gate · usable workload path"]
+    ACTIONS --> M2_GATE
+~~~
+
+Run the provider-switch preservation case in T23.7 with T51 using the deployed human transition.
+
+#### Browser sessions and SPA (M3)
+
+~~~mermaid
+flowchart TD
+    INPUT["M1b and M2 gates"] --> SESSIONS["T30–T31 · OIDC, enrollment and cookie sessions"]
+    INPUT --> ROUTES["T32.3, T32.10 · route controller, guards and deployment boundaries"]
+    INPUT --> INTERNAL_KEYS["T32.14 · internal signer and standby"]
+    INPUT --> SPA["T33.1–T33.4, T33.6–T33.8 · TypeScript package and independent consumer"]
+    SESSIONS --> BROWSER_GATEWAY["T32.1–T32.2, T32.4–T32.5, T32.13<br/>Browser gateway, credential containment and request binding"]
+    ROUTES --> BROWSER_GATEWAY
+    INTERNAL_KEYS --> BROWSER_GATEWAY
+    BROWSER_GATEWAY --> STREAMS["T32.6–T32.8, T32.11–T32.12 · live checks, leases and typed errors"]
+    SPA --> BROWSER_TEST["T33.5 · real-browser tests with the packed SPA library"]
+    STREAMS --> BROWSER_TEST
+    BROWSER_TEST --> M3_GATE["M3 gate · browser path and bearer regression"]
+~~~
+
+If the optional T32.9 ForwardAuth path is included, verify its equivalent deployment enforcement alongside the browser gateway.
+
+#### Native client, migration and release (M4 and M5)
+
+~~~mermaid
+flowchart TD
+    INPUT["M1b OAuth state, M2 and M3 gates"] --> NATIVE_SERVER["T40.1–T40.5, T40.12–T40.14<br/>Native callback, comparison, confirmation and refresh"]
+    INPUT --> NATIVE_CLIENT["T40.7, T40.9–T40.11 · Rust library, reference CLI and packaging"]
+    INPUT --> PROVIDER["T41.1–T41.4 · provider capability and adapter boundaries"]
+    NATIVE_SERVER --> NATIVE_TEST["T40.8, T40.15, T41.5, T26.6 (native)<br/>Independent CLI, generic refresh and provider compatibility"]
+    NATIVE_CLIENT --> NATIVE_TEST
+    PROVIDER --> NATIVE_TEST
+    NATIVE_TEST --> M4_GATE["M4 gate · packaged native client and refresh"]
+    M4_GATE --> DEPLOY["T50 · deployment and package audit"]
+    M4_GATE --> MIGRATION["T51 · switch and rollback through T13.9"]
+    M4_GATE --> SECURITY["T52 · security conformance and review"]
+    DEPLOY -->|Deployed topology| MIGRATION
+    DEPLOY -->|Deployed topology| SECURITY
+    DEPLOY --> RELEASE["M5 gate · C01–C10, A01–A64 and both libraries"]
+    MIGRATION --> RELEASE
+    SECURITY --> RELEASE
+~~~
+
+T40.6 applies only if the device-flow profile is included. Carry the packed TypeScript and Rust artifacts into T51 so the provider-switch rehearsal can compare the same builds before and after reauthentication.
+
 ## 10. Definitions of done
 
 **Protocol:** explicit standard/private grant distinction and private credential typing, selectors/defaults/binding selection/replay/constraints; profile-specific verification without upstream-provider configuration or subject-prefix exemptions.
