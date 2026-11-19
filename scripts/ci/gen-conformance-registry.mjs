@@ -255,6 +255,10 @@ const NEG = '; − '; // U+2212 MINUS SIGN, as in the table
 const COND = '. Conditional sub-ID';
 const COND_RE = /^Conditional sub-ID(?: (A\d\d\.\d\d))? \(([^,()]+), (T\d\d\.\d+)\): (.+)$/;
 
+// Conditional sub-IDs are numbered .90–.99; required ones .01–.89, inside
+// the annex range that the parent's §2 note declares (layout §3, §5 Q1).
+const isConditionalNumber = (id) => Number(id.slice(4)) >= 90;
+
 // Parses a "Conditional sub-ID [Axx.yy] (<feature>, Txx.y): <text>" sentence.
 export function parseConditional(text) {
   const m = COND_RE.exec(text);
@@ -294,6 +298,12 @@ export function parseLayoutRow(line, where, codes) {
     const p = Math.min(...cands);
     entry.note = rest.slice(0, p + 1);
     rest = rest.slice(p + 2);
+    // An annex range for required sub-IDs, e.g. "A58.01–A58.89" (en dash).
+    const r = new RegExp(`\\b${id}\\.(\\d\\d)–${id}\\.(\\d\\d)\\b`).exec(entry.note);
+    if (r) {
+      entry.annex = { from: Number(r[1]), to: Number(r[2]) };
+      if (entry.annex.from < 1 || entry.annex.to > 89 || entry.annex.from > entry.annex.to) fail(`annex range ${r[0]} must lie within ${id}.01–${id}.89`);
+    }
   }
   rest = rest.slice(POS.length);
   const sentences = rest.split(COND);
@@ -304,6 +314,7 @@ export function parseLayoutRow(line, where, codes) {
     if (!c) fail(`unparsable sentence "${text}"`);
     if (!c.feature) fail(`unknown conditional feature "${c.label}" (known: ${Object.keys(FEATURES).join(', ')})`);
     if (c.id && c.id.slice(0, 3) !== id) fail(`conditional sub-ID ${c.id} is not a sub-ID of ${id}`);
+    if (c.id && !isConditionalNumber(c.id)) fail(`conditional sub-ID ${c.id} must be numbered ${id}.90–${id}.99`);
     return { ...c, parent: id, text, n: where };
   });
   const parts = splitTop(rest, NEG);
@@ -381,7 +392,11 @@ export function parseToml(text, file = 'toml') {
           if (e in simple) s += simple[e];
           else if (e === 'u' || e === 'U') {
             const len = e === 'u' ? 4 : 8;
-            s += String.fromCodePoint(parseInt(text.slice(i, i + len), 16));
+            const hex = text.slice(i, i + len);
+            if (!new RegExp(`^[0-9A-Fa-f]{${len}}$`).test(hex)) err(`bad \\${e} escape "\\${e}${hex}"`);
+            const cp = parseInt(hex, 16);
+            if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) err(`\\${e} escape "\\${e}${hex}" is not a Unicode scalar value`);
+            s += String.fromCodePoint(cp);
             i += len;
           } else err(`bad escape \\${e}`);
         } else s += d;
@@ -555,6 +570,27 @@ function duplicateErrors(doc, file, table) {
   return errors;
 }
 
+// Type checks of one committed stage; returns true if it added errors.
+// `where` is "file:line: id milestone".
+function stageErrors(s, where, errors) {
+  const before = errors.length;
+  const strings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+  if (typeof s.milestone !== 'string' || !MILESTONES.includes(s.milestone)) errors.push(`${where}: milestone must be one of ${MILESTONES.join(', ')}`);
+  if (typeof s.scope !== 'string' || !s.scope) errors.push(`${where}: scope must be a string`);
+  if (!strings(s.legs) || !s.legs.length) errors.push(`${where}: legs must be a non-empty list of strings`);
+  else for (const leg of new Set(s.legs.filter((x, i) => s.legs.indexOf(x) !== i))) errors.push(`${where}: legs lists ${leg} twice`);
+  if (!STATUSES.includes(s.status)) errors.push(`${where}: status must be planned or implemented`);
+  if (!strings(s.tests)) errors.push(`${where}: tests must be a list of strings`);
+  return errors.length > before;
+}
+
+// 1-based line of the first top-level `key =` in a TOML text (0 if absent).
+function lineOfKey(text, key) {
+  if (text === null) return 0;
+  const i = text.split('\n').findIndex((l) => new RegExp(`^${key}\\s*=`).test(l));
+  return i + 1;
+}
+
 function validStages(stages, where, errors) {
   for (const s of stages) {
     if (!MILESTONES.includes(s.milestone)) errors.push(`${where}: unknown stage milestone ${s.milestone}`);
@@ -582,8 +618,9 @@ function checkLegs(e, where, catalogue, errors) {
 
 // Matches subcases.toml against the conditional sub-IDs that layout §2 names.
 // A named ID must exist with the named parent, feature and first owner; an
-// unnumbered one must match exactly one entry by those three; every entry
-// must be named.
+// unnumbered one must match exactly one entry by those three; every
+// conditional entry must be named. Required sub-IDs need not be named (their
+// annex range is checked in generate()).
 function checkNamedSubcases(named, subs, errors) {
   const matched = new Set();
   const explicit = new Set(named.filter((n) => n.id).map((n) => n.id));
@@ -605,7 +642,9 @@ function checkNamedSubcases(named, subs, errors) {
     else if (!c.length) errors.push(`${desc(n)} but missing from ${SUBCASES}`);
     else errors.push(`${desc(n)} without an ID, but ${c.map((s) => s.id).join(' and ')} all match it`);
   }
-  for (const s of subs) if (!matched.has(s)) errors.push(`${SUBCASES}: ${s.id} is not a sub-ID named in ${LAYOUT} §2`);
+  for (const s of subs) {
+    if (!matched.has(s) && s.conditional_on !== undefined) errors.push(`${SUBCASES}: ${s.id} is a conditional sub-ID not named in ${LAYOUT} §2`);
+  }
 }
 
 // Returns { files: { [path]: text }, errors: string[], entries, catalogue, codes }.
@@ -672,11 +711,22 @@ export function generate(root) {
     for (const r of c.rows) if (!covered.has(r.id)) errors.push(`${LAYOUT}: contract ${r.id} has no "Covered by" row in §5`);
     for (const id of covered.keys()) if (!c.rows.some((r) => r.id === id)) errors.push(`${LAYOUT}: §5 maps ${id}, which is not a contract of ${DESIGN} §2`);
 
-    // Hand-authored stage fields from the committed file.
+    // Hand-authored stage fields from the committed file. An invalid stage is
+    // reported and not reused.
     const oldStages = new Map();
-    for (const e of old.scenario ?? []) for (const s of e.stage ?? []) oldStages.set(`${e.id}/${s.milestone}`, s);
-    const gates = old.gates_passed ?? [];
-    for (const g of gates) if (!MILESTONES.includes(g)) errors.push(`${SCENARIOS}: gates_passed has unknown milestone ${g}`);
+    for (const e of old.scenario ?? []) {
+      for (const s of e.stage ?? []) {
+        if (!stageErrors(s, `${SCENARIOS}:${s.__line}: ${e.id} ${s.milestone}`, errors)) oldStages.set(`${e.id}/${s.milestone}`, s);
+      }
+    }
+    let gates = old.gates_passed ?? [];
+    const gatesAt = `${SCENARIOS}:${lineOfKey(oldScenarios, 'gates_passed')}`;
+    if (!Array.isArray(gates) || !gates.every((g) => typeof g === 'string')) {
+      errors.push(`${gatesAt}: gates_passed must be a list of milestones`);
+      gates = [];
+    }
+    for (const g of gates) if (!MILESTONES.includes(g)) errors.push(`${gatesAt}: gates_passed has unknown milestone ${g}`);
+    for (const g of new Set(gates.filter((g, i) => gates.indexOf(g) !== i))) errors.push(`${gatesAt}: gates_passed lists ${g} twice`);
 
     const scenarios = [];
     for (const r of a.rows) {
@@ -703,14 +753,37 @@ export function generate(root) {
     const byId = new Map(scenarios.map((e) => [e.id, e]));
     const subBlocks = [];
     for (const s of subs) {
-      const where = `${SUBCASES}: ${s.id}`;
+      const where = `${SUBCASES}:${s.__line}: ${s.id}`;
       const before = errors.length;
-      if (!/^A\d\d\.\d\d$/.test(s.id ?? '')) errors.push(`${where}: id must look like A58.07`);
-      if (s.parent !== s.id?.slice(0, 3) || !byId.has(s.parent)) errors.push(`${where}: parent must be the registered scenario ${s.id?.slice(0, 3)}`);
-      for (const k of ['layers', 'envs', 'harness', 'owners', 'stage']) if (!Array.isArray(s[k]) || !s[k].length) errors.push(`${where}: ${k} must be a non-empty list`);
+      if (typeof s.id !== 'string' || !/^A\d\d\.\d\d$/.test(s.id)) errors.push(`${where}: id must look like A58.07`);
+      else if (s.parent !== s.id.slice(0, 3) || !byId.has(s.parent)) errors.push(`${where}: parent must be the registered scenario ${s.id.slice(0, 3)}`);
+      for (const k of ['layers', 'envs', 'harness', 'owners']) {
+        if (!Array.isArray(s[k]) || !s[k].length || !s[k].every((x) => typeof x === 'string' && x)) errors.push(`${where}: ${k} must be a non-empty list of strings`);
+      }
+      if (!Array.isArray(s.stage) || !s.stage.length) errors.push(`${where}: needs at least one [[subcase.stage]]`);
       for (const k of ['positive', 'negative']) if (typeof s[k] !== 'string' || !s[k]) errors.push(`${where}: ${k} must be a non-empty string`);
+      if (errors.length > before) continue;
+      for (const x of s.layers) if (!Object.values(LAYERS).includes(x)) errors.push(`${where}: unknown layer "${x}"`);
+      for (const x of s.envs) if (!Object.values(codes).includes(x)) errors.push(`${where}: unknown env "${x}"`);
+      s.stage.forEach((st, i) => {
+        if (stageErrors(st, `${SUBCASES}:${st.__line}: ${s.id} ${st.milestone}`, errors)) return;
+        const prev = s.stage[i - 1];
+        if (prev && MILESTONES.includes(prev.milestone) && mIndex(st.milestone) <= mIndex(prev.milestone)) {
+          errors.push(`${SUBCASES}:${st.__line}: ${s.id}: stage ${st.milestone} comes after ${prev.milestone}; stage milestones must increase`);
+        }
+      });
+      const parentRow = layoutById.get(s.parent);
       if (s.conditional_on === undefined) {
         if (s.table_text !== undefined) errors.push(`${where}: table_text is only for a conditional sub-ID`);
+        const n = Number(s.id.slice(4));
+        const r = parentRow?.annex;
+        if (!r) errors.push(`${where}: required sub-ID, but layout §2 row ${s.parent} declares no annex range`);
+        else if (n < r.from || n > r.to) {
+          const fmt = (x) => `${s.parent}.${String(x).padStart(2, '0')}`;
+          errors.push(`${where}: required sub-ID is outside the annex range ${fmt(r.from)}–${fmt(r.to)} that layout §2 row ${s.parent} declares`);
+        }
+      } else if (!isConditionalNumber(s.id)) {
+        errors.push(`${where}: conditional sub-ID ${s.id} must be numbered ${s.parent}.90–${s.parent}.99`);
       } else if (!Object.values(FEATURES).includes(s.conditional_on)) {
         errors.push(`${where}: conditional_on must be one of ${Object.values(FEATURES).join(', ')}`);
       } else {

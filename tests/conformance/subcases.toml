@@ -3,7 +3,7 @@
 # scripts/ci/gen-conformance-registry.mjs rewrites; see tests/conformance/README.md.
 
 [[subcase]]
-id = "A18.01"
+id = "A18.90"
 kind = "subcase"
 parent = "A18"
 conditional_on = "forwardauth"
@@ -31,11 +31,11 @@ status = "planned"
 tests = []
 
 [[subcase]]
-id = "A27.01"
+id = "A27.90"
 kind = "subcase"
 parent = "A27"
 conditional_on = "device-flow"
-table_text = "Conditional sub-ID A27.01 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass"
+table_text = "Conditional sub-ID A27.90 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass"
 layers = ["security"]
 envs = ["browser", "native-3os"]
 harness = ["BR", "OIDC with live SSO", "RN", "attacker loopback process"]
@@ -61,11 +61,11 @@ status = "planned"
 tests = []
 
 [[subcase]]
-id = "A33.01"
+id = "A33.90"
 kind = "subcase"
 parent = "A33"
 conditional_on = "back-channel-logout"
-table_text = "Conditional sub-ID A33.01 (back-channel logout, T30.6): verified sid targeting"
+table_text = "Conditional sub-ID A33.90 (back-channel logout, T30.6): verified sid targeting"
 layers = ["security"]
 envs = ["pg"]
 harness = ["PG", "UC"]
@@ -84,7 +84,7 @@ status = "planned"
 tests = []
 
 [[subcase]]
-id = "A58.01"
+id = "A58.90"
 kind = "subcase"
 parent = "A58"
 conditional_on = "forwardauth"

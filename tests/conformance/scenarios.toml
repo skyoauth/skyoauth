@@ -409,7 +409,7 @@ id = "A18"
 kind = "scenario"
 layers = ["security", "integration"]
 envs = ["envoy-k3s", "browser"]
-harness = ["ENV raw capture", "OIDC", "BR"]
+harness = ["ENV raw capture", "OIDC", "BR", "deployed T50 topology (M5)"]
 owners = ["T25.4", "T32.4", "T50.4", "T52.4"]
 positive = "real SkyOAuth cookie flows work"
 negative = "Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion"
@@ -999,17 +999,7 @@ tests = []
 [[scenario.stage]]
 milestone = "M5"
 scope = "through switch/rollback"
-legs = [
-  "scenarios-hermetic/x86_64",
-  "scenarios-hermetic/aarch64",
-  "migration-rehearsal",
-  "typescript-browser/chromium",
-  "typescript-browser/firefox",
-  "typescript-browser/webkit",
-  "clients-rust-native/ubuntu",
-  "clients-rust-native/macos",
-  "clients-rust-native/windows",
-]
+legs = ["migration-rehearsal"]
 status = "planned"
 tests = []
 
@@ -1369,9 +1359,9 @@ id = "A58"
 kind = "scenario"
 layers = ["integration"]
 envs = ["pg", "envoy-k3s"]
-harness = ["K3", "ENV", "cert-manager", "VAP", "≥2 controllers", "UC"]
+harness = ["K3", "ENV", "cert-manager", "VAP", "≥2 controllers", "UC", "deployed T50 topology (M5)"]
 owners = ["T13.2", "T14.9", "T31.6", "T32.3", "T32.4", "T50.4", "T52.4"]
-note = "Sub-IDs A58.01… in the annex (Q1):"
+note = "Sub-IDs A58.01–A58.89 in the annex (Q1):"
 positive = "every approved, mode-matched path"
 negative = "every listed stale/wrong-mode/revoked/mismatch/hold case"
 matrix_sha256 = "8e4e05e65fe2d1d38ac8be0707f9800e8f37f0883892f2239dadf87a27976f1c"
@@ -1483,7 +1473,7 @@ id = "A62"
 kind = "scenario"
 layers = ["security"]
 envs = ["pg", "envoy-k3s"]
-harness = ["UC", "PG", "REP"]
+harness = ["UC", "PG", "REP", "deployed T50 topology (M5)"]
 owners = ["T32.14", "T50.3", "T52.5"]
 note = "Internal signer group only (Q5)."
 positive = "rotation and clean promotion"
@@ -1492,7 +1482,7 @@ matrix_sha256 = "08371809e5c67ca8913610da5a02c1f7ac68297d2266d24e30a5895c7c74e8e
 
 [[scenario.stage]]
 milestone = "M3"
-scope = "internal signer rotation and promotion"
+scope = "internal signer lifecycle and standby tripwire"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = []

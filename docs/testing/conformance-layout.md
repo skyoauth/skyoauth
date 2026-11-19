@@ -122,7 +122,7 @@ Legend:
 | A15 | I | PG, EK | GH, uploaded keyset, K3×2 shared issuer, PG | M5 | T23.7, T51.2, T51.6, T51.7 | + identical decision fixtures before and after; − any changed source/CA/reviewer/keyset ID fails |
 | A16 | I | PG | PG, OIDC×2 | M1a: preservation · M5: switch | T10.11, T12.10, T51.6 | + IDs, modes, defaults, constraints and revisions equal; − dormant impersonation still disabled and not issuable |
 | A17 | I | PG | PG, OIDC×2 | M1b: T13.9 transition · M5: rehearsal | T13.9, T51.8 | + policy/audience change made between switch and rollback survives, epochs are fresh; − pre-switch human state not resurrected |
-| A18 | S+I | EK, BR | ENV raw capture, OIDC, BR | M2: header spoof · M3: cookies · M5: deployed-topology audit | T25.4, T32.4, T50.4, T52.4 | + real SkyOAuth cookie flows work; − Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion. Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain |
+| A18 | S+I | EK, BR | ENV raw capture, OIDC, BR, deployed T50 topology (M5) | M2: header spoof · M3: cookies · M5: deployed-topology audit | T25.4, T32.4, T50.4, T52.4 | + real SkyOAuth cookie flows work; − Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion. Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain |
 | A19 | C | H, EK | FX, UC, ENV JWKS cache | M2 | T20.1, T20.2 | + old and new tokens verify through the overlap with no config change; − retired key after overlap, unknown kid |
 | A20 | I | PG, N3 | OIDC outage toggle, PG, OP | M3: outage · M5: switch during outage | T13.7, T30.3, T51.11 | + WIF and operator recovery during the outage; − fresh login fails closed |
 | A21 | S | PG | PG, UC | M2: WIF · M4: human | T12.6, T20.7, T26.5 | + outstanding token verifies offline until exp ≤ 300 s; − new issuance and live check after committed disable |
@@ -131,13 +131,13 @@ Legend:
 | A24 | S | PG | REP, PG, barriers | M1a: consume primitive · M2: exchange | T10.9, T21.6, T21.8, T52.7 | + exactly one issuance across N replicas and grants; − missing jti, replay, store failure |
 | A25 | C | PG | PG, UC | M1a: selection · M2: exchange | T12.3, T12.8, T21.4, T21.7 | + selector picks the authorized actor/target; − subject/target/mode override, wrong tenant |
 | A26 | C | PG | PG, UC | M1a: policy · M2: exchange | T12.8, T21.5 | + omitted scope → explicit defaults; − omitted with no defaults, empty or excessive scope → invalid_scope |
-| A27 | S | BR, N3 | BR, OIDC with live SSO, RN, attacker loopback process | M4 | T40.2, T40.4, T40.8, T52.3 | + explicit confirmation yields a code; − SSO alone, deny, expiry, attacker's own PKCE/loopback: no code. Conditional sub-ID A27.01 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass |
+| A27 | S | BR, N3 | BR, OIDC with live SSO, RN, attacker loopback process | M4 | T40.2, T40.4, T40.8, T52.3 | + explicit confirmation yields a code; − SSO alone, deny, expiry, attacker's own PKCE/loopback: no code. Conditional sub-ID A27.90 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass |
 | A28 | S | PG, EK | K3×2 (PR: two TRm sharing an issuer string) | M2 | T11.7, T11.10, T23.4 | + selected cluster validates; − other cluster's proof, asserting no probing or fallback |
 | A29 | S | PG | PG, proptest with fixed seed | M1a: registry and references · M2: exchange | T10.8, T11.10, T14.8, T21.3 | + same-issuer and same-name registrations coexist; − each crossed reference at write (M1a); a proof from one tenant's source with another tenant's grant at exchange (M2) |
 | A30 | C | H | FX claim-set vectors per profile | M2: WIF · M3: human_session · M4: human_cli | T12.9, T20.3, T20.4, T32.5, T40.13 | + complete set per profile; − absent, unknown, contradictory, missing revision, subject-prefix exemption attempt |
 | A31 | S | PG | PG, mTLS checker identities, fault injection | M2: WIF · M3: human | T14.3, T26.1, T26.3, T26.5 | + correct checker/action; − each wrong dimension, superseded revision; unavailable → typed unavailable, no positive cache, no redirect |
 | A32 | S | PG | PG, local verifier, OP, barriers | M1a | T13.4, T13.5, T13.6 | + one bootstrap, signed recovery restores; − concurrent or reopened bootstrap, forged IdP admin, revoked key, replayed recovery |
-| A33 | S | PG | PG, UC | M3 | T10.10, T31.2, T31.6 | + inside both deadlines; − idle expiry, absolute expiry, wrong origin, no revival by coalesced write; local and upstream logout revoke exactly the sessions of the indexed sid, switch invalidation revokes affected sessions, other sessions untouched. Conditional sub-ID A33.01 (back-channel logout, T30.6): verified sid targeting |
+| A33 | S | PG | PG, UC | M3 | T10.10, T31.2, T31.6 | + inside both deadlines; − idle expiry, absolute expiry, wrong origin, no revival by coalesced write; local and upstream logout revoke exactly the sessions of the indexed sid, switch invalidation revokes affected sessions, other sessions untouched. Conditional sub-ID A33.90 (back-channel logout, T30.6): verified sid targeting |
 | A34 | S | PG | REP, PG, barriers | M4: code and refresh · M5: switch/rollback | T10.9, T40.3, T40.5, T40.15, T51.4 | + one code use and one refresh successor; − concurrent reuse, plain replay revokes the family, ID added/removed on replay, post-switch refresh |
 | A35 | S | PG | PG, UC | M2: digest-key rotation, restore · M5: switch | T10.6, T21.8, T51.7, T51.9 | + fresh proof works after each change; − consumed proof stays denied |
 | A36 | I | EK, LV | GH-live, K3, ENV, RB | M2 | T22.6, T23.5, T25.5 | + real GitHub (push-to-main run only) and k3s calls reach the API; − spoofed headers, IdP/store outage, direct backend, private listener |
@@ -162,11 +162,11 @@ Legend:
 | A55 | C | H | FX, UC | M2: WIF · M3: internal assertion · M4: human_cli | T00.3, T20.8, T32.2, T40.13 | + exact type/profile/ingress pairs; − at+jwt, ID token, internal token on bearer ingress, WIF token with invented client_id |
 | A56 | I+P | PG, EK, BR | PG, ENV, RB, UC, BR | M3 | T14.5, T32.6, T32.12, T33.3 | + owner close releases once, cap change affects new admission only; − foreign or replayed close, retry-budget reset loop, 503 → login |
 | A57 | C+P | PG, N3 | PG, UC, RN, plain OAuth form client | M4 | T40.5, T40.15 | + plain rotation; Rust exact retry ≤ 30 s gets one successor; − consumed replay revokes, added/malformed ID, downgrade, beyond 7 d/24 h |
-| A58 | I | PG, EK | K3, ENV, cert-manager, VAP, ≥2 controllers, UC | M1b: prepare/approve persistence · M3: enforcement · M5: deployed-topology audit | T13.2, T14.9, T31.6, T32.3, T32.4, T50.4, T52.4 | Sub-IDs A58.01… in the annex (Q1): + every approved, mode-matched path; − every listed stale/wrong-mode/revoked/mismatch/hold case. Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence |
+| A58 | I | PG, EK | K3, ENV, cert-manager, VAP, ≥2 controllers, UC, deployed T50 topology (M5) | M1b: prepare/approve persistence · M3: enforcement · M5: deployed-topology audit | T13.2, T14.9, T31.6, T32.3, T32.4, T50.4, T52.4 | Sub-IDs A58.01–A58.89 in the annex (Q1): + every approved, mode-matched path; − every listed stale/wrong-mode/revoked/mismatch/hold case. Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence |
 | A59 | C+S | H, BR, N3 | FX comparison vectors, BR, RN | M4 | T40.2, T40.8, T40.14 | + matching descriptor approves; − each comparison field changed, concurrent malicious request, superseded tab |
 | A60 | S | PG, BR, N3 | OIDC, PG, barriers, BR/RN | M3: browser · M4: native | T30.4, T30.8 | + auto_create creates one zero-privilege principal; − default denies, email merge, disabled replacement, migration hold |
 | A61 | C+S | H, EK | FX digest vectors, ENV | M3 | T32.2, T32.13 | + 4 KiB query → fixed 43-char binding; − each byte-level variant, rewrite or rematch; logs redacted |
-| A62 | S | PG, EK | UC, PG, REP | M3: internal signer rotation and promotion · M5: deployed-topology audit | T32.14, T50.3, T52.5 | Internal signer group only (Q5). + rotation and clean promotion; − valid unpromoted-standby signature denies and alerts, invalid-signature kid spoof raises no verified alert, disabled active key with no standby fails closed |
+| A62 | S | PG, EK | UC, PG, REP, deployed T50 topology (M5) | M3: internal signer lifecycle and standby tripwire · M5: deployed-topology audit | T32.14, T50.3, T52.5 | Internal signer group only (Q5). + rotation and clean promotion; − valid unpromoted-standby signature denies and alerts, invalid-signature kid spoof raises no verified alert, disabled active key with no standby fails closed |
 | A63 | S | PG | PG, OIDC | M1b: admin · M3: sessions · M4: refresh | T13.9, T30.9, T52.5 | + credential-only rotation keeps epochs, sessions and refresh; − semantic change via the rotation path rejects |
 | A64 | I | H, PG, N3 | OP on 3 OSes, Linux service, SoftHSM2 | M1a | T13.3, T13.5, T13.7, T13.10 | + remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6); − key export into the pod, wrong-instance challenge, expired challenge at the TTL boundary (hermetic), unsupported adapter fails explicitly |
 
@@ -254,11 +254,11 @@ A sub-ID entry in `tests/conformance/subcases.toml`:
 
 ```toml
 [[subcase]]
-id = "A27.01"
+id = "A27.90"
 kind = "subcase"
 parent = "A27"
 conditional_on = "device-flow"
-table_text = "Conditional sub-ID A27.01 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass"
+table_text = "Conditional sub-ID A27.90 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass"
 layers = ["security"]
 envs = ["browser", "native-3os"]
 harness = ["BR", "OIDC with live SSO", "RN", "attacker loopback process"]
@@ -282,13 +282,13 @@ status = "planned"
 tests = []
 ```
 
-`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole table line, from the leading `|` to the trailing `|`, with no trailing newline: the `| A24 | … |` line in tasks §8 for a scenario, the `| C07 | … |` line in design §2 for a contract. The values above are the current ones. A sub-ID entry instead hashes the task text it was drafted from, by the same rule: the whole tasks.md line `- [ ] **Txx.y** …` of its first owner. A conditional sub-ID adds `conditional_on = "device-flow"` (or `"back-channel-logout"`, `"forwardauth"`) and `table_text`, the exact sentence that its parent's section 2 row shows for it. Every conditional sub-ID that section 2 names must have exactly one entry with that parent, feature and first owner, and the annex holds no sub-ID that section 2 does not name.
+`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole table line, from the leading `|` to the trailing `|`, with no trailing newline: the `| A24 | … |` line in tasks §8 for a scenario, the `| C07 | … |` line in design §2 for a contract. The values above are the current ones. A sub-ID entry instead hashes the task text it was drafted from, by the same rule: the whole tasks.md line `- [ ] **Txx.y** …` of its first owner. A conditional sub-ID adds `conditional_on = "device-flow"` (or `"back-channel-logout"`, `"forwardauth"`) and `table_text`, the exact sentence that its parent's section 2 row shows for it. Every conditional sub-ID that section 2 names must have exactly one entry with that parent, feature and first owner, and the annex holds no conditional sub-ID that section 2 does not name. Conditional sub-IDs are numbered .90–.99. A required (non-conditional) sub-ID has neither `conditional_on` nor `table_text`, need not be named in section 2, and is allowed only under a parent whose section 2 note declares an annex range that contains it, such as A58's `A58.01–A58.89`.
 
 **Which job produces a test.** A registered test ID names its package and target. The package and target fix the job, and the job fixes the env:
 
 | Test source | Job (legs) | Env |
 | --- | --- | --- |
-| `skyoauth-scenarios`, targets `hermetic` / `pg` / `envoy_k3s` / `live` | `scenarios-hermetic` / `scenarios-pg` / `scenarios-envoy-k3s`, `scenarios-envoy-k3s-nightly` or `migration-rehearsal` / `live-wif` | hermetic / pg / envoy-k3s / live |
+| `skyoauth-scenarios`, targets `hermetic` / `pg` / `envoy_k3s` / `live` | `scenarios-hermetic` / `scenarios-pg` / `scenarios-envoy-k3s`, `scenarios-envoy-k3s-nightly`, `migration-rehearsal` or `deployed-topology-audit` / `live-wif` | hermetic / pg / envoy-k3s / live |
 | `clients/rust/tests` | `clients-rust` (Linux x86_64) or `clients-rust-native` (ubuntu, macos, windows) | hermetic or native-3os |
 | `operator/tests` | `operator` (ubuntu, macos, windows); `recovery-offline` chain | native-3os |
 | `clients/typescript/test/*.test.ts` | `typescript` (Node 22, 24) | hermetic |
@@ -370,9 +370,9 @@ Coverage: the existing gates (Rust 85 % lines; TypeScript 85 % lines/functions/b
 
 The lead decided these on review. They replace the former open questions Q1–Q11.
 
-1. **Q1 Oversized rows: sub-IDs in an annex.** Scheme `A58.07` in the registry and titles, `a58_07_…` in Rust names. A parent passes only if all its required sub-IDs pass. The scenario count stays 64. The T32.3 owner drafts the A58 sub-IDs before M1b. A56, A18, A12 and A57 are split only if a row has more than about six independent assertions.
+1. **Q1 Oversized rows: sub-IDs in an annex.** Scheme `A58.07` in the registry and titles, `a58_07_…` in Rust names. A parent passes only if all its required sub-IDs pass. The scenario count stays 64. The T32.3 owner drafts the A58 sub-IDs before M1b. Required sub-IDs are numbered .01–.89 and live in an annex range that the parent's section 2 note declares (A58: A58.01–A58.89); conditional sub-IDs are numbered .90–.99, so the two never collide. A56, A18, A12 and A57 are split only if a row has more than about six independent assertions.
 2. **Q2 "Backend denies" (A01, A08, A13, A43): yes.** Evidence is the backend-verifier fixture vectors plus a clearly test-only reference ConnectRPC backend (RB) reached through Envoy. v0.1 ships no verifier library.
-3. **Q3 A33.** The required part is T10.10, T31.2 and T31.6: idle, absolute and origin expiry; local and upstream logout by indexed sid; switch invalidation; other sessions untouched. Back-channel-driven sid targeting is conditional sub-ID A33.01 and blocks release only if T30.6 ships.
+3. **Q3 A33.** The required part is T10.10, T31.2 and T31.6: idle, absolute and origin expiry; local and upstream logout by indexed sid; switch invalidation; other sessions untouched. Back-channel-driven sid targeting is conditional sub-ID A33.90 and blocks release only if T30.6 ships.
 4. **Q4 A53** is the disabled-record lifecycle of design §5.6: export/import round-trip; reject an enabled or approved create/import; reject an enabling PATCH; unchanged across restart and forward migration; reject startup/import with an active unsupported record (seeded through a restore fixture) without rewriting it. No feature flag is involved. Preservation across a provider switch is A16's M5 stage; C06 maps both A16 and A53.
 5. **Q5 A62** covers the internal signer groups only. Public signer rotation and overlap are A19 and C01.
 6. **Q6 A64: option (a).**
@@ -409,7 +409,7 @@ Answered by the lead in the second review round:
 3. **Slow jobs:** required on PRs if about 15 minutes or less, otherwise post-merge on the push to `main` (section 4).
 4. **Release commits:** only commits on `main` with a passing `live-wif` push run; the release workflow checks reachability from `main`; hotfixes land on `main` first (section 4).
 5. **Contract mapping:** decided (section 5, Q11).
-6. **ForwardAuth (T32.9):** two conditional sub-IDs, one under A58 (deployment-enforcer equivalence) and one under A18 (credential containment and trusted forwarded chain). Device flow stays under A27 (A27.01). The release manifest is a committed file owned by the T50/release owner; changes need a PR the lead approved.
+6. **ForwardAuth (T32.9):** two conditional sub-IDs, A58.90 under A58 (deployment-enforcer equivalence) and A18.90 under A18 (credential containment and trusted forwarded chain). Device flow stays under A27 (A27.90). The release manifest is a committed file owned by the T50/release owner; changes need a PR the lead approved.
 
 Still open:
 

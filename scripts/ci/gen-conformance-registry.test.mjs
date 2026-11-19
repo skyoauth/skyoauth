@@ -80,7 +80,7 @@ describe('committed registry', () => {
     assert.equal(kinds.filter((k) => k === 'contract').length, 10);
     assert.deepEqual(doc.gates_passed, []);
     const subs = parseToml(read(REPO, SUBCASES)).subcase.map((s) => s.id);
-    assert.deepEqual(subs, ['A18.01', 'A27.01', 'A33.01', 'A58.01']);
+    assert.deepEqual(subs, ['A18.90', 'A27.90', 'A33.90', 'A58.90']);
   });
 
   test('layout §3 example hashes (A24, A64, C07) are reproduced', () => {
@@ -141,7 +141,7 @@ describe('committed registry', () => {
     assert.deepEqual(byId.get('A02').harness, ['GH', 'PG claim-mutation table', 'GH-live']);
     assert.deepEqual(byId.get('A14').envs, ['envoy-k3s']);
     assert.deepEqual(byId.get('A42').envs, ['hermetic', 'envoy-k3s', 'browser', 'native-3os']);
-    assert.equal(byId.get('A58').note, 'Sub-IDs A58.01… in the annex (Q1):');
+    assert.equal(byId.get('A58').note, 'Sub-IDs A58.01–A58.89 in the annex (Q1):');
     assert.equal(byId.get('A62').note, 'Internal signer group only (Q5).');
     for (const e of doc.scenario) {
       for (const k of ['env_notes', 'pos_neg_prefix', 'pos_neg_suffix']) assert.ok(!(k in e), `${e.id} has ${k}`);
@@ -176,7 +176,7 @@ describe('drift is detected', () => {
     const root = fixture((rel, t) => (rel === TASKS ? replaceOnce(t, '**T40.6** Device flow conditional:', '**T40.6** Device flow, conditional:') : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /A27\.01: matrix_sha256 is 02c64cda/);
+    assert.match(r.stderr, /A27\.90: matrix_sha256 is 02c64cda/);
   });
 
   test('an edited layout §2 cell fails --check on that field', () => {
@@ -230,7 +230,7 @@ describe('drift is detected', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? null : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    for (const re of [/A27\.01 \(device-flow/, /A33\.01 \(back-channel-logout/, /sub-ID of A18 \(forwardauth/, /sub-ID of A58 \(forwardauth/]) assert.match(r.stderr, re);
+    for (const re of [/A27\.90 \(device-flow/, /A33\.90 \(back-channel-logout/, /sub-ID of A18 \(forwardauth/, /sub-ID of A58 \(forwardauth/]) assert.match(r.stderr, re);
   });
 });
 
@@ -269,7 +269,7 @@ describe('spec errors stop generation', () => {
 
   test('an unknown leg in a hand-authored stage', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'legs = ["scenarios-pg/x86_64"]', 'legs = ["scenarios-pg/arm"]') : t));
-    assert.match(errorsOf(root), /A33\.01 M3: unknown leg "scenarios-pg\/arm"/);
+    assert.match(errorsOf(root), /A33\.90 M3: unknown leg "scenarios-pg\/arm"/);
   });
 
   test('a leg whose job is outside the entry envs', () => {
@@ -295,6 +295,12 @@ describe('spec errors stop generation', () => {
       () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A98.01 (device flow, T10.1): x |', 'x', { PG: 'pg' }),
       /A98\.01 is not a sub-ID of A99/,
     );
+    assert.throws(
+      () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A99.05 (device flow, T10.1): x |', 'x', { PG: 'pg' }),
+      /conditional sub-ID A99\.05 must be numbered A99\.90–A99\.99/,
+    );
+    const ranged = parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | Sub-IDs A99.01–A99.89 in the annex (Q1): + a; − b |', 'x', { PG: 'pg' });
+    assert.deepEqual(ranged.annex, { from: 1, to: 89 });
   });
 
   test('a note before "+" and a trailing conditional sentence', () => {
@@ -375,65 +381,219 @@ describe('duplicate keys in the committed files are rejected', () => {
   test('a duplicate subcase ID', () => {
     const root = fixture((rel, t) => {
       if (rel !== SUBCASES) return t;
-      const block = entryBlock(t, 'subcase', 'A33.01');
+      const block = entryBlock(t, 'subcase', 'A33.90');
       return replaceOnce(t, block, block + block);
     });
     const text = read(root, SUBCASES);
-    failsBothModes(root, new RegExp(`subcases\\.toml:${lineOf(text, '[[subcase]]\nid = "A33.01"', 1)}: duplicate subcase A33\\.01`));
+    failsBothModes(root, new RegExp(`subcases\\.toml:${lineOf(text, '[[subcase]]\nid = "A33.90"', 1)}: duplicate subcase A33\\.90`));
   });
 
   test('a second stage with the same subcase and milestone', () => {
     const root = fixture((rel, t) => {
       if (rel !== SUBCASES) return t;
-      const block = entryBlock(t, 'subcase', 'A33.01');
+      const block = entryBlock(t, 'subcase', 'A33.90');
       const stage = block.slice(block.indexOf('[[subcase.stage]]'));
       return replaceOnce(t, block, block.trimEnd() + '\n\n' + stage);
     });
     const text = read(root, SUBCASES);
-    const at = text.indexOf('[[subcase]]\nid = "A33.01"');
+    const at = text.indexOf('[[subcase]]\nid = "A33.90"');
     const dup = text.slice(0, text.indexOf('[[subcase.stage]]', text.indexOf('[[subcase.stage]]', at) + 1)).split('\n').length;
-    failsBothModes(root, new RegExp(`subcases\\.toml:${dup}: duplicate stage A33\\.01 M3`));
+    failsBothModes(root, new RegExp(`subcases\\.toml:${dup}: duplicate stage A33\\.90 M3`));
   });
 });
 
 describe('subcases match the sub-IDs the layout doc names', () => {
   test('a named sub-ID missing from subcases.toml', () => {
-    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A27.01'), '') : t));
-    failsBothModes(root, /A27\.01 \(device-flow, T40\.6\) is named in .*conformance-layout\.md.* but missing from tests\/conformance\/subcases\.toml/);
+    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A27.90'), '') : t));
+    failsBothModes(root, /A27\.90 \(device-flow, T40\.6\) is named in .*conformance-layout\.md.* but missing from tests\/conformance\/subcases\.toml/);
   });
 
   test('an unnumbered named sub-ID missing from subcases.toml', () => {
-    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A18.01'), '') : t));
+    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A18.90'), '') : t));
     failsBothModes(root, /sub-ID of A18 \(forwardauth, T32\.9\) is named in .* but missing/);
   });
 
   test('a wrong parent', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'parent = "A27"', 'parent = "A28"') : t));
-    failsBothModes(root, /A27\.01: parent is A28, but the layout doc names it under A27/);
+    failsBothModes(root, /A27\.90: parent is A28, but the layout doc names it under A27/);
   });
 
   test('a wrong conditional_on', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'conditional_on = "device-flow"', 'conditional_on = "forwardauth"') : t));
-    failsBothModes(root, /A27\.01: conditional_on is forwardauth, but the layout doc names device-flow/);
+    failsBothModes(root, /A27\.90: conditional_on is forwardauth, but the layout doc names device-flow/);
   });
 
   test('a wrong source task', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'owners = ["T30.6"]', 'owners = ["T31.2"]') : t));
-    failsBothModes(root, /A33\.01: first owner is T31\.2, but the layout doc names T30\.6/);
+    failsBothModes(root, /A33\.90: first owner is T31\.2, but the layout doc names T30\.6/);
   });
 
   test('a sub-ID the layout doc does not name', () => {
     const root = fixture((rel, t) => {
       if (rel !== SUBCASES) return t;
-      const extra = entryBlock(t, 'subcase', 'A33.01').replace('id = "A33.01"', 'id = "A33.02"');
+      const extra = entryBlock(t, 'subcase', 'A33.90').replace('id = "A33.90"', 'id = "A33.91"').replace('sub-ID A33.90', 'sub-ID A33.91');
       return `${t.trimEnd()}\n\n${extra}`;
     });
-    failsBothModes(root, /A33\.02 is not a sub-ID named in .*conformance-layout\.md/);
+    failsBothModes(root, /A33\.91 is a conditional sub-ID not named in .*conformance-layout\.md/);
   });
 
   test('a renumbered sub-ID in the layout doc', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Conditional sub-ID A33.01 (back-channel', 'Conditional sub-ID A33.02 (back-channel') : t));
-    failsBothModes(root, /A33\.02 \(back-channel-logout, T30\.6\) is named in .* but missing/);
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Conditional sub-ID A33.90 (back-channel', 'Conditional sub-ID A33.91 (back-channel') : t));
+    failsBothModes(root, /A33\.91 \(back-channel-logout, T30\.6\) is named in .* but missing/);
+  });
+});
+
+// A required (non-conditional) A58 sub-ID, as the T32.3 owner would add it.
+const REQUIRED_A58 = (id) => `
+[[subcase]]
+id = "${id}"
+kind = "subcase"
+parent = "A58"
+layers = ["integration"]
+envs = ["pg"]
+harness = ["PG", "UC"]
+owners = ["T32.3"]
+positive = "approved prepare persists"
+negative = "stale approval rejected"
+matrix_sha256 = ""
+
+[[subcase.stage]]
+milestone = "M1b"
+scope = "full row"
+legs = ["scenarios-pg/x86_64"]
+status = "planned"
+tests = []
+`;
+
+describe('required and conditional sub-ID numbering', () => {
+  test('a required sub-ID inside the annex range A58 declares is accepted', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? t + REQUIRED_A58('A58.02') : t));
+    const r = cli('--root', root);
+    assert.equal(r.status, 0, r.stderr);
+    const sub = parseToml(read(root, SUBCASES)).subcase.find((e) => e.id === 'A58.02');
+    assert.ok(sub && !('conditional_on' in sub) && !('table_text' in sub));
+    assert.equal(sub.matrix_sha256, sha256(read(root, TASKS).split('\n').find((l) => l.startsWith('- [ ] **T32.3** '))));
+    assert.equal(cli('--root', root, '--check').status, 0);
+  });
+
+  test('a required sub-ID outside the declared annex range', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? t + REQUIRED_A58('A58.89').replace('A58.89', 'A58.95') : t));
+    failsBothModes(root, /A58\.95: required sub-ID is outside the annex range A58\.01–A58\.89 that layout §2 row A58 declares/);
+  });
+
+  test('a required sub-ID under a parent with no declared annex range', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? t + REQUIRED_A58('A33.02').replace('parent = "A58"', 'parent = "A33"') : t));
+    failsBothModes(root, /A33\.02: required sub-ID, but layout §2 row A33 declares no annex range/);
+  });
+
+  test('a conditional sub-ID numbered outside .90–.99', () => {
+    const root = fixture((rel, t) => {
+      if (rel === SUBCASES) return t.replaceAll('A27.90', 'A27.05');
+      if (rel === LAYOUT) return t.replaceAll('A27.90', 'A27.05');
+      return t;
+    });
+    failsBothModes(root, /conditional sub-ID A27\.05 must be numbered A27\.90–A27\.99/);
+  });
+
+  test('table_text on a required sub-ID', () => {
+    const root = fixture((rel, t) =>
+      rel === SUBCASES ? t + REQUIRED_A58('A58.02').replace('owners = ["T32.3"]', 'table_text = "x"\nowners = ["T32.3"]') : t,
+    );
+    failsBothModes(root, /A58\.02: table_text is only for a conditional sub-ID/);
+  });
+});
+
+// Replaces `from` with `to` inside the first stage of entry `id`.
+function editStage(text, table, id, from, to) {
+  const block = entryBlock(text, table, id);
+  const at = block.indexOf(`[[${table}.stage]]`);
+  const next = block.indexOf(`[[${table}.stage]]`, at + 1);
+  const end = next < 0 ? block.length : next;
+  return replaceOnce(text, block, block.slice(0, at) + replaceOnce(block.slice(at, end), from, to) + block.slice(end));
+}
+const stageLine = (text, table, id) => lineOf(text, `[[${table}]]\nid = "${id}"`) + entryBlock(text, table, id).slice(0, entryBlock(text, table, id).indexOf(`[[${table}.stage]]`)).split('\n').length - 1;
+const entryLine = (text, table, id) => lineOf(text, `[[${table}]]\nid = "${id}"`);
+
+describe('hand-authored input is validated', () => {
+  const failsAt = (rel, edit, reFor) => {
+    const root = fixture((r, t) => (r === rel ? edit(t) : t));
+    failsBothModes(root, reFor(read(root, rel)));
+  };
+
+  test('tests must be a list', () => {
+    failsAt(SCENARIOS, (t) => editStage(t, 'scenario', 'A24', 'tests = []', 'tests = "a24_pos_x"'),
+      (t) => new RegExp(`scenarios\\.toml:${stageLine(t, 'scenario', 'A24')}: A24 M1a: tests must be a list of strings`));
+  });
+
+  test('scope must be a string', () => {
+    failsAt(SUBCASES, (t) => editStage(t, 'subcase', 'A33.90', 'scope = "full row"', 'scope = ["full row"]'),
+      (t) => new RegExp(`subcases\\.toml:${stageLine(t, 'subcase', 'A33.90')}: A33\\.90 M3: scope must be a string`));
+  });
+
+  test('subcase layers must be known layers', () => {
+    failsAt(SUBCASES, (t) => replaceOnce(t, 'layers = ["security"]\nenvs = ["pg"]', 'layers = ["secure"]\nenvs = ["pg"]'),
+      (t) => new RegExp(`subcases\\.toml:${entryLine(t, 'subcase', 'A33.90')}: A33\\.90: unknown layer "secure"`));
+  });
+
+  test('subcase envs must be known envs', () => {
+    failsAt(SUBCASES, (t) => replaceOnce(t, 'layers = ["security"]\nenvs = ["pg"]', 'layers = ["security"]\nenvs = ["pg", "moon"]'),
+      (t) => new RegExp(`subcases\\.toml:${entryLine(t, 'subcase', 'A33.90')}: A33\\.90: unknown env "moon"`));
+  });
+
+  test('subcase stage milestones must increase', () => {
+    failsAt(SUBCASES, (t) => {
+      const block = entryBlock(t, 'subcase', 'A27.90');
+      const extra = '\n[[subcase.stage]]\nmilestone = "M3"\nscope = "browser"\nlegs = ["typescript-browser/chromium"]\nstatus = "planned"\ntests = []\n';
+      return replaceOnce(t, block, block.trimEnd() + '\n' + extra + '\n');
+    }, (t) => new RegExp(`subcases\\.toml:${lineOf(t, 'milestone = "M3"\nscope = "browser"') - 1}: A27\\.90: stage M3 comes after M4; stage milestones must increase`));
+  });
+
+  test('duplicate legs', () => {
+    failsAt(SCENARIOS, (t) => editStage(t, 'scenario', 'A24', 'legs = ["scenarios-pg/x86_64"]', 'legs = ["scenarios-pg/x86_64", "scenarios-pg/x86_64"]'),
+      (t) => new RegExp(`scenarios\\.toml:${stageLine(t, 'scenario', 'A24')}: A24 M1a: legs lists scenarios-pg/x86_64 twice`));
+  });
+
+  test('legs must be a list', () => {
+    failsAt(SCENARIOS, (t) => editStage(t, 'scenario', 'A24', 'legs = ["scenarios-pg/x86_64"]', 'legs = "scenarios-pg/x86_64"'),
+      (t) => new RegExp(`scenarios\\.toml:${stageLine(t, 'scenario', 'A24')}: A24 M1a: legs must be a non-empty list of strings`));
+  });
+
+  test('duplicate gates_passed entries', () => {
+    failsAt(SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M1a", "M1a"]'),
+      (t) => new RegExp(`scenarios\\.toml:${lineOf(t, 'gates_passed = [')}: gates_passed lists M1a twice`));
+  });
+
+  test('gates_passed must be a list', () => {
+    failsAt(SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', 'gates_passed = "M0"'),
+      (t) => new RegExp(`scenarios\\.toml:${lineOf(t, 'gates_passed = ')}: gates_passed must be a list of milestones`));
+  });
+
+  test('a subcase stage without tests', () => {
+    failsAt(SUBCASES, (t) => editStage(t, 'subcase', 'A33.90', 'status = "planned"\ntests = []\n', 'status = "planned"\n'),
+      (t) => new RegExp(`subcases\\.toml:${stageLine(t, 'subcase', 'A33.90')}: A33\\.90 M3: tests must be a list of strings`));
+  });
+
+  test('a subcase stage without scope', () => {
+    failsAt(SUBCASES, (t) => editStage(t, 'subcase', 'A33.90', 'scope = "full row"\n', ''),
+      (t) => new RegExp(`subcases\\.toml:${stageLine(t, 'subcase', 'A33.90')}: A33\\.90 M3: scope must be a string`));
+  });
+
+  for (const [name, esc, re] of [
+    ['non-hex \\u escape', '\\\\uZZZZ', /bad \\u escape/],
+    ['out-of-range \\U escape', '\\\\U00110000', /\\U escape .* is not a Unicode scalar value/],
+    ['surrogate \\u escape', '\\\\uD800', /\\u escape .* is not a Unicode scalar value/],
+    ['short \\u escape', '\\\\u12', /bad \\u escape/],
+  ]) {
+    test(`a ${name} is a clean error`, () => {
+      const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'positive = "verified sid targeting"', `positive = "verified ${esc.replaceAll('\\\\', '\\')} sid"`) : t));
+      const line = lineOf(read(root, SUBCASES), 'positive = "verified \\');
+      failsBothModes(root, new RegExp(`subcases\\.toml:${line}: ${re.source}`));
+      assert.throws(() => parseToml(`a = "${esc.replaceAll('\\\\', '\\')}"`, 'x'), (ex) => ex.message.startsWith('x:1: ') && re.test(ex.message));
+    });
+  }
+
+  test('valid \\u and \\U escapes still parse', () => {
+    assert.deepEqual(parseToml('a = "\\u00e9\\U0001F600"'), { a: 'é😀' });
   });
 });
 
@@ -467,12 +627,12 @@ describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
 
   test('a table_text that names another task than the first owner', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, '(device flow, T40.6)', '(device flow, T40.7)') : t));
-    failsBothModes(root, /A27\.01: table_text names T40\.7, but the first owner is T40\.6/);
+    failsBothModes(root, /A27\.90: table_text names T40\.7, but the first owner is T40\.6/);
   });
 
   test('a table_text whose feature does not match conditional_on', () => {
-    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'Conditional sub-ID A33.01 (back-channel logout,', 'Conditional sub-ID A33.01 (device flow,') : t));
-    failsBothModes(root, /A33\.01: table_text names device-flow, but conditional_on is back-channel-logout/);
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'Conditional sub-ID A33.90 (back-channel logout,', 'Conditional sub-ID A33.90 (device flow,') : t));
+    failsBothModes(root, /A33\.90: table_text names device-flow, but conditional_on is back-channel-logout/);
   });
 
   test('an edited sentence in the layout row', () => {

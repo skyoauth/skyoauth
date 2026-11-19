@@ -5,7 +5,7 @@ This directory holds the conformance scenario registry proposed in [the conforma
 | File | What it holds |
 | --- | --- |
 | `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`. |
-| `subcases.toml` | The sub-IDs that layout §2 names, as `[[subcase]]` entries (`kind = "subcase"`, with `parent`, and for a conditional sub-ID `conditional_on` and `table_text`). |
+| `subcases.toml` | Sub-IDs as `[[subcase]]` entries (`kind = "subcase"`, with `parent`). Today it holds the four conditional sub-IDs that layout §2 names; each carries `conditional_on` and `table_text`. |
 | [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Generates both files from the specs and checks them with `--check`. Node 20 or later, no dependencies. |
 | [`scripts/ci/gen-conformance-registry.test.mjs`](../../scripts/ci/gen-conformance-registry.test.mjs) | Self-test of the generator (`node:test`). |
 
@@ -22,8 +22,15 @@ The generator is deterministic and idempotent: a second run changes nothing. `--
 Both modes also run these checks and, on any failure, exit 1 and write nothing:
 
 - The layout §2 scenario table, rendered back from the registry, must equal the committed table, so the registry can always reproduce it.
-- `subcases.toml` must hold exactly the sub-IDs that layout §2 names, with the parent, feature and task named there.
-- Neither file may repeat an ID or a stage milestone within an entry. These errors name the file and line.
+- `subcases.toml` must hold exactly the conditional sub-IDs that layout §2 names, with the parent, feature and task named there. They are numbered .90–.99. A required (non-conditional) sub-ID need not be named in §2. It is allowed only inside the annex range that its parent's §2 note declares, and today only A58 declares one (`A58.01–A58.89`).
+- Neither file may repeat an ID or a stage milestone within an entry.
+- Hand-authored values must have the right type and allowed values:
+  - `gates_passed` is a list of distinct milestones.
+  - Each stage has a string `scope`, a non-empty list of distinct `legs`, a known `status` and a list of `tests`.
+  - A subcase's `layers` and `envs` are known values, and its stages are in milestone order.
+  - `\u`/`\U` escapes are valid Unicode scalar values.
+
+  These errors name the file and line.
 - Every leg must be a leg string from the layout §1.1 **Leg strings** column.
 - The specs must have no missing, duplicate or out-of-order rows, and no unknown owner, layer or env. Every contract must have a mapping.
 
@@ -41,7 +48,7 @@ Fields are either **derived**, which means the generator rewrites them on every 
 | Contracts C01–C10 | `id`, `matrix_sha256` | Row `\| Cnn \| … \|` of design §2 ([docs/skyoauth-design.md](../../docs/skyoauth-design.md)) |
 | | `covered_by` | Row `\| Cnn … \|` of the "Covered by" table in layout §5, decision Q11, in table order |
 | Subcases | `matrix_sha256` | The task line of the subcase's first owner (below) |
-| | every other field | Hand-authored, then checked against layout §2: `parent`, `conditional_on`, the first owner and `table_text` must match the sentence that §2 shows |
+| | every other field | Hand-authored. For a conditional sub-ID, `parent`, `conditional_on`, the first owner and `table_text` must match the sentence that §2 shows. A required sub-ID must lie in its parent's declared annex range. |
 | File | `gates_passed` | Hand-authored. A gate PR changes it (layout §3). |
 | File | comments | Generated; hand-written comments are dropped |
 
@@ -72,12 +79,14 @@ An edited spec line changes its hash, so `--check` fails until the generator is 
 
 | ID | Parent | `conditional_on` | Named in layout §2 as | Hash source (tasks.md line) |
 | --- | --- | --- | --- | --- |
-| A18.01 | A18 | `forwardauth` | "Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain" | T32.9 |
-| A27.01 | A27 | `device-flow` | "Conditional sub-ID A27.01 (device flow, T40.6): …" | T40.6 |
-| A33.01 | A33 | `back-channel-logout` | "Conditional sub-ID A33.01 (back-channel logout, T30.6): verified sid targeting" | T30.6 |
-| A58.01 | A58 | `forwardauth` | "Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence" | T32.9 |
+| A18.90 | A18 | `forwardauth` | "Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain" | T32.9 |
+| A27.90 | A27 | `device-flow` | "Conditional sub-ID A27.90 (device flow, T40.6): …" | T40.6 |
+| A33.90 | A33 | `back-channel-logout` | "Conditional sub-ID A33.90 (back-channel logout, T30.6): verified sid targeting" | T30.6 |
+| A58.90 | A58 | `forwardauth` | "Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence" | T32.9 |
 
-A sub-ID that §2 names with a number must exist under that number. An unnumbered one, the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task, so `A18.01` and `A58.01` are provisional numbers. Any entry that §2 does not name fails the check. The required A58 sub-IDs that layout §5 Q1 assigns to the T32.3 owner are not drafted yet, so they are not here. Once they are drafted, §2 must also name them.
+Sub-IDs are numbered so the two kinds never collide (layout §3, §5 Q1). Conditional sub-IDs use .90–.99. Required sub-IDs use .01–.89, inside the annex range the parent's §2 note declares. A58's note declares `A58.01–A58.89` for the required sub-IDs that the T32.3 owner drafts. Those are not drafted yet, so they are not here.
+
+A conditional sub-ID that §2 names with a number must exist under that number. An unnumbered one, the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task. A conditional entry that §2 does not name fails the check. A required sub-ID has neither `conditional_on` nor `table_text`, and need not be named in §2.
 
 A subcase's `layers`, `envs`, `harness` and stage `legs` copy its parent's stage at the subcase's milestone, which is the milestone of the owning task's group. The layout doc does not specify them.
 
@@ -96,7 +105,7 @@ Each job's first milestone is the `JOB_FROM` table in the generator, taken from 
 
 - A12: M2 `scenarios-pg` and `scenarios-envoy-k3s`; M3 `scenarios-envoy-k3s` and `typescript-browser`; M4 `scenarios-envoy-k3s` and `clients-rust-native`.
 - A14 M5: `migration-rehearsal` only.
-- A42: M4 adds `clients-rust/x86_64`, `typescript/node22` and `typescript/node24` (T51.7 fixtures); M5 adds `migration-rehearsal`.
+- A42: M4 adds `clients-rust/x86_64`, `typescript/node22` and `typescript/node24` (T51.7 fixtures). M5 has `migration-rehearsal` only, because only that job carries the artifacts through the switch.
 - A59 M4: adds `clients-rust/x86_64` (T40.14).
 - A60 M4: `scenarios-pg` and `clients-rust-native`.
 
