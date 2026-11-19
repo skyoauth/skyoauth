@@ -574,7 +574,8 @@ is fixed by GW-227; wire results are frozen in
   scope are the "required operator authority" for compensation; disabling the
   preparing `client_admin` MUST NOT stop it. A newer parent disable or an
   elapsed forward `expires_at` MUST NOT reject already-approved compensating
-  writes. (design §4.2; lead decision, OQ-GW-9)
+  writes. The approver's part of that authority is fixed by GW-146. (design
+  §4.2; lead decision, OQ-GW-9)
 - **GW-142** The controller MUST stop forward work, fence prior owners and
   outstanding writes, and restore only approved protected resource values. It
   MAY delete an attempt-created object only with the journaled matching UID and
@@ -590,6 +591,13 @@ is fixed by GW-227; wire results are frozen in
 - **GW-145** Transient compensation failures MAY be retried only within the
   original abort window. Aborting is idempotent and bounded, not a general
   rollback API. (design §4.2)
+- **GW-146** Disabling the approving instance `security_admin` MUST NOT
+  invalidate an already-recorded approval for compensation. Compensation MUST
+  require that the approval was not explicitly revoked before the apply
+  started. A revocation recorded after the apply started still stops
+  compensating writes under GW-133, and GW-130 still rechecks approver
+  authority before `begin` and at activation. Decided (lead decision,
+  2026-11-19); see OQ-GW-9.
 
 ### 11.5 Superseding a failed attempt
 
@@ -971,11 +979,14 @@ later task. All other items are not resolved by this contract.
   origin was not stated.
 - **OQ-GW-9 — Required authority for compensation.** **Decided** (lead
   decision, 2026-11-19): compensation needs an unrevoked approval and current
-  controller scope; disabling the preparer does not stop it (GW-141).
-  Original question: compensation needs "enabled required operator
-  authority", but the sources do not say whether this is the preparer, the
-  approver or both, or what happens if the preparing `client_admin` is
-  disabled during `aborting`.
+  controller scope; disabling the preparer does not stop it (GW-141). The
+  approver sub-question is also Decided (lead decision, 2026-11-19):
+  disabling the approving `security_admin` does not invalidate an
+  already-recorded approval, and compensation requires that the approval was
+  not explicitly revoked before the apply started (GW-146). Original
+  question: compensation needs "enabled required operator authority", but the
+  sources do not say whether this is the preparer, the approver or both, or
+  what happens if the preparing `client_admin` is disabled during `aborting`.
 - **OQ-GW-10 — Cancel outside `applying`.** **Decided** (lead decision,
   2026-11-19): cancel when the bundle is `idle` or its attempt is
   `recovery_required` rejects with no state change (GW-137). Original

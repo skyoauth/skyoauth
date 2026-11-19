@@ -114,7 +114,7 @@ Terms used in the tables:
 | -------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | `__Host-skyoauth_login` and `BrowserFlowBinding`         | Default 10 min; ceiling 15 min                     | Consumed at callback; a new flow in the same slot invalidates the old one                                              | design §5.1; lead decision (OQ-LT-1)                      |
 | `OIDCTransaction`                                        | Default 10 min; ceiling 15 min (`expires_at`)      | One-time; consumed atomically with session creation                                                                    | design §5.1; tasks §3; lead decision (OQ-LT-1)            |
-| `__Host-skyoauth_native` and `OAuthAuthorizationRequest` | "Short transaction lifetime"; not specified        | Rotated at issuer callback; consumed at approval, denial or expiry; a new native start invalidates the previous slot   | design §5.2; tasks T40.12                                 |
+| `__Host-skyoauth_native` and `OAuthAuthorizationRequest` | Default 10 min; ceiling 15 min (`expires_at`)      | Rotated at issuer callback; consumed at approval, denial or expiry; a new native start invalidates the previous slot   | design §5.2; tasks T40.12; lead decision (OQ-LT-1)        |
 | `OAuthAuthorizationCode`                                 | Default 60 s; ceiling 5 min (`expires_at`)         | Single use across replicas                                                                                             | design §5.2; tasks §3; lead decision (OQ-LT-1)            |
 | Native loopback listener                                 | Bounded; not specified                             | Closed after success, cancellation or timeout                                                                          | design §5.2, §10.3; tasks T40.9                           |
 | `Session` idle                                           | Default 8 h; ceiling 24 h (`idle_timeout_seconds`) | Coalesced last-seen writes MUST NOT revive an expired session; bounded early idle expiry from coalescing is documented | design §5.1; tasks T10.10, T31.2; lead decision (OQ-LT-2) |
@@ -130,10 +130,12 @@ Terms used in the tables:
   idle or absolute expiry. (design §6.1.1)
 - **LT-022** Native confirmation denial or expiry MUST create no code, consume
   the confirmation state and clear its cookie. (design §5.2)
-- **LT-023** The login flow, `OIDCTransaction`, authorization code and session
-  lifetimes in the table above MUST be instance-configurable within their
-  ceilings; LT-006 applies to out-of-range values. (lead decision, OQ-LT-1,
-  OQ-LT-2)
+- **LT-023** The login flow, `OIDCTransaction`, native authorization request
+  (`__Host-skyoauth_native` and `OAuthAuthorizationRequest`), authorization
+  code and session lifetimes in the table above MUST be instance-configurable
+  within their ceilings; LT-006 applies to out-of-range values. (lead decision,
+  OQ-LT-1, OQ-LT-2; native authorization request: Decided (lead decision,
+  2026-11-19))
 
 ## 4. Epochs, revisions and generations
 
@@ -381,13 +383,16 @@ follow-up amendment. A decision is revisited through an ADR if implementation
 shows problems. All other items are not resolved by this contract.
 
 - **OQ-LT-1 — Flow, transaction and code lifetimes.** **Decided** (lead
-  decision, 2026-11-19) in part: the OIDC login flow (`__Host-skyoauth_login`,
+  decision, 2026-11-19): the OIDC login flow (`__Host-skyoauth_login`,
   `BrowserFlowBinding`, `OIDCTransaction`) defaults to 10 min with a 15 min
   ceiling; the issuer-native authorization code defaults to 60 s with a 5 min
   ceiling and is single use; all are instance-configurable within the
-  ceilings (§3, LT-023). Still open: the lifetime of `__Host-skyoauth_native`
-  and `OAuthAuthorizationRequest`. Original question: T00.6 asks to specify
-  flow and code lifetimes; the sources call the login flow cookie and native
+  ceilings (§3, LT-023). The native authorization request
+  (`__Host-skyoauth_native` and `OAuthAuthorizationRequest`) is Decided (lead
+  decision, 2026-11-19): it uses the same default of 10 min and ceiling of
+  15 min, instance-configurable within the ceiling (§3, LT-023). No part of
+  this item remains open. Original question: T00.6 asks to specify flow and
+  code lifetimes; the sources call the login flow cookie and native
   transaction "short-lived" and give `expires_at` fields for
   `BrowserFlowBinding`, `OIDCTransaction`, `OAuthAuthorizationRequest` and
   `OAuthAuthorizationCode`, but no numbers or ceilings.
