@@ -105,14 +105,14 @@ tenant preparation and instance approval (design §4.2).
     the switch operation) to the same operator client before M3 (design §7.2;
     T13.8, T13.9). One explicitly scoped operator and tenant is a valid small
     deployment, not an implicit-tenant protocol (design §1.3, §7.2), but only
-    under the explicit audited single-actor instance policy; otherwise
-    provider switch and rollback commit, and links to existing principals,
-    need a distinct second `adm_*` approver (OQ-TM-7). Provisioning a link to
-    an existing principal uses a browser-bound transaction that proves both
-    identities, or, when the old IdP is unavailable during migration, an
-    operator-asserted link with OQ-TM-7 approval and user notification;
-    operator enrollment of a new principal is operator-asserted and audited
-    (OQ-TM-6).
+    under the explicit audited single-actor instance policy; otherwise every
+    plan commit except a disable-only commit, and links to existing
+    principals, need a distinct second `adm_*` approver (OQ-TM-7).
+    Provisioning a link to an existing principal uses a browser-bound
+    transaction that proves both identities, or, when the old IdP is
+    unavailable during migration, an operator-asserted link with OQ-TM-7
+    approval and user notification; operator enrollment of a new principal is
+    operator-asserted and audited (OQ-TM-6).
 
 ### Route preparation and approval
 
@@ -213,8 +213,9 @@ this ADR, each Decided (lead decision, 2026-11-19):
   uses a browser-bound transaction proving both identities, or an
   operator-asserted link with OQ-TM-7 approval and user notification when the
   old IdP is unavailable during migration (item 10).
-- **OQ-TM-7** — separation of duty: provider switch and rollback commit and
-  links to existing principals need a distinct second `adm_*` approver;
+- **OQ-TM-7** — separation of duty: every plan commit except a disable-only
+  commit and links to existing principals need a distinct second `adm_*`
+  approver;
   single-actor mode only through an explicit audited instance policy;
   zero-privilege enrollment resume may be single-actor (item 10).
 - **OQ-TM-8** — recovery scope and key lifecycle: restoration only enrolls a
