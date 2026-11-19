@@ -51,8 +51,9 @@ recovery among the decisions requiring ratification.
      standby.
    - Emergency disable and rotation of public keys go through an audited
      admin endpoint, `/admin/v1/issuer-keys`. The performing role is
-     instance `security_admin` (inferred from how internal keys are run,
-     design §6.2; the lead named the endpoint but not the role).
+     instance `security_admin`: a single actor for routine rotation, and
+     the same role for emergency disable, which the OQ-TM-12 sink records
+     (lead decision, 2026-11-19).
    - The issuer JWKS cache max-age is at most 300 s, and a disabled key is
      removed from the published JWKS at once. Both are specified before M2.
    - The signer enforces structural limits on what it signs (`typ` and
