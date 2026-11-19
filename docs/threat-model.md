@@ -969,13 +969,14 @@ prevention (OQ-TM-16, decided).
 
 **Gaps.**
 
-- None open. OQ-TM-10, OQ-TM-11, OQ-TM-12, OQ-TM-14 and OQ-TM-16 are decided.
-  The OQ-TM-14 operation is specified (design §7.3, T13.9, API-154) and must
-  exist before M3 (§6.1). The instance-wide response endpoint, with its
-  per-tenant revision checks, atomicity and partial-failure rules, is open
-  (OQ-ADR021-3) and blocks M1b and M3. OQ-API-2 is decided in part: tenant-wide revocation
-  is that operation; revoking one session, refresh family or authentication
-  context stays open in the public-API contract.
+- No threat-model question is open: OQ-TM-10, OQ-TM-11, OQ-TM-12, OQ-TM-14
+  and OQ-TM-16 are decided. The OQ-TM-14 operation is specified (design §7.3,
+  T13.9, API-154) and must exist before M3 (§6.1).
+- Open elsewhere: the instance-wide response endpoint, with its per-tenant
+  revision checks, atomicity and partial-failure rules (OQ-ADR021-3), blocks
+  M1b and M3. OQ-API-2 is decided in part: tenant-wide revocation is that
+  operation; revoking one session, refresh family or authentication context
+  stays open in the public-API contract.
 
 ### TM-17 — Operator-credential compromise
 
@@ -1450,14 +1451,17 @@ the contract amendments; what is still open is named in the entry:
   0600; `pods/exec` on the SkyOAuth namespace restricted to trusted
   infrastructure administrators); T13.4; T50.1.
 - **OQ-TM-10:** design §3.1, §6 and §6.2; T20.2, T50.3; ADR-002; a public
-  access-token key administration endpoint (OQ-API-3).
-- **OQ-TM-12:** design §7 and §7.2; T50.6.
-- **OQ-TM-13:** design §5.4 and §7.3 (per-tenant secret namespace for
+  access-token key administration endpoint (OQ-API-3), now API-153 with
+  API-042 and API-043 for the JWKS bounds.
+- **OQ-TM-12:** design §7; T50.6.
+- **OQ-TM-13:** design §5.4 and §7.2 (per-tenant secret namespace for
   `ca_bundle_ref`, `reviewer_credential_ref` and provider `credential_ref`;
-  `security_admin`-approved egress allowlist); tasks §3 (`TrustSource`,
-  `HumanProvider`); T11.2, T11.8, T23.2; before M1a.
+  `security_admin`-approved egress allowlist); T11.2, T11.8, T23.2; before
+  M1a. Still open: the tasks §3 schema (`TrustSource`, `HumanProvider`) does
+  not yet model the allowlist or the per-tenant secret namespace.
 - **OQ-TM-14:** design §5.1.1 and §7.3; tasks §3 (`TenantLoginState`); the
-  public-API operator endpoint matrix (OQ-API-2); the lifetimes contract §4
+  public-API operator endpoint matrix (OQ-API-2), now API-154; the lifetimes
+  contract §4
   epochs table (split: the compromise transition advances only
   `auth_generation`); T31.6; before M1b and M3. Still open (OQ-ADR021-3,
   ADR-021): the instance-wide response endpoint, its path, per-tenant revision

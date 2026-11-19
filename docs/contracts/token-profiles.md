@@ -354,9 +354,8 @@ follow-up. All other items are not resolved by this contract.
 - **OQ-TP-1 — Route revision claim.** **Decided** (lead decision,
   2026-11-19): `skyoauth_route` carries the `ApplicationRoute` ID and a
   separate claim `skyoauth_route_version` carries the pinned
-  `ApplicationRouteVersion` ID (TP-047). Follow-up: the design names only
-  `skyoauth_route` and "its revision"; design §4.1, §6 and tasks T32.2 need the
-  new claim name. Original question: whether the revision is a separate claim
+  `ApplicationRouteVersion` ID (TP-047). Design §6 and tasks T32.2 now name
+  the claim. Original question: whether the revision is a separate claim
   (and its name) or part of a structured `skyoauth_route` value.
 - **OQ-TP-2 — `iss` of internal assertions.** **Decided** (lead decision,
   2026-11-19): internal assertions use the same canonical issuer as access
@@ -388,16 +387,16 @@ follow-up. All other items are not resolved by this contract.
   `scope` claim itself must be canonical.
 - **OQ-TP-9 — Meaning of `skyoauth_policy_revision` for human profiles.**
   **Decided** (lead decision, 2026-11-19): the claim holds the
-  `PolicyRevision` ID for every profile (TP-035). Follow-up: the design §6
-  table's "HumanAccessPolicy revision" wording should say it is the
-  `PolicyRevision` that snapshots the `HumanAccessPolicy`. Original question:
+  `PolicyRevision` ID for every profile (TP-035). Design §6 and tasks now say
+  it is the `PolicyRevision` that snapshots the `HumanAccessPolicy`. Original
+  question:
   whether the claim holds the `PolicyRevision` ID or the `HumanAccessPolicy`
   revision number.
 - **OQ-TP-10 — Clock skew.** **Decided** (lead decision, 2026-11-19): the
   allowed clock skew is instance-configurable, default 60 s, ceiling 120 s
   (TP-060). This is the same decision as OQ-LT-16 in the T00.6 lifetimes
-  contract ([lifetimes.md](lifetimes.md)). Follow-up: design §6 needs the
-  values. Original question: "bounded TTL/skew" is required, but the maximum
+  contract ([lifetimes.md](lifetimes.md)). Design §6 states the values.
+  Original question: "bounded TTL/skew" is required, but the maximum
   allowed clock skew is not given.
 - **OQ-TP-11 — Assertion header.** **Decided** (lead decision, 2026-11-19):
   `X-SkyOAuth-Assertion` (same decision as OQ-API-10; see

@@ -68,25 +68,31 @@ unauthorized actor fall back onto another grant (design §5.7).
    `invalid_scope`. Explicit empty or excessive scopes deny rather than being
    trimmed or broadened (design §5.7; T12.8).
 8. **Other denials.** Duplicate parameters, missing selectors, profile
-   mismatch, unsupported `resource` or requested token type deny. One exact
-   registered API audience per credential (design §5.7; T21.1). `resource` is
-   always rejected with `invalid_target`; `requested_token_type` is accepted
-   only when absent or exactly `urn:ietf:params:oauth:token-type:access_token`,
-   and any other value gets `invalid_request` (OQ-ADR015-1).
+   mismatch, any `resource` parameter and an unsupported requested token type
+   deny. One exact registered API audience per credential (design §5.7;
+   T21.1). `resource` is never supported and is always rejected;
+   `requested_token_type` is accepted only when absent or exactly
+   `urn:ietf:params:oauth:token-type:access_token` (OQ-ADR015-1). Item 9 gives
+   the codes.
 9. **Error codes** (OQ-ERR-3; decided for the WIF exchange profiles, lead
-   decision, 2026-11-19):
-   - `invalid_request` for malformed input, duplicate parameters, missing
-     selectors, unsupported parameters, an unsupported `requested_token_type`
-     and profile mismatch;
-   - one uniform `invalid_grant` for any source, grant, binding or proof
-     failure, revealing no detail about which one failed (ERR-020);
-   - `invalid_target` for an `audience` not in the grant's set or not
-     assigned to the tenant, and for any `resource` parameter, which is
-     always rejected. This is an explicit exception to the generic
-     `invalid_request` rule for unsupported parameters (RFC 8693 §2.2.2,
-     RFC 8707; Decided (lead decision, 2026-11-19), OQ-ADR015-1);
-   - `invalid_scope` and `unsupported_grant_type` keep their existing
-     meaning.
+   decision, 2026-11-19; errors-retry ERR-020 and ERR-024, public-api
+   API-015), in this order:
+   1. a request carrying `resource` gets `invalid_target`, an explicit
+      exception to the generic `invalid_request` rule for unsupported
+      parameters (RFC 8693 §2.2.2, RFC 8707; Decided (lead decision,
+      2026-11-19), OQ-ADR015-1);
+   2. an `audience` not in the selected grant's audience set or not assigned
+      to the tenant gets `invalid_target`, which does not distinguish a
+      nonexistent resource server from an unassigned one;
+   3. other unsupported parameters (including an unsupported
+      `requested_token_type`), malformed input, duplicate parameters, missing
+      selectors and profile mismatch get `invalid_request`;
+   4. any source, grant (selection or validation), binding or proof failure
+      gets one uniform `invalid_grant`, revealing no detail about which one
+      failed (ERR-020).
+
+   `invalid_scope` and `unsupported_grant_type` keep their existing meaning.
+
 10. **Response.** Success returns `access_token`, `token_type=Bearer`,
     `expires_in`, explicit `scope` and
     `issued_token_type=urn:ietf:params:oauth:token-type:access_token`, with
@@ -136,8 +142,8 @@ Existing contract questions that touch this ADR:
   `invalid_scope`. Decided for the WIF exchange profiles (lead decision,
   2026-11-19): the mapping in item 9. Other `/oauth/token` denials (refresh
   overrides, unknown clients, revoked or expired families) stay open under
-  OQ-ERR-3. The errors-retry contract entry still reads open; the contracts
-  follow-up PR must update it. This ADR does not edit the contract.
+  OQ-ERR-3. The errors-retry contract now records this decision (§3 table,
+  ERR-020, ERR-024, OQ-ERR-3) and public-api API-015 matches it.
 - **OQ-ERR-7** — HTTP status and OAuth error for an unavailable replay store at
   `/oauth/token` (open).
 - **OQ-API-8** — whether the private grant appears in the metadata's
@@ -155,8 +161,10 @@ New questions raised by this ADR:
   `invalid_target` (an explicit exception to the generic `invalid_request`
   rule; RFC 8693 §2.2.2, RFC 8707). `requested_token_type` is accepted only
   when absent or exactly `urn:ietf:params:oauth:token-type:access_token`; an
-  unsupported value gets `invalid_request`. An `audience` not in the grant's
-  set or not assigned gets `invalid_target` (items 8 and 9). Original
+  unsupported value gets `invalid_request`. An `audience` not in the selected
+  grant's audience set or not assigned to the tenant gets `invalid_target`,
+  without distinguishing a nonexistent resource server from an unassigned one
+  (items 8 and 9). Original
   question: design §5.7 denies
   an "unsupported resource or requested token type", and T21.1 rejects
   "unsupported target/subject/resource parameters". The sources did not say

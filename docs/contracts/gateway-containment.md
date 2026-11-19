@@ -37,18 +37,18 @@ RFC 8174) when they appear in capitals. Requirement IDs use `GW-nnn`.
 
 ## 1. Terms
 
-| Term               | Meaning in this contract                                                                                                                                                                                                                                                                                                     | Source                                                                 |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection: an application origin host or the issuer host (GW-035)                                                                                                                     | design §4, §4.2; lead decision (OQ-GW-12)                              |
-| SkyOAuth route     | A fixed SkyOAuth endpoint routed to the independently verified SkyOAuth backend identity, on an application origin or the issuer host. Only the exempt endpoints in §4.1 (the seven fixed endpoints plus each registered per-provider issuer callback path) skip the §3 removals (GW-033)                                    | design §4; lead decision (OQ-GW-3, OQ-GW-12, OQ-TM-4)                  |
-| Exempt endpoint    | One of the seven fixed SkyOAuth cookie endpoints in §4.1 or an exact registered per-provider issuer callback path `/oauth/callback/{provider_id}` (GW-036); together the only routes on an enrolled host outside the §3 removals                                                                                             | design §4, §5.2; lead decision (OQ-GW-3, OQ-TM-4)                      |
-| Non-SkyOAuth route | Every other route on an enrolled host: SPA shell, assets, public, health, bearer and cookie-protected application routes                                                                                                                                                                                                     | design §4                                                              |
-| Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                                                                                                                                                                                           | design §4.2                                                            |
-| Route bundle       | Parent whose immutable versions pin its route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests. `kind=application`: tenant-owned, pins one origin version, exactly one per `ApplicationOrigin` in v0.1 (GW-115). `kind=issuer_system`: the one instance-level issuer-host system bundle (GW-116) | design §4.2; tasks §3, T14.5, T14.9; lead decision (OQ-GW-8, OQ-GW-12) |
-| Attempt            | Durable `RouteBundleAttempt` of one approved `gateway_apply` version, with its deadlines, reason and write journal                                                                                                                                                                                                           | design §4.2; tasks §3                                                  |
-| Traffic gate       | Runtime eligibility of the bundle, and so of its whole origin (GW-115), for new cookie-authenticated application requests and continuation admissions                                                                                                                                                                        | design §4.2; lead decision (OQ-GW-8)                                   |
-| Projection `P`     | Versioned `P(configuration, protected_scope)` computed on prepared xDS and on observed active configuration                                                                                                                                                                                                                  | design §4.2                                                            |
-| Deployment version | `deployment_version_id`: the approved version whose unchanged gateway configuration is backed by observations, distinct from the active registry pins                                                                                                                                                                        | design §4.2                                                            |
+| Term               | Meaning in this contract                                                                                                                                                                                                                                                                                                                                                                      | Source                                                                 |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection: an application origin host or the issuer host (GW-035)                                                                                                                                                                                      | design §4, §4.2; lead decision (OQ-GW-12)                              |
+| SkyOAuth route     | A route to the independently verified SkyOAuth backend identity, on an application origin or the issuer host: a fixed SkyOAuth endpoint or an exact registered per-provider issuer callback path `/oauth/callback/{provider_id}` (GW-036). Only the exempt endpoints in §4.1 (the seven fixed endpoints plus each registered per-provider issuer callback path) skip the §3 removals (GW-033) | design §4; lead decision (OQ-GW-3, OQ-GW-12, OQ-TM-4)                  |
+| Exempt endpoint    | One of the seven fixed SkyOAuth cookie endpoints in §4.1 or an exact registered per-provider issuer callback path `/oauth/callback/{provider_id}` (GW-036); together the only routes on an enrolled host outside the §3 removals                                                                                                                                                              | design §4, §5.2; lead decision (OQ-GW-3, OQ-TM-4)                      |
+| Non-SkyOAuth route | Every route on an enrolled host that is not a SkyOAuth route: SPA shell, assets, public, health, bearer and cookie-protected application routes                                                                                                                                                                                                                                               | design §4                                                              |
+| Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                                                                                                                                                                                                                                                            | design §4.2                                                            |
+| Route bundle       | Parent whose immutable versions pin its route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests. `kind=application`: tenant-owned, pins one origin version, exactly one per `ApplicationOrigin` in v0.1 (GW-115). `kind=issuer_system`: the one instance-level issuer-host system bundle (GW-116)                                                                  | design §4.2; tasks §3, T14.5, T14.9; lead decision (OQ-GW-8, OQ-GW-12) |
+| Attempt            | Durable `RouteBundleAttempt` of one approved `gateway_apply` version, with its deadlines, reason and write journal                                                                                                                                                                                                                                                                            | design §4.2; tasks §3                                                  |
+| Traffic gate       | Runtime eligibility of the bundle, and so of its whole origin (GW-115), for new cookie-authenticated application requests and continuation admissions                                                                                                                                                                                                                                         | design §4.2; lead decision (OQ-GW-8)                                   |
+| Projection `P`     | Versioned `P(configuration, protected_scope)` computed on prepared xDS and on observed active configuration                                                                                                                                                                                                                                                                                   | design §4.2                                                            |
+| Deployment version | `deployment_version_id`: the approved version whose unchanged gateway configuration is backed by observations, distinct from the active registry pins                                                                                                                                                                                                                                         | design §4.2                                                            |
 
 ## 2. Digest binding
 
@@ -978,8 +978,7 @@ later task. All other items are not resolved by this contract.
   2026-11-19): T00.5 freezes only the shape: the per-target `resource` and
   `mask` and the response size and request time bound categories (GW-106).
   The literal values move to T32.3 and T50.4, where a tested pair exists
-  (GW-092). Follow-up: amend T00.5 and design §4.2 ("Freeze the literal
-  targets/masks and size/time bounds for each supported adapter in T00.5").
+  (GW-092). Design §4.2 and T00.5 now say so.
   Original question: design §4.2 requires T00.5 to "freeze the literal
   targets/masks and size/time bounds for each supported adapter", but the
   sources give no literal `/config_dump` `resource` or `mask` values, response
@@ -987,7 +986,7 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-2 — Pinned versions.** **Decided** (lead decision, 2026-11-19):
   T00.5 freezes what is pinned and how (GW-090, GW-092); the literal version
   pair and artifact digests are chosen in T32.3 and T50.4 against a tested
-  pair. Follow-up: amend T00.5 ("Pin EG/egctl/Envoy/bootstrap"). Original
+  pair. T00.5 now says so. Original
   question: the sources cite Envoy Gateway v1.10 and v1.10.0, Envoy v1.40.1
   and cert-manager v1.20.0 as references but state that they specify "a
   mechanism, not a tested version pair"; no pinned Envoy Gateway, egctl,
@@ -1032,8 +1031,8 @@ later task. All other items are not resolved by this contract.
   image (GW-015); the preparation input digest and `translator_input_digest`
   are one value, computed by the preparation worker inside the isolated route
   controller and accepted only in that worker's result, never from a tenant
-  or other caller (GW-016, GW-070). Follow-up: design §4.2 says the preparation request stores the
-  "input snapshot and digest"; amend it so the worker computes the digest.
+  or other caller (GW-016, GW-070). Design §4.2, the tasks endpoint matrix and
+  tasks §3 now say the worker computes the digest.
   Still open: the digest encoding; the list of "documented nonsemantic
   noise"; and which component computes `adapter_artifact_digests`,
   `canonicalization_version` and `dependency_contract_digest` (§2.2).
@@ -1043,7 +1042,7 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-8 — Gate scope: bundle or origin (ambiguity).** **Decided** (lead
   decision, 2026-11-19): v0.1 allows exactly one `RouteBundle` per
   `ApplicationOrigin`, so the gate is origin-wide and bundle-wide (GW-115).
-  Follow-up: add the uniqueness rule to the T14.5 and T14.9 schema. Original
+  Design §4.2, T14.5 and T14.9 now carry the uniqueness rule. Original
   question: `ApplicationRoute` has a `route_bundle_id` and `RouteBundle` has
   one `application_origin_id`, so the logical model allows several bundles per
   origin. Design §4.1 and §4.2 say `begin` closes "the entire affected origin
@@ -1057,14 +1056,9 @@ later task. All other items are not resolved by this contract.
   approver sub-question is also Decided (lead decision, 2026-11-19):
   disabling the approving `security_admin` is not a revocation and does not
   stop compensation; only explicit revocation (GW-133) does (GW-146).
-  Follow-up (spec-amendments triage): design §4.2 "Abort of an unfinished
-  apply" makes "enabled required operator authority" mandatory for
-  compensation and moves the attempt to `recovery_required` on "revoked
-  required authority/approval", so revoking operator or controller authority
-  prevents compensation there; design §4.2 needs an amendment stating that
-  the required authority is the unrevoked approval and current controller
-  scope, and that disabling the preparer or approver does not stop
-  compensation. Original
+  Design §4.2 now states that the required authority for compensation is
+  the unrevoked approval and current controller scope, and that disabling the
+  preparer or approver does not stop it (tasks §3 matches). Original
   question: compensation needs "enabled required operator authority", but the
   sources do not say whether this is the preparer, the approver or both, or
   what happens if the preparing `client_admin` is disabled during `aborting`.

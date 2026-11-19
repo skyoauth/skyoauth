@@ -153,8 +153,8 @@ tenant preparation and instance approval (design §4.2).
   API-155 (including API-152, break-glass limits), the operator endpoint and
   local/workstation interface tables in public-api §7.1, the role table in
   identity-registry §5.2, GW-070 to GW-076 (preparation), GW-130 to GW-137
-  (roles, cancel, revoke), GW-230 to GW-235 (security-revision-bound
-  recovery), LT-100 and LT-107 (restore and recovery challenge).
+  (roles, cancel, revoke), GW-230 to GW-236 (security-revision-bound
+  recovery and first enablement), LT-100 and LT-107 (restore and recovery challenge).
 - Zero static application secrets does not mean zero privileged keys:
   operator and recovery keys need protection (design §9). A compromised human
   IdP cannot rewrite operator authority (design §9).
@@ -186,8 +186,8 @@ Existing contract questions that touch this ADR:
 - **OQ-API-3** — no operator endpoint administers public issuer keys.
   Decided (lead decision, 2026-11-19) by OQ-TM-10: an admin endpoint for
   public-key emergency disable and rotation is added (ADR-002 item 4). The
-  public-api contract entry still reads open; the contracts follow-up PR must
-  update it.
+  public-api contract now decides it: `/admin/v1/issuer-keys` (API-153), with
+  API-042 and API-043 for the JWKS bounds.
 - **OQ-API-6** — who may security-disable. Decided (lead decision,
   2026-11-19): tenant `client_admin` only (API-145).
 - **OQ-API-7** — roles that may read login state (open).
@@ -214,14 +214,19 @@ this ADR, each Decided (lead decision, 2026-11-19):
   operator-asserted link with OQ-TM-7 approval and user notification when the
   old IdP is unavailable during migration (item 10).
 - **OQ-TM-7** — separation of duty: every plan commit except a disable-only
-  commit and links to existing principals need a distinct second `adm_*`
-  approver;
-  single-actor mode only through an explicit audited instance policy;
+  commit (authentication-critical changes to the active provider, activation
+  from null, switch and rollback), and every link to an existing principal,
+  needs a distinct second `adm_*` approver (`security_admin` or another
+  `provider_admin`); single-actor mode only through an explicit audited
+  instance policy for small installations; a disable-only commit fails safe;
   zero-privilege enrollment resume may be single-actor (item 10).
-- **OQ-TM-8** — recovery scope and key lifecycle: restoration only enrolls a
-  replacement `security_admin` credential and revokes operator credentials;
-  the same signed recovery transaction enrolls the replacement recovery
-  public key; one recovery key in v0.1, quorum deferred (item 8).
+- **OQ-TM-8** — recovery scope and key lifecycle: operator restoration only
+  enrolls a replacement `security_admin` credential and revokes operator
+  credentials; the challenge TTL defaults to 5 min with a 15 min maximum
+  (LT-107); every break-glass transaction (operator restoration or provider
+  switch or rollback) enrolls a replacement recovery public key in the same
+  signed transaction and retires the used key; one recovery key in v0.1,
+  quorum deferred (item 8).
 - **OQ-TM-9** — local recovery channel access: socket owned by the service
   UID, mode 0600; `pods/exec` on the SkyOAuth namespace limited to trusted
   infrastructure administrators (item 8).
