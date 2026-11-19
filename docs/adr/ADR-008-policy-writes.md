@@ -97,8 +97,11 @@ design §7.2 and identity-registry §5.2.
     the server detects as widening without the flag is rejected (lead decision,
     2026-11-19, OQ-ADR008-3). A distinct second `adm_*` approver, as OQ-TM-7
     requires for every provider plan commit except a disable-only commit, is
-    optional and off by default; how an installation turns it on is open
-    (OQ-ADR008-3).
+    optional and off by default. It is the instance policy setting
+    `widening_second_approver`; turning it on or off is itself an audited write
+    that needs a distinct second `security_admin` approver, or the audited
+    single-actor instance policy (tasks §3 `InstanceSecurityPolicy`; Decided
+    (lead decision, 2026-11-19), OQ-ADR008-3).
 13. **Deleting a predicate is widening.** Matcher predicates are ANDed; omitted
     optional predicates are unconstrained; the required predicates of the
     binding `profile` template (ADR-016 item 4) cannot be omitted; deleting a
@@ -160,7 +163,9 @@ Existing contract questions that touch this ADR:
 - **OQ-TM-12** — audit sink independence. Decided (lead decision, 2026-11-19):
   operator writes and other security events are also emitted to an append-only
   external sink, at minimum structured logs; the database audit stays
-  authoritative. The sink is chosen by M1a.
+  authoritative. The sink is decided (lead decision, 2026-11-19): an
+  operator-configured append-only, hash-chained JSONL stream forwarded to a
+  syslog-over-TLS or OTLP-logs endpoint (tasks Gate M1a).
 - **OQ-TM-13** — external secret references and egress approval. Decided (lead
   decision, 2026-11-19): secret references written in source and provider
   records resolve only within a per-tenant provisioned secret namespace;
@@ -185,10 +190,12 @@ New questions raised by this ADR:
   hard-deleted, and whether deleting a whole binding or grant (not only a
   predicate) needs the same approval, is not stated.
 - **OQ-ADR008-3 — Widening classification and the optional second approver.**
-  Decided in part (lead decision, 2026-11-19): the server detects widening; the
-  flag only acknowledges it (item 12). Still open: how an installation turns on
-  the optional second approver; to be decided before the M1a schema (lead
-  decision, 2026-11-19). Original question: The OQ-ADR016-2 decision
+  Decided (lead decision, 2026-11-19): the server detects widening; the flag
+  only acknowledges it (item 12). The optional second approver is the instance
+  policy setting `widening_second_approver`, off by default; turning it on or
+  off is an audited write that needs a distinct second `security_admin`
+  approver, or the audited single-actor instance policy. It is in the tasks §3
+  schema with the M1a spec amendments. Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a
   new keyset version or an added allowed binding), whether the server detects

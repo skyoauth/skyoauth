@@ -61,8 +61,13 @@ recovery among the decisions requiring ratification.
      logs every signature to the external sink. It does not re-check
      issuance policy; that residual risk is accepted for v0.1 (OQ-TM-16).
    - Key operations and the standby-use tripwire (item 11) are also emitted
-     to the append-only external sink, at minimum structured logs; the
-     database audit stays authoritative (OQ-TM-12).
+     to the append-only external sink; the database audit stays authoritative
+     (OQ-TM-12). v0.1 requires an operator-configured sink: an append-only,
+     hash-chained JSONL stream forwarded to a configured syslog-over-TLS or
+     OTLP-logs endpoint. Public-signer activation and emergency disable are
+     refused until a sink is configured; the sink is validated at install, and
+     its failures are alerting events (Decided (lead decision, 2026-11-19),
+     OQ-TM-12; tasks Gate M1a).
 
 ### Internal assertion signer group
 
@@ -219,8 +224,11 @@ this ADR:
 - **OQ-TM-12** — audit sink independence. Decided (lead decision,
   2026-11-19): key operations and the standby-use tripwire (item 11) are also
   emitted to an append-only external sink, at minimum structured logs; the
-  database audit stays authoritative; the sink is chosen by M1a and
-  implemented under T50.6.
+  database audit stays authoritative. The sink is an operator-configured
+  append-only, hash-chained JSONL stream forwarded to a syslog-over-TLS or
+  OTLP-logs endpoint, validated at install, with failures as alerting events;
+  public-signer activation and emergency disable are refused until it is
+  configured (item 4; tasks Gate M1a). It is implemented under T50.6.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision,
   2026-11-19): a revision-checked, audited operation advances a tenant's
   `auth_generation` without a provider change (see Consequences).

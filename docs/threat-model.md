@@ -295,9 +295,9 @@ A54.
 
 - OQ-TM-13 is decided: secret references resolve only within a per-tenant
   provisioned namespace, and egress destinations come from an allowlist that
-  instance `security_admin` approves. Design §5.4 and T11.2, T11.8 and T23.2
-  carry it; the tasks §3 schema for the allowlist and namespace is still open
-  and must land before M1a (T11.2) (§6.1).
+  instance `security_admin` approves. Design §5.4, T11.2, T11.8, T23.2 and the
+  tasks §3 schema (`EgressAllowlistEntry`, `Tenant.secret_namespace`) carry it
+  (§6.1).
 - OQ-TP-3 (allowed algorithms for SkyOAuth's own tokens) remains open in the
   token-profiles contract.
 
@@ -936,7 +936,7 @@ preparation supervisor or its translator helper, or a backend.
 | Token-issuing replica (`/oauth/token`, `/oauth/authorize`, `/oauth/confirm`) | Needs public signing to issue access tokens; signer isolation keeps the private key out of the replica when the signer is separately deployed or uses KMS/HSM; the signer enforces structural limits (`typ`/profile, `iss`, registered audience, `exp`−`iat` ≤ 300 s) and logs every signature to the external sink (decided, OQ-TM-16) | Isolation protects the key, not the signing service: the signer does not re-check issuance policy, so while compromised the replica can have the signer sign any structurally valid access token for any registered audience or tenant; accepted for v0.1, and each signature is logged externally (OQ-TM-16, decided). Sees proofs, codes and refresh credentials in transit | Design §3.1, §6; T50.3                           |
 | Public signer                                                                | Isolated from public handlers; may be separately deployed or KMS/HSM; retired keys retained through TTL plus skew; emergency disable and rotation with a prepublished standby (decided, OQ-TM-10)                                                                                                                                       | Can mint any access token for any audience or tenant until key disable propagates to verifier JWKS caches                                                                                                                                                                                                                                                                     | Design §3.1, §6                                  |
 | PostgreSQL read                                                              | Secrets stored as keyed hashes; retry envelope encrypted with a key outside the database; reviewer and provider credentials are references; no private keys                                                                                                                                                                             | Exposes policy, subjects and audit                                                                                                                                                                                                                                                                                                                                            | Design §5.2.2, §7; tasks §3                      |
-| PostgreSQL write                                                             | Store failure never expands privilege; restore preserves one-time state or quarantines; security events also go to an append-only external sink (decided, OQ-TM-12)                                                                                                                                                                     | Can rewrite policy, role bindings, operator credentials and consumed state; design §9 calls this a separate high-impact risk                                                                                                                                                                                                                                                  | Design §7, §9                                    |
+| PostgreSQL write                                                             | Store failure never expands privilege; restore preserves one-time state or quarantines; security events also go to an operator-configured append-only, hash-chained external sink (syslog over TLS or OTLP logs); public-signer activation and emergency disable are refused without one (decided, OQ-TM-12)                            | Can rewrite policy, role bindings, operator credentials and consumed state; design §9 calls this a separate high-impact risk                                                                                                                                                                                                                                                  | Design §7, §9                                    |
 | Envoy                                                                        | Holds no signing key; backends require the authenticated gateway channel                                                                                                                                                                                                                                                                | Sees cookies and tokens in transit; holds its channel credentials; can skip removals                                                                                                                                                                                                                                                                                          | Design §3.1, §4                                  |
 | Route controller                                                             | No signer, WIF or human authority; approvals bind exact plans; old epochs cannot reopen a gate                                                                                                                                                                                                                                          | Sole writer and sole reporter of observations for its scope; accepted for v0.1, with backend credential validation compensating (OQ-TM-11, decided)                                                                                                                                                                                                                           | Design §4.2; GW-100–GW-106                       |
 | Preparation supervisor (credentialed)                                        | Scoped API calls and scoped Secret reads only; records only nonsecret dependency metadata; real key material never enters helper input, logs, plans, results or dumps                                                                                                                                                                   | Reads the real Secrets in its scope (for example downstream TLS private keys) and is on the credentialed side of the sandbox (design §4.2), so it also carries the route-controller residual                                                                                                                                                                                  | Design §4.2; GW-084, GW-160–GW-163; T32.3, T50.4 |
@@ -1378,7 +1378,13 @@ that ignores a denial keeps sending; the backend is trusted to stop.
   2026-11-19:** security events (operator writes, recovery, key operations,
   provider switches and the standby tripwire) are also emitted to an
   append-only external sink, at minimum structured logs. The database audit
-  stays authoritative. The sink is chosen by M1a and implemented under T50.6.
+  stays authoritative. v0.1 requires an operator-configured sink for key
+  operations and the standby tripwire alert: an append-only, hash-chained
+  JSONL stream forwarded to a configured syslog-over-TLS or OTLP-logs
+  endpoint. Public-signer activation and emergency disable are refused until
+  a sink is configured; the sink is validated at install and its failures are
+  alerting events (tasks Gate M1a; ADR-002 item 4). It is implemented under
+  T50.6.
   Spec amendments: §6.1. Original question: must audit events and
   alerts also be sent to a store outside PostgreSQL so a database-write
   compromise cannot erase them?
@@ -1388,8 +1394,8 @@ that ignores a denial keeps sending; the backend is trusted to stop.
   secret provisioned for another tenant. Discovery, JWKS and TokenReview
   egress destinations come from an allowlist approved by instance
   `security_admin`; tenant operators only choose from it. The amendment must
-  land before M1a (T11.8); the tasks §3 schema for the allowlist and
-  namespace is still open (T11.2). Spec amendments: §6.1. Original
+  land before M1a (T11.8); it has landed in T11.2, T11.8, T23.2 and the tasks
+  §3 schema (`EgressAllowlistEntry`, `Tenant.secret_namespace`). Spec amendments: §6.1. Original
   question: which external secrets may a tenant `trust_admin`
   (`token_review_endpoint`, `ca_bundle_ref`, `reviewer_credential_ref`) or
   `provider_admin` (provider `credential_ref`) reference, can a reference
@@ -1454,12 +1460,12 @@ the contract amendments; what is still open is named in the entry:
 - **OQ-TM-10:** design §3.1, §6 and §6.2; T20.2, T50.3; ADR-002; a public
   access-token key administration endpoint (OQ-API-3), now API-153 with
   API-042 and API-043 for the JWKS bounds.
-- **OQ-TM-12:** design §7; T50.6.
+- **OQ-TM-12:** design §7; ADR-002 item 4; tasks Gate M1a and §3
+  (`InstanceSecurityPolicy`); T50.6.
 - **OQ-TM-13:** design §5.4 and §7.2 (per-tenant secret namespace for
   `ca_bundle_ref`, `reviewer_credential_ref` and provider `credential_ref`;
-  `security_admin`-approved egress allowlist); T11.2, T11.8, T23.2; before
-  M1a. Still open: the tasks §3 schema (`TrustSource`, `HumanProvider`) does
-  not yet model the allowlist or the per-tenant secret namespace.
+  `security_admin`-approved egress allowlist); T11.2, T11.8, T23.2; the tasks
+  §3 schema (`EgressAllowlistEntry`, `Tenant.secret_namespace`); before M1a.
 - **OQ-TM-14:** design §5.1.1 and §7.3; tasks §3 (`TenantLoginState`); the
   public-API operator endpoint matrix (OQ-API-2), now API-154; the lifetimes
   contract §4
