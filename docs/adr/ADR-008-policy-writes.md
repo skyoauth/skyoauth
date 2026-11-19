@@ -42,7 +42,11 @@ design §7.2 and identity-registry §5.2.
    client, origin and operator records cannot cascade-delete through
    `HumanProvider` (design §7; T10.1). Removal is soft disable only; deleting a
    whole binding or grant counts as widening and is approved as in item 12 (lead
-   decision, 2026-11-19, OQ-ADR008-2).
+   decision, 2026-11-19, OQ-ADR008-2). A binding that is not referenced by any
+   grant, approval or audit-required record may be hard-deleted by an audited
+   admin write; "soft disable only" applies to anything referenced or enabled.
+   Deleting a whole binding or grant is still widening-class. Decided (lead
+   decision, 2026-11-19; reconciles OQ-ADR008-2 with OQ-ADR022-1).
 4. **Fail closed.** Store failures never expand privilege, and conservative
    cache invalidation applies (design §7).
 
@@ -167,11 +171,14 @@ New questions raised by this ADR:
   of a GitOps document and a later API write wins for the same object, or how
   drift between them is reported.
 - **OQ-ADR008-2 — Deletion versus disable.** Decided (lead decision,
-  2026-11-19): soft disable only; deleting a whole binding or grant counts as
-  widening (item 3). Original question: The baseline names "deletion approval",
-  while design §7 and T10.1 describe soft disable and immutable revisions. Which
-  objects, if any, can be hard-deleted, and whether deleting a whole binding or
-  grant (not only a predicate) needs the same approval, is not stated.
+  2026-11-19): soft disable only for anything referenced or enabled; a binding
+  not referenced by any grant, approval or audit-required record may be
+  hard-deleted by an audited admin write; deleting a whole binding or grant
+  counts as widening (item 3; consistent with OQ-ADR022-1). Original question:
+  The baseline names "deletion approval", while design §7 and T10.1 describe
+  soft disable and immutable revisions. Which objects, if any, can be
+  hard-deleted, and whether deleting a whole binding or grant (not only a
+  predicate) needs the same approval, is not stated.
 - **OQ-ADR008-3 — Widening classification and the optional second approver.**
   Decided in part (lead decision, 2026-11-19): the server detects widening; the
   flag only acknowledges it (item 12). Still open: how an installation turns on
