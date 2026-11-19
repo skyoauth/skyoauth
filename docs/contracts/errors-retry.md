@@ -192,16 +192,16 @@ Only the codes below are fixed by the sources; see OQ-ERR-3 for the rest.
 - **ERR-046** Automatic retries for shared capacity, infrastructure 503 and
   read-only reconnect MUST use exponential backoff with base 1 s, factor 2,
   cap 30 s and full jitter (each delay uniform between 0 and the capped
-  exponential value). They MUST stop after 5 attempts or 120 s, whichever
-  comes first, and then surface the error. The 5 attempts are retries counted
-  after the initial failure, and the 120 s runs from that initial failure.
-  The 120 s cap applies to backoff-driven retries only; a wait for a valid
-  `Retry-After` follows ERR-047. (lead decision, OQ-ERR-4, OQ-ERR-12; design
-  §6.1.1)
+  exponential value). They MUST stop after 5 attempts or 120 s of accumulated
+  backoff waiting, whichever comes first, and then surface the error. The 5
+  attempts are retries counted after the initial failure. The 120 s counts
+  only backoff waits; time spent waiting for a valid `Retry-After` (ERR-047)
+  is excluded from that clock, while each such attempt still counts toward the
+  maximum of 5. (lead decision, OQ-ERR-4, OQ-ERR-12; design §6.1.1)
 - **ERR-047** Client libraries MUST honor a valid 503 `Retry-After` of at most
-  300 s as the earliest time of the next attempt. The client waits that long
-  even when the wait reaches past the ERR-046 120 s cap, which does not apply
-  to that wait; the attempt still counts toward the ERR-046 maximum of 5. A
+  300 s as the earliest time of the next attempt. The client waits that long;
+  that wait is excluded from the ERR-046 120 s backoff clock, and the attempt
+  still counts toward the ERR-046 maximum of 5. A
   missing, invalid or larger hint falls back to the ERR-046 schedule. (lead
   decision, OQ-ERR-4, OQ-ERR-12)
 - **ERR-048** The single delayed per-session retry (`too_many_open_streams`)
@@ -288,7 +288,7 @@ follow-up. All other items are not resolved by this contract.
   (ERR-046); 503 `Retry-After` honored up to 300 s (ERR-047); the one delayed
   per-session retry adds jitter uniform in 0 to min(5 s, 10% of the hint)
   (ERR-048). The readings of ERR-046 (5 retries after the initial failure; 120 s
-  from that failure) and ERR-047 (an invalid or over-300 s `Retry-After` falls
+  of accumulated backoff waiting) and ERR-047 (an invalid or over-300 s `Retry-After` falls
   back to backoff), first recorded as inferred, are also decided (lead decision,
   2026-11-19). Original question: the finite attempt and elapsed budgets, the
   jitter on the per-session retry, the backoff base and cap and the bound on
@@ -340,8 +340,9 @@ follow-up. All other items are not resolved by this contract.
 - **OQ-ERR-12 — `Retry-After` beyond the elapsed budget.** **Decided** (lead
   decision, 2026-11-19): the 120 s budget caps backoff-driven retries only. When
   the server sends a valid `Retry-After` of at most 300 s, the client waits that
-  long and the 120 s cap does not apply to that wait; the attempt still counts
-  toward the maximum of 5 (ERR-046, ERR-047). Original question: the OQ-ERR-4
+  long; that wait is excluded from the 120 s elapsed clock, which counts only
+  backoff waits, and the attempt still counts toward the maximum of 5
+  (ERR-046, ERR-047). Original question: the OQ-ERR-4
   decision accepts a 503 `Retry-After` of up to 300 s but also caps automatic
   retries at 120 s. Whether a valid hint longer than the remaining elapsed
   budget ends the retries, or whether the wait it asks for is outside that
