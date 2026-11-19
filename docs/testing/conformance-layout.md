@@ -15,16 +15,16 @@ The three directories are **source homes grouped by layer**. Layer is a label fo
 
 ### 1.1 Execution environments
 
-Every scenario lists the environments its required tests need (`envs` in the registry, **Env** column in section 2). Each environment maps to fixed CI jobs and legs:
+Every scenario lists the environments its required tests need (`envs` in the registry, **Env** column in section 2). Each environment maps to fixed CI jobs and legs. The **Leg strings** column lists every leg exactly as a registry stage names it in `legs`: `job/leg`, or the bare job name for a job with a single leg.
 
-| Env | Code | Provides | CI job (legs) |
-| --- | --- | --- | --- |
-| `hermetic` | H | No network, no database. In-process mocks only (GitHub OIDC issuer, TokenReview, human IdP), fixtures, injected clock. | `scenarios-hermetic` (x86_64, aarch64) for the scenario package; `clients-rust` (Linux x86_64) from M2; `typescript` (Node 22, 24) for vitest; `bundle-check` from M3 |
-| `pg` | PG | `hermetic` plus a pinned PostgreSQL service container, template DB per test, the barrier-driven replica harness (REP) and fault-injecting repositories. Any test that reads or writes state through the real repository is `pg`. No in-memory repository is proposed, so the atomicity claims (A24, A34) are tested on the real store. | `scenarios-pg` (x86_64) |
-| `envoy-k3s` | EK | `pg` plus pinned k3s (one or two clusters), Envoy Gateway/egctl/Envoy with raw upstream capture, cert-manager, VAP, ≥2 controllers and the reference ConnectRPC backend | `scenarios-envoy-k3s` (x86_64); `scenarios-envoy-k3s-nightly` for real kubelet rotation (A54) and long deadline narratives; `migration-rehearsal` from M5 |
-| `browser` | BR | Packed `@skyoauth/client` tarball installed in `examples/spa`, Playwright with pinned browsers, against the `envoy-k3s` stack | `typescript-browser` (Chromium, Firefox, WebKit) |
-| `native-3os` | N3 | Native binaries on hosted Linux, macOS and Windows runners | `operator` (M1a), `recovery-offline` three-job chain (M1a, see Q6), `clients-rust-native` (M4); each leg is ubuntu, macos, windows unless the row says Linux only |
-| `live` | LV | Real GitHub Actions OIDC (`id-token: write` on that job only) and egress | `live-wif`: the **positive** case only from the `push` to `main` run of the commit; **negative** cases from `schedule` and `workflow_dispatch` runs (see section 4) |
+| Env | Code | Provides | CI job (legs) | Leg strings |
+| --- | --- | --- | --- | --- |
+| `hermetic` | H | No network, no database. In-process mocks only (GitHub OIDC issuer, TokenReview, human IdP), fixtures, injected clock. | `scenarios-hermetic` (x86_64, aarch64) for the scenario package; `clients-rust` (Linux x86_64) from M2; `typescript` (Node 22, 24) for vitest; `bundle-check` from M3 | `scenarios-hermetic/x86_64`, `scenarios-hermetic/aarch64`, `clients-rust/x86_64`, `typescript/node22`, `typescript/node24`, `bundle-check` |
+| `pg` | PG | `hermetic` plus a pinned PostgreSQL service container, template DB per test, the barrier-driven replica harness (REP) and fault-injecting repositories. Any test that reads or writes state through the real repository is `pg`. No in-memory repository is proposed, so the atomicity claims (A24, A34) are tested on the real store. | `scenarios-pg` (x86_64) | `scenarios-pg/x86_64` |
+| `envoy-k3s` | EK | `pg` plus pinned k3s (one or two clusters), Envoy Gateway/egctl/Envoy with raw upstream capture, cert-manager, VAP, ≥2 controllers and the reference ConnectRPC backend | `scenarios-envoy-k3s` (x86_64); `scenarios-envoy-k3s-nightly` for real kubelet rotation (A54) and long deadline narratives; `migration-rehearsal` from M5, which also drives the packed SPA in Playwright and the Linux CLI itself (A14); `deployed-topology-audit` from M5 for the deployed-topology audit stages (A18, A58, A62) | `scenarios-envoy-k3s/x86_64`, `scenarios-envoy-k3s-nightly`, `migration-rehearsal`, `deployed-topology-audit` |
+| `browser` | BR | Packed `@skyoauth/client` tarball installed in `examples/spa`, Playwright with pinned browsers, against the `envoy-k3s` stack | `typescript-browser` (Chromium, Firefox, WebKit) | `typescript-browser/chromium`, `typescript-browser/firefox`, `typescript-browser/webkit` |
+| `native-3os` | N3 | Native binaries on hosted Linux, macOS and Windows runners | `operator` (M1a), `recovery-offline` three-job chain (M1a, see Q6), `clients-rust-native` (M4); each with the legs ubuntu, macos and windows | `operator/ubuntu`, `operator/macos`, `operator/windows`, `recovery-offline/ubuntu`, `recovery-offline/macos`, `recovery-offline/windows`, `clients-rust-native/ubuntu`, `clients-rust-native/macos`, `clients-rust-native/windows` |
+| `live` | LV | Real GitHub Actions OIDC (`id-token: write` on that job only) and egress | `live-wif`: the **positive** case only from the `push` to `main` run of the commit; **negative** cases from `schedule` and `workflow_dispatch` runs (see section 4) | `live-wif` |
 
 Nightly real-Zitadel compatibility (T30.1) is a compatibility job, not a conformance environment. Its result never counts toward a scenario.
 
@@ -98,15 +98,15 @@ Legend:
 
 - **Layer:** C conformance · S security · I integration · P client package. A label only.
 - **Env:** execution environments from section 1.1 (H, PG, EK, BR, N3, LV). The jobs follow from the env.
-- **Harness:** UC in-process service with injected clock · PG PostgreSQL · FX shared fixtures · GH mock GitHub OIDC · GH‑live real Actions OIDC · TRm mock TokenReview · K3 / K3×2 one or two k3s clusters · ENV pinned Envoy Gateway with raw upstream capture · OIDC / OIDC×2 mock human IdP(s) · BR Playwright real browser · RN Rust native on Linux/macOS/Windows · OP `skyoauth-operator` · REP ≥2 service replicas on one PG with barriers · RB test-only reference ConnectRPC backend behind Envoy.
+- **Harness:** UC in-process service with injected clock · PG PostgreSQL · FX shared fixtures · GH mock GitHub OIDC · GH-live real Actions OIDC · TRm mock TokenReview · K3 / K3×2 one or two k3s clusters · ENV pinned Envoy Gateway with raw upstream capture · OIDC / OIDC×2 mock human IdP(s) · BR Playwright real browser · RN Rust native on Linux/macOS/Windows · OP `skyoauth-operator` · REP ≥2 service replicas on one PG with barriers · RB test-only reference ConnectRPC backend behind Envoy.
 - **Stages:** the milestone at which each part of the row must pass. A row with one milestone has one stage. These map one-to-one to registry stages (section 3).
 - **+ / −:** the minimum positive and negative cases. Every row needs at least one of each.
 - **Conditional** sub-IDs block release only if the named optional feature ships.
 
 | ID | Layer | Env | Harness | Stages | Owners | + / − required |
 | --- | --- | --- | --- | --- | --- | --- |
-| A01 | C+I | PG, EK, LV | FX, GH, PG; GH‑live, ENV, RB | M2 | T12.3, T20.3, T21.4, T22.2, T22.6 | + push to `main` with selected grant → WIF profile with signed tenant/grant/revision (live positive only from the push-to-main run of that commit); − same token blocked by RB tenant/RBAC |
-| A02 | S | PG, LV | GH, PG claim-mutation table; GH‑live | M1a: policy on verified-claim fixtures · M2: exchange and live negatives | T12.2, T12.7, T22.5, T52.2 | + push; − one case each for pull_request, pull_request_target, workflow_dispatch, issue_comment, workflow_run, missing event, and wrong owner/repo/ref/env/workflow; live: the real token of a `schedule` or `workflow_dispatch` run is denied by the push-only binding |
+| A01 | C+I | PG, EK, LV | FX, GH, PG, GH-live, ENV, RB | M2 | T12.3, T20.3, T21.4, T22.2, T22.6 | + push to `main` with selected grant → WIF profile with signed tenant/grant/revision (live positive only from the push-to-main run of that commit); − same token blocked by RB tenant/RBAC |
+| A02 | S | PG, LV | GH, PG claim-mutation table, GH-live | M1a: policy on verified-claim fixtures · M2: exchange and live negatives | T12.2, T12.7, T22.5, T52.2 | + push; − one case each for pull_request, pull_request_target, workflow_dispatch, issue_comment, workflow_run, missing event, and wrong owner/repo/ref/env/workflow; live: the real token of a `schedule` or `workflow_dispatch` run is denied by the push-only binding |
 | A03 | S | H, PG | FX, GH with per-source JWKS fetch counter, UC | M1a: verifier selection · M2: exchange | T11.5, T11.7, T21.3, T52.1 | + selected source verifies; − wrong iss/kid/aud, asserting no verifier call and no discovery/JWKS fetch for any non-selected source |
 | A04 | C | PG | PG, UC | M1a: keyset lifecycle · M2: exchange through the overlap | T11.6, T11.9, T24.2 | + old and new keys valid in the overlap, with parent/source/binding/grant IDs unchanged; − each key outside its window |
 | A05 | S | H, PG | UC, FX | M1a: upload and token-header rejection · M2: generic issuer keysets | T11.3, T11.5, T24.3, T52.1 | + public-only JWK; − private members, jku, x5u, embedded jwk, unsafe key URL; M2 adds disallowed issuer/alg, conflicting kid, cross-tenant keyset |
@@ -118,11 +118,11 @@ Legend:
 | A11 | S | PG | UC, PG with fault-injecting repository | M3 | T31.2, T31.5, T32.6 | + live session; − revoked or expired → 401, store down → 503, never an allow |
 | A12 | I+P | PG, EK, BR, N3 | ENV, RB, UC, BR, RN | M2: bearer · M3: browser leases · M4: native reconnect | T26.6, T32.7, T32.8, T32.12, T33.3, T40.15 | + bytes go straight through Envoy, fresh-token reconnect resumes by cursor; − continuing past exp/lease/1 h, restarted mutation, unbounded retry |
 | A13 | C+S | H, EK | FX backend-verifier vectors, RB | M2: WIF · M3: human_session · M4: human_cli | T12.9, T14.2, T20.4, T25.4, T40.13, T52.6 | + canonical tenant and RBAC match; − valid credential on another tenant's resource; name-only match; WIF token whose signed allowlist does not cover the resource/action (M2); human_session whose backend RBAC denies (M3); human_cli whose backend RBAC denies (M4) |
-| A14 | I | BR, N3 (Linux leg) | OIDC×2, BR, RN, packed artifacts with recorded sha256 | M5 | T41.5, T51.5, T51.10 | + same artifacts, endpoints and config work after reauth; − old session/refresh denied; any artifact or config hash change fails the test |
+| A14 | I | EK | OIDC×2, BR, RN, packed artifacts with recorded sha256 | M5 | T41.5, T51.5, T51.10 | + same artifacts, endpoints and config work after reauth; − old session/refresh denied; any artifact or config hash change fails the test |
 | A15 | I | PG, EK | GH, uploaded keyset, K3×2 shared issuer, PG | M5 | T23.7, T51.2, T51.6, T51.7 | + identical decision fixtures before and after; − any changed source/CA/reviewer/keyset ID fails |
 | A16 | I | PG | PG, OIDC×2 | M1a: preservation · M5: switch | T10.11, T12.10, T51.6 | + IDs, modes, defaults, constraints and revisions equal; − dormant impersonation still disabled and not issuable |
 | A17 | I | PG | PG, OIDC×2 | M1b: T13.9 transition · M5: rehearsal | T13.9, T51.8 | + policy/audience change made between switch and rollback survives, epochs are fresh; − pre-switch human state not resurrected |
-| A18 | S+I | EK, BR | ENV raw capture, OIDC, BR | M2: header spoof · M3: cookies | T25.4, T32.4, T50.4, T52.4 | + real SkyOAuth cookie flows work; − Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion. Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain |
+| A18 | S+I | EK, BR | ENV raw capture, OIDC, BR, deployed T50 topology (M5) | M2: header spoof · M3: cookies · M5: deployed-topology audit | T25.4, T32.4, T50.4, T52.4 | + real SkyOAuth cookie flows work; − Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion. Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain |
 | A19 | C | H, EK | FX, UC, ENV JWKS cache | M2 | T20.1, T20.2 | + old and new tokens verify through the overlap with no config change; − retired key after overlap, unknown kid |
 | A20 | I | PG, N3 | OIDC outage toggle, PG, OP | M3: outage · M5: switch during outage | T13.7, T30.3, T51.11 | + WIF and operator recovery during the outage; − fresh login fails closed |
 | A21 | S | PG | PG, UC | M2: WIF · M4: human | T12.6, T20.7, T26.5 | + outstanding token verifies offline until exp ≤ 300 s; − new issuance and live check after committed disable |
@@ -131,22 +131,22 @@ Legend:
 | A24 | S | PG | REP, PG, barriers | M1a: consume primitive · M2: exchange | T10.9, T21.6, T21.8, T52.7 | + exactly one issuance across N replicas and grants; − missing jti, replay, store failure |
 | A25 | C | PG | PG, UC | M1a: selection · M2: exchange | T12.3, T12.8, T21.4, T21.7 | + selector picks the authorized actor/target; − subject/target/mode override, wrong tenant |
 | A26 | C | PG | PG, UC | M1a: policy · M2: exchange | T12.8, T21.5 | + omitted scope → explicit defaults; − omitted with no defaults, empty or excessive scope → invalid_scope |
-| A27 | S | BR, N3 | BR, OIDC with live SSO, RN, attacker loopback process | M4 | T40.2, T40.4, T40.8, T52.3 | + explicit confirmation yields a code; − SSO alone, deny, expiry, attacker's own PKCE/loopback: no code. Conditional sub-ID A27.01 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass |
+| A27 | S | BR, N3 | BR, OIDC with live SSO, RN, attacker loopback process | M4 | T40.2, T40.4, T40.8, T52.3 | + explicit confirmation yields a code; − SSO alone, deny, expiry, attacker's own PKCE/loopback: no code. Conditional sub-ID A27.90 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass |
 | A28 | S | PG, EK | K3×2 (PR: two TRm sharing an issuer string) | M2 | T11.7, T11.10, T23.4 | + selected cluster validates; − other cluster's proof, asserting no probing or fallback |
 | A29 | S | PG | PG, proptest with fixed seed | M1a: registry and references · M2: exchange | T10.8, T11.10, T14.8, T21.3 | + same-issuer and same-name registrations coexist; − each crossed reference at write (M1a); a proof from one tenant's source with another tenant's grant at exchange (M2) |
 | A30 | C | H | FX claim-set vectors per profile | M2: WIF · M3: human_session · M4: human_cli | T12.9, T20.3, T20.4, T32.5, T40.13 | + complete set per profile; − absent, unknown, contradictory, missing revision, subject-prefix exemption attempt |
 | A31 | S | PG | PG, mTLS checker identities, fault injection | M2: WIF · M3: human | T14.3, T26.1, T26.3, T26.5 | + correct checker/action; − each wrong dimension, superseded revision; unavailable → typed unavailable, no positive cache, no redirect |
 | A32 | S | PG | PG, local verifier, OP, barriers | M1a | T13.4, T13.5, T13.6 | + one bootstrap, signed recovery restores; − concurrent or reopened bootstrap, forged IdP admin, revoked key, replayed recovery |
-| A33 | S | PG | PG, UC | M3 | T10.10, T31.2, T31.6 | + inside both deadlines; − idle expiry, absolute expiry, wrong origin, no revival by coalesced write; local and upstream logout revoke exactly the sessions of the indexed sid, switch invalidation revokes affected sessions, other sessions untouched. Conditional sub-ID A33.01 (back-channel logout, T30.6): verified sid targeting |
+| A33 | S | PG | PG, UC | M3 | T10.10, T31.2, T31.6 | + inside both deadlines; − idle expiry, absolute expiry, wrong origin, no revival by coalesced write; local and upstream logout revoke exactly the sessions of the indexed sid, switch invalidation revokes affected sessions, other sessions untouched. Conditional sub-ID A33.90 (back-channel logout, T30.6): verified sid targeting |
 | A34 | S | PG | REP, PG, barriers | M4: code and refresh · M5: switch/rollback | T10.9, T40.3, T40.5, T40.15, T51.4 | + one code use and one refresh successor; − concurrent reuse, plain replay revokes the family, ID added/removed on replay, post-switch refresh |
 | A35 | S | PG | PG, UC | M2: digest-key rotation, restore · M5: switch | T10.6, T21.8, T51.7, T51.9 | + fresh proof works after each change; − consumed proof stays denied |
-| A36 | I | EK, LV | GH‑live, K3, ENV, RB | M2 | T22.6, T23.5, T25.5 | + real GitHub (push-to-main run only) and k3s calls reach the API; − spoofed headers, IdP/store outage, direct backend, private listener |
+| A36 | I | EK, LV | GH-live, K3, ENV, RB | M2 | T22.6, T23.5, T25.5 | + real GitHub (push-to-main run only) and k3s calls reach the API; − spoofed headers, IdP/store outage, direct backend, private listener |
 | A37 | C | PG | PG, UC | M1a | T00.12, T12.2 | + optional predicate omitted is unconstrained; − required production predicate omitted rejects, removal needs widening approval |
 | A38 | C+S | H, PG | UC, PG, metadata fixture | M1a: storage · M2: metadata and issuance | T10.11, T12.5, T20.1 | + disabled record stored; − device or impersonation not advertised, issuance rejected, capability gain does not activate |
 | A39 | P | H, BR | npm pack, browser bundle check, BR, typecheck | M3 | T33.2, T33.4, T33.8 | + core from the tarball works in the browser; − Node built-in, polyfill, react or connect in the core bundle fails |
 | A40 | S+P | H, BR | vitest fetch spy, BR | M3 | T33.1, T33.6, T33.7 | + same-origin HTTPS with CSRF; − foreign origin, userinfo, http, redirect, option overrides, off-origin health base: no CSRF or cookie sent; no token getter in the API and nothing written to localStorage/sessionStorage/IndexedDB; caller-supplied Authorization/bearer rejected (no mixed auth); no automatic mutation replay after 401 or login |
 | A41 | P | N3 | RN on 3 OSes, examples/rust-cli, mock issuer | M4 | T40.7, T40.9, T40.10, T40.11 | + PKCE/loopback/cancel with minimal and default features; − plaintext fallback, off-origin forwarding, non-loopback redirect, credential or refresh token in logs/`Debug`/error output (redaction) |
-| A42 | C | H, BR, N3 | FX v1, prebuilt consumers, OIDC×2 | M4: fixtures · M5: through switch/rollback | T41.5, T51.5, T51.7 | + every shipped fixture version (v1 in v0.1) passes before and after switch/rollback with unchanged artifacts; − cross-profile credential use |
+| A42 | C | H, EK, BR, N3 | FX v1, prebuilt consumers, OIDC×2 | M4: fixtures · M5: through switch/rollback | T41.5, T51.5, T51.7 | + every shipped fixture version (v1 in v0.1) passes before and after switch/rollback with unchanged artifacts; − cross-profile credential use |
 | A43 | S | PG, EK | PG, RB | M1a: write · M2: issuance and backend | T14.1, T14.2, T52.6 | + A uses its own audience; − B writes, grants or issues on A's audience, RB tenant mismatch |
 | A44 | C+S | H | FX, UC | M3: human_session · M4: human_cli | T12.9, T20.3, T32.5, T40.13 | + complete human_session and human_cli; − missing discriminator, WIF forged into human shape, wrong route |
 | A45 | C | PG | PG, mTLS checker | M2 | T14.3, T26.3, T26.5 | + direct grant with null target passes live check; − delegated subject as checker, unknown action, another audience's checker |
@@ -157,20 +157,20 @@ Legend:
 | A50 | C | PG | PG, UC | M1a: matching · M2: exchange | T12.3, T21.4, T21.7 | + grant actor's binding matches despite another actor's overlap; − no eligible match; several same-actor matches give a stable ID with no union |
 | A51 | S | BR | BR with attacker and victim contexts, OIDC | M3 | T30.2, T30.7, T33.5, T52.3 | + normal login; − attacker callback in victim browser, wrong cookie, mix-up, tampered return, stale tab: victim session unchanged |
 | A52 | S | BR, N3 | BR, OIDC, RN | M4 | T40.3, T40.12, T52.3 | + issuer-native flow with approval; − transaction ID alone, app cookie, foreign browser, reused rotated binding |
-| A53 | S | PG | PG, UC, OP, restore fixture | M1a | T10.11, T12.10 | + disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart, forward migration and provider switch; − enabled/approved create or import rejected, enabling PATCH rejected, startup/import with an active unsupported record (seeded by restore fixture) rejected without rewriting it |
+| A53 | S | PG | PG, UC, OP, restore fixture | M1a | T10.11, T12.10 | + disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart and forward migration; − enabled/approved create or import rejected, enabling PATCH rejected, startup/import with an active unsupported record (seeded by restore fixture) rejected without rewriting it |
 | A54 | C+I | PG, EK | TRm with token-file swap (PR), K3 kubelet rotation (nightly) | M1a: single_use rejection · M2: renewal | T11.11, T21.6, T23.1, T23.5, T23.6 | + renews with the same token, then with the rotated token; − single_use enrollment/import on a TokenReview/projected source |
 | A55 | C | H | FX, UC | M2: WIF · M3: internal assertion · M4: human_cli | T00.3, T20.8, T32.2, T40.13 | + exact type/profile/ingress pairs; − at+jwt, ID token, internal token on bearer ingress, WIF token with invented client_id |
 | A56 | I+P | PG, EK, BR | PG, ENV, RB, UC, BR | M3 | T14.5, T32.6, T32.12, T33.3 | + owner close releases once, cap change affects new admission only; − foreign or replayed close, retry-budget reset loop, 503 → login |
 | A57 | C+P | PG, N3 | PG, UC, RN, plain OAuth form client | M4 | T40.5, T40.15 | + plain rotation; Rust exact retry ≤ 30 s gets one successor; − consumed replay revokes, added/malformed ID, downgrade, beyond 7 d/24 h |
-| A58 | I | PG, EK | K3, ENV, cert-manager, VAP, ≥2 controllers, UC | M1b: prepare/approve persistence · M3: enforcement | T13.2, T14.9, T31.6, T32.3, T32.4, T50.4 | Sub-IDs A58.01… in the annex (Q1): + every approved, mode-matched path; − every listed stale/wrong-mode/revoked/mismatch/hold case. Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence |
+| A58 | I | PG, EK | K3, ENV, cert-manager, VAP, ≥2 controllers, UC, deployed T50 topology (M5) | M1b: prepare/approve persistence · M3: enforcement · M5: deployed-topology audit | T13.2, T14.9, T31.6, T32.3, T32.4, T50.4, T52.4 | Sub-IDs A58.01–A58.89 in the annex (Q1): + every approved, mode-matched path; − every listed stale/wrong-mode/revoked/mismatch/hold case. Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence |
 | A59 | C+S | H, BR, N3 | FX comparison vectors, BR, RN | M4 | T40.2, T40.8, T40.14 | + matching descriptor approves; − each comparison field changed, concurrent malicious request, superseded tab |
 | A60 | S | PG, BR, N3 | OIDC, PG, barriers, BR/RN | M3: browser · M4: native | T30.4, T30.8 | + auto_create creates one zero-privilege principal; − default denies, email merge, disabled replacement, migration hold |
 | A61 | C+S | H, EK | FX digest vectors, ENV | M3 | T32.2, T32.13 | + 4 KiB query → fixed 43-char binding; − each byte-level variant, rewrite or rematch; logs redacted |
-| A62 | S | PG | UC, PG, REP | M3 | T32.14, T50.3, T52.5 | Internal signer group only (Q5). + rotation and clean promotion; − valid unpromoted-standby signature denies and alerts, invalid-signature kid spoof raises no verified alert, disabled active key with no standby fails closed |
+| A62 | S | PG, EK | UC, PG, REP, deployed T50 topology (M5) | M3: internal signer lifecycle and standby tripwire · M5: deployed-topology audit | T32.14, T50.3, T52.5 | Internal signer group only (Q5). + rotation and clean promotion; − valid unpromoted-standby signature denies and alerts, invalid-signature kid spoof raises no verified alert, disabled active key with no standby fails closed |
 | A63 | S | PG | PG, OIDC | M1b: admin · M3: sessions · M4: refresh | T13.9, T30.9, T52.5 | + credential-only rotation keeps epochs, sessions and refresh; − semantic change via the rotation path rejects |
 | A64 | I | H, PG, N3 | OP on 3 OSes, Linux service, SoftHSM2 | M1a | T13.3, T13.5, T13.7, T13.10 | + remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6); − key export into the pod, wrong-instance challenge, expired challenge at the TTL boundary (hermetic), unsupported adapter fails explicitly |
 
-Counts by first stage: M1a 20 · M1b 5 · M2 17 · M3 13 · M4 7 · M5 2. Counts by final stage: M1a 4 · M1b 2 · M2 21 · M3 16 · M4 13 · M5 8. 34 rows have more than one stage. All 8 M5 stages belong to T51: A14 (T51.5, T51.10), A15, A16, A17, A20, A34, A35 and A42. T52 is the security conformance task group (T52.1–T52.8). The §9 DAG feeds it the deployed T50 topology, but the spec does not say that every S row is re-run there; which S-row tests also run against the deployed topology is for the T52 owner to register as M5 stages.
+Counts by first stage: M1a 20 · M1b 5 · M2 17 · M3 13 · M4 7 · M5 2. Counts by final stage: M1a 4 · M1b 2 · M2 21 · M3 13 · M4 13 · M5 11. 35 rows have more than one stage. Of the 11 M5 stages, 8 belong to T51: A14 (T51.5, T51.10), A15, A16, A17, A20, A34, A35 and A42. The other 3 are deployed-topology audits run by the `deployed-topology-audit` job: A18 and A58 (T50.4, T52.4) and A62 (T50.3, T52.5). T52 is the security conformance task group (T52.1–T52.8). The §9 DAG feeds it the deployed T50 topology, but the spec does not say that every S row is re-run there; which other S-row tests also run against the deployed topology is for the T52 owner to register as M5 stages.
 
 **Stages are separate evidence.** Each stage has its own tests and its own result, and the gate of its milestone needs that stage passed. For example, A12's M2 stage is the bearer expiry and fresh-token reconnect of T26.6 and must pass at the M2 gate. A12 as a whole stays open until its M3 and M4 stages pass too. A scenario counts as passed for release only when every stage passes.
 
@@ -182,7 +182,7 @@ Counts by first stage: M1a 20 · M1b 5 · M2 17 · M3 13 · M4 7 · M5 2. Counts
 - vitest/Playwright: the test's own title begins with `A40 pos:` or `A40 neg:`; sub-IDs use `A58.07 neg:`.
 - The polarity token lets the checker confirm both a `pos` and a `neg` test for every implemented stage.
 
-**Registry.** `tests/conformance/scenarios.toml` holds all 64 scenarios and the 10 contracts from M0. Sub-IDs live in an annex file `tests/conformance/subcases.toml` with the same entry shape and a `parent` key. An entry carries every column of the section 2 table, so the table can be rendered from it: `layers` (one or more of `conformance`, `security`, `integration`, `package`; the table shows a combined row such as C+I), `envs`, `harness`, `owners`, `positive`, `negative` and one `stage` per milestone. Legs are declared **per stage**. The example parses with Python `tomllib`:
+**Registry.** `tests/conformance/scenarios.toml` holds all 64 scenarios and the 10 contracts from M0. Sub-IDs live in an annex file `tests/conformance/subcases.toml` as `[[subcase]]` entries with `kind = "subcase"`, the same entry shape and a `parent` key. An entry carries every column of the section 2 table, so the table can be rendered from it: `layers` (one or more of `conformance`, `security`, `integration`, `package`; the table shows a combined row such as C+I), `envs`, `harness`, `owners`, `positive`, `negative`, an optional `note` for text that the **+ / −** cell shows before its `+` (A58, A62), and one `stage` per milestone. The conditional sub-ID sentence that ends a row's **+ / −** cell is rendered from that sub-ID's entry (below). Legs are declared **per stage**, as leg strings from the section 1.1 **Leg strings** column. The example parses with Python `tomllib`:
 
 ```toml
 gates_passed = []    # milestones whose gate PR has merged, e.g. ["M0", "M1a", "M2"]
@@ -207,7 +207,7 @@ tests = []
 
 [[scenario.stage]]
 milestone = "M2"
-scope = "exchange across replicas and grants"
+scope = "exchange"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = [
@@ -220,10 +220,10 @@ id = "A64"
 kind = "scenario"
 layers = ["integration"]
 envs = ["hermetic", "pg", "native-3os"]
-harness = ["OP", "Linux service", "SoftHSM2"]
+harness = ["OP on 3 OSes", "Linux service", "SoftHSM2"]
 owners = ["T13.3", "T13.5", "T13.7", "T13.10"]
-positive = "remote scoped write; offline recovery via the three-job chain"
-negative = "key export into the pod, wrong-instance challenge, expired challenge, unsupported adapter"
+positive = "remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6)"
+negative = "key export into the pod, wrong-instance challenge, expired challenge at the TTL boundary (hermetic), unsupported adapter fails explicitly"
 matrix_sha256 = "078ca6a19a34b32f05d2982cb296c71cf5a182e64f2e6589767807fd36eaeec3"
 
 [[scenario.stage]]
@@ -231,6 +231,7 @@ milestone = "M1a"
 scope = "full row"
 legs = [
   "scenarios-hermetic/x86_64",
+  "scenarios-hermetic/aarch64",
   "scenarios-pg/x86_64",
   "operator/ubuntu",
   "operator/macos",
@@ -249,13 +250,45 @@ covered_by = ["A15", "A35"]
 matrix_sha256 = "060bdd6d1424c821626c7f63561da93b9fbf89a6869d9f363128efca9fcbbf0b"
 ```
 
-`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole table line, from the leading `|` to the trailing `|`, with no trailing newline: the `| A24 | … |` line in tasks §8 for a scenario, the `| C07 | … |` line in design §2 for a contract. The values above are the current ones. A sub-ID entry instead hashes the task text it was drafted from, by the same rule. A conditional sub-ID adds `conditional_on = "device-flow"` (or `"back-channel-logout"`, `"forwardauth"`).
+A sub-ID entry in `tests/conformance/subcases.toml`:
+
+```toml
+[[subcase]]
+id = "A27.90"
+kind = "subcase"
+parent = "A27"
+conditional_on = "device-flow"
+table_text = "Conditional sub-ID A27.90 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass"
+layers = ["security"]
+envs = ["browser", "native-3os"]
+harness = ["BR", "OIDC with live SSO", "RN", "attacker loopback process"]
+owners = ["T40.6"]
+positive = "user-code approval"
+negative = "expiry/polling abuse, no interaction bypass"
+matrix_sha256 = "02c64cdac8a18ddfb48397e703e048a59f5ea84e7867ab5c31998ee9df5a5fc9"
+
+[[subcase.stage]]
+milestone = "M4"
+scope = "full row"
+legs = [
+  "typescript-browser/chromium",
+  "typescript-browser/firefox",
+  "typescript-browser/webkit",
+  "clients-rust-native/ubuntu",
+  "clients-rust-native/macos",
+  "clients-rust-native/windows",
+]
+status = "planned"
+tests = []
+```
+
+`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole table line, from the leading `|` to the trailing `|`, with no trailing newline: the `| A24 | … |` line in tasks §8 for a scenario, the `| C07 | … |` line in design §2 for a contract. The values above are the current ones. A sub-ID entry instead hashes the task text it was drafted from, by the same rule: the whole tasks.md line `- [ ] **Txx.y** …` of its first owner. A conditional sub-ID adds `conditional_on = "device-flow"` (or `"back-channel-logout"`, `"forwardauth"`) and `table_text`, the exact sentence that its parent's section 2 row shows for it. Every conditional sub-ID that section 2 names must have exactly one entry with that parent, feature and first owner, and the annex holds no conditional sub-ID that section 2 does not name. Conditional sub-IDs are numbered .90–.99. A required (non-conditional) sub-ID has neither `conditional_on` nor `table_text`, need not be named in section 2, and is allowed only under a parent whose section 2 note declares an annex range that contains it, such as A58's `A58.01–A58.89`.
 
 **Which job produces a test.** A registered test ID names its package and target. The package and target fix the job, and the job fixes the env:
 
 | Test source | Job (legs) | Env |
 | --- | --- | --- |
-| `skyoauth-scenarios`, targets `hermetic` / `pg` / `envoy_k3s` / `live` | `scenarios-hermetic` / `scenarios-pg` / `scenarios-envoy-k3s`, `scenarios-envoy-k3s-nightly` or `migration-rehearsal` / `live-wif` | hermetic / pg / envoy-k3s / live |
+| `skyoauth-scenarios`, targets `hermetic` / `pg` / `envoy_k3s` / `live` | `scenarios-hermetic` / `scenarios-pg` / `scenarios-envoy-k3s`, `scenarios-envoy-k3s-nightly`, `migration-rehearsal` or `deployed-topology-audit` / `live-wif` | hermetic / pg / envoy-k3s / live |
 | `clients/rust/tests` | `clients-rust` (Linux x86_64) or `clients-rust-native` (ubuntu, macos, windows) | hermetic or native-3os |
 | `operator/tests` | `operator` (ubuntu, macos, windows); `recovery-offline` chain | native-3os |
 | `clients/typescript/test/*.test.ts` | `typescript` (Node 22, 24) | hermetic |
@@ -271,9 +304,9 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
   - Every `matrix_sha256` still matches, so an edited matrix row fails until the registry entry is reviewed.
   - IDs are monotonic, and owners exist as task IDs in the tasks doc.
   - Every stage milestone is a known milestone, and the last stage of each scenario is its full milestone.
-  - Every stage `legs` entry names a job and leg from section 1.1, every env in `envs` has at least one leg in some stage, and every leg's job belongs to one of the scenario's `envs`.
+  - Every stage `legs` entry is a leg string from the section 1.1 **Leg strings** column, every env in `envs` has at least one leg in some stage, and every leg's job belongs to one of the scenario's `envs`.
   - Every fixture directory not starting with `_` names a registered scenario, and every fixture validates against its schema.
-  - The scenario table in this document equals the table rendered from the registry (`id`, `layers`, `envs`, `harness`, stages, `owners`, `positive`, `negative`).
+  - The scenario table in this document equals the table rendered from the registry (`id`, `layers`, `envs`, `harness`, stages, `owners`, `note`, `positive`, `negative`, and the `table_text` of each conditional sub-ID of the row).
   - Every waiver entry (see **Waivers** below) has all required fields, names a commit on `main`, a registered test and one of that test's stage legs.
 - *Resolution part.* Runs in the code jobs.
   - Every `implemented` stage lists, **for each job among its legs**, at least one `pos` and one `neg` test produced by that job. A declared leg whose job contributes no test fails the check, so a leg such as `recovery-offline/windows` cannot be satisfied by tests from other jobs.
@@ -317,7 +350,7 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
 - Servers bind port 0 on loopback. Hermetic jobs need no egress, and every mock issuer is in-process. Cluster/Envoy jobs wait on observed conditions with deadlines, not fixed sleeps.
 - Only the `live-wif` job touches the internet for conformance. The nightly real-Zitadel compatibility job also does, but it is not conformance evidence.
 
-**Live WIF (A01, A02, A36).** Production bindings permit `push` only (T22.4). The live positive therefore comes only from the `push` to `main` run of the commit being judged. A `schedule` or `workflow_dispatch` run has a different `event_name`, and the push-only binding must deny it (A02, T22.5). Those runs supply live **negative** cases. A tag push does carry `event_name: push`, but its `ref` is `refs/tags/…`; the production binding's ref predicate (`refs/heads/main`) must deny it. The release reporter joins the push-to-main run by commit SHA. Releases are therefore cut only from commits on `main` that had a passing `live-wif` push run. The release workflow checks that the release commit is reachable from `main`, and a hotfix lands on `main` first.
+**Live WIF (A01, A02, A36).** Production bindings permit `push` only (T22.4). The live positive therefore comes only from the `push` to `main` run of the commit being judged. A `schedule` or `workflow_dispatch` run has a different `event_name`, and the push-only binding must deny it (A02, T22.5). Those runs supply live **negative** cases. A tag push does carry `event_name: push`, but its `ref` is `refs/tags/…`; the production binding's ref predicate (`refs/heads/main`) must deny it. The release reporter joins the push-to-main run by commit SHA. Releases are therefore cut only from commits on `main` that had a passing `live-wif` push run. The release workflow checks that the release commit is reachable from `main`, and a hotfix lands on `main` first. A split of `live-wif` into a push leg (positive) and a negative leg (schedule and dispatch runs) is accepted as a design but not yet registered; until it lands, stages name the single leg `live-wif`.
 
 **Slow jobs and merge queue.** Slow Envoy/k3s jobs are required on PRs if they take about 15 minutes or less. Otherwise they run post-merge on the push to `main`, where the reporter result for that commit gates milestones and release. `ci.yml` has no `merge_group` trigger today. A merge queue needs both the repository setting and a `merge_group:` trigger. Whether to enable one before M3 is a maintainers' repository-setting decision (section 6).
 
@@ -329,7 +362,7 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
 | M2 | Mock GH/TRm in `scenarios-hermetic`/`scenarios-pg`; `clients-rust` (Linux WIF, minimal/default/all features, `cargo package` and consumer); `scenarios-envoy-k3s` (pinned k3s, Envoy Gateway/egctl/Envoy, RB; A36 negatives); `live-wif` (positive from push to `main` only, negatives from schedule/dispatch, never on PRs) | hermetic and PG yes; `scenarios-envoy-k3s` yes if runtime ≤ ~15 min, else post-merge | `live-wif` on push to `main` and nightly; `scenarios-envoy-k3s-nightly` (A54 kubelet rotation) |
 | M3 | `typescript-browser` (packed tarball → `examples/spa`, Playwright Chromium/Firefox/WebKit, pinned browsers); `bundle-check` (browser-platform bundle with Node built-ins forbidden, A39); Envoy job adds raw-capture cookie tests, mock OIDC×2, ≥2 controllers, cert-manager, VAP (A58 sub-IDs) | browser and bundle yes; A58 cluster sub-IDs post-merge if too slow | Nightly real-Zitadel compatibility (not conformance); nightly run of deadline cases at production defaults (Q8) |
 | M4 | `clients-rust-native` matrix on 3 OSes (loopback, injected browser launcher driving Playwright for confirm, OS keychain: macOS Keychain, Windows Credential Manager, Linux secret-service under dbus); `examples/rust-cli` packaged consumer | yes | — |
-| M5 | `migration-rehearsal` (artifacts built once and carried by hash into switch/rollback, OIDC×2, K3×2); `fuzz` (T52.7, time-boxed; PRs replay seed corpora only); load tests; deployed-topology T52 audit | seed replay yes | fuzz/load nightly; **release workflow** requires the reporter to show all 64 scenarios **passed** on the release commit, live jobs included, plus C01–C10 and both libraries |
+| M5 | `migration-rehearsal` (artifacts built once and carried by hash into switch/rollback, OIDC×2, K3×2); `fuzz` (T52.7, time-boxed; PRs replay seed corpora only); load tests; `deployed-topology-audit` (the M5 deployed-topology audit stages of A18, A58 and A62, T50.3, T50.4, T52.4, T52.5) | seed replay yes | fuzz/load nightly; **release workflow** requires the reporter to show all 64 scenarios **passed** on the release commit, live jobs included, plus C01–C10 and both libraries |
 
 Coverage: the existing gates (Rust 85 % lines; TypeScript 85 % lines/functions/branches/statements) stay on unit tests. Scenario and integration coverage is uploaded and reported but not gated (Q9).
 
@@ -337,10 +370,10 @@ Coverage: the existing gates (Rust 85 % lines; TypeScript 85 % lines/functions/b
 
 The lead decided these on review. They replace the former open questions Q1–Q11.
 
-1. **Q1 Oversized rows: sub-IDs in an annex.** Scheme `A58.07` in the registry and titles, `a58_07_…` in Rust names. A parent passes only if all its required sub-IDs pass. The scenario count stays 64. The T32.3 owner drafts the A58 sub-IDs before M1b. A56, A18, A12 and A57 are split only if a row has more than about six independent assertions.
+1. **Q1 Oversized rows: sub-IDs in an annex.** Scheme `A58.07` in the registry and titles, `a58_07_…` in Rust names. A parent passes only if all its required sub-IDs pass. The scenario count stays 64. The T32.3 owner drafts the A58 sub-IDs before M1b. Required sub-IDs are numbered .01–.89 and live in an annex range that the parent's section 2 note declares (A58: A58.01–A58.89); conditional sub-IDs are numbered .90–.99, so the two never collide. A56, A18, A12 and A57 are split only if a row has more than about six independent assertions.
 2. **Q2 "Backend denies" (A01, A08, A13, A43): yes.** Evidence is the backend-verifier fixture vectors plus a clearly test-only reference ConnectRPC backend (RB) reached through Envoy. v0.1 ships no verifier library.
-3. **Q3 A33.** The required part is T10.10, T31.2 and T31.6: idle, absolute and origin expiry; local and upstream logout by indexed sid; switch invalidation; other sessions untouched. Back-channel-driven sid targeting is conditional sub-ID A33.01 and blocks release only if T30.6 ships.
-4. **Q4 A53** is the disabled-record lifecycle of design §5.6: export/import round-trip; reject an enabled or approved create/import; reject an enabling PATCH; unchanged across restart and forward migration; reject startup/import with an active unsupported record (seeded through a restore fixture) without rewriting it; unchanged across provider switch. No feature flag is involved.
+3. **Q3 A33.** The required part is T10.10, T31.2 and T31.6: idle, absolute and origin expiry; local and upstream logout by indexed sid; switch invalidation; other sessions untouched. Back-channel-driven sid targeting is conditional sub-ID A33.90 and blocks release only if T30.6 ships.
+4. **Q4 A53** is the disabled-record lifecycle of design §5.6: export/import round-trip; reject an enabled or approved create/import; reject an enabling PATCH; unchanged across restart and forward migration; reject startup/import with an active unsupported record (seeded through a restore fixture) without rewriting it. No feature flag is involved. Preservation across a provider switch is A16's M5 stage; C06 maps both A16 and A53.
 5. **Q5 A62** covers the internal signer groups only. Public signer rotation and overlap are A19 and C01.
 6. **Q6 A64: option (a).**
    - Offline recovery runs as three jobs: Linux emits the challenge as an artifact, macOS/Windows (and Linux) sign it with the workstation operator, Linux verifies and applies it.
@@ -376,7 +409,7 @@ Answered by the lead in the second review round:
 3. **Slow jobs:** required on PRs if about 15 minutes or less, otherwise post-merge on the push to `main` (section 4).
 4. **Release commits:** only commits on `main` with a passing `live-wif` push run; the release workflow checks reachability from `main`; hotfixes land on `main` first (section 4).
 5. **Contract mapping:** decided (section 5, Q11).
-6. **ForwardAuth (T32.9):** two conditional sub-IDs, one under A58 (deployment-enforcer equivalence) and one under A18 (credential containment and trusted forwarded chain). Device flow stays under A27 (A27.01). The release manifest is a committed file owned by the T50/release owner; changes need a PR the lead approved.
+6. **ForwardAuth (T32.9):** two conditional sub-IDs, A58.90 under A58 (deployment-enforcer equivalence) and A18.90 under A18 (credential containment and trusted forwarded chain). Device flow stays under A27 (A27.90). The release manifest is a committed file owned by the T50/release owner; changes need a PR the lead approved.
 
 Still open:
 
