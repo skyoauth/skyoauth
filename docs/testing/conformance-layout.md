@@ -75,7 +75,7 @@ Put one directory per scenario at `tests/conformance/fixtures/a61/`, with one JS
   | Reader | Path |
   | --- | --- |
   | `tests/` (`skyoauth-scenarios`) | `CARGO_MANIFEST_DIR/conformance/fixtures` |
-  | `service/` | `CARGO_MANIFEST_DIR/../tests/conformance/fixtures` |
+  | `service/` (unit support only until it has a nextest job, section 3) | `CARGO_MANIFEST_DIR/../tests/conformance/fixtures` |
   | `operator/` | `CARGO_MANIFEST_DIR/../tests/conformance/fixtures` |
   | `clients/rust/` | `CARGO_MANIFEST_DIR/../../tests/conformance/fixtures` |
   | vitest, `clients/typescript/test/*.test.ts` | `new URL("../../../tests/conformance/fixtures/", import.meta.url)`, read with `node:fs` in the test only, never from `src/`, so the browser core stays free of Node |
@@ -117,12 +117,12 @@ Legend:
 | A10 | S | PG, EK | UC, ENV | M2: bearer + assertion · M3: cookie | T25.2, T31.4, T32.4 | + each credential alone; − cookie + bearer, bearer + internal assertion, duplicate auth cookies |
 | A11 | S | PG | UC, PG with fault-injecting repository | M3 | T31.2, T31.5, T32.6 | + live session; − revoked or expired → 401, store down → 503, never an allow |
 | A12 | I+P | PG, EK, BR, N3 | ENV, RB, UC, BR, RN | M2: bearer · M3: browser leases · M4: native reconnect | T26.6, T32.7, T32.8, T32.12, T33.3, T40.15 | + bytes go straight through Envoy, fresh-token reconnect resumes by cursor; − continuing past exp/lease/1 h, restarted mutation, unbounded retry |
-| A13 | C+S | H, EK | FX backend-verifier vectors, RB | M2: WIF · M3: human | T12.9, T14.2, T20.4, T25.4, T52.6 | + canonical tenant and RBAC match; − valid credential on another tenant's resource; name-only match; WIF token whose signed allowlist does not cover the resource/action (M2); human_session or human_cli whose backend RBAC denies (M3) |
+| A13 | C+S | H, EK | FX backend-verifier vectors, RB | M2: WIF · M3: human_session · M4: human_cli | T12.9, T14.2, T20.4, T25.4, T40.13, T52.6 | + canonical tenant and RBAC match; − valid credential on another tenant's resource; name-only match; WIF token whose signed allowlist does not cover the resource/action (M2); human_session whose backend RBAC denies (M3); human_cli whose backend RBAC denies (M4) |
 | A14 | I | BR, N3 (Linux leg) | OIDC×2, BR, RN, packed artifacts with recorded sha256 | M5 | T41.5, T51.5, T51.10 | + same artifacts, endpoints and config work after reauth; − old session/refresh denied; any artifact or config hash change fails the test |
 | A15 | I | PG, EK | GH, uploaded keyset, K3×2 shared issuer, PG | M5 | T23.7, T51.2, T51.6, T51.7 | + identical decision fixtures before and after; − any changed source/CA/reviewer/keyset ID fails |
 | A16 | I | PG | PG, OIDC×2 | M1a: preservation · M5: switch | T10.11, T12.10, T51.6 | + IDs, modes, defaults, constraints and revisions equal; − dormant impersonation still disabled and not issuable |
 | A17 | I | PG | PG, OIDC×2 | M1b: T13.9 transition · M5: rehearsal | T13.9, T51.8 | + policy/audience change made between switch and rollback survives, epochs are fresh; − pre-switch human state not resurrected |
-| A18 | S+I | EK, BR | ENV raw capture, OIDC, BR | M2: header spoof · M3: cookies | T25.4, T32.4, T50.4, T52.4 | + real SkyOAuth cookie flows work; − Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion |
+| A18 | S+I | EK, BR | ENV raw capture, OIDC, BR | M2: header spoof · M3: cookies | T25.4, T32.4, T50.4, T52.4 | + real SkyOAuth cookie flows work; − Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion. Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain |
 | A19 | C | H, EK | FX, UC, ENV JWKS cache | M2 | T20.1, T20.2 | + old and new tokens verify through the overlap with no config change; − retired key after overlap, unknown kid |
 | A20 | I | PG, N3 | OIDC outage toggle, PG, OP | M3: outage · M5: switch during outage | T13.7, T30.3, T51.11 | + WIF and operator recovery during the outage; − fresh login fails closed |
 | A21 | S | PG | PG, UC | M2: WIF · M4: human | T12.6, T20.7, T26.5 | + outstanding token verifies offline until exp ≤ 300 s; − new issuance and live check after committed disable |
@@ -133,7 +133,7 @@ Legend:
 | A26 | C | PG | PG, UC | M1a: policy · M2: exchange | T12.8, T21.5 | + omitted scope → explicit defaults; − omitted with no defaults, empty or excessive scope → invalid_scope |
 | A27 | S | BR, N3 | BR, OIDC with live SSO, RN, attacker loopback process | M4 | T40.2, T40.4, T40.8, T52.3 | + explicit confirmation yields a code; − SSO alone, deny, expiry, attacker's own PKCE/loopback: no code. Conditional sub-ID A27.01 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass |
 | A28 | S | PG, EK | K3×2 (PR: two TRm sharing an issuer string) | M2 | T11.7, T11.10, T23.4 | + selected cluster validates; − other cluster's proof, asserting no probing or fallback |
-| A29 | S | PG | PG, proptest with fixed seed | M1a | T10.8, T11.10, T14.8 | + same-issuer and same-name registrations coexist; − each crossed reference |
+| A29 | S | PG | PG, proptest with fixed seed | M1a: registry and references · M2: exchange | T10.8, T11.10, T14.8, T21.3 | + same-issuer and same-name registrations coexist; − each crossed reference at write (M1a); a proof from one tenant's source with another tenant's grant at exchange (M2) |
 | A30 | C | H | FX claim-set vectors per profile | M2: WIF · M3: human_session · M4: human_cli | T12.9, T20.3, T20.4, T32.5, T40.13 | + complete set per profile; − absent, unknown, contradictory, missing revision, subject-prefix exemption attempt |
 | A31 | S | PG | PG, mTLS checker identities, fault injection | M2: WIF · M3: human | T14.3, T26.1, T26.3, T26.5 | + correct checker/action; − each wrong dimension, superseded revision; unavailable → typed unavailable, no positive cache, no redirect |
 | A32 | S | PG | PG, local verifier, OP, barriers | M1a | T13.4, T13.5, T13.6 | + one bootstrap, signed recovery restores; − concurrent or reopened bootstrap, forged IdP admin, revoked key, replayed recovery |
@@ -145,7 +145,7 @@ Legend:
 | A38 | C+S | H, PG | UC, PG, metadata fixture | M1a: storage · M2: metadata and issuance | T10.11, T12.5, T20.1 | + disabled record stored; − device or impersonation not advertised, issuance rejected, capability gain does not activate |
 | A39 | P | H, BR | npm pack, browser bundle check, BR, typecheck | M3 | T33.2, T33.4, T33.8 | + core from the tarball works in the browser; − Node built-in, polyfill, react or connect in the core bundle fails |
 | A40 | S+P | H, BR | vitest fetch spy, BR | M3 | T33.1, T33.6, T33.7 | + same-origin HTTPS with CSRF; − foreign origin, userinfo, http, redirect, option overrides, off-origin health base: no CSRF or cookie sent; no token getter in the API and nothing written to localStorage/sessionStorage/IndexedDB; caller-supplied Authorization/bearer rejected (no mixed auth); no automatic mutation replay after 401 or login |
-| A41 | P | N3 | RN on 3 OSes, examples/rust-cli, mock issuer | M4 | T40.7, T40.9, T40.10, T40.11 | + PKCE/loopback/cancel with minimal and default features; − plaintext fallback, off-origin forwarding, non-loopback redirect |
+| A41 | P | N3 | RN on 3 OSes, examples/rust-cli, mock issuer | M4 | T40.7, T40.9, T40.10, T40.11 | + PKCE/loopback/cancel with minimal and default features; − plaintext fallback, off-origin forwarding, non-loopback redirect, credential or refresh token in logs/`Debug`/error output (redaction) |
 | A42 | C | H, BR, N3 | FX v1, prebuilt consumers, OIDC×2 | M4: fixtures · M5: through switch/rollback | T41.5, T51.5, T51.7 | + every shipped fixture version (v1 in v0.1) passes before and after switch/rollback with unchanged artifacts; − cross-profile credential use |
 | A43 | S | PG, EK | PG, RB | M1a: write · M2: issuance and backend | T14.1, T14.2, T52.6 | + A uses its own audience; − B writes, grants or issues on A's audience, RB tenant mismatch |
 | A44 | C+S | H | FX, UC | M3: human_session · M4: human_cli | T12.9, T20.3, T32.5, T40.13 | + complete human_session and human_cli; − missing discriminator, WIF forged into human shape, wrong route |
@@ -162,15 +162,15 @@ Legend:
 | A55 | C | H | FX, UC | M2: WIF · M3: internal assertion · M4: human_cli | T00.3, T20.8, T32.2, T40.13 | + exact type/profile/ingress pairs; − at+jwt, ID token, internal token on bearer ingress, WIF token with invented client_id |
 | A56 | I+P | PG, EK, BR | PG, ENV, RB, UC, BR | M3 | T14.5, T32.6, T32.12, T33.3 | + owner close releases once, cap change affects new admission only; − foreign or replayed close, retry-budget reset loop, 503 → login |
 | A57 | C+P | PG, N3 | PG, UC, RN, plain OAuth form client | M4 | T40.5, T40.15 | + plain rotation; Rust exact retry ≤ 30 s gets one successor; − consumed replay revokes, added/malformed ID, downgrade, beyond 7 d/24 h |
-| A58 | I | PG, EK | K3, ENV, cert-manager, VAP, ≥2 controllers, UC | M1b: prepare/approve persistence · M3: enforcement | T13.2, T14.9, T31.6, T32.3, T32.4, T50.4 | Sub-IDs A58.01… in the annex (Q1): + every approved, mode-matched path; − every listed stale/wrong-mode/revoked/mismatch/hold case. Conditional sub-ID (ForwardAuth, T32.9): equivalent deployment enforcement |
+| A58 | I | PG, EK | K3, ENV, cert-manager, VAP, ≥2 controllers, UC | M1b: prepare/approve persistence · M3: enforcement | T13.2, T14.9, T31.6, T32.3, T32.4, T50.4 | Sub-IDs A58.01… in the annex (Q1): + every approved, mode-matched path; − every listed stale/wrong-mode/revoked/mismatch/hold case. Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence |
 | A59 | C+S | H, BR, N3 | FX comparison vectors, BR, RN | M4 | T40.2, T40.8, T40.14 | + matching descriptor approves; − each comparison field changed, concurrent malicious request, superseded tab |
 | A60 | S | PG, BR, N3 | OIDC, PG, barriers, BR/RN | M3: browser · M4: native | T30.4, T30.8 | + auto_create creates one zero-privilege principal; − default denies, email merge, disabled replacement, migration hold |
 | A61 | C+S | H, EK | FX digest vectors, ENV | M3 | T32.2, T32.13 | + 4 KiB query → fixed 43-char binding; − each byte-level variant, rewrite or rematch; logs redacted |
 | A62 | S | PG | UC, PG, REP | M3 | T32.14, T50.3, T52.5 | Internal signer group only (Q5). + rotation and clean promotion; − valid unpromoted-standby signature denies and alerts, invalid-signature kid spoof raises no verified alert, disabled active key with no standby fails closed |
 | A63 | S | PG | PG, OIDC | M1b: admin · M3: sessions · M4: refresh | T13.9, T30.9, T52.5 | + credential-only rotation keeps epochs, sessions and refresh; − semantic change via the rotation path rejects |
-| A64 | I | PG, N3 | OP on 3 OSes, Linux service, SoftHSM2 | M1a | T13.3, T13.5, T13.7, T13.10 | + remote scoped write against the Linux service; offline recovery via the three-job chain (Q6); − key export into the pod, wrong-instance challenge, unsupported adapter fails explicitly |
+| A64 | I | H, PG, N3 | OP on 3 OSes, Linux service, SoftHSM2 | M1a | T13.3, T13.5, T13.7, T13.10 | + remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6); − key export into the pod, wrong-instance challenge, expired challenge at the TTL boundary (hermetic), unsupported adapter fails explicitly |
 
-Counts by first stage: M1a 20 · M1b 5 · M2 17 · M3 13 · M4 7 · M5 2. Counts by final stage: M1a 5 · M1b 2 · M2 20 · M3 17 · M4 12 · M5 8. 33 rows have more than one stage. All eight M5 stages belong to T51: A14 (T51.5, T51.10), A15, A16, A17, A20, A34, A35 and A42. T52 is the release-time audit: it re-runs every S row against the deployed T50 topology.
+Counts by first stage: M1a 20 · M1b 5 · M2 17 · M3 13 · M4 7 · M5 2. Counts by final stage: M1a 4 · M1b 2 · M2 21 · M3 16 · M4 13 · M5 8. 34 rows have more than one stage. All 8 M5 stages belong to T51: A14 (T51.5, T51.10), A15, A16, A17, A20, A34, A35 and A42. T52 is the security conformance task group (T52.1–T52.8). The §9 DAG feeds it the deployed T50 topology, but the spec does not say that every S row is re-run there; which S-row tests also run against the deployed topology is for the T52 owner to register as M5 stages.
 
 **Stages are separate evidence.** Each stage has its own tests and its own result, and the gate of its milestone needs that stage passed. For example, A12's M2 stage is the bearer expiry and fresh-token reconnect of T26.6 and must pass at the M2 gate. A12 as a whole stays open until its M3 and M4 stages pass too. A scenario counts as passed for release only when every stage passes.
 
@@ -182,7 +182,7 @@ Counts by first stage: M1a 20 · M1b 5 · M2 17 · M3 13 · M4 7 · M5 2. Counts
 - vitest/Playwright: the test's own title begins with `A40 pos:` or `A40 neg:`; sub-IDs use `A58.07 neg:`.
 - The polarity token lets the checker confirm both a `pos` and a `neg` test for every implemented stage.
 
-**Registry.** `tests/conformance/scenarios.toml` holds all 64 scenarios and the 10 contracts from M0. Sub-IDs live in an annex file `tests/conformance/subcases.toml` with the same entry shape and a `parent` key. Every array of tables below parses with Python `tomllib`:
+**Registry.** `tests/conformance/scenarios.toml` holds all 64 scenarios and the 10 contracts from M0. Sub-IDs live in an annex file `tests/conformance/subcases.toml` with the same entry shape and a `parent` key. An entry carries every column of the section 2 table, so the table can be rendered from it: `layers` (one or more of `conformance`, `security`, `integration`, `package`; the table shows a combined row such as C+I), `envs`, `harness`, `owners`, `positive`, `negative` and one `stage` per milestone. Legs are declared **per stage**. The example parses with Python `tomllib`:
 
 ```toml
 gates_passed = []    # milestones whose gate PR has merged, e.g. ["M0", "M1a", "M2"]
@@ -190,30 +190,47 @@ gates_passed = []    # milestones whose gate PR has merged, e.g. ["M0", "M1a", "
 [[scenario]]
 id = "A24"
 kind = "scenario"
-layer = "security"
+layers = ["security"]
 envs = ["pg"]
-legs = ["scenarios-pg/x86_64"]
+harness = ["REP", "PG", "barriers"]
 owners = ["T10.9", "T21.6", "T21.8", "T52.7"]
+positive = "exactly one issuance across N replicas and grants"
+negative = "missing jti, replay, store failure"
 matrix_sha256 = "b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443"
 
 [[scenario.stage]]
 milestone = "M1a"
 scope = "consume primitive"
+legs = ["scenarios-pg/x86_64"]
 status = "planned"    # planned | implemented
 tests = []
 
 [[scenario.stage]]
 milestone = "M2"
 scope = "exchange across replicas and grants"
+legs = ["scenarios-pg/x86_64"]
 status = "planned"
-tests = ["cargo:skyoauth-scenarios/pg/security::a24::a24_neg_concurrent_single_use"]
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_pos_single_issuance_across_replicas",
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_concurrent_single_use",
+]
 
 [[scenario]]
 id = "A64"
 kind = "scenario"
-layer = "integration"
-envs = ["pg", "native-3os"]
+layers = ["integration"]
+envs = ["hermetic", "pg", "native-3os"]
+harness = ["OP", "Linux service", "SoftHSM2"]
+owners = ["T13.3", "T13.5", "T13.7", "T13.10"]
+positive = "remote scoped write; offline recovery via the three-job chain"
+negative = "key export into the pod, wrong-instance challenge, expired challenge, unsupported adapter"
+matrix_sha256 = "078ca6a19a34b32f05d2982cb296c71cf5a182e64f2e6589767807fd36eaeec3"
+
+[[scenario.stage]]
+milestone = "M1a"
+scope = "full row"
 legs = [
+  "scenarios-hermetic/x86_64",
   "scenarios-pg/x86_64",
   "operator/ubuntu",
   "operator/macos",
@@ -222,12 +239,6 @@ legs = [
   "recovery-offline/macos",
   "recovery-offline/windows",
 ]
-owners = ["T13.3", "T13.5", "T13.7", "T13.10"]
-matrix_sha256 = "<sha256 of the A64 row>"
-
-[[scenario.stage]]
-milestone = "M1a"
-scope = "full row"
 status = "planned"
 tests = []
 
@@ -235,9 +246,23 @@ tests = []
 id = "C07"
 kind = "contract"
 covered_by = ["A15", "A35"]
+matrix_sha256 = "060bdd6d1424c821626c7f63561da93b9fbf89a6869d9f363128efca9fcbbf0b"
 ```
 
-`matrix_sha256` is the SHA-256 of the scenario's whole `| A24 | … |` line in tasks §8 (the value above is the current one). A sub-ID entry instead hashes the task text it was drafted from. A conditional sub-ID adds `conditional_on = "device-flow"` (or `"back-channel-logout"`, `"forwardauth"`).
+`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole table line, from the leading `|` to the trailing `|`, with no trailing newline: the `| A24 | … |` line in tasks §8 for a scenario, the `| C07 | … |` line in design §2 for a contract. The values above are the current ones. A sub-ID entry instead hashes the task text it was drafted from, by the same rule. A conditional sub-ID adds `conditional_on = "device-flow"` (or `"back-channel-logout"`, `"forwardauth"`).
+
+**Which job produces a test.** A registered test ID names its package and target. The package and target fix the job, and the job fixes the env:
+
+| Test source | Job (legs) | Env |
+| --- | --- | --- |
+| `skyoauth-scenarios`, targets `hermetic` / `pg` / `envoy_k3s` / `live` | `scenarios-hermetic` / `scenarios-pg` / `scenarios-envoy-k3s`, `scenarios-envoy-k3s-nightly` or `migration-rehearsal` / `live-wif` | hermetic / pg / envoy-k3s / live |
+| `clients/rust/tests` | `clients-rust` (Linux x86_64) or `clients-rust-native` (ubuntu, macos, windows) | hermetic or native-3os |
+| `operator/tests` | `operator` (ubuntu, macos, windows); `recovery-offline` chain | native-3os |
+| `clients/typescript/test/*.test.ts` | `typescript` (Node 22, 24) | hermetic |
+| `clients/typescript/test/browser/` | `typescript-browser` (Chromium, Firefox, WebKit) | browser |
+| `service/tests`, `service/src` | `rust` today runs plain `cargo test`, which emits no JUnit | none: not registrable |
+
+Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, which depends on `skyoauth-service`. A `service/` test can be registered only after a nextest job for that package is added; the same rule then applies to it. Every job above that produces registered tests runs cargo-nextest, vitest or Playwright with a JUnit reporter.
 
 **Check: `check-conformance-registry`** (proposed path under `scripts/ci/`, to land after the concurrent `scripts/ci` work merges).
 
@@ -246,19 +271,23 @@ covered_by = ["A15", "A35"]
   - Every `matrix_sha256` still matches, so an edited matrix row fails until the registry entry is reviewed.
   - IDs are monotonic, and owners exist as task IDs in the tasks doc.
   - Every stage milestone is a known milestone, and the last stage of each scenario is its full milestone.
-  - Every `legs` entry names a job and leg from section 1.1, and every env in `envs` has at least one leg.
+  - Every stage `legs` entry names a job and leg from section 1.1, every env in `envs` has at least one leg in some stage, and every leg's job belongs to one of the scenario's `envs`.
   - Every fixture directory not starting with `_` names a registered scenario, and every fixture validates against its schema.
-  - The scenario table in this document equals the table rendered from the registry.
+  - The scenario table in this document equals the table rendered from the registry (`id`, `layers`, `envs`, `harness`, stages, `owners`, `positive`, `negative`).
+  - A waiver file (see the reporter) names an existing commit, test and leg, and its PR was approved by the lead.
 - *Resolution part.* Runs in the code jobs.
-  - Every `implemented` stage lists at least one `pos` and one `neg` test. Each one resolves against `cargo nextest list`, `vitest list --json` or `playwright test --list --reporter=json`, and none is `#[ignore]`d, `.skip`ped or `.fixme`d. A Rust test's target must be one of the scenario's `envs`.
-  - **No orphans.** Every listed test whose name matches a scenario pattern is registered. Rust names are module-qualified, so the check matches the last path segment: `(^|::)a\d\d_`. vitest joins describe titles with ` > `, so it matches `(^|> )A\d\d[ .]`; for Playwright it matches the test's own title with `^A\d\d[ .]`.
-  - **Gates.** For every milestone in `gates_passed`, every stage with that milestone is `implemented`. A gate PR adds its milestone to `gates_passed` only when this holds and the reporter shows those stages passed. M1b and M2 can pass in either order. The gate is mechanical only for the scenario stages; the other gate conditions in tasks §3–§7 still need review.
+  - Every `implemented` stage lists, **for each job among its legs**, at least one `pos` and one `neg` test produced by that job. A declared leg whose job contributes no test fails the check, so a leg such as `recovery-offline/windows` cannot be satisfied by tests from other jobs.
+  - Each listed test resolves against `cargo nextest list`, `vitest list --json` or `playwright test --list --reporter=json`, and none is `#[ignore]`d, `.skip`ped or `.fixme`d.
+  - **Same job.** Each listed test, from any package (`skyoauth-scenarios`, `clients/rust`, `operator/`, the TypeScript package, or `service/` once it has a nextest job), is produced by the job of one of its stage's legs, per the table above.
+  - **No orphans.** Every listed test whose name matches a scenario pattern is registered in some stage's `tests`. This includes every generated fixture case: each case name (`a61_neg_query_reordered_mismatch`, `A61 neg: query_reordered_mismatch`) is listed explicitly, so adding a fixture fails the check until a stage claims it. Rust names are module-qualified, so the check matches the last path segment: `(^|::)a\d\d_`. vitest joins describe titles with ` > `, so it matches `(^|> )A\d\d[ .]`; for Playwright it matches the test's own title with `^A\d\d[ .]`.
+  - **Gates.** For every milestone in `gates_passed`, every stage with that milestone is `implemented`. A gate PR changes only `gates_passed`. A PR cannot show live or post-merge stages passed, because `live-wif` and slow jobs never run on PRs. The gate check therefore reads the reporter result for a named commit on `main`: the gate PR's base commit. It passes only if every stage of that milestone is **passed** there, live and post-merge legs included. M1b and M2 can pass in either order. The gate is mechanical only for the scenario stages; the other gate conditions in tasks §3–§7 still need review.
 - *Result join (reporter).* After the test jobs run, the reporter collects JUnit from every workflow run for the **same commit SHA** (CI, `live-wif`, nightly, release). cargo-nextest (pinned) emits JUnit; plain `cargo test` cannot on stable. vitest and Playwright use their junit reporters. All retries are 0, and a test that passes only on retry counts as **failed**.
+  - **Re-runs never hide a failure.** The reporter reads every attempt of every run for the commit (JUnit artifacts are named with `github.run_attempt`). A failed result for a (test, leg) on a commit is permanent: a later attempt cannot overwrite it. A failure is cleared only by a new commit, or by an audited waiver in `tests/conformance/waivers.toml` naming the commit, test, leg and reason, committed through a PR the lead approved. The reporter reads waivers from the tip of `main` at judging time, because the waived commit's own tree cannot contain its waiver. A leg that produced no result (for example, a cancelled job) is not run, and a later attempt may fill it.
   - For each stage, the reporter checks every pair (test, required leg) where the test belongs to that leg's job. A fixture-driven test is one test per fixture case, so cases are keyed the same way. A pair is **passed** only with a passing JUnit case from that leg. A missing case, skipped or filtered test, skipped job or absent environment makes the pair **not run**. A required leg that never ran is therefore **not run** even if every other leg passed: A64 passing on ubuntu and macos with no windows result is not run, and so is A41 without one of its three OS legs.
   - A stage takes the worst status of its pairs, with precedence **failed > not run > passed**. A scenario takes the worst status of its stages up to the milestone being judged. A parent takes the worst of its required sub-IDs. A contract (`kind = "contract"`) is passed only when every scenario in `covered_by` is passed.
   - `planned` stages are reported as planned and never count as passed.
 - Only **passed** counts. When the docs-only classifier skips the build jobs, the summary reads "runtime conformance: not run (docs-only change)". The `ci-passed` aggregator's `success | skipped` rule satisfies branch protection, but **it is not a conformance signal**. Release gating must read the reporter output, never `ci-passed`.
-- **Release.** The release check requires every non-conditional scenario stage, every required sub-ID, C01–C10 and both libraries to be passed on the release commit. Conditional sub-IDs are required only when a committed release manifest lists their feature as shipped.
+- **Release.** The release check requires every non-conditional scenario stage, every required sub-ID, C01–C10 and both libraries to be passed on the release commit, which must be reachable from `main`. Conditional sub-IDs are required only when the release manifest lists their feature as shipped. The manifest is a committed file owned by the T50/release owner; a change to it needs a PR the lead approved.
 
 ## 4. CI integration per milestone
 
@@ -270,13 +299,13 @@ covered_by = ["A15", "A35"]
 - Servers bind port 0 on loopback. Hermetic jobs need no egress, and every mock issuer is in-process. Cluster/Envoy jobs wait on observed conditions with deadlines, not fixed sleeps.
 - Only the `live-wif` job touches the internet for conformance. The nightly real-Zitadel compatibility job also does, but it is not conformance evidence.
 
-**Live WIF (A01, A02, A36).** Production bindings permit `push` only (T22.4). The live positive therefore comes only from the `push` to `main` run of the commit being judged. A `schedule` or `workflow_dispatch` run has a different `event_name`, and the push-only binding must deny it (A02, T22.5). Those runs supply live **negative** cases. A tag push does carry `event_name: push`, but its `ref` is `refs/tags/…`; the production binding's ref predicate (`refs/heads/main`) must deny it. The release reporter joins the push-to-main run by commit SHA, so a release must be cut from a commit that was pushed to `main`.
+**Live WIF (A01, A02, A36).** Production bindings permit `push` only (T22.4). The live positive therefore comes only from the `push` to `main` run of the commit being judged. A `schedule` or `workflow_dispatch` run has a different `event_name`, and the push-only binding must deny it (A02, T22.5). Those runs supply live **negative** cases. A tag push does carry `event_name: push`, but its `ref` is `refs/tags/…`; the production binding's ref predicate (`refs/heads/main`) must deny it. The release reporter joins the push-to-main run by commit SHA. Releases are therefore cut only from commits on `main` that had a passing `live-wif` push run. The release workflow checks that the release commit is reachable from `main`, and a hotfix lands on `main` first.
 
-**Merge queue.** `ci.yml` has no `merge_group` trigger today. Running slow jobs in a merge queue needs both the repository setting and a `merge_group:` trigger. Until both exist, slow jobs run on PRs (if they fit the budget) or after merge on the push to `main`.
+**Slow jobs and merge queue.** Slow Envoy/k3s jobs are required on PRs if they take about 15 minutes or less. Otherwise they run post-merge on the push to `main`, where the reporter result for that commit gates milestones and release. `ci.yml` has no `merge_group` trigger today. A merge queue needs both the repository setting and a `merge_group:` trigger. Whether to enable one before M3 is a maintainers' repository-setting decision (section 6).
 
 | Milestone | New jobs (Rust jobs keep the x86_64/aarch64 matrix where the bootstrap has it) | Required on PR | Post-merge / nightly / release |
 | --- | --- | --- | --- |
-| M0 | `conformance-registry` (static check, runs even for docs-only changes); fixture schema validation once M0 wire examples land as fixtures. **This is the only M0 deliverable: 64 planned scenarios and 10 planned contracts, 0 implemented.** | yes, via `ci-passed` | — |
+| M0 | `conformance-registry` (static check, runs even for docs-only changes); fixture schema validation once M0 wire examples land as fixtures. **This is the only conformance-harness deliverable in M0: 64 planned scenarios and 10 planned contracts, 0 implemented.** The M0 milestone itself is T00's reviewed contracts and threat model (tasks §9). | yes, via `ci-passed` | — |
 | M1a | `skyoauth-scenarios` member with `scenarios-hermetic` and `scenarios-pg`, plus the `rust` and coverage-alias changes from section 1.2; `operator` matrix ubuntu/macos/windows; `recovery-offline` three-job chain (Q6); registry resolution and reporter | yes | — |
 | M1b | Same jobs extended with the human chain, T13.9 transitions, A46 origin resolution and A58 persistence sub-IDs | yes | — |
 | M2 | Mock GH/TRm in `scenarios-hermetic`/`scenarios-pg`; `clients-rust` (Linux WIF, minimal/default/all features, `cargo package` and consumer); `scenarios-envoy-k3s` (pinned k3s, Envoy Gateway/egctl/Envoy, RB; A36 negatives); `live-wif` (positive from push to `main` only, negatives from schedule/dispatch, never on PRs) | hermetic and PG yes; `scenarios-envoy-k3s` yes if runtime ≤ ~15 min, else post-merge | `live-wif` on push to `main` and nightly; `scenarios-envoy-k3s-nightly` (A54 kubelet rotation) |
@@ -297,6 +326,7 @@ The lead decided these on review. They replace the former open questions Q1–Q1
 5. **Q5 A62** covers the internal signer groups only. Public signer rotation and overlap are A19 and C01.
 6. **Q6 A64: option (a).**
    - Offline recovery runs as three jobs: Linux emits the challenge as an artifact, macOS/Windows (and Linux) sign it with the workstation operator, Linux verifies and applies it.
+   - The M0 contracts set a production default and maximum for the recovery challenge TTL. The chain does not depend on runner latency: service and operator clocks are injected and start from the challenge's `issued_at`, and that clock state is carried between jobs with the artifacts. A hermetic test covers expiry at the TTL boundary, and one same-job Linux run uses real time.
    - Remote writes run a full positive against the Linux service, plus per-OS transport and keystore tests.
    - SoftHSM2/PKCS#11 is automated. Real hardware drills are manual evidence and are never counted as passed.
    - No self-hosted runners or tunnels.
@@ -304,28 +334,38 @@ The lead decided these on review. They replace the former open questions Q1–Q1
 8. **Q8 Test-profile timings are acceptable** if they use the same code path, stay within spec ceilings, never shorten a spec minimum, and are recorded as JUnit properties. A nightly job also runs those cases at production defaults.
 9. **Q9 Coverage.** Integration coverage, and scenario-package coverage generally, is informational.
 10. **Q10 Fixture versions.** No compatibility window is promised. `fixture_version` stays, and a breaking change adds v2 and keeps v1 (section 1.3). A42 and T51.7 require stability through switch/rollback only; v0.1 ships v1.
-11. **Q11 Contracts in the registry: yes.** C01–C10 are registered with `kind = "contract"` and `covered_by`. A contract passes only when every covered scenario passes. The mapping, checked against design §2 and tasks §8:
+11. **Q11 Contracts in the registry: yes.** C01–C10 are registered with `kind = "contract"`, `covered_by` and their own `matrix_sha256`. A contract passes only when every covered scenario passes. The mapping is decided: the corrected draft below plus the lead's additions (C03 +A16, A17, A18; C08 +A14; C10 +A64).
 
-| Contract | Covered by | Change from the lead's draft |
+| Contract | Covered by | Change from the lead's first draft |
 | --- | --- | --- |
 | C01 issuer, discovery/JWKS, signing-key rotation | A19, A14 | A04 moved to C05: A04 rotates an external source's uploaded keyset (T11.9, T24.2), not SkyOAuth's signing key. A14 added because its endpoints include the issuer and discovery URLs, which must not change on a provider switch (T51.10). |
 | C02 native OAuth, WIF exchange, session and library interfaces, generated selectors | A14, A42, A25, A49 | A25 and A49 added: C02 names generated source/grant selectors, which those rows test |
-| C03 audience registrations, IDs, credential profiles, constraint semantics, gateway/backend identity | A30, A44, A55, A37 | A37 added for constraint semantics |
+| C03 audience registrations, IDs, credential profiles, constraint semantics, gateway/backend identity | A30, A44, A55, A37, A16, A17, A18 | A37 added for constraint semantics; A16, A17 (stable IDs and constraints through migration) and A18 (gateway/backend identity) added by the lead |
 | C04 human migration needs no client/backend change; clients, origins, human policies stable | A14, A17, A34 | A34 added: its switch/rollback case requires invalid human state with stable registrations |
 | C05 external source configurations survive | A15, A04 | A04 added (keyset IDs and lifecycle metadata) |
 | C06 bindings, grants, ceilings, scopes, constraints survive; unsupported impersonation unchanged and inactive | A16, A53 | A53 added: it is the unchanged-and-inactive impersonation record |
 | C07 identical WIF outcomes; consumed proofs not reset | A15, A35 | none |
-| C08 issuer distinct from upstream IdPs | A36, A55, A20 | A20 added: WIF keeps working while the human IdP is down |
+| C08 issuer distinct from upstream IdPs | A36, A55, A20, A14 | A20 added: WIF keeps working while the human IdP is down; A14 added by the lead |
 | C09 tenant checks and backend RBAC never bypassed | A13, A43, A01, A08 | A01 and A08 added: both require backend tenant/RBAC denial despite a valid credential |
-| C10 switch separate from policy administration; authority independent of the human IdP | A17, A47, A20, A22, A32, A63 | A20, A22 and A32 added for authority and recovery independent of the IdP; A63 added because semantic provider changes must go through the guarded transition |
+| C10 switch separate from policy administration; authority independent of the human IdP | A17, A47, A20, A22, A32, A63, A64 | A20, A22 and A32 added for authority and recovery independent of the IdP; A63 added because semantic provider changes must go through the guarded transition; A64 added by the lead |
 
-## 6. Remaining questions and risks
+## 6. Answered follow-ups, remaining questions and risks
 
-1. **Spec update for `tests/`.** Tasks §1 and design §10.4 list `operator`, `clients/rust` and `cli` as the new workspace members. Adding `skyoauth-scenarios` at `tests/` needs both specs updated in the same PR. Does the lead accept the package, or should the scenario tests live under `service/tests/` instead?
-2. **Recovery challenge TTL (Q6).** Design §7.2 says only "short-lived". There is no numeric ceiling. The three-job chain must hand a challenge across jobs within its TTL. Which TTL may the test profile use? Under Q8 it may not lengthen a production maximum, and none is specified.
-3. **Slow jobs without a merge queue.** Should `scenarios-envoy-k3s` and the A58 cluster sub-IDs be required on PRs, or run post-merge until the repository enables a merge queue and `ci.yml` gains a `merge_group` trigger?
-4. **Release commits.** The live WIF positive exists only for commits pushed to `main`. Confirm that releases are always cut from such commits.
-5. **Contract mapping.** Section 5 changes the lead's draft in C01 (A04 moved to C05) and adds rows to C02–C06 and C08–C10. Please confirm.
-6. **Conditional placement.** Device flow is placed under A27 (A27.01) and ForwardAuth under A58. Is A58 the right parent for T32.9, or should it sit under A18? Who owns the release manifest that lists shipped optional features?
-7. **Risk: ci.yml coordination.** The `rust` job and the `coverage` alias change in section 1.2 must land with the first M1a scenario PR, and another agent is editing `ci.yml` now. Land the registry check (M0) first.
-8. **Risk: docs-only blind spot.** Editing the §8 matrix is a docs-only change that today skips all build jobs. The static registry check must run outside the `changes` gate, or matrix drift will merge unnoticed.
+Answered by the lead in the second review round:
+
+1. **`tests/` as its own workspace member: accepted.** The first M1a scenario PR updates the layout in tasks §1 and design §10.4.
+2. **Recovery challenge TTL:** the M0 contracts set a production default and maximum. The test chain is described under Q6 in section 5.
+3. **Slow jobs:** required on PRs if about 15 minutes or less, otherwise post-merge on the push to `main` (section 4).
+4. **Release commits:** only commits on `main` with a passing `live-wif` push run; the release workflow checks reachability from `main`; hotfixes land on `main` first (section 4).
+5. **Contract mapping:** decided (section 5, Q11).
+6. **ForwardAuth (T32.9):** two conditional sub-IDs, one under A58 (deployment-enforcer equivalence) and one under A18 (credential containment and trusted forwarded chain). Device flow stays under A27 (A27.01). The release manifest is a committed file owned by the T50/release owner; changes need a PR the lead approved.
+
+Still open:
+
+1. **Merge queue before M3** (maintainers): enabling a merge queue needs a repository setting and a `merge_group:` trigger in `ci.yml`. Until then, slow jobs that miss the PR budget gate only after merge.
+2. **Service-side conformance evidence:** the `rust` job runs plain `cargo test`, which emits no JUnit, so `service/` tests cannot be registered (section 3). Is replaying service-consumer fixtures from `skyoauth-scenarios` acceptable, or should the `rust` job move to nextest?
+
+Risks:
+
+1. **ci.yml coordination.** The `rust` job and the `coverage` alias change in section 1.2 must land with the first M1a scenario PR, and another agent is editing `ci.yml` now. Land the registry check (M0) first.
+2. **Docs-only blind spot.** Editing the §8 matrix is a docs-only change that today skips all build jobs. The static registry check must run outside the `changes` gate, or matrix drift will merge unnoticed.
