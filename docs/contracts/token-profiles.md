@@ -99,7 +99,7 @@ Every SkyOAuth credential carries these claims (design §6).
 | `aud`                      | JSON string                           | Exactly one registered audience, as a string, equal to the verifier's own audience (TP-032)    | design §6, §5.7; lead decision         |
 | `iat`                      | NumericDate                           | Required                                                                                       | design §6                              |
 | `nbf`                      | NumericDate                           | Required                                                                                       | design §6                              |
-| `exp`                      | NumericDate                           | Required; bounded TTL (§7) and bounded skew (OQ-TP-10)                                         | design §6                              |
+| `exp`                      | NumericDate                           | Required; bounded TTL (§7) and bounded skew (TP-060)                                           | design §6                              |
 | `jti`                      | String                                | Required; unique per issued credential, an issuer property (TP-033); not a verifier replay key | design §6; tasks T20.2                 |
 | `scope`                    | Space-delimited string                | Required and explicit; canonical on issue, a set on verify (TP-034)                            | design §5.7, §6; lead decision         |
 | `skyoauth_tenant`          | Tenant ID                             | Required; signed                                                                               | design §6                              |
@@ -226,8 +226,11 @@ lifetimes and their interactions.
 | `human_session` assertion | 30 s; never beyond session, authentication or applicable route-observation deadlines | design §6; tasks T32.2 |
 
 - **TP-060** A verifier MUST reject a credential whose lifetime exceeds its
-  profile maximum or whose time claims fall outside the bounded skew. (design
-  §6)
+  profile maximum or whose time claims fall outside the bounded skew. The
+  allowed clock skew is instance-configurable with a default of 60 s and a
+  ceiling of 120 s; a configured value above 120 s MUST be rejected. The same
+  configured skew applies wherever this contract adds skew, including TP-061.
+  (design §6; skew values: lead decision, OQ-TP-10)
 - **TP-061** Retired public verification keys MUST be retained through the
   maximum issued TTL plus skew. Retired internal verification keys MUST be
   retained for the 30-second assertion lifetime plus skew. Compromised or
@@ -390,8 +393,12 @@ follow-up. All other items are not resolved by this contract.
   `PolicyRevision` that snapshots the `HumanAccessPolicy`. Original question:
   whether the claim holds the `PolicyRevision` ID or the `HumanAccessPolicy`
   revision number.
-- **OQ-TP-10 — Clock skew.** "Bounded TTL/skew" is required, but the maximum
-  allowed clock skew is not given.
+- **OQ-TP-10 — Clock skew.** **Decided** (lead decision, 2026-11-19): the
+  allowed clock skew is instance-configurable, default 60 s, ceiling 120 s
+  (TP-060). This is the same decision as OQ-LT-16 in the T00.6 lifetimes
+  contract (`lifetimes.md`, PR #10). Follow-up: design §6 needs the values.
+  Original question: "bounded TTL/skew" is required, but the maximum allowed
+  clock skew is not given.
 - **OQ-TP-11 — Assertion header.** **Decided** (lead decision, 2026-11-19):
   `X-SkyOAuth-Assertion` (same decision as OQ-API-10; see
   [public-api.md API-061](public-api.md#4-private-gateway-endpoints)).

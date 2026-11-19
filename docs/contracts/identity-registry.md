@@ -402,7 +402,7 @@ Other allowlists in the registry, each with the rule its source states:
 | Wrong tenant or audience at live check                            | Deny                                  | design §6.1                |
 | Audience with no active same-tenant assignment                    | Refuse at write and at issuance       | design §7.1                |
 | Canonical resource tenant mapping                                 | Deny                                  | design §6, §7.1            |
-| Human with no backend membership                                  | Deny                                  | design §6                  |
+| Any principal without backend permission for the resource         | Deny                                  | design §2 C09, §6          |
 | Route, method, policy, assignment or profile for a cookie request | Deny; no fallback to a broader route  | design §4.1                |
 | Application origin, or spoofed Host or Forwarded value            | Deny before redirect                  | design §4                  |
 | OAuth client                                                      | Reject                                | design §5.2.2              |

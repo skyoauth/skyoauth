@@ -34,7 +34,8 @@ not implement any of them.
   as "Withdrawn" with a pointer to the canonical requirement, so that the ID
   is never reused.
 - Tables write every path in full; the tasks matrix's grouped-path shorthand
-  is not used (OQ-API-11).
+  is not used. A row expanded from a grouped tasks-matrix entry names the
+  reading it uses, sibling or child (OQ-API-11).
 
 ## Changing a contract
 
