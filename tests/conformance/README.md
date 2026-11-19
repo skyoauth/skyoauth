@@ -1,79 +1,83 @@
 # Conformance registry
 
-This directory holds the conformance scenario registry proposed in [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**. There are no runtime tests, fixtures, schemas or waivers here yet. Nothing here is wired into CI: the `check-conformance-registry` check and its `conformance-registry` CI job land in the follow-up PR (layout §3 and the M0 row of §4).
+This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**. There are no runtime tests, fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job).
 
 | File | What it holds |
 | --- | --- |
-| `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`. |
+| `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`. **The source of the layout §2 scenario table.** |
 | `subcases.toml` | Sub-IDs as `[[subcase]]` entries (`kind = "subcase"`, with `parent`). Today it holds the four conditional sub-IDs that layout §2 names; each carries `conditional_on` and `table_text`. |
-| [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Generates both files from the specs and checks them with `--check`. Node 20 or later, no dependencies. |
-| [`scripts/ci/gen-conformance-registry.test.mjs`](../../scripts/ci/gen-conformance-registry.test.mjs) | Self-test of the generator (`node:test`). |
+| `waivers.toml` | Optional; absent today. Flake waivers (format below). |
+| `fixtures/`, `schema/` | Absent today. Layout §1.3. |
+| [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Rewrites the derived fields of both files and renders the layout §2 table from them; `--check` verifies. Node 20 or later, no dependencies. |
+| [`scripts/ci/check-conformance-registry.mjs`](../../scripts/ci/check-conformance-registry.mjs) | The static registry check (layout §3). Needs `smol-toml` from [`scripts/ci/package.json`](../../scripts/ci/package.json). |
+| `scripts/ci/*.test.mjs` | Self-tests of both scripts (`node:test`). |
 
 ## Generate and check
 
 ```sh
-node scripts/ci/gen-conformance-registry.mjs           # rewrite both files from the specs
-node scripts/ci/gen-conformance-registry.mjs --check   # exit 1 if either file differs from regenerated output
+node scripts/ci/gen-conformance-registry.mjs           # rewrite derived fields and the layout §2 table
+node scripts/ci/gen-conformance-registry.mjs --check   # exit 1 if any of the three files differs from regenerated output
 node --test scripts/ci/gen-conformance-registry.test.mjs
+
+(cd scripts/ci && npm ci --ignore-scripts)              # once: installs the pinned smol-toml
+node scripts/ci/check-conformance-registry.mjs          # add --require-history to fail without git history
+node --test scripts/ci/check-conformance-registry.test.mjs
 ```
 
-The generator is deterministic and idempotent: a second run changes nothing. `--check` names each differing entry and field, for example `A24: matrix_sha256 is …, but its spec line hashes to …` after the tasks §8 A24 row is edited.
+CI runs all four commands in the `conformance-registry` job, which `CI passed` requires to pass (a skip does not count). The job checks out the full history, because the waiver rule needs `origin/main`.
 
-Both modes also run these checks and, on any failure, exit 1 and write nothing:
+## Source of truth
 
-- The layout §2 scenario table, rendered back from the registry, must equal the committed table, so the registry can always reproduce it.
-- `subcases.toml` must hold exactly the conditional sub-IDs that layout §2 names, with the parent, feature and task named there. They are numbered .90–.99. A required (non-conditional) sub-ID need not be named in §2. It is allowed only inside the annex range that its parent's §2 note declares, and today only A58 declares one (`A58.01–A58.89`).
-- Neither file may repeat an ID or a stage milestone within an entry.
-- Hand-authored values must have the right type and allowed values:
-  - `gates_passed` is a list of distinct milestones.
-  - Each stage has a string `scope`, a non-empty list of distinct `legs`, a known `status` and a list of `tests`.
-  - A subcase's `layers` and `envs` are known values, and its stages are in milestone order.
-  - `\u`/`\U` escapes are valid Unicode scalar values.
+`scenarios.toml` is authoritative for every column of the layout §2 scenario table, and `subcases.toml` for the conditional sub-ID sentences at the end of a row. The generator renders the table and the "Counts by first stage …" sentences after it into `docs/testing/conformance-layout.md`. It never parses the table back. To change a row, edit its registry entry and run the generator; a hand edit of the table is overwritten by the generator and fails `--check` and the registry check.
 
-  These errors name the file and line.
-- Every leg must be a leg string from the layout §1.1 **Leg strings** column.
-- The specs must have no missing, duplicate or out-of-order rows, and no unknown owner, layer or env. Every contract must have a mapping.
-
-Today the layout §2 table is the source and the registry is derived from it. Layout §2 says that once this file lands the direction flips: the registry becomes the single source and the check renders the table from it. That switch belongs to the follow-up PR.
-
-## Where each field comes from
-
-Fields are either **derived**, which means the generator rewrites them on every run, or **hand-authored**, which means the generator keeps the committed value.
+IDs and hashes are still derived from the specs: the tasks §8 rows decide which scenarios exist and in what order, the design §2 rows which contracts exist. A tasks §8 row without a registry entry, or an entry without a row, is an error, so a new scenario needs a hand-written entry in the same PR as its row.
 
 | Entry group | Field | Source |
 | --- | --- | --- |
-| Scenarios A01–A64 | `id`, `matrix_sha256` | Row `\| Axx \| … \|` of tasks §8 ([docs/skyoauth-tasks.md](../../docs/skyoauth-tasks.md)), one entry per row in row order |
-| | `layers`, `envs`, `harness`, `owners`, `note`, `positive`, `negative`, and each stage's `milestone` and `scope` | Row `\| Axx \| … \|` of the layout §2 scenario map ([docs/testing/conformance-layout.md](../../docs/testing/conformance-layout.md)) |
-| | stage `legs`, `status`, `tests` | Hand-authored. A stage that has no committed legs gets the generator's provisional default legs (below). |
-| Contracts C01–C10 | `id`, `matrix_sha256` | Row `\| Cnn \| … \|` of design §2 ([docs/skyoauth-design.md](../../docs/skyoauth-design.md)) |
-| | `covered_by` | Row `\| Cnn … \|` of the "Covered by" table in layout §5, decision Q11, in table order |
-| Subcases | `matrix_sha256` | The task line of the subcase's first owner (below) |
-| | every other field | Hand-authored. For a conditional sub-ID, `parent`, `conditional_on`, the first owner and `table_text` must match the sentence that §2 shows. A required sub-ID must lie in its parent's declared annex range. |
+| Scenarios A01–A64 | entry order, `matrix_sha256` | Derived from row `\| Axx \| … \|` of tasks §8 ([docs/skyoauth-tasks.md](../../docs/skyoauth-tasks.md)) |
+| | `layers`, `envs`, `harness`, `owners`, `note`, `positive`, `negative`, and every stage field | Hand-authored. A stage without a `legs` key gets the provisional default legs (below); a missing `status` is `planned` and missing `tests` are `[]`. |
+| Contracts C01–C10 | `id`, `matrix_sha256` | Derived from row `\| Cnn \| … \|` of design §2 ([docs/skyoauth-design.md](../../docs/skyoauth-design.md)) |
+| | `covered_by` | Derived from the "Covered by" table in layout §5, decision Q11 |
+| Subcases | `matrix_sha256` | Derived from the task line of the subcase's first owner (below) |
+| | every other field | Hand-authored |
 | File | `gates_passed` | Hand-authored. A gate PR changes it (layout §3). |
 | File | comments | Generated; hand-written comments are dropped |
+| Layout §2 | the scenario table and its counts sentences | Rendered from the registry |
 
-### Layout §2 columns
+### How a row is rendered
 
 | Column | Registry field | Rule |
 | --- | --- | --- |
 | ID | `id` | |
-| Layer | `layers` | `C`, `S`, `I`, `P` → `conformance`, `security`, `integration`, `package`, kept in the order the cell joins them with `+` |
-| Env | `envs` | Codes from the layout §1.1 **Code** column (`H`, `PG`, `EK`, `BR`, `N3`, `LV`) → env names, split on `, ` |
-| Harness | `harness` | Split on `, ` outside parentheses and backticks |
-| Stages | `[[scenario.stage]]` `milestone`, `scope` | The cell is split on ` · `, and each part is `Mx: scope`. A one-stage cell holds only `Mx`, and its scope is the fixed text `full row`, as in the layout §3 A64 example. |
-| Owners | `owners` | The cell is split on `, `. Each owner must be a `**Txx.y**` task in tasks.md. |
-| + / − required | `note`, `positive`, `negative`, plus each conditional sub-ID's `table_text` | The cell is `[note + " "] + "+ " + positive + "; − " + negative`, followed by `". " + table_text` for each conditional sub-ID of the row, in ID order. `note` is text shown before the `+`; it is used only by A58 and A62 and is omitted when empty. The trailing sentence is rendered from `subcases.toml`: today that is A18, A27, A33 and A58. |
+| Layer | `layers` | `conformance`, `security`, `integration`, `package` → `C`, `S`, `I`, `P`, joined with `+` in list order |
+| Env | `envs` | Env names → the layout §1.1 **Code** column (`H`, `PG`, `EK`, `BR`, `N3`, `LV`), joined with `, ` |
+| Harness | `harness` | Joined with `, ` |
+| Stages | `[[scenario.stage]]` `milestone`, `scope` | `Mx: scope` parts joined with ` · `. A one-stage entry, whose scope is the fixed text `full row`, shows only `Mx`. |
+| Owners | `owners` | Joined with `, ` |
+| + / − required | `note`, `positive`, `negative`, plus each conditional sub-ID's `table_text` | `[note + " "] + "+ " + positive + "; − " + negative`, followed by `". " + table_text` for each conditional sub-ID of the row, in ID order |
+
+Every text field is a table cell, so it holds no `|` and no line break.
 
 ### Hash rule
 
-`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole source line, from its first to its last character, with no trailing newline (layout §3). For a scenario the source line is its tasks §8 table line, and for a contract it is its design §2 table line. Both run from the leading `|` to the trailing `|`. A sub-ID hashes "the task text it was drafted from" (layout §3). Here that is the whole `- [ ] **Txx.y** …` bullet line in tasks.md of the subcase's first owner, which is the task that its §2 sentence names. Each subcase carries a generated comment that quotes the line. To recompute one by hand:
+`matrix_sha256` is the SHA-256 of the UTF-8 bytes of the entry's whole source line, from its first to its last character, with no trailing newline (layout §3). For a scenario the source line is its tasks §8 table line, and for a contract it is its design §2 table line. A sub-ID hashes the whole `- [ ] **Txx.y** …` bullet line in tasks.md of its first owner. To recompute one by hand:
 
 ```sh
 grep -m1 '^| A24 |' docs/skyoauth-tasks.md | tr -d '\n' | sha256sum
 grep -m1 -F -- '- [ ] **T40.6** ' docs/skyoauth-tasks.md | tr -d '\n' | sha256sum
 ```
 
-An edited spec line changes its hash, so `--check` fails until the generator is re-run. The reviewer then confirms that the entry still matches the row.
+An edited spec line changes its hash, so `--check` and the registry check fail until the generator is re-run. The reviewer then confirms that the entry still matches the row.
+
+### Implemented stages
+
+Status is keyed by the stage's (id, milestone, scope, spec row), not by its position. A stage with `status = "implemented"` must list its `tests` and carry
+
+```toml
+implemented_sha256 = "<SHA-256 of id, milestone, scope and matrix_sha256 joined with newlines>"
+```
+
+for example `printf '%s\n%s\n%s\n%s' A24 M1a 'consume primitive' "$matrix_sha256" | sha256sum`. A `planned` stage carries none. When the scope changes, the stage moves to another milestone, or the tasks §8 row changes, the stamp no longer matches and both the generator and the check fail until a reviewer either sets the stage back to `planned` (and removes the stamp) or re-stamps it after confirming that its tests still cover the new scope. The generator never fills the stamp itself. Stages are never re-keyed or dropped, so a stage that moves milestone keeps its `tests`.
 
 ### Subcases
 
@@ -84,22 +88,60 @@ An edited spec line changes its hash, so `--check` fails until the generator is 
 | A33.90 | A33 | `back-channel-logout` | "Conditional sub-ID A33.90 (back-channel logout, T30.6): verified sid targeting" | T30.6 |
 | A58.90 | A58 | `forwardauth` | "Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence" | T32.9 |
 
-Sub-IDs are numbered so the two kinds never collide (layout §3, §5 Q1). Conditional sub-IDs use .90–.99. Required sub-IDs use .01–.89, inside the annex range the parent's §2 note declares. A58's note declares `A58.01–A58.89` for the required sub-IDs that the T32.3 owner drafts. Those are not drafted yet, so they are not here.
+Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, inside the annex range that the parent's `note` declares; today only A58 declares one (`A58.01–A58.89`), and a declared range must itself lie within .01–.89. The T32.3 owner drafts A58's required sub-IDs; none exist yet.
 
-A conditional sub-ID that §2 names with a number must exist under that number. An unnumbered one, the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task. A conditional entry that §2 does not name fails the check. A required sub-ID has neither `conditional_on` nor `table_text`, and need not be named in §2.
+`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
 
-A subcase's `layers`, `envs`, `harness` and stage `legs` copy its parent's stage at the subcase's milestone, which is the milestone of the owning task's group. The layout doc does not specify them.
+## The registry check
+
+`node scripts/ci/check-conformance-registry.mjs` implements the static part of layout §3. Each error names its rule and, where it can, the file and line:
+
+| Rule | Checks |
+| --- | --- |
+| `toml` | Every registry file parses with smol-toml **and** with the generator's subset reader, and both return the same data. smol-toml 1.9.1 silently rolls an impossible date such as `2026-02-30` over to March; the subset reader rejects it, as Python `tomllib` does. |
+| `fields` | Known keys only, with the right types; the files exist. |
+| `ids` | Tasks §8 A rows equal the registry scenario IDs, design §2 C rows equal the contract IDs: no gaps, duplicates or extras. |
+| `order` | Scenario, contract and subcase IDs increase in file order. |
+| `hash` | Every `matrix_sha256` matches its source line. |
+| `owners` | Every owner is a task in tasks.md. |
+| `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
+| `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, no leg repeats in a stage, and every env has a leg. |
+| `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
+| `subcases` | The sub-ID rules above. |
+| `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
+| `waivers` | The waiver format below. |
+
+The generator reports the same spec and registry errors; the check adds `toml`, `fixtures`, `waivers` and line numbers, and is what CI gates on.
+
+### Waivers
+
+`tests/conformance/waivers.toml` is optional. Each flake waiver is one `[[waiver]]` table with every field:
+
+```toml
+[[waiver]]
+commit = "0123456789abcdef0123456789abcdef01234567"   # 40-hex SHA of a commit on main
+test = "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_concurrent_single_use"   # in some stage's tests
+leg = "scenarios-pg/x86_64"                            # a leg of a stage that lists the test
+run_id = 12345678901                                   # positive integer
+run_attempt = 1                                        # positive integer
+reason = "PostgreSQL service container lost mid-test; runner fault, not product behaviour"
+expires = 2026-12-31                                   # a TOML local date, not a string
+```
+
+The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays, inline tables, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI, which makes it an error. Expiry against the current date and the reporter's use of waivers are not part of the static check.
 
 ## Legs
 
-Every leg is a leg string from the **Leg strings** column of layout §1.1: `job/leg`, or the bare job name for a single-leg job (`bundle-check`, `scenarios-envoy-k3s-nightly`, `migration-rehearsal`, `deployed-topology-audit`, `live-wif`). The generator reads that column and rejects:
+Every leg is a leg string from the **Leg strings** column of layout §1.1: `job/leg`, or the bare job name for a single-leg job (`bundle-check`, `scenarios-envoy-k3s-nightly`, `migration-rehearsal`, `deployed-topology-audit`, `live-wif-push`, `live-wif-negative`). The generator reads that column and rejects:
 
 - an unknown leg;
 - a leg whose env is not one of the entry's `envs`;
 - a leg whose job does not exist yet at the stage's milestone;
 - an env that has no leg in any stage.
 
-Each job's first milestone is the `JOB_FROM` table in the generator, taken from layout §1.1 and §4. A job in the column without an entry there is an error. The planned split of `live-wif` into a push leg and a negative leg is not registered yet.
+Each job's first milestone is the `JOB_FROM` table in the generator, taken from layout §1.1 and §4. A job in the column without an entry there is an error.
+
+The live WIF job is split in two (layout §1.1, §4): `live-wif-push` runs on push to `main` (A01's and A36's live positive, plus a wrong-audience negative), and `live-wif-negative` runs on schedule and dispatch (A02's denial of a schedule or dispatch token, plus a positive control). A01 and A36 use `live-wif-push`; A02 uses `live-wif-negative`.
 
 **Legs are provisional.** The PR that implements a stage must confirm its legs and correct them in the same PR. The committed legs are the generator's defaults, with these trims and additions decided on review:
 
@@ -118,11 +160,9 @@ The default legs are used only when a stage has none committed. For each env of 
 | envoy-k3s | `scenarios-envoy-k3s` (x86_64) from M2 | M5 stages: `migration-rehearsal`. A54 adds `scenarios-envoy-k3s-nightly`. |
 | browser | `typescript-browser` (chromium, firefox, webkit) from M3 | |
 | native-3os | `clients-rust-native` (ubuntu, macos, windows) from M4 | Rows whose harness has `OP`: `operator` from M1a. A64: `operator` and `recovery-offline` (§5 Q6). |
-| live | `live-wif` from M2 | |
+| live | `live-wif-push` from M2 | A02: `live-wif-negative`. |
 
-## Not in this PR
+## Not here yet
 
-- Runtime tests, fixtures (`fixtures/`), fixture schemas (`schema/`) and `waivers.toml`.
-- The `check-conformance-registry` static and resolution checks, the reporter, and the CI job that runs `--check` on every event, docs-only changes included. These come in the follow-up PR.
-- The `live-wif` push and negative leg split.
-- `.github/CODEOWNERS` naming the lead as owner of `scenarios.toml`, `subcases.toml`, `waivers.toml` and the release manifest (layout §3 "Who approves" and §6). That is a pending follow-up and is not added here.
+- Runtime tests, fixtures, fixture schemas, `waivers.toml`, the resolution part of `check-conformance-registry` and the reporter.
+- **PENDING FOLLOW-UP: CODEOWNERS.** Layout §3 "Who approves" plans a `.github/CODEOWNERS` file that names the lead as owner of `tests/conformance/waivers.toml`, `tests/conformance/scenarios.toml`, `tests/conformance/subcases.toml` and the release manifest, together with "Require review from Code Owners" in the branch protection of `main`. It is not added here: it needs the lead's real GitHub handle and the maintainers' decision on the branch-protection setting (layout §6). Until then, no check enforces who approved a registry or waiver change.

@@ -76,6 +76,50 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/docs-check.test.mjs
 
+  # Static part of the conformance registry check
+  # (docs/testing/conformance-layout.md §3): tests/conformance against tasks
+  # §8, design §2 and the layout §2 table, plus fixtures and waivers. Like
+  # docs-check it runs for every change, so it does not need `changes`. The
+  # full history (fetch-depth: 0, which also fetches origin/main) lets the
+  # check confirm that each waiver's commit is on main; --require-history
+  # turns a missing history into an error instead of a note. smol-toml comes
+  # from the scripts/ci lockfile, installed without lifecycle scripts.
+  conformance-registry:
+    name: Conformance registry
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install check dependencies
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
+
+      - name: Check the registry
+        run: node scripts/ci/check-conformance-registry.mjs --require-history
+
+      - name: Check the generated registry files
+        if: success() || failure()
+        run: node scripts/ci/gen-conformance-registry.mjs --check
+
+      - name: Self-test the registry check
+        if: success() || failure()
+        run: node --test scripts/ci/check-conformance-registry.test.mjs
+
+      - name: Self-test the generator
+        if: success() || failure()
+        run: node --test scripts/ci/gen-conformance-registry.test.mjs
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes
@@ -423,14 +467,15 @@ jobs:
   # docs-only change satisfies a required check, except a matrix job: it
   # reports under its unexpanded name, so requiring one would never
   # arrive. This job passes when every job it needs passed or was skipped,
-  # except docs-check: it has no condition, so it must have passed; a skip
-  # there would mean it never ran.
+  # except docs-check and conformance-registry: they have no condition, so
+  # they must have passed; a skip there would mean they never ran.
   ci-passed:
     name: CI passed
     if: always()
     needs:
       - changes
       - docs-check
+      - conformance-registry
       - rust
       - rust-coverage
       - service-nextest
@@ -444,10 +489,15 @@ jobs:
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
           DOCS_CHECK: ${{ needs.docs-check.result }}
+          REGISTRY: ${{ needs.conformance-registry.result }}
         run: |
           echo "Job results: $RESULTS"
           if [ "$DOCS_CHECK" != success ]; then
             echo "Docs consistency did not pass: '$DOCS_CHECK'"
+            exit 1
+          fi
+          if [ "$REGISTRY" != success ]; then
+            echo "Conformance registry did not pass: '$REGISTRY'"
             exit 1
           fi
           for result in $RESULTS; do

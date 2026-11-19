@@ -1,0 +1,8 @@
+{
+  "name": "skyoauth-ci-scripts",
+  "private": true,
+  "description": "Dependencies of the CI check scripts in scripts/ci (install with npm ci --ignore-scripts).",
+  "dependencies": {
+    "smol-toml": "1.9.1"
+  }
+}
