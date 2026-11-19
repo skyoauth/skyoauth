@@ -1002,8 +1002,10 @@ later task. All other items are not resolved by this contract.
   Set-Cookie removal (GW-033); the issuer host is not enrolled as an
   `ApplicationOrigin` (GW-034). Still open: per exempt endpoint, which cookies
   and headers are retained beyond those named in the §4.1 table. Design §4
-  and §5.2, T00.5, T32.4 and T40.12 list the exemptions (spec-amendments PR);
-  §1, §4.1 and GW-030, GW-033, GW-034 and GW-036 here match. Original
+  and §5.2, T00.5, T32.4 and T40.12 list the exemptions (#15). The follow-up
+  that #15 recorded here (§1, §4.1, GW-030, GW-033 and GW-034 exempted only
+  the literal `/oauth/callback`) is resolved: they and GW-036 now include each
+  exact registered per-provider issuer callback path. Original
   question: design §4 exempts
   "fixed SkyOAuth authentication/session endpoints" without listing them, and
   whether the issuer host is an enrolled host and whether the non-cookie
@@ -1080,7 +1082,7 @@ later task. All other items are not resolved by this contract.
   `Set-Cookie` removals, the projection and the admission guard apply there,
   and only the exempt endpoints in §4.1 are outside the removals (GW-020,
   GW-027, GW-033, GW-034, GW-035). Design §4 now covers the issuer host and
-  non-exempt SkyOAuth endpoints (spec-amendments PR). Sub-questions (a) and (b) are also Decided (lead
+  non-exempt SkyOAuth endpoints (#15). Sub-questions (a) and (b) are also Decided (lead
   decision, 2026-11-19): (a) the issuer host is the single exception to one
   bundle per `ApplicationOrigin` (GW-115): one instance-level system bundle
   carries its protected scope, projection and observations; (b) an origin
@@ -1092,8 +1094,7 @@ later task. All other items are not resolved by this contract.
   `RouteBundle.kind=issuer_system`, owned and prepared by instance
   `security_admin` and approved by a distinct second `security_admin` or one
   actor under an explicit audited instance policy (GW-116). Design §4.2 and
-  T14.5/T14.9 state these (spec-amendments PR); the tasks §3 schema does not
-  yet show `RouteBundle.kind` or the `RouteControllerIdentity` issuer-host
+  T14.5/T14.9 state these (#15); the tasks §3 schema does not yet show `RouteBundle.kind` or the `RouteControllerIdentity` issuer-host
   scope. Original sub-questions: (a) a route bundle is owned by exactly one
   `ApplicationOrigin` (GW-115) and the issuer host is not one, so which
   approved bundle or enrollment carries the issuer host's protected scope,
