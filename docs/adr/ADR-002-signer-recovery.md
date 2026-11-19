@@ -61,8 +61,18 @@ recovery among the decisions requiring ratification.
      logs every signature to the external sink. It does not re-check
      issuance policy; that residual risk is accepted for v0.1 (OQ-TM-16).
    - Key operations and the standby-use tripwire (item 11) are also emitted
-     to the append-only external sink, at minimum structured logs; the
-     database audit stays authoritative (OQ-TM-12).
+     to the append-only external sink; the database audit stays authoritative
+     (OQ-TM-12). v0.1 requires an operator-configured sink: an append-only,
+     hash-chained JSONL stream forwarded to a configured syslog-over-TLS or
+     OTLP-logs endpoint, set in deployment configuration and validated at
+     startup. Public-signer key enrollment, activation and publication are
+     refused until a sink is configured. Emergency disable and standby
+     promotion are never refused: a sink outage or missing sink raises an
+     alert and a local append-only record, and the operation proceeds; if the
+     sink configuration is removed while keys are published, the instance
+     starts degraded with an alert and disable still works. Sink delivery
+     failures are alerting events (Decided (lead decision, 2026-11-19),
+     OQ-TM-12; tasks Gate M1a, T20.2).
 
 ### Internal assertion signer group
 
@@ -218,9 +228,25 @@ this ADR:
   OQ-ADR002-2.
 - **OQ-TM-12** — audit sink independence. Decided (lead decision,
   2026-11-19): key operations and the standby-use tripwire (item 11) are also
-  emitted to an append-only external sink, at minimum structured logs; the
-  database audit stays authoritative; the sink is chosen by M1a and
-  implemented under T50.6.
+  emitted to an append-only external sink; the database audit stays
+  authoritative. Decided (lead decision, 2026-11-19): v0.1 requires an
+  operator-configured sink: an append-only, hash-chained JSONL stream (one
+  chain per instance) forwarded to a configured syslog-over-TLS or OTLP-logs
+  endpoint. The endpoint, protocol and TLS trust or credential reference are
+  instance deployment configuration, not a tenant secret namespace; the
+  database holds only `audit_sink_config_digest` and `audit_sink_validated_at`,
+  and observed sink health is a metric and health signal, not a revisioned row.
+  "Configured" means the endpoint is set and validated at startup. A
+  configuration change takes effect only on restart and first emits a "sink
+  changed" event to the old sink, plus an audit event. Public-signer key
+  enrollment, activation and publication are refused until a sink is
+  configured. Emergency disable and standby promotion are never refused: a
+  sink outage or missing sink raises an alert and a local append-only record,
+  and the operation proceeds; if the sink configuration is removed while keys
+  are published, the instance starts degraded with an alert and disable still
+  works. Sink delivery failures are alerting events. (item 4;
+  tasks Gate M1a and §3). It is implemented under T50.6. Still open: the sink
+  TLS trust settings and alert routing.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision,
   2026-11-19): a revision-checked, audited operation advances a tenant's
   `auth_generation` without a provider change (see Consequences).

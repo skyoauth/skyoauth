@@ -95,10 +95,12 @@ v0.1 boundary.
 Existing contract questions that touch this ADR:
 
 - **OQ-TM-12** — audit sink. Decided (lead decision, 2026-11-19): security
-  events are also emitted to an append-only external sink; the sink is chosen by
-  M1a and implemented under T50.6.
+  events are also emitted to an append-only external sink: an
+  operator-configured hash-chained JSONL stream forwarded to a syslog-over-TLS
+  or OTLP-logs endpoint (tasks Gate M1a), implemented under T50.6.
 - **OQ-TM-13** — secret references and egress approval. Decided (lead decision,
-  2026-11-19): the amendment must land before M1a.
+  2026-11-19): the amendment had to land before M1a; it has landed with the
+  M1a spec amendments (T11.2, T11.8, T23.2 and the tasks §3 schema).
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19):
   the operation must be specified before M1b and M3.
 

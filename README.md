@@ -48,6 +48,18 @@ GitHub Actions runs on pushes to `main` and on pull requests:
 - Rust: formatting, clippy, tests, doctests and rustdoc on x86_64 and aarch64
   Linux; the coverage gate; and a `cargo check` on the minimum supported Rust
   version declared in `Cargo.toml`.
+- Scenarios on PostgreSQL (`scenarios-pg`): cargo-nextest runs the
+  conformance scenario tests (Rust names `a<NN>_<pos|neg>_…`, see
+  `docs/testing/conformance-layout.md` §3) against a PostgreSQL 17 service
+  container, reached through `SKYOAUTH_IT_DATABASE_URL`, and uploads the
+  JUnit report for the leg `scenarios-pg/x86_64`. While no scenario test
+  exists, the job passes with a warning annotation: no scenario ran, which
+  is not a conformance pass.
+- Service tests (nextest): `cargo nextest run --workspace --all-features
+  --profile ci` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
+  profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
+  report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
+  even when tests fail. nextest skips doctests; the Rust job runs them.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
@@ -62,10 +74,21 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   warning annotations that do not fail the job (locally the latter is an
   info note); ADRs never referenced by ID are one info summary line, listed
   with `--verbose`.
+- Conformance registry also runs on every change, and `CI passed` requires
+  it to pass: `node scripts/ci/check-conformance-registry.mjs` checks
+  `tests/conformance/` (scenario and contract IDs and hashes against the
+  specs, stages, legs, sub-IDs, fixtures and waivers), and confirms that the
+  layout §2 scenario table equals the one rendered from
+  `tests/conformance/scenarios.toml`, which is its source. The job also runs
+  `node scripts/ci/gen-conformance-registry.mjs --check` and both
+  self-tests. Its one dependency, `smol-toml`, is pinned in
+  `scripts/ci/package.json` and installed with `npm ci --ignore-scripts`.
+  See `tests/conformance/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. To protect `main`, require the `CI passed` check: it passes when `Docs
-consistency` passed and every other job passed or was skipped. Dependabot keeps actions, crates and npm
+consistency` and `Conformance registry` passed and every other job passed or
+was skipped. Dependabot keeps actions, crates and npm
 packages up to date.
 
 ## License

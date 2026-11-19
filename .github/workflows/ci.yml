@@ -76,6 +76,50 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/docs-check.test.mjs
 
+  # Static part of the conformance registry check
+  # (docs/testing/conformance-layout.md §3): tests/conformance against tasks
+  # §8, design §2 and the layout §2 table, plus fixtures and waivers. Like
+  # docs-check it runs for every change, so it does not need `changes`. The
+  # full history (fetch-depth: 0, which also fetches origin/main) lets the
+  # check confirm that each waiver's commit is on main; --require-history
+  # turns a missing history into an error instead of a note. smol-toml comes
+  # from the scripts/ci lockfile, installed without lifecycle scripts.
+  conformance-registry:
+    name: Conformance registry
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install check dependencies
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
+
+      - name: Check the registry
+        run: node scripts/ci/check-conformance-registry.mjs --require-history
+
+      - name: Check the generated registry files
+        if: success() || failure()
+        run: node scripts/ci/gen-conformance-registry.mjs --check
+
+      - name: Self-test the registry check
+        if: success() || failure()
+        run: node --test scripts/ci/check-conformance-registry.test.mjs
+
+      - name: Self-test the generator
+        if: success() || failure()
+        run: node --test scripts/ci/gen-conformance-registry.test.mjs
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes
@@ -155,6 +199,44 @@ jobs:
           path: target/coverage/
           if-no-files-found: warn
 
+  # Runs the workspace tests under cargo-nextest with the `ci` profile in
+  # .config/nextest.toml (no retries, no fail-fast) and uploads the JUnit
+  # report, even when tests fail. nextest does not run doctests; the
+  # `rust` job does. The artifact name carries the run attempt so a
+  # re-run never replaces an earlier attempt's report.
+  service-nextest:
+    name: Service tests (nextest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      - name: Run tests
+        run: cargo nextest run --locked --workspace --all-features --profile ci
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: service-nextest-junit-${{ github.run_attempt }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
   msrv:
     name: Minimum supported Rust version
     needs: changes
@@ -171,6 +253,135 @@ jobs:
 
       - name: Check
         run: cargo check --locked --workspace --all-targets --all-features
+
+  # Conformance scenarios on PostgreSQL: env `pg`, leg string
+  # `scenarios-pg/x86_64` (docs/testing/conformance-layout.md §1.1). Tests
+  # reach the database through SKYOAUTH_IT_DATABASE_URL (§1.2); the
+  # official image's user is a superuser, so tests can create template
+  # databases. Only tests named by the Rust convention of §3 run here:
+  # `a<NN>_<pos|neg>_…` or `a<NN>_<SS>_<pos|neg>_…`, matched on the last
+  # path segment of a module-qualified name. The nextest `ci` profile has
+  # retries = 0 and writes JUnit to target/nextest/ci/junit.xml.
+  #
+  # Empty selection: no scenario test exists yet, so the run passes
+  # `--no-tests=warn` instead of nextest's default `fail`, and the next step
+  # turns an empty run into a warning annotation. A green job with that
+  # warning means no scenario ran; the reporter records those stages as
+  # `not run`, never `passed`. When the first `skyoauth-scenarios` test
+  # lands (§1.2), narrow the run to `-p skyoauth-scenarios --test pg` and
+  # drop `--no-tests=warn`, so an empty selection fails from then on.
+  scenarios-pg:
+    name: Scenarios (PostgreSQL, x86_64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SKYOAUTH_CONFORMANCE_LEG: scenarios-pg/x86_64
+      SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+    services:
+      postgres:
+        # postgres:17 (17.12) pinned by its multi-arch index digest.
+        # Dependabot is not configured for this pin; bump it by hand
+        # (docs/testing/conformance-layout.md section 4): take the
+        # multi-arch index digest of the new 17.x tag from Docker Hub and
+        # change tag and digest together. Docker pulls by digest and
+        # ignores the tag, so the check step fails if they disagree.
+        image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+        env:
+          POSTGRES_USER: skyoauth
+          POSTGRES_PASSWORD: skyoauth
+          POSTGRES_DB: skyoauth
+        ports:
+          - 5432:5432
+        # Probe over TCP: the image's init-time server listens on the Unix
+        # socket only, so a socket probe can report ready before the real
+        # server starts.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U skyoauth -d skyoauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      # Proves the service container is reachable from the runner with the
+      # URL the tests use, that it is the pinned major version, and that the
+      # server version matches the image tag (catches a tag bumped without
+      # its digest, or the reverse).
+      - name: Check PostgreSQL is reachable
+        run: |
+          pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
+          version="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version_num')"
+          echo "server_version_num: $version"
+          if [ "${version%????}" != 17 ]; then
+            echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
+            exit 1
+          fi
+          tag="$(sed -n 's/^ *image: postgres:\([0-9.]*\)@sha256:.*/\1/p' .github/workflows/ci.yml)"
+          server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
+          server="${server%% *}"
+          echo "image tag: $tag, server_version: $server"
+          if [ -z "$tag" ] || [ "$tag" != "$server" ]; then
+            echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
+            exit 1
+          fi
+
+      - name: Run scenario tests
+        run: >-
+          cargo nextest run --locked --workspace --all-features --profile ci
+          --no-tests=warn
+          -E 'test(/(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_/)'
+
+      - name: Report scenario count
+        run: |
+          junit=target/nextest/ci/junit.xml
+          count=0
+          if [ -f "$junit" ]; then
+            count="$(sed -n 's/.*<testsuites[^>]* tests="\([0-9]*\)".*/\1/p' "$junit" | head -n 1)"
+            if [ -z "$count" ]; then
+              echo "::error::Cannot read the test count from $junit"
+              exit 1
+            fi
+          fi
+          if [ "$count" -eq 0 ]; then
+            msg="No scenario test ran on $SKYOAUTH_CONFORMANCE_LEG; its stages are not run, not passed."
+            echo "::warning title=No scenario tests::$msg"
+          else
+            msg="$count scenario tests ran on $SKYOAUTH_CONFORMANCE_LEG."
+          fi
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+
+      # The artifact carries the leg string in `leg` next to the JUnit file,
+      # and its name carries the attempt (§3: every attempt is kept).
+      - name: Record the leg
+        if: always()
+        run: |
+          mkdir -p target/nextest/ci
+          printf '%s\n' "$SKYOAUTH_CONFORMANCE_LEG" > target/nextest/ci/leg
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-scenarios-pg-x86_64-attempt-${{ github.run_attempt }}
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/leg
+          if-no-files-found: warn
 
   typescript:
     name: TypeScript lint, test, build (Node ${{ matrix.node }})
@@ -256,17 +467,20 @@ jobs:
   # docs-only change satisfies a required check, except a matrix job: it
   # reports under its unexpanded name, so requiring one would never
   # arrive. This job passes when every job it needs passed or was skipped,
-  # except docs-check: it has no condition, so it must have passed; a skip
-  # there would mean it never ran.
+  # except docs-check and conformance-registry: they have no condition, so
+  # they must have passed; a skip there would mean they never ran.
   ci-passed:
     name: CI passed
     if: always()
     needs:
       - changes
       - docs-check
+      - conformance-registry
       - rust
       - rust-coverage
+      - service-nextest
       - msrv
+      - scenarios-pg
       - typescript
       - typescript-coverage
     runs-on: ubuntu-24.04
@@ -275,10 +489,15 @@ jobs:
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
           DOCS_CHECK: ${{ needs.docs-check.result }}
+          REGISTRY: ${{ needs.conformance-registry.result }}
         run: |
           echo "Job results: $RESULTS"
           if [ "$DOCS_CHECK" != success ]; then
             echo "Docs consistency did not pass: '$DOCS_CHECK'"
+            exit 1
+          fi
+          if [ "$REGISTRY" != success ]; then
+            echo "Conformance registry did not pass: '$REGISTRY'"
             exit 1
           fi
           for result in $RESULTS; do
