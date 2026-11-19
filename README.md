@@ -57,10 +57,11 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   `node scripts/ci/docs-check.mjs` cross-checks fences, HTML comments, task,
   ADR and conformance IDs, Mermaid task DAGs and links in `docs/`, and
   `node --test scripts/ci/docs-check.test.mjs` is its self-test. Errors fail
-  the job. In CI, findings are also annotations; ADR bookkeeping (numbering
-  gaps in the tasks §11 table, ADRs never referenced, ADR files without a
-  table row) shows as warnings that do not fail the job (locally the last
-  two are info notes, listed with `--verbose`).
+  the job. In CI, errors and warnings are also annotations. ADR numbering
+  gaps in the tasks §11 table and ADR files without a table row are
+  warning annotations that do not fail the job (locally the latter is an
+  info note); ADRs never referenced by ID are one info summary line, listed
+  with `--verbose`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. To protect `main`, require the `CI passed` check: it passes when `Docs

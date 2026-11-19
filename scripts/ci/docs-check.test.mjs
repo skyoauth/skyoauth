@@ -759,29 +759,42 @@ describe('command line', () => {
     assert.equal(p.status, 2, p.stdout + p.stderr);
     assert.match(p.stderr, /ENOTDIR/);
   });
-  test('in GitHub Actions, diagnostics and ADR notes are annotations and still exit 0', () => {
-    // ADR-002 is missing from the table (a numbering gap), ADR-003 is never
-    // referenced, and ADR-004 exists only as a file (a missing row).
+  test('ADR notes: gaps and missing rows are warnings in CI, unreferenced ADRs one info line', () => {
+    // ADR-002 is missing from the table (a numbering gap), ADR-003 and
+    // ADR-004 are never referenced, and ADR-004 exists only as a file (a
+    // missing row).
     const tasks = edit(TASKS, '| ADR-002 | Signer', '| ADR-003 | Signer');
     const root = fixture({ 'docs/adr/ADR-004-x.md': '# ADR-004: X\n' }, { tasks: edit(tasks, 'Threat model; see design §3.', 'Threat model; see §3.') });
     const table = lineOf(TASKS, '## 11. ADR decisions');
-    const local = cli(['--root', root, '--verbose']);
+    const row = lineOf(tasks, '| ADR-003 |');
+
+    const local = cli(['--root', root]);
     assert.equal(local.status, 0, local.stdout + local.stderr);
     assert.doesNotMatch(local.stdout, /^::/m);
     assert.match(local.stdout, new RegExp(`^docs/skyoauth-tasks\\.md:${table}: warning \\[adr\\] ADR-002 is missing from the ADR table`, 'm'));
+    assert.match(local.stdout, /^2 ADRs are never referenced by ID; --verbose lists them$/m);
+    assert.doesNotMatch(local.stdout, /never referenced$/m);
+    // The bare-§ note and the missing row are the other info notes.
+    assert.match(local.stdout, /^\(2 info notes; rerun with --verbose to list them\)$/m);
+
+    const verbose = cli(['--root', root, '--verbose']);
+    assert.match(verbose.stdout, new RegExp(`^docs/skyoauth-tasks\\.md:${row}: info \\[adr\\] ADR-003 is defined but never referenced$`, 'm'));
+    assert.match(verbose.stdout, /^docs\/adr\/ADR-004-x\.md:1: info \[adr\] ADR-004 is defined but never referenced$/m);
+    assert.doesNotMatch(verbose.stdout, /ADRs are never referenced by ID/);
 
     const p = cli(['--root', root], { env: { GITHUB_ACTIONS: 'true' } });
     assert.equal(p.status, 0, p.stdout + p.stderr);
     const ann = p.stdout.split('\n').filter((l) => l.startsWith('::'));
     assert.deepEqual(ann, [
       `::warning file=docs/skyoauth-tasks.md,line=${table},title=docs-check [adr]::docs/skyoauth-tasks.md:${table}: warning [adr] ADR-002 is missing from the ADR table (rows run up to ADR-003)`,
-      `::warning file=docs/adr/ADR-004-x.md,line=1,title=docs-check [adr]::docs/adr/ADR-004-x.md:1: info [adr] ADR-004 is defined but never referenced`,
       `::warning file=docs/adr/ADR-004-x.md,line=1,title=docs-check [adr]::docs/adr/ADR-004-x.md:1: info [adr] ADR-004 is defined only by this ADR file, not the tasks §11 table`,
-      `::warning file=docs/skyoauth-tasks.md,line=${lineOf(tasks, '| ADR-003 |')},title=docs-check [adr]::docs/skyoauth-tasks.md:${lineOf(tasks, '| ADR-003 |')}: info [adr] ADR-003 is defined but never referenced`,
     ]);
-    // The bare-§ note is not an ADR note: it stays a counted info line.
-    assert.match(p.stdout, /\(1 info notes; rerun with --verbose to list them\)/);
+    assert.match(p.stdout, /^2 ADRs are never referenced by ID; --verbose lists them$/m);
+    // Only the bare-§ note is left as a counted info line.
+    assert.match(p.stdout, /^\(1 info notes; rerun with --verbose to list them\)$/m);
     assert.match(p.stdout, /\nOK \(1 warning\(s\)\)/);
+    // One unreferenced ADR reads in the singular (the base fixture's ADR-002).
+    assert.match(cli(['--root', fixture()]).stdout, /^1 ADR is never referenced by ID; --verbose lists it$/m);
   });
   test('in GitHub Actions, errors are ::error annotations and exit 1', () => {
     const root = fixture({}, { tasks: edit(TASKS, 'after T00.1–T00.2', 'after T00.1–T00.9') });

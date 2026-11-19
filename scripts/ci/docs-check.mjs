@@ -57,8 +57,10 @@ class Report {
   warn(file, line, check, msg) {
     this.warnings.push({ file, line, check, msg });
   }
-  info(file, line, check, msg) {
-    this.infos.push({ file, line, check, msg });
+  // `tag` marks infos that main() prints specially ('unreferenced-adr',
+  // 'adr-without-row').
+  info(file, line, check, msg, tag) {
+    this.infos.push(tag ? { file, line, check, msg, tag } : { file, line, check, msg });
   }
 }
 
@@ -1004,7 +1006,7 @@ export function checkDocs({ root, parseMermaid = parseFlowchart } = {}) {
     } else {
       adrFileDefs.set(key, { file: f, line: h1 ? h1.line : 1 });
       if (fromTitle) defLines.add(`${f}:${h1.line}:${doc.prose[h1.line - 1].search(/ADR[- ]\d/i) + 1}`);
-      if (!defs.adr.has(key)) report.info(f, h1 ? h1.line : 1, 'adr', `${key} is defined only by this ADR file, not the tasks §11 table`);
+      if (!defs.adr.has(key)) report.info(f, h1 ? h1.line : 1, 'adr', `${key} is defined only by this ADR file, not the tasks §11 table`, 'adr-without-row');
     }
   }
   stats.adrs = new Set([...defs.adr.keys(), ...adrFileDefs.keys()]).size;
@@ -1044,7 +1046,7 @@ export function checkDocs({ root, parseMermaid = parseFlowchart } = {}) {
     }
   }
   for (const [key, d] of [...defs.adr, ...adrFileDefs]) {
-    if (!referenced.adr.has(key)) report.info(d.file, d.line, 'adr', `${key} is defined but never referenced`);
+    if (!referenced.adr.has(key)) report.info(d.file, d.line, 'adr', `${key} is defined but never referenced`, 'unreferenced-adr');
   }
 
   // 5. Mermaid.
@@ -1343,21 +1345,29 @@ async function main(argv) {
   let { infos } = result;
   // In GitHub Actions (GITHUB_ACTIONS=true) errors and warnings are printed
   // as workflow commands, so they become annotations on the run and the pull
-  // request. ADR bookkeeping is deliberately louder there: numbering gaps in
-  // the tasks §11 table are warnings everywhere, but an ADR that is never
-  // referenced, or that only a docs/adr/ file defines (a missing table row),
-  // is an info note locally and a ::warning annotation in CI, so a reviewer
-  // sees it without it failing the job. Only errors fail (exit 1).
+  // request. ADR bookkeeping: numbering gaps in the tasks §11 table are
+  // warnings everywhere; an ADR that only a docs/adr/ file defines (a
+  // missing table row) is an info note locally and a ::warning annotation in
+  // CI, so a reviewer sees it. An ADR that is never referenced by ID is plain
+  // info everywhere, summarised in one line (--verbose lists them), since
+  // most ratification-table ADRs legitimately have no references. Only
+  // errors fail (exit 1).
   const gha = process.env.GITHUB_ACTIONS === 'true';
   const print = (level, d) => console.log(gha ? formatAnnotation(level, d) : formatDiagnostic(level, d));
   for (const d of errors) print('error', d);
   for (const d of warnings) print('warning', d);
   if (gha) {
-    for (const d of infos.filter((x) => x.check === 'adr')) console.log(formatAnnotation('warning', d, 'info'));
-    infos = infos.filter((x) => x.check !== 'adr');
+    for (const d of infos.filter((x) => x.tag === 'adr-without-row')) console.log(formatAnnotation('warning', d, 'info'));
+    infos = infos.filter((x) => x.tag !== 'adr-without-row');
   }
   if (verbose) for (const d of infos) console.log(formatDiagnostic('info', d));
-  else if (infos.length) console.log(`(${infos.length} info notes; rerun with --verbose to list them)`);
+  else {
+    const unreferenced = infos.filter((x) => x.tag === 'unreferenced-adr').length;
+    infos = infos.filter((x) => x.tag !== 'unreferenced-adr');
+    if (unreferenced === 1) console.log('1 ADR is never referenced by ID; --verbose lists it');
+    else if (unreferenced) console.log(`${unreferenced} ADRs are never referenced by ID; --verbose lists them`);
+    if (infos.length) console.log(`(${infos.length} info notes; rerun with --verbose to list them)`);
+  }
   const mermaid = Object.entries(stats.mermaid)
     .filter(([, n]) => n)
     .map(([f, n]) => `${f}: ${n}`)
