@@ -1028,14 +1028,23 @@ later task. All other items are not resolved by this contract.
   (GW-020, GW-027, GW-033, GW-034, GW-035). Follow-up: design §4 scopes the
   removals to "every route to an application backend" and "every
   non-SkyOAuth route"; amend it to cover the issuer host and non-exempt
-  SkyOAuth endpoints. Still open: (a) a route bundle is owned by exactly one
+  SkyOAuth endpoints. Sub-questions (a) and (b) are also Decided (lead
+  decision, 2026-11-19): (a) the issuer host is the single exception to one
+  bundle per `ApplicationOrigin` (GW-115): one instance-level system bundle
+  carries its protected scope, projection and observations; (b) an origin
+  cannot be security-enabled without an enrolled protected scope, so before
+  the M3 controller exists no application origin is gated, and containment
+  applies to the issuer host once the controller is installed. Follow-up:
+  design §4.2 and T14.5/T14.9 state both (spec-amendments PR); the normative
+  text above (GW-115 and the route-bundle term) does not yet name the system
+  bundle. Original sub-questions: (a) a route bundle is owned by exactly one
   `ApplicationOrigin` (GW-115) and the issuer host is not one, so which
   approved bundle or enrollment carries the issuer host's protected scope,
-  projection and observations is not stated; (b) design §4 and §4.2 describe
+  projection and observations was not stated; (b) design §4 and §4.2 describe
   two enrollments, `ApplicationOrigin` ownership and protected-scope
   enrollment, and whether an origin can be registered without an enrolled
   protected scope (for example before the M3 controller is installed), and
-  whether containment applies then, is not stated.
+  whether containment applies then, was not stated.
 - **OQ-GW-13 — Supported exact-mode usages.** The sources require exact mode
   for "supported policy/backend" credentials but do not enumerate which
   policy or backend Secret usages v0.1 supports.
