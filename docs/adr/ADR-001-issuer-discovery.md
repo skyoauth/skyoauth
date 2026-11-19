@@ -95,7 +95,9 @@ Existing contract questions that touch this ADR:
   A19 requires independent issuer-key rotation. Decided (lead decision,
   2026-11-19) by [threat model](../threat-model.md) OQ-TM-10: an admin
   endpoint for public-key emergency disable and rotation is added, with a
-  prepublished standby and a bounded JWKS cache max-age (ADR-002).
+  prepublished standby and a bounded JWKS cache max-age (ADR-002 item 4). The
+  public-api contract entry still reads open; the contracts follow-up PR must
+  update it.
 - **OQ-TP-2** — `iss` of internal assertions. Decided (lead decision,
   2026-11-19): the canonical issuer (TP-031).
 - **OQ-TP-3** — the allowed JWS algorithm set is not fixed (open).

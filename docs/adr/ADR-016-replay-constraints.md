@@ -45,10 +45,20 @@ that verifiers and live checks know exactly which policy authorized it
    protection: `environment` is an additional ANDed predicate, and
    self-hosted runners shared across trust domains are out of scope and
    residual risk ([threat model](../threat-model.md) OQ-TM-2).
-4. **Required predicates per source kind.** Each source kind has a fixed
-   profile enum entry with a required predicate set. GitHub's is item 3;
-   Kubernetes requires namespace, service-account name and service-account
-   UID; generic sources require an exact `sub` (OQ-ADR016-1).
+4. **Required predicates per binding profile template.** The required
+   predicate set is keyed on the binding `profile` template (a fixed enum,
+   for example `github_production`, `kubernetes_production` and
+   `generic_production`), not on the source kind: GitHub is an
+   `oidc_discovery` source, and Kubernetes local JWT validation uses an
+   `uploaded_jwks` or `oidc_discovery` source (OQ-ADR005-1). Enrollment
+   checks that the template fits the source and its `assertion_profile`.
+   - `github_production` requires the item 3 set.
+   - `kubernetes_production` requires namespace, service-account name and
+     service-account UID.
+   - `generic_production` requires an exact `sub`.
+
+   The binding `profile` is a template name separate from the source's
+   `assertion_profile` (OQ-ADR005-2; OQ-ADR016-1).
 
 ### Replay is a source capability
 
@@ -153,10 +163,13 @@ Existing contract questions that touch this ADR:
 New questions raised by this ADR:
 
 - **OQ-ADR016-1 — Required production predicates outside GitHub.** Decided
-  (lead decision, 2026-11-19): each source kind gets a fixed profile enum
-  entry with a required predicate set; Kubernetes requires namespace,
-  service-account name and UID; generic sources require an exact `sub`
-  (item 4). Original question: the required set is given only for GitHub (design §5.3; T12.2). For
+  (lead decision, 2026-11-19): required predicate sets are keyed on the
+  binding `profile` template (for example `github_production`,
+  `kubernetes_production`, `generic_production`), and enrollment checks that
+  the template fits the source and its `assertion_profile`. Kubernetes
+  requires namespace, service-account name and UID; generic requires an exact
+  `sub`; GitHub keeps the item 3 set (item 4). Original question: the
+  required set is given only for GitHub (design §5.3; T12.2). For
   `uploaded_jwks`, other `oidc_discovery` and Kubernetes bindings, the sources
   do not say which predicates are required, or how a binding is designated
   "production" (the design §5.7 example uses `profile: github_production`).
