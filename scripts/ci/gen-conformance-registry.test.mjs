@@ -17,9 +17,12 @@ import {
   DESIGN,
   generate,
   LAYOUT,
-  parseLayoutRow,
+  LocalDate,
+  parseConditional,
   parseToml,
   renderLayoutRow,
+  rowConditionals,
+  stageStamp,
   run,
   SCENARIOS,
   sha256,
@@ -129,7 +132,8 @@ describe('committed registry', () => {
   test('the §1.1 Leg strings column is the leg catalogue', () => {
     const { catalogue } = generate(REPO);
     assert.deepEqual(catalogue.get('typescript/node24'), { job: 'typescript', env: 'hermetic' });
-    assert.deepEqual(catalogue.get('live-wif'), { job: 'live-wif', env: 'live' });
+    assert.deepEqual(catalogue.get('live-wif-push'), { job: 'live-wif-push', env: 'live' });
+    assert.deepEqual(catalogue.get('live-wif-negative'), { job: 'live-wif-negative', env: 'live' });
     assert.deepEqual(catalogue.get('deployed-topology-audit'), { job: 'deployed-topology-audit', env: 'envoy-k3s' });
     assert.deepEqual(catalogue.get('clients-rust/x86_64'), { job: 'clients-rust', env: 'hermetic' });
   });
@@ -179,58 +183,81 @@ describe('drift is detected', () => {
     assert.match(r.stderr, /A27\.90: matrix_sha256 is 02c64cda/);
   });
 
-  test('an edited layout §2 cell fails --check on that field', () => {
+  test('a hand-edited §2 table row fails --check, and the write mode renders it back', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '| A26 | C | PG | PG, UC |', '| A26 | C | PG | PG, UC, FX |') : t));
+    const line = lineOf(read(root, LAYOUT), '| A26 |');
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /A26: harness differs from the specs/);
+    assert.match(r.stderr, new RegExp(`conformance-layout\\.md:${line}: §2 row A26 differs from the table rendered from the registry`));
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
   });
 
-  test('a new env in the layout table needs legs before it passes', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '| A26 | C | PG |', '| A26 | C | H, PG |') : t));
-    const r = cli('--root', root, '--check');
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /A26: env hermetic has no leg in any stage/);
+  test('an edited registry column is rendered into the §2 table', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'harness = ["PG", "UC"]\nowners = ["T12.8", "T21.5"]', 'harness = ["PG", "UC", "FX"]\nowners = ["T12.8", "T21.5"]') : t));
+    assert.match(cli('--root', root, '--check').stderr, /§2 row A26 differs from the table rendered from the registry/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(specLine(read(root, LAYOUT), 'A26'), specLine(read(REPO, LAYOUT), 'A26').replace('| PG, UC |', '| PG, UC, FX |'));
+    assert.equal(read(root, SCENARIOS), read(REPO, SCENARIOS).replace('harness = ["PG", "UC"]\nowners = ["T12.8", "T21.5"]', 'harness = ["PG", "UC", "FX"]\nowners = ["T12.8", "T21.5"]'));
+    assert.equal(cli('--root', root, '--check').status, 0);
   });
 
-  test('a hand-edited derived field fails --check', () => {
-    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'negative = "missing jti, replay, store failure"', 'negative = "replay"') : t));
+  test('a stale counts sentence fails --check and is rendered back', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Counts by first stage: M1a 20 ', 'Counts by first stage: M1a 21 ') : t));
+    assert.match(cli('--root', root, '--check').stderr, /conformance-layout\.md:\d+: the §2 counts sentences differ/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
+  });
+
+  test('a new env in the registry needs legs before it passes', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'envs = ["pg"]\nharness = ["PG", "UC"]\nowners = ["T12.8", "T21.5"]', 'envs = ["hermetic", "pg"]\nharness = ["PG", "UC"]\nowners = ["T12.8", "T21.5"]') : t));
+    failsBothModes(root, /A26: env hermetic has no leg in any stage/);
+  });
+
+  test('a hand-edited matrix_sha256 fails --check', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443', '0'.repeat(64)) : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /A24: negative differs from the specs/);
+    assert.match(r.stderr, /A24: matrix_sha256 is 0{64}, but its spec line hashes to b4df384e/);
   });
 
   test('a formatting-only change fails --check with a line number', () => {
     const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'gates_passed = []', 'gates_passed = [ ]') : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /scenarios\.toml:6: formatting differs/);
+    assert.match(r.stderr, new RegExp(`scenarios\\.toml:${lineOf(read(root, SCENARIOS), 'gates_passed = ')}: formatting differs`));
   });
 
-  test('a scenario missing from the registry fails --check', () => {
+  test('a scenario missing from the registry cannot be generated', () => {
     const root = fixture((rel, t) => {
       if (rel !== SCENARIOS) return t;
       const start = t.indexOf('[[scenario]]\nid = "A33"');
       const end = t.indexOf('[[scenario]]\nid = "A34"');
       return t.slice(0, start) + t.slice(end);
     });
-    const r = cli('--root', root, '--check');
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /A33 is missing/);
+    failsBothModes(root, new RegExp(`skyoauth-tasks\\.md:${lineOf(read(root, TASKS), '| A33 |')}: scenario A33 has no \\[\\[scenario\\]\\] entry`));
   });
 
-  test('a missing registry file fails --check', () => {
+  test('a registry scenario that is not a tasks §8 row', () => {
+    const root = fixture((rel, t) => (rel === TASKS ? t.replace(`${specLine(t, 'A64')}\n`, '') : t));
+    failsBothModes(root, /scenarios\.toml:\d+: scenario A64 is not a row of docs\/skyoauth-tasks\.md §8/);
+  });
+
+  test('a missing registry file is an error: it is the source', () => {
     const root = fixture((rel, t) => (rel === SCENARIOS ? null : t));
-    const r = cli('--root', root, '--check');
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /scenarios\.toml: missing/);
+    for (const args of [['--root', root], ['--root', root, '--check']]) {
+      const r = cli(...args);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /scenarios\.toml: not found/);
+    }
   });
 
-  test('a missing subcases file fails on every named sub-ID', () => {
+  test('a missing subcases file drops the conditional sentences from the table', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? null : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    for (const re of [/A27\.90 \(device-flow/, /A33\.90 \(back-channel-logout/, /sub-ID of A18 \(forwardauth/, /sub-ID of A58 \(forwardauth/]) assert.match(r.stderr, re);
+    for (const id of ['A18', 'A27', 'A33', 'A58']) assert.match(r.stderr, new RegExp(`§2 row ${id} differs`));
+    assert.match(r.stderr, /subcases\.toml: missing/);
   });
 });
 
@@ -240,16 +267,24 @@ describe('spec errors stop generation', () => {
   test('a tasks §8 row removed leaves a gap', () => {
     const root = fixture((rel, t) => (rel === TASKS ? t.replace(`${specLine(t, 'A40')}\n`, '') : t));
     assert.match(errorsOf(root), /expected A40, found A41/);
-    assert.match(errorsOf(root), /§2 row A40 is not a scenario/);
+    assert.match(errorsOf(root), /scenario A40 is not a row of docs\/skyoauth-tasks\.md §8/);
   });
 
-  test('a layout §2 row removed is a missing scenario', () => {
+  test('a layout §2 row removed is rendered back', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? t.replace(`${specLine(t, 'A12')}\n`, '') : t));
-    assert.match(errorsOf(root), /scenario A12 of docs\/skyoauth-tasks\.md §8 has no row in the §2 table/);
-    // and the CLI writes nothing
-    const before = read(root, SCENARIOS);
-    assert.equal(cli('--root', root).status, 1);
-    assert.equal(read(root, SCENARIOS), before);
+    assert.match(cli('--root', root, '--check').stderr, /§2 row A12 differs/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
+  });
+
+  test('a missing §2 table header', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '| ID | Layer | Env |', '| ID | Layers | Env |') : t));
+    failsBothModes(root, /layout §2 scenario table header not found/);
+  });
+
+  test('missing counts sentences', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Counts by first stage:', 'Counted by first stage:') : t));
+    failsBothModes(root, /the "Counts by first stage: \.\.\. rows have more than one stage\." sentences after the §2 table are missing/);
   });
 
   test('a duplicate contract row', () => {
@@ -258,7 +293,7 @@ describe('spec errors stop generation', () => {
   });
 
   test('an owner that is not a task', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '| T12.8, T21.5 |', '| T12.8, T21.99 |') : t));
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'owners = ["T12.8", "T21.5"]', 'owners = ["T12.8", "T21.99"]') : t));
     assert.match(errorsOf(root), /A26: owner T21\.99 is not a task/);
   });
 
@@ -274,43 +309,76 @@ describe('spec errors stop generation', () => {
 
   test('a leg whose job is outside the entry envs', () => {
     const root = fixture((rel, t) =>
-      rel === SCENARIOS ? t.replace(/(id = "A26"[\s\S]*?legs = )\["scenarios-pg\/x86_64"\]/, '$1["scenarios-pg/x86_64", "live-wif"]') : t,
+      rel === SCENARIOS ? t.replace(/(id = "A26"[\s\S]*?legs = )\["scenarios-pg\/x86_64"\]/, '$1["scenarios-pg/x86_64", "live-wif-push"]') : t,
     );
-    assert.match(errorsOf(root), /A26 M1a: leg "live-wif" belongs to env live/);
+    assert.match(errorsOf(root), /A26 M1a: leg "live-wif-push" belongs to env live/);
   });
 
-  test('an unparsable stage cell', () => {
-    assert.throws(
-      () => parseLayoutRow('| A99 | C | PG | PG | M2 · M3 | T10.1 | + a; − b |', 'x', { PG: 'pg' }),
-      /stage "M2" of a multi-stage row has no scope/,
-    );
-    assert.throws(() => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a, − b |', 'x', { PG: 'pg' }), /exactly one/);
-    assert.throws(() => parseLayoutRow('| A99 | X | PG | PG | M2 | T10.1 | + a; − b |', 'x', { PG: 'pg' }), /unknown layer/);
-    assert.throws(() => parseLayoutRow('| A99 | C | XX | PG | M2 | T10.1 | + a; − b |', 'x', { PG: 'pg' }), /unknown env "XX"/);
-    assert.throws(
-      () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A99.01 (magic, T10.1): x |', 'x', { PG: 'pg' }),
-      /unknown conditional feature "magic"/,
-    );
-    assert.throws(
-      () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A98.01 (device flow, T10.1): x |', 'x', { PG: 'pg' }),
-      /A98\.01 is not a sub-ID of A99/,
-    );
-    assert.throws(
-      () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A99.05 (device flow, T10.1): x |', 'x', { PG: 'pg' }),
-      /conditional sub-ID A99\.05 must be numbered A99\.90–A99\.99/,
-    );
-    const ranged = parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | Sub-IDs A99.01–A99.89 in the annex (Q1): + a; − b |', 'x', { PG: 'pg' });
-    assert.deepEqual(ranged.annex, { from: 1, to: 89 });
+  // A fixture whose A26 registry entry (stages M1a and M2) has `from` replaced by `to`.
+  const a26 = (from, to) => fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, entryBlock(t, 'scenario', 'A26'), replaceOnce(entryBlock(t, 'scenario', 'A26'), from, to)) : t));
+
+  test('an unknown layer or env in a registry entry', () => {
+    failsBothModes(a26('layers = ["conformance"]', 'layers = ["conform"]'), /A26: unknown layer "conform"/);
+    failsBothModes(a26('envs = ["pg"]', 'envs = ["pg", "moon"]'), /A26: unknown env "moon"/);
   });
 
-  test('a note before "+" and a trailing conditional sentence', () => {
-    const e = parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | Only this (Q9). + a; − b. Conditional sub-ID (ForwardAuth, T32.9): x |', 'x', { PG: 'pg' });
-    assert.equal(e.note, 'Only this (Q9).');
-    assert.deepEqual([e.positive, e.negative], ['a', 'b']);
+  test('a registry entry with a missing column, an unknown field or a "|" in a cell', () => {
+    failsBothModes(a26('positive = ', 'positiv = '), /A26: unknown field positiv/);
+    failsBothModes(a26('positive = ', 'positiv = '), /A26: positive must be non-empty table text/);
+    failsBothModes(a26('harness = ["PG", "UC"]', 'harness = ["PG | UC"]'), /A26: harness must be a non-empty list of table text/);
+    failsBothModes(a26('owners = ["T12.8", "T21.5"]', 'owners = []'), /A26: owners must be a non-empty list of table text/);
+    failsBothModes(a26('kind = "scenario"\n', 'kind = "scenario"\nnote = ""\n'), /A26: note must be non-empty table text when present/);
+  });
+
+  test('a registry entry without stages', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SCENARIOS) return t;
+      const block = entryBlock(t, 'scenario', 'A26');
+      return replaceOnce(t, block, block.slice(0, block.indexOf('[[scenario.stage]]')));
+    });
+    failsBothModes(root, /A26: needs at least one \[\[scenario\.stage\]\]/);
+  });
+
+  test('an unknown kind', () => {
+    failsBothModes(a26('kind = "scenario"', 'kind = "scenery"'), /A26: kind must be scenario or contract/);
+  });
+
+  test('stage order and the "full row" scope', () => {
+    failsBothModes(a26('milestone = "M2"', 'milestone = "M1a"'), /duplicate stage A26 M1a/);
+    failsBothModes(a26('milestone = "M1a"', 'milestone = "M3"'), /A26 M2: stage M2 comes after M3; stage milestones must increase/);
+    failsBothModes(a26('scope = "policy"', 'scope = "full row"'), /A26 M1a: scope "full row" is the scope of a single-stage entry, and only of one/);
+    failsBothModes(a26('scope = "policy"', 'scope = "po|icy"'), /A26 M1a: scope must be table text/);
+    const one = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'scope = "consume primitive"', 'scope = "full row"') : t));
+    failsBothModes(one, /A24 M1a: scope "full row" is the scope of a single-stage entry/);
+    const single = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A23', 'scope = "full row"', 'scope = "exchange"') : t));
+    failsBothModes(single, /A23 M2: scope "full row" is the scope of a single-stage entry, and only of one/);
+  });
+
+  test('an unknown stage field', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A26', 'status = "planned"', 'status = "planned"\nowner = "T12.8"') : t));
+    failsBothModes(root, /A26 M1a: unknown stage field owner/);
+  });
+
+  test('an annex range in a note must lie within .01–.89', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'note = "Sub-IDs A58.01–A58.89 in the annex (Q1):"', 'note = "Sub-IDs A58.01–A58.95 in the annex (Q1):"') : t));
+    failsBothModes(root, /A58: annex range A58\.01–A58\.95 must lie within A58\.01–A58\.89/);
+    const rev = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'note = "Sub-IDs A58.01–A58.89 in the annex (Q1):"', 'note = "Sub-IDs A58.50–A58.10 in the annex (Q1):"') : t));
+    failsBothModes(rev, /A58: annex range A58\.50–A58\.10 must lie within/);
+    const zero = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'note = "Sub-IDs A58.01–A58.89 in the annex (Q1):"', 'note = "Sub-IDs A58.00–A58.10 in the annex (Q1):"') : t));
+    failsBothModes(zero, /A58: annex range A58\.00–A58\.10 must lie within/);
+  });
+
+  test('conditional sentences of a row are parsed for the named check', () => {
     assert.deepEqual(
-      e.conditional.map((c) => [c.id, c.feature, c.task, c.text]),
-      [[null, 'forwardauth', 'T32.9', 'Conditional sub-ID (ForwardAuth, T32.9): x']],
+      rowConditionals('| A99 | C | PG | PG | M2 | T10.1 | Only this (Q9). + a; − b. Conditional sub-ID (ForwardAuth, T32.9): x. Conditional sub-ID A99.91 (magic, T10.1): y |', 'A99').map((c) => [c.id, c.feature, c.task, c.text]),
+      [
+        [null, 'forwardauth', 'T32.9', 'Conditional sub-ID (ForwardAuth, T32.9): x'],
+        ['A99.91', null, 'T10.1', 'Conditional sub-ID A99.91 (magic, T10.1): y'],
+      ],
     );
+    assert.deepEqual(rowConditionals('| A99 | C | PG | PG | M2 | T10.1 | + a; − b |', 'A99'), []);
+    assert.deepEqual(rowConditionals('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A99.90 x |', 'A99').map((c) => [c.id, c.feature, c.task]), [[null, null, null]]);
+    assert.equal(parseConditional('Conditional sub-ID A27.90 (device flow T40.6): x'), null);
   });
 });
 
@@ -402,44 +470,47 @@ describe('duplicate keys in the committed files are rejected', () => {
   });
 });
 
-describe('subcases match the sub-IDs the layout doc names', () => {
-  test('a named sub-ID missing from subcases.toml', () => {
+describe('subcases are consistent with their §2 sentences', () => {
+  test('a removed conditional sub-ID drops its sentence from the table', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A27.90'), '') : t));
-    failsBothModes(root, /A27\.90 \(device-flow, T40\.6\) is named in .*conformance-layout\.md.* but missing from tests\/conformance\/subcases\.toml/);
-  });
-
-  test('an unnumbered named sub-ID missing from subcases.toml', () => {
-    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A18.90'), '') : t));
-    failsBothModes(root, /sub-ID of A18 \(forwardauth, T32\.9\) is named in .* but missing/);
+    assert.match(cli('--root', root, '--check').stderr, /§2 row A27 differs from the table rendered from the registry/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.ok(!specLine(read(root, LAYOUT), 'A27').includes('Conditional sub-ID'));
   });
 
   test('a wrong parent', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'parent = "A27"', 'parent = "A28"') : t));
-    failsBothModes(root, /A27\.90: parent is A28, but the layout doc names it under A27/);
+    failsBothModes(root, /A27\.90: parent must be the registered scenario A27/);
   });
 
   test('a wrong conditional_on', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'conditional_on = "device-flow"', 'conditional_on = "forwardauth"') : t));
-    failsBothModes(root, /A27\.90: conditional_on is forwardauth, but the layout doc names device-flow/);
+    failsBothModes(root, /A27\.90: table_text names device-flow, but conditional_on is forwardauth/);
   });
 
   test('a wrong source task', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'owners = ["T30.6"]', 'owners = ["T31.2"]') : t));
-    failsBothModes(root, /A33\.90: first owner is T31\.2, but the layout doc names T30\.6/);
+    failsBothModes(root, /A33\.90: table_text names T30\.6, but the first owner is T31\.2/);
   });
 
-  test('a sub-ID the layout doc does not name', () => {
+  test('a new conditional sub-ID is rendered into its parent row', () => {
     const root = fixture((rel, t) => {
       if (rel !== SUBCASES) return t;
       const extra = entryBlock(t, 'subcase', 'A33.90').replace('id = "A33.90"', 'id = "A33.91"').replace('sub-ID A33.90', 'sub-ID A33.91');
       return `${t.trimEnd()}\n\n${extra}`;
     });
-    failsBothModes(root, /A33\.91 is a conditional sub-ID not named in .*conformance-layout\.md/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.match(specLine(read(root, LAYOUT), 'A33'), /\. Conditional sub-ID A33\.90 \(back-channel logout, T30\.6\): verified sid targeting\. Conditional sub-ID A33\.91 /);
+    assert.equal(cli('--root', root, '--check').status, 0);
   });
 
-  test('a renumbered sub-ID in the layout doc', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Conditional sub-ID A33.90 (back-channel', 'Conditional sub-ID A33.91 (back-channel') : t));
-    failsBothModes(root, /A33\.91 \(back-channel-logout, T30\.6\) is named in .* but missing/);
+  test('two unnumbered sentences of one parent, feature and task', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SUBCASES) return t;
+      const extra = entryBlock(t, 'subcase', 'A18.90').replace('id = "A18.90"', 'id = "A18.91"');
+      return `${t.trimEnd()}\n\n${extra}`;
+    });
+    failsBothModes(root, /sub-ID of A18 \(forwardauth, T32\.9\) is named in .* without an ID, but A18\.90 and A18\.91 all match it/);
   });
 });
 
@@ -487,11 +558,7 @@ describe('required and conditional sub-ID numbering', () => {
   });
 
   test('a conditional sub-ID numbered outside .90–.99', () => {
-    const root = fixture((rel, t) => {
-      if (rel === SUBCASES) return t.replaceAll('A27.90', 'A27.05');
-      if (rel === LAYOUT) return t.replaceAll('A27.90', 'A27.05');
-      return t;
-    });
+    const root = fixture((rel, t) => (rel === SUBCASES ? t.replaceAll('A27.90', 'A27.05') : t));
     failsBothModes(root, /conditional sub-ID A27\.05 must be numbered A27\.90–A27\.99/);
   });
 
@@ -545,7 +612,7 @@ describe('hand-authored input is validated', () => {
       const block = entryBlock(t, 'subcase', 'A27.90');
       const extra = '\n[[subcase.stage]]\nmilestone = "M3"\nscope = "browser"\nlegs = ["typescript-browser/chromium"]\nstatus = "planned"\ntests = []\n';
       return replaceOnce(t, block, block.trimEnd() + '\n' + extra + '\n');
-    }, (t) => new RegExp(`subcases\\.toml:${lineOf(t, 'milestone = "M3"\nscope = "browser"') - 1}: A27\\.90: stage M3 comes after M4; stage milestones must increase`));
+    }, (t) => new RegExp(`subcases\\.toml:${lineOf(t, 'milestone = "M3"\nscope = "browser"') - 1}: A27\\.90 M3: stage M3 comes after M4; stage milestones must increase`));
   });
 
   test('duplicate legs', () => {
@@ -609,8 +676,8 @@ describe('the §1.1 leg catalogue', () => {
   });
 
   test('a leg string listed under two envs', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '`scenarios-pg/x86_64` |', '`scenarios-pg/x86_64`, `live-wif` |') : t));
-    failsBothModes(root, /leg live-wif is listed under both pg and live/);
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '`scenarios-pg/x86_64` |', '`scenarios-pg/x86_64`, `live-wif-push` |') : t));
+    failsBothModes(root, /leg live-wif-push is listed under both pg and live/);
   });
 
   test('a §1.1 table without the Leg strings column', () => {
@@ -620,9 +687,11 @@ describe('the §1.1 leg catalogue', () => {
 });
 
 describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
-  test('an edited table_text no longer renders the parent row', () => {
+  test('an edited table_text is rendered into the parent row', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'user-code approval, expiry/polling abuse, no interaction bypass"', 'user-code approval"') : t));
-    failsBothModes(root, /A27: rendered row differs from the committed row/);
+    assert.match(cli('--root', root, '--check').stderr, /§2 row A27 differs from the table rendered from the registry/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.ok(specLine(read(root, LAYOUT), 'A27').endsWith('. Conditional sub-ID A27.90 (device flow, T40.6): user-code approval |'));
   });
 
   test('a table_text that names another task than the first owner', () => {
@@ -635,20 +704,23 @@ describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
     failsBothModes(root, /A33\.90: table_text names device-flow, but conditional_on is back-channel-logout/);
   });
 
-  test('an edited sentence in the layout row', () => {
+  test('a hand-edited sentence in the layout row is rendered back', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '(back-channel logout, T30.6): verified sid targeting', '(back-channel logout, T30.6): verified sid targeting only') : t));
-    failsBothModes(root, /A33: rendered row differs from the committed row/);
+    assert.match(cli('--root', root, '--check').stderr, /§2 row A33 differs/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
   });
 });
 
+const STAMP_A24 = (scope = 'consume primitive', matrix = 'b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443') => stageStamp('A24', 'M1a', scope, matrix);
+const A24_TESTS = 'tests = [\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x",\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y",\n]';
+// scenarios.toml with A24's M1a stage implemented, stamped with `stamp`.
+const implementedA24 = (t, stamp = STAMP_A24()) =>
+  editStage(t, 'scenario', 'A24', 'status = "planned"\ntests = []', `status = "implemented"\n${stamp === null ? '' : `implemented_sha256 = "${stamp}"\n`}${A24_TESTS}`);
+
 describe('hand-authored fields are kept', () => {
-  test('legs, status, tests and gates_passed survive regeneration', () => {
-    const tests = 'tests = [\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x",\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y",\n]';
-    const root = fixture((rel, t) => {
-      if (rel !== SCENARIOS) return t;
-      t = replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M0", "M1a"]');
-      return t.replace(/(id = "A24"[\s\S]*?milestone = "M1a"[\s\S]*?)status = "planned"\ntests = \[\]/, `$1status = "implemented"\n${tests}`);
-    });
+  test('legs, status, tests, the stamp and gates_passed survive regeneration', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? implementedA24(replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M0", "M1a"]')) : t));
     const before = read(root, SCENARIOS);
     assert.notEqual(before, read(REPO, SCENARIOS));
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
@@ -656,26 +728,119 @@ describe('hand-authored fields are kept', () => {
     assert.equal(cli('--root', root, '--check').status, 0);
   });
 
-  test('a stage without committed legs gets the default legs', () => {
-    const root = fixture((rel, t) => (rel === SCENARIOS ? null : t));
+  test('a stage without a legs key gets the default legs', () => {
+    const drop = (t, id, i) => {
+      const block = entryBlock(t, 'scenario', id);
+      const at = block.split('[[scenario.stage]]')[i + 1];
+      const legs = /legs = .*\n/.exec(at)[0];
+      return replaceOnce(t, block, block.replace(at, at.replace(legs, '')));
+    };
+    const root = fixture((rel, t) => (rel === SCENARIOS ? drop(drop(drop(drop(drop(t, 'A14', 0), 'A62', 1), 'A24', 0), 'A01', 0), 'A02', 1) : t));
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
-    const doc = parseToml(read(root, SCENARIOS));
-    assert.deepEqual(doc.gates_passed, []);
-    const byId = new Map(doc.scenario.map((e) => [e.id, e]));
-    assert.deepEqual(byId.get('A14').stage[0].legs, ['migration-rehearsal']);
-    assert.deepEqual(byId.get('A62').stage[1].legs, ['deployed-topology-audit']);
-    assert.deepEqual(byId.get('A24').stage[0].legs, ['scenarios-pg/x86_64']);
+    // The committed legs of these stages are the defaults.
+    assert.equal(read(root, SCENARIOS), read(REPO, SCENARIOS));
+  });
+
+  test('a stage that moves milestone keeps its tests', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'milestone = "M1a"\nscope = "consume primitive"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\ntests = []', `milestone = "M1b"\nscope = "consume primitive"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\n${A24_TESTS}`) : t));
+    assert.equal(cli('--root', root).status, 0);
+    const a24 = parseToml(read(root, SCENARIOS)).scenario.find((e) => e.id === 'A24');
+    assert.deepEqual([a24.stage[0].milestone, a24.stage[0].tests.length], ['M1b', 2]);
+    assert.match(specLine(read(root, LAYOUT), 'A24'), /\| M1b: consume primitive · M2: exchange \|/);
+    assert.match(read(root, LAYOUT), /Counts by first stage: M1a 19 · M1b 6 /);
+  });
+});
+
+describe('an implemented stage is tied to what was implemented', () => {
+  const unchanged = (root, re) => {
+    const before = [SCENARIOS, SUBCASES, LAYOUT].map((rel) => read(root, rel));
+    failsBothModes(root, re);
+    assert.deepEqual([SCENARIOS, SUBCASES, LAYOUT].map((rel) => read(root, rel)), before);
+  };
+
+  test('an implemented stage without a stamp', () => {
+    unchanged(fixture((rel, t) => (rel === SCENARIOS ? implementedA24(t, null) : t)), new RegExp(`A24 M1a: implemented_sha256 is missing, but this stage's \\(id, milestone, scope, matrix_sha256\\) stamps to ${STAMP_A24()}`));
+  });
+
+  test('a changed scope of an implemented stage', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(implementedA24(t), 'scenario', 'A24', 'scope = "consume primitive"', 'scope = "consume primitive and replay"') : t));
+    unchanged(root, new RegExp(`A24 M1a: implemented_sha256 is ${STAMP_A24()}, but .* stamps to ${STAMP_A24('consume primitive and replay')}\\. The stage changed`));
+  });
+
+  test('an implemented stage that moves milestone', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(implementedA24(t), 'scenario', 'A24', 'milestone = "M1a"', 'milestone = "M1b"') : t));
+    unchanged(root, /A24 M1b: implemented_sha256 is [0-9a-f]{64}, but .* stamps to/);
+  });
+
+  test('an edited tasks §8 row of an implemented stage is not re-hashed silently', () => {
+    const root = fixture((rel, t) => {
+      if (rel === SCENARIOS) return implementedA24(t);
+      return rel === TASKS ? replaceOnce(t, 'Exactly one issuance, missing jti', 'Exactly one issuance, absent jti') : t;
+    });
+    const matrix = sha256(specLine(read(root, TASKS), 'A24'));
+    unchanged(root, new RegExp(`A24 M1a: implemented_sha256 is ${STAMP_A24()}, but .* stamps to ${STAMP_A24(undefined, matrix)}`));
+  });
+
+  test('a re-stamped stage is accepted', () => {
+    const root = fixture((rel, t) => {
+      if (rel === SCENARIOS) return editStage(implementedA24(t, STAMP_A24('consume primitive and replay')), 'scenario', 'A24', 'scope = "consume primitive"', 'scope = "consume primitive and replay"');
+      return t;
+    });
+    assert.equal(cli('--root', root).status, 0);
     assert.equal(cli('--root', root, '--check').status, 0);
+  });
+
+  test('an implemented stage without tests', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'status = "planned"\ntests = []', `status = "implemented"\nimplemented_sha256 = "${STAMP_A24()}"\ntests = []`) : t));
+    unchanged(root, /A24 M1a: an implemented stage must list its tests/);
+  });
+
+  test('a stamp on a planned stage', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'status = "planned"', `status = "planned"\nimplemented_sha256 = "${STAMP_A24()}"`) : t));
+    unchanged(root, /A24 M1a: implemented_sha256 is only for an implemented stage/);
+  });
+
+  test('a stamp that is not a string', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(implementedA24(t), 'scenario', 'A24', `implemented_sha256 = "${STAMP_A24()}"`, 'implemented_sha256 = 1') : t));
+    unchanged(root, /A24 M1a: implemented_sha256 must be a string/);
+    const sub = fixture((rel, t) => (rel === SUBCASES ? editStage(t, 'subcase', 'A33.90', 'status = "planned"', 'status = "planned"\nimplemented_sha256 = 1') : t));
+    unchanged(sub, /A33\.90 M3: implemented_sha256 must be a string/);
+  });
+
+  test('a subcase stage follows the same rule', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? editStage(t, 'subcase', 'A33.90', 'status = "planned"\ntests = []', 'status = "implemented"\ntests = ["x"]') : t));
+    const matrix = parseToml(read(REPO, SUBCASES)).subcase.find((s) => s.id === 'A33.90').matrix_sha256;
+    unchanged(root, new RegExp(`A33\\.90 M3: implemented_sha256 is missing, but .* stamps to ${stageStamp('A33.90', 'M3', 'full row', matrix)}`));
+  });
+
+  test('the stamp is the SHA-256 of id, milestone, scope and matrix_sha256 joined by newlines', () => {
+    assert.equal(stageStamp('A24', 'M1a', 's', 'h'), sha256('A24\nM1a\ns\nh'));
   });
 });
 
 describe('TOML', () => {
   test('strings with quotes, backslashes and control characters round-trip', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '+ selected source verifies;', '+ "selected" \\ source\tverifies;') : t));
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'positive = "selected source verifies"', 'positive = "\\"selected\\" \\\\ source\\tverifies"') : t));
     const { files, errors } = generate(root);
     assert.deepEqual(errors, []);
     const a03 = parseToml(files[SCENARIOS]).scenario.find((e) => e.id === 'A03');
     assert.equal(a03.positive, '"selected" \\ source\tverifies');
+    assert.equal(files[SCENARIOS], read(root, SCENARIOS));
+    assert.match(specLine(files[LAYOUT], 'A03'), /\| \+ "selected" \\ source\tverifies; − /);
+  });
+
+  test('local dates', () => {
+    const d = parseToml('a = 2026-12-31 # c\nb = [2024-02-29, 2000-02-29]\n');
+    assert.ok(d.a instanceof LocalDate);
+    assert.deepEqual(JSON.parse(JSON.stringify(d)), { a: '2026-12-31', b: ['2024-02-29', '2000-02-29'] });
+    assert.equal(String(d.a), '2026-12-31');
+    for (const bad of ['2026-02-29', '1900-02-29', '2026-04-31', '2026-13-01', '2026-00-10', '2026-01-00', '2026-01-32']) {
+      assert.throws(() => parseToml(`a = ${bad}`, 'x'), new RegExp(`x:1: invalid date ${bad}$`));
+    }
+    for (const dt of ['2026-12-31T00:00:00Z', '2026-12-31t00:00:00', '2026-12-31 10:00:00']) {
+      assert.throws(() => parseToml(`a = ${dt}`, 'x'), /x:1: only local dates are supported, not date-times/);
+    }
+    assert.deepEqual(parseToml('a = 2026-12-31\nb = 2026'), { a: new LocalDate('2026-12-31'), b: 2026 });
   });
 
   test('python3 tomllib parses both files', (t) => {

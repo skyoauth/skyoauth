@@ -62,10 +62,21 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   warning annotations that do not fail the job (locally the latter is an
   info note); ADRs never referenced by ID are one info summary line, listed
   with `--verbose`.
+- Conformance registry also runs on every change, and `CI passed` requires
+  it to pass: `node scripts/ci/check-conformance-registry.mjs` checks
+  `tests/conformance/` (scenario and contract IDs and hashes against the
+  specs, stages, legs, sub-IDs, fixtures and waivers), and confirms that the
+  layout §2 scenario table equals the one rendered from
+  `tests/conformance/scenarios.toml`, which is its source. The job also runs
+  `node scripts/ci/gen-conformance-registry.mjs --check` and both
+  self-tests. Its one dependency, `smol-toml`, is pinned in
+  `scripts/ci/package.json` and installed with `npm ci --ignore-scripts`.
+  See `tests/conformance/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. To protect `main`, require the `CI passed` check: it passes when `Docs
-consistency` passed and every other job passed or was skipped. Dependabot keeps actions, crates and npm
+consistency` and `Conformance registry` passed and every other job passed or
+was skipped. Dependabot keeps actions, crates and npm
 packages up to date.
 
 ## License

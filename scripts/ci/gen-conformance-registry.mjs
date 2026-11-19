@@ -1,44 +1,63 @@
 #!/usr/bin/env node
-// Generates the conformance registry from the specs.
+// Generates the conformance registry files and the layout §2 scenario table.
 //
 //   node scripts/ci/gen-conformance-registry.mjs [--root DIR]          # write
 //   node scripts/ci/gen-conformance-registry.mjs [--root DIR] --check  # verify
 //
-// Outputs tests/conformance/scenarios.toml and tests/conformance/subcases.toml.
+// Outputs tests/conformance/scenarios.toml, tests/conformance/subcases.toml
+// and the §2 scenario table (with its "Counts by first stage ..." sentences)
+// in docs/testing/conformance-layout.md.
+//
+// Source of truth (layout §2, §3): scenarios.toml is authoritative for every
+// scenario column of the §2 table, and subcases.toml for the conditional
+// sub-ID sentences; the generator renders the table from them. It never
+// parses the table back into the registry.
 //
 // Derived (rewritten on every run, never edit by hand):
-//   - scenario IDs A01... and matrix_sha256 from the tasks §8 table rows;
-//   - contract IDs C01... and matrix_sha256 from the design §2 table rows;
-//   - layers, envs, harness, owners, note, positive, negative and each stage's
-//     milestone and scope from the scenario table in
-//     docs/testing/conformance-layout.md §2;
-//   - contract covered_by from the contract table in the layout doc §5 (Q11);
+//   - the order of the scenario entries and their matrix_sha256, from the
+//     tasks §8 table rows (an ID there without a registry entry, or a registry
+//     scenario that is not a row there, is an error);
+//   - contract IDs C01..., covered_by and matrix_sha256 from the design §2
+//     table rows and the layout doc §5 (Q11) contract table;
 //   - subcase matrix_sha256 from the tasks bullet line of the subcase's first
-//     owner, and every comment in both files.
+//     owner, and every comment in both files;
+//   - the layout §2 table and its counts sentences, rendered from the registry.
 // Hand-authored (kept from the committed files):
 //   - gates_passed;
-//   - each stage's legs, status and tests, keyed by (id, milestone). A stage
-//     with no committed legs gets the provisional default legs computed by
-//     defaultLegs();
+//   - every scenario column (layers, envs, harness, owners, note, positive,
+//     negative) and every stage field (milestone, scope, legs, status, tests,
+//     implemented_sha256). A stage without a legs key gets the provisional
+//     default legs computed by defaultLegs(); a missing status is planned and
+//     missing tests are [];
 //   - every field of a subcase except matrix_sha256.
 //
-// Checked against the layout doc:
-//   - every leg is a leg string of the §1.1 "Leg strings" column, whose env is
-//     one of the entry's envs and whose job exists at the stage's milestone;
-//   - the §2 table rendered back from the registry equals the committed
-//     table. A row's trailing "Conditional sub-ID ..." sentence is rendered
-//     from the table_text of that sub-ID's entry in subcases.toml;
-//   - subcases.toml holds exactly the sub-IDs that §2 names, with the parent,
-//     conditional_on and first owner that §2 gives them;
+// Checked (hand-authored input is validated; any error exits 1):
+//   - every leg is a leg string of the layout §1.1 "Leg strings" column, whose
+//     env is one of the entry's envs and whose job exists at the stage's
+//     milestone; every env has a leg in some stage;
+//   - stage milestones are known and increase; "full row" is the scope of a
+//     single-stage entry, and only of one;
+//   - an implemented stage lists tests and carries implemented_sha256, the
+//     stamp of the (id, milestone, scope, matrix_sha256) it was implemented
+//     for (stageStamp()). A changed scope, a moved milestone or a changed
+//     spec row therefore never keeps a stage implemented silently: the run
+//     fails and writes nothing until a reviewer resets the stage to planned
+//     or re-stamps it. Stages are never re-keyed, so a moved stage keeps its
+//     tests;
+//   - conditional sub-IDs are numbered .90-.99 and are the ones the rendered
+//     §2 table names; required sub-IDs lie in the annex range that the
+//     parent's note declares (e.g. "A58.01–A58.89");
 //   - neither file repeats an ID or a (id, milestone) stage.
 //
 // matrix_sha256 is the SHA-256 of the UTF-8 bytes of the whole source line,
 // from its first character to its last, with no trailing newline.
 //
-// --check regenerates both files in memory and exits 1 if either differs from
-// the committed file, listing each differing (id, field). Spec and registry
-// errors exit 1 in both modes and write nothing. Usage and internal errors
-// exit 2. Needs only Node (>=20); no dependencies.
+// --check regenerates everything in memory and exits 1 if any output differs
+// from the committed file, listing each differing (id, field) or table row.
+// Spec and registry errors exit 1 in both modes and write nothing. Usage and
+// internal errors exit 2. Needs only Node (>=20); no dependencies. The CI
+// check scripts/ci/check-conformance-registry.mjs imports the derive and
+// render code below.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
@@ -53,14 +72,14 @@ export const SUBCASES = 'tests/conformance/subcases.toml';
 
 export const MILESTONES = ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5'];
 
-const LAYERS = { C: 'conformance', S: 'security', I: 'integration', P: 'package' };
+export const LAYERS = { C: 'conformance', S: 'security', I: 'integration', P: 'package' };
 // Feature label in a §2 "Conditional sub-ID (<label>, Txx.y)" sentence ->
 // conditional_on value.
-const FEATURES = { 'device flow': 'device-flow', 'back-channel logout': 'back-channel-logout', ForwardAuth: 'forwardauth' };
-const STATUSES = ['planned', 'implemented'];
+export const FEATURES = { 'device flow': 'device-flow', 'back-channel logout': 'back-channel-logout', ForwardAuth: 'forwardauth' };
+export const STATUSES = ['planned', 'implemented'];
 // A single-stage row shows only its milestone in the table; its stage scope
 // is this fixed text (as in the layout §3 A64 example).
-const FULL_ROW = 'full row';
+export const FULL_ROW = 'full row';
 const AUDIT = 'deployed-topology audit';
 
 // First milestone in which each CI job exists (layout §1.1 and the §4 table;
@@ -80,7 +99,8 @@ export const JOB_FROM = {
   operator: 'M1a',
   'recovery-offline': 'M1a',
   'clients-rust-native': 'M4',
-  'live-wif': 'M2',
+  'live-wif-push': 'M2',
+  'live-wif-negative': 'M2',
 };
 
 const mIndex = (m) => MILESTONES.indexOf(m);
@@ -113,7 +133,8 @@ export function defaultLegs(entry, stage, catalogue) {
         if (entry.harness.some((h) => /^OP\b/.test(h))) return ['operator'];
         return ['clients-rust-native'];
       case 'live':
-        return ['live-wif'];
+        // A02's live cases are the schedule/dispatch denials (layout §4).
+        return entry.id === 'A02' ? ['live-wif-negative'] : ['live-wif-push'];
       default:
         return [];
     }
@@ -132,11 +153,11 @@ export function defaultLegs(entry, stage, catalogue) {
 
 export const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
 
-class SpecError extends Error {}
+export class SpecError extends Error {}
 
 // Lines of a "## <n>." section, outside fenced code blocks, with 1-based
 // line numbers.
-function section(text, file, prefix) {
+export function section(text, file, prefix) {
   const lines = text.split('\n');
   const out = [];
   let inside = false;
@@ -165,7 +186,7 @@ const cellsOf = (line) => line.slice(2, -2).split(' | ');
 
 // Rows `| <ID> | ...` of a section whose ID matches `re` (anchored, with a
 // single capture for the number). Checks for duplicates and gaps from 01.
-function idRows(lines, file, re, what) {
+export function idRows(lines, file, re, what) {
   const rows = [];
   const errors = [];
   const seen = new Map();
@@ -229,27 +250,6 @@ export function parseEnvironments(layout, errors) {
   return { codes, catalogue };
 }
 
-// Splits on `sep` outside parentheses and backticks.
-function splitTop(s, sep) {
-  const out = [];
-  let depth = 0;
-  let tick = false;
-  let start = 0;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (c === '`') tick = !tick;
-    else if (!tick && c === '(') depth++;
-    else if (!tick && c === ')') depth--;
-    else if (!tick && depth === 0 && s.startsWith(sep, i)) {
-      out.push(s.slice(start, i));
-      start = i + sep.length;
-      i += sep.length - 1;
-    }
-  }
-  out.push(s.slice(start));
-  return out;
-}
-
 const POS = '+ ';
 const NEG = '; − '; // U+2212 MINUS SIGN, as in the table
 const COND = '. Conditional sub-ID';
@@ -257,7 +257,14 @@ const COND_RE = /^Conditional sub-ID(?: (A\d\d\.\d\d))? \(([^,()]+), (T\d\d\.\d+
 
 // Conditional sub-IDs are numbered .90–.99; required ones .01–.89, inside
 // the annex range that the parent's §2 note declares (layout §3, §5 Q1).
-const isConditionalNumber = (id) => Number(id.slice(4)) >= 90;
+export const isConditionalNumber = (id) => Number(id.slice(4)) >= 90;
+
+// The annex range for required sub-IDs that a scenario's note declares, such
+// as "A58.01–A58.89" (en dash): { from, to, text }, or null.
+export function annexRange(id, note) {
+  const r = new RegExp(`\\b${id}\\.(\\d\\d)–${id}\\.(\\d\\d)\\b`).exec(note ?? '');
+  return r ? { from: Number(r[1]), to: Number(r[2]), text: r[0] } : null;
+}
 
 // Parses a "Conditional sub-ID [Axx.yy] (<feature>, Txx.y): <text>" sentence.
 export function parseConditional(text) {
@@ -266,76 +273,90 @@ export function parseConditional(text) {
   return { id: m[1] ?? null, label: m[2], feature: FEATURES[m[2]] ?? null, task: m[3] };
 }
 
-// Parses one row of the layout §2 scenario table. `conditional` lists the
-// row's trailing conditional sub-ID sentences; they are not registry fields
-// of the row (subcases.toml renders them).
-export function parseLayoutRow(line, where, codes) {
-  const cells = cellsOf(line);
-  if (cells.length !== 7) throw new SpecError(`${where}: expected 7 cells, found ${cells.length}`);
-  const [id, layer, env, harness, stages, owners, pm] = cells;
-  const fail = (msg) => {
-    throw new SpecError(`${where}: ${id}: ${msg}`);
-  };
-  const entry = { id };
-  entry.layers = layer.split('+').map((c) => LAYERS[c] ?? fail(`unknown layer code "${c}"`));
-  entry.envs = env.split(', ').map((c) => codes[c] ?? fail(`unknown env "${c}"`));
-  entry.harness = splitTop(harness, ', ');
-  entry.owners = owners.split(', ');
-  for (const o of entry.owners) if (!/^T\d\d\.\d+$/.test(o)) fail(`owner "${o}" is not a task ID`);
-  entry.stages = stages.split(' · ').map((part, i, all) => {
-    const m = /^(M[0-9][ab]?)(?:: (.+))?$/.exec(part);
-    if (!m || !MILESTONES.includes(m[1])) fail(`unparsable stage "${part}"`);
-    if (!m[2] && all.length > 1) fail(`stage "${part}" of a multi-stage row has no scope`);
-    return { milestone: m[1], scope: m[2] ?? FULL_ROW };
-  });
-  for (let i = 1; i < entry.stages.length; i++) {
-    if (mIndex(entry.stages[i].milestone) <= mIndex(entry.stages[i - 1].milestone)) fail('stage milestones are not increasing');
-  }
-  let rest = pm;
-  if (!rest.startsWith(POS)) {
-    const cands = [rest.indexOf(`: ${POS}`), rest.indexOf(`. ${POS}`)].filter((x) => x >= 0);
-    if (!cands.length) fail('"+ / −" cell has no "+ " part');
-    const p = Math.min(...cands);
-    entry.note = rest.slice(0, p + 1);
-    rest = rest.slice(p + 2);
-    // An annex range for required sub-IDs, e.g. "A58.01–A58.89" (en dash).
-    const r = new RegExp(`\\b${id}\\.(\\d\\d)–${id}\\.(\\d\\d)\\b`).exec(entry.note);
-    if (r) {
-      entry.annex = { from: Number(r[1]), to: Number(r[2]) };
-      if (entry.annex.from < 1 || entry.annex.to > 89 || entry.annex.from > entry.annex.to) fail(`annex range ${r[0]} must lie within ${id}.01–${id}.89`);
-    }
-  }
-  rest = rest.slice(POS.length);
-  const sentences = rest.split(COND);
-  rest = sentences.shift();
-  entry.conditional = sentences.map((s) => {
-    const text = `Conditional sub-ID${s}`;
-    const c = parseConditional(text);
-    if (!c) fail(`unparsable sentence "${text}"`);
-    if (!c.feature) fail(`unknown conditional feature "${c.label}" (known: ${Object.keys(FEATURES).join(', ')})`);
-    if (c.id && c.id.slice(0, 3) !== id) fail(`conditional sub-ID ${c.id} is not a sub-ID of ${id}`);
-    if (c.id && !isConditionalNumber(c.id)) fail(`conditional sub-ID ${c.id} must be numbered ${id}.90–${id}.99`);
-    return { ...c, parent: id, text, n: where };
-  });
-  const parts = splitTop(rest, NEG);
-  if (parts.length !== 2) fail(`"+ / −" cell must contain exactly one "${NEG}", found ${parts.length - 1}`);
-  [entry.positive, entry.negative] = parts;
-  if (renderLayoutRow(entry, codes, entry.conditional.map((c) => c.text)) !== line) fail('row does not round-trip through the registry fields');
-  return entry;
+// The conditional sub-IDs that a layout §2 row names in the trailing
+// sentences of its "+ / −" cell, as checkNamedSubcases() takes them. An
+// unparsable sentence is returned with feature and task null.
+export function rowConditionals(line, id) {
+  return (cellsOf(line).at(-1) ?? '')
+    .split(COND)
+    .slice(1)
+    .map((rest) => {
+      const text = `Conditional sub-ID${rest}`;
+      const c = parseConditional(text) ?? { id: null, label: text, feature: null, task: null };
+      return { ...c, parent: id, text };
+    });
 }
 
-// Renders a scenario entry back into its layout §2 table row. `sentences` are
-// the table_text values of the row's conditional sub-IDs, in ID order.
+// Renders a scenario entry into its layout §2 table row. `sentences` are the
+// table_text values of the row's conditional sub-IDs, in ID order. The entry
+// may have the generator's shape (stages) or the registry's (stage).
 export function renderLayoutRow(e, codes, sentences = []) {
   const code = (v) => Object.keys(codes).find((k) => codes[k] === v) ?? `?${v}`;
-  const stages =
-    e.stages.length === 1 && e.stages[0].scope === FULL_ROW
-      ? e.stages[0].milestone
-      : e.stages.map((s) => `${s.milestone}: ${s.scope}`).join(' · ');
+  const st = e.stages ?? e.stage;
+  const stages = st.length === 1 && st[0].scope === FULL_ROW ? st[0].milestone : st.map((s) => `${s.milestone}: ${s.scope}`).join(' · ');
   const pm = `${e.note ? `${e.note} ` : ''}${POS}${e.positive}${NEG}${e.negative}${sentences.map((s) => `. ${s}`).join('')}`;
   const cells = [e.id, e.layers.map((l) => Object.keys(LAYERS).find((k) => LAYERS[k] === l)).join('+'), e.envs.map(code).join(', '), e.harness.join(', '), stages, e.owners.join(', '), pm];
   return `| ${cells.join(' | ')} |`;
 }
+
+export const TABLE_HEADER = ['| ID | Layer | Env | Harness | Stages | Owners | + / − required |', '| --- | --- | --- | --- | --- | --- | --- |'];
+
+// The layout §2 scenario table (header, separator, rows) rendered from the
+// scenario entries in order, each row ending with the table_text of its
+// conditional sub-IDs in ID order.
+export function renderTable(scenarios, subcases, codes) {
+  const sorted = [...subcases].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const rows = scenarios.map((e) =>
+    renderLayoutRow(
+      e,
+      codes,
+      sorted.filter((s) => s.parent === e.id && s.conditional_on !== undefined).map((s) => s.table_text),
+    ),
+  );
+  return [...TABLE_HEADER, ...rows];
+}
+
+// Locates the §2 scenario table: { first, lines } with the 1-based line of
+// its header and its consecutive "|" lines.
+export function findTable(layout) {
+  const lines = section(layout, LAYOUT, '2.');
+  const h = lines.findIndex((l) => l.line === TABLE_HEADER[0]);
+  if (h < 0) throw new SpecError(`${LAYOUT}: layout §2 scenario table header not found (expected "${TABLE_HEADER[0]}")`);
+  const out = [];
+  for (let i = h; i < lines.length && lines[i].line.startsWith('|') && lines[i].n === lines[h].n + out.length; i++) out.push(lines[i].line);
+  return { first: lines[h].n, lines: out };
+}
+
+// The mechanical counts sentences after the §2 table: entries per first and
+// per final stage milestone, and the number of multi-stage rows.
+export function renderCounts(scenarios) {
+  const count = (pick) => {
+    const n = new Map();
+    for (const e of scenarios) {
+      const m = pick(e.stages ?? e.stage).milestone;
+      n.set(m, (n.get(m) ?? 0) + 1);
+    }
+    return MILESTONES.filter((m) => n.has(m)).map((m) => `${m} ${n.get(m)}`).join(' · ');
+  };
+  const multi = scenarios.filter((e) => (e.stages ?? e.stage).length > 1).length;
+  return `Counts by first stage: ${count((st) => st[0])}. Counts by final stage: ${count((st) => st[st.length - 1])}. ${multi} rows have more than one stage.`;
+}
+
+export const COUNTS_RE = /^Counts by first stage: [^.]*\. Counts by final stage: [^.]*\. \d+ rows have more than one stage\./;
+
+// Locates the counts sentences in §2: { n, text } (1-based line, the matched
+// sentences), or null.
+export function findCounts(layout) {
+  for (const { line, n } of section(layout, LAYOUT, '2.')) {
+    const m = COUNTS_RE.exec(line);
+    if (m) return { n, text: m[0] };
+  }
+  return null;
+}
+
+// The stamp an implemented stage carries in implemented_sha256: SHA-256 of
+// id, milestone, scope and the entry's matrix_sha256, joined by "\n".
+export const stageStamp = (id, milestone, scope, matrix) => sha256([id, milestone, scope, matrix].join('\n'));
 
 // Task IDs defined as "- [ ] **T12.3** ..." bullets, with their lines.
 export function taskLines(text) {
@@ -349,8 +370,32 @@ export function taskLines(text) {
 
 // ---------------------------------------------------------------------------
 // TOML subset reader (what this script writes: comments, [[tables]], keys with
-// basic strings, integers, booleans, arrays and inline tables). Each [[table]]
-// object carries its header line in the non-enumerable property __line.
+// basic strings, integers, booleans, arrays and inline tables, plus local
+// dates such as a waiver's `expires = 2026-12-31`). Each [[table]] object
+// carries its header line in the non-enumerable property __line.
+
+// A TOML local date (YYYY-MM-DD). Offset and local date-times and times are
+// not part of the subset.
+export class LocalDate {
+  constructor(text) {
+    this.text = text;
+  }
+  toString() {
+    return this.text;
+  }
+  toJSON() {
+    return this.text;
+  }
+}
+
+const isLeap = (y) => y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+const DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+// True for a calendar date: month 01-12 and a day that exists in that month.
+export function validDate(y, m, d) {
+  if (m < 1 || m > 12 || d < 1) return false;
+  return d <= (m === 2 && isLeap(y) ? 29 : DAYS[m - 1]);
+}
 
 export function parseToml(text, file = 'toml') {
   let i = 0;
@@ -440,6 +485,14 @@ export function parseToml(text, file = 'toml') {
         } else err('expected "," or "}"');
       }
     }
+    const date = /^(\d{4})-(\d{2})-(\d{2})/.exec(text.slice(i, i + 40));
+    if (date) {
+      // A time part ("T10:00", " 10:00") would make it a date-time.
+      if (/^[Tt]|^ \d/.test(text.slice(i + 10, i + 12))) err('only local dates are supported, not date-times');
+      if (!validDate(Number(date[1]), Number(date[2]), Number(date[3]))) err(`invalid date ${date[0]}`);
+      i += 10;
+      return new LocalDate(date[0]);
+    }
     const m = /^(true|false|-?\d+)/.exec(text.slice(i, i + 40));
     if (!m) err('unsupported value');
     i += m[0].length;
@@ -507,6 +560,7 @@ function stageBlock(table, s) {
     kv('scope', s.scope),
     kv('legs', s.legs),
     kv('status', s.status),
+    ...(s.implemented_sha256 === undefined ? [] : [kv('implemented_sha256', s.implemented_sha256)]),
     kv('tests', s.tests),
   ].join('\n');
 }
@@ -535,9 +589,10 @@ function subcaseBlock(e, sourceLine) {
 }
 
 const SCENARIOS_HEADER = `# Conformance scenario registry: A01–A64 (tasks §8) and C01–C10 (design §2).
-# Generated by scripts/ci/gen-conformance-registry.mjs; see tests/conformance/README.md.
-# Hand-edit only gates_passed and each stage's legs, status and tests; the
-# generator keeps those and rewrites everything else from the specs.
+# The source of the layout §2 scenario table, which
+# scripts/ci/gen-conformance-registry.mjs renders from it; see tests/conformance/README.md.
+# Hand-edit gates_passed, the scenario columns and the stages. The generator
+# rewrites the entry order, matrix_sha256, the contracts and the comments.
 `;
 
 const SUBCASES_HEADER = `# Sub-ID annex of the conformance registry (layout doc §3, §5 Q1/Q3, §6).
@@ -591,12 +646,50 @@ function lineOfKey(text, key) {
   return i + 1;
 }
 
-function validStages(stages, where, errors) {
-  for (const s of stages) {
-    if (!MILESTONES.includes(s.milestone)) errors.push(`${where}: unknown stage milestone ${s.milestone}`);
-    if (!STATUSES.includes(s.status)) errors.push(`${where} ${s.milestone}: status must be planned or implemented`);
-    if (!Array.isArray(s.legs) || !s.legs.length) errors.push(`${where} ${s.milestone}: stage has no legs`);
-  }
+const SCENARIO_KEYS = ['id', 'kind', 'layers', 'envs', 'harness', 'owners', 'note', 'positive', 'negative', 'matrix_sha256', 'stage'];
+const STAGE_KEYS = ['milestone', 'scope', 'legs', 'status', 'implemented_sha256', 'tests'];
+// Text rendered into a §2 table cell: non-empty, no "|" or line break.
+const isCell = (v) => typeof v === 'string' && v !== '' && !/[|\n]/.test(v);
+const isCells = (v) => Array.isArray(v) && v.length > 0 && v.every(isCell);
+
+// The hand-authored §2 columns of a scenario entry; true if they are valid.
+function validScenario(s, where, codes, tasksById, errors) {
+  const before = errors.length;
+  for (const k of Object.keys(s)) if (!SCENARIO_KEYS.includes(k)) errors.push(`${where}: unknown field ${k}`);
+  for (const k of ['layers', 'envs', 'harness', 'owners']) if (!isCells(s[k])) errors.push(`${where}: ${k} must be a non-empty list of table text`);
+  for (const k of ['positive', 'negative']) if (!isCell(s[k])) errors.push(`${where}: ${k} must be non-empty table text`);
+  if (s.note !== undefined && !isCell(s.note)) errors.push(`${where}: note must be non-empty table text when present`);
+  if (!Array.isArray(s.stage) || !s.stage.length) errors.push(`${where}: needs at least one [[scenario.stage]]`);
+  if (errors.length > before) return false;
+  for (const x of s.layers) if (!Object.values(LAYERS).includes(x)) errors.push(`${where}: unknown layer "${x}"`);
+  for (const x of s.envs) if (!Object.values(codes).includes(x)) errors.push(`${where}: unknown env "${x}"`);
+  for (const o of s.owners) if (!tasksById.has(o)) errors.push(`${where}: owner ${o} is not a task in ${TASKS}`);
+  const r = annexRange(s.id, s.note);
+  if (r && (r.from < 1 || r.to > 89 || r.from > r.to)) errors.push(`${where}: annex range ${r.text} must lie within ${s.id}.01–${s.id}.89`);
+  return errors.length === before;
+}
+
+// Checks of a scenario's or subcase's type-checked stages, in order. `e` has
+// its derived matrix_sha256; `at(s)` is "file:line: id milestone".
+function validStages(e, at, errors) {
+  const n = e.stages.length;
+  e.stages.forEach((s, i) => {
+    const prev = e.stages[i - 1];
+    if (prev && mIndex(s.milestone) <= mIndex(prev.milestone)) errors.push(`${at(s)}: stage ${s.milestone} comes after ${prev.milestone}; stage milestones must increase`);
+    for (const k of Object.keys(s)) if (!STAGE_KEYS.includes(k)) errors.push(`${at(s)}: unknown stage field ${k}`);
+    if ((s.scope === FULL_ROW) !== (n === 1)) errors.push(`${at(s)}: scope "${FULL_ROW}" is the scope of a single-stage entry, and only of one`);
+    else if (/[|\n]/.test(s.scope)) errors.push(`${at(s)}: scope must be table text (no "|" or line break)`);
+    if (s.status === 'implemented') {
+      if (!s.tests.length) errors.push(`${at(s)}: an implemented stage must list its tests`);
+      const want = stageStamp(e.id, s.milestone, s.scope, e.matrix_sha256);
+      if (s.implemented_sha256 !== want) {
+        errors.push(
+          `${at(s)}: implemented_sha256 is ${s.implemented_sha256 ?? 'missing'}, but this stage's (id, milestone, scope, matrix_sha256) stamps to ${want}. ` +
+            'The stage changed since it was marked implemented: review it, then set status = "planned" or re-stamp it',
+        );
+      }
+    } else if (s.implemented_sha256 !== undefined) errors.push(`${at(s)}: implemented_sha256 is only for an implemented stage`);
+  });
 }
 
 // Leg checks of layout §3: each leg is a §1.1 leg string, its env is one of
@@ -621,7 +714,7 @@ function checkLegs(e, where, catalogue, errors) {
 // unnumbered one must match exactly one entry by those three; every
 // conditional entry must be named. Required sub-IDs need not be named (their
 // annex range is checked in generate()).
-function checkNamedSubcases(named, subs, errors) {
+export function checkNamedSubcases(named, subs, errors) {
   const matched = new Set();
   const explicit = new Set(named.filter((n) => n.id).map((n) => n.id));
   const desc = (n) => `${n.id ?? `sub-ID of ${n.parent}`} (${n.feature}, ${n.task}) is named in ${LAYOUT} §2 row ${n.parent}`;
@@ -664,8 +757,9 @@ export function generate(root) {
     const { codes, catalogue } = parseEnvironments(layout, errors);
 
     // Committed files: reject repeated keys before anything is keyed by them.
-    const oldScenarios = readMaybe(root, SCENARIOS);
-    const old = oldScenarios === null ? {} : parseToml(oldScenarios, SCENARIOS);
+    // scenarios.toml is the source of the scenario columns, so it must exist.
+    const oldScenarios = read(SCENARIOS);
+    const old = parseToml(oldScenarios, SCENARIOS);
     const subText = readMaybe(root, SUBCASES);
     const subDoc = subText === null ? {} : parseToml(subText, SUBCASES);
     const dups = [...duplicateErrors(old, SCENARIOS, 'scenario'), ...duplicateErrors(subDoc, SUBCASES, 'subcase')];
@@ -676,27 +770,11 @@ export function generate(root) {
 
     const a = idRows(section(tasks, TASKS, '8.'), TASKS, 'A\\d\\d', 'scenario');
     const c = idRows(section(design, DESIGN, '2.'), DESIGN, 'C\\d\\d', 'contract');
-    const l = idRows(section(layout, LAYOUT, '2.'), LAYOUT, 'A\\d\\d', 'layout scenario');
-    errors.push(...a.errors, ...c.errors, ...l.errors);
-
+    errors.push(...a.errors, ...c.errors);
     const aIds = a.rows.map((r) => r.id);
-    const lIds = new Set(l.rows.map((r) => r.id));
-    for (const id of aIds) if (!lIds.has(id)) errors.push(`${LAYOUT}: scenario ${id} of ${TASKS} §8 has no row in the §2 table`);
-    for (const id of lIds) if (!aIds.includes(id)) errors.push(`${LAYOUT}: §2 row ${id} is not a scenario of ${TASKS} §8`);
-
-    const layoutById = new Map();
-    const named = [];
-    for (const r of l.rows) {
-      try {
-        const e = parseLayoutRow(r.line, `${LAYOUT}:${r.n}`, codes);
-        for (const o of e.owners) if (!tasksById.has(o)) errors.push(`${LAYOUT}:${r.n}: ${r.id}: owner ${o} is not a task in ${TASKS}`);
-        named.push(...e.conditional);
-        layoutById.set(r.id, e);
-      } catch (ex) {
-        if (!(ex instanceof SpecError)) throw ex;
-        errors.push(ex.message);
-      }
-    }
+    const table = findTable(layout);
+    const counts = findCounts(layout);
+    if (!counts) errors.push(`${LAYOUT}: the "Counts by first stage: ... rows have more than one stage." sentences after the §2 table are missing`);
 
     // Contract mapping: "| C01 <title> | A19, A14 | ... |" rows of layout §5.
     const covered = new Map();
@@ -711,14 +789,6 @@ export function generate(root) {
     for (const r of c.rows) if (!covered.has(r.id)) errors.push(`${LAYOUT}: contract ${r.id} has no "Covered by" row in §5`);
     for (const id of covered.keys()) if (!c.rows.some((r) => r.id === id)) errors.push(`${LAYOUT}: §5 maps ${id}, which is not a contract of ${DESIGN} §2`);
 
-    // Hand-authored stage fields from the committed file. An invalid stage is
-    // reported and not reused.
-    const oldStages = new Map();
-    for (const e of old.scenario ?? []) {
-      for (const s of e.stage ?? []) {
-        if (!stageErrors(s, `${SCENARIOS}:${s.__line}: ${e.id} ${s.milestone}`, errors)) oldStages.set(`${e.id}/${s.milestone}`, s);
-      }
-    }
     let gates = old.gates_passed ?? [];
     const gatesAt = `${SCENARIOS}:${lineOfKey(oldScenarios, 'gates_passed')}`;
     if (!Array.isArray(gates) || !gates.every((g) => typeof g === 'string')) {
@@ -728,29 +798,44 @@ export function generate(root) {
     for (const g of gates) if (!MILESTONES.includes(g)) errors.push(`${gatesAt}: gates_passed has unknown milestone ${g}`);
     for (const g of new Set(gates.filter((g, i) => gates.indexOf(g) !== i))) errors.push(`${gatesAt}: gates_passed lists ${g} twice`);
 
+    // Scenarios: the tasks §8 rows give the IDs, their order and matrix_sha256;
+    // everything else comes from the registry entry. Stages are taken as they
+    // are, never re-keyed, so a stage that moves milestone keeps its tests.
+    const registered = new Map();
+    for (const e of old.scenario ?? []) {
+      if (e.kind === 'scenario') registered.set(e.id, e);
+      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e.__line}: ${e.id}: kind must be scenario or contract`);
+    }
+    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e.__line}: scenario ${id} is not a row of ${TASKS} §8`);
     const scenarios = [];
     for (const r of a.rows) {
-      const e = layoutById.get(r.id);
-      if (!e) continue;
-      e.matrix_sha256 = sha256(r.line);
-      e.stages = e.stages.map((s) => {
-        const prev = oldStages.get(`${e.id}/${s.milestone}`);
-        return {
-          ...s,
-          legs: prev?.legs ?? defaultLegs(e, s, catalogue),
-          status: prev?.status ?? 'planned',
-          tests: prev?.tests ?? [],
-        };
+      const s = registered.get(r.id);
+      if (!s) {
+        errors.push(`${TASKS}:${r.n}: scenario ${r.id} has no [[scenario]] entry in ${SCENARIOS}; add one with its layout §2 columns and stages`);
+        continue;
+      }
+      const where = `${SCENARIOS}:${s.__line}: ${r.id}`;
+      if (!validScenario(s, where, codes, tasksById, errors)) continue;
+      const e = { id: r.id, layers: s.layers, envs: s.envs, harness: s.harness, owners: s.owners, note: s.note, positive: s.positive, negative: s.negative, matrix_sha256: sha256(r.line) };
+      const at = (st) => `${SCENARIOS}:${st.__line}: ${r.id} ${st.milestone}`;
+      const before = errors.length;
+      e.stages = s.stage.map((st) => {
+        const full = { ...st, legs: st.legs ?? defaultLegs(e, st, catalogue), status: st.status ?? 'planned', tests: st.tests ?? [] };
+        Object.defineProperty(full, '__line', { value: st.__line });
+        stageErrors(full, at(full), errors);
+        if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${at(full)}: implemented_sha256 must be a string`);
+        return full;
       });
-      validStages(e.stages, `${SCENARIOS}: ${e.id}`, errors);
-      checkLegs(e, `${SCENARIOS}: ${e.id}`, catalogue, errors);
-      scenarios.push(e);
+      if (errors.length > before) continue;
+      validStages(e, at, errors);
+      checkLegs(e, where, catalogue, errors);
+      if (errors.length === before) scenarios.push(e);
     }
     const contracts = c.rows.map((r) => ({ id: r.id, covered_by: covered.get(r.id) ?? [], matrix_sha256: sha256(r.line) }));
 
     // Subcases: everything but matrix_sha256 is hand-authored.
     const subs = subDoc.subcase ?? [];
-    const byId = new Map(scenarios.map((e) => [e.id, e]));
+    const byId = new Map([...registered].filter(([id]) => aIds.includes(id)));
     const subBlocks = [];
     for (const s of subs) {
       const where = `${SUBCASES}:${s.__line}: ${s.id}`;
@@ -765,18 +850,16 @@ export function generate(root) {
       if (errors.length > before) continue;
       for (const x of s.layers) if (!Object.values(LAYERS).includes(x)) errors.push(`${where}: unknown layer "${x}"`);
       for (const x of s.envs) if (!Object.values(codes).includes(x)) errors.push(`${where}: unknown env "${x}"`);
-      s.stage.forEach((st, i) => {
-        if (stageErrors(st, `${SUBCASES}:${st.__line}: ${s.id} ${st.milestone}`, errors)) return;
-        const prev = s.stage[i - 1];
-        if (prev && MILESTONES.includes(prev.milestone) && mIndex(st.milestone) <= mIndex(prev.milestone)) {
-          errors.push(`${SUBCASES}:${st.__line}: ${s.id}: stage ${st.milestone} comes after ${prev.milestone}; stage milestones must increase`);
-        }
-      });
-      const parentRow = layoutById.get(s.parent);
+      const stageAt = (st) => `${SUBCASES}:${st.__line}: ${s.id} ${st.milestone}`;
+      for (const st of s.stage) {
+        stageErrors(st, stageAt(st), errors);
+        if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${stageAt(st)}: implemented_sha256 must be a string`);
+      }
+      const parent = byId.get(s.parent);
       if (s.conditional_on === undefined) {
         if (s.table_text !== undefined) errors.push(`${where}: table_text is only for a conditional sub-ID`);
         const n = Number(s.id.slice(4));
-        const r = parentRow?.annex;
+        const r = annexRange(s.parent, parent?.note);
         if (!r) errors.push(`${where}: required sub-ID, but layout §2 row ${s.parent} declares no annex range`);
         else if (n < r.from || n > r.to) {
           const fmt = (x) => `${s.parent}.${String(x).padStart(2, '0')}`;
@@ -799,12 +882,24 @@ export function generate(root) {
       for (const o of s.owners) if (!tasksById.has(o)) errors.push(`${where}: owner ${o} is not a task in ${TASKS}`);
       if (!tasksById.has(s.owners[0])) continue;
       const entry = { ...s, stages: s.stage, matrix_sha256: sha256(tasksById.get(s.owners[0])) };
-      validStages(entry.stages, where, errors);
+      validStages(entry, stageAt, errors);
       checkLegs(entry, where, catalogue, errors);
       subBlocks.push({ id: s.id, text: subcaseBlock(entry, tasksById.get(s.owners[0])), entry });
     }
     subBlocks.sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
-    checkNamedSubcases(named, subs, errors);
+    const subEntries = subBlocks.map((b) => b.entry);
+
+    // The §2 table and its counts are rendered from the registry (layout §2,
+    // §3). Every conditional sub-ID is one that the rendered table names.
+    const rendered = renderTable(scenarios, subEntries, codes);
+    checkNamedSubcases(
+      rendered.slice(TABLE_HEADER.length).flatMap((line) => rowConditionals(line, line.slice(2, 5))),
+      subs,
+      errors,
+    );
+    const lines = layout.split('\n');
+    if (counts) lines[counts.n - 1] = renderCounts(scenarios) + lines[counts.n - 1].slice(counts.text.length);
+    lines.splice(table.first - 1, table.lines.length, ...rendered);
 
     const scenariosToml =
       `${SCENARIOS_HEADER}\n${kv('gates_passed', gates)}\n\n` +
@@ -812,19 +907,10 @@ export function generate(root) {
       '\n';
     const subcasesToml = `${SUBCASES_HEADER}\n` + subBlocks.map((b) => b.text).join('\n\n') + '\n';
 
-    // The table must be renderable from the registry (layout §3), with each
-    // row's conditional sub-ID sentences taken from subcases.toml.
-    for (const r of l.rows) {
-      const e = byId.get(r.id);
-      if (!e) continue;
-      const sentences = subBlocks.filter((b) => b.entry.parent === r.id && b.entry.conditional_on !== undefined).map((b) => b.entry.table_text);
-      if (renderLayoutRow(e, codes, sentences) !== r.line) errors.push(`${LAYOUT}:${r.n}: ${r.id}: rendered row differs from the committed row`);
-    }
-
     return {
-      files: { [SCENARIOS]: scenariosToml, [SUBCASES]: subcasesToml },
+      files: { [SCENARIOS]: scenariosToml, [SUBCASES]: subcasesToml, [LAYOUT]: lines.join('\n') },
       errors,
-      entries: { scenarios, contracts, subcases: subBlocks.map((b) => b.entry) },
+      entries: { scenarios, contracts, subcases: subEntries },
       catalogue,
       codes,
     };
@@ -839,6 +925,18 @@ export function generate(root) {
 // Field-level differences between a committed and a regenerated file.
 export function describeDiff(path, committed, regenerated) {
   if (committed === null) return [`${path}: missing; run node scripts/ci/gen-conformance-registry.mjs`];
+  if (path === LAYOUT) {
+    const a = committed.split('\n');
+    const b = regenerated.split('\n');
+    const out = [];
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      if (a[i] === b[i]) continue;
+      const row = /^\| (A\d\d) \|/.exec(b[i] ?? '') ?? /^\| (A\d\d) \|/.exec(a[i] ?? '');
+      const what = row ? `§2 row ${row[1]}` : COUNTS_RE.test(b[i] ?? '') ? 'the §2 counts sentences' : 'line';
+      out.push(`${path}:${i + 1}: ${what} differs from the table rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
+    }
+    return out;
+  }
   let oldDoc;
   try {
     oldDoc = parseToml(committed, path);
@@ -902,6 +1000,7 @@ export function run(argv, log = console.log, logErr = console.error) {
     return 0;
   }
   for (const [rel, text] of Object.entries(files)) {
+    if (readMaybe(root, rel) === text) continue;
     mkdirSync(dirname(join(root, rel)), { recursive: true });
     writeFileSync(join(root, rel), text);
     log(`wrote ${rel}`);
