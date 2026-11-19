@@ -49,16 +49,26 @@ principal and how migration blocks that until operators have reconciled links.
 
 7. **Hold set atomically.** `TenantLoginState.enrollment_hold` is set by a
    provider switch or rollback in the same transaction as epoch invalidation,
-   and overrides `auto_create` (design §5.1.1; ADR-012).
+   and overrides `auto_create` (design §5.1.1; ADR-012). Disabling the active
+   provider, a single-actor operation, also sets the hold in its commit (lead
+   decision, 2026-11-19, OQ-ADR023-2). The audited compromise transition does
+   not set it (ADR-021 item 8).
 8. **Rechecked on every callback.** Every callback rechecks the current hold,
    policy and generation before creating any principal; there is no auto-create
    across a concurrent switch or rollback (design §5.1.1; T30.8).
 9. **Effect.** Unmatched replacement-provider subjects are denied while the hold
    is set, not assigned new IDs. Existing verified links continue normally after
    reauthentication (design §5.1.1).
-10. **Initial activation.** Activation from a null provider may explicitly
-    enable `auto_create` only as an approved fresh-install choice in its plan
-    (design §5.1.1).
+10. **Activation from null.** Initial activation on a true fresh install, where
+    no provider has ever been active for the tenant, sets no hold and may
+    explicitly enable `auto_create` only as an approved fresh-install choice in
+    its plan (design §5.1.1). Activation from null after any provider was ever
+    active, for example after a disable, is treated as a switch: it sets the
+    hold, and the fresh-install `auto_create` choice is unavailable. A disable
+    followed by an activation therefore never acts as a switch without a hold
+    (lead decision, 2026-11-19, OQ-ADR023-1, OQ-ADR023-2). The service keeps a
+    durable record that a tenant has had an active provider (inferred: the
+    decision needs one, and no source names it).
 
 ### Deliberate generation-bound resume
 
@@ -87,6 +97,11 @@ principal and how migration blocks that until operators have reconciled links.
   (design §5.1.1).
 - Invitation workflows are deferred; operators preprovision through the
   verified-enrollment path (design §5.1.1).
+- Spec amendment follow-ups for the OQ-ADR023-1 and OQ-ADR023-2 decisions:
+  design §5.1.1 (the hold on disable and on activation from null after a prior
+  provider; the fresh-install exception) and design §7.3 (the transition
+  primitive), with the matching tasks T13.9 and T30.8 text and contract rows
+  (inferred: the lead decision names design §5.1.1 and §7, not the section).
 - Conformance rows: A22, A47, A60.
 
 ## Alternatives considered
@@ -118,20 +133,31 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR023-1 — Hold on initial activation.** Design §5.1.1 says a switch or
-  rollback sets the hold and that activation from null may enable `auto_create`
-  in its plan. Whether initial activation from null sets `enrollment_hold`,
-  leaving a fresh install with `auto_create` blocked until a resume, is not
-  stated.
-- **OQ-ADR023-2 — Disable of the active provider.** The transition primitive
-  covers "switch/disable/rollback" (T13.9), but whether disabling the active
-  provider without a replacement sets the hold, and what `enrollment_required`
-  callers see while no provider is active, is not stated.
+- **OQ-ADR023-1 — Hold on initial activation.** Decided (lead decision,
+  2026-11-19): initial activation on a true fresh install sets no hold;
+  activation from null after any provider was ever active is treated as a
+  switch, sets the hold and cannot offer the fresh-install `auto_create` choice
+  (item 10). Original question: Design §5.1.1 says a switch or rollback sets the
+  hold and that activation from null may enable `auto_create` in its plan.
+  Whether initial activation from null sets `enrollment_hold`, leaving a fresh
+  install with `auto_create` blocked until a resume, is not stated.
+- **OQ-ADR023-2 — Disable of the active provider.** Decided (lead decision,
+  2026-11-19): disable is single-actor and sets the enrollment hold, so a
+  disable and a later activation from null cannot together act as a switch
+  without a hold (items 7 and 10). What a login attempt sees while no provider
+  is active is not decided here (see OQ-ERR-6). Original question: The
+  transition primitive covers "switch/disable/rollback" (T13.9), but whether
+  disabling the active provider without a replacement sets the hold, and what
+  `enrollment_required` callers see while no provider is active, is not stated.
 
 ## Tests
 
 - A60 — first browser and native login in default and auto-create mode,
   concurrent callbacks, disabled user, switch and rollback hold.
+- A60 (disable and reactivation) — disabling the active provider sets the hold;
+  activation from null after a prior provider sets the hold and rejects a
+  fresh-install `auto_create` choice; initial activation on a fresh install sets
+  no hold (OQ-ADR023-1, OQ-ADR023-2).
 - A22 — email-only link or upstream admin-role claim.
 - A47 — generic writes cannot move the provider or clear state.
 - Task tests: T30.7, T30.8, T51.11.

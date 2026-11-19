@@ -45,11 +45,11 @@ transition's effect on state is ADR-012.
 
 5. One M1b primitive covers authentication-critical changes, initial activation
    from null, switch, disable and rollback: an immutable plan, dry-run and
-   commit against expected login and configuration revisions; only its
-   authorized commit updates login state and advances epochs atomically, with
-   the enrollment hold and audit (design §7.3; T13.9). It is the sole routine
-   epoch-advancing transition; the audited compromise transition (OQ-TM-14) is
-   the only other one (lead decision, 2026-11-19).
+   commit against expected login and configuration revisions. Apart from the
+   audited compromise transition (item 8), only its authorized commit updates
+   login state and advances epochs, atomically with the audit and with the
+   enrollment hold where ADR-023 sets it (design §7.3; T13.9; lead decision,
+   2026-11-19).
 6. M5 migration tooling (T51) orchestrates this primitive and is not an
    alternate writer; break-glass recovery may run the same validated transition
    only (design §7.2; T51.1).
@@ -66,7 +66,14 @@ transition's effect on state is ADR-012.
    variant. Instance `security_admin` may only run the instance-wide response,
    which runs the tenant transition for every tenant; it has no per-tenant
    write, following the OQ-API-6 precedent (lead decision on OQ-TM-14 and
-   OQ-ADR021-1, 2026-11-19).
+   OQ-ADR021-1, 2026-11-19). The compromise transition advances both provider
+   `auth_epoch` and tenant `auth_generation` (lifetimes §4) and does not set the
+   enrollment hold (lead decision, 2026-11-19). The endpoint of the
+   instance-wide response is not named (OQ-ADR021-3). Spec amendment follow-ups:
+   the tasks §2 endpoint matrix (the compromise-transition endpoint and the
+   instance-wide response), public-api §7.1 (their endpoint rows) and §7.2
+   (their approval-boundary rows), and design §7.3 (the compromise transition as
+   the second epoch-advancing path).
 
 ### Separate audited credential-only rotation
 
@@ -77,8 +84,8 @@ transition's effect on state is ADR-012.
 10. It compares expected provider and credential revisions, validates the
     unchanged semantic tuple and advances only administrative and credential
     revisions. Provider `auth_epoch` and tenant `auth_generation` do not change;
-    sessions, native refresh families and pending transcripts keep their identity
-    binding (design §7.3).
+    sessions, native refresh families and pending transcripts keep their
+    identity binding (design §7.3).
 11. Only explicitly configured versions are used for bounded provider-supported
     overlap; there is no arbitrary secret or key fallback. Lack of upstream
     overlap may fail an in-flight code exchange but does not log out existing
@@ -137,21 +144,27 @@ New questions raised by this ADR:
 
 - **OQ-ADR021-1 — Second epoch-advancing path.** Decided (lead decision,
   2026-11-19): the provider transition is the sole routine epoch-advancing
-  transition, and the audited compromise transition (OQ-TM-14) is the only
-  other one. It owns the tenant-wide `auth_generation` advance at `POST` on
-  `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, run by
-  tenant `provider_admin` for that tenant, single actor with no second
-  approver; instance `security_admin` may only run the instance-wide response,
-  which runs it for every tenant (item 8). Original question: the baseline makes the provider
-  transition the "sole epoch-advancing semantic transition", while the OQ-TM-14
-  decision adds an operation that advances `auth_generation` without a provider
-  change. The sources do not say whether that operation is a mode of the
-  transition primitive or a separate path, which endpoint and role own it, or
-  whether compromise-triggered invalidation (T30.9) uses it or a full
+  transition, and the audited compromise transition (OQ-TM-14) is the only other
+  one. It owns the tenant-wide `auth_generation` advance at `POST` on
+  `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, run by tenant
+  `provider_admin` for that tenant, single actor with no second approver;
+  instance `security_admin` may only run the instance-wide response, which runs
+  it for every tenant (item 8). Original question: the baseline makes the
+  provider transition the "sole epoch-advancing semantic transition", while the
+  OQ-TM-14 decision adds an operation that advances `auth_generation` without a
+  provider change. The sources do not say whether that operation is a mode of
+  the transition primitive or a separate path, which endpoint and role own it,
+  or whether compromise-triggered invalidation (T30.9) uses it or a full
   transition.
 - **OQ-ADR021-2 — Rotation overlap bound.** T30.9 requires a "bounded configured
   overlap" for credential-only rotation, but no default, maximum or field for it
-  is given.
+  is given. Open; to be decided before M1b/M3 (lead decision, 2026-11-19).
+- **OQ-ADR021-3 — Instance-wide compromise response endpoint.** The
+  instance-wide response that instance `security_admin` may run (item 8) has no
+  named endpoint, request shape or audit record in the sources or in the lead
+  decision. It is part of the item 8 spec amendment follow-ups. Open; to be
+  decided before M1b/M3 (inferred from OQ-TM-14, which is to be specified before
+  M1b and M3).
 
 ## Tests
 
@@ -161,4 +174,7 @@ New questions raised by this ADR:
 - A63 — credential-only rotation preserves epochs, sessions and refresh; mixed
   semantic changes require the transition.
 - A17 — rollback after independent policy changes.
+- Compromise transition — advances provider `auth_epoch` and tenant
+  `auth_generation`, sets no enrollment hold, and is denied to instance
+  `security_admin` per tenant (item 8; lifetimes §4).
 - Task tests: T51.3, T51.11.

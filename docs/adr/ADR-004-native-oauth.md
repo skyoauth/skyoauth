@@ -244,11 +244,13 @@ New questions raised by this ADR:
   envelope under "a separate protected encryption-key reference" outside the
   database and separate from signing keys. Who provisions it, how it rotates,
   and whether an in-window receipt sealed under the previous key stays
-  recoverable after rotation are not stated.
+  recoverable after rotation are not stated. Open; to be decided before M4 (lead
+  decision, 2026-11-19).
 - **OQ-ADR004-2 — Displayed session duration.** The confirmation page shows the
   "approved native-session duration" (design §5.2) and "the browser displays
   these limits at initial approval" (design §5.2.2). Whether the page shows both
   the absolute and the idle family limit, or a single value, is not stated.
+  Open; to be decided before M4 (lead decision, 2026-11-19).
 
 ## Tests
 

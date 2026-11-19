@@ -40,7 +40,8 @@ fixes the boundary that holds whether or not the feature ships.
 5. **Vault only behind a feature.** An upstream token may be retained only in
    the explicit encrypted vault, for an approved upstream operation, behind an
    explicit feature; by default upstream tokens are discarded (design §5.5;
-   T30.5).
+   T30.5). The vault is not in required v0.1 scope: T30.5 keeps only the feature
+   flag and the default discard (lead decision, 2026-11-19, OQ-ADR009-2).
 6. **Separate administration adapter.** Upstream administration uses a
    separately isolated, restricted service adapter. It is neither SkyOAuth
    operator authority nor a target of public WIF delegation, and an upstream
@@ -91,14 +92,18 @@ New questions raised by this ADR:
 - **OQ-ADR009-1 — Exchange surface.** The sources define no endpoint, grant
   type, token profile or operator role for upstream exchange or for an "approved
   upstream operation". Which of these a release including this ADR must add, and
-  through which contract, is not stated.
-- **OQ-ADR009-2 — Vault milestone.** T30.5 places the optional encrypted
-  provider-token vault in M3, while design §11 lists "upstream exchange/vault"
-  as conditional/later. Whether the vault feature may ship in v0.1 without
-  exchange, or only together with it, is not stated.
+  through which contract, is not stated. Open; deferred (lead decision,
+  2026-11-19).
+- **OQ-ADR009-2 — Vault milestone.** Decided (lead decision, 2026-11-19): the
+  vault is not in required v0.1 scope; T30.5 keeps only the feature flag and
+  default discard (item 5). Original question: T30.5 places the optional
+  encrypted provider-token vault in M3, while design §11 lists "upstream
+  exchange/vault" as conditional/later. Whether the vault feature may ship in
+  v0.1 without exchange, or only together with it, is not stated.
 - **OQ-ADR009-3 — Vault key and retention.** The vault is "explicit encrypted"
   (design §5.5), but its key custody, retention bound and the effect of a
-  provider switch or session revocation on vaulted tokens are not stated.
+  provider switch or session revocation on vaulted tokens are not stated. Open;
+  deferred (lead decision, 2026-11-19).
 
 ## Tests
 

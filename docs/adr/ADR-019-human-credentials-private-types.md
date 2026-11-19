@@ -171,11 +171,13 @@ New questions raised by this ADR:
   ingress route does not allow, and `ApplicationRouteVersion.allowed_profiles`
   records this for routes in a route bundle. For M2 bearer routes on a host that
   is not enrolled in a bundle, the sources do not say where the accepted
-  profiles (`wif` and `human_cli`) of the ingress route are recorded.
+  profiles (`wif` and `human_cli`) of the ingress route are recorded. Open; to
+  be decided before M2 (lead decision, 2026-11-19).
 - **OQ-ADR019-2 — Publishing the private profile.** T20.1 and T20.8 require
   "explicit private token-profile metadata" and published validation rules, but
   not whether the profile is advertised in discovery metadata, a separate
-  document or only the contract (related: OQ-API-8).
+  document or only the contract (related: OQ-API-8). Open; deferred (lead
+  decision, 2026-11-19).
 
 ## Tests
 

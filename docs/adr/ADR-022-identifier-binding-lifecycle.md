@@ -68,7 +68,10 @@ the selected grant scopes binding evaluation over their lifetime.
     target. Only enabled bindings for the selected source that map to that
     grant's actor and appear in its approved `allowed_binding_ids` are
     evaluated; at least one must match the verified evidence (design §5.7;
-    T12.3; ADR-015).
+    T12.3; ADR-015). A disabled binding may stay in `allowed_binding_ids` but
+    never matches; a grant with no enabled allowed binding denies; a binding is
+    never hard-deleted while referenced (lead decision, 2026-11-19,
+    OQ-ADR022-1).
 11. **Other actors are irrelevant.** A matching binding for another actor
     neither authorizes nor makes the request ambiguous (design §5.7; T12.7).
 12. **No union.** Several matching same-actor bindings select one by stable ID
@@ -114,14 +117,18 @@ Existing contract questions that touch this ADR:
 New questions raised by this ADR:
 
 - **OQ-ADR022-1 — Disabled or deleted bindings in `allowed_binding_ids`.**
-  Configuration rejects cross-actor references, but the sources do not say
-  whether a grant may keep a disabled binding in `allowed_binding_ids`, what
-  happens to a grant whose every allowed binding is disabled, or whether a
-  binding can ever be hard-deleted while referenced.
+  Decided (lead decision, 2026-11-19): disabled bindings may stay in the list
+  but never match; a grant with no enabled binding denies; no hard delete while
+  referenced (item 10). Original question: Configuration rejects cross-actor
+  references, but the sources do not say whether a grant may keep a disabled
+  binding in `allowed_binding_ids`, what happens to a grant whose every allowed
+  binding is disabled, or whether a binding can ever be hard-deleted while
+  referenced.
 - **OQ-ADR022-2 — Manifest references and mapping format.** The importer
   resolves "tenant-local manifest references" and returns "a persistent mapping"
   (design §7.4), but the reference syntax in import documents and the mapping's
-  format and storage are not specified.
+  format and storage are not specified. Open; to be resolved in T10.7 (lead
+  decision, 2026-11-19).
 
 ## Tests
 

@@ -187,11 +187,13 @@ New questions raised by this ADR:
   baseline defers "gateway-metadata-only routing"; design §4.1 defers "trusted
   per-route audience metadata ... under ADR-007/ADR-020". The sources do not
   define either term or say whether they are the same alternative, nor which of
-  the two ADRs would own its future decision.
+  the two ADRs would own its future decision. Open; deferred (lead decision,
+  2026-11-19).
 - **OQ-ADR007-2 — Applications that need cookies.** Application responses cannot
   set cookies in v0.1 (design §4). The sources do not say whether this is a
   permanent product boundary or a v0.1 limit, nor what an application on an
-  enrolled host that relies on its own cookies is expected to do.
+  enrolled host that relies on its own cookies is expected to do. Open; deferred
+  (lead decision, 2026-11-19).
 
 ## Tests
 

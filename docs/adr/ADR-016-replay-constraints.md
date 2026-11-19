@@ -173,11 +173,12 @@ New questions raised by this ADR:
   `uploaded_jwks`, other `oidc_discovery` and Kubernetes bindings, the sources
   do not say which predicates are required, or how a binding is designated
   "production" (the design §5.7 example uses `profile: github_production`).
-- **OQ-ADR016-2 — Widening approval.** Deleting a predicate is "explicit
+- **OQ-ADR016-2 — Widening approval.** Decided in ADR-008 item 12 (lead
+  decision, 2026-11-19). Original question: deleting a predicate is "explicit
   privilege widening" (design §5.3), and the trust-source, keyset, binding and
   grant endpoints require "explicit widening approval" (tasks §2 "Endpoint
   matrix"; ADR-008 baseline), but the approving role, the operation and its
-  record are not defined. Open here: it is decided in ADR-008 (next ADR PR).
+  record are not defined.
 
 ## Tests
 

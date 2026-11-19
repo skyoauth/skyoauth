@@ -123,7 +123,10 @@ gate are ADR-010.
    writes affecting it to the route-controller service account, covering new and
    unlabeled routes, wildcard hostnames, shadow routes, parentRefs,
    cross-namespace attachment and namespace selectors. Installation is verified
-   before protected traffic (design §4.2).
+   before protected traffic (design §4.2). The enrolment is stored in a
+   dedicated protected-set entity, separate from `CredentialProtectionScope`
+   (lead decision, 2026-11-19, OQ-ADR020-1); adding it to the tasks §3 logical
+   model is a spec amendment follow-up (inferred).
 7. Non-cookie bearer, public, auth and health paths on a protected host are
    managed in the same bundle with explicit authentication classes. Shared
    Gateway-wide policy or listener changes need approval of all affected bundles
@@ -284,7 +287,11 @@ gate are ADR-010.
     through move-away and retirement before decommission. Continuously protected
     same-consumer holds keep their proofs across PATCH, verified same-ID cutover
     and reconciler outage; known protection loss invalidates the proof (design
-    §4.2).
+    §4.2; GW-210 to GW-213). Cutover requires continuous compatible coverage,
+    rejects prior-revision acknowledgements and requires current-revision
+    evidence for new adoption (GW-211 to GW-213, inferred mapping: no GW ID
+    states the cutover rule itself). Deadlines do not extend (GW-121, GW-123,
+    GW-132, GW-155).
 
 ### Observation and its limits
 
@@ -397,20 +404,22 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR020-1 — Protected-set record.** `security_admin` enrolls the protected
-  set by cluster, Gateway UID, listener and hostname (design §4.2), and
-  approvals bind "protected scopes", but the tasks §3 logical model has no
-  entity or endpoint that stores this enrolment separately from
+- **OQ-ADR020-1 — Protected-set record.** Decided (lead decision, 2026-11-19):
+  add a protected-set entity (item 6). Original question: `security_admin`
+  enrolls the protected set by cluster, Gateway UID, listener and hostname
+  (design §4.2), and approvals bind "protected scopes", but the tasks §3 logical
+  model has no entity or endpoint that stores this enrolment separately from
   `CredentialProtectionScope`, which covers Secret namespaces.
 - **OQ-ADR020-2 — TLS runtime key.** `TLSRenewalRuntime` is keyed by `bundle_id`
   and dependency (tasks §3), while design §4.2 binds it to the stable
   `dependency_contract_digest` across plan changes. Whether one Secret shared by
   two bundles (for example a shared listener) has one runtime or two, and which
-  bundle's gate its outcome closes, is not stated.
+  bundle's gate its outcome closes, is not stated. Open; to be decided before
+  M1b/M3 (lead decision, 2026-11-19).
 - **OQ-ADR020-3 — Controller replica count.** The baseline requires ">=2 fenced
   controllers" and T32.3 requires at least two replicas, but the sources do not
   say whether a single available replica is an alerted degraded state or blocks
-  applies.
+  applies. Open; to be decided before M1b/M3 (lead decision, 2026-11-19).
 
 ## Tests
 

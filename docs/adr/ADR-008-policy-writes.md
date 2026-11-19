@@ -40,7 +40,9 @@ design §7.2 and identity-registry §5.2.
    and revision rules (tasks §3 "Policy revisions"; T10.1, T10.4).
 3. **Soft disable.** Records are disabled, not cascade-deleted; WIF, audience,
    client, origin and operator records cannot cascade-delete through
-   `HumanProvider` (design §7; T10.1).
+   `HumanProvider` (design §7; T10.1). Removal is soft disable only; deleting a
+   whole binding or grant counts as widening and is approved as in item 12 (lead
+   decision, 2026-11-19, OQ-ADR008-2).
 4. **Fail closed.** Store failures never expand privilege, and conservative
    cache invalidation applies (design §7).
 
@@ -59,7 +61,9 @@ design §7.2 and identity-registry §5.2.
    material and restorable active route observations are excluded (design §7;
    T10.5).
 8. **Reconciliation, not wipe.** Reapplying is tenant-local reconciliation; an
-   import never wipes objects it omits (design §7.4; T10.7).
+   import never wipes objects it omits (design §7.4; T10.7). For GitOps
+   precedence, API writes win: GitOps reports drift from its documents and never
+   reverts automatically (lead decision, 2026-11-19, OQ-ADR008-1).
 9. **Not ordinary writable configuration.** Active-provider state and
    route-runtime pointers and observations are read-only through PATCH and
    import (ADR-021). Protected gateway resources are applied only by the
@@ -82,14 +86,17 @@ design §7.2 and identity-registry §5.2.
     require explicit widening approval (tasks §2 "Endpoint matrix"). Lead
     decision on OQ-ADR016-2 (2026-11-19): a write that widens access carries an
     explicit widening flag and the expected revision of the object it widens,
-    and is recorded in the atomic audit record. A widening write without the
-    flag is rejected (inferred: the decision names the flag as required). A
-    distinct second `adm_*` approver, as OQ-TM-7 requires for provider switch
-    commits, is optional and off by default.
+    and is recorded in the atomic audit record. The server detects whether a
+    write widens access; the flag only acknowledges that detection, and a write
+    the server detects as widening without the flag is rejected (lead decision,
+    2026-11-19, OQ-ADR008-3). A distinct second `adm_*` approver, as OQ-TM-7
+    requires for provider switch commits, is optional and off by default; how an
+    installation turns it on is open (OQ-ADR008-3).
 13. **Deleting a predicate is widening.** Matcher predicates are ANDed; omitted
-    optional predicates are unconstrained; required production GitHub predicates
-    cannot be omitted; deleting a predicate is explicit privilege widening and
-    is reviewed as such (design §5.3; T12.2).
+    optional predicates are unconstrained; the required predicates of the
+    binding `profile` template (ADR-016 item 4) cannot be omitted; deleting a
+    predicate is explicit privilege widening and is reviewed as such (design
+    §5.3; T12.2).
 14. **Ceilings.** Writes stay within instance audience assignments and other
     ceilings; a tenant cannot self-assign an audience (design §7.1; ADR-018).
 
@@ -154,25 +161,32 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR008-1 — GitOps precedence.** T10.7 requires "GitOps precedence" but no
-  source says which of a GitOps document and a later API write wins for the same
-  object, or how drift between them is reported.
-- **OQ-ADR008-2 — Deletion versus disable.** The baseline names "deletion
-  approval", while design §7 and T10.1 describe soft disable and immutable
-  revisions. Which objects, if any, can be hard-deleted, and whether deleting a
-  whole binding or grant (not only a predicate) needs the same approval, is not
-  stated.
+- **OQ-ADR008-1 — GitOps precedence.** Decided (lead decision, 2026-11-19): API
+  writes win; GitOps reports drift and never reverts automatically (item 8).
+  Original question: T10.7 requires "GitOps precedence" but no source says which
+  of a GitOps document and a later API write wins for the same object, or how
+  drift between them is reported.
+- **OQ-ADR008-2 — Deletion versus disable.** Decided (lead decision,
+  2026-11-19): soft disable only; deleting a whole binding or grant counts as
+  widening (item 3). Original question: The baseline names "deletion approval",
+  while design §7 and T10.1 describe soft disable and immutable revisions. Which
+  objects, if any, can be hard-deleted, and whether deleting a whole binding or
+  grant (not only a predicate) needs the same approval, is not stated.
 - **OQ-ADR008-3 — Widening classification and the optional second approver.**
-  The OQ-ADR016-2 decision requires a widening flag, but the sources do not list
-  which changes count as widening beyond predicate deletion (for example a wider
-  audience ceiling, a new keyset version or an added allowed binding), whether
-  the server detects widening itself or relies on the flag, or how an
-  installation turns on the optional second approver.
+  Decided in part (lead decision, 2026-11-19): the server detects widening; the
+  flag only acknowledges it (item 12). Still open: how an installation turns on
+  the optional second approver. Original question: The OQ-ADR016-2 decision
+  requires a widening flag, but the sources do not list which changes count as
+  widening beyond predicate deletion (for example a wider audience ceiling, a
+  new keyset version or an added allowed binding), whether the server detects
+  widening itself or relies on the flag, or how an installation turns on the
+  optional second approver.
 
 ## Tests
 
-- A37 — required predicate omission rejects; optional removal is reviewed
-  widening.
+- A37 — required predicate omission rejects; optional predicate removal is
+  detected as widening, and the expected result is the widening flag plus the
+  expected revision plus the audit record; without the flag it rejects.
 - A47 — PATCH, import, reload, delete and authentication-critical edits cannot
   move the active provider; epochs are unchanged on denial.
 - A48 — empty installation provisioned by staged operator tools; missing roles

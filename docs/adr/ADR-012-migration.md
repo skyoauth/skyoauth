@@ -37,7 +37,11 @@ only writer is ADR-021, and the enrollment hold it sets is ADR-023.
 3. **Operator independence.** Operators authenticate independently of the
    upstream provider; a switch or rollback works during an IdP outage through
    the portable operator client and the local recovery verifier, with no
-   upstream-admin link (design §7.2, §8 step 2; T51.11).
+   upstream-admin link (design §7.2, §8 step 2; T51.11). Under OQ-TM-7 a switch
+   or rollback commit needs a distinct second `adm_*` approver; a switch signed
+   with the recovery key through the local recovery verifier counts as its own
+   approval, the recovery key acting as the second factor, and is audited (lead
+   decision, 2026-11-19; OQ-TM-7, OQ-TM-8).
 
 ### Monotonic auth invalidation
 
@@ -46,7 +50,8 @@ only writer is ADR-021, and the enrollment hold it sets is ADR-023.
    invalidates affected browser and native flow bindings, sessions and
    authentication contexts, pending requests and codes, required refresh
    families and dependent continuations, and sets the enrollment hold (design §8
-   step 4; T51.4; ADR-023).
+   step 4; T51.4; ADR-023; for disable and activation from null see ADR-023
+   items 7 and 10).
 5. **Residuals.** Offline human JWTs keep only their documented short TTL (at
    most 300 seconds); live checks reject invalidated contexts; existing stream
    leases expire within their approved remaining window (design §8 step 4;
@@ -119,6 +124,11 @@ Existing contract questions that touch this ADR:
   second `adm_*` approver, unless an explicit audited instance policy allows
   single-actor mode. Disabling the active provider is fail-safe and does not
   need one (lead decision, 2026-11-19).
+- **OQ-TM-8** — recovery scope and key lifecycle. Decided (lead decision,
+  2026-11-19): recovery restores operators only by enrolling a replacement
+  `security_admin` credential and revoking operator credentials; a single
+  recovery key in v0.1. A switch signed with the recovery key counts as its own
+  approval and is audited (lead decision, 2026-11-19; item 3).
 - **OQ-TM-12** — audit sink. Decided (lead decision, 2026-11-19): provider
   switches are also emitted to an append-only external sink.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
@@ -134,10 +144,11 @@ New questions raised by this ADR:
   verified links continue after reauthentication, but not what happens to
   `HumanSubjectLink` records for the previous provider after a switch: whether
   they stay active, are disabled, or become usable again on rollback without a
-  new link.
+  new link. Open; to be decided before M1b/M3 (lead decision, 2026-11-19).
 - **OQ-ADR012-2 — Dry-run output.** Design §8 step 7 compares pre and post
   allowed and denied decisions, but the content of the dry-run plan (affected
-  session and family counts, the fixtures it evaluates) is not specified.
+  session and family counts, the fixtures it evaluates) is not specified. Open;
+  to be decided before M1b/M3 (lead decision, 2026-11-19).
 
 ## Tests
 

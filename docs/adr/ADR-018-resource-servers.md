@@ -43,7 +43,9 @@ action-to-scope/profile/resource rules".
    clients, application origins and `HumanAccessPolicy` records reference
    registered audience IDs and are refused at write and at issuance without an
    active same-tenant assignment; the assignment is rechecked on every live
-   check (design §7.1; T14.2).
+   check (design §7.1; T14.2). Disabling a resource server denies its live
+   checks and new issuance for its audience; dependent records stay (lead
+   decision, 2026-11-19, OQ-ADR018-2).
 5. **Defense in depth, not ownership.** For a shared multi-tenant audience, the
    backend maps every resource to a canonical SkyOAuth tenant and compares it
    with the signed tenant before scopes, resources and RBAC; a missing mapping
@@ -58,6 +60,9 @@ action-to-scope/profile/resource rules".
    instance-scoped endpoints. A `ServiceIdentity` is a possible token subject,
    never checker authority, whatever its allowed audiences; a resource server
    cannot use another audience's checker identity (design §7.1, §6.1; T14.3).
+   The checker's tenant set must be a subset of the resource server's active
+   tenant assignments; disabling an assignment removes that tenant from it (lead
+   decision, 2026-11-19, OQ-ADR018-1).
 7. **Direct grants work.** Direct workload credentials with no target service
    are fully supported by the live check (design §6.1; T14.3).
 
@@ -125,12 +130,16 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR018-1 — Checker tenant set versus assignments.** A checker's
-  `allowed_tenant_ids` and the resource server's `AudienceTenantAssignment`
-  records are separate. Whether the checker tenant set must be a subset of the
-  currently assigned tenants, and what happens to a checker's tenant entry when
-  an assignment is disabled, is not stated.
-- **OQ-ADR018-2 — Disabling a resource server.** `ResourceServer` has a
+- **OQ-ADR018-1 — Checker tenant set versus assignments.** Decided (lead
+  decision, 2026-11-19): the checker tenant set must be a subset of active
+  assignments; disabling an assignment removes the tenant from it (item 6).
+  Original question: A checker's `allowed_tenant_ids` and the resource server's
+  `AudienceTenantAssignment` records are separate. Whether the checker tenant
+  set must be a subset of the currently assigned tenants, and what happens to a
+  checker's tenant entry when an assignment is disabled, is not stated.
+- **OQ-ADR018-2 — Disabling a resource server.** Decided (lead decision,
+  2026-11-19): disabling a resource server denies live checks and new issuance;
+  dependent records stay (item 4). Original question: `ResourceServer` has a
   `status`, but the effect of disabling one on outstanding credentials,
   continuations and dependent grants, clients and origins is not stated beyond
   live checks denying invalid authority (inferred).

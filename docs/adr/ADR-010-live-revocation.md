@@ -116,7 +116,9 @@ records how leases and cleanup behave under it.
     8, tenant `client_admin`) and `InstanceCapacityPolicy` (security_admin:
     per-session ceiling 1–64 and finite tenant, checker and global quotas and
     rate limits) are operational records excluded from route-bundle pins and
-    authorization snapshots. The effective session cap is the lower of the two;
+    authorization snapshots. The instance quotas and rate limits are explicit
+    values required at installation, with no implicit defaults (lead decision,
+    2026-11-19, OQ-ADR010-1). The effective session cap is the lower of the two;
     lowering it blocks new admissions only and never closes streams or changes
     authorization (design §6.1.1; T10.4).
 15. **Distinct errors.** 401 is authentication only and 403 a definitive denial.
@@ -240,19 +242,25 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR010-1 — Default quotas.** `InstanceCapacityPolicy` stores "explicit
-  finite tenant/checker/global quotas and rate limits" (design §6.1.1), but no
-  default values or installation-time requirement for them are given.
+- **OQ-ADR010-1 — Default quotas.** Decided (lead decision, 2026-11-19):
+  explicit quotas are required at installation; there are no implicit defaults
+  (item 14). Original question: `InstanceCapacityPolicy` stores "explicit finite
+  tenant/checker/global quotas and rate limits" (design §6.1.1), but no default
+  values or installation-time requirement for them are given.
 - **OQ-ADR010-2 — Shortening the one-hour cap.** The continuation deadline is
   "at most 1 hour from creation (route/action policy may shorten it)" (design
   §6.1.1). Whether `max_stream_duration_seconds` on `ResourceAction` and
   `ApplicationRouteVersion` is the field that shortens it is not stated
-  (inferred reading).
-- **OQ-ADR010-3 — Rust bearer reconnect policy.** Design §6.1.1 says "both
-  client libraries provide opt-in read-only reconnect" with backoff and
-  `Retry-After`; the one delayed per-session retry is stated only for the
-  TypeScript library. Whether the Rust crate's bearer reconnect uses the same
-  ERR-046 budget is not stated.
+  (inferred reading). Open; to be decided before M1b/M3 (lead decision,
+  2026-11-19).
+- **OQ-ADR010-3 — Rust bearer reconnect policy.** Answered by ERR-046: the
+  errors-retry §6 row for read-only stream or download reconnect applies to both
+  libraries (opt-in) with ERR-046 backoff, so the Rust crate's bearer reconnect
+  uses the same budget. Original question: Design §6.1.1 says "both client
+  libraries provide opt-in read-only reconnect" with backoff and `Retry-After`;
+  the one delayed per-session retry is stated only for the TypeScript library.
+  Whether the Rust crate's bearer reconnect uses the same ERR-046 budget is not
+  stated.
 
 ## Tests
 

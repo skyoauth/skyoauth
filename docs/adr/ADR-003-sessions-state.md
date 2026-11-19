@@ -47,7 +47,9 @@ are ADR-010.
    carries opaque internal references, never cookie hashes or tickets (design
    §6). The only stored credential values are the opted-in, at most 30-second,
    authenticated-encrypted refresh-retry envelope of ADR-004 (design §5.2.2;
-   T10.3).
+   T10.3). One versioned keyed-hash key, held outside the database, computes
+   these hashes; old key versions are kept for lookup until the state that
+   depends on them expires (lead decision, 2026-11-19, OQ-ADR003-1).
 3. **Backups versus exports.** Encrypted database backups differ from redacted
    configuration exports; neither ordinary YAML nor logs expose cookies, proof
    tokens or refresh credentials (design §7).
@@ -204,17 +206,19 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR003-1 — Hashing key.** The sources require keyed hashes for flow
-  cookies, session tickets, codes and refresh tokens (tasks §3 "One-time state";
-  T10.3), and require replay digests to survive digest-key rotation (design
-  §5.3; T21.8). They do not say which key computes the session, flow, code and
-  refresh hashes, where it is held, or how a rotation keeps live sessions and
-  refresh families resolvable.
+- **OQ-ADR003-1 — Hashing key.** Decided (lead decision, 2026-11-19): one
+  versioned keyed-hash key outside the database; old versions are kept for
+  lookup until dependent state expires (item 2). Original question: The sources
+  require keyed hashes for flow cookies, session tickets, codes and refresh
+  tokens (tasks §3 "One-time state"; T10.3), and require replay digests to
+  survive digest-key rotation (design §5.3; T21.8). They do not say which key
+  computes the session, flow, code and refresh hashes, where it is held, or how
+  a rotation keeps live sessions and refresh families resolvable.
 - **OQ-ADR003-2 — Back-channel logout without `sid`.** Back-channel logout
   selects sessions by "indexed provider/subject/sid selectors" (design §5.1 step
   7; T30.6). Whether a verified logout token that carries `sub` but no `sid`
   revokes every session of that subject for the provider, or is rejected, is not
-  stated.
+  stated. Open; to be decided before M1b/M3 (lead decision, 2026-11-19).
 
 ## Tests
 

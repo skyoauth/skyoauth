@@ -44,7 +44,9 @@ v0.1 boundary.
    follows (tasks §9).
 5. **No premature dependencies.** Human tables, browser or native UX and a
    tenant-management UI are not prerequisites of the first workload token (tasks
-   §0, §9).
+   §0, §9). A spec amendment that a lead decision requires before a milestone
+   gates the start of that milestone, not its completion (lead decision,
+   2026-11-19, OQ-ADR024-2).
 
 ### Full v0.1 is unchanged
 
@@ -106,11 +108,13 @@ New questions raised by this ADR:
   WIF slice" that "can ship" after M1a, but do not say whether it is published
   as a versioned release, which conformance rows gate it, or whether its token
   endpoint and Rust workload library are covered by the v0.1 compatibility
-  contract (design §2) from that point.
-- **OQ-ADR024-2 — Spec amendments before slices.** Several lead decisions
-  (OQ-TM-12, OQ-TM-13, OQ-TM-14) require design or task amendments before M1a,
-  M1b or M3. The sources do not say whether those amendments gate the start or
-  the completion of each milestone.
+  contract (design §2) from that point. Open; deferred (lead decision,
+  2026-11-19).
+- **OQ-ADR024-2 — Spec amendments before slices.** Decided (lead decision,
+  2026-11-19): amendments gate the start of a milestone (item 5). Original
+  question: Several lead decisions (OQ-TM-12, OQ-TM-13, OQ-TM-14) require design
+  or task amendments before M1a, M1b or M3. The sources do not say whether those
+  amendments gate the start or the completion of each milestone.
 
 ## Tests
 

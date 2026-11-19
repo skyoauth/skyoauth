@@ -81,7 +81,8 @@ manifest/CI/packaged-consumer gates".
     never gets WIF refresh credentials (design §10.1, §10.3).
 12. **Shared fixtures.** Both libraries share versioned wire and error fixtures;
     the fixture-set version, not a body field, versions errors (ERR-071; design
-    §10.4).
+    §10.4). Fixtures live in `tests/conformance/`; each package release ships
+    with its fixture-set version (lead decision, 2026-11-19, OQ-ADR017-3).
 
 ### Artifact and platform gates
 
@@ -89,12 +90,16 @@ manifest/CI/packaged-consumer gates".
     `examples/spa`; declarations, exports and a browser bundle without Node
     built-ins, polyfills, React or Connect in the core are verified;
     real-browser tests, not only Node fetch mocks (design §10.2; T33.4, T33.5,
-    T33.8).
+    T33.8). Supported browsers are the current and previous major versions of
+    Chrome, Edge, Firefox and Safari (desktop and iOS), tested on Chromium,
+    Firefox and WebKit (lead decision, 2026-11-19, OQ-ADR017-1).
 14. **Rust.** The packaged crate is compiled by independent `examples/rust-cli`
     without private workspace paths; native support is tested on Linux, macOS
     and Windows with minimal and default feature sets; MSRV, TLS, runtime,
     feature and platform policy is published separately from Linux server
-    support (design §10.3; T40.10, T40.11).
+    support (design §10.3; T40.10, T40.11). The policy is a pinned MSRV, rustls
+    as the default TLS backend, tokio as the async runtime and a published
+    feature matrix (lead decision, 2026-11-19, OQ-ADR017-2).
 15. **Operator.** `skyoauth-operator` builds and tests on Linux, macOS and
     Windows independently of server, database and native SDK in M1a (T13.10).
 16. **CI with the code.** Each PR adding or moving a member, entry point or
@@ -147,16 +152,23 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR017-1 — Supported browser matrix.** T00.13 asks to freeze "supported
-  browser/native environments" and T33.4 requires "tested browser support
-  documented", but no source names the supported browsers or versions.
-- **OQ-ADR017-2 — Rust MSRV, TLS and runtime.** Design §10.3 and T40.10 require
-  publishing MSRV, TLS backend, async runtime and feature policy; none is
-  chosen.
-- **OQ-ADR017-3 — Fixture home and versioning.** `tests/conformance/` holds
-  "versioned wire/profile and migration fixtures" (tasks §1), but how the
-  TypeScript and Rust packages consume them and how the fixture-set version is
-  published with each package release is not stated.
+- **OQ-ADR017-1 — Supported browser matrix.** Decided (lead decision,
+  2026-11-19): current and previous major versions of Chrome, Edge, Firefox and
+  Safari (desktop and iOS), tested on Chromium, Firefox and WebKit (item 13).
+  Original question: T00.13 asks to freeze "supported browser/native
+  environments" and T33.4 requires "tested browser support documented", but no
+  source names the supported browsers or versions.
+- **OQ-ADR017-2 — Rust MSRV, TLS and runtime.** Decided (lead decision,
+  2026-11-19): a pinned MSRV policy, rustls as the default TLS, tokio and a
+  published feature matrix (item 14). Original question: Design §10.3 and T40.10
+  require publishing MSRV, TLS backend, async runtime and feature policy; none
+  is chosen.
+- **OQ-ADR017-3 — Fixture home and versioning.** Decided (lead decision,
+  2026-11-19): fixtures live in `tests/conformance/`, and each package release
+  ships with its fixture-set version (item 12). Original question:
+  `tests/conformance/` holds "versioned wire/profile and migration fixtures"
+  (tasks §1), but how the TypeScript and Rust packages consume them and how the
+  fixture-set version is published with each package release is not stated.
 
 ## Tests
 
