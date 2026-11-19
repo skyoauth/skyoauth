@@ -116,8 +116,8 @@ Existing contract questions that touch this ADR:
   failure is one uniform `invalid_grant`, which covers a selected grant of the
   wrong mode (inferred) (ADR-015 item 9). Other `/oauth/token` denials
   (refresh overrides, unknown clients, revoked or expired families) stay open
-  under OQ-ERR-3. The errors-retry contract entry still reads open; the
-  contracts follow-up PR must update it. This ADR does not edit the contract.
+  under OQ-ERR-3. The errors-retry contract now decides the WIF exchange codes
+  (ERR-024, OQ-ERR-3).
 
 New questions raised by this ADR:
 

@@ -1,0 +1,14 @@
+# cargo-nextest configuration. CI runs `cargo nextest run --profile ci`;
+# the default profile is left as nextest ships it for local runs.
+
+# Used by the `service-nextest` job in .github/workflows/ci.yml.
+# Retries stay at 0: a test that passes only on retry counts as failed
+# (docs/testing/conformance-layout.md, section 3). Every test runs even
+# after a failure, so the JUnit report is complete.
+[profile.ci]
+retries = 0
+fail-fast = false
+
+# Written to target/nextest/ci/junit.xml.
+[profile.ci.junit]
+path = "junit.xml"

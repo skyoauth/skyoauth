@@ -196,8 +196,8 @@ Existing contract questions that touch this ADR:
 - **OQ-API-3** — no operator endpoint administers public issuer keys.
   Decided (lead decision, 2026-11-19) by OQ-TM-10: `/admin/v1/issuer-keys`
   for public access-token key emergency disable and rotation (item 4). The
-  public-api contract entry for OQ-API-3 still reads open; the contracts
-  follow-up PR must update it. This ADR does not edit the contract.
+  public-api contract now decides OQ-API-3 (API-153) and carries the item 4
+  JWKS bounds (API-042, API-043).
 - **OQ-API-12** — who may fetch `/internal/v1/assertion-jwks`: only
   registered checkers and gateway trust consumers, or other verifying
   backends (open; lead lean recorded, not decided).

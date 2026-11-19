@@ -37,18 +37,18 @@ RFC 8174) when they appear in capitals. Requirement IDs use `GW-nnn`.
 
 ## 1. Terms
 
-| Term               | Meaning in this contract                                                                                                                                                                                      | Source                                         |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection: an application origin host or the issuer host (GW-035)      | design §4, §4.2; lead decision (OQ-GW-12)      |
-| SkyOAuth route     | A fixed SkyOAuth endpoint routed to the independently verified SkyOAuth backend identity, on an application origin or the issuer host. Only the seven exempt endpoints in §4.1 skip the §3 removals (GW-033)  | design §4; lead decision (OQ-GW-3, OQ-GW-12)   |
-| Exempt endpoint    | One of the seven fixed SkyOAuth cookie endpoints in §4.1, the only routes on an enrolled host outside the §3 removals                                                                                         | lead decision (OQ-GW-3)                        |
-| Non-SkyOAuth route | Every other route on an enrolled host: SPA shell, assets, public, health, bearer and cookie-protected application routes                                                                                      | design §4                                      |
-| Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                                                                            | design §4.2                                    |
-| Route bundle       | Tenant-owned parent whose immutable versions pin one origin version, route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests; exactly one per `ApplicationOrigin` in v0.1 (GW-115) | design §4.2; tasks §3; lead decision (OQ-GW-8) |
-| Attempt            | Durable `RouteBundleAttempt` of one approved `gateway_apply` version, with its deadlines, reason and write journal                                                                                            | design §4.2; tasks §3                          |
-| Traffic gate       | Runtime eligibility of the bundle, and so of its whole origin (GW-115), for new cookie-authenticated application requests and continuation admissions                                                         | design §4.2; lead decision (OQ-GW-8)           |
-| Projection `P`     | Versioned `P(configuration, protected_scope)` computed on prepared xDS and on observed active configuration                                                                                                   | design §4.2                                    |
-| Deployment version | `deployment_version_id`: the approved version whose unchanged gateway configuration is backed by observations, distinct from the active registry pins                                                         | design §4.2                                    |
+| Term               | Meaning in this contract                                                                                                                                                                                                                                                                                                                                                                      | Source                                                                 |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection: an application origin host or the issuer host (GW-035)                                                                                                                                                                                      | design §4, §4.2; lead decision (OQ-GW-12)                              |
+| SkyOAuth route     | A route to the independently verified SkyOAuth backend identity, on an application origin or the issuer host: a fixed SkyOAuth endpoint or an exact registered per-provider issuer callback path `/oauth/callback/{provider_id}` (GW-036). Only the exempt endpoints in §4.1 (the seven fixed endpoints plus each registered per-provider issuer callback path) skip the §3 removals (GW-033) | design §4; lead decision (OQ-GW-3, OQ-GW-12, OQ-TM-4)                  |
+| Exempt endpoint    | One of the seven fixed SkyOAuth cookie endpoints in §4.1 or an exact registered per-provider issuer callback path `/oauth/callback/{provider_id}` (GW-036); together the only routes on an enrolled host outside the §3 removals                                                                                                                                                              | design §4, §5.2; lead decision (OQ-GW-3, OQ-TM-4)                      |
+| Non-SkyOAuth route | Every route on an enrolled host that is not a SkyOAuth route: SPA shell, assets, public, health, bearer and cookie-protected application routes                                                                                                                                                                                                                                               | design §4                                                              |
+| Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                                                                                                                                                                                                                                                            | design §4.2                                                            |
+| Route bundle       | Parent whose immutable versions pin its route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests. `kind=application`: tenant-owned, pins one origin version, exactly one per `ApplicationOrigin` in v0.1 (GW-115). `kind=issuer_system`: the one instance-level issuer-host system bundle (GW-116)                                                                  | design §4.2; tasks §3, T14.5, T14.9; lead decision (OQ-GW-8, OQ-GW-12) |
+| Attempt            | Durable `RouteBundleAttempt` of one approved `gateway_apply` version, with its deadlines, reason and write journal                                                                                                                                                                                                                                                                            | design §4.2; tasks §3                                                  |
+| Traffic gate       | Runtime eligibility of the bundle, and so of its whole origin (GW-115), for new cookie-authenticated application requests and continuation admissions                                                                                                                                                                                                                                         | design §4.2; lead decision (OQ-GW-8)                                   |
+| Projection `P`     | Versioned `P(configuration, protected_scope)` computed on prepared xDS and on observed active configuration                                                                                                                                                                                                                                                                                   | design §4.2                                                            |
+| Deployment version | `deployment_version_id`: the approved version whose unchanged gateway configuration is backed by observations, distinct from the active registry pins                                                                                                                                                                                                                                         | design §4.2                                                            |
 
 ## 2. Digest binding
 
@@ -192,22 +192,26 @@ mechanism until that scope is enrolled (design §4.2).
 Only fixed SkyOAuth authentication and session endpoints that route to the
 independently verified SkyOAuth backend identity may consume or issue their
 required cookies (design §4). The cookie-bearing endpoints named by the
-sources, and the complete v0.1 exemption list (lead decision, OQ-GW-3), are:
+sources, and the complete v0.1 exemption list (lead decision, OQ-GW-3,
+OQ-TM-4), are:
 
-| Host               | Path                  | Cookies the endpoint consumes or issues                                                           | Source                |
-| ------------------ | --------------------- | ------------------------------------------------------------------------------------------------- | --------------------- |
-| Application origin | `/_skyoauth/login`    | Issues `__Host-skyoauth_login`                                                                    | design §4, §5.1       |
-| Application origin | `/_skyoauth/callback` | Consumes `__Host-skyoauth_login`; issues `__Host-skyoauth_session`                                | design §5.1           |
-| Application origin | `/_skyoauth/session`  | Consumes `__Host-skyoauth_session`                                                                | design §5.1           |
-| Application origin | `/_skyoauth/logout`   | Consumes `__Host-skyoauth_session` and `X-SkyOAuth-CSRF`; expires the session cookie              | design §5.1; tasks §2 |
-| Issuer origin      | `/oauth/authorize`    | Issues `__Host-skyoauth_native`                                                                   | design §5.2           |
-| Issuer origin      | `/oauth/callback`     | Consumes and rotates `__Host-skyoauth_native`                                                     | design §5.2           |
-| Issuer origin      | `/oauth/confirm`      | Consumes the rotated `__Host-skyoauth_native` and CSRF; clears it on completion, denial or expiry | design §5.2           |
+| Host               | Path                                                     | Cookies the endpoint consumes or issues                                                           | Source                                   |
+| ------------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Application origin | `/_skyoauth/login`                                       | Issues `__Host-skyoauth_login`                                                                    | design §4, §5.1                          |
+| Application origin | `/_skyoauth/callback`                                    | Consumes `__Host-skyoauth_login`; issues `__Host-skyoauth_session`                                | design §5.1                              |
+| Application origin | `/_skyoauth/session`                                     | Consumes `__Host-skyoauth_session`                                                                | design §5.1                              |
+| Application origin | `/_skyoauth/logout`                                      | Consumes `__Host-skyoauth_session` and `X-SkyOAuth-CSRF`; expires the session cookie              | design §5.1; tasks §2                    |
+| Issuer origin      | `/oauth/authorize`                                       | Issues `__Host-skyoauth_native`                                                                   | design §5.2                              |
+| Issuer origin      | `/oauth/callback`                                        | Consumes and rotates `__Host-skyoauth_native`                                                     | design §5.2                              |
+| Issuer origin      | `/oauth/confirm`                                         | Consumes the rotated `__Host-skyoauth_native` and CSRF; clears it on completion, denial or expiry | design §5.2                              |
+| Issuer origin      | Each registered `/oauth/callback/{provider_id}` (GW-036) | Consumes and rotates `__Host-skyoauth_native`, as `/oauth/callback`                               | design §4, §5.2; lead decision (OQ-TM-4) |
 
 - **GW-030** An exemption MUST require both the exact fixed path and routing
   to the independently verified SkyOAuth backend identity. A path prefix, a
-  caller header or a tenant-supplied flag alone MUST NOT grant an exemption.
-  How that backend identity is expressed and verified is deferred to T32.4
+  caller header or a tenant-supplied flag alone MUST NOT grant an exemption,
+  and no `/oauth/callback/` prefix or pattern exempts a per-provider callback
+  path: each is exempt only by its exact registered path (GW-036). How that
+  backend identity is expressed and verified is deferred to T32.4
   (OQ-GW-4). (design §4; tasks T32.4)
 - **GW-031** Genuine SkyOAuth login, callback, session, logout and native flows
   MUST continue to work under containment. (design §4; tasks A18)
@@ -215,20 +219,33 @@ sources, and the complete v0.1 exemption list (lead decision, OQ-GW-3), are:
   an application apply, and a `cleanup_to_closed` target MUST preserve fixed
   SkyOAuth cleanup endpoints. (design §4.2; see also
   [public-api.md §8](public-api.md#8-independence-from-the-application-route-gate))
-- **GW-033** Only the seven endpoints in the table above MAY be exempt from the
+- **GW-033** Only the seven fixed endpoints in the table above and each exact
+  registered per-provider issuer callback path (GW-036) MAY be exempt from the
   §3 removals. Every other SkyOAuth endpoint, including `/oauth/token`,
   `/oauth/revoke`, `/.well-known/*` and `/_skyoauth/oidc/backchannel-logout`,
   MUST keep the §3 Cookie, `X-SkyOAuth-CSRF` and Set-Cookie removal. (lead
-  decision, OQ-GW-3)
+  decision, OQ-GW-3, OQ-TM-4)
 - **GW-034** The issuer host MUST NOT be enrolled as an `ApplicationOrigin`.
-  Its three native endpoints in the table above are its only cookie
-  exemptions. (lead decision, OQ-GW-3, OQ-GW-12)
+  Its three fixed native endpoints in the table above and its exact registered
+  per-provider callback paths (GW-036) are its only cookie exemptions. (lead
+  decision, OQ-GW-3, OQ-GW-12, OQ-TM-4)
 - **GW-035** The issuer host MUST be enrolled for containment although it is
   not an `ApplicationOrigin` (GW-034): its routes are in the protected scope,
   the §3 `Cookie`, `X-SkyOAuth-CSRF` and `Set-Cookie` removals apply to every
-  issuer-host route except its three exempt endpoints, and the protected-scope
+  issuer-host route except its exempt endpoints (GW-034), and the protected-scope
   projection (§6) and admission guard (§5) cover it. Decided (lead decision,
   2026-11-19); see OQ-GW-12.
+- **GW-036** A provider that does not advertise the RFC 9207 authorization
+  response `iss` MUST use its own issuer callback path. That path MUST be
+  server-generated in the reserved form `/oauth/callback/{provider_id}` and
+  MUST NOT be tenant-supplied. The validator MUST reject a path that collides
+  with another SkyOAuth endpoint or another provider's path. Adding the path
+  MUST be an apply of the `issuer_system` bundle (GW-116), and that apply MUST
+  complete before the provider is tested or used for native login. The path is
+  exempt exactly as `/oauth/callback`: it consumes and rotates
+  `__Host-skyoauth_native`, is listed by exact path in the approved issuer
+  projection and routes to the verified SkyOAuth backend identity. (design §4,
+  §5.2; tasks T00.5, T32.4, T40.12; lead decision, OQ-TM-4)
 
 ### 4.2 Filter order
 
@@ -484,11 +501,25 @@ remains necessary (design §4.2; tasks T50.4).
 - **GW-114** Incident re-enable MUST use `gateway_apply`, even when gateway
   contents are unchanged. (design §4.2)
 - **GW-115** In v0.1 each `ApplicationOrigin` MUST have exactly one
-  `RouteBundle`, and the T14.5 and T14.9 schema MUST enforce that uniqueness.
+  `RouteBundle` of `kind=application`, and the T14.5 and T14.9 schema MUST
+  enforce that uniqueness.
   The traffic gate is therefore both origin-wide and bundle-wide: `begin`
   closes every cookie-authenticated application route of that origin, and the
   "unaffected bundles" that need not stop (design §4.1) are the bundles of
   other origins. (lead decision, OQ-GW-8)
+- **GW-116** `RouteBundle.kind` MUST be `application` or `issuer_system`.
+  Partial unique indexes MUST enforce one `application` bundle per
+  `ApplicationOrigin` (GW-115) and at most one `issuer_system` bundle per
+  instance. Tenant and origin references MAY be null only for `issuer_system`.
+  The `issuer_system` bundle has no `ApplicationOrigin`; it carries
+  the issuer host's protected scope, projection and observations (GW-035). A
+  `RouteControllerIdentity` MUST hold an explicit issuer-host scope to prepare,
+  apply or observe it; application-origin assignments MUST NOT grant that
+  scope. Instance `security_admin` owns and prepares the `issuer_system`
+  bundle, and a distinct second `security_admin` MUST approve it unless an
+  explicit audited instance policy lets one actor do both. Its admin endpoints
+  and issuer-host `begin` and `cleanup_to_closed` semantics are open
+  (OQ-GW-15). (design §4.2; tasks T14.5, T14.9; lead decision, OQ-GW-12)
 
 ### 11.2 Apply phases
 
@@ -859,7 +890,8 @@ wire reasons: the wire result in every 503 row is
   its captured `security_revision`. They are execution preconditions, not a
   continuous equality that disables unrelated live routes. (design §4.2;
   tasks §3)
-- **GW-231** A disable MUST atomically set `security_status=disabled`, advance
+- **GW-231** A disable MUST atomically set `security_status=disabled` (for an
+  origin, with `security_reason=incident`; GW-236), advance
   `security_revision` and invalidate forward execution of plans that captured
   the prior revision. If the current attempt is `applying`, the same
   transaction MUST mark it `abort_required`. Existing `abort_required` or
@@ -869,7 +901,11 @@ wire reasons: the wire result in every 503 row is
   revisions and recovery reasons. Successful activation MUST clear only those
   parents and advance their revisions in the same transaction as the pin
   change; omitted parents keep their state. No PATCH or import can clear a
-  veto. (design §4.2; tasks §3)
+  veto. The only exception is an origin still disabled with
+  `security_reason=not_enrolled`, which its first approved `gateway_apply`
+  enables without a `reenable_targets` entry (GW-236). A parent disabled by an
+  incident (GW-231, `security_reason=incident` for an origin) is cleared only
+  as a named target. (design §4.2; tasks §3, T14.5)
 - **GW-233** Unpinning or replacing a security-disabled route MUST require
   explicit recovery intent for that parent, not an overlapping new-ID bypass.
   (design §4.2)
@@ -881,6 +917,19 @@ wire reasons: the wire result in every 503 row is
 - **GW-235** Re-enable, rollback and abort completion MUST NOT resurrect
   invalidated credentials or closed continuations, or restore historical
   security state. (design §4.2)
+- **GW-236** A new `ApplicationOrigin` MUST start with `security_status=disabled`
+  and `security_reason=not_enrolled`. `security_reason` is `not_enrolled` or
+  `incident` while the origin is disabled and empty while it is enabled. The
+  first approved `gateway_apply` activation covering its verified protected
+  scope MUST enable it in the same transaction as the pin change, only while
+  `security_reason` is still `not_enrolled`, checked by compare-and-set on
+  `security_revision`, and MUST advance `security_revision`. This initial
+  enablement is not a recovery and needs no `reenable_targets` entry or
+  recovery reason (carve-out from GW-232). An origin disabled by an incident
+  (GW-231, `security_reason=incident`) MUST NOT be enabled this way. Until
+  enabled, its `/_skyoauth/login` and `/_skyoauth/callback` deny (see
+  [public-api.md](public-api.md) API-134). (design §4.2; tasks T14.5; lead
+  decision, OQ-GW-12)
 
 Fixture (tasks T14.9, A58): an approval at 09:00, a disable at 09:20 and an
 activation attempt at 09:30 MUST reject without re-preparation and fresh
@@ -929,8 +978,7 @@ later task. All other items are not resolved by this contract.
   2026-11-19): T00.5 freezes only the shape: the per-target `resource` and
   `mask` and the response size and request time bound categories (GW-106).
   The literal values move to T32.3 and T50.4, where a tested pair exists
-  (GW-092). Follow-up: amend T00.5 and design §4.2 ("Freeze the literal
-  targets/masks and size/time bounds for each supported adapter in T00.5").
+  (GW-092). Design §4.2 and T00.5 now say so.
   Original question: design §4.2 requires T00.5 to "freeze the literal
   targets/masks and size/time bounds for each supported adapter", but the
   sources give no literal `/config_dump` `resource` or `mask` values, response
@@ -938,23 +986,26 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-2 — Pinned versions.** **Decided** (lead decision, 2026-11-19):
   T00.5 freezes what is pinned and how (GW-090, GW-092); the literal version
   pair and artifact digests are chosen in T32.3 and T50.4 against a tested
-  pair. Follow-up: amend T00.5 ("Pin EG/egctl/Envoy/bootstrap"). Original
+  pair. T00.5 now says so. Original
   question: the sources cite Envoy Gateway v1.10 and v1.10.0, Envoy v1.40.1
   and cert-manager v1.20.0 as references but state that they specify "a
   mechanism, not a tested version pair"; no pinned Envoy Gateway, egctl,
   Envoy, bootstrap or cert-manager version or artifact digest is chosen.
 - **OQ-GW-3 — Exact exemption list.** **Decided** (lead decision,
-  2026-11-19): only the seven cookie endpoints in §4.1 are exempt;
+  2026-11-19): the seven fixed cookie endpoints in §4.1 and each exact
+  registered per-provider issuer callback path `/oauth/callback/{provider_id}`
+  (GW-036; lead decision, OQ-TM-4) are exempt. The per-provider exemption
+  supersedes the earlier "only the seven cookie endpoints" wording;
   `/oauth/token`, `/oauth/revoke`, `/.well-known/*` and
   `/_skyoauth/oidc/backchannel-logout` keep Cookie, `X-SkyOAuth-CSRF` and
   Set-Cookie removal (GW-033); the issuer host is not enrolled as an
   `ApplicationOrigin` (GW-034). Still open: per exempt endpoint, which cookies
-  and headers are retained beyond those named in the §4.1 table. Follow-up:
-  list the exemptions in design §4. Follow-up (not yet applied): §1, §4.1,
-  GW-030, GW-033 and GW-034 exempt only the literal `/oauth/callback`, but
-  design §4 and §5.2 (OQ-TM-4) also exempt each exact registered
-  per-provider issuer callback path for a provider without RFC 9207 `iss`;
-  amend them to match. Original question: design §4 exempts
+  and headers are retained beyond those named in the §4.1 table. Design §4
+  and §5.2, T00.5, T32.4 and T40.12 list the exemptions (#15). The follow-up
+  that #15 recorded here (§1, §4.1, GW-030, GW-033 and GW-034 exempted only
+  the literal `/oauth/callback`) is resolved: they and GW-036 now include each
+  exact registered per-provider issuer callback path. Original
+  question: design §4 exempts
   "fixed SkyOAuth authentication/session endpoints" without listing them, and
   whether the issuer host is an enrolled host and whether the non-cookie
   endpoints are exempt was not stated.
@@ -980,8 +1031,8 @@ later task. All other items are not resolved by this contract.
   image (GW-015); the preparation input digest and `translator_input_digest`
   are one value, computed by the preparation worker inside the isolated route
   controller and accepted only in that worker's result, never from a tenant
-  or other caller (GW-016, GW-070). Follow-up: design §4.2 says the preparation request stores the
-  "input snapshot and digest"; amend it so the worker computes the digest.
+  or other caller (GW-016, GW-070). Design §4.2, the tasks endpoint matrix and
+  tasks §3 now say the worker computes the digest.
   Still open: the digest encoding; the list of "documented nonsemantic
   noise"; and which component computes `adapter_artifact_digests`,
   `canonicalization_version` and `dependency_contract_digest` (§2.2).
@@ -991,7 +1042,7 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-8 — Gate scope: bundle or origin (ambiguity).** **Decided** (lead
   decision, 2026-11-19): v0.1 allows exactly one `RouteBundle` per
   `ApplicationOrigin`, so the gate is origin-wide and bundle-wide (GW-115).
-  Follow-up: add the uniqueness rule to the T14.5 and T14.9 schema. Original
+  Design §4.2, T14.5 and T14.9 now carry the uniqueness rule. Original
   question: `ApplicationRoute` has a `route_bundle_id` and `RouteBundle` has
   one `application_origin_id`, so the logical model allows several bundles per
   origin. Design §4.1 and §4.2 say `begin` closes "the entire affected origin
@@ -1005,14 +1056,9 @@ later task. All other items are not resolved by this contract.
   approver sub-question is also Decided (lead decision, 2026-11-19):
   disabling the approving `security_admin` is not a revocation and does not
   stop compensation; only explicit revocation (GW-133) does (GW-146).
-  Follow-up (spec-amendments triage): design §4.2 "Abort of an unfinished
-  apply" makes "enabled required operator authority" mandatory for
-  compensation and moves the attempt to `recovery_required` on "revoked
-  required authority/approval", so revoking operator or controller authority
-  prevents compensation there; design §4.2 needs an amendment stating that
-  the required authority is the unrevoked approval and current controller
-  scope, and that disabling the preparer or approver does not stop
-  compensation. Original
+  Design §4.2 now states that the required authority for compensation is
+  the unrevoked approval and current controller scope, and that disabling the
+  preparer or approver does not stop it (tasks §3 matches). Original
   question: compensation needs "enabled required operator authority", but the
   sources do not say whether this is the preparer, the approver or both, or
   what happens if the preparing `client_admin` is disabled during `aborting`.
@@ -1024,24 +1070,26 @@ later task. All other items are not resolved by this contract.
   `idle` was not stated.
 - **OQ-GW-11 — Helper bounds.** The helper's resource, time and output limits
   are required but not given numerically.
-- **OQ-GW-12 — "Enrolled host".** **Decided** (lead decision, 2026-11-19) in
-  part: the issuer host is not enrolled as an `ApplicationOrigin`, but its
+- **OQ-GW-12 — "Enrolled host".** **Decided** (lead decision, 2026-11-19):
+  the issuer host is not enrolled as an `ApplicationOrigin`, but its
   routes are enrolled for containment: the §3 `Cookie`, `X-SkyOAuth-CSRF` and
   `Set-Cookie` removals, the projection and the admission guard apply there,
-  and only the seven exempt endpoints in §4.1 are outside the removals
-  (GW-020, GW-027, GW-033, GW-034, GW-035). Follow-up: design §4 scopes the
-  removals to "every route to an application backend" and "every
-  non-SkyOAuth route"; amend it to cover the issuer host and non-exempt
-  SkyOAuth endpoints. Sub-questions (a) and (b) are also Decided (lead
+  and only the exempt endpoints in §4.1 are outside the removals (GW-020,
+  GW-027, GW-033, GW-034, GW-035). Design §4 now covers the issuer host and
+  non-exempt SkyOAuth endpoints (#15). Sub-questions (a) and (b) are also Decided (lead
   decision, 2026-11-19): (a) the issuer host is the single exception to one
   bundle per `ApplicationOrigin` (GW-115): one instance-level system bundle
   carries its protected scope, projection and observations; (b) an origin
   cannot be security-enabled without an enrolled protected scope, so before
   the M3 controller exists no application origin is gated, and containment
-  applies to the issuer host once the controller is installed. Follow-up:
-  design §4.2 and T14.5/T14.9 state both (spec-amendments PR); the normative
-  text above (GW-115 and the route-bundle term) does not yet name the system
-  bundle. Original sub-questions: (a) a route bundle is owned by exactly one
+  applies to the issuer host once the controller is installed. A new origin
+  starts disabled with reason `not_enrolled` and its first approved
+  `gateway_apply` enables it (GW-236). The system bundle is
+  `RouteBundle.kind=issuer_system`, owned and prepared by instance
+  `security_admin` and approved by a distinct second `security_admin` or one
+  actor under an explicit audited instance policy (GW-116). Design §4.2 and
+  T14.5/T14.9 state these (#15); the tasks §3 schema does not yet show `RouteBundle.kind` or the `RouteControllerIdentity` issuer-host
+  scope. Original sub-questions: (a) a route bundle is owned by exactly one
   `ApplicationOrigin` (GW-115) and the issuer host is not one, so which
   approved bundle or enrollment carries the issuer host's protected scope,
   projection and observations was not stated; (b) design §4 and §4.2 describe
@@ -1055,9 +1103,19 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-14 — Admission exception list (contradiction).** **Decided** (lead
   decision, 2026-11-19): exactly four exemptions (status-only narrow updates,
   approved credential renewal, the non-referenceable temporary-key CREATE and
-  DELETE class, and retirement DELETE); GW-056 stands. Follow-up: fix the
-  "only" sentence in design §4.2 "Protected scope". Original question: design
+  DELETE class, and retirement DELETE); GW-056 stands. Design §4.2
+  "Protected scope" now names all four (spec-amendments PR). Original
+  question: design
   §4.2 "Protected scope" says that besides the TLS-renewer update and sealed
   retirement DELETE, "only narrow status-only updates by the existing gateway
   controller are exempt", while design §4.2 "Guard coverage" and tasks §3 also
   allow the temporary-key CREATE and DELETE class.
+- **OQ-GW-15 — Issuer system-bundle operations.** Open; blocks M1b (tasks
+  T14.5, T14.9). GW-116 fixes the `RouteBundle.kind` schema, the
+  `RouteControllerIdentity` issuer-host scope and who prepares and approves
+  the `issuer_system` bundle. Not yet stated: the instance-level admin
+  endpoints that prepare, approve, cancel, revoke and read it (the §7.1 rows in
+  [public-api.md](public-api.md) are tenant-scoped), and what `begin` and
+  `cleanup_to_closed` mean on the issuer host, which is not an
+  `ApplicationOrigin` (GW-034) and whose fixed native routes the controller
+  must preserve (GW-032).

@@ -329,7 +329,7 @@ gate are ADR-010.
   GW-126, GW-130 to GW-137, GW-140 to GW-146, GW-150 to GW-155 (activation,
   apply, roles, abort, supersession), GW-160 to GW-166, GW-170, GW-180 to
   GW-186, GW-190, GW-191, GW-200, GW-201, GW-210 to GW-213 (Secrets, TLS,
-  holds), GW-220 to GW-227, GW-230 to GW-235 (observation and recovery); LT-050
+  holds), GW-220 to GW-227, GW-230 to GW-236 (observation, recovery and first enablement); LT-050
   to LT-055, LT-090 to LT-094; API-130 to API-134 (independence from the gate),
   API-140 to API-146 (approval boundaries).
 - Every gateway apply on an origin interrupts all its cookie streams; operators
@@ -363,8 +363,10 @@ Existing contract questions that touch this ADR:
   2026-11-19): T00.5 freezes the shape; literals move to T32.3 and T50.4.
 - **OQ-GW-2** — pinned versions. Decided (lead decision, 2026-11-19): T00.5
   freezes what is pinned; the version pair is chosen in T32.3 and T50.4.
-- **OQ-GW-3** — exemptions. Decided (lead decision, 2026-11-19): seven cookie
-  endpoints; per-endpoint retained headers still open.
+- **OQ-GW-3** — exemptions. Decided (lead decision, 2026-11-19): the seven
+  fixed cookie endpoints plus each exact registered per-provider issuer
+  callback path `/oauth/callback/{provider_id}` (GW-036, OQ-TM-4);
+  per-endpoint retained headers still open.
 - **OQ-GW-4** — verified SkyOAuth backend identity. Deferred (lead decision,
   2026-11-19) to T32.4.
 - **OQ-GW-5** — literal filter chain and assertion-header stripping stage
