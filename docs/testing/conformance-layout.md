@@ -274,7 +274,7 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
   - Every stage `legs` entry names a job and leg from section 1.1, every env in `envs` has at least one leg in some stage, and every leg's job belongs to one of the scenario's `envs`.
   - Every fixture directory not starting with `_` names a registered scenario, and every fixture validates against its schema.
   - The scenario table in this document equals the table rendered from the registry (`id`, `layers`, `envs`, `harness`, stages, `owners`, `positive`, `negative`).
-  - A waiver file (see the reporter) names an existing commit, test and leg, and its PR was approved by the lead.
+  - Every waiver entry (see **Waivers** below) has all required fields, names a commit on `main`, a registered test and one of that test's stage legs.
 - *Resolution part.* Runs in the code jobs.
   - Every `implemented` stage lists, **for each job among its legs**, at least one `pos` and one `neg` test produced by that job. A declared leg whose job contributes no test fails the check, so a leg such as `recovery-offline/windows` cannot be satisfied by tests from other jobs.
   - Each listed test resolves against `cargo nextest list`, `vitest list --json` or `playwright test --list --reporter=json`, and none is `#[ignore]`d, `.skip`ped or `.fixme`d.
@@ -282,12 +282,30 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
   - **No orphans.** Every listed test whose name matches a scenario pattern is registered in some stage's `tests`. This includes every generated fixture case: each case name (`a61_neg_query_reordered_mismatch`, `A61 neg: query_reordered_mismatch`) is listed explicitly, so adding a fixture fails the check until a stage claims it. Rust names are module-qualified, so the check matches the last path segment: `(^|::)a\d\d_`. vitest joins describe titles with ` > `, so it matches `(^|> )A\d\d[ .]`; for Playwright it matches the test's own title with `^A\d\d[ .]`.
   - **Gates.** For every milestone in `gates_passed`, every stage with that milestone is `implemented`. A gate PR changes only `gates_passed`. A PR cannot show live or post-merge stages passed, because `live-wif` and slow jobs never run on PRs. The gate check therefore reads the reporter result for a named commit on `main`: the gate PR's base commit. It passes only if every stage of that milestone is **passed** there, live and post-merge legs included. M1b and M2 can pass in either order. The gate is mechanical only for the scenario stages; the other gate conditions in tasks §3–§7 still need review.
 - *Result join (reporter).* After the test jobs run, the reporter collects JUnit from every workflow run for the **same commit SHA** (CI, `live-wif`, nightly, release). cargo-nextest (pinned) emits JUnit; plain `cargo test` cannot on stable. vitest and Playwright use their junit reporters. All retries are 0, and a test that passes only on retry counts as **failed**.
-  - **Re-runs never hide a failure.** The reporter reads every attempt of every run for the commit (JUnit artifacts are named with `github.run_attempt`). A failed result for a (test, leg) on a commit is permanent: a later attempt cannot overwrite it. A failure is cleared only by a new commit, or by an audited waiver in `tests/conformance/waivers.toml` naming the commit, test, leg and reason, committed through a PR the lead approved. The reporter reads waivers from the tip of `main` at judging time, because the waived commit's own tree cannot contain its waiver. A leg that produced no result (for example, a cancelled job) is not run, and a later attempt may fill it.
+  - **Re-runs never hide a failure.** The reporter reads every attempt of every run for the commit (JUnit artifacts are named with `github.run_attempt`). A failed result for a (test, leg) on a commit is permanent: a later attempt cannot overwrite it. A new commit starts with no results. On the same commit, a failed attempt can be discarded only by a waiver (see **Waivers** below). A leg that produced no result (for example, a cancelled job) is not run, and a later attempt may fill it.
   - For each stage, the reporter checks every pair (test, required leg) where the test belongs to that leg's job. A fixture-driven test is one test per fixture case, so cases are keyed the same way. A pair is **passed** only with a passing JUnit case from that leg. A missing case, skipped or filtered test, skipped job or absent environment makes the pair **not run**. A required leg that never ran is therefore **not run** even if every other leg passed: A64 passing on ubuntu and macos with no windows result is not run, and so is A41 without one of its three OS legs.
   - A stage takes the worst status of its pairs, with precedence **failed > not run > passed**. A scenario takes the worst status of its stages up to the milestone being judged. A parent takes the worst of its required sub-IDs. A contract (`kind = "contract"`) is passed only when every scenario in `covered_by` is passed.
   - `planned` stages are reported as planned and never count as passed.
+- **Waivers.** `tests/conformance/waivers.toml` holds audited exceptions for single failed attempts. The reporter reads it from the tip of `main` at judging time, because the waived commit's own tree cannot contain its waiver.
+  - Each waiver is bound to one failed attempt: commit SHA, test, leg, `run_id` and `run_attempt`. It also states a reason and an expiry date.
+  - A waiver only discards that one failed attempt. The (test, leg) pair **still needs a passing result** from another attempt on the same commit. A waiver never turns a failure into a pass.
+  - A waiver never applies to **not run** or **planned**. A waiver that matches no failed attempt, or whose expiry has passed at judging time, is not applied, and the failure counts again.
+  - The reporter lists every waiver it applied in its output, next to the result it affected.
+
+  ```toml
+  [[waiver]]
+  commit = "0123456789abcdef0123456789abcdef01234567"
+  test = "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_concurrent_single_use"
+  leg = "scenarios-pg/x86_64"
+  run_id = 12345678901
+  run_attempt = 1
+  reason = "PostgreSQL service container lost mid-test; runner fault, not product behaviour"
+  expires = 2026-12-31
+  ```
+
+- **Who approves.** No script can verify that the lead approved a PR. The plan is a `.github/CODEOWNERS` file (none exists yet) that names the lead as owner of `tests/conformance/waivers.toml`, `tests/conformance/scenarios.toml`, `tests/conformance/subcases.toml` and the release manifest, combined with "Require review from Code Owners" in branch protection for `main`. That branch-protection setting is a maintainers' decision (section 6). The registry check only validates the file contents.
 - Only **passed** counts. When the docs-only classifier skips the build jobs, the summary reads "runtime conformance: not run (docs-only change)". The `ci-passed` aggregator's `success | skipped` rule satisfies branch protection, but **it is not a conformance signal**. Release gating must read the reporter output, never `ci-passed`.
-- **Release.** The release check requires every non-conditional scenario stage, every required sub-ID, C01–C10 and both libraries to be passed on the release commit, which must be reachable from `main`. Conditional sub-IDs are required only when the release manifest lists their feature as shipped. The manifest is a committed file owned by the T50/release owner; a change to it needs a PR the lead approved.
+- **Release.** The release check requires every non-conditional scenario stage, every required sub-ID, C01–C10 and both libraries to be passed on the release commit, which must be reachable from `main`. Conditional sub-IDs are required only when the release manifest lists their feature as shipped. The manifest is a committed file owned by the T50/release owner; a change to it needs a PR the lead approved, enforced through code-owner review (see **Who approves**).
 
 ## 4. CI integration per milestone
 
@@ -363,7 +381,8 @@ Answered by the lead in the second review round:
 Still open:
 
 1. **Merge queue before M3** (maintainers): enabling a merge queue needs a repository setting and a `merge_group:` trigger in `ci.yml`. Until then, slow jobs that miss the PR budget gate only after merge.
-2. **Service-side conformance evidence:** the `rust` job runs plain `cargo test`, which emits no JUnit, so `service/` tests cannot be registered (section 3). Is replaying service-consumer fixtures from `skyoauth-scenarios` acceptable, or should the `rust` job move to nextest?
+2. **Code-owner review** (maintainers): turn on "Require review from Code Owners" for `main` and add `.github/CODEOWNERS` for the waiver file, the registry files and the release manifest (section 3). Without it, "lead approved" is a convention, not a check.
+3. **Service-side conformance evidence:** the `rust` job runs plain `cargo test`, which emits no JUnit, so `service/` tests cannot be registered (section 3). Is replaying service-consumer fixtures from `skyoauth-scenarios` acceptable, or should the `rust` job move to nextest?
 
 Risks:
 
