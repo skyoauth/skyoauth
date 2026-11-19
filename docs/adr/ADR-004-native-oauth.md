@@ -44,13 +44,32 @@ code) is stored as in ADR-003; the `human_cli` profile is ADR-019.
    `OAuthAuthorizationRequest`, and sets `__Host-skyoauth_native` on the issuer
    origin with the same secure host-only attributes and a short transaction
    lifetime (design §5.2; T40.1, T40.12).
-2. **Issuer callback.** Upstream authentication returns to the fixed issuer
-   `/oauth/callback`, registered on the tenant's `HumanProvider`, not the
-   app-origin callback. The callback checks state, the native flow cookie,
-   expected issuer, client and callback, PKCE, nonce, epoch and ID token, stores
-   the verified human on the request, and rotates the issuer-local flow secret
-   before confirmation. Native and app flow cookies are never interchangeable
-   (design §5.2; T40.12).
+2. **Issuer callback.** Upstream authentication returns to an issuer callback
+   registered on the tenant's `HumanProvider`, never the app-origin callback.
+   Which callback depends on the provider (OQ-TM-4; T30.1, T40.12):
+   - **Provider advertises RFC 9207.** It returns to the fixed issuer
+     `/oauth/callback`, and the callback checks the authorization-response `iss`
+     against that provider's expected issuer before any code exchange; a
+     mismatched `iss` denies, and so does a missing one (inferred, RFC 9207
+     §2.4).
+   - **Provider does not advertise RFC 9207.** It returns to its own
+     per-provider issuer callback path, server-generated in the reserved form
+     `/oauth/callback/{provider_id}` and never tenant-supplied. The validator
+     rejects a collision with another SkyOAuth endpoint or provider path. The
+     path is an exact registered issuer route with the same cookie exemption and
+     checks as `/oauth/callback` (ADR-007 item 7). The callback denies, before
+     any code exchange, a response that arrives on a path other than the one
+     registered for the transaction's provider (inferred). Adding the path is a
+     system-bundle apply that must finish before the provider is tested or used
+     for native login.
+
+   Either callback checks state, the native flow cookie, expected issuer, client
+   and callback, PKCE, nonce, epoch and ID token, stores the verified human on
+   the request, and rotates the issuer-local flow secret before confirmation.
+   Native and app flow cookies are never interchangeable (design §5.2; T40.12).
+   Decided (lead decision, 2026-11-19, OQ-TM-4; spec amendment pending,
+   threat-model §6.1).
+
 3. **Fresh explicit approval.** Every new loopback authorization requires
    explicit SkyOAuth approval at `/oauth/confirm`, showing the registered client
    name, account, audience and scopes, approved native-session duration, exact
@@ -214,7 +233,7 @@ Existing contract questions that touch this ADR:
   lead lean recorded).
 - **OQ-TM-4** — mix-up defense at the shared issuer callback. Decided (lead
   decision, 2026-11-19): RFC 9207 `iss` check where advertised, otherwise
-  per-provider callback paths.
+  per-provider callback paths; carried into item 2.
 - **OQ-TM-5** — native redirect matching. Decided (lead decision, 2026-11-19):
   scheme `http`, IP literal and path fixed, port bound per transaction,
   `localhost` rejected.
@@ -238,6 +257,11 @@ New questions raised by this ADR:
   expiry yields no code.
 - A52 — issuer callback and confirmation with the correct native binding;
   transaction ID or app cookie alone denies.
+- OQ-TM-4 mix-up — with an RFC 9207 provider, a missing or wrong `iss` denies
+  before code exchange; with a provider without it, the native flow completes
+  through its `/oauth/callback/{provider_id}` path, and a response for that
+  provider on `/oauth/callback` or another provider's path denies before code
+  exchange (T30.1, T40.12).
 - A34, A57 — concurrent code and refresh reuse, plain versus extension replay,
   lost reply, family limits and switch.
 - A41 — packaged crate in an independent CLI on Linux, macOS and Windows with

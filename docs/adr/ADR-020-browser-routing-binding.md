@@ -189,10 +189,20 @@ gate are ADR-010.
 16. **Gateway apply.** `begin` closes the origin gate before any write. In the
     words of T00.6 and this ADR's baseline: real gateway apply interrupts origin
     cookie traffic, unchanged contexts get unavailable only to their lease,
-    cleanup stays independent. New cookie requests and admissions get 503
-    `route_configuration_unavailable` with bounded `Retry-After` throughout
-    applying, abort_required, aborting and recovery_required; reopening requires
-    fresh complete evidence (design §4.1, §4.2; ADR-010 item 19).
+    cleanup stays independent. Throughout applying, abort_required, aborting and
+    recovery_required, new gated application cookie requests and admissions get
+    503 `route_configuration_unavailable` with bounded `Retry-After`; reopening
+    requires fresh complete evidence (design §4.1, §4.2; ADR-010 item 19). The
+    503 does not cover the routes that stay available while the gate is closed
+    (API-130): the cleanup endpoints, and `/_skyoauth/login` and
+    `/_skyoauth/callback`, which the route controller preserves during the apply
+    and which are not subject to the gate (API-132, API-134). While the gate is
+    closed, login and callback are served only if the origin has an active
+    pinned `ApplicationOriginVersion` and the origin parent is security-enabled;
+    otherwise they deny before any redirect, and all their own checks (API-050
+    to API-052) still apply. They never mint an application assertion or
+    forwarding authority (API-131). Decided (lead decision, 2026-11-19,
+    OQ-API-1; design §4.2 amendment pending).
 
 ### Approval, apply deadline, cancel and revoke
 
@@ -410,4 +420,9 @@ New questions raised by this ADR:
   query.
 - A51, A52 — app and native flow bindings.
 - A18, A61 — containment and request binding on guarded routes.
+- Gate independence during apply — while applying or recovery_required, a gated
+  cookie request gets 503 `route_configuration_unavailable`, cleanup endpoints
+  stay available, and `/_skyoauth/login` and `/_skyoauth/callback` are served
+  with an active pinned origin version and a security-enabled parent and deny
+  before any redirect otherwise (API-130 to API-134).
 - Task tests: T14.9, T32.3, T50.4, T52.8.

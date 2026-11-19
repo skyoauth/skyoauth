@@ -28,8 +28,9 @@ to freeze "app/native flow cookies". The logical model holds this state in
 `BrowserFlowBinding`, `OIDCTransaction`, `HumanAuthentication`, `Session`,
 `OAuthAuthorizationRequest`, `OAuthAuthorizationCode` and the refresh tables
 (tasks §3). This ADR records how that state is stored, bound and expired. Native
-refresh semantics are ADR-004; provider epochs, their sole routine writer and the
-audited compromise transition are ADR-012 and ADR-021; stream continuations are ADR-010.
+refresh semantics are ADR-004; provider epochs, their sole routine writer and
+the audited compromise transition are ADR-012 and ADR-021; stream continuations
+are ADR-010.
 
 ## Decision
 
@@ -115,8 +116,8 @@ audited compromise transition are ADR-012 and ADR-021; stream continuations are 
     continuations (design §8 step 4; T51.4). Credential-only rotation keeps the
     epochs (design §7.3; ADR-021). The audited compromise transition advances
     the tenant `auth_generation` without a provider change (OQ-TM-14; ADR-021).
-    Rollback uses fresh monotonic epochs and
-    never resets generations (design §7.3; T10.6).
+    Rollback uses fresh monotonic epochs and never resets generations (design
+    §7.3; T10.6).
 16. **Logout targeting.** Local logout revokes the session and authentication
     context. Optional back-channel logout verifies signature, issuer, audience,
     events, time and replay and selects sessions only through indexed provider,
@@ -129,9 +130,15 @@ audited compromise transition are ADR-012 and ADR-021; stream continuations are 
     default 10 min, ceiling 15 min; code default 60 s, ceiling 5 min; session
     idle default 8 h, ceiling 24 h; absolute default 24 h, ceiling 7 d; lead
     decisions OQ-LT-1, OQ-LT-2).
-18. **Restore.** Restore preserves consumed one-time state or quarantines
-    issuance; rollback never revives credentials or resets monotonic generations
-    (T10.6; design §7.2).
+18. **Restore.** Restore preserves bootstrap-closed and consumed one-time state,
+    or quarantines issuance (default 15 min, ceiling 60 min) until outstanding
+    state can no longer be replayed. Where consumed state is not preserved and
+    the quarantine cannot cover the outstanding state, the affected credentials
+    are revoked: the quarantine alone never covers state that outlives it, such
+    as native refresh families with an absolute lifetime up to 7 d (LT-100,
+    LT-106; revocation alternative: Decided (lead decision, 2026-11-19)).
+    Rollback and restore never revive credentials, sessions or refresh state or
+    reset monotonic generations (LT-101; T10.6; design §7.2).
 19. **Gate independence.** The session and logout routes do not depend on the
     application route gate; they keep their own Origin, CSRF and store checks
     (design §4.2; ADR-010, ADR-020).
@@ -141,10 +148,10 @@ audited compromise transition are ADR-012 and ADR-021; stream continuations are 
 - Contract requirements: API-050 to API-056 (origin resolution, return paths,
   callback binding, Origin and CSRF, safe session read, cookie attributes,
   duplicate cookies), LT-020, LT-021, LT-023, LT-024 (session and flow
-  deadlines), LT-030 (fresh epochs on rollback), LT-100, LT-101 (restore),
-  ERR-052 (no-store session read), GW-024 (duplicate cookies reject), IR-033
-  (tenant from the registered origin), TP-041 (human credentials carry no WIF
-  claims).
+  deadlines), LT-030 (fresh epochs on rollback), LT-100, LT-101, LT-106
+  (restore), ERR-052 (no-store session read), GW-024 (duplicate cookies reject),
+  IR-033 (tenant from the registered origin), TP-041 (human credentials carry no
+  WIF claims).
 - A database read exposes only keyed hashes, not usable tickets or codes
   (inferred). HttpOnly limits token extraction, not authenticated actions by
   same-origin malicious JavaScript (design §9).
@@ -193,8 +200,7 @@ Existing contract questions that touch this ADR:
   revision-checked, audited operation advances the tenant's `auth_generation`
   without a provider change; to be specified before M1b and M3. It is the
   audited compromise transition of ADR-021: tenant `provider_admin` per tenant,
-  no single-origin variant; the instance-wide response runs it for every
-  tenant.
+  no single-origin variant; the instance-wide response runs it for every tenant.
 
 New questions raised by this ADR:
 
@@ -219,6 +225,9 @@ New questions raised by this ADR:
 - A33 — idle and absolute expiry, session-origin crossover and provider/`sid`
   targeting.
 - A34 — switch and rollback invalidate affected human state.
+- A35 — restore after proof consumption: consumed stays consumed, or issuance is
+  quarantined; where neither covers outstanding state (such as a native refresh
+  family), the affected credentials are revoked (LT-100, LT-106).
 - A46 — origin-resolved tenant and provider; spoofed Host, Forwarded or tenant
   query denies before redirect.
 - A51, A52 — attacker-initiated callbacks and app/native flow-cookie crossover

@@ -42,30 +42,46 @@ admission procedure that enforces these rules is ADR-020.
    and authenticated transport and must not infer profiles from a subject prefix
    (design §4).
 
-### Containment on every non-SkyOAuth route
+### Containment on every enrolled-host route
 
-4. **Request removal.** On an enrolled host, every route to an application
-   backend removes all `Cookie` fields and `X-SkyOAuth-CSRF` before forwarding,
-   whatever its authentication class and whether or not ext_authz runs,
-   including the SPA shell, assets, public and health endpoints and bearer
-   routes. HTTPRoute `RequestHeaderModifier.remove: [cookie, x-skyoauth-csrf]`
-   produces Envoy route-level `request_headers_to_remove`; the removal is not
-   conditional on an auth-service response (design §4; T32.4).
+4. **Request removal.** On an enrolled host, including the issuer host, every
+   route except the exact exemptions of item 7 removes all `Cookie` fields and
+   `X-SkyOAuth-CSRF` before forwarding, whatever its authentication class and
+   whether or not ext_authz runs. This covers the SPA shell, assets, public and
+   health endpoints, bearer routes and every non-exempt SkyOAuth endpoint,
+   including `/oauth/token`, `/oauth/revoke`, `/.well-known/*` and
+   `/_skyoauth/oidc/backchannel-logout` (GW-020, GW-033, GW-035; lead decision,
+   OQ-GW-3, OQ-GW-12). HTTPRoute
+   `RequestHeaderModifier.remove: [cookie, x-skyoauth-csrf]` produces Envoy
+   route-level `request_headers_to_remove`; the removal is not conditional on an
+   auth-service response (design §4; T32.4).
 5. **Stage.** On protected routes SkyOAuth first receives the original bounded
    metadata for session, Origin and CSRF validation and mixed-credential
    rejection; removal uses the ordinary upstream stage, not early removal before
    ext_authz. The gRPC `headers_to_remove` remains defense in depth only (design
    §4; T32.4).
-6. **Response removal.** Every non-SkyOAuth route also removes every
-   `Set-Cookie` response field (`ResponseHeaderModifier.remove: [set-cookie]`),
-   not a selective parse of reserved names. Application responses cannot set
-   cookies in v0.1 (design §4).
+6. **Response removal.** The same routes, with the same exact exemptions (item
+   7), also remove every `Set-Cookie` response field
+   (`ResponseHeaderModifier.remove: [set-cookie]`), including duplicate and
+   nonreserved cookies, not a selective parse of reserved names. Non-exempt
+   SkyOAuth endpoints, issuer-host routes among them, set no cookies.
+   Application responses cannot set cookies in v0.1 (design §4; GW-027, GW-033,
+   GW-035; lead decision, OQ-GW-3, OQ-GW-12).
 7. **Exact identity-bound exemptions.** Only the fixed SkyOAuth authentication
    and session endpoints routed to the independently verified SkyOAuth backend
    identity may consume or issue their cookies. A path prefix, caller header or
-   tenant-supplied flag cannot grant an exemption (design §4). The exemption
-   list is the seven endpoints of gateway-containment §4.1 (lead decision,
-   OQ-GW-3).
+   tenant-supplied flag cannot grant an exemption (design §4). One exception
+   list scopes both the request removal (item 4) and the response removal (item
+   6): the seven fixed endpoints of gateway-containment §4.1 (app-origin
+   `/_skyoauth/login`, `/_skyoauth/callback`, `/_skyoauth/session`,
+   `/_skyoauth/logout`; issuer `/oauth/authorize`, `/oauth/callback`,
+   `/oauth/confirm`; lead decision, OQ-GW-3), plus each exact registered
+   per-provider issuer callback path `/oauth/callback/{provider_id}`. Such a
+   path is server-generated for a provider without RFC 9207 `iss`, is exempt in
+   the same way as `/oauth/callback`, is listed by exact path in the approved
+   issuer projection and routes to the verified SkyOAuth backend; no prefix or
+   pattern exemption covers these paths (OQ-TM-4; T00.5, T32.4, T40.12; spec
+   amendment pending, threat-model §6.1).
 8. **Projected and tested.** Both removals, their stage and order, and the exact
    exemptions are part of the approved semantic projection; a missing removal or
    unauthorized exemption rejects preparation or activation. Tests check actual
@@ -181,7 +197,13 @@ New questions raised by this ADR:
 
 - A18 — public, health, static and bearer backends receive no Cookie or
   `X-SkyOAuth-CSRF` and cannot set cookies, with no Check call; projected
-  removals and exemptions; genuine SkyOAuth flows still work.
+  removals and exemptions; genuine SkyOAuth flows still work, including the
+  native flow through `/oauth/callback/{provider_id}`.
+- A18 (non-exempt issuer route) — on the issuer host, `/oauth/token`,
+  `/oauth/revoke` and `/.well-known/*` receive no Cookie or `X-SkyOAuth-CSRF`
+  upstream and their `Set-Cookie` fields are removed; an unregistered
+  `/oauth/callback/{provider_id}`-shaped path or a path prefix gets no exemption
+  (GW-020, GW-027, GW-033, GW-035).
 - A61 — raw-target variants, 4 KiB query, digest tampering, rewrites and
   rematching.
 - A08, A10, A44 — typed human-session evidence, mixed-credential denial, profile
