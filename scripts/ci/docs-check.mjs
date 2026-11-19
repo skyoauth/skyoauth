@@ -142,9 +142,12 @@ const FENCE_RE = /^((?:[ \t]*>)*[ \t]*)(`{3,}|~{3,})(.*)$/;
 const COMMENT_BLOCK_RE = /^((?:[ \t]*>)*[ \t]*)<!--/;
 
 // Scans the block structure: fenced code blocks and HTML comment blocks.
-// Returns { blocks, comments, errors }. Each block is { start, end, char,
-// len, info, lang, body: string[] } with 1-based line numbers (end is the
-// closing fence line). Follows CommonMark: a backtick fence's info string
+// Returns { blocks, comments, errors, unclosed }. Each block is { start,
+// end, char, len, info, lang, body: string[] } with 1-based line numbers (end
+// is the closing fence line). A fence never closed is an error and is
+// returned as `unclosed` ({ start, ... } without end), not in `blocks`: as
+// in CommonMark it runs to the end of the document, so analyse() treats
+// every later line as code. Follows CommonMark: a backtick fence's info string
 // cannot contain a backtick; a closing fence uses the same character, is at
 // least as long as the opener and has no info string.
 //
@@ -225,6 +228,11 @@ export function scanFences(lines) {
     }
     errors.push({ line: open.start, msg });
   }
+  let unclosed = null;
+  if (open) {
+    const { nearMisses, ...rest } = open;
+    unclosed = { ...rest, unclosed: true };
+  }
   if (comment) {
     errors.push({
       line: comment.start,
@@ -232,7 +240,7 @@ export function scanFences(lines) {
       msg: 'HTML comment opened here is never closed (no later "-->"), so Markdown hides the rest of the file',
     });
   }
-  return { blocks, comments, errors };
+  return { blocks, comments, errors, unclosed };
 }
 
 // Index just past the backtick run of exactly `len` backticks that closes a
@@ -252,9 +260,10 @@ function codeSpanEnd(s, from, len) {
 // block scanner's errors plus inline comments that are never closed.
 function analyse(text) {
   const lines = text.split(/\r?\n/);
-  const { blocks, comments, errors } = scanFences(lines);
+  const { blocks, comments, errors, unclosed } = scanFences(lines);
   const inFence = new Array(lines.length + 1).fill(null); // 1-based -> block
   for (const b of blocks) for (let n = b.start; n <= b.end; n++) inFence[n] = b;
+  if (unclosed) for (let n = unclosed.start; n <= lines.length; n++) inFence[n] = unclosed;
   const inComment = new Array(lines.length + 1).fill(null); // 1-based -> comment block
   for (const c of comments) for (let n = c.start; n <= c.end; n++) inComment[n] = c;
   // Mask HTML comments, keeping line structure. Comment blocks come from the
@@ -359,7 +368,8 @@ function headings(doc) {
       !inFence[i + 2] &&
       prose[i].trim() !== '' &&
       /^ {0,3}(=+|-+)[ \t]*$/.test(next) &&
-      !/^\s*([-*+]\s|\||>|#)/.test(prose[i]) &&
+      // Not a list item (bullet or ordered, 1-9 digits), table row, quote or ATX line.
+      !/^\s*([-*+](\s|$)|\d{1,9}[.)](\s|$)|\||>|#)/.test(prose[i]) &&
       !(i > 0 && prose[i - 1].trim() !== '' && !inFence[i])
     ) {
       out.push({ line: i + 1, level: next.trim()[0] === '=' ? 1 : 2, text: prose[i].trim() });
@@ -1021,7 +1031,7 @@ export function checkDocs({ root, parseMermaid = parseFlowchart } = {}) {
       const block = doc.inFence[i + 1];
       let text;
       if (block) {
-        if (block.lang !== 'mermaid' || i + 1 === block.start || i + 1 === block.end) continue;
+        if (block.unclosed || block.lang !== 'mermaid' || i + 1 === block.start || i + 1 === block.end) continue;
         text = doc.lines[i].replace(/^\s*%%.*$/, '');
       } else text = doc.prose[i];
       for (const kind of Object.keys(KINDS)) {
@@ -1356,8 +1366,13 @@ async function main(argv) {
   const print = (level, d) => console.log(gha ? formatAnnotation(level, d) : formatDiagnostic(level, d));
   for (const d of errors) print('error', d);
   for (const d of warnings) print('warning', d);
+  // The summary counts warnings as printed: in CI that includes the
+  // missing-row annotations, so it equals the number of ::warning lines.
+  let warningCount = warnings.length;
   if (gha) {
-    for (const d of infos.filter((x) => x.tag === 'adr-without-row')) console.log(formatAnnotation('warning', d, 'info'));
+    const rows = infos.filter((x) => x.tag === 'adr-without-row');
+    for (const d of rows) console.log(formatAnnotation('warning', d, 'info'));
+    warningCount += rows.length;
     infos = infos.filter((x) => x.tag !== 'adr-without-row');
   }
   if (verbose) for (const d of infos) console.log(formatDiagnostic('info', d));
@@ -1380,7 +1395,7 @@ async function main(argv) {
       `  conformance scenarios: ${stats.scenarios} defined, ${stats.scenarioRefs} references; compatibility invariants: ${stats.invariants} defined, ${stats.invariantRefs} references`,
       `  mermaid: ${mermaid || 'none'} (${stats.mermaidNodes} nodes, ${stats.mermaidEdges} edges)${stats.oracle !== undefined ? `; real Mermaid parsed ${stats.oracle}` : ''}`,
       `  links: ${stats.links} relative links, ${stats.anchors} anchors; ${stats.sectionRefs} explicit section references`,
-      errors.length ? `FAILED: ${errors.length} error(s), ${warnings.length} warning(s)` : `OK (${warnings.length} warning(s))`,
+      errors.length ? `FAILED: ${errors.length} error(s), ${warningCount} warning(s)` : `OK (${warningCount} warning(s))`,
     ].join('\n'),
   );
   return errors.length ? 1 : 0;
