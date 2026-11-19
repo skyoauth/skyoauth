@@ -48,6 +48,13 @@ GitHub Actions runs on pushes to `main` and on pull requests:
 - Rust: formatting, clippy, tests, doctests and rustdoc on x86_64 and aarch64
   Linux; the coverage gate; and a `cargo check` on the minimum supported Rust
   version declared in `Cargo.toml`.
+- Scenarios on PostgreSQL (`scenarios-pg`): cargo-nextest runs the
+  conformance scenario tests (Rust names `a<NN>_<pos|neg>_…`, see
+  `docs/testing/conformance-layout.md` §3) against a PostgreSQL 17 service
+  container, reached through `SKYOAUTH_IT_DATABASE_URL`, and uploads the
+  JUnit report for the leg `scenarios-pg/x86_64`. While no scenario test
+  exists, the job passes with a warning annotation: no scenario ran, which
+  is not a conformance pass.
 - Service tests (nextest): `cargo nextest run --workspace --all-features
   --profile ci` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit

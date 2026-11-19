@@ -210,6 +210,120 @@ jobs:
       - name: Check
         run: cargo check --locked --workspace --all-targets --all-features
 
+  # Conformance scenarios on PostgreSQL: env `pg`, leg string
+  # `scenarios-pg/x86_64` (docs/testing/conformance-layout.md §1.1). Tests
+  # reach the database through SKYOAUTH_IT_DATABASE_URL (§1.2); the
+  # official image's user is a superuser, so tests can create template
+  # databases. Only tests named by the Rust convention of §3 run here:
+  # `a<NN>_<pos|neg>_…` or `a<NN>_<SS>_<pos|neg>_…`, matched on the last
+  # path segment of a module-qualified name. The nextest `ci` profile has
+  # retries = 0 and writes JUnit to target/nextest/ci/junit.xml.
+  #
+  # Empty selection: no scenario test exists yet, so the run passes
+  # `--no-tests=warn` instead of nextest's default `fail`, and the next step
+  # turns an empty run into a warning annotation. A green job with that
+  # warning means no scenario ran; the reporter records those stages as
+  # `not run`, never `passed`. When the first `skyoauth-scenarios` test
+  # lands (§1.2), narrow the run to `-p skyoauth-scenarios --test pg` and
+  # drop `--no-tests=warn`, so an empty selection fails from then on.
+  scenarios-pg:
+    name: Scenarios (PostgreSQL, x86_64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      SKYOAUTH_CONFORMANCE_LEG: scenarios-pg/x86_64
+      SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+    services:
+      postgres:
+        # postgres:17 (17.12) pinned by its multi-arch index digest.
+        image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+        env:
+          POSTGRES_USER: skyoauth
+          POSTGRES_PASSWORD: skyoauth
+          POSTGRES_DB: skyoauth
+        ports:
+          - 5432:5432
+        # Probe over TCP: the image's init-time server listens on the Unix
+        # socket only, so a socket probe can report ready before the real
+        # server starts.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U skyoauth -d skyoauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      # Proves the service container is reachable from the runner with the
+      # URL the tests use, and that it is the pinned major version.
+      - name: Check PostgreSQL is reachable
+        run: |
+          pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
+          version="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version_num')"
+          echo "server_version_num: $version"
+          if [ "${version%????}" != 17 ]; then
+            echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
+            exit 1
+          fi
+
+      - name: Run scenario tests
+        run: >-
+          cargo nextest run --locked --workspace --all-features --profile ci
+          --no-tests=warn
+          -E 'test(/(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_/)'
+
+      - name: Report scenario count
+        run: |
+          junit=target/nextest/ci/junit.xml
+          count=0
+          if [ -f "$junit" ]; then
+            count="$(sed -n 's/.*<testsuites[^>]* tests="\([0-9]*\)".*/\1/p' "$junit" | head -n 1)"
+            if [ -z "$count" ]; then
+              echo "::error::Cannot read the test count from $junit"
+              exit 1
+            fi
+          fi
+          if [ "$count" -eq 0 ]; then
+            msg="No scenario test ran on $SKYOAUTH_CONFORMANCE_LEG; its stages are not run, not passed."
+            echo "::warning title=No scenario tests::$msg"
+          else
+            msg="$count scenario tests ran on $SKYOAUTH_CONFORMANCE_LEG."
+          fi
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+
+      # The artifact carries the leg string in `leg` next to the JUnit file,
+      # and its name carries the attempt (§3: every attempt is kept).
+      - name: Record the leg
+        if: always()
+        run: |
+          mkdir -p target/nextest/ci
+          printf '%s\n' "$SKYOAUTH_CONFORMANCE_LEG" > target/nextest/ci/leg
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-scenarios-pg-x86_64-attempt-${{ github.run_attempt }}
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/leg
+          if-no-files-found: warn
+
   typescript:
     name: TypeScript lint, test, build (Node ${{ matrix.node }})
     needs: changes
@@ -306,6 +420,7 @@ jobs:
       - rust-coverage
       - service-nextest
       - msrv
+      - scenarios-pg
       - typescript
       - typescript-coverage
     runs-on: ubuntu-24.04
