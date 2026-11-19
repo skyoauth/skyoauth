@@ -110,18 +110,18 @@ Terms used in the tables:
 
 ## 3. Browser and native flow state
 
-| Item                                                     | Lifetime                                           | Rules                                                                                                                  | Source                                                    |
-| -------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `__Host-skyoauth_login` and `BrowserFlowBinding`         | Default 10 min; ceiling 15 min                     | Consumed at callback; a new flow in the same slot invalidates the old one                                              | design §5.1; lead decision (OQ-LT-1)                      |
-| `OIDCTransaction`                                        | Default 10 min; ceiling 15 min (`expires_at`)      | One-time; consumed atomically with session creation                                                                    | design §5.1; tasks §3; lead decision (OQ-LT-1)            |
-| `__Host-skyoauth_native` and `OAuthAuthorizationRequest` | Default 10 min; ceiling 15 min (`expires_at`)      | Rotated at issuer callback; consumed at approval, denial or expiry; a new native start invalidates the previous slot   | design §5.2; tasks T40.12; lead decision (OQ-LT-1)        |
-| `OAuthAuthorizationCode`                                 | Default 60 s; ceiling 5 min (`expires_at`)         | Single use across replicas                                                                                             | design §5.2; tasks §3; lead decision (OQ-LT-1)            |
-| Native loopback listener                                 | Bounded; not specified                             | Closed after success, cancellation or timeout                                                                          | design §5.2, §10.3; tasks T40.9                           |
-| `Session` idle                                           | Default 8 h; ceiling 24 h (`idle_timeout_seconds`) | Coalesced last-seen writes MUST NOT revive an expired session; bounded early idle expiry from coalescing is documented | design §5.1; tasks T10.10, T31.2; lead decision (OQ-LT-2) |
-| `Session` absolute                                       | Default 24 h; ceiling 7 d (`absolute_expires_at`)  | Never extended by activity, streams or rechecks                                                                        | design §5.1, §6.1.1; tasks T31.2; lead decision (OQ-LT-2) |
-| Browser `HumanAuthentication`                            | Not specified (`expires_at`)                       | Bound to provider and tenant epochs                                                                                    | design §5.1; tasks §3                                     |
-| Native `HumanAuthentication`                             | Refresh family and stricter authentication bound   | Not capped by the first access token's 300 s                                                                           | design §5.2.2; tasks §3 "One-time state"                  |
-| Session CSRF token                                       | Session lifetime                                   | Session-bound                                                                                                          | design §5.1                                               |
+| Item                                                     | Lifetime                                           | Rules                                                                                                                                                             | Source                                                    |
+| -------------------------------------------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `__Host-skyoauth_login` and `BrowserFlowBinding`         | Default 10 min; ceiling 15 min                     | Consumed at callback; a new flow in the same slot invalidates the old one                                                                                         | design §5.1; lead decision (OQ-LT-1)                      |
+| `OIDCTransaction`                                        | Default 10 min; ceiling 15 min (`expires_at`)      | One-time; consumed atomically with session creation                                                                                                               | design §5.1; tasks §3; lead decision (OQ-LT-1)            |
+| `__Host-skyoauth_native` and `OAuthAuthorizationRequest` | Default 10 min; ceiling 15 min (`expires_at`)      | Rotated at issuer callback with the original `expires_at` kept (LT-024); consumed at approval, denial or expiry; a new native start invalidates the previous slot | design §5.2; tasks T40.12; lead decision (OQ-LT-1)        |
+| `OAuthAuthorizationCode`                                 | Default 60 s; ceiling 5 min (`expires_at`)         | Single use across replicas                                                                                                                                        | design §5.2; tasks §3; lead decision (OQ-LT-1)            |
+| Native loopback listener                                 | Bounded; not specified                             | Closed after success, cancellation or timeout                                                                                                                     | design §5.2, §10.3; tasks T40.9                           |
+| `Session` idle                                           | Default 8 h; ceiling 24 h (`idle_timeout_seconds`) | Coalesced last-seen writes MUST NOT revive an expired session; bounded early idle expiry from coalescing is documented                                            | design §5.1; tasks T10.10, T31.2; lead decision (OQ-LT-2) |
+| `Session` absolute                                       | Default 24 h; ceiling 7 d (`absolute_expires_at`)  | Never extended by activity, streams or rechecks                                                                                                                   | design §5.1, §6.1.1; tasks T31.2; lead decision (OQ-LT-2) |
+| Browser `HumanAuthentication`                            | Not specified (`expires_at`)                       | Bound to provider and tenant epochs                                                                                                                               | design §5.1; tasks §3                                     |
+| Native `HumanAuthentication`                             | Refresh family and stricter authentication bound   | Not capped by the first access token's 300 s                                                                                                                      | design §5.2.2; tasks §3 "One-time state"                  |
+| Session CSRF token                                       | Session lifetime                                   | Session-bound                                                                                                                                                     | design §5.1                                               |
 
 - **LT-020** A session MUST be usable only before both its idle and absolute
   deadlines, on its registered origin and tenant, with live principal,
@@ -136,6 +136,11 @@ Terms used in the tables:
   within their ceilings; LT-006 applies to out-of-range values. (lead decision,
   OQ-LT-1, OQ-LT-2; native authorization request: Decided (lead decision,
   2026-11-19))
+- **LT-024** Rotating `__Host-skyoauth_native` at the issuer callback MUST
+  keep the original `expires_at` of the native authorization request. Rotation
+  MUST NOT reset, restart or extend its lifetime (default 10 min, ceiling
+  15 min), consistent with the no-extension rule (LT-001, LT-002). (OQ-LT-1:
+  Decided (lead decision, 2026-11-19))
 
 ## 4. Epochs, revisions and generations
 
@@ -390,12 +395,16 @@ shows problems. All other items are not resolved by this contract.
   ceilings (§3, LT-023). The native authorization request
   (`__Host-skyoauth_native` and `OAuthAuthorizationRequest`) is Decided (lead
   decision, 2026-11-19): it uses the same default of 10 min and ceiling of
-  15 min, instance-configurable within the ceiling (§3, LT-023). No part of
-  this item remains open. Original question: T00.6 asks to specify flow and
-  code lifetimes; the sources call the login flow cookie and native
-  transaction "short-lived" and give `expires_at` fields for
-  `BrowserFlowBinding`, `OIDCTransaction`, `OAuthAuthorizationRequest` and
-  `OAuthAuthorizationCode`, but no numbers or ceilings.
+  15 min, instance-configurable within the ceiling (§3, LT-023). Whether
+  rotating `__Host-skyoauth_native` at the issuer callback resets the 10/15 min
+  clock is Decided (lead decision, 2026-11-19): rotation keeps the original
+  `expires_at`, with no reset and no extension, consistent with the
+  no-extension rule (§3, LT-024). No part of this item remains open.
+  Original question: T00.6 asks to specify flow and code lifetimes; the
+  sources call the login flow cookie and native transaction "short-lived" and
+  give `expires_at` fields for `BrowserFlowBinding`, `OIDCTransaction`,
+  `OAuthAuthorizationRequest` and `OAuthAuthorizationCode`, but no numbers or
+  ceilings.
 - **OQ-LT-2 — Session lifetimes.** **Decided** (lead decision, 2026-11-19) in
   part: browser session idle defaults to 8 h (ceiling 24 h) and absolute to
   24 h (ceiling 7 d), instance-configurable within the ceilings (§3, LT-023).
