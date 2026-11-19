@@ -155,6 +155,44 @@ jobs:
           path: target/coverage/
           if-no-files-found: warn
 
+  # Runs the workspace tests under cargo-nextest with the `ci` profile in
+  # .config/nextest.toml (no retries, no fail-fast) and uploads the JUnit
+  # report, even when tests fail. nextest does not run doctests; the
+  # `rust` job does. The artifact name carries the run attempt so a
+  # re-run never replaces an earlier attempt's report.
+  service-nextest:
+    name: Service tests (nextest)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      - name: Run tests
+        run: cargo nextest run --locked --workspace --all-features --profile ci
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: service-nextest-junit-${{ github.run_attempt }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
   msrv:
     name: Minimum supported Rust version
     needs: changes
@@ -380,6 +418,7 @@ jobs:
       - docs-check
       - rust
       - rust-coverage
+      - service-nextest
       - msrv
       - scenarios-pg
       - typescript
