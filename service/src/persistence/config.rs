@@ -18,6 +18,10 @@ const ACQUIRE_TIMEOUT_SECS: RangeInclusive<u32> = 1..=300;
 /// PostgreSQL connection settings with a bounded pool size and acquire
 /// timeout.
 ///
+/// TLS follows the URL's `sslmode` parameter, which defaults to sqlx's
+/// `prefer` (TLS if the server offers it, otherwise plaintext). Requiring TLS
+/// is a follow-up.
+///
 /// `Debug` never prints the password or the connection URL.
 #[derive(Clone)]
 pub struct DatabaseConfig {
@@ -100,6 +104,8 @@ impl DatabaseConfig {
             return Err(ConfigError::InvalidUrl);
         }
         // The parse error is dropped: its message may echo part of the URL.
+        // TODO(tls): reject or upgrade sslmode values weaker than verify-full
+        // once deployments provide the server CA; until then the URL decides.
         let connect = PgConnectOptions::from_str(&url).map_err(|_| ConfigError::InvalidUrl)?;
         let number = |var, default: u32, bounds| match get(var) {
             None => Ok(default),

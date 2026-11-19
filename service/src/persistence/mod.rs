@@ -16,6 +16,10 @@
 //! Concurrent runners, such as several replicas started at once, serialize on
 //! a PostgreSQL advisory lock held for the whole run, so each migration is
 //! applied exactly once.
+//!
+//! TLS to the database follows the URL's `sslmode` (sqlx's default is
+//! `prefer`); enforcing TLS is a follow-up. Neither [`DatabaseConfig`]'s
+//! `Debug` output nor any error message contains the password.
 
 mod config;
 
@@ -50,6 +54,21 @@ pub async fn migrate(pool: &PgPool) -> Result<(), MigrateError> {
 mod tests {
     use super::*;
     use sqlx::migrate::MigrationType;
+
+    #[tokio::test]
+    async fn connect_failure_error_omits_the_password() {
+        // Port 1 on loopback refuses connections.
+        let config = DatabaseConfig::from_lookup(|var| match var {
+            DATABASE_URL_VAR => Some("postgres://skyoauth:s3cr3t-pw@127.0.0.1:1/skyoauth".into()),
+            ACQUIRE_TIMEOUT_VAR => Some("1".into()),
+            _ => None,
+        })
+        .unwrap();
+        let err = connect(&config).await.unwrap_err();
+        for text in [err.to_string(), format!("{err:?}")] {
+            assert!(!text.contains("s3cr3t-pw"), "{text}");
+        }
+    }
 
     #[test]
     fn migrator_locks_and_refuses_unknown_applied_migrations() {

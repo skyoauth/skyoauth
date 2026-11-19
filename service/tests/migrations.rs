@@ -1,8 +1,13 @@
 //! Migration runner safety properties against a real PostgreSQL server.
 //!
-//! These tests need `SKYOAUTH_TEST_DATABASE_URL`, a URL for a role that may
-//! create databases; each test creates and drops its own database. When the
-//! variable is unset they pass after printing a skip notice.
+//! These tests need `SKYOAUTH_IT_DATABASE_URL`, a URL for a role that may
+//! create databases; each test creates and drops its own database. They are
+//! ordinary service tests, not `pg` conformance scenarios, so when the
+//! variable is unset they pass after printing a skip notice instead of
+//! failing loudly.
+//!
+//! No test name here may match the scenario pattern
+//! `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, so `scenarios-pg` never selects them.
 
 use std::{
     str::FromStr,
@@ -13,7 +18,7 @@ use std::{
 use skyoauth_service::persistence::{self, DatabaseConfig, MIGRATOR, MigrateError, PgPool};
 use sqlx::{AssertSqlSafe, Connection, PgConnection, postgres::PgConnectOptions};
 
-const TEST_DATABASE_URL_VAR: &str = "SKYOAUTH_TEST_DATABASE_URL";
+const IT_DATABASE_URL_VAR: &str = "SKYOAUTH_IT_DATABASE_URL";
 
 struct TestDb {
     admin_url: String,
@@ -25,8 +30,8 @@ impl TestDb {
     /// Creates a fresh, empty database, or returns `None` when no server is
     /// configured.
     async fn create(test: &str) -> Option<Self> {
-        let Ok(admin_url) = std::env::var(TEST_DATABASE_URL_VAR) else {
-            eprintln!("skipping {test}: {TEST_DATABASE_URL_VAR} is not set");
+        let Ok(admin_url) = std::env::var(IT_DATABASE_URL_VAR) else {
+            eprintln!("skipping {test}: {IT_DATABASE_URL_VAR} is not set");
             return None;
         };
         static COUNTER: AtomicU32 = AtomicU32::new(0);
