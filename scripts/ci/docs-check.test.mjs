@@ -13,9 +13,17 @@ import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { checkDocs, findCycle, findRefs, githubSlug, MermaidError, parseFlowchart, scanFences } from './docs-check.mjs';
+import { checkDocs, findCycle, findRefs, formatAnnotation, githubSlug, MermaidError, parseFlowchart, scanFences } from './docs-check.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'docs-check.mjs');
+
+// Runs the CLI. The output format depends on GITHUB_ACTIONS, so it is removed
+// from the inherited environment unless a test sets it.
+function cli(args, { env = {}, cwd } = {}) {
+  const base = { ...process.env };
+  delete base.GITHUB_ACTIONS;
+  return spawnSync(process.execPath, [SCRIPT, ...args], { cwd, env: { ...base, ...env }, encoding: 'utf8' });
+}
 
 const DESIGN = `# Design
 
@@ -218,6 +226,95 @@ describe('fences', () => {
     const r = run({}, { 'docs/contracts/wire.md': '# Wire\n\n~~~json\n{}\n' });
     expectError(r, { file: 'docs/contracts/wire.md', line: 3, check: 'fence', match: /never closed/ });
   });
+  test('a fence inside an HTML comment block is not a fence', () => {
+    // CommonMark HTML block (type 2): everything up to the line holding
+    // "-->" is raw HTML, so this unmatched fence is invisible.
+    const design = edit(DESIGN, '## 3. Architecture\n', '## 3. Architecture\n\n<!--\nOld example:\n```js\nconst x = T99.9;\n-->\n\nStill checked: T00.9.\n');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check]), [[lineOf(design, 'Still checked'), 'task']]);
+    assert.deepEqual(scanFences(['<!--', '```js', '-->', '```', 'x', '```']), {
+      blocks: [{ start: 4, end: 6, char: '`', len: 3, info: '', lang: '', body: ['x'] }],
+      comments: [{ start: 1, end: 3, col: 0, closeCol: 0 }],
+      errors: [],
+    });
+    assert.deepEqual(scanFences(['> <!-- a --> ```', '```']).blocks.length, 0);
+  });
+  test('comment-like text inside a real fence is code', () => {
+    const design = edit(DESIGN, '## 3. Architecture\n', '## 3. Architecture\n\n```html\n<!-- open\n```\n\nStill checked: T00.9.\n');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check]), [[lineOf(design, 'Still checked'), 'task']]);
+  });
+  test('a fence still interrupts a paragraph with an open inline comment', () => {
+    // "Text <!-- note" is a paragraph; the fence ends it, so "<!--" is shown
+    // as text and the "-->" is code.
+    const tasks = `${TASKS}\nText <!-- note\n\`\`\`js\n-->\n\`\`\`\nafter --> T00.9\n`;
+    const r = run({ tasks });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check]), [
+      [lineOf(tasks, 'Text <!--'), 'comment'],
+      [lineOf(tasks, 'after -->'), 'task'],
+    ]);
+    expectError(r, { file: T, line: lineOf(tasks, 'Text <!--'), check: 'comment', match: /not closed before its paragraph ends/ });
+    // Unclosed, the fence is reported too.
+    const t2 = `${TASKS}\nText <!-- note\n\`\`\`js\n-->\n`;
+    expectError(run({ tasks: t2 }), { file: T, line: lineOf(t2, '```js'), check: 'fence', match: /never closed/ });
+  });
+});
+
+describe('HTML comments', () => {
+  test('closed comments hide references and links, inline and multi-line', () => {
+    const design = edit(
+      DESIGN,
+      '## 3. Architecture\n',
+      '## 3. Architecture\n\nKeep <!-- T99.9 [x](missing.md) --> going, <!-- ADR-999\nA99 --> done.\n\n<!--\nC99 [y](gone.md)\n\n```\n-->\n',
+    );
+    assert.deepEqual(run({ design }).errors, []);
+  });
+  test('text after a closed comment is still checked', () => {
+    const design = edit(DESIGN, '## 3. Architecture\n', '## 3. Architecture\n\nText <!-- a --> T99.8 <!-- b\nc --> T99.9\n');
+    const r = run({ design });
+    expectError(r, { file: D, line: lineOf(design, 'T99.8'), check: 'task', match: /undefined task T99\.8/ });
+    expectError(r, { file: D, line: lineOf(design, 'c --> T99.9'), check: 'task', match: /undefined task T99\.9/ });
+  });
+  test('text after a comment block on its closing line is checked', () => {
+    const design = edit(DESIGN, '## 3. Architecture\n', '## 3. Architecture\n\n<!-- one line --> T99.7\n\n<!--\nT99.8\n--> T99.9\n');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.msg]), [
+      [lineOf(design, '--> T99.7'), 'undefined task T99.7'],
+      [lineOf(design, '--> T99.9'), 'undefined task T99.9'],
+    ]);
+    assert.deepEqual(scanFences(['  <!-- x --> ```', '```', '```']).comments, [{ start: 1, end: 1, col: 2, closeCol: 9 }]);
+  });
+  test('an unmatched backtick does not stop comment masking', () => {
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Lone ` tick <!-- T99.9 --> then T00.9.\n\nBack to [the summary](#1-summary).');
+    assert.deepEqual(run({ design }).errors.map((e) => [e.line, e.msg]), [[lineOf(design, 'Lone `'), 'undefined task T00.9']]);
+  });
+  test('"<!--" inside a code span does not start a comment', () => {
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Write `<!--` or `` a`<!--`b `` to start a comment.\n\nBack to [the summary](#1-summary) and T00.9.');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check, e.msg]), [[lineOf(design, 'and T00.9'), 'task', 'undefined task T00.9']]);
+  });
+  test('a comment opened before a code span wins over the span', () => {
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'x <!-- a ` T99.9 --> T00.9 ` d\n\nBack to [the summary](#1-summary).');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.msg]), [[lineOf(design, 'x <!--'), 'undefined task T00.9']]);
+  });
+  test('an inline comment left open is an error and hides nothing after its paragraph', () => {
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Note <!-- unfinished T99.9\n\nBack to [the summary](#1-summary) and T00.9.');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check]), [
+      [lineOf(design, 'Note <!--'), 'comment'],
+      [lineOf(design, 'and T00.9'), 'task'],
+    ]);
+    expectError(r, { file: D, line: lineOf(design, 'Note <!--'), check: 'comment', match: /Markdown shows it as text/ });
+  });
+  test('an inline comment open at end of file is an error', () => {
+    const tasks = `${TASKS}\nTrailing <!-- note`;
+    expectError(run({ tasks }), { file: T, line: lineOf(tasks, 'Trailing'), check: 'comment', match: /not closed/ });
+  });
+  test('a comment block open at end of file is an error', () => {
+    const tasks = `${TASKS}\n<!--\nT99.9 hidden\n`;
+    expectError(run({ tasks }), { file: T, line: lineOf(tasks, '<!--\nT99.9'), check: 'comment', match: /never closed.*hides the rest of the file/ });
+  });
 });
 
 describe('task IDs', () => {
@@ -261,6 +358,58 @@ describe('task IDs', () => {
     const tasks = edit(TASKS, '- [ ] **T00.2** Threat', '- [ ] **T10.3** Threat');
     expectError(run({ tasks }), { file: T, line: lineOf(tasks, '**T10.3**'), check: 'task', match: /listed under ### T00/ });
   });
+  test('subtask out of order', () => {
+    const tasks = edit(TASKS, '- [ ] **T10.1** Migrations after T00.1–T00.2 and T00, T10.\n- [ ] **T10.2** IDs per T00.1-2 and `T10.1`.', '- [ ] **T10.2** IDs per T00.1-2 and `T10.1`.\n- [ ] **T10.1** Migrations after T00.1–T00.2 and T00, T10.');
+    const r = run({ tasks });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.msg]), [[lineOf(tasks, '**T10.1** Migrations'), 'T10.1 is out of order after T10.2']]);
+  });
+  test('subtasks without a group heading', () => {
+    const tasks = edit(TASKS, '### T10 — Schema\n', '### Schema\n');
+    const r = run({ tasks });
+    expectError(r, { file: T, line: lineOf(tasks, '**T10.1**'), check: 'task', match: /^subtasks of T10 have no "### T10" heading$/ });
+    expectError(r, { file: T, line: lineOf(tasks, '**T10.1**'), check: 'task', match: /T10\.1 is listed under no task heading, not ### T10/ });
+  });
+  test('a level-4 heading does not end a task group', () => {
+    const tasks = edit(TASKS, '- [ ] **T10.2** IDs', '#### Notes\n\n- [ ] **T10.2** IDs');
+    assert.deepEqual(run({ tasks }).errors, []);
+    const t2 = edit(TASKS, '- [ ] **T10.2** IDs', '### Notes\n\n- [ ] **T10.2** IDs');
+    expectError(run({ tasks: t2 }), { file: T, line: lineOf(t2, '**T10.2**'), check: 'task', match: /listed under no task heading/ });
+  });
+  test('malformed checkbox task IDs', () => {
+    for (const bad of ['**T1.2**', '**T10.2a**', '**T10.** ', '**T10**']) {
+      const tasks = edit(TASKS, '**T10.2** IDs', `${bad} IDs`);
+      const r = run({ tasks });
+      expectError(r, { file: T, line: lineOf(tasks, `${bad} IDs`), check: 'task', match: /^malformed task checkbox ID \(expected \*\*Tgg\.n\*\*\)$/ });
+    }
+    // Prose that merely starts with a bold task ID outside a checkbox is fine.
+    assert.deepEqual(run({ tasks: edit(TASKS, '## 9. Delivery\n', '## 9. Delivery\n\n**T10.2** is last.\n') }).errors, []);
+  });
+  test('subtask ID with a leading zero', () => {
+    const tasks = edit(TASKS, '- [ ] **T10.2** IDs', '- [ ] **T10.02** IDs');
+    const r = run({ tasks });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.msg]), [[lineOf(tasks, '**T10.02**'), 'task ID T10.02 has a leading zero (write T10.2)']]);
+  });
+  test('range mixing a task group and a subtask', () => {
+    for (const range of ['T00–T10.1', 'T00.1–T10']) {
+      const tasks = edit(TASKS, 'and T00, T10.', `and ${range}.`);
+      expectError(run({ tasks }), { file: T, line: lineOf(tasks, range), check: 'task', match: new RegExp(`task range '${range}': range mixes a task group and a subtask`) });
+    }
+  });
+  test('reversed and empty ranges of every kind', () => {
+    const cases = [
+      ['and T00, T10.', 'and T10–T00.', 'task', /task range 'T10–T00': range end is not after its start/],
+      ['and T00, T10.', 'and T10–T10.', 'task', /range end is not after its start/],
+      ['IDs per T00.1-2', 'IDs per T00.2-2', 'task', /range end is not after its start/],
+      ['Gate · A01–A02', 'Gate · A02–A01', 'scenario', /scenario range 'A02–A01': range end is not after its start/],
+      ['Gate · A01–A02', 'Gate · A01–A01', 'scenario', /scenario range 'A01–A01': range end is not after its start/],
+      ['C01–C02 hold', 'C02–C01 hold', 'invariant', /compatibility invariant range 'C02–C01'/],
+      ['Freeze contracts (ADR-001)', 'Freeze contracts (ADR-002–001)', 'adr', /ADR range 'ADR-002–001'/],
+    ];
+    for (const [from, to, check, match] of cases) {
+      const tasks = edit(TASKS, from, to);
+      expectError(run({ tasks }), { file: T, line: lineOf(tasks, to), check, match });
+    }
+  });
   test('an extra file cannot define tasks', () => {
     const r = run({}, { 'docs/notes.md': '# Notes\n\n### T30 — Sessions\n\n- [ ] **T30.1** x\n\nSee T30.1.\n' });
     expectError(r, { file: 'docs/notes.md', line: 7, check: 'task', match: /undefined task T30\.1/ });
@@ -292,6 +441,54 @@ describe('ADRs', () => {
   test('ADR file whose name and title disagree', () => {
     const r = run({}, { 'docs/adr/ADR-004-x.md': '# ADR-005: X\n' });
     expectError(r, { file: 'docs/adr/ADR-004-x.md', line: 1, check: 'adr', match: /file name says ADR-004 but title says ADR-005/ });
+  });
+  test('two ADR files for the same number', () => {
+    const r = run({}, { 'docs/adr/0003-a.md': '# Signer\n', 'docs/adr/ADR-003-b.md': 'No title.\n' });
+    assert.deepEqual(r.errors, [{ file: 'docs/adr/ADR-003-b.md', line: 1, check: 'adr', msg: 'ADR-003 is also defined by docs/adr/0003-a.md' }]);
+    assert.equal(r.stats.adrs, 3);
+  });
+  test('ADR table numbering gap and out-of-order rows', () => {
+    const tasks = edit(TASKS, '| ADR-002 | Signer', '| ADR-004 | Signer');
+    const r = run({ tasks });
+    assert.deepEqual(r.errors, []);
+    assert.deepEqual(r.warnings.map((w) => [w.line, w.check, w.msg]), [
+      [lineOf(TASKS, '## 11.'), 'adr', 'ADR-002 is missing from the ADR table (rows run up to ADR-004)'],
+      [lineOf(TASKS, '## 11.'), 'adr', 'ADR-003 is missing from the ADR table (rows run up to ADR-004)'],
+    ]);
+    const t2 = edit(TASKS, '| ADR-001 | Issuer | One issuer |\n| ADR-002 | Signer | Separate keys |', '| ADR-002 | Signer | Separate keys |\n| ADR-001 | Issuer | One issuer |');
+    expectError(run({ tasks: t2 }), { file: T, line: lineOf(t2, '| ADR-001 |'), check: 'adr', match: /^ADR-001 is out of order in the ADR table \(after ADR-002\)$/ });
+  });
+  test('an ADR table with no rows', () => {
+    const tasks = edit(TASKS, '| ADR-001 | Issuer | One issuer |\n| ADR-002 | Signer | Separate keys |\n', '');
+    expectError(run({ tasks }), { file: T, line: lineOf(TASKS, '## 11.'), check: 'adr', match: /ADR table under "11\. ADR decisions to ratify" has no rows/ });
+  });
+});
+
+describe('table sections', () => {
+  test('extra headings that mention ADRs, the matrix or the contract do not move the tables', () => {
+    const tasks = edit(
+      TASKS,
+      '## 8. Conformance matrix',
+      '### Where the conformance matrix lives\n\nBelow.\n\n#### ADR-002 notes\n\nNotes.\n\n#### Conformance matrix\n\n| A09 | x | y |\n\n## 8. Conformance matrix',
+    );
+    const design = edit(DESIGN, '## 2. Stable compatibility contract', '### Compatibility contract notes\n\n| C09 | x |\n\n## 2. Stable compatibility contract');
+    const r = run({ tasks, design });
+    // The stray rows are references to undefined IDs, nothing else.
+    assert.deepEqual(r.errors.map((e) => [e.file, e.line, e.msg]), [
+      [D, lineOf(design, '| C09 |'), 'undefined compatibility invariant C09'],
+      [T, lineOf(tasks, '| A09 |'), 'undefined scenario A09'],
+    ]);
+    assert.deepEqual([r.stats.adrs, r.stats.scenarios, r.stats.invariants], [2, 2, 2]);
+  });
+  test('the table sections must be numbered headings', () => {
+    const tasks = edit(TASKS, '## 8. Conformance matrix', '## Conformance matrix');
+    expectError(run({ tasks }), { file: T, line: 0, check: 'scenario', match: /no section heading matching/ });
+    const design = edit(DESIGN, '## 2. Stable compatibility contract', '## Stable compatibility contract');
+    expectError(run({ design }), { file: D, line: 0, check: 'invariant', match: /no section heading matching/ });
+  });
+  test('two numbered headings for one table are an error', () => {
+    const tasks = `${TASKS}\n## 12. ADR decisions, continued\n\n| ADR-003 | x | y |\n`;
+    expectError(run({ tasks }), { file: T, line: lineOf(tasks, '## 12.'), check: 'adr', match: /second section heading for the ADR table/ });
   });
 });
 
@@ -389,6 +586,45 @@ describe('mermaid', () => {
       assert.throws(() => parseFlowchart(bad), MermaidError, bad.join('\\n'));
     }
   });
+  test('a header ending in ";" keeps the semicolon out of the direction', () => {
+    // Checked against mermaid 12.2.0: it accepts the first three and rejects
+    // the rest.
+    assert.equal(parseFlowchart(['flowchart TD;', 'A["a"] --> B["b"]']).direction, 'TD');
+    assert.equal(parseFlowchart(['graph LR;', 'A["a"] --> B["b"]']).direction, 'LR');
+    assert.equal(parseFlowchart(['graph TD;;', 'A["a"] --> B["b"]']).direction, 'TD');
+    assert.throws(() => parseFlowchart(['flowchart XY;']), /invalid flowchart direction 'XY'$/);
+    for (const bad of ['graph ;', 'flowchart;', 'flowchart TD ;']) {
+      assert.throws(() => parseFlowchart([bad]), new RegExp(`: invalid flowchart header '${bad}'$`));
+    }
+    const tasks = edit(TASKS, 'flowchart TD\n    %% Milestones', 'flowchart TD;\n    %% Milestones');
+    assert.deepEqual(run({ tasks }).errors, []);
+  });
+  test('undirected link in a task DAG', () => {
+    const tasks = edit(TASKS, '    classDef gate', '    SCHEMA --- GATE\n    classDef gate');
+    const r = run({ tasks });
+    expectError(r, { file: T, line: lineOf(tasks, 'SCHEMA --- GATE'), check: 'mermaid', match: /undirected link SCHEMA --- GATE in a task DAG/ });
+    // The design diagram is not a task DAG: its undirected links are fine.
+    assert.deepEqual(run({ design: edit(DESIGN, 'U <--> DB', 'U --- DB') }).errors, []);
+  });
+  test('"%%" comment lines are not scanned for references', () => {
+    const tasks = edit(TASKS, '    %% Milestones', '    %% Milestones T99.9 A99 ADR-999');
+    assert.deepEqual(run({ tasks }).errors, []);
+    // Only whole-line comments are stripped; a label is still checked.
+    const t2 = edit(TASKS, '    %% Milestones', '    %% Milestones\n    Q["T99.9"] --> GATE');
+    expectError(run({ tasks: t2 }), { file: T, line: lineOf(t2, 'Q["T99.9"]'), check: 'task', match: /undefined task T99\.9/ });
+  });
+  test('an internal error in the Mermaid parser is not reported as a docs error', () => {
+    const root = fixture();
+    const boom = () => {
+      throw new TypeError('boom');
+    };
+    assert.throws(() => checkDocs({ root, parseMermaid: boom }), /boom/);
+    const bad = () => {
+      throw new MermaidError(7, 'nope');
+    };
+    const r = checkDocs({ root, parseMermaid: bad });
+    assert.equal(r.errors.filter((e) => e.check === 'mermaid' && e.msg === 'nope' && e.line === 7).length, 3);
+  });
 });
 
 describe('links and anchors', () => {
@@ -426,6 +662,46 @@ describe('links and anchors', () => {
     execFileSync('git', ['-C', root, 'add', 'README.md']);
     assert.deepEqual(checkDocs({ root }).errors, []);
   });
+  test('reference links need a definition', () => {
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'See [the tasks][tasks], [Tasks][] and [the plan][plan].\n\n[tasks]: skyoauth-tasks.md#task-dag');
+    const r = run({ design });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check, e.msg]), [[lineOf(design, 'See [the tasks]'), 'link', 'reference link [plan] has no definition']]);
+    // The definition's target is itself checked.
+    const d2 = edit(design, '[tasks]: skyoauth-tasks.md#task-dag', '[tasks]: skyoauth-tasks.md#no-such\n[plan]: plan.md');
+    const r2 = run({ design: d2 });
+    expectError(r2, { file: D, line: lineOf(d2, '[tasks]: '), check: 'link', match: /anchor '#no-such' not found/ });
+    expectError(r2, { file: D, line: lineOf(d2, '[plan]: '), check: 'link', match: /'plan\.md' does not exist/ });
+  });
+  test('a link leaving the repository', () => {
+    for (const target of ['../../outside.md', '/../outside.md']) {
+      const design = edit(DESIGN, '[the tasks](skyoauth-tasks.md)', `[out](${target})`);
+      expectError(run({ design }), { file: D, line: 3, check: 'link', match: new RegExp(`^link '${target.replace(/\./g, '\\.')}' leaves the repository$`) });
+    }
+    // A root-relative link resolves against the repository root.
+    const design = edit(DESIGN, '[the tasks](skyoauth-tasks.md)', '[the tasks](/docs/skyoauth-tasks.md#task-dag)');
+    assert.deepEqual(run({ design }).errors, []);
+  });
+  test('a malformed link target', () => {
+    const design = edit(DESIGN, '[the tasks](skyoauth-tasks.md)', '[the tasks](skyoauth-%E0%A4%A.md)');
+    expectError(run({ design }), { file: D, line: 3, check: 'link', match: /^malformed link target 'skyoauth-%E0%A4%A\.md'$/ });
+    // Percent-encoded paths that do decode are resolved.
+    const d2 = edit(DESIGN, '[the tasks](skyoauth-tasks.md)', '[the tasks](skyoauth%2Dtasks.md)');
+    assert.deepEqual(run({ design: d2 }).errors, []);
+  });
+  test('links inside code spans are not checked', () => {
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Write `[x](missing.md)` or ``[y][nolabel]`` literally.\n\nBack to [the summary](#1-summary).');
+    assert.deepEqual(run({ design }).errors, []);
+  });
+  test('setext headings are anchors and numbered sections', () => {
+    const design = edit(
+      DESIGN,
+      'Back to [the summary](#1-summary).',
+      'Back to [the summary](#1-summary).\n\nSetext title\n============\n\nSee [it](#setext-title) and [sub](#setext-sub).\n\nSetext sub\n----------\n',
+    );
+    assert.deepEqual(run({ design }).errors, []);
+    const d2 = edit(design, '[sub](#setext-sub)', '[sub](#setext-subs)');
+    expectError(run({ design: d2 }), { file: D, check: 'link', match: /anchor '#setext-subs' not found/ });
+  });
   test('githubSlug matches GitHub', () => {
     assert.equal(githubSlug('T00 — Protocol and threat model (M0)'), 't00--protocol-and-threat-model-m0');
     assert.equal(githubSlug('5.2.1 Match the browser approval to the initiating CLI'), '521-match-the-browser-approval-to-the-initiating-cli');
@@ -450,35 +726,92 @@ describe('section references', () => {
 describe('command line', () => {
   test('exit 0 and a summary on success, from any cwd', () => {
     const root = fixture();
-    const p = spawnSync(process.execPath, [SCRIPT, '--root', root], { cwd: tmpdir(), encoding: 'utf8' });
+    const p = cli(['--root', root], { cwd: tmpdir() });
     assert.equal(p.status, 0, p.stdout + p.stderr);
     assert.match(p.stdout, /tasks: 2 groups, 4 subtasks/);
     assert.match(p.stdout, /\nOK \(0 warning\(s\)\)/);
+    assert.doesNotMatch(p.stdout, /^::/m);
   });
   test('exit 1 with file:line messages on failure', () => {
     const root = fixture({}, { tasks: edit(TASKS, 'after T00.1–T00.2', 'after T00.1–T00.9') });
-    const p = spawnSync(process.execPath, [SCRIPT, `--root=${root}`], { cwd: tmpdir(), encoding: 'utf8' });
+    const p = cli([`--root=${root}`], { cwd: tmpdir() });
     assert.equal(p.status, 1, p.stdout + p.stderr);
     assert.match(p.stdout, /^docs\/skyoauth-tasks\.md:\d+: error \[task\] range 'T00\.1–T00\.9' includes undefined task T00\.3/m);
     assert.match(p.stdout, /FAILED: 1 error/);
   });
   test('missing spec fails', () => {
     const root = fixture({ 'docs/skyoauth-design.md': null });
-    const p = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+    const p = cli(['--root', root]);
     assert.equal(p.status, 1);
     assert.match(p.stdout, /docs\/skyoauth-design\.md: error \[files\] spec is missing/);
+  });
+  test('--root without a value exits 2 instead of checking the default root', () => {
+    for (const args of [['--root'], ['--root='], ['--verbose', '--root']]) {
+      const p = cli(args);
+      assert.equal(p.status, 2, `${args.join(' ')}: ${p.stdout}${p.stderr}`);
+      assert.match(p.stderr, /--root needs a directory/);
+      assert.equal(p.stdout, '');
+    }
+  });
+  test('an internal crash (--root naming a file) exits 2', () => {
+    const root = fixture();
+    const p = cli(['--root', join(root, 'docs', 'skyoauth-tasks.md')]);
+    assert.equal(p.status, 2, p.stdout + p.stderr);
+    assert.match(p.stderr, /ENOTDIR/);
+  });
+  test('in GitHub Actions, diagnostics and ADR notes are annotations and still exit 0', () => {
+    // ADR-002 is missing from the table (a numbering gap), ADR-003 is never
+    // referenced, and ADR-004 exists only as a file (a missing row).
+    const tasks = edit(TASKS, '| ADR-002 | Signer', '| ADR-003 | Signer');
+    const root = fixture({ 'docs/adr/ADR-004-x.md': '# ADR-004: X\n' }, { tasks: edit(tasks, 'Threat model; see design §3.', 'Threat model; see §3.') });
+    const table = lineOf(TASKS, '## 11. ADR decisions');
+    const local = cli(['--root', root, '--verbose']);
+    assert.equal(local.status, 0, local.stdout + local.stderr);
+    assert.doesNotMatch(local.stdout, /^::/m);
+    assert.match(local.stdout, new RegExp(`^docs/skyoauth-tasks\\.md:${table}: warning \\[adr\\] ADR-002 is missing from the ADR table`, 'm'));
+
+    const p = cli(['--root', root], { env: { GITHUB_ACTIONS: 'true' } });
+    assert.equal(p.status, 0, p.stdout + p.stderr);
+    const ann = p.stdout.split('\n').filter((l) => l.startsWith('::'));
+    assert.deepEqual(ann, [
+      `::warning file=docs/skyoauth-tasks.md,line=${table},title=docs-check [adr]::docs/skyoauth-tasks.md:${table}: warning [adr] ADR-002 is missing from the ADR table (rows run up to ADR-003)`,
+      `::warning file=docs/adr/ADR-004-x.md,line=1,title=docs-check [adr]::docs/adr/ADR-004-x.md:1: info [adr] ADR-004 is defined but never referenced`,
+      `::warning file=docs/adr/ADR-004-x.md,line=1,title=docs-check [adr]::docs/adr/ADR-004-x.md:1: info [adr] ADR-004 is defined only by this ADR file, not the tasks §11 table`,
+      `::warning file=docs/skyoauth-tasks.md,line=${lineOf(tasks, '| ADR-003 |')},title=docs-check [adr]::docs/skyoauth-tasks.md:${lineOf(tasks, '| ADR-003 |')}: info [adr] ADR-003 is defined but never referenced`,
+    ]);
+    // The bare-§ note is not an ADR note: it stays a counted info line.
+    assert.match(p.stdout, /\(1 info notes; rerun with --verbose to list them\)/);
+    assert.match(p.stdout, /\nOK \(1 warning\(s\)\)/);
+  });
+  test('in GitHub Actions, errors are ::error annotations and exit 1', () => {
+    const root = fixture({}, { tasks: edit(TASKS, 'after T00.1–T00.2', 'after T00.1–T00.9') });
+    const p = cli(['--root', root], { env: { GITHUB_ACTIONS: 'true' } });
+    assert.equal(p.status, 1, p.stdout + p.stderr);
+    const line = lineOf(TASKS, 'after T00.1');
+    assert.match(
+      p.stdout,
+      new RegExp(`^::error file=docs/skyoauth-tasks\\.md,line=${line},title=docs-check \\[task\\]::docs/skyoauth-tasks\\.md:${line}: error \\[task\\] range 'T00\\.1–T00\\.9'`, 'm'),
+    );
+  });
+  test('formatAnnotation escapes workflow-command metacharacters', () => {
+    assert.equal(
+      formatAnnotation('warning', { file: 'docs/a,b:c.md', line: 0, check: 'x', msg: '50% done\r\nnext' }),
+      '::warning file=docs/a%2Cb%3Ac.md,title=docs-check [x]::docs/a,b:c.md: warning [x] 50%25 done%0D%0Anext',
+    );
   });
   test('runs when invoked through a symlinked path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'docs-check-link-'));
     roots.push(dir);
     symlinkSync(dirname(SCRIPT), join(dir, 'ci'));
     const root = fixture({}, { tasks: edit(TASKS, 'after T00.1–T00.2', 'after T00.1–T00.9') });
-    const p = spawnSync(process.execPath, [join(dir, 'ci', 'docs-check.mjs'), '--root', root], { encoding: 'utf8' });
+    const env = { ...process.env };
+    delete env.GITHUB_ACTIONS;
+    const p = spawnSync(process.execPath, [join(dir, 'ci', 'docs-check.mjs'), '--root', root], { env, encoding: 'utf8' });
     assert.equal(p.status, 1, p.stdout + p.stderr);
     assert.match(p.stdout, /FAILED: 1 error/);
   });
   test('unknown argument exits 2', () => {
-    const p = spawnSync(process.execPath, [SCRIPT, '--bogus'], { encoding: 'utf8' });
+    const p = cli(['--bogus']);
     assert.equal(p.status, 2);
   });
 });

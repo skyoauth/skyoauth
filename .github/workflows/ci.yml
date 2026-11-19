@@ -255,7 +255,9 @@ jobs:
   # The one check to require in branch protection. A job skipped for a
   # docs-only change satisfies a required check, except a matrix job: it
   # reports under its unexpanded name, so requiring one would never
-  # arrive. This job passes when every job it needs passed or was skipped.
+  # arrive. This job passes when every job it needs passed or was skipped,
+  # except docs-check: it has no condition, so it must have passed; a skip
+  # there would mean it never ran.
   ci-passed:
     name: CI passed
     if: always()
@@ -272,8 +274,13 @@ jobs:
       - name: Check job results
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          DOCS_CHECK: ${{ needs.docs-check.result }}
         run: |
           echo "Job results: $RESULTS"
+          if [ "$DOCS_CHECK" != success ]; then
+            echo "Docs consistency did not pass: '$DOCS_CHECK'"
+            exit 1
+          fi
           for result in $RESULTS; do
             case "$result" in
               success | skipped) ;;

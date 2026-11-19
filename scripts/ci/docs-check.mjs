@@ -13,6 +13,9 @@
 //
 // Checks:
 //   fence    Markdown ``` and ~~~ fences are balanced (CommonMark closing rules).
+//   comment  HTML comments close: a "<!--" block before EOF, an inline one
+//            within its paragraph. Fences inside a comment block are text;
+//            "<!--" inside a fence or code span is not a comment.
 //   task     Task IDs and ranges (T13.1–T13.7, T10–T14) resolve to definitions;
 //            definitions are unique, contiguous and under their group heading.
 //   adr      ADR-NNN references resolve to the tasks §11 table or docs/adr/.
@@ -26,6 +29,8 @@
 //            heading of that spec.
 //
 // Errors exit 1 with file:line messages. Warnings and info lines never fail.
+// Usage errors and internal failures exit 2. With GITHUB_ACTIONS=true the
+// messages are printed as ::error/::warning annotations (see main()).
 // Needs only Node (>=20) and the files in the repository; no dependencies.
 
 import { execFileSync } from 'node:child_process';
@@ -60,6 +65,19 @@ class Report {
 export function formatDiagnostic(level, d) {
   const loc = d.line ? `${d.file}:${d.line}` : d.file;
   return `${loc}: ${level} [${d.check}] ${d.msg}`;
+}
+
+// A GitHub Actions workflow command (::error/::warning) for a diagnostic.
+// The message keeps the plain file:line form (with level `shown`) so the raw
+// log stays readable. Escaping follows the runner's rules for data and
+// property values.
+export function formatAnnotation(command, d, shown = command) {
+  const data = (s) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  const prop = (s) => data(s).replace(/:/g, '%3A').replace(/,/g, '%2C');
+  const props = [`file=${prop(d.file)}`];
+  if (d.line) props.push(`line=${d.line}`);
+  props.push(`title=${prop(`docs-check [${d.check}]`)}`);
+  return `::${command} ${props.join(',')}::${data(formatDiagnostic(shown, d))}`;
 }
 
 function sortDiagnostics(list) {
@@ -119,18 +137,47 @@ function listRepoFiles(root) {
 // Markdown scanning: fences, comments, headings
 
 const FENCE_RE = /^((?:[ \t]*>)*[ \t]*)(`{3,}|~{3,})(.*)$/;
+const COMMENT_BLOCK_RE = /^((?:[ \t]*>)*[ \t]*)<!--/;
 
-// Scans fenced code blocks. Returns { blocks, errors } where each block is
-// { start, end, char, len, info, lang, body: string[] } with 1-based line
-// numbers (end is the closing fence line). Follows CommonMark: a backtick
-// fence's info string cannot contain a backtick; a closing fence uses the
-// same character, is at least as long as the opener and has no info string.
+// Scans the block structure: fenced code blocks and HTML comment blocks.
+// Returns { blocks, comments, errors }. Each block is { start, end, char,
+// len, info, lang, body: string[] } with 1-based line numbers (end is the
+// closing fence line). Follows CommonMark: a backtick fence's info string
+// cannot contain a backtick; a closing fence uses the same character, is at
+// least as long as the opener and has no info string.
+//
+// A line that starts with "<!--" outside a fence opens an HTML block
+// (CommonMark type 2) that ends on the first line containing "-->"; nothing
+// in it is Markdown, so a fence-like line inside is text. Each comment is
+// { start, end, col, closeCol }: col is the index of "<!--" on the start
+// line and closeCol that of "-->" on the end line. Inside a fence, "<!--" is
+// code. Comments opened mid-line are inline HTML; analyse() handles them.
 export function scanFences(lines) {
   const blocks = [];
+  const comments = [];
   const errors = [];
   let open = null;
+  let comment = null;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (comment) {
+      const e = line.indexOf('-->');
+      if (e >= 0) {
+        comments.push({ ...comment, end: i + 1, closeCol: e });
+        comment = null;
+      }
+      continue;
+    }
+    if (!open) {
+      const c = COMMENT_BLOCK_RE.exec(line);
+      if (c) {
+        const col = c[1].length;
+        const e = line.indexOf('-->', col + 4);
+        if (e >= 0) comments.push({ start: i + 1, end: i + 1, col, closeCol: e });
+        else comment = { start: i + 1, col };
+        continue;
+      }
+    }
     const m = FENCE_RE.exec(line);
     if (!open) {
       if (!m) continue;
@@ -176,47 +223,104 @@ export function scanFences(lines) {
     }
     errors.push({ line: open.start, msg });
   }
-  return { blocks, errors };
+  if (comment) {
+    errors.push({
+      line: comment.start,
+      check: 'comment',
+      msg: 'HTML comment opened here is never closed (no later "-->"), so Markdown hides the rest of the file',
+    });
+  }
+  return { blocks, comments, errors };
+}
+
+// Index just past the backtick run of exactly `len` backticks that closes a
+// code span opened before `from`, or -1.
+function codeSpanEnd(s, from, len) {
+  for (let j = s.indexOf('`', from); j >= 0; j = s.indexOf('`', j)) {
+    let k = j;
+    while (s[k] === '`') k++;
+    if (k - j === len) return k;
+    j = k;
+  }
+  return -1;
 }
 
 // Per-line view of a document: which lines are inside fences, prose with HTML
-// comments masked, and the fenced blocks themselves.
+// comments masked, and the fenced blocks themselves. `errors` holds the
+// block scanner's errors plus inline comments that are never closed.
 function analyse(text) {
   const lines = text.split(/\r?\n/);
-  const { blocks, errors } = scanFences(lines);
+  const { blocks, comments, errors } = scanFences(lines);
   const inFence = new Array(lines.length + 1).fill(null); // 1-based -> block
   for (const b of blocks) for (let n = b.start; n <= b.end; n++) inFence[n] = b;
-  // Mask HTML comments (outside fences), keeping line structure.
-  const prose = lines.map((l, i) => (inFence[i + 1] ? '' : l));
-  let inComment = false;
-  for (let i = 0; i < prose.length; i++) {
-    let s = prose[i];
+  const inComment = new Array(lines.length + 1).fill(null); // 1-based -> comment block
+  for (const c of comments) for (let n = c.start; n <= c.end; n++) inComment[n] = c;
+  // Mask HTML comments, keeping line structure. Comment blocks come from the
+  // block scanner. An inline comment ("text <!-- ... -->") is raw HTML only
+  // if it closes within its paragraph; otherwise Markdown shows "<!--" as
+  // text, so it is reported and masks nothing past the paragraph. A code span
+  // that starts first wins over "<!--" (and vice versa), as in CommonMark.
+  const prose = [];
+  let inline = null; // { line } of an open inline comment
+  const endParagraph = () => {
+    if (!inline) return;
+    errors.push({
+      line: inline.line,
+      check: 'comment',
+      msg: 'HTML comment opened here is not closed before its paragraph ends, so Markdown shows it as text',
+    });
+    inline = null;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const s = lines[i];
+    const block = inComment[i + 1];
+    if (inFence[i + 1] || block || s.trim() === '') endParagraph();
+    if (inFence[i + 1]) {
+      prose.push('');
+      continue;
+    }
     let out = '';
     let pos = 0;
-    while (pos < s.length) {
-      if (inComment) {
-        const e = s.indexOf('-->', pos);
-        if (e < 0) {
-          pos = s.length;
-        } else {
-          pos = e + 3;
-          inComment = false;
-        }
-      } else {
-        const b = s.indexOf('<!--', pos);
-        if (b < 0) {
-          out += s.slice(pos);
-          pos = s.length;
-        } else {
-          out += s.slice(pos, b);
-          pos = b + 4;
-          inComment = true;
-        }
+    if (block) {
+      // Before "<!--" there is only indentation or ">"; after "-->" on the
+      // last line there may be text, which is checked.
+      if (i + 1 !== block.end) {
+        prose.push('');
+        continue;
       }
+      pos = block.closeCol + 3;
     }
-    prose[i] = out;
+    while (pos < s.length) {
+      if (inline) {
+        const e = s.indexOf('-->', pos);
+        if (e < 0) break;
+        pos = e + 3;
+        inline = null;
+        continue;
+      }
+      const b = s.indexOf('<!--', pos);
+      const t = s.indexOf('`', pos);
+      if (b < 0) {
+        out += s.slice(pos);
+        break;
+      }
+      if (t >= 0 && t < b) {
+        let k = t;
+        while (s[k] === '`') k++;
+        const end = codeSpanEnd(s, k, k - t);
+        const next = end < 0 ? k : end; // an unmatched run is literal text
+        out += s.slice(pos, next);
+        pos = next;
+        continue;
+      }
+      out += s.slice(pos, b);
+      pos = b + 4;
+      inline = { line: i + 1 };
+    }
+    prose.push(out);
   }
-  return { lines, prose, blocks, fenceErrors: errors, inFence };
+  endParagraph();
+  return { lines, prose, blocks, errors, inFence };
 }
 
 function stripInlineCode(s) {
@@ -290,15 +394,24 @@ function sectionNumbers(doc) {
   return out;
 }
 
-// The line range [start, end) of the section whose heading matches re.
+// The line range [start, end) of the first section whose heading matches re,
+// plus any later headings that match too.
 function sectionRange(doc, re) {
   const hs = headings(doc);
   const idx = hs.findIndex((h) => re.test(h.text));
   if (idx < 0) return null;
   const level = hs[idx].level;
   const next = hs.slice(idx + 1).find((h) => h.level <= level);
-  return { heading: hs[idx], start: hs[idx].line, end: next ? next.line : doc.lines.length + 1 };
+  const others = hs.slice(idx + 1).filter((h) => re.test(h.text));
+  return { heading: hs[idx], start: hs[idx].line, end: next ? next.line : doc.lines.length + 1, others };
 }
+
+// The numbered section headings that hold the ID tables (tasks §8 and §11,
+// design §2). Anchored to "N. Title" so that other headings mentioning an
+// ADR or the matrix ("#### ADR-009 notes") cannot be mistaken for them.
+const ADR_SECTION = /^\d+\.\s+ADR decisions\b/i;
+const MATRIX_SECTION = /^\d+\.\s+Conformance matrix\b/i;
+const CONTRACT_SECTION = /^\d+\.\s+Stable compatibility contract\b/i;
 
 // ---------------------------------------------------------------------------
 // Identifier references
@@ -450,9 +563,13 @@ export function parseFlowchart(body, firstLine = 1) {
     const t = raw.trim();
     if (t === '' || t.startsWith('%%')) continue;
     if (!headerSeen) {
-      const h = /^(flowchart|graph)(?:[ \t]+(\S+))?[ \t]*;?$/.exec(t);
+      // "flowchart", "flowchart TD" or "flowchart TD;" (Mermaid also takes
+      // extra ";" but rejects "flowchart;" and "flowchart TD ;"). The ";" is
+      // not part of the direction.
+      const h = /^(flowchart|graph)(?:[ \t]+([^\s;]+)(?:;[\s;]*)?)?$/.exec(t);
       if (!h) {
         const kind = t.split(/[\s;]/)[0];
+        if (kind === 'flowchart' || kind === 'graph') throw new MermaidError(lineNo, `invalid flowchart header '${t}'`);
         throw new MermaidError(lineNo, `unsupported diagram type '${kind}' (only flowchart/graph is validated)`);
       }
       if (h[2] !== undefined && !DIRECTIONS.test(h[2])) {
@@ -753,7 +870,9 @@ export function findCycle(g) {
 // ---------------------------------------------------------------------------
 // Main check
 
-export function checkDocs({ root } = {}) {
+// `parseMermaid` replaces parseFlowchart; the self-test uses it to check that
+// an internal parser failure propagates instead of becoming a docs error.
+export function checkDocs({ root, parseMermaid = parseFlowchart } = {}) {
   root = resolve(root || join(dirname(fileURLToPath(import.meta.url)), '..', '..'));
   const report = new Report();
   const stats = {
@@ -785,10 +904,10 @@ export function checkDocs({ root } = {}) {
   for (const f of docFiles) docs.set(f, analyse(readFileSync(join(root, f), 'utf8')));
   stats.files = docFiles;
 
-  // 1. Fences.
+  // 1. Fences and HTML comments.
   for (const [f, doc] of docs) {
     stats.fences += doc.blocks.length;
-    for (const e of doc.fenceErrors) report.error(f, e.line, 'fence', e.msg);
+    for (const e of doc.errors) report.error(f, e.line, e.check || 'fence', e.msg);
   }
 
   // Definitions.
@@ -826,7 +945,7 @@ export function checkDocs({ root } = {}) {
         continue;
       }
       const key = `T${m[1]}.${Number(m[2])}`;
-      if (m[2] !== String(Number(m[2]))) report.error(TASKS, i + 1, 'task', `task ID ${m[0].trim()} has a leading zero`);
+      if (m[2] !== String(Number(m[2]))) report.error(TASKS, i + 1, 'task', `task ID T${m[1]}.${m[2]} has a leading zero (write ${key})`);
       define('task', key, TASKS, i + 1, tasks.prose[i].indexOf(`T${m[1]}.`) + 1);
       if (group !== `T${m[1]}`) {
         report.error(TASKS, i + 1, 'task', `${key} is listed under ${group ? `### ${group}` : 'no task heading'}, not ### T${m[1]}`);
@@ -849,19 +968,19 @@ export function checkDocs({ root } = {}) {
     stats.subtasks = defs.task.size - stats.taskGroups;
 
     // 3. ADR table (tasks §11).
-    defineTable(tasks, TASKS, /\bADR\b/, /^\|\s*ADR-(\d{3,4})\s*\|/, (m) => adrKey(Number(m[1])), 'adr', define, report, {
+    defineTable(tasks, TASKS, ADR_SECTION, /^\|\s*ADR-(\d{3,4})\s*\|/, (m) => adrKey(Number(m[1])), 'adr', define, report, {
       contiguous: 'warn',
       what: 'ADR table',
     });
     // 4. Conformance matrix (tasks §8).
-    defineTable(tasks, TASKS, /conformance matrix/i, /^\|\s*A(\d{2})\s*\|/, (m) => `A${m[1]}`, 'scenario', define, report, {
+    defineTable(tasks, TASKS, MATRIX_SECTION, /^\|\s*A(\d{2})\s*\|/, (m) => `A${m[1]}`, 'scenario', define, report, {
       contiguous: 'error',
       what: 'conformance matrix',
     });
   }
   const design = docs.get(DESIGN);
   if (design) {
-    defineTable(design, DESIGN, /compatibility contract/i, /^\|\s*C(\d{2})\s*\|/, (m) => `C${m[1]}`, 'invariant', define, report, {
+    defineTable(design, DESIGN, CONTRACT_SECTION, /^\|\s*C(\d{2})\s*\|/, (m) => `C${m[1]}`, 'invariant', define, report, {
       contiguous: 'error',
       what: 'compatibility contract table',
     });
@@ -936,9 +1055,9 @@ export function checkDocs({ root } = {}) {
     for (const b of mermaid) {
       let g;
       try {
-        g = parseFlowchart(b.body, b.start + 1);
+        g = parseMermaid(b.body, b.start + 1);
       } catch (e) {
-        if (!(e instanceof MermaidError)) throw e;
+        if (!(e instanceof MermaidError)) throw e; // a bug here, not in the docs: exit 2
         if (!isSpec && /^unsupported diagram type/.test(e.message)) {
           report.warn(f, e.line, 'mermaid', `${e.message}; not validated`);
         } else {
@@ -1103,6 +1222,9 @@ function defineTable(doc, file, headingRe, rowRe, keyOf, kind, define, report, o
     report.error(file, 0, kind, `no section heading matching ${headingRe} with the ${opts.what}`);
     return;
   }
+  for (const h of range.others) {
+    report.error(file, h.line, kind, `"${h.text}" is a second section heading for the ${opts.what} (the first is line ${range.start}); its rows are not definitions`);
+  }
   const rows = [];
   for (let n = range.start; n < range.end; n++) {
     const m = rowRe.exec(doc.prose[n - 1]);
@@ -1194,9 +1316,14 @@ async function main(argv) {
   let oracleDir = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--root') root = argv[++i];
-    else if (a.startsWith('--root=')) root = a.slice(7);
-    else if (a === '--verbose' || a === '-v') verbose = true;
+    if (a === '--root' || a.startsWith('--root=')) {
+      // Without this check a missing value would silently check the default root.
+      root = a === '--root' ? argv[++i] : a.slice('--root='.length);
+      if (!root) {
+        console.error('docs-check: --root needs a directory');
+        return 2;
+      }
+    } else if (a === '--verbose' || a === '-v') verbose = true;
     else if (a.startsWith('--mermaid-oracle=')) oracleDir = a.slice('--mermaid-oracle='.length);
     else if (a === '--help' || a === '-h') {
       console.log('usage: node scripts/ci/docs-check.mjs [--root DIR] [--verbose] [--mermaid-oracle=DIR]');
@@ -1212,9 +1339,23 @@ async function main(argv) {
     result.stats.oracle = await oracle(result);
     sortDiagnostics(result.errors);
   }
-  const { errors, warnings, infos, stats } = result;
-  for (const d of errors) console.log(formatDiagnostic('error', d));
-  for (const d of warnings) console.log(formatDiagnostic('warning', d));
+  const { errors, warnings, stats } = result;
+  let { infos } = result;
+  // In GitHub Actions (GITHUB_ACTIONS=true) errors and warnings are printed
+  // as workflow commands, so they become annotations on the run and the pull
+  // request. ADR bookkeeping is deliberately louder there: numbering gaps in
+  // the tasks §11 table are warnings everywhere, but an ADR that is never
+  // referenced, or that only a docs/adr/ file defines (a missing table row),
+  // is an info note locally and a ::warning annotation in CI, so a reviewer
+  // sees it without it failing the job. Only errors fail (exit 1).
+  const gha = process.env.GITHUB_ACTIONS === 'true';
+  const print = (level, d) => console.log(gha ? formatAnnotation(level, d) : formatDiagnostic(level, d));
+  for (const d of errors) print('error', d);
+  for (const d of warnings) print('warning', d);
+  if (gha) {
+    for (const d of infos.filter((x) => x.check === 'adr')) console.log(formatAnnotation('warning', d, 'info'));
+    infos = infos.filter((x) => x.check !== 'adr');
+  }
   if (verbose) for (const d of infos) console.log(formatDiagnostic('info', d));
   else if (infos.length) console.log(`(${infos.length} info notes; rerun with --verbose to list them)`);
   const mermaid = Object.entries(stats.mermaid)
