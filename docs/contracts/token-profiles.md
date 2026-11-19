@@ -216,8 +216,8 @@ profile and therefore rejected as an extra claim (TP-045).
 ## 7. Lifetimes
 
 This table summarizes the credential maxima from design §5.2.2, §6 and §6.1.
-The T00.6 lifetimes contract (`lifetimes.md`, PR #10) is authoritative for
-lifetimes and their interactions.
+The T00.6 lifetimes contract ([lifetimes.md](lifetimes.md)) is authoritative
+for lifetimes and their interactions.
 
 | Credential                | Maximum lifetime                                                                     | Source                 |
 | ------------------------- | ------------------------------------------------------------------------------------ | ---------------------- |
@@ -396,9 +396,9 @@ follow-up. All other items are not resolved by this contract.
 - **OQ-TP-10 — Clock skew.** **Decided** (lead decision, 2026-11-19): the
   allowed clock skew is instance-configurable, default 60 s, ceiling 120 s
   (TP-060). This is the same decision as OQ-LT-16 in the T00.6 lifetimes
-  contract (`lifetimes.md`, PR #10). Follow-up: design §6 needs the values.
-  Original question: "bounded TTL/skew" is required, but the maximum allowed
-  clock skew is not given.
+  contract ([lifetimes.md](lifetimes.md)). Follow-up: design §6 needs the
+  values. Original question: "bounded TTL/skew" is required, but the maximum
+  allowed clock skew is not given.
 - **OQ-TP-11 — Assertion header.** **Decided** (lead decision, 2026-11-19):
   `X-SkyOAuth-Assertion` (same decision as OQ-API-10; see
   [public-api.md API-061](public-api.md#4-private-gateway-endpoints)).
