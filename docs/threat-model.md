@@ -1397,7 +1397,8 @@ that ignores a denial keeps sending; the backend is trusted to stop.
 - **OQ-TM-14 — Bulk session revocation.** **Decided — lead decision,
   2026-11-19:** add a revision-checked, audited operation that advances the
   tenant's `auth_generation` without a provider change, which invalidates the
-  tenant's sessions in bulk. It must be specified before M1b and M3. It is
+  tenant's sessions in bulk. It advances only `auth_generation`; the provider
+  `auth_epoch` advances only with a provider transition (lifetimes §4). It must be specified before M1b and M3. It is
   `POST /admin/v1/tenants/{tenant}/login-state/compromise-transitions`, run
   by tenant `provider_admin` as a single actor with no second approver; no
   single-origin variant (API-154). The instance-wide response that runs it for
@@ -1437,7 +1438,11 @@ the contract amendments; what is still open is named in the entry:
 - **OQ-TM-6:** design §5.1 and §5.1.1; the tasks endpoint matrix
   `/human-links` entry; T30.4, T51.3.
 - **OQ-TM-7:** design §7.2, §7.3 and §8; API-148; the link operation; T13.9,
-  T51.1.
+  T51.1. Still open (OQ-ADR012-3, ADR-012): whether a switch signed with the
+  recovery key through the local recovery verifier while the IdP is
+  unavailable needs the second approver or takes an audited single-actor
+  exception; the lead decides before M1b. Spec follow-up against design §7.2
+  and §7.3, T13.5, T13.9 and OQ-TM-7.
 - **OQ-TM-8:** design §7.2; T13.5; API-152 and T13.4 (scope of the recovery
   transaction: replacement `security_admin` credential, operator-credential
   revocation, replacement recovery public key).
@@ -1453,7 +1458,16 @@ the contract amendments; what is still open is named in the entry:
   `HumanProvider`); T11.2, T11.8, T23.2; before M1a.
 - **OQ-TM-14:** design §5.1.1 and §7.3; tasks §3 (`TenantLoginState`); the
   public-API operator endpoint matrix (OQ-API-2); the lifetimes contract §4
-  epochs table; T31.6; before M1b and M3.
+  epochs table (split: the compromise transition advances only
+  `auth_generation`); T31.6; before M1b and M3. Still open (OQ-ADR021-3,
+  ADR-021): the instance-wide response endpoint, its path, per-tenant revision
+  checks, atomicity and partial-failure rules.
+- **OQ-ADR023-1 and OQ-ADR023-2 (ADR-023, decided):** disabling the active
+  provider sets the enrollment hold; activation from null after any provider
+  was ever active is a switch, sets the hold and cannot use the fresh-install
+  `auto_create`; a true fresh install sets no hold. Design §5.1.1 and §7.3;
+  tasks §3 (a durable record that a provider was ever active); T13.9; API-148
+  and the provider-switch commit row; TM-10.
 - **OQ-TM-15:** design §7.2 ("signer/recovery policy" excludes replacing the
   recovery key); API-152; T13.5.
 - **OQ-TM-16:** design §3.1 and §6 (public signer structural limits and

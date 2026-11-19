@@ -466,10 +466,8 @@ shows problems. All other items are not resolved by this contract.
   state can no longer be replayed"; the quarantine length and how it is
   computed were not stated.
 - **OQ-LT-14 — ADR-010 record (contradiction).** **Decided** (lead decision,
-  2026-11-19) and resolved, with ADR-010 publication pending in PR #18: this
-  contract text depends on PR #18 merging, because ADR-010 is not yet in
-  `docs/adr` on main. The decided clause, which ADR-010 carries in PR #18, is
-  "Real gateway
+  2026-11-19) and resolved: ADR-010, published in `docs/adr` (item 19), carries
+  the clause "Real gateway
   apply/compensation closes origin cookie admissions; unchanged contexts get
   unavailable only to their existing lease; fixed
   session/logout/revoke/back-channel/security-disable cleanup stays
