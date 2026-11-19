@@ -256,10 +256,17 @@ verified SkyOAuth backend identity.
   credentials (cookie plus bearer, bearer plus internal assertion) MUST be
   denied. This requirement is canonical; token-profiles TP-022 refers to it.
   (design §4, §6; tasks T31.4, A10)
-- **API-063** Every non-SkyOAuth route on an enrolled host MUST remove all
-  `Cookie` fields and `X-SkyOAuth-CSRF` before forwarding and all
-  `Set-Cookie` response fields, independently of whether Check runs. The
-  detailed containment contract is T00.5 and is out of scope here. (design §4)
+- **API-063** Every route on an enrolled host, including the issuer host, MUST
+  remove all `Cookie` fields and `X-SkyOAuth-CSRF` before forwarding and all
+  `Set-Cookie` response fields, independently of whether Check runs. The only
+  exceptions are the seven fixed SkyOAuth cookie endpoints listed in
+  [gateway-containment.md §4.1](gateway-containment.md#41-exemptions); every
+  other SkyOAuth endpoint, including `/oauth/token`, `/oauth/revoke` and
+  `/.well-known/*`, keeps the removals. The T00.5
+  [gateway-containment contract](gateway-containment.md) is canonical for the
+  mechanism, stage and exemptions (GW-020, GW-027, GW-033, GW-035).
+  (design §4; issuer host and SkyOAuth endpoints: lead decision, OQ-GW-3,
+  OQ-GW-12)
 - **API-064** Withdrawn as a duplicate. Auth-service transport failure follows
   [errors-retry.md ERR-016](errors-retry.md#2-status-classes), which is
   canonical.
@@ -355,8 +362,8 @@ these identities has signer, WIF or human authority (**API-101**). (design
 
 Route-bundle transitions (design §4.2; tasks §3 "Route preparation, approval
 and recovery"). This table is a summary; the T00.5 gateway-containment
-contract (`gateway-containment.md`, PR #10) is authoritative for the detailed
-transition preconditions and effects.
+contract ([gateway-containment.md](gateway-containment.md)) is authoritative
+for the detailed transition preconditions and effects.
 
 | Transition               | Allowed from                                                                                                                                                                                                                                                                                                                                                            | Approval mode required | Effect                                                                                                                                               | Source                                      |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
