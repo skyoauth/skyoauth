@@ -21,9 +21,11 @@ This document freezes how the Envoy Gateway adapter keeps browser credentials
 away from application backends, how the request digest and the gateway
 configuration digests are bound, and who may prepare, approve, activate,
 cancel, revoke, abort and supersede a route-bundle deployment. It restates
-the design and the tasks plan and adds no new behavior. Where the sources
-leave a detail open, it is listed under [Open questions](#open-questions) and
-is not decided here.
+the design and the tasks plan and adds no new behavior, except where an open
+question is marked **Decided**: those record a lead decision whose design and
+tasks amendment is a pending follow-up. Every other detail the sources leave
+open is listed under [Open questions](#open-questions) and is not decided
+here.
 
 The contract covers the Envoy Gateway adapter only. Every alternate gateway
 adapter, including ForwardAuth on Kubernetes, needs its own reviewed
@@ -35,17 +37,17 @@ RFC 8174) when they appear in capitals. Requirement IDs use `GW-nnn`.
 
 ## 1. Terms
 
-| Term               | Meaning in this contract                                                                                                                                        | Source                |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection (see OQ-GW-12) | design §4, §4.2       |
-| SkyOAuth route     | A fixed SkyOAuth authentication or session endpoint routed to the independently verified SkyOAuth backend identity                                              | design §4             |
-| Non-SkyOAuth route | Every other route on an enrolled host: SPA shell, assets, public, health, bearer and cookie-protected application routes                                        | design §4             |
-| Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                              | design §4.2           |
-| Route bundle       | Tenant-owned parent whose immutable versions pin one origin version, route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests         | design §4.2; tasks §3 |
-| Attempt            | Durable `RouteBundleAttempt` of one approved `gateway_apply` version, with its deadlines, reason and write journal                                              | design §4.2; tasks §3 |
-| Traffic gate       | Runtime eligibility of the bundle for new cookie-authenticated application requests and continuation admissions                                                 | design §4.2           |
-| Projection `P`     | Versioned `P(configuration, protected_scope)` computed on prepared xDS and on observed active configuration                                                     | design §4.2           |
-| Deployment version | `deployment_version_id`: the approved version whose unchanged gateway configuration is backed by observations, distinct from the active registry pins           | design §4.2           |
+| Term               | Meaning in this contract                                                                                                                                                                                      | Source                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection (see OQ-GW-12)                                               | design §4, §4.2                                |
+| SkyOAuth route     | A fixed SkyOAuth authentication or session endpoint routed to the independently verified SkyOAuth backend identity                                                                                            | design §4                                      |
+| Non-SkyOAuth route | Every other route on an enrolled host: SPA shell, assets, public, health, bearer and cookie-protected application routes                                                                                      | design §4                                      |
+| Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                                                                            | design §4.2                                    |
+| Route bundle       | Tenant-owned parent whose immutable versions pin one origin version, route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests; exactly one per `ApplicationOrigin` in v0.1 (GW-115) | design §4.2; tasks §3; lead decision (OQ-GW-8) |
+| Attempt            | Durable `RouteBundleAttempt` of one approved `gateway_apply` version, with its deadlines, reason and write journal                                                                                            | design §4.2; tasks §3                          |
+| Traffic gate       | Runtime eligibility of the bundle, and so of its whole origin (GW-115), for new cookie-authenticated application requests and continuation admissions                                                         | design §4.2; lead decision (OQ-GW-8)           |
+| Projection `P`     | Versioned `P(configuration, protected_scope)` computed on prepared xDS and on observed active configuration                                                                                                   | design §4.2                                    |
+| Deployment version | `deployment_version_id`: the approved version whose unchanged gateway configuration is backed by observations, distinct from the active registry pins                                                         | design §4.2                                    |
 
 ## 2. Digest binding
 
@@ -84,18 +86,17 @@ This section adds the gateway and backend obligations.
 
 ### 2.2 Configuration digests
 
-| Digest or version field      | Binds                                                                                                              | Computed by                                                                       | Source                |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | --------------------- |
-| Preparation input digest     | Immutable input snapshot of the `route_bundle_prepare` operation                                                   | Service, at the preparation request                                               | design §4.2           |
-| `translator_input_digest`    | Validated complete input snapshot, explicit bootstrap inputs and the Secret substitution profile                   | Preparation worker; bound by the service to the pending operation                 | design §4.2; tasks §3 |
-| `adapter_artifact_digests`   | Pinned Envoy Gateway, egctl, Envoy and bootstrap artifacts                                                         | Preparation worker; recorded in the version                                       | design §4.2; tasks §3 |
-| `canonicalization_version`   | Version of the projection `P` and its canonical form                                                               | Adapter                                                                           | design §4.2; tasks §3 |
-| `expected_gateway_digest`    | `P` of the translated xDS for the protected scope                                                                  | Preparation worker running the pinned translator; never a caller or running proxy | design §4.2           |
-| `plan_digest`                | Complete plan, including `activation_mode`, `abort_plan`, `security_preconditions`, `reenable_targets` and timeout | Service, at finalization                                                          | design §4.2           |
-| `observed_gateway_digest`    | `P` of one proxy's observed active configuration                                                                   | Controller from the management listener; recorded per proxy                       | design §4.2; tasks §3 |
-| `recovery_snapshot_digest`   | Failed attempt revision and journal digest, recovery inventory, last completed pair and unresolved obligations     | Preparation for a supersession                                                    | design §4.2           |
-| `dependency_contract_digest` | Stable TLS dependency contract: reference, UID, profile and writers                                                | Service                                                                           | design §4.2           |
-| `dependency_evidence_digest` | Fresh supervisor verification of real Secret dependencies for one observation                                      | Controller supervisor                                                             | design §4.2           |
+| Digest or version field                              | Binds                                                                                                                                                              | Computed by                                                                             | Source                               |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------ |
+| Preparation input digest (`translator_input_digest`) | Immutable input snapshot of the `route_bundle_prepare` operation: validated complete input snapshot, explicit bootstrap inputs and the Secret substitution profile | Preparation worker inside the isolated route controller; never caller-supplied (GW-016) | design §4.2; lead decision (OQ-GW-7) |
+| `adapter_artifact_digests`                           | Pinned Envoy Gateway, egctl, Envoy and bootstrap artifacts                                                                                                         | Not specified (OQ-GW-7)                                                                 | design §4.2; tasks §3                |
+| `canonicalization_version`                           | Version of the projection `P` and its canonical form                                                                                                               | Not specified (OQ-GW-7)                                                                 | design §4.2; tasks §3                |
+| `expected_gateway_digest`                            | `P` of the translated xDS for the protected scope                                                                                                                  | Preparation worker running the pinned translator; never a caller or running proxy       | design §4.2                          |
+| `plan_digest`                                        | Complete plan, including `activation_mode`, `abort_plan`, `security_preconditions`, `reenable_targets` and timeout                                                 | Service, at finalization                                                                | design §4.2                          |
+| `observed_gateway_digest`                            | `P` of one proxy's observed active configuration                                                                                                                   | Controller from the management listener; recorded per proxy                             | design §4.2; tasks §3                |
+| `recovery_snapshot_digest`                           | Failed attempt revision and journal digest, recovery inventory, last completed pair and unresolved obligations                                                     | Preparation for a supersession                                                          | design §4.2                          |
+| `dependency_contract_digest`                         | Stable TLS dependency contract: reference, UID, profile and writers                                                                                                | Not specified (OQ-GW-7)                                                                 | design §4.2                          |
+| `dependency_evidence_digest`                         | Fresh supervisor verification of real Secret dependencies for one observation                                                                                      | Controller supervisor                                                                   | design §4.2                          |
 
 - **GW-010** The service MUST NOT trust a caller-supplied expected digest. A
   tenant cannot supply a trusted expected digest, and a scoped worker result is
@@ -114,8 +115,17 @@ This section adds the gateway and backend obligations.
   historical leaf certificate or resourceVersion. Exact-mode dependencies
   additionally bind their material pins. (design §4.2)
 
-The hash algorithm and canonical serialization of these digests are not
-specified (OQ-GW-7).
+- **GW-015** Every digest in this table MUST be SHA-256 over the RFC 8785 JSON
+  Canonicalization Scheme (JCS) serialization of its input. (lead decision,
+  OQ-GW-7)
+- **GW-016** The preparation input digest and `translator_input_digest` are
+  one value. The M3 preparation worker MUST compute it inside the isolated
+  route controller from the stored input snapshot. The service MUST NOT
+  accept it from a tenant or other caller (GW-010). (lead decision, OQ-GW-7)
+
+The digest encoding, the list of documented nonsemantic noise and the
+component that computes the rows marked "Not specified" remain open
+(OQ-GW-7).
 
 ## 3. All-route credential containment
 
@@ -171,7 +181,7 @@ mechanism until that scope is enrolled (design §4.2).
 Only fixed SkyOAuth authentication and session endpoints that route to the
 independently verified SkyOAuth backend identity may consume or issue their
 required cookies (design §4). The cookie-bearing endpoints named by the
-sources are:
+sources, and the complete v0.1 exemption list (lead decision, OQ-GW-3), are:
 
 | Host               | Path                  | Cookies the endpoint consumes or issues                                                           | Source                |
 | ------------------ | --------------------- | ------------------------------------------------------------------------------------------------- | --------------------- |
@@ -183,20 +193,25 @@ sources are:
 | Issuer origin      | `/oauth/callback`     | Consumes and rotates `__Host-skyoauth_native`                                                     | design §5.2           |
 | Issuer origin      | `/oauth/confirm`      | Consumes the rotated `__Host-skyoauth_native` and CSRF; clears it on completion, denial or expiry | design §5.2           |
 
-Whether the issuer host is an enrolled host, and whether non-cookie SkyOAuth
-endpoints (`/oauth/token`, `/oauth/revoke`, `/.well-known/*`,
-`/_skyoauth/oidc/backchannel-logout`) are exempt, are open (OQ-GW-3).
-
 - **GW-030** An exemption MUST require both the exact fixed path and routing
   to the independently verified SkyOAuth backend identity. A path prefix, a
   caller header or a tenant-supplied flag alone MUST NOT grant an exemption.
-  (design §4; tasks T32.4)
+  How that backend identity is expressed and verified is deferred to T32.4
+  (OQ-GW-4). (design §4; tasks T32.4)
 - **GW-031** Genuine SkyOAuth login, callback, session, logout and native flows
   MUST continue to work under containment. (design §4; tasks A18)
 - **GW-032** The route controller MUST preserve the fixed SkyOAuth routes during
   an application apply, and a `cleanup_to_closed` target MUST preserve fixed
   SkyOAuth cleanup endpoints. (design §4.2; see also
   [public-api.md §8](public-api.md#8-independence-from-the-application-route-gate))
+- **GW-033** Only the seven endpoints in the table above MAY be exempt from the
+  §3 removals. Every other SkyOAuth endpoint, including `/oauth/token`,
+  `/oauth/revoke`, `/.well-known/*` and `/_skyoauth/oidc/backchannel-logout`,
+  MUST keep the §3 Cookie, `X-SkyOAuth-CSRF` and Set-Cookie removal. (lead
+  decision, OQ-GW-3)
+- **GW-034** The issuer host MUST NOT be enrolled as an `ApplicationOrigin`.
+  Its three native endpoints in the table above are its only cookie
+  exemptions. (lead decision, OQ-GW-3, OQ-GW-12)
 
 ### 4.2 Filter order
 
@@ -241,10 +256,12 @@ Envoy filter chain of the pinned adapter is an adapter fixture (OQ-GW-5).
   §4.2)
 - **GW-055** Shared Gateway-wide policy or listener changes MUST require
   approval of all affected bundles or be rejected. (design §4.2)
-- **GW-056** Admission exceptions are limited to narrow status-only updates by
-  the existing gateway controller, the scoped TLS-renewer update (§12.4), the
-  cert-manager temporary-key class (§12.4) and sealed, acknowledged
-  credential-retirement DELETE (§12.6). (design §4.2; see OQ-GW-14)
+- **GW-056** Admission exceptions are limited to exactly four: narrow
+  status-only updates by the existing gateway controller, the scoped
+  TLS-renewer credential-renewal update (§12.4), the non-referenceable
+  cert-manager temporary-key CREATE and DELETE class (§12.4) and sealed,
+  acknowledged credential-retirement DELETE (§12.6). No other admission
+  exception exists. (design §4.2; tasks §3; lead decision, OQ-GW-14)
 - **GW-057** Helm, Argo CD and Flux MAY render and submit approved bundle
   inputs but MUST NOT directly apply managed objects while the sole-writer
   guard is installed. (design §4.2; tasks T10.7; ADR-020)
@@ -309,11 +326,13 @@ remains necessary (design §4.2; tasks T50.4).
 
 - **GW-070** A preparation request at
   `POST /admin/v1/tenants/{tenant}/route-bundles/{id}/preparations` MUST store
-  an immutable `route_bundle_prepare` operation with the input snapshot and
-  digest, expected active generation, origin and route versions, security
+  an immutable `route_bundle_prepare` operation with the input snapshot,
+  expected active generation, origin and route versions, security
   preconditions, required `activation_mode`, gateway-apply timeout and any
-  explicit recovery intent including `supersedes_attempt_id`. It is not an
-  approved deployment or a version with a caller-chosen digest. (design §4.2)
+  explicit recovery intent including `supersedes_attempt_id`. The input
+  digest of that snapshot is computed by the preparation worker (GW-016), not
+  supplied with the request. It is not an approved deployment or a version
+  with a caller-chosen digest. (design §4.2; lead decision, OQ-GW-7)
 - **GW-071** The M3 preparation worker MUST run the pinned translator
   (`egctl x translate --from gateway-api --to xds`) before approval and submit
   its scoped result at
@@ -362,15 +381,15 @@ remains necessary (design §4.2; tasks T50.4).
 
 ## 9. Pinned adapter inputs
 
-| Input                                                    | Requirement                                            | Named in sources                                                        | Source           |
-| -------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------- | ---------------- |
-| Envoy Gateway controller and egctl                       | Same pinned translator build as the deployed gateway   | v1.10 documentation and v1.10.0 source as references, not a tested pair | design §4.2, §13 |
-| Envoy proxy                                              | Pinned with the gateway and bootstrap                  | v1.40.1 documentation as reference                                      | design §4.2, §13 |
-| EnvoyProxy bootstrap customization                       | Pinned; adds the static management listener            | Not versioned                                                           | design §4.2      |
-| Management listener targets, masks, size and time bounds | Literal values frozen per adapter                      | Not given (OQ-GW-1)                                                     | design §4.2      |
-| Projection canonicalization                              | `canonicalization_version` bound into the version      | Not given                                                               | tasks §3         |
-| Placeholder Secret fixtures                              | Adapter-versioned, deterministic, public test data     | Not given                                                               | design §4.2      |
-| cert-manager key manager                                 | Pinned version whose temporary-key lifecycle is tested | v1.20.0 source as reference                                             | design §4.2, §13 |
+| Input                                                    | Requirement                                            | Named in sources                                                                                              | Source           |
+| -------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ---------------- |
+| Envoy Gateway controller and egctl                       | Same pinned translator build as the deployed gateway   | v1.10 documentation and v1.10.0 source as references, not a tested pair; literal pair in T32.3/T50.4 (GW-092) | design §4.2, §13 |
+| Envoy proxy                                              | Pinned with the gateway and bootstrap                  | v1.40.1 documentation as reference; literal version in T32.3/T50.4 (GW-092)                                   | design §4.2, §13 |
+| EnvoyProxy bootstrap customization                       | Pinned; adds the static management listener            | Not versioned; literal version in T32.3/T50.4 (GW-092)                                                        | design §4.2      |
+| Management listener targets, masks, size and time bounds | Categories frozen here (GW-106)                        | Not given; literal values in T32.3/T50.4 (GW-092)                                                             | design §4.2      |
+| Projection canonicalization                              | `canonicalization_version` bound into the version      | Not given                                                                                                     | tasks §3         |
+| Placeholder Secret fixtures                              | Adapter-versioned, deterministic, public test data     | Not given                                                                                                     | design §4.2      |
+| cert-manager key manager                                 | Pinned version whose temporary-key lifecycle is tested | v1.20.0 source as reference; literal version in T32.3/T50.4 (GW-092)                                          | design §4.2, §13 |
 
 - **GW-090** Gateway, egctl, Envoy and bootstrap artifacts MUST be pinned
   together, and projection fixtures plus real gateway tests MUST be rerun on
@@ -379,6 +398,12 @@ remains necessary (design §4.2; tasks T50.4).
 - **GW-091** Translation MUST run on a validated complete input snapshot with
   explicit bootstrap inputs. Unspecified missing-resource synthesis is
   forbidden. (design §4.2)
+- **GW-092** This contract (T00.5) freezes only the shape of the pins: which
+  inputs in the table above are pinned, that they are pinned together as one
+  set (GW-090), and the management-listener categories in GW-106. The literal
+  version pair, artifact digests, `/config_dump` targets, masks and size and
+  time bounds MUST be fixed in T32.3 and T50.4 against a tested pair, before
+  protected traffic is admitted. (lead decision, OQ-GW-1, OQ-GW-2)
 
 ## 10. Management listener
 
@@ -400,23 +425,28 @@ remains necessary (design §4.2; tasks T50.4).
 - **GW-105** The listener and its isolation MUST be validated before protected
   traffic is admitted. A deployment that cannot enforce this adapter MUST NOT
   silently open the full admin surface. (design §4.2)
+- **GW-106** For each supported adapter, every allowlisted target MUST have a
+  fixed `/config_dump` `resource` value and a fixed `mask` value, and the
+  listener MUST enforce a maximum response size and a request timeout. These
+  categories are frozen here; their literal values are fixed per GW-092.
+  (design §4.2; lead decision, OQ-GW-1)
 
 ## 11. Activation, apply and recovery
 
 ### 11.1 Activation modes
 
-| Property                       | `registry_only`                                                                                        | `gateway_apply`                                                                      | Source      |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ----------- |
-| Transition used                | `activate_registry_only`                                                                               | `begin`, then `activate`                                                             | design §4.2 |
-| Gateway writes                 | None                                                                                                   | Scoped controller writes under the write journal                                     | design §4.2 |
-| Gate                           | Stays open; current gate must already be eligible                                                      | Closed at `begin` for the affected origin bundle until verified activation (OQ-GW-8) | design §4.2 |
-| Evidence                       | Complete observations fresh within 30 s; original samples, ages and deadlines retained                 | Complete fresh matching observation set before `activate`                            | design §4.2 |
-| `deployment_version_id`        | Retained                                                                                               | Advanced on activation                                                               | design §4.2 |
-| `reenable_targets`             | MUST be empty                                                                                          | Allowed; cleared atomically on activation                                            | design §4.2 |
-| Supersession of failed attempt | Not allowed                                                                                            | Allowed with fresh approval                                                          | design §4.2 |
-| `abort_plan`, `abort_until`    | None; no compensation authority                                                                        | Required                                                                             | design §4.2 |
-| `apply_timeout_seconds`        | Not applicable                                                                                         | Bound into preparation, version and approval                                         | design §4.2 |
-| Failed check                   | Old pair unchanged; MAY retry freshness in the same mode while approval is valid; no fallback to apply | Abort path (§11.4)                                                                   | design §4.2 |
+| Property                       | `registry_only`                                                                                        | `gateway_apply`                                                                    | Source      |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- | ----------- |
+| Transition used                | `activate_registry_only`                                                                               | `begin`, then `activate`                                                           | design §4.2 |
+| Gateway writes                 | None                                                                                                   | Scoped controller writes under the write journal                                   | design §4.2 |
+| Gate                           | Stays open; current gate must already be eligible                                                      | Closed at `begin` for the bundle's whole origin until verified activation (GW-115) | design §4.2 |
+| Evidence                       | Complete observations fresh within 30 s; original samples, ages and deadlines retained                 | Complete fresh matching observation set before `activate`                          | design §4.2 |
+| `deployment_version_id`        | Retained                                                                                               | Advanced on activation                                                             | design §4.2 |
+| `reenable_targets`             | MUST be empty                                                                                          | Allowed; cleared atomically on activation                                          | design §4.2 |
+| Supersession of failed attempt | Not allowed                                                                                            | Allowed with fresh approval                                                        | design §4.2 |
+| `abort_plan`, `abort_until`    | None; no compensation authority                                                                        | Required                                                                           | design §4.2 |
+| `apply_timeout_seconds`        | Not applicable                                                                                         | Bound into preparation, version and approval                                       | design §4.2 |
+| Failed check                   | Old pair unchanged; MAY retry freshness in the same mode while approval is valid; no fallback to apply | Abort path (§11.4)                                                                 | design §4.2 |
 
 - **GW-110** Mode MUST be immutable from preparation onward. There is no
   automatic mode, and neither the controller nor an approval retry can change
@@ -436,6 +466,12 @@ remains necessary (design §4.2; tasks T50.4).
   NOT give a copied sample a new age or extra tolerance. (design §4.2)
 - **GW-114** Incident re-enable MUST use `gateway_apply`, even when gateway
   contents are unchanged. (design §4.2)
+- **GW-115** In v0.1 each `ApplicationOrigin` MUST have exactly one
+  `RouteBundle`, and the T14.5 and T14.9 schema MUST enforce that uniqueness.
+  The traffic gate is therefore both origin-wide and bundle-wide: `begin`
+  closes every cookie-authenticated application route of that origin, and the
+  "unaffected bundles" that need not stop (design §4.1) are the bundles of
+  other origins. (lead decision, OQ-GW-8)
 
 ### 11.2 Apply phases
 
@@ -474,8 +510,9 @@ remains necessary (design §4.2; tasks T50.4).
   election, disruption and placement controls; failover MUST NOT reset
   sequences or observation ages. (design §4.2; tasks T32.3)
 
-Gate outcomes while a phase other than `idle` is current are in §13; wire
-results are frozen in
+Gate outcomes while a phase other than `idle` is current are in §13, and
+which credentials and contexts an activation or `complete_abort` supersedes
+is fixed by GW-227; wire results are frozen in
 [errors-retry.md §2](errors-retry.md#2-status-classes) and
 [§4](errors-retry.md#4-policy-check-recheck-and-close-results).
 
@@ -517,6 +554,10 @@ results are frozen in
 - **GW-136** The operator MUST read the attempt ID and revision before cancel or
   supplying `supersedes_attempt_id`; a racing phase or revision change MUST
   reject the stale write rather than act on a newer attempt. (design §4.2)
+- **GW-137** Cancel when no attempt is current (`idle`) or when the current
+  attempt is `recovery_required` MUST reject with no state change. This does
+  not alter the idempotent cancel of an `abort_required` or `aborting`
+  attempt (GW-132). (lead decision, OQ-GW-10)
 
 ### 11.4 Abort of an unfinished apply
 
@@ -528,11 +569,12 @@ results are frozen in
 - **GW-140** Compensation MUST be limited to the approval's exact `abort_plan`,
   not arbitrary historical versions. Abort calls MUST bind approval and attempt
   ID, plan digest and current controller epoch. (design §4.2)
-- **GW-141** Compensation MUST require current controller scope, enabled
-  required operator authority (OQ-GW-9), an unrevoked approval and
-  `now < abort_until`. A newer parent disable or an elapsed forward
-  `expires_at` MUST NOT reject already-approved compensating writes. (design
-  §4.2)
+- **GW-141** Compensation MUST require current controller scope, an unrevoked
+  approval and `now < abort_until`. The unrevoked approval and controller
+  scope are the "required operator authority" for compensation; disabling the
+  preparing `client_admin` MUST NOT stop it. A newer parent disable or an
+  elapsed forward `expires_at` MUST NOT reject already-approved compensating
+  writes. (design §4.2; lead decision, OQ-GW-9)
 - **GW-142** The controller MUST stop forward work, fence prior owners and
   outstanding writes, and restore only approved protected resource values. It
   MAY delete an attempt-created object only with the journaled matching UID and
@@ -749,15 +791,22 @@ contract freezes only the invariants the gateway path depends on.
   withdrawal or draining followed by verification of the remainder. (design
   §4.2)
 
-| Condition                                                            | New cookie application requests and admissions | Existing continuation recheck                                                                              | Source                    |
-| -------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------- |
-| Verified deployment, evidence within its bound, no other hold        | Eligible                                       | Ordinary                                                                                                   | design §4.2               |
-| Observation loss within the last-known-good bound                    | Eligible                                       | Ordinary, leases capped by remaining observation validity                                                  | design §4.2               |
-| Observation bound exhausted or no verified deployment                | 503 `route_configuration_unavailable`          | Unavailable; no renewal, no `closed_at`                                                                    | design §4.2               |
-| `applying`, `abort_required`, `aborting`, `recovery_required`        | 503 `route_configuration_unavailable`          | Unchanged dependencies: unavailable to the existing lease; changed, removed or security-disabled: terminal | design §4.2; tasks T32.12 |
-| Fresh authenticated out-of-plan digest mismatch                      | 503 immediately; no 30 s or 300 s allowance    | Terminal deny and `closed_at`                                                                              | design §4.2; tasks A58    |
-| TLS nonconvergence at the overlap cutoff, no established violation   | 503 (`awaiting_evidence`)                      | Unavailable; no renewal, no `closed_at`                                                                    | design §4.2               |
-| Confirmed invalid, revoked, expired, foreign or unaccounted material | 503 (`material_mismatch`)                      | Terminal deny and `closed_at`                                                                              | design §4.2               |
+| Condition                                                            | New cookie application requests and admissions                                | Existing continuation recheck                                                                              | Source                    |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------- |
+| Verified deployment, evidence within its bound, no other hold        | Eligible                                                                      | Ordinary                                                                                                   | design §4.2               |
+| Observation loss within the last-known-good bound                    | Eligible                                                                      | Ordinary, leases capped by remaining observation validity                                                  | design §4.2               |
+| Observation bound exhausted or no verified deployment                | 503 `route_configuration_unavailable`                                         | Unavailable; no renewal, no `closed_at`                                                                    | design §4.2               |
+| `applying`, `abort_required`, `aborting`, `recovery_required`        | 503 `route_configuration_unavailable`                                         | Unchanged dependencies: unavailable to the existing lease; changed, removed or security-disabled: terminal | design §4.2; tasks T32.12 |
+| Fresh authenticated out-of-plan digest mismatch                      | 503 `route_configuration_unavailable` immediately; no 30 s or 300 s allowance | Terminal deny and `closed_at`                                                                              | design §4.2; tasks A58    |
+| TLS nonconvergence at the overlap cutoff, no established violation   | 503 `route_configuration_unavailable`; gate reason `awaiting_evidence`        | Unavailable; no renewal, no `closed_at`                                                                    | design §4.2; tasks §3     |
+| Confirmed invalid, revoked, expired, foreign or unaccounted material | 503 `route_configuration_unavailable`; gate reason `material_mismatch`        | Terminal deny and `closed_at`                                                                              | design §4.2; tasks §3     |
+
+`awaiting_evidence` and `material_mismatch` are `TLSRenewalRuntime`
+`verification_state` values (design §4.2; tasks §3) used as internal
+gate reasons, for example in the administrative `gate_reason`. They are not
+wire reasons: the wire result in every 503 row is
+`route_configuration_unavailable`
+([errors-retry.md §2](errors-retry.md#2-status-classes)).
 
 - **GW-224** Only differences accounted for by the approved forward or abort
   plan and write journal under a closed gate are transitional; out-of-plan
@@ -771,6 +820,15 @@ contract freezes only the invariants the gateway path depends on.
   and MUST NOT mint application assertions (see
   [public-api.md §8](public-api.md#8-independence-from-the-application-route-gate)).
   (design §4.2)
+- **GW-227** Activation in either mode (`activate` or `activate_registry_only`)
+  and `complete_abort` MUST supersede only credentials and contexts whose
+  actual pinned origin or route versions or security dependencies changed,
+  compared with the activated version or, for `complete_abort`, with the
+  recorded abort source. An unchanged route MUST NOT be revoked solely because
+  the bundle ID or version pointer advanced; its contexts stay subject to the
+  gate outcomes above and to their existing lease. (design §4.2 "Immutable
+  configuration versus live state" and "During gateway apply or
+  compensation"; tasks §3 "Policy revisions", T32.11, T32.12; ADR-007)
 
 ## 14. Security-revision-bound recovery
 
@@ -836,28 +894,49 @@ revision.
 ## Open questions
 
 These are gaps, ambiguities or contradictions in the design and tasks
-documents. This contract does not resolve them. Entries marked
-"(contradiction)" are places where the sources disagree.
+documents. Entries marked "(contradiction)" are places where the sources
+disagree.
 
-- **OQ-GW-1 — Management listener literals.** Design §4.2 requires T00.5 to
-  "freeze the literal targets/masks and size/time bounds for each supported
-  adapter". The sources give no literal `/config_dump` `resource` or `mask`
-  values, response size limit or request timeout.
-- **OQ-GW-2 — Pinned versions.** The sources cite Envoy Gateway v1.10 and
-  v1.10.0, Envoy v1.40.1 and cert-manager v1.20.0 as references but state that
-  they specify "a mechanism, not a tested version pair". No pinned
-  Envoy Gateway, egctl, Envoy, bootstrap or cert-manager version or artifact
-  digest is chosen.
-- **OQ-GW-3 — Exact exemption list.** Design §4 exempts "fixed SkyOAuth
-  authentication/session endpoints" without listing them. Open: whether the
-  issuer host is an enrolled host subject to containment; whether
-  `/_skyoauth/oidc/backchannel-logout`, `/oauth/token`, `/oauth/revoke` and
-  `/.well-known/*` are exempt or keep Cookie and Set-Cookie removal; and,
-  per exempt endpoint, which cookies and headers are retained.
-- **OQ-GW-4 — Verified SkyOAuth backend identity.** The exemption requires
-  routing to the "independently verified SkyOAuth backend identity", but how
-  that identity is expressed and verified (Service and namespace, UID, peer
-  certificate identity or cluster) is not specified.
+Items marked **Decided** record a lead decision; the normative text above
+already reflects it, and the design and tasks documents still need the
+follow-up amendment named in the item. A decision is revisited through an ADR
+if implementation shows problems. Items marked **Deferred** are assigned to a
+later task. All other items are not resolved by this contract.
+
+- **OQ-GW-1 — Management listener literals.** **Decided** (lead decision,
+  2026-11-19): T00.5 freezes only the shape: the per-target `resource` and
+  `mask` and the response size and request time bound categories (GW-106).
+  The literal values move to T32.3 and T50.4, where a tested pair exists
+  (GW-092). Follow-up: amend T00.5 and design §4.2 ("Freeze the literal
+  targets/masks and size/time bounds for each supported adapter in T00.5").
+  Original question: design §4.2 requires T00.5 to "freeze the literal
+  targets/masks and size/time bounds for each supported adapter", but the
+  sources give no literal `/config_dump` `resource` or `mask` values, response
+  size limit or request timeout.
+- **OQ-GW-2 — Pinned versions.** **Decided** (lead decision, 2026-11-19):
+  T00.5 freezes what is pinned and how (GW-090, GW-092); the literal version
+  pair and artifact digests are chosen in T32.3 and T50.4 against a tested
+  pair. Follow-up: amend T00.5 ("Pin EG/egctl/Envoy/bootstrap"). Original
+  question: the sources cite Envoy Gateway v1.10 and v1.10.0, Envoy v1.40.1
+  and cert-manager v1.20.0 as references but state that they specify "a
+  mechanism, not a tested version pair"; no pinned Envoy Gateway, egctl,
+  Envoy, bootstrap or cert-manager version or artifact digest is chosen.
+- **OQ-GW-3 — Exact exemption list.** **Decided** (lead decision,
+  2026-11-19): only the seven cookie endpoints in §4.1 are exempt;
+  `/oauth/token`, `/oauth/revoke`, `/.well-known/*` and
+  `/_skyoauth/oidc/backchannel-logout` keep Cookie, `X-SkyOAuth-CSRF` and
+  Set-Cookie removal (GW-033); the issuer host is not enrolled as an
+  `ApplicationOrigin` (GW-034). Still open: per exempt endpoint, which cookies
+  and headers are retained beyond those named in the §4.1 table. Follow-up:
+  list the exemptions in design §4. Original question: design §4 exempts
+  "fixed SkyOAuth authentication/session endpoints" without listing them, and
+  whether the issuer host is an enrolled host and whether the non-cookie
+  endpoints are exempt was not stated.
+- **OQ-GW-4 — Verified SkyOAuth backend identity.** **Deferred** (lead
+  decision, 2026-11-19) to T32.4. The exemption requires routing to the
+  "independently verified SkyOAuth backend identity", but how that identity
+  is expressed and verified (Service and namespace, UID, peer certificate
+  identity or cluster) is not specified.
 - **OQ-GW-5 — Literal filter chain and assertion-header stripping.** The
   sources fix ordering constraints but not the pinned adapter's per-route
   filter list, or at which stage client-supplied identity and assertion
@@ -866,40 +945,62 @@ documents. This contract does not resolve them. Entries marked
 - **OQ-GW-6 — Guarded inventory kinds.** "Supported security/traffic
   extensions" and "backend identity/routing configuration" are not enumerated
   as Kubernetes kinds for the admission guard.
-- **OQ-GW-7 — Digest algorithm and canonical form.** Only `target_sha256` has a
-  defined algorithm and encoding. The hash, encoding and canonical
-  serialization of input, plan, expected and observed gateway, recovery,
-  dependency-contract and dependency-evidence digests, and the list of
-  "documented nonsemantic noise", are not specified.
-- **OQ-GW-8 — Gate scope: bundle or origin (contradiction).** `ApplicationRoute` has a
-  `route_bundle_id` and `RouteBundle` has one `application_origin_id`, so an
-  origin may have several bundles. Design §4.1 and §4.2 say `begin` closes
-  "the entire affected origin bundle" and "unaffected bundles need not stop",
-  while design §4.2, ADR-020 and T00.6 describe the interruption as
-  origin-wide ("every cookie stream on the origin"). Whether one bundle's apply
-  closes another bundle on the same origin is unresolved.
-- **OQ-GW-9 — Required authority for compensation.** Compensation needs
-  "enabled required operator authority", but the sources do not say whether
-  this is the preparer, the approver or both, or what happens if the preparing
-  `client_admin` is disabled during `aborting`.
-- **OQ-GW-10 — Cancel outside `applying`.** Cancel is defined for an
-  `applying` attempt and is idempotent for `abort_required` or `aborting`. Its
-  result for `recovery_required` or `idle` is not stated.
+- **OQ-GW-7 — Digest algorithm and canonical form.** **Decided** (lead
+  decision, 2026-11-19) in part: every configuration digest is SHA-256 over
+  RFC 8785 JCS canonical JSON (GW-015); the preparation input digest and
+  `translator_input_digest` are one value, computed by the preparation worker
+  inside the isolated route controller and never caller-supplied (GW-016,
+  GW-070). Follow-up: design §4.2 says the preparation request stores the
+  "input snapshot and digest"; amend it so the worker computes the digest.
+  Still open: the digest encoding; the list of "documented nonsemantic
+  noise"; and which component computes `adapter_artifact_digests`,
+  `canonicalization_version` and `dependency_contract_digest` (§2.2).
+  Original question: only `target_sha256` has a defined algorithm and
+  encoding; the hash, encoding and canonical serialization of the other
+  digests were not specified.
+- **OQ-GW-8 — Gate scope: bundle or origin (ambiguity).** **Decided** (lead
+  decision, 2026-11-19): v0.1 allows exactly one `RouteBundle` per
+  `ApplicationOrigin`, so the gate is origin-wide and bundle-wide (GW-115).
+  Follow-up: add the uniqueness rule to the T14.5 and T14.9 schema. Original
+  question: `ApplicationRoute` has a `route_bundle_id` and `RouteBundle` has
+  one `application_origin_id`, so the logical model allows several bundles per
+  origin. Design §4.1 and §4.2 say `begin` closes "the entire affected origin
+  bundle" and "unaffected bundles need not stop", while design §4.2, ADR-020
+  and T00.6 describe the interruption as origin-wide ("every cookie stream on
+  the origin"). Whether one bundle's apply closes another bundle on the same
+  origin was not stated.
+- **OQ-GW-9 — Required authority for compensation.** **Decided** (lead
+  decision, 2026-11-19): compensation needs an unrevoked approval and current
+  controller scope; disabling the preparer does not stop it (GW-141).
+  Original question: compensation needs "enabled required operator
+  authority", but the sources do not say whether this is the preparer, the
+  approver or both, or what happens if the preparing `client_admin` is
+  disabled during `aborting`.
+- **OQ-GW-10 — Cancel outside `applying`.** **Decided** (lead decision,
+  2026-11-19): cancel when the bundle is `idle` or its attempt is
+  `recovery_required` rejects with no state change (GW-137). Original
+  question: cancel is defined for an `applying` attempt and is idempotent for
+  `abort_required` or `aborting`; its result for `recovery_required` or
+  `idle` was not stated.
 - **OQ-GW-11 — Helper bounds.** The helper's resource, time and output limits
   are required but not given numerically.
-- **OQ-GW-12 — "Enrolled host".** Design §4 scopes containment to "an enrolled
-  host" while design §4 and §4.2 describe two enrollments: `ApplicationOrigin`
-  ownership and protected-scope enrollment. Whether an origin can be
-  registered without an enrolled protected scope (for example before the M3
-  controller is installed), and whether containment applies then, is not
-  stated.
+- **OQ-GW-12 — "Enrolled host".** **Decided** (lead decision, 2026-11-19) in
+  part: the issuer host is not enrolled as an `ApplicationOrigin`; its
+  non-exempt SkyOAuth endpoints keep the §3 removals (GW-033, GW-034). Still
+  open: design §4 scopes containment to "an enrolled host" while design §4 and
+  §4.2 describe two enrollments, `ApplicationOrigin` ownership and
+  protected-scope enrollment. Whether an origin can be registered without an
+  enrolled protected scope (for example before the M3 controller is
+  installed), and whether containment applies then, is not stated.
 - **OQ-GW-13 — Supported exact-mode usages.** The sources require exact mode
   for "supported policy/backend" credentials but do not enumerate which
   policy or backend Secret usages v0.1 supports.
-
-- **OQ-GW-14 — Admission exception list (contradiction).** Design §4.2
-  "Protected scope" says that besides the TLS-renewer update and sealed
+- **OQ-GW-14 — Admission exception list (contradiction).** **Decided** (lead
+  decision, 2026-11-19): exactly four exemptions (status-only narrow updates,
+  approved credential renewal, the non-referenceable temporary-key CREATE and
+  DELETE class, and retirement DELETE); GW-056 stands. Follow-up: fix the
+  "only" sentence in design §4.2 "Protected scope". Original question: design
+  §4.2 "Protected scope" says that besides the TLS-renewer update and sealed
   retirement DELETE, "only narrow status-only updates by the existing gateway
-  controller are exempt". Design §4.2 "Guard coverage" and tasks §3 also allow
-  the cert-manager temporary-key CREATE/DELETE class. GW-056 lists all four;
-  the earlier "only" sentence should be reconciled.
+  controller are exempt", while design §4.2 "Guard coverage" and tasks §3 also
+  allow the temporary-key CREATE and DELETE class.

@@ -18,9 +18,12 @@
 
 This document collects every lifetime, default, ceiling and deadline the
 sources define, and the rules for combining, renewing and recovering them. It
-restates the design and the tasks plan and adds no new values. Where the
-sources require a bound but give no number, the table says "Not specified"
-and the gap is listed under [Open questions](#open-questions).
+restates the design and the tasks plan and adds no new values, except values
+cited as "lead decision": those come from an open question marked
+**Decided**, whose design and tasks amendment is a pending follow-up. Where the
+sources require a bound but give no number and no decision exists, the table
+says "Not specified" and the gap is listed under
+[Open questions](#open-questions).
 
 These are proposed product limits, not OAuth-mandated values or availability
 promises (design §5.2.2, §12).
@@ -33,8 +36,9 @@ Terms used in the tables:
 - **Default:** the value used when configuration does not set one.
 - **Ceiling:** the largest value configuration may set.
 - **Maximum:** a fixed upper bound that no configuration can exceed.
-- **Skew:** the bounded clock skew; its value is not specified (OQ-TP-10 in
-  [token-profiles.md](token-profiles.md#open-questions)).
+- **Skew:** the bounded clock skew: default 60 s, instance-configurable up to
+  a ceiling of 120 s (lead decision, OQ-LT-16; the same decision answers
+  OQ-TP-10 in [token-profiles.md](token-profiles.md#open-questions)).
 
 ## 1. Composition rules
 
@@ -52,13 +56,17 @@ Terms used in the tables:
 - **LT-004** Local deadlines MUST use a monotonic clock set no later than the
   request start plus the returned lease, less a safety margin. Network delay
   MUST NOT extend them. (design §6.1.1; margin is OQ-LT-12)
-- **LT-005** Increasing a credential or authorization lifetime limit (for
-  example the native refresh-family absolute or idle limit) MUST NOT extend
-  existing state; it applies only to newly approved state. Tightening such a
-  limit MUST permanently narrow or revoke affected state, enforced at the next
-  refresh or live check. Elapsed or revoked state is never resurrected.
-  Capacity limits follow LT-007 instead. (design §5.2.2; tasks §3 "One-time
-  state", T40.5)
+- **LT-005** Increasing a native refresh-family absolute or idle limit (the
+  native refresh fields of `HumanAccessPolicy`, tasks §3) MUST NOT extend an
+  existing family or `HumanAuthentication`; it applies only to newly approved
+  families. Tightening such a limit MUST permanently narrow the limits of
+  affected families or revoke them, enforced at the next refresh or live
+  check. Elapsed or revoked state is never resurrected by a later increase.
+  LT-005 does not govern route-bundle approval deadlines: `expires_at`,
+  `apply_deadline` and `abort_until` are bound into the approval and attempt
+  (§6), and no limit change shortens an approved `abort_until` (inferred from
+  the explicit approved `abort_until`, design §4.2). Capacity limits follow
+  LT-007. (design §5.2.2; tasks §3 "One-time state", T40.5)
 - **LT-006** Configuration MUST reject out-of-range or contradictory values
   rather than silently widen them. Durations MUST be positive. (design §5.2.2,
   §6.1.1)
@@ -102,18 +110,18 @@ Terms used in the tables:
 
 ## 3. Browser and native flow state
 
-| Item                                                     | Lifetime                                         | Rules                                                                                                                  | Source                                   |
-| -------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `__Host-skyoauth_login` and `BrowserFlowBinding`         | "Short-lived"; not specified                     | Consumed at callback; a new flow in the same slot invalidates the old one                                              | design §5.1                              |
-| `OIDCTransaction`                                        | Not specified (`expires_at`)                     | One-time; consumed atomically with session creation                                                                    | design §5.1; tasks §3                    |
-| `__Host-skyoauth_native` and `OAuthAuthorizationRequest` | "Short transaction lifetime"; not specified      | Rotated at issuer callback; consumed at approval, denial or expiry; a new native start invalidates the previous slot   | design §5.2; tasks T40.12                |
-| `OAuthAuthorizationCode`                                 | Not specified (`expires_at`)                     | Single use across replicas                                                                                             | design §5.2; tasks §3                    |
-| Native loopback listener                                 | Bounded; not specified                           | Closed after success, cancellation or timeout                                                                          | design §5.2, §10.3; tasks T40.9          |
-| `Session` idle                                           | Not specified (`idle_timeout_seconds`)           | Coalesced last-seen writes MUST NOT revive an expired session; bounded early idle expiry from coalescing is documented | design §5.1; tasks T10.10, T31.2         |
-| `Session` absolute                                       | Not specified (`absolute_expires_at`)            | Never extended by activity, streams or rechecks                                                                        | design §5.1, §6.1.1; tasks T31.2         |
-| Browser `HumanAuthentication`                            | Not specified (`expires_at`)                     | Bound to provider and tenant epochs                                                                                    | design §5.1; tasks §3                    |
-| Native `HumanAuthentication`                             | Refresh family and stricter authentication bound | Not capped by the first access token's 300 s                                                                           | design §5.2.2; tasks §3 "One-time state" |
-| Session CSRF token                                       | Session lifetime                                 | Session-bound                                                                                                          | design §5.1                              |
+| Item                                                     | Lifetime                                           | Rules                                                                                                                  | Source                                                    |
+| -------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `__Host-skyoauth_login` and `BrowserFlowBinding`         | Default 10 min; ceiling 15 min                     | Consumed at callback; a new flow in the same slot invalidates the old one                                              | design §5.1; lead decision (OQ-LT-1)                      |
+| `OIDCTransaction`                                        | Default 10 min; ceiling 15 min (`expires_at`)      | One-time; consumed atomically with session creation                                                                    | design §5.1; tasks §3; lead decision (OQ-LT-1)            |
+| `__Host-skyoauth_native` and `OAuthAuthorizationRequest` | "Short transaction lifetime"; not specified        | Rotated at issuer callback; consumed at approval, denial or expiry; a new native start invalidates the previous slot   | design §5.2; tasks T40.12                                 |
+| `OAuthAuthorizationCode`                                 | Default 60 s; ceiling 5 min (`expires_at`)         | Single use across replicas                                                                                             | design §5.2; tasks §3; lead decision (OQ-LT-1)            |
+| Native loopback listener                                 | Bounded; not specified                             | Closed after success, cancellation or timeout                                                                          | design §5.2, §10.3; tasks T40.9                           |
+| `Session` idle                                           | Default 8 h; ceiling 24 h (`idle_timeout_seconds`) | Coalesced last-seen writes MUST NOT revive an expired session; bounded early idle expiry from coalescing is documented | design §5.1; tasks T10.10, T31.2; lead decision (OQ-LT-2) |
+| `Session` absolute                                       | Default 24 h; ceiling 7 d (`absolute_expires_at`)  | Never extended by activity, streams or rechecks                                                                        | design §5.1, §6.1.1; tasks T31.2; lead decision (OQ-LT-2) |
+| Browser `HumanAuthentication`                            | Not specified (`expires_at`)                       | Bound to provider and tenant epochs                                                                                    | design §5.1; tasks §3                                     |
+| Native `HumanAuthentication`                             | Refresh family and stricter authentication bound   | Not capped by the first access token's 300 s                                                                           | design §5.2.2; tasks §3 "One-time state"                  |
+| Session CSRF token                                       | Session lifetime                                   | Session-bound                                                                                                          | design §5.1                                               |
 
 - **LT-020** A session MUST be usable only before both its idle and absolute
   deadlines, on its registered origin and tenant, with live principal,
@@ -122,6 +130,10 @@ Terms used in the tables:
   idle or absolute expiry. (design §6.1.1)
 - **LT-022** Native confirmation denial or expiry MUST create no code, consume
   the confirmation state and clear its cookie. (design §5.2)
+- **LT-023** The login flow, `OIDCTransaction`, authorization code and session
+  lifetimes in the table above MUST be instance-configurable within their
+  ceilings; LT-006 applies to out-of-range values. (lead decision, OQ-LT-1,
+  OQ-LT-2)
 
 ## 4. Epochs, revisions and generations
 
@@ -162,7 +174,7 @@ These values have no lifetime. They are monotonic and are never reset.
   item's previous lease. (design §6.1.1)
 - **LT-043** Expired contexts MUST stop counting toward capacity without waiting
   for a cleanup job. (design §6.1.1)
-- **LT-044** Renewals SHOULD be scheduled with jitter before each earliest
+- **LT-044** Renewals MUST be scheduled with jitter before each earliest
   deadline and MUST NOT be delayed to fill a batch. (design §6.1.1)
 - **LT-045** The one-hour cap deliberately interrupts unfinished downloads;
   resumable APIs use stable object versions and ranges. (design §6.1.1; tasks
@@ -173,14 +185,14 @@ These values have no lifetime. They are monotonic and are never reset.
 | Item                                 | Value                                                        | Rules                                                                                                                           | Source                   |
 | ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
 | Proxy poll interval                  | At least every 10 s                                          | Per traffic-eligible proxy, plus configuration and membership watch                                                             | design §4.2; tasks T00.6 |
-| Stale mark and alert                 | 30 s                                                         | Reference point: see OQ-LT-9                                                                                                    | design §4.2              |
+| Stale mark and alert                 | 30 s from sample collection start                            | Same reference point as the 300 s bound (lead decision, OQ-LT-9)                                                                | design §4.2              |
 | Last-known-good deployment evidence  | Maximum 300 s from sample collection start                   | Only with unchanged `deployment_version_id` and serving-set generation, equivalent registry version, no apply or known mismatch | design §4.2; tasks T00.6 |
 | Registry-only activation freshness   | Complete observations no older than 30 s                     | Retains original sample ages; cannot extend the 300 s bound                                                                     | design §4.2; tasks T14.9 |
 | TLS recovery evidence freshness      | Complete evidence no older than 30 s                         | Original sample collection times unchanged                                                                                      | design §4.2              |
 | New proxy grace                      | None                                                         | Outside readiness until verified                                                                                                | design §4.2              |
 | Known out-of-plan mismatch allowance | None                                                         | Immediate closure; no 30 s or 300 s allowance                                                                                   | design §4.2; tasks A58   |
 | Gateway apply allowance              | None                                                         | Gate closed from `begin`                                                                                                        | design §4.2; tasks T00.6 |
-| `apply_timeout_seconds`              | Default 120 s                                                | Positive; at most the instance ceiling of 300 s (OQ-LT-6)                                                                       | design §4.2; tasks §3    |
+| `apply_timeout_seconds`              | Default 120 s                                                | Positive; at most the instance ceiling, which is instance-configurable and hard-capped at 300 s (lead decision, OQ-LT-6)        | design §4.2; tasks §3    |
 | `apply_deadline`                     | `min(begun_at + apply_timeout_seconds, approval.expires_at)` | Persisted at `begin`; survives takeover                                                                                         | design §4.2; tasks §3    |
 | Service deadline reconciler          | At least every 10 s                                          | Every transition also enforces deadlines                                                                                        | design §4.2              |
 | Forward approval `expires_at`        | Not specified                                                | Bounds forward execution only                                                                                                   | design §4.2              |
@@ -200,8 +212,10 @@ These values have no lifetime. They are monotonic and are never reset.
 - **LT-053** `apply_timeout_seconds`, forward `expires_at` and `abort_until`
   MUST have distinct meanings: the first two bound forward execution, the last
   bounds compensation only. All three MUST survive takeover. Forward expiry
-  alone MUST NOT stop compensation; revocation of approval or required
-  authority does. (design §4.2; tasks T00.6)
+  alone MUST NOT stop compensation; revocation of the approval or loss of
+  controller scope does, and disabling the preparer does not
+  ([gateway-containment.md GW-141](gateway-containment.md#114-abort-of-an-unfinished-apply)).
+  (design §4.2; tasks T00.6; lead decision, OQ-GW-9)
 - **LT-054** Transient compensation failures MAY retry only within the original
   abort window. At `now >= abort_until` an unfinished attempt MUST become
   `recovery_required`. `abort_until` is not a release of credential holds.
@@ -211,12 +225,12 @@ These values have no lifetime. They are monotonic and are never reset.
 
 ## 7. TLS renewal
 
-| Item                               | Value                                                                                         | Source                |
-| ---------------------------------- | --------------------------------------------------------------------------------------------- | --------------------- |
-| `renewal_overlap_seconds`          | Default 120 s; positive; at most the instance ceiling of 300 s (OQ-LT-6)                      | design §4.2; tasks §3 |
-| `overlap_until`                    | `min(first_new_seen_at + renewal_overlap_seconds, old certificate's profile-validity cutoff)` | design §4.2; tasks §3 |
-| Profile minimum remaining validity | Set by the approved profile; no default given (OQ-LT-15)                                      | design §4.2           |
-| Accepted candidates                | At most two: current and previous                                                             | design §4.2           |
+| Item                               | Value                                                                                                                                   | Source                |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `renewal_overlap_seconds`          | Default 120 s; positive; at most the instance ceiling, which is instance-configurable and hard-capped at 300 s (lead decision, OQ-LT-6) | design §4.2; tasks §3 |
+| `overlap_until`                    | `min(first_new_seen_at + renewal_overlap_seconds, old certificate's profile-validity cutoff)`                                           | design §4.2; tasks §3 |
+| Profile minimum remaining validity | Set by the approved profile; no default given (OQ-LT-15)                                                                                | design §4.2           |
+| Accepted candidates                | At most two: current and previous                                                                                                       | design §4.2           |
 
 - **LT-060** `overlap_until` MUST be fixed when a different valid leaf is first
   seen. Same-leaf rewrites, metadata rereads, ownership transfer, other Secret
@@ -272,12 +286,13 @@ These values have no lifetime. They are monotonic and are never reset.
 
 - **LT-090** A real gateway apply, incident re-enable or compensating abort
   MUST close the affected origin's cookie application traffic for the whole
-  apply-and-observe cycle (see OQ-GW-8 in
-  [gateway-containment.md](gateway-containment.md#open-questions) for bundle
-  versus origin scope). Unchanged contexts receive unavailable with no lease
-  extension and stop at their existing lease; changed or removed dependencies
-  and security disable deny terminally. (design §4.1, §4.2; tasks T00.6,
-  T32.12, ADR-020)
+  apply-and-observe cycle; with exactly one route bundle per origin in v0.1,
+  this is the bundle's whole origin
+  ([gateway-containment.md GW-115](gateway-containment.md#111-activation-modes)).
+  Unchanged contexts receive unavailable with no lease extension and stop at
+  their existing lease; changed or removed dependencies and security disable
+  deny terminally. (design §4.1, §4.2; tasks T00.6, T32.12, ADR-020; lead
+  decision, OQ-GW-8)
 - **LT-091** Because an apply can take up to the apply timeout while default
   leases are 15 seconds, an apply can interrupt every cookie stream on the
   origin, including unchanged routes. Operators MUST schedule accordingly; no
@@ -289,8 +304,21 @@ These values have no lifetime. They are monotonic and are never reset.
 - **LT-093** A checker or store outage terminates default-lease streams whose
   last deadline passes; route-observer loss alone follows the separate
   observation bound in §6. (design §6.1.1)
+- **LT-094** Activation in either mode and `complete_abort` MUST supersede only
+  credentials and contexts whose actual origin or route versions or security
+  dependencies changed. An unchanged route MUST NOT be revoked solely because
+  the bundle ID or version pointer advanced; its contexts keep only their
+  existing lease under LT-090
+  ([gateway-containment.md GW-227](gateway-containment.md#13-observation-and-gate-outcomes)).
+  (design §4.2 "Immutable configuration versus live state"; tasks §3 "Policy
+  revisions"; ADR-007)
 
-## 11. Restore and rollback
+## 11. Restore, rollback and break-glass recovery
+
+| Item                               | Value                                                 | Source                                |
+| ---------------------------------- | ----------------------------------------------------- | ------------------------------------- |
+| Restore issuance quarantine        | Default 15 min; ceiling 60 min; instance-configurable | design §7.2; lead decision (OQ-LT-13) |
+| Break-glass recovery challenge TTL | Default 5 min; maximum 15 min; single use             | design §7.2; lead decision (OQ-LT-17) |
 
 - **LT-100** Restore MUST preserve bootstrap-closed and consumed state, or
   quarantine issuance until outstanding state can no longer be replayed.
@@ -308,6 +336,14 @@ These values have no lifetime. They are monotonic and are never reset.
   history MUST stay quarantined. (design §4.2; tasks T50.2)
 - **LT-105** Abort completion and deliberate rollback MUST NOT restore
   historical security state. (design §4.1, §4.2)
+- **LT-106** The restore issuance quarantine is bounded by the table above.
+  Outstanding state that could still be replayed after the quarantine ends
+  MUST be covered by preserved bootstrap-closed and consumed state (LT-100,
+  LT-101), not by the quarantine alone. (lead decision, OQ-LT-13; the second
+  sentence is inferred from LT-100)
+- **LT-107** A break-glass recovery challenge MUST expire within its TTL and
+  MUST be consumed durably on first use; an expired or consumed challenge
+  MUST NOT authorize an operation. (design §7.2; TTL values: lead decision, OQ-LT-17)
 
 ## 12. Worked timelines
 
@@ -336,17 +372,31 @@ These values have no lifetime. They are monotonic and are never reset.
 ## Open questions
 
 These are gaps, ambiguities or contradictions in the design and tasks
-documents. This contract does not resolve them. Entries marked
-"(contradiction)" are places where the sources disagree.
+documents. Entries marked "(contradiction)" are places where the sources
+disagree.
 
-- **OQ-LT-1 — Flow, transaction and code lifetimes.** T00.6 asks to specify
-  flow and code lifetimes. The sources call the login flow cookie and native
+Items marked **Decided** record a lead decision; the normative text above
+already reflects it, and the design and tasks documents still need the
+follow-up amendment. A decision is revisited through an ADR if implementation
+shows problems. All other items are not resolved by this contract.
+
+- **OQ-LT-1 — Flow, transaction and code lifetimes.** **Decided** (lead
+  decision, 2026-11-19) in part: the OIDC login flow (`__Host-skyoauth_login`,
+  `BrowserFlowBinding`, `OIDCTransaction`) defaults to 10 min with a 15 min
+  ceiling; the issuer-native authorization code defaults to 60 s with a 5 min
+  ceiling and is single use; all are instance-configurable within the
+  ceilings (§3, LT-023). Still open: the lifetime of `__Host-skyoauth_native`
+  and `OAuthAuthorizationRequest`. Original question: T00.6 asks to specify
+  flow and code lifetimes; the sources call the login flow cookie and native
   transaction "short-lived" and give `expires_at` fields for
   `BrowserFlowBinding`, `OIDCTransaction`, `OAuthAuthorizationRequest` and
   `OAuthAuthorizationCode`, but no numbers or ceilings.
-- **OQ-LT-2 — Session lifetimes.** No default or ceiling is given for session
-  idle or absolute lifetime, the browser `HumanAuthentication` lifetime, or
-  the last-seen coalescing interval that bounds early idle expiry.
+- **OQ-LT-2 — Session lifetimes.** **Decided** (lead decision, 2026-11-19) in
+  part: browser session idle defaults to 8 h (ceiling 24 h) and absolute to
+  24 h (ceiling 7 d), instance-configurable within the ceilings (§3, LT-023).
+  Still open: the browser `HumanAuthentication` lifetime and the last-seen
+  coalescing interval that bounds early idle expiry. Original question: no
+  default or ceiling was given for session idle or absolute lifetime.
 - **OQ-LT-3 — Refresh idle reset.** The sources define a 1 h default idle
   limit but do not say which events advance `idle_expires_at` (successful
   refresh only, or also live checks).
@@ -355,20 +405,23 @@ documents. This contract does not resolve them. Entries marked
   where it is configured are not given.
 - **OQ-LT-5 — Forward approval expiry.** No default or maximum is given for a
   route-bundle approval's forward `expires_at`.
-- **OQ-LT-6 — Ceiling semantics.** For `apply_timeout_seconds` and
-  `renewal_overlap_seconds` the sources say "at most the instance ceiling of
-  300 seconds". Whether 300 s is a fixed maximum or an instance-configurable
-  ceiling capped at 300 s, and where it is configured, is not stated.
+- **OQ-LT-6 — Ceiling semantics.** **Decided** (lead decision, 2026-11-19):
+  the ceiling is instance-configurable and hard-capped at 300 s (§6, §7).
+  Still open: where the ceiling is configured. Original question: for
+  `apply_timeout_seconds` and `renewal_overlap_seconds` the sources say "at
+  most the instance ceiling of 300 seconds", without saying whether 300 s is
+  a fixed maximum or an instance-configurable ceiling capped at 300 s.
 - **OQ-LT-7 — Instance refresh limits.** Refresh limits are "within any
   stricter instance/assurance limits", but no instance-level refresh limit
   field exists in the logical model.
 - **OQ-LT-8 — Controller and scope ownership leases.** Route-bundle
   `owner_lease_until` and protection-scope `owner_lease_until` have no
   duration.
-- **OQ-LT-9 — Stale reference point and observation fields.** The 300 s bound
-  is measured "from sample collection start"; the 30 s stale threshold has no
-  stated reference point. `RouteBundleObservation.fresh_until` and
-  `valid_until` are not defined.
+- **OQ-LT-9 — Stale reference point and observation fields.** **Decided**
+  (lead decision, 2026-11-19) in part: the 30 s stale threshold is measured
+  from sample collection start, like the 300 s bound (§6). Still open:
+  `RouteBundleObservation.fresh_until` and `valid_until` are not defined.
+  Original question: the 30 s stale threshold had no stated reference point.
 - **OQ-LT-10 — Closed-context retention.** Closed-context identity is kept
   "long enough for bounded idempotent retries" without a value.
 - **OQ-LT-11 — Cache values.** Unknown-`kid` refetch rate limit and negative
@@ -376,17 +429,34 @@ documents. This contract does not resolve them. Entries marked
   given.
 - **OQ-LT-12 — Lease safety margin.** Local continuation deadlines subtract a
   "safety margin" whose size is not specified.
-- **OQ-LT-13 — Restore quarantine duration.** Restore must quarantine issuance
-  "until outstanding state can no longer be replayed". With refresh families
-  up to 7 days, the required quarantine length, and how it is computed, is not
+- **OQ-LT-13 — Restore quarantine duration.** **Decided** (lead decision,
+  2026-11-19): default 15 min, ceiling 60 min (§11, LT-106). Because refresh
+  families can last up to 7 days, longer-lived outstanding state relies on
+  preserved consumed state rather than on the quarantine (LT-106). Original
+  question: restore must quarantine issuance "until outstanding state can no
+  longer be replayed"; the quarantine length and how it is computed were not
   stated.
-- **OQ-LT-14 — ADR-010 record (contradiction).** T00.6 requires the
-  full-origin apply interruption and cleanup independence to be recorded in
-  ADR-010 and ADR-020. ADR-020 in tasks §11 records both; ADR-010 records
-  neither. The ADR table is outside this contract and was not changed.
+- **OQ-LT-14 — ADR-010 record (contradiction).** **Decided** (lead decision,
+  2026-11-19); to be recorded in the ADR PR. ADR-010 gains the clause: "Real
+  gateway apply/compensation closes origin cookie admissions; unchanged
+  contexts get unavailable only to their existing lease; fixed
+  session/logout/revoke/back-channel/security-disable cleanup stays
+  independent of the route gate." Until that PR lands, this item stays open
+  for tracking. Original question: T00.6 requires the full-origin apply
+  interruption and cleanup independence to be recorded in ADR-010 and
+  ADR-020; ADR-020 in tasks §11 records both, ADR-010 records neither. The ADR
+  table is outside this contract and was not changed.
 - **OQ-LT-15 — TLS minimum remaining validity.** The `tls_renewal` profile
   pins a minimum remaining validity, but no default or floor is given.
-- **OQ-LT-16 — Clock skew and `Retry-After` bounds.** The maximum skew
-  (OQ-TP-10) and the bound on `Retry-After` for 503 results (OQ-ERR-4) are
-  open in the related contracts and affect every retention row above that
-  adds skew.
+- **OQ-LT-16 — Clock skew and `Retry-After` bounds.** **Decided** (lead
+  decision, 2026-11-19) for skew: default 60 s, ceiling 120 s (Terms; same
+  decision as OQ-TP-10). The bound on `Retry-After` for 503 results is
+  tracked in the related contract (OQ-ERR-4 in
+  [errors-retry.md](errors-retry.md#open-questions)). Original question: the
+  maximum skew and the `Retry-After` bound were open and affect every
+  retention row above that adds skew.
+- **OQ-LT-17 — Break-glass recovery challenge TTL.** **Decided** (lead
+  decision, 2026-11-19): default 5 min, maximum 15 min (§11, LT-107).
+  Follow-up: add the values to design §7.2. Original question: design §7.2
+  calls the recovery challenge "short-lived" and single use without a
+  number.
