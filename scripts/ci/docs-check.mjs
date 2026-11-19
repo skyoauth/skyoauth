@@ -82,9 +82,19 @@ export function formatAnnotation(command, d, shown = command) {
   return `::${command} ${props.join(',')}::${data(formatDiagnostic(shown, d))}`;
 }
 
+// Fence and comment problems come first: an unclosed fence or comment turns
+// the rest of a file into code or hides it, so it is usually the cause of
+// many later errors (a hidden definitions table makes every reference fail).
+// Then by file, line and message.
+const blockFirst = (d) => (d.check === 'fence' || d.check === 'comment' ? 0 : 1);
+
 function sortDiagnostics(list) {
   return list.sort(
-    (a, b) => a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.msg.localeCompare(b.msg),
+    (a, b) =>
+      blockFirst(a) - blockFirst(b) ||
+      a.file.localeCompare(b.file) ||
+      (a.line || 0) - (b.line || 0) ||
+      a.msg.localeCompare(b.msg),
   );
 }
 
@@ -368,8 +378,10 @@ function headings(doc) {
       !inFence[i + 2] &&
       prose[i].trim() !== '' &&
       /^ {0,3}(=+|-+)[ \t]*$/.test(next) &&
-      // Not a list item (bullet or ordered, 1-9 digits), table row, quote or ATX line.
-      !/^\s*([-*+](\s|$)|\d{1,9}[.)](\s|$)|\||>|#)/.test(prose[i]) &&
+      // Not a list item (bullet or ordered, 1-9 digits), table row, quote or
+      // ATX line. A list marker is followed by a space, a tab or the end of
+      // the line; any other whitespace (e.g. U+00A0) makes it paragraph text.
+      !/^\s*([-*+]([ \t]|$)|\d{1,9}[.)]([ \t]|$)|\||>|#)/.test(prose[i]) &&
       !(i > 0 && prose[i - 1].trim() !== '' && !inFence[i])
     ) {
       out.push({ line: i + 1, level: next.trim()[0] === '=' ? 1 : 2, text: prose[i].trim() });

@@ -282,6 +282,41 @@ describe('fences', () => {
   });
 });
 
+describe('error order', () => {
+  // An unclosed fence before tasks §11 hides the ADR table; every ADR
+  // reference then fails. The fence (the cause) must be reported first,
+  // ahead of errors in files that sort earlier (the design spec).
+  const tasks = edit(TASKS, '## 11. ADR decisions to ratify\n', '```text\n## 11. ADR decisions to ratify\n');
+  const extra = { 'docs/a-notes.md': '# Notes\n\nSee ADR-001.\n\nOpen <!-- comment\n' };
+  test('fence and comment errors come before all other errors', () => {
+    const r = run({ tasks }, extra);
+    const checks = r.errors.map((e) => `${e.file}:${e.check}`);
+    assert.deepEqual(checks.slice(0, 2), [`docs/a-notes.md:comment`, `${T}:fence`]);
+    assert.ok(checks.length > 4, checks.join('\n'));
+    assert.ok(checks.slice(2).every((c) => !/:(fence|comment)$/.test(c)), checks.join('\n'));
+    // The rest keep file, line order.
+    const rest = r.errors.slice(2).map((e) => [e.file, e.line]);
+    assert.deepEqual(rest, [...rest].sort((a, b) => a[0].localeCompare(b[0]) || a[1] - b[1]));
+    assert.ok(rest.some(([f]) => f === D) && rest.some(([f]) => f === 'docs/a-notes.md'));
+  });
+  test('the CLI prints them first, plain and as annotations, with the same exit code', () => {
+    const root = fixture(extra, { tasks });
+    const fenceLine = lineOf(tasks, '```text');
+    const plain = cli(['--root', root]);
+    assert.equal(plain.status, 1);
+    const errs = plain.stdout.split('\n').filter((l) => / error \[/.test(l));
+    assert.match(errs[0], /^docs\/a-notes\.md:5: error \[comment\] /);
+    assert.match(errs[1], new RegExp(`^docs/skyoauth-tasks\\.md:${fenceLine}: error \\[fence\\] fence \`\`\`text opened here is never closed`));
+    assert.match(plain.stdout, new RegExp(`\\nFAILED: ${errs.length} error\\(s\\)`));
+    const gha = cli(['--root', root], { env: { GITHUB_ACTIONS: 'true' } });
+    assert.equal(gha.status, 1);
+    const ann = gha.stdout.split('\n').filter((l) => l.startsWith('::error '));
+    assert.equal(ann.length, errs.length);
+    assert.match(ann[0], /^::error file=docs\/a-notes\.md,line=5,title=docs-check \[comment\]::/);
+    assert.match(ann[1], new RegExp(`^::error file=docs/skyoauth-tasks\\.md,line=${fenceLine},title=docs-check \\[fence\\]::`));
+  });
+});
+
 describe('HTML comments', () => {
   test('closed comments hide references and links, inline and multi-line', () => {
     const design = edit(
@@ -729,6 +764,9 @@ describe('links and anchors', () => {
     // "===" the underline is lazy paragraph text. Neither is a heading.
     const cases = [
       ['9. Ordered dot', '---', '#9-ordered-dot'],
+      ['1. item', '---', '#1-item'],
+      ['1. Setup', '====', '#1-setup'],
+      ['1.\tTab', '===', '#1tab'],
       ['9) Ordered paren', '===', '#9-ordered-paren'],
       ['   123456789. Nine digits', '---', '#123456789-nine-digits'],
       ['- Bullet dash', '---', '#--bullet-dash'],
@@ -746,6 +784,17 @@ describe('links and anchors', () => {
     // Ten digits is not a list marker, so that is a heading; so is "9.x".
     const ok = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Back to [the summary](#1-summary), [a](#1234567890-x) and [b](#9x-y).\n\n1234567890. x\n---\n\n9.x y\n---\n');
     assert.deepEqual(run({ design: ok }).errors, []);
+  });
+  test('a marker followed by a non-breaking space is not a list item, so a setext heading stays', () => {
+    // A list marker must be followed by a space or tab (or end the line);
+    // U+00A0 is neither, so "1.\u00a0Setup" is a paragraph and "====" makes
+    // it a heading with anchor #1setup (GitHub drops the NBSP). Same for "-".
+    const design = edit(
+      DESIGN,
+      'Back to [the summary](#1-summary).',
+      'Back to [the summary](#1-summary), [setup](#1setup) and [bullet](#-bullet).\n\n1.\u00a0Setup\n====\n\n-\u00a0Bullet\n---\n',
+    );
+    assert.deepEqual(run({ design }).errors, []);
   });
   test('githubSlug matches GitHub', () => {
     assert.equal(githubSlug('T00 — Protocol and threat model (M0)'), 't00--protocol-and-threat-model-m0');
