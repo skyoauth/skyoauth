@@ -39,8 +39,9 @@ RFC 8174) when they appear in capitals. Requirement IDs use `GW-nnn`.
 
 | Term               | Meaning in this contract                                                                                                                                                                                      | Source                                         |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection (see OQ-GW-12)                                               | design §4, §4.2                                |
-| SkyOAuth route     | A fixed SkyOAuth authentication or session endpoint routed to the independently verified SkyOAuth backend identity                                                                                            | design §4                                      |
+| Enrolled host      | A host whose routes are in the protected set that instance `security_admin` enrolled by cluster, Gateway UID, listener and hostname intersection: an application origin host or the issuer host (GW-035)      | design §4, §4.2; lead decision (OQ-GW-12)      |
+| SkyOAuth route     | A fixed SkyOAuth endpoint routed to the independently verified SkyOAuth backend identity, on an application origin or the issuer host. Only the seven exempt endpoints in §4.1 skip the §3 removals (GW-033)  | design §4; lead decision (OQ-GW-3, OQ-GW-12)   |
+| Exempt endpoint    | One of the seven fixed SkyOAuth cookie endpoints in §4.1, the only routes on an enrolled host outside the §3 removals                                                                                         | lead decision (OQ-GW-3)                        |
 | Non-SkyOAuth route | Every other route on an enrolled host: SPA shell, assets, public, health, bearer and cookie-protected application routes                                                                                      | design §4                                      |
 | Protected scope    | The enrolled cluster, Gateway UID, listener and hostname set of an approved bundle                                                                                                                            | design §4.2                                    |
 | Route bundle       | Tenant-owned parent whose immutable versions pin one origin version, route versions, gateway plan, `activation_mode`, optional `abort_plan` and digests; exactly one per `ApplicationOrigin` in v0.1 (GW-115) | design §4.2; tasks §3; lead decision (OQ-GW-8) |
@@ -86,17 +87,17 @@ This section adds the gateway and backend obligations.
 
 ### 2.2 Configuration digests
 
-| Digest or version field                              | Binds                                                                                                                                                              | Computed by                                                                             | Source                               |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------ |
-| Preparation input digest (`translator_input_digest`) | Immutable input snapshot of the `route_bundle_prepare` operation: validated complete input snapshot, explicit bootstrap inputs and the Secret substitution profile | Preparation worker inside the isolated route controller; never caller-supplied (GW-016) | design §4.2; lead decision (OQ-GW-7) |
-| `adapter_artifact_digests`                           | Pinned Envoy Gateway, egctl, Envoy and bootstrap artifacts                                                                                                         | Not specified (OQ-GW-7)                                                                 | design §4.2; tasks §3                |
-| `canonicalization_version`                           | Version of the projection `P` and its canonical form                                                                                                               | Not specified (OQ-GW-7)                                                                 | design §4.2; tasks §3                |
-| `expected_gateway_digest`                            | `P` of the translated xDS for the protected scope                                                                                                                  | Preparation worker running the pinned translator; never a caller or running proxy       | design §4.2                          |
-| `plan_digest`                                        | Complete plan, including `activation_mode`, `abort_plan`, `security_preconditions`, `reenable_targets` and timeout                                                 | Service, at finalization                                                                | design §4.2                          |
-| `observed_gateway_digest`                            | `P` of one proxy's observed active configuration                                                                                                                   | Controller from the management listener; recorded per proxy                             | design §4.2; tasks §3                |
-| `recovery_snapshot_digest`                           | Failed attempt revision and journal digest, recovery inventory, last completed pair and unresolved obligations                                                     | Preparation for a supersession                                                          | design §4.2                          |
-| `dependency_contract_digest`                         | Stable TLS dependency contract: reference, UID, profile and writers                                                                                                | Not specified (OQ-GW-7)                                                                 | design §4.2                          |
-| `dependency_evidence_digest`                         | Fresh supervisor verification of real Secret dependencies for one observation                                                                                      | Controller supervisor                                                                   | design §4.2                          |
+| Digest or version field                              | Binds                                                                                                                                                              | Computed by                                                                                    | Source                               |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Preparation input digest (`translator_input_digest`) | Immutable input snapshot of the `route_bundle_prepare` operation: validated complete input snapshot, explicit bootstrap inputs and the Secret substitution profile | Preparation worker inside the isolated route controller; accepted from no other party (GW-016) | design §4.2; lead decision (OQ-GW-7) |
+| `adapter_artifact_digests`                           | Pinned Envoy Gateway, egctl, Envoy and bootstrap artifacts                                                                                                         | Not specified (OQ-GW-7)                                                                        | design §4.2; tasks §3                |
+| `canonicalization_version`                           | Version of the projection `P` and its canonical form                                                                                                               | Not specified (OQ-GW-7)                                                                        | design §4.2; tasks §3                |
+| `expected_gateway_digest`                            | `P` of the translated xDS for the protected scope                                                                                                                  | Preparation worker running the pinned translator; never a caller or running proxy              | design §4.2                          |
+| `plan_digest`                                        | Complete plan, including `activation_mode`, `abort_plan`, `security_preconditions`, `reenable_targets` and timeout                                                 | Service, at finalization                                                                       | design §4.2                          |
+| `observed_gateway_digest`                            | `P` of one proxy's observed active configuration                                                                                                                   | Controller from the management listener; recorded per proxy                                    | design §4.2; tasks §3                |
+| `recovery_snapshot_digest`                           | Failed attempt revision and journal digest, recovery inventory, last completed pair and unresolved obligations                                                     | Preparation for a supersession                                                                 | design §4.2                          |
+| `dependency_contract_digest`                         | Stable TLS dependency contract: reference, UID, profile and writers                                                                                                | Not specified (OQ-GW-7)                                                                        | design §4.2                          |
+| `dependency_evidence_digest`                         | Fresh supervisor verification of real Secret dependencies for one observation                                                                                      | Controller supervisor                                                                          | design §4.2                          |
 
 - **GW-010** The service MUST NOT trust a caller-supplied expected digest. A
   tenant cannot supply a trusted expected digest, and a scoped worker result is
@@ -115,13 +116,19 @@ This section adds the gateway and backend obligations.
   historical leaf certificate or resourceVersion. Exact-mode dependencies
   additionally bind their material pins. (design §4.2)
 
-- **GW-015** Every digest in this table MUST be SHA-256 over the RFC 8785 JSON
-  Canonicalization Scheme (JCS) serialization of its input. (lead decision,
-  OQ-GW-7)
+- **GW-015** Every JSON-structured digest in this table MUST be SHA-256 over
+  the RFC 8785 JSON Canonicalization Scheme (JCS) serialization of its input.
+  `adapter_artifact_digests` are not JSON-structured: each entry MUST be the
+  native SHA-256 digest of the pinned artifact (the file bytes of a binary,
+  the OCI content digest of a container image), not a JCS digest. (lead
+  decision, OQ-GW-7; artifact digests: Decided (lead decision, 2026-11-19))
 - **GW-016** The preparation input digest and `translator_input_digest` are
   one value. The M3 preparation worker MUST compute it inside the isolated
-  route controller from the stored input snapshot. The service MUST NOT
-  accept it from a tenant or other caller (GW-010). (lead decision, OQ-GW-7)
+  route controller from the stored input snapshot and submit it with its
+  scoped preparation result (GW-071). The service MUST accept it only in that
+  worker result, and MUST NOT accept it from a tenant or from any caller other
+  than that worker (GW-010). (lead decision, OQ-GW-7; worker wording: Decided
+  (lead decision, 2026-11-19))
 
 The digest encoding, the list of documented nonsemantic noise and the
 component that computes the rows marked "Not specified" remain open
@@ -129,20 +136,22 @@ component that computes the rows marked "Not specified" remain open
 
 ## 3. All-route credential containment
 
-| Rule                              | Applies to                                   | Mechanism                                                                                               | Stage                                                         | Source                 |
-| --------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------- |
-| Remove every `Cookie` field       | Every non-SkyOAuth route on an enrolled host | HTTPRoute `RequestHeaderModifier.remove: [cookie, x-skyoauth-csrf]` → route `request_headers_to_remove` | Ordinary upstream stage; after ext_authz where ext_authz runs | design §4; tasks T32.4 |
-| Remove `X-SkyOAuth-CSRF`          | Every non-SkyOAuth route on an enrolled host | Same modifier                                                                                           | Same                                                          | design §4; tasks T32.4 |
-| Remove every `Set-Cookie` field   | Every non-SkyOAuth route on an enrolled host | HTTPRoute `ResponseHeaderModifier.remove: [set-cookie]` → `response_headers_to_remove: [set-cookie]`    | Response                                                      | design §4; tasks T32.4 |
-| ext_authz `headers_to_remove`     | Protected cookie routes                      | gRPC `OkHttpResponse.headers_to_remove`                                                                 | Defense in depth only                                         | design §4; tasks T32.4 |
-| Assertion header replacement      | Protected cookie routes                      | Non-appending replacement of the private backend header                                                 | After a successful Check                                      | design §4, §6          |
-| Client-supplied assertion headers | All routes                                   | Removed by Envoy                                                                                        | Not specified (OQ-GW-5)                                       | design §3.1, §6        |
+| Rule                                          | Applies to                                                                                     | Mechanism                                                                                               | Stage                                                         | Source                                                         |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------- |
+| Remove every `Cookie` field                   | Every route on an enrolled host, including the issuer host, except the exempt endpoints (§4.1) | HTTPRoute `RequestHeaderModifier.remove: [cookie, x-skyoauth-csrf]` → route `request_headers_to_remove` | Ordinary upstream stage; after ext_authz where ext_authz runs | design §4; tasks T32.4; lead decision (OQ-GW-3, OQ-GW-12)      |
+| Remove `X-SkyOAuth-CSRF`                      | Every route on an enrolled host, including the issuer host, except the exempt endpoints (§4.1) | Same modifier                                                                                           | Same                                                          | design §4; tasks T32.4; lead decision (OQ-GW-3, OQ-GW-12)      |
+| Remove every `Set-Cookie` field               | Every route on an enrolled host, including the issuer host, except the exempt endpoints (§4.1) | HTTPRoute `ResponseHeaderModifier.remove: [set-cookie]` → `response_headers_to_remove: [set-cookie]`    | Response                                                      | design §4; tasks T32.4; lead decision (OQ-GW-3, OQ-GW-12)      |
+| ext_authz `headers_to_remove`                 | Protected cookie routes                                                                        | gRPC `OkHttpResponse.headers_to_remove`                                                                 | Defense in depth only                                         | design §4; tasks T32.4                                         |
+| Assertion header replacement                  | Protected cookie routes                                                                        | Non-appending replacement of the private backend header `X-SkyOAuth-Assertion`                          | After a successful Check                                      | design §4, §6; lead decision (OQ-API-10)                       |
+| Remove client-supplied `X-SkyOAuth-Assertion` | All routes                                                                                     | Removed by Envoy before forwarding (public-api API-061)                                                 | Stage relative to ext_authz not specified (OQ-GW-5)           | design §3.1, §6; public-api API-061; lead decision (OQ-API-10) |
 
-- **GW-020** On an enrolled host, every route to an application backend MUST
-  remove all `Cookie` fields and `X-SkyOAuth-CSRF` before forwarding,
-  regardless of authentication class or whether ext_authz runs. This includes
-  the SPA shell, assets, public and health endpoints and bearer routes.
-  (design §4; tasks T32.4, A18)
+- **GW-020** On an enrolled host, including the issuer host (GW-035), every
+  route except the exempt endpoints in §4.1 (GW-033) MUST remove all `Cookie`
+  fields and `X-SkyOAuth-CSRF` before forwarding, regardless of
+  authentication class or whether ext_authz runs. This includes the SPA
+  shell, assets, public and health endpoints, bearer routes and every
+  non-exempt SkyOAuth endpoint. (design §4; tasks T32.4, A18; issuer host and
+  non-exempt SkyOAuth endpoints: lead decision, OQ-GW-3, OQ-GW-12)
 - **GW-021** The removal MUST NOT be conditional on an auth-service response.
   (design §4)
 - **GW-022** On protected routes SkyOAuth MUST first receive the original
@@ -159,10 +168,12 @@ component that computes the rows marked "Not specified" remain open
 - **GW-026** Configurations that restore or expose the removed credentials MUST
   be prohibited, including through retries and mirrors. (design §4; tasks
   T32.4, A18)
-- **GW-027** Every non-SkyOAuth route MUST remove every `Set-Cookie` response
-  field, including duplicate and nonreserved cookies, without parsing cookie
-  names. No Lua, Wasm or ext_proc cookie-name filter is required or relied on.
-  (design §4; tasks T32.4)
+- **GW-027** Every route on an enrolled host, including the issuer host
+  (GW-035), except the exempt endpoints in §4.1 (GW-033) MUST remove every
+  `Set-Cookie` response field, including duplicate and nonreserved cookies,
+  without parsing cookie names. No Lua, Wasm or ext_proc cookie-name filter is
+  required or relied on. (design §4; tasks T32.4; issuer host and non-exempt
+  SkyOAuth endpoints: lead decision, OQ-GW-3, OQ-GW-12)
 - **GW-028** Both removals, their stage and order, and the exact exemptions
   MUST be included in the approved projection. Missing removal or an
   unauthorized exemption MUST reject preparation and activation. (design §4,
@@ -212,6 +223,12 @@ sources, and the complete v0.1 exemption list (lead decision, OQ-GW-3), are:
 - **GW-034** The issuer host MUST NOT be enrolled as an `ApplicationOrigin`.
   Its three native endpoints in the table above are its only cookie
   exemptions. (lead decision, OQ-GW-3, OQ-GW-12)
+- **GW-035** The issuer host MUST be enrolled for containment although it is
+  not an `ApplicationOrigin` (GW-034): its routes are in the protected scope,
+  the §3 `Cookie`, `X-SkyOAuth-CSRF` and `Set-Cookie` removals apply to every
+  issuer-host route except its three exempt endpoints, and the protected-scope
+  projection (§6) and admission guard (§5) cover it. Decided (lead decision,
+  2026-11-19); see OQ-GW-12.
 
 ### 4.2 Filter order
 
@@ -591,13 +608,10 @@ is fixed by GW-227; wire results are frozen in
 - **GW-145** Transient compensation failures MAY be retried only within the
   original abort window. Aborting is idempotent and bounded, not a general
   rollback API. (design §4.2)
-- **GW-146** Disabling the approving instance `security_admin` MUST NOT
-  invalidate an already-recorded approval for compensation. Compensation MUST
-  require that the approval was not explicitly revoked before the apply
-  started. A revocation recorded after the apply started still stops
-  compensating writes under GW-133, and GW-130 still rechecks approver
-  authority before `begin` and at activation. Decided (lead decision,
-  2026-11-19); see OQ-GW-9.
+- **GW-146** Disabling the approving `security_admin` is not a revocation and
+  MUST NOT stop compensation; only explicit revocation (GW-133) does. GW-130
+  still rechecks approver authority before `begin` and at activation.
+  Decided (lead decision, 2026-11-19); see OQ-GW-9.
 
 ### 11.5 Superseding a failed attempt
 
@@ -948,17 +962,21 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-5 — Literal filter chain and assertion-header stripping.** The
   sources fix ordering constraints but not the pinned adapter's per-route
   filter list, or at which stage client-supplied identity and assertion
-  headers are removed relative to ext_authz. The assertion header name is also
-  open (OQ-API-10, OQ-TP-11).
+  headers are removed relative to ext_authz. The assertion header name is
+  Decided elsewhere: it is `X-SkyOAuth-Assertion`, and Envoy removes any
+  client-supplied copy before forwarding (public-api API-061; OQ-API-10,
+  OQ-TP-11).
 - **OQ-GW-6 — Guarded inventory kinds.** "Supported security/traffic
   extensions" and "backend identity/routing configuration" are not enumerated
   as Kubernetes kinds for the admission guard.
 - **OQ-GW-7 — Digest algorithm and canonical form.** **Decided** (lead
-  decision, 2026-11-19) in part: every configuration digest is SHA-256 over
-  RFC 8785 JCS canonical JSON (GW-015); the preparation input digest and
-  `translator_input_digest` are one value, computed by the preparation worker
-  inside the isolated route controller and never caller-supplied (GW-016,
-  GW-070). Follow-up: design §4.2 says the preparation request stores the
+  decision, 2026-11-19) in part: every JSON-structured configuration digest
+  is SHA-256 over RFC 8785 JCS canonical JSON, while
+  `adapter_artifact_digests` use the native SHA-256 digest of each binary or
+  image (GW-015); the preparation input digest and `translator_input_digest`
+  are one value, computed by the preparation worker inside the isolated route
+  controller and accepted only in that worker's result, never from a tenant
+  or other caller (GW-016, GW-070). Follow-up: design §4.2 says the preparation request stores the
   "input snapshot and digest"; amend it so the worker computes the digest.
   Still open: the digest encoding; the list of "documented nonsemantic
   noise"; and which component computes `adapter_artifact_digests`,
@@ -981,9 +999,16 @@ later task. All other items are not resolved by this contract.
   decision, 2026-11-19): compensation needs an unrevoked approval and current
   controller scope; disabling the preparer does not stop it (GW-141). The
   approver sub-question is also Decided (lead decision, 2026-11-19):
-  disabling the approving `security_admin` does not invalidate an
-  already-recorded approval, and compensation requires that the approval was
-  not explicitly revoked before the apply started (GW-146). Original
+  disabling the approving `security_admin` is not a revocation and does not
+  stop compensation; only explicit revocation (GW-133) does (GW-146).
+  Follow-up (spec-amendments triage): design §4.2 "Abort of an unfinished
+  apply" makes "enabled required operator authority" mandatory for
+  compensation and moves the attempt to `recovery_required` on "revoked
+  required authority/approval", so revoking operator or controller authority
+  prevents compensation there; design §4.2 needs an amendment stating that
+  the required authority is the unrevoked approval and current controller
+  scope, and that disabling the preparer or approver does not stop
+  compensation. Original
   question: compensation needs "enabled required operator authority", but the
   sources do not say whether this is the preparer, the approver or both, or
   what happens if the preparing `client_admin` is disabled during `aborting`.
@@ -996,13 +1021,21 @@ later task. All other items are not resolved by this contract.
 - **OQ-GW-11 — Helper bounds.** The helper's resource, time and output limits
   are required but not given numerically.
 - **OQ-GW-12 — "Enrolled host".** **Decided** (lead decision, 2026-11-19) in
-  part: the issuer host is not enrolled as an `ApplicationOrigin`; its
-  non-exempt SkyOAuth endpoints keep the §3 removals (GW-033, GW-034). Still
-  open: design §4 scopes containment to "an enrolled host" while design §4 and
-  §4.2 describe two enrollments, `ApplicationOrigin` ownership and
-  protected-scope enrollment. Whether an origin can be registered without an
-  enrolled protected scope (for example before the M3 controller is
-  installed), and whether containment applies then, is not stated.
+  part: the issuer host is not enrolled as an `ApplicationOrigin`, but its
+  routes are enrolled for containment: the §3 `Cookie`, `X-SkyOAuth-CSRF` and
+  `Set-Cookie` removals, the projection and the admission guard apply there,
+  and only the seven exempt endpoints in §4.1 are outside the removals
+  (GW-020, GW-027, GW-033, GW-034, GW-035). Follow-up: design §4 scopes the
+  removals to "every route to an application backend" and "every
+  non-SkyOAuth route"; amend it to cover the issuer host and non-exempt
+  SkyOAuth endpoints. Still open: (a) a route bundle is owned by exactly one
+  `ApplicationOrigin` (GW-115) and the issuer host is not one, so which
+  approved bundle or enrollment carries the issuer host's protected scope,
+  projection and observations is not stated; (b) design §4 and §4.2 describe
+  two enrollments, `ApplicationOrigin` ownership and protected-scope
+  enrollment, and whether an origin can be registered without an enrolled
+  protected scope (for example before the M3 controller is installed), and
+  whether containment applies then, is not stated.
 - **OQ-GW-13 — Supported exact-mode usages.** The sources require exact mode
   for "supported policy/backend" credentials but do not enumerate which
   policy or backend Secret usages v0.1 supports.

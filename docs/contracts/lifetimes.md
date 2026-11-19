@@ -139,7 +139,7 @@ Terms used in the tables:
 - **LT-024** Rotating `__Host-skyoauth_native` at the issuer callback MUST
   keep the original `expires_at` of the native authorization request. Rotation
   MUST NOT reset, restart or extend its lifetime (default 10 min, ceiling
-  15 min), consistent with the no-extension rule (LT-001, LT-002). (OQ-LT-1:
+  15 min), consistent with the no-extension rule (LT-001). (OQ-LT-1:
   Decided (lead decision, 2026-11-19))
 
 ## 4. Epochs, revisions and generations
@@ -220,9 +220,11 @@ These values have no lifetime. They are monotonic and are never reset.
   MUST have distinct meanings: the first two bound forward execution, the last
   bounds compensation only. All three MUST survive takeover. Forward expiry
   alone MUST NOT stop compensation; revocation of the approval or loss of
-  controller scope does, and disabling the preparer does not
-  ([gateway-containment.md GW-141](gateway-containment.md#114-abort-of-an-unfinished-apply)).
-  (design §4.2; tasks T00.6; lead decision, OQ-GW-9)
+  controller scope does, and disabling the preparer or the approving
+  `security_admin` does not
+  ([gateway-containment.md GW-141, GW-146](gateway-containment.md#114-abort-of-an-unfinished-apply)).
+  (design §4.2; tasks T00.6; lead decision, OQ-GW-9; approver: Decided (lead
+  decision, 2026-11-19))
 - **LT-054** Transient compensation failures MAY retry only within the original
   abort window. At `now >= abort_until` an unfinished attempt MUST become
   `recovery_required`. `abort_until` is not a release of credential holds.
@@ -328,8 +330,11 @@ These values have no lifetime. They are monotonic and are never reset.
 | Break-glass recovery challenge TTL | Default 5 min; maximum 15 min; single use             | design §7.2; lead decision (OQ-LT-17) |
 
 - **LT-100** Restore MUST preserve bootstrap-closed and consumed state, or
-  quarantine issuance until outstanding state can no longer be replayed.
-  (design §7.2; tasks T10.6, A35)
+  quarantine issuance (bounded by the table above) until outstanding state can
+  no longer be replayed, or, where consumed state is not preserved and the
+  quarantine cannot cover the outstanding state, revoke the affected
+  credentials (LT-106). (design §7.2; tasks T10.6, A35; revocation
+  alternative: Decided (lead decision, 2026-11-19))
 - **LT-101** Rollback and restore MUST NOT revive credentials, consumed proofs,
   refresh state, sessions or continuations, or reset monotonic generations.
   (design §7.2, §8; tasks T10.6, T51.8, T51.9)
@@ -346,8 +351,16 @@ These values have no lifetime. They are monotonic and are never reset.
 - **LT-106** The restore issuance quarantine is bounded by the table above.
   Outstanding state that could still be replayed after the quarantine ends
   MUST be covered by preserved bootstrap-closed and consumed state (LT-100,
-  LT-101), not by the quarantine alone. (lead decision, OQ-LT-13; the second
-  sentence is inferred from LT-100)
+  LT-101), or, where consumed state is not preserved, by revoking the affected
+  credentials (LT-101), not by the quarantine alone. (lead decision,
+  OQ-LT-13; the second sentence is inferred from LT-100; the revocation
+  alternative: Decided (lead decision, 2026-11-19))
+
+  Note: the 60 min quarantine ceiling cannot cover native refresh families,
+  whose absolute lifetime can reach 7 d (§2). Outstanding refresh state after
+  a restore is therefore covered only by preserved consumed state or by
+  revocation of the affected families, never by the quarantine.
+
 - **LT-107** A break-glass recovery challenge MUST expire within its TTL and
   MUST be consumed durably on first use; an expired or consumed challenge
   MUST NOT authorize an operation. (design §7.2; TTL values: lead decision, OQ-LT-17)
@@ -446,10 +459,11 @@ shows problems. All other items are not resolved by this contract.
 - **OQ-LT-13 — Restore quarantine duration.** **Decided** (lead decision,
   2026-11-19): default 15 min, ceiling 60 min (§11, LT-106). Because refresh
   families can last up to 7 days, longer-lived outstanding state relies on
-  preserved consumed state rather than on the quarantine (LT-106). Original
-  question: restore must quarantine issuance "until outstanding state can no
-  longer be replayed"; the quarantine length and how it is computed were not
-  stated.
+  preserved consumed state or, where that is not preserved, on revoking the
+  affected credentials, rather than on the quarantine (LT-100, LT-106).
+  Original question: restore must quarantine issuance "until outstanding
+  state can no longer be replayed"; the quarantine length and how it is
+  computed were not stated.
 - **OQ-LT-14 — ADR-010 record (contradiction).** **Decided** (lead decision,
   2026-11-19); to be recorded in the ADR PR. ADR-010 gains the clause: "Real
   gateway apply/compensation closes origin cookie admissions; unchanged
@@ -465,8 +479,10 @@ shows problems. All other items are not resolved by this contract.
 - **OQ-LT-16 — Clock skew and `Retry-After` bounds.** **Decided** (lead
   decision, 2026-11-19) for skew: default 60 s, ceiling 120 s (Terms; same
   decision as OQ-TP-10). The bound on `Retry-After` for 503 results is
-  tracked in the related contract (OQ-ERR-4 in
-  [errors-retry.md](errors-retry.md#open-questions)). Original question: the
+  Decided (lead decision, 2026-11-19) in the related contract: clients honor
+  a valid 503 `Retry-After` of at most 300 s (ERR-047, OQ-ERR-4 in
+  [errors-retry.md](errors-retry.md#open-questions)). No part of this item
+  remains open. Original question: the
   maximum skew and the `Retry-After` bound were open and affect every
   retention row above that adds skew.
 - **OQ-LT-17 — Break-glass recovery challenge TTL.** **Decided** (lead
