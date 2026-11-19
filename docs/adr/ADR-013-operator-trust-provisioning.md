@@ -150,7 +150,7 @@ tenant preparation and instance approval (design §4.2).
   no upstream or WIF authority), API-003 (validated, revision-checked,
   audited writes), API-120 (no role inheritance), API-121 (whole-plan import
   authorization), API-122, API-123, the approval-boundary table API-140 to
-  API-152 (including API-152, break-glass limits), the operator endpoint and
+  API-155 (including API-152, break-glass limits), the operator endpoint and
   local/workstation interface tables in public-api §7.1, the role table in
   identity-registry §5.2, GW-070 to GW-076 (preparation), GW-130 to GW-137
   (roles, cancel, revoke), GW-230 to GW-235 (security-revision-bound

@@ -114,7 +114,10 @@ profiles, by the OQ-ERR-3 decision; see OQ-ERR-3 for the rest.
 - **ERR-020** Token endpoint failures MUST NOT reveal whether a source, grant,
   client or token exists in another tenant. (design §5.7 for sources and
   grants; clients and tokens inferred from the non-enumerating revoke response
-  in design §5.2.2)
+  in design §5.2.2) Any `invalid_target` response MUST NOT distinguish "no
+  such resource server" from "not assigned to this grant", so it reveals
+  nothing beyond the caller's own grant set (ERR-024). Any source, grant,
+  binding or proof failure remains the uniform `invalid_grant`.
 - **ERR-021** Reuse of a consumed refresh credential outside an opted-in exact
   retry MUST revoke the whole family, including a replay that adds a request ID
   after the fact. (design §5.2.2)
@@ -134,7 +137,9 @@ profiles, by the OQ-ERR-3 decision; see OQ-ERR-3 for the rest.
   MUST always return `invalid_target`, an explicit exception to the
   `invalid_request` rule for unsupported parameters (RFC 8693 §2.2.2,
   RFC 8707). An audience that is not in the grant's audience set or is not
-  assigned MUST return `invalid_target`. An unsupported requested token type
+  assigned MUST return `invalid_target`, and `invalid_target` MUST NOT
+  distinguish "no such resource server" from "not assigned to this grant", so
+  it reveals nothing beyond the caller's own grant set. An unsupported requested token type
   MUST return `invalid_request` (public-api API-015). (lead decision,
   OQ-ERR-3)
 
