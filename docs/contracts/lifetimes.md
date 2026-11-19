@@ -52,13 +52,22 @@ Terms used in the tables:
 - **LT-004** Local deadlines MUST use a monotonic clock set no later than the
   request start plus the returned lease, less a safety margin. Network delay
   MUST NOT extend them. (design §6.1.1; margin is OQ-LT-12)
-- **LT-005** Increasing a configured limit MUST NOT extend existing state.
-  Tightening a limit MUST narrow or revoke affected state, enforced at the next
+- **LT-005** Increasing a credential or authorization lifetime limit (for
+  example the native refresh-family absolute or idle limit) MUST NOT extend
+  existing state; it applies only to newly approved state. Tightening such a
+  limit MUST permanently narrow or revoke affected state, enforced at the next
   refresh or live check. Elapsed or revoked state is never resurrected.
-  (design §5.2.2; tasks §3 "One-time state", T40.5)
+  Capacity limits follow LT-007 instead. (design §5.2.2; tasks §3 "One-time
+  state", T40.5)
 - **LT-006** Configuration MUST reject out-of-range or contradictory values
   rather than silently widen them. Durations MUST be positive. (design §5.2.2,
   §6.1.1)
+- **LT-007** Origin and instance capacity limits govern only new admissions.
+  Lowering one MUST block new admissions until occupancy falls below the
+  effective limit and MUST NOT close, evict or revoke existing live
+  continuations. Changing one MUST NOT alter route pins, credentials,
+  authorization revisions or existing lease deadlines. (design §6.1.1; tasks
+  §3 "Operational capacity", T14.5)
 
 ## 2. Credentials
 

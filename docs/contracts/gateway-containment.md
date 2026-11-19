@@ -724,11 +724,15 @@ contract freezes only the invariants the gateway path depends on.
   contract stay continuously held; a zero-hold gap, new UID or consumer,
   widened contract or known protection loss requires fresh adoption. (design
   §4.2; tasks T32.3)
-- **GW-213** Deletion MUST require a zero-hold `credential_retirement` seal, a
-  matching `release_ack`/`delete_authorized` for the exact UID,
-  resourceVersion and principal, and DELETE with UID and resourceVersion
-  preconditions. A held, retiring, stale or unknown UID MUST NOT be deleted.
-  (design §4.2)
+- **GW-213** Only a UID that a zero-hold `credential_retirement` operation has
+  sealed as `retiring` MAY be deleted, and only while a current matching
+  `release_ack`/`delete_authorized` covers that exact UID, resourceVersion and
+  enrolled Kubernetes principal in the exact guard generation. The DELETE
+  MUST carry UID and resourceVersion preconditions. A held, unsealed, retired,
+  stale or unknown UID, `awaiting_guard`, a cleared or superseded
+  authorization, or a raced resourceVersion MUST NOT lead to deletion; a retry
+  needs fresh metadata and a new service-authorized attempt, never deletion by
+  name alone. (design §4.2)
 
 ## 13. Observation and gate outcomes
 
