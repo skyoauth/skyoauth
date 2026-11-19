@@ -490,3 +490,7 @@ follow-up. All other items are not resolved by this contract.
   v1. Design §5.7 and §5.2.2 deny duplicate request parameters and excessive
   scopes at `/oauth/token`, but do not say whether a WIF or refresh `scope`
   parameter containing the same token twice is rejected or treated as a set.
+
+  Lead lean (not decided): keep duplicate scope tokens tolerated outside
+  comparison v1 unless a source says otherwise. Set semantics everywhere is
+  not adopted. (triage: spec-amendments PR)

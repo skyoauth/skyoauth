@@ -583,6 +583,10 @@ All other items are not resolved by this contract.
   source. This contract writes every path in full (API-004 withdrawn) and
   marks the rows that depend on the child reading; the tasks matrix should
   spell its paths in full.
+
+  Lead lean (not decided): write every path out in full, in the tasks matrix
+  as well as here. (triage: spec-amendments PR)
+
 - **OQ-API-12 — Who fetches `/internal/v1/assertion-jwks`.** Design §6.2 says
   "backends/live checkers" obtain the internal key set; the design §4 table
   says "registered checker"; the tasks matrix says "authenticated
@@ -591,3 +595,8 @@ All other items are not resolved by this contract.
   endpoint enrolls a non-checker trust consumer. Whether every verifying
   backend must hold a checker identity, or a separate trust-consumer identity
   exists, is not stated.
+
+  Lead lean (not decided): only registered checkers and gateway trust
+  consumers fetch `/internal/v1/assertion-jwks`; a backend that verifies
+  `human_session` assertions offline must be registered as a checker. (triage:
+  spec-amendments PR)

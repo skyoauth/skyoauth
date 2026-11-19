@@ -249,8 +249,10 @@ Offline verification (backend or gateway):
   per-`jti` one-use rules are continuation admission
   ([public-api.md API-080](public-api.md#5-private-policy-and-trust-endpoints))
   and the replay check on `single_use` external WIF proofs (design §5.3), which
-  applies to the incoming proof's `jti`, not to a SkyOAuth credential. (design
-  §5.3, §6, §6.1, §6.1.1)
+  applies to the incoming proof's `jti`, not to a SkyOAuth credential. A
+  well-formed `jti` is a JSON string; any other JSON type MUST be rejected.
+  (design §5.3, §6, §6.1, §6.1.1; `jti` as a JSON string: lead decision,
+  OQ-TP-12)
 - **TP-071** Reject a profile that the resource-server registration or the
   ingress route does not allow. (design §4.1, §6)
 - **TP-072** Validate `skyoauth_constraints` against the profile's schema;
@@ -393,3 +395,9 @@ follow-up. All other items are not resolved by this contract.
 - **OQ-TP-11 — Assertion header.** **Decided** (lead decision, 2026-11-19):
   `X-SkyOAuth-Assertion` (same decision as OQ-API-10; see
   [public-api.md API-061](public-api.md#4-private-gateway-endpoints)).
+- **OQ-TP-12 — Well-formed `jti`.** **Decided** (lead decision, 2026-11-19):
+  a well-formed `jti` is a JSON string, and TP-070 checks that it is present
+  as one. This contract's reading, first recorded as inferred, is accepted.
+  Original question: design §6 requires a "unique jti" but does not say what
+  a verifier checks beyond presence, since uniqueness is an issuer property
+  (TP-033).
