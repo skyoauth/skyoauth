@@ -10,7 +10,7 @@ id = "A01"
 kind = "scenario"
 layers = ["conformance", "integration"]
 envs = ["pg", "envoy-k3s", "live"]
-harness = ["FX", "GH", "PG; GH‑live", "ENV", "RB"]
+harness = ["FX", "GH", "PG", "GH-live", "ENV", "RB"]
 owners = ["T12.3", "T20.3", "T21.4", "T22.2", "T22.6"]
 positive = "push to `main` with selected grant → WIF profile with signed tenant/grant/revision (live positive only from the push-to-main run of that commit)"
 negative = "same token blocked by RB tenant/RBAC"
@@ -28,7 +28,7 @@ id = "A02"
 kind = "scenario"
 layers = ["security"]
 envs = ["pg", "live"]
-harness = ["GH", "PG claim-mutation table; GH‑live"]
+harness = ["GH", "PG claim-mutation table", "GH-live"]
 owners = ["T12.2", "T12.7", "T22.5", "T52.2"]
 positive = "push"
 negative = "one case each for pull_request, pull_request_target, workflow_dispatch, issue_comment, workflow_run, missing event, and wrong owner/repo/ref/env/workflow; live: the real token of a `schedule` or `workflow_dispatch` run is denied by the push-only binding"
@@ -266,7 +266,6 @@ tests = []
 milestone = "M3"
 scope = "browser leases"
 legs = [
-  "scenarios-pg/x86_64",
   "scenarios-envoy-k3s/x86_64",
   "typescript-browser/chromium",
   "typescript-browser/firefox",
@@ -279,11 +278,7 @@ tests = []
 milestone = "M4"
 scope = "native reconnect"
 legs = [
-  "scenarios-pg/x86_64",
   "scenarios-envoy-k3s/x86_64",
-  "typescript-browser/chromium",
-  "typescript-browser/firefox",
-  "typescript-browser/webkit",
   "clients-rust-native/ubuntu",
   "clients-rust-native/macos",
   "clients-rust-native/windows",
@@ -327,8 +322,7 @@ tests = []
 id = "A14"
 kind = "scenario"
 layers = ["integration"]
-envs = ["browser", "native-3os"]
-env_notes = { native-3os = "Linux leg" }
+envs = ["envoy-k3s"]
 harness = ["OIDC×2", "BR", "RN", "packed artifacts with recorded sha256"]
 owners = ["T41.5", "T51.5", "T51.10"]
 positive = "same artifacts, endpoints and config work after reauth"
@@ -338,12 +332,7 @@ matrix_sha256 = "e1b9ac5a5b0437eb6f96725ce14ad7c57d511d0ccbc883fafe4cf8d88ccd154
 [[scenario.stage]]
 milestone = "M5"
 scope = "full row"
-legs = [
-  "typescript-browser/chromium",
-  "typescript-browser/firefox",
-  "typescript-browser/webkit",
-  "clients-rust-native/ubuntu",
-]
+legs = ["migration-rehearsal"]
 status = "planned"
 tests = []
 
@@ -424,7 +413,6 @@ harness = ["ENV raw capture", "OIDC", "BR"]
 owners = ["T25.4", "T32.4", "T50.4", "T52.4"]
 positive = "real SkyOAuth cookie flows work"
 negative = "Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion"
-pos_neg_suffix = ". Conditional sub-ID (ForwardAuth, T32.9): credential containment and trusted forwarded chain"
 matrix_sha256 = "18f274a381c33d105b2dd99fe447d3e6d9fa8353e8168577ff707a7e68f38728"
 
 [[scenario.stage]]
@@ -443,6 +431,13 @@ legs = [
   "typescript-browser/firefox",
   "typescript-browser/webkit",
 ]
+status = "planned"
+tests = []
+
+[[scenario.stage]]
+milestone = "M5"
+scope = "deployed-topology audit"
+legs = ["deployed-topology-audit"]
 status = "planned"
 tests = []
 
@@ -641,7 +636,6 @@ harness = ["BR", "OIDC with live SSO", "RN", "attacker loopback process"]
 owners = ["T40.2", "T40.4", "T40.8", "T52.3"]
 positive = "explicit confirmation yields a code"
 negative = "SSO alone, deny, expiry, attacker's own PKCE/loopback: no code"
-pos_neg_suffix = ". Conditional sub-ID A27.01 (device flow, T40.6): user-code approval, expiry/polling abuse, no interaction bypass"
 matrix_sha256 = "9f578eeae8ac3d1a3ed67c9aac250ceacef5c48aebd9c0b86c200a60e71443ed"
 
 [[scenario.stage]]
@@ -785,7 +779,6 @@ harness = ["PG", "UC"]
 owners = ["T10.10", "T31.2", "T31.6"]
 positive = "inside both deadlines"
 negative = "idle expiry, absolute expiry, wrong origin, no revival by coalesced write; local and upstream logout revoke exactly the sessions of the indexed sid, switch invalidation revokes affected sessions, other sessions untouched"
-pos_neg_suffix = ". Conditional sub-ID A33.01 (back-channel logout, T30.6): verified sid targeting"
 matrix_sha256 = "64df60ada44caa3a05912f8a2389147931fca8d763002a960e5f652f98f6a001"
 
 [[scenario.stage]]
@@ -850,7 +843,7 @@ id = "A36"
 kind = "scenario"
 layers = ["integration"]
 envs = ["envoy-k3s", "live"]
-harness = ["GH‑live", "K3", "ENV", "RB"]
+harness = ["GH-live", "K3", "ENV", "RB"]
 owners = ["T22.6", "T23.5", "T25.5"]
 positive = "real GitHub (push-to-main run only) and k3s calls reach the API"
 negative = "spoofed headers, IdP/store outage, direct backend, private listener"
@@ -977,7 +970,7 @@ tests = []
 id = "A42"
 kind = "scenario"
 layers = ["conformance"]
-envs = ["hermetic", "browser", "native-3os"]
+envs = ["hermetic", "envoy-k3s", "browser", "native-3os"]
 harness = ["FX v1", "prebuilt consumers", "OIDC×2"]
 owners = ["T41.5", "T51.5", "T51.7"]
 positive = "every shipped fixture version (v1 in v0.1) passes before and after switch/rollback with unchanged artifacts"
@@ -990,6 +983,9 @@ scope = "fixtures"
 legs = [
   "scenarios-hermetic/x86_64",
   "scenarios-hermetic/aarch64",
+  "clients-rust/x86_64",
+  "typescript/node22",
+  "typescript/node24",
   "typescript-browser/chromium",
   "typescript-browser/firefox",
   "typescript-browser/webkit",
@@ -1006,6 +1002,7 @@ scope = "through switch/rollback"
 legs = [
   "scenarios-hermetic/x86_64",
   "scenarios-hermetic/aarch64",
+  "migration-rehearsal",
   "typescript-browser/chromium",
   "typescript-browser/firefox",
   "typescript-browser/webkit",
@@ -1252,7 +1249,7 @@ layers = ["security"]
 envs = ["pg"]
 harness = ["PG", "UC", "OP", "restore fixture"]
 owners = ["T10.11", "T12.10"]
-positive = "disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart, forward migration and provider switch"
+positive = "disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart and forward migration"
 negative = "enabled/approved create or import rejected, enabling PATCH rejected, startup/import with an active unsupported record (seeded by restore fixture) rejected without rewriting it"
 matrix_sha256 = "e21a9edc840e10b9906382c02f18bcf6a2297ecbf922a85b8600021e94a7a8c3"
 
@@ -1373,11 +1370,10 @@ kind = "scenario"
 layers = ["integration"]
 envs = ["pg", "envoy-k3s"]
 harness = ["K3", "ENV", "cert-manager", "VAP", "≥2 controllers", "UC"]
-owners = ["T13.2", "T14.9", "T31.6", "T32.3", "T32.4", "T50.4"]
+owners = ["T13.2", "T14.9", "T31.6", "T32.3", "T32.4", "T50.4", "T52.4"]
+note = "Sub-IDs A58.01… in the annex (Q1):"
 positive = "every approved, mode-matched path"
 negative = "every listed stale/wrong-mode/revoked/mismatch/hold case"
-pos_neg_prefix = "Sub-IDs A58.01… in the annex (Q1): "
-pos_neg_suffix = ". Conditional sub-ID (ForwardAuth, T32.9): deployment-enforcer equivalence"
 matrix_sha256 = "8e4e05e65fe2d1d38ac8be0707f9800e8f37f0883892f2239dadf87a27976f1c"
 
 [[scenario.stage]]
@@ -1391,6 +1387,13 @@ tests = []
 milestone = "M3"
 scope = "enforcement"
 legs = ["scenarios-pg/x86_64", "scenarios-envoy-k3s/x86_64"]
+status = "planned"
+tests = []
+
+[[scenario.stage]]
+milestone = "M5"
+scope = "deployed-topology audit"
+legs = ["deployed-topology-audit"]
 status = "planned"
 tests = []
 
@@ -1411,6 +1414,7 @@ scope = "full row"
 legs = [
   "scenarios-hermetic/x86_64",
   "scenarios-hermetic/aarch64",
+  "clients-rust/x86_64",
   "typescript-browser/chromium",
   "typescript-browser/firefox",
   "typescript-browser/webkit",
@@ -1449,9 +1453,6 @@ milestone = "M4"
 scope = "native"
 legs = [
   "scenarios-pg/x86_64",
-  "typescript-browser/chromium",
-  "typescript-browser/firefox",
-  "typescript-browser/webkit",
   "clients-rust-native/ubuntu",
   "clients-rust-native/macos",
   "clients-rust-native/windows",
@@ -1481,18 +1482,25 @@ tests = []
 id = "A62"
 kind = "scenario"
 layers = ["security"]
-envs = ["pg"]
+envs = ["pg", "envoy-k3s"]
 harness = ["UC", "PG", "REP"]
 owners = ["T32.14", "T50.3", "T52.5"]
+note = "Internal signer group only (Q5)."
 positive = "rotation and clean promotion"
 negative = "valid unpromoted-standby signature denies and alerts, invalid-signature kid spoof raises no verified alert, disabled active key with no standby fails closed"
-pos_neg_prefix = "Internal signer group only (Q5). "
 matrix_sha256 = "08371809e5c67ca8913610da5a02c1f7ac68297d2266d24e30a5895c7c74e8ea"
 
 [[scenario.stage]]
 milestone = "M3"
-scope = "full row"
+scope = "internal signer rotation and promotion"
 legs = ["scenarios-pg/x86_64"]
+status = "planned"
+tests = []
+
+[[scenario.stage]]
+milestone = "M5"
+scope = "deployed-topology audit"
+legs = ["deployed-topology-audit"]
 status = "planned"
 tests = []
 

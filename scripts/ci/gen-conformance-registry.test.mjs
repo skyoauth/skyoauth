@@ -16,8 +16,6 @@ import { fileURLToPath } from 'node:url';
 import {
   DESIGN,
   generate,
-  JOBS,
-  KNOWN_LEGS,
   LAYOUT,
   parseLayoutRow,
   parseToml,
@@ -105,20 +103,53 @@ describe('committed registry', () => {
 
   test('every layout §2 row renders back from the registry', () => {
     const layout = read(REPO, LAYOUT);
-    const { entries, errors } = generate(REPO);
+    const { entries, errors, codes } = generate(REPO);
     assert.deepEqual(errors, []);
-    for (const e of entries.scenarios) assert.equal(renderLayoutRow(e), specLine(layout, e.id));
+    for (const e of entries.scenarios) {
+      const sentences = entries.subcases.filter((s) => s.parent === e.id && s.conditional_on).map((s) => s.table_text);
+      assert.equal(renderLayoutRow(e, codes, sentences), specLine(layout, e.id));
+    }
+    // A18, A27, A33 and A58 end with a conditional sub-ID sentence from subcases.toml.
+    assert.equal(entries.subcases.filter((s) => s.conditional_on).length, 4);
   });
 
-  test('every leg is a §1.1 leg whose job serves one of the entry envs', () => {
-    const { entries } = generate(REPO);
+  test('every leg is a §1.1 leg string whose env is one of the entry envs', () => {
+    const { entries, catalogue } = generate(REPO);
+    assert.ok(catalogue.size > 0);
     for (const e of [...entries.scenarios, ...entries.subcases]) {
       for (const s of e.stages) {
         for (const leg of s.legs) {
-          assert.ok(KNOWN_LEGS.has(leg), `${e.id}: ${leg}`);
-          assert.ok(e.envs.includes(JOBS[KNOWN_LEGS.get(leg)].env), `${e.id}: ${leg}`);
+          assert.ok(catalogue.has(leg), `${e.id}: ${leg}`);
+          assert.ok(e.envs.includes(catalogue.get(leg).env), `${e.id}: ${leg}`);
         }
       }
+    }
+  });
+
+  test('the §1.1 Leg strings column is the leg catalogue', () => {
+    const { catalogue } = generate(REPO);
+    assert.deepEqual(catalogue.get('typescript/node24'), { job: 'typescript', env: 'hermetic' });
+    assert.deepEqual(catalogue.get('live-wif'), { job: 'live-wif', env: 'live' });
+    assert.deepEqual(catalogue.get('deployed-topology-audit'), { job: 'deployed-topology-audit', env: 'envoy-k3s' });
+    assert.deepEqual(catalogue.get('clients-rust/x86_64'), { job: 'clients-rust', env: 'hermetic' });
+  });
+
+  test('registry fields follow the lead decisions on the table notation', () => {
+    const doc = parseToml(read(REPO, SCENARIOS));
+    const byId = new Map(doc.scenario.map((e) => [e.id, e]));
+    assert.deepEqual(byId.get('A01').harness, ['FX', 'GH', 'PG', 'GH-live', 'ENV', 'RB']);
+    assert.deepEqual(byId.get('A02').harness, ['GH', 'PG claim-mutation table', 'GH-live']);
+    assert.deepEqual(byId.get('A14').envs, ['envoy-k3s']);
+    assert.deepEqual(byId.get('A42').envs, ['hermetic', 'envoy-k3s', 'browser', 'native-3os']);
+    assert.equal(byId.get('A58').note, 'Sub-IDs A58.01… in the annex (Q1):');
+    assert.equal(byId.get('A62').note, 'Internal signer group only (Q5).');
+    for (const e of doc.scenario) {
+      for (const k of ['env_notes', 'pos_neg_prefix', 'pos_neg_suffix']) assert.ok(!(k in e), `${e.id} has ${k}`);
+      assert.ok(!JSON.stringify(e).includes('\u2011'), `${e.id} has U+2011`);
+    }
+    for (const id of ['A18', 'A58', 'A62']) {
+      const last = byId.get(id).stage.at(-1);
+      assert.deepEqual([last.milestone, last.scope, last.legs], ['M5', 'deployed-topology audit', ['deployed-topology-audit']]);
     }
   });
 });
@@ -189,10 +220,17 @@ describe('drift is detected', () => {
   });
 
   test('a missing registry file fails --check', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? null : t));
+    const r = cli('--root', root, '--check');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /scenarios\.toml: missing/);
+  });
+
+  test('a missing subcases file fails on every named sub-ID', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? null : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /subcases\.toml: missing/);
+    for (const re of [/A27\.01 \(device-flow/, /A33\.01 \(back-channel-logout/, /sub-ID of A18 \(forwardauth/, /sub-ID of A58 \(forwardauth/]) assert.match(r.stderr, re);
   });
 });
 
@@ -243,11 +281,203 @@ describe('spec errors stop generation', () => {
 
   test('an unparsable stage cell', () => {
     assert.throws(
-      () => parseLayoutRow('| A99 | C | PG | PG | M2 · M3 | T10.1 | + a; − b |', 'x'),
+      () => parseLayoutRow('| A99 | C | PG | PG | M2 · M3 | T10.1 | + a; − b |', 'x', { PG: 'pg' }),
       /stage "M2" of a multi-stage row has no scope/,
     );
-    assert.throws(() => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a, − b |', 'x'), /exactly one/);
-    assert.throws(() => parseLayoutRow('| A99 | X | PG | PG | M2 | T10.1 | + a; − b |', 'x'), /unknown layer/);
+    assert.throws(() => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a, − b |', 'x', { PG: 'pg' }), /exactly one/);
+    assert.throws(() => parseLayoutRow('| A99 | X | PG | PG | M2 | T10.1 | + a; − b |', 'x', { PG: 'pg' }), /unknown layer/);
+    assert.throws(() => parseLayoutRow('| A99 | C | XX | PG | M2 | T10.1 | + a; − b |', 'x', { PG: 'pg' }), /unknown env "XX"/);
+    assert.throws(
+      () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A99.01 (magic, T10.1): x |', 'x', { PG: 'pg' }),
+      /unknown conditional feature "magic"/,
+    );
+    assert.throws(
+      () => parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | + a; − b. Conditional sub-ID A98.01 (device flow, T10.1): x |', 'x', { PG: 'pg' }),
+      /A98\.01 is not a sub-ID of A99/,
+    );
+  });
+
+  test('a note before "+" and a trailing conditional sentence', () => {
+    const e = parseLayoutRow('| A99 | C | PG | PG | M2 | T10.1 | Only this (Q9). + a; − b. Conditional sub-ID (ForwardAuth, T32.9): x |', 'x', { PG: 'pg' });
+    assert.equal(e.note, 'Only this (Q9).');
+    assert.deepEqual([e.positive, e.negative], ['a', 'b']);
+    assert.deepEqual(
+      e.conditional.map((c) => [c.id, c.feature, c.task, c.text]),
+      [[null, 'forwardauth', 'T32.9', 'Conditional sub-ID (ForwardAuth, T32.9): x']],
+    );
+  });
+});
+
+// 1-based line of the n-th (0-based) occurrence of `needle` in `text`.
+function lineOf(text, needle, n = 0) {
+  let i = -1;
+  for (let k = 0; k <= n; k++) {
+    i = text.indexOf(needle, i + 1);
+    assert.ok(i >= 0, `not found: ${needle}`);
+  }
+  return text.slice(0, i).split('\n').length;
+}
+
+// The block of `[[table]]` entry `id`, from its header to the next entry header.
+function entryBlock(text, table, id) {
+  const start = text.indexOf(`[[${table}]]\nid = "${id}"`);
+  assert.ok(start >= 0, `no ${table} ${id}`);
+  const next = text.indexOf(`[[${table}]]\n`, start + 1);
+  return text.slice(start, next < 0 ? text.length : next);
+}
+
+// Both modes must fail with `re` and the write mode must leave the files alone.
+function failsBothModes(root, re) {
+  const before = [read(root, SCENARIOS), read(root, SUBCASES)];
+  for (const args of [['--root', root], ['--root', root, '--check']]) {
+    const r = cli(...args);
+    assert.equal(r.status, 1, `${args.join(' ')}: ${r.stderr}`);
+    assert.match(r.stderr, re);
+  }
+  assert.deepEqual([read(root, SCENARIOS), read(root, SUBCASES)], before);
+}
+
+describe('duplicate keys in the committed files are rejected', () => {
+  test('a second stage with the same scenario and milestone', () => {
+    let dupLine;
+    const root = fixture((rel, t) => {
+      if (rel !== SCENARIOS) return t;
+      const stage = '[[scenario.stage]]\nmilestone = "M1a"\nscope = "consume primitive"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\ntests = []\n\n';
+      const block = entryBlock(t, 'scenario', 'A24');
+      const out = replaceOnce(t, block, block.replace(stage, stage + stage));
+      dupLine = lineOf(out, stage, 1);
+      return out;
+    });
+    const first = lineOf(read(root, SCENARIOS), '[[scenario.stage]]\nmilestone = "M1a"\nscope = "consume primitive"');
+    failsBothModes(root, new RegExp(`scenarios\\.toml:${dupLine}: duplicate stage A24 M1a \\(first at line ${first}\\)`));
+  });
+
+  test('a duplicate scenario ID', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SCENARIOS) return t;
+      const block = entryBlock(t, 'scenario', 'A24');
+      return replaceOnce(t, block, block + block);
+    });
+    const text = read(root, SCENARIOS);
+    failsBothModes(root, new RegExp(`scenarios\\.toml:${lineOf(text, '[[scenario]]\nid = "A24"', 1)}: duplicate scenario A24 \\(first at line ${lineOf(text, '[[scenario]]\nid = "A24"')}\\)`));
+  });
+
+  test('a duplicate contract ID', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SCENARIOS) return t;
+      const block = entryBlock(t, 'scenario', 'C07');
+      return replaceOnce(t, block, `${block}\n${block}`);
+    });
+    const text = read(root, SCENARIOS);
+    failsBothModes(root, new RegExp(`scenarios\\.toml:${lineOf(text, '[[scenario]]\nid = "C07"', 1)}: duplicate scenario C07`));
+  });
+
+  test('a duplicate subcase ID', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SUBCASES) return t;
+      const block = entryBlock(t, 'subcase', 'A33.01');
+      return replaceOnce(t, block, block + block);
+    });
+    const text = read(root, SUBCASES);
+    failsBothModes(root, new RegExp(`subcases\\.toml:${lineOf(text, '[[subcase]]\nid = "A33.01"', 1)}: duplicate subcase A33\\.01`));
+  });
+
+  test('a second stage with the same subcase and milestone', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SUBCASES) return t;
+      const block = entryBlock(t, 'subcase', 'A33.01');
+      const stage = block.slice(block.indexOf('[[subcase.stage]]'));
+      return replaceOnce(t, block, block.trimEnd() + '\n\n' + stage);
+    });
+    const text = read(root, SUBCASES);
+    const at = text.indexOf('[[subcase]]\nid = "A33.01"');
+    const dup = text.slice(0, text.indexOf('[[subcase.stage]]', text.indexOf('[[subcase.stage]]', at) + 1)).split('\n').length;
+    failsBothModes(root, new RegExp(`subcases\\.toml:${dup}: duplicate stage A33\\.01 M3`));
+  });
+});
+
+describe('subcases match the sub-IDs the layout doc names', () => {
+  test('a named sub-ID missing from subcases.toml', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A27.01'), '') : t));
+    failsBothModes(root, /A27\.01 \(device-flow, T40\.6\) is named in .*conformance-layout\.md.* but missing from tests\/conformance\/subcases\.toml/);
+  });
+
+  test('an unnumbered named sub-ID missing from subcases.toml', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? t.replace(entryBlock(t, 'subcase', 'A18.01'), '') : t));
+    failsBothModes(root, /sub-ID of A18 \(forwardauth, T32\.9\) is named in .* but missing/);
+  });
+
+  test('a wrong parent', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'parent = "A27"', 'parent = "A28"') : t));
+    failsBothModes(root, /A27\.01: parent is A28, but the layout doc names it under A27/);
+  });
+
+  test('a wrong conditional_on', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'conditional_on = "device-flow"', 'conditional_on = "forwardauth"') : t));
+    failsBothModes(root, /A27\.01: conditional_on is forwardauth, but the layout doc names device-flow/);
+  });
+
+  test('a wrong source task', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'owners = ["T30.6"]', 'owners = ["T31.2"]') : t));
+    failsBothModes(root, /A33\.01: first owner is T31\.2, but the layout doc names T30\.6/);
+  });
+
+  test('a sub-ID the layout doc does not name', () => {
+    const root = fixture((rel, t) => {
+      if (rel !== SUBCASES) return t;
+      const extra = entryBlock(t, 'subcase', 'A33.01').replace('id = "A33.01"', 'id = "A33.02"');
+      return `${t.trimEnd()}\n\n${extra}`;
+    });
+    failsBothModes(root, /A33\.02 is not a sub-ID named in .*conformance-layout\.md/);
+  });
+
+  test('a renumbered sub-ID in the layout doc', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Conditional sub-ID A33.01 (back-channel', 'Conditional sub-ID A33.02 (back-channel') : t));
+    failsBothModes(root, /A33\.02 \(back-channel-logout, T30\.6\) is named in .* but missing/);
+  });
+});
+
+describe('the §1.1 leg catalogue', () => {
+  test('a leg that the Leg strings column no longer lists', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '`typescript/node22`, `typescript/node24`, ', '`typescript/node22`, ') : t));
+    failsBothModes(root, /A39 M3: unknown leg "typescript\/node24" \(not in the layout §1\.1 Leg strings column\)/);
+  });
+
+  test('a job whose first milestone the generator does not know', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '`scenarios-pg/x86_64` |', '`scenarios-pg/x86_64`, `scenarios-pg-extra` |') : t));
+    failsBothModes(root, /job scenarios-pg-extra of the layout §1\.1 Leg strings column has no known first milestone/);
+  });
+
+  test('a leg string listed under two envs', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '`scenarios-pg/x86_64` |', '`scenarios-pg/x86_64`, `live-wif` |') : t));
+    failsBothModes(root, /leg live-wif is listed under both pg and live/);
+  });
+
+  test('a §1.1 table without the Leg strings column', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '| CI job (legs) | Leg strings |', '| CI job (legs) | Legs |') : t));
+    failsBothModes(root, /layout §1\.1 table has no "Leg strings" column/);
+  });
+});
+
+describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
+  test('an edited table_text no longer renders the parent row', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'user-code approval, expiry/polling abuse, no interaction bypass"', 'user-code approval"') : t));
+    failsBothModes(root, /A27: rendered row differs from the committed row/);
+  });
+
+  test('a table_text that names another task than the first owner', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, '(device flow, T40.6)', '(device flow, T40.7)') : t));
+    failsBothModes(root, /A27\.01: table_text names T40\.7, but the first owner is T40\.6/);
+  });
+
+  test('a table_text whose feature does not match conditional_on', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'Conditional sub-ID A33.01 (back-channel logout,', 'Conditional sub-ID A33.01 (device flow,') : t));
+    failsBothModes(root, /A33\.01: table_text names device-flow, but conditional_on is back-channel-logout/);
+  });
+
+  test('an edited sentence in the layout row', () => {
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '(back-channel logout, T30.6): verified sid targeting', '(back-channel logout, T30.6): verified sid targeting only') : t));
+    failsBothModes(root, /A33: rendered row differs from the committed row/);
   });
 });
 
@@ -271,10 +501,11 @@ describe('hand-authored fields are kept', () => {
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
     const doc = parseToml(read(root, SCENARIOS));
     assert.deepEqual(doc.gates_passed, []);
-    const a14 = doc.scenario.find((e) => e.id === 'A14');
-    assert.deepEqual(a14.env_notes, { 'native-3os': 'Linux leg' });
-    assert.ok(a14.stage[0].legs.includes('clients-rust-native/ubuntu'));
-    assert.ok(!a14.stage[0].legs.includes('clients-rust-native/macos'));
+    const byId = new Map(doc.scenario.map((e) => [e.id, e]));
+    assert.deepEqual(byId.get('A14').stage[0].legs, ['migration-rehearsal']);
+    assert.deepEqual(byId.get('A62').stage[1].legs, ['deployed-topology-audit']);
+    assert.deepEqual(byId.get('A24').stage[0].legs, ['scenarios-pg/x86_64']);
+    assert.equal(cli('--root', root, '--check').status, 0);
   });
 });
 
