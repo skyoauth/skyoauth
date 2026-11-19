@@ -234,7 +234,8 @@ Existing contract questions that touch this ADR:
   2026-11-19): no `jti` rejection for ordinary requests; continuation admission
   stays one per `jti`.
 - **OQ-TM-14** — bulk invalidation through `auth_generation`. Decided (lead
-  decision, 2026-11-19) in the threat model.
+  decision, 2026-11-19) in the threat model; the audited compromise transition
+  of ADR-021 owns it.
 
 New questions raised by this ADR:
 

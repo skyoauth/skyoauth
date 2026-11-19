@@ -121,7 +121,9 @@ Existing contract questions that touch this ADR:
   switches are also emitted to an append-only external sink.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
   revision-checked, audited operation advances the tenant's `auth_generation`
-  without a provider change; to be specified before M1b and M3 (see ADR-021).
+  without a provider change; to be specified before M1b and M3. It is the
+  audited compromise transition, the only epoch-advancing path besides the
+  provider transition (ADR-021).
 
 New questions raised by this ADR:
 

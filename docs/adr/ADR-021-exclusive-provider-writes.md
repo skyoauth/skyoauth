@@ -41,41 +41,53 @@ transition's effect on state is ADR-012.
    ordinary import (design §7.3; ADR-008).
 4. A rejected generic write leaves epochs unchanged (tasks §8 A47).
 
-### Sole epoch-advancing semantic transition (M1b)
+### Sole routine epoch-advancing transition (M1b)
 
 5. One M1b primitive covers authentication-critical changes, initial activation
    from null, switch, disable and rollback: an immutable plan, dry-run and
    commit against expected login and configuration revisions; only its
    authorized commit updates login state and advances epochs atomically, with
-   the enrollment hold and audit (design §7.3; T13.9).
+   the enrollment hold and audit (design §7.3; T13.9). It is the sole routine
+   epoch-advancing transition; the audited compromise transition (OQ-TM-14) is
+   the only other one (lead decision, 2026-11-19).
 6. M5 migration tooling (T51) orchestrates this primitive and is not an
    alternate writer; break-glass recovery may run the same validated transition
    only (design §7.2; T51.1).
 7. Rollback uses the same transaction with fresh monotonic epochs (design §7.3;
    ADR-012).
 
+### Audited compromise transition
+
+8. The compromise transition owns the tenant-wide `auth_generation` advance
+   without a provider change: `POST` on
+   `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, by tenant
+   `provider_admin` or instance `security_admin`, revision-checked and audited.
+   It is a single-actor operation with no second approver (lead decision on
+   OQ-TM-14 and OQ-ADR021-1, 2026-11-19).
+
 ### Separate audited credential-only rotation
 
-8. A dedicated, audited `provider_admin` operation may replace the versioned
+9. A dedicated, audited `provider_admin` operation may replace the versioned
    secret or key reference for the same issuer, upstream `client_id`,
    client-authentication method, callbacks and identity and authentication
    semantics, including on the active provider (design §7.3; T30.9).
-9. It compares expected provider and credential revisions, validates the
-   unchanged semantic tuple and advances only administrative and credential
-   revisions. Provider `auth_epoch` and tenant `auth_generation` do not change;
-   sessions, native refresh families and pending transcripts keep their identity
-   binding (design §7.3).
-10. Only explicitly configured versions are used for bounded provider-supported
+10. It compares expected provider and credential revisions, validates the
+    unchanged semantic tuple and advances only administrative and credential
+    revisions. Provider `auth_epoch` and tenant `auth_generation` do not change;
+    sessions, native refresh families and pending transcripts keep their identity
+    binding (design §7.3).
+11. Only explicitly configured versions are used for bounded provider-supported
     overlap; there is no arbitrary secret or key fallback. Lack of upstream
     overlap may fail an in-flight code exchange but does not log out existing
     sessions (design §7.3).
-11. Requests that also change issuer, `client_id`, auth method, callbacks or
+12. Requests that also change issuer, `client_id`, auth method, callbacks or
     assurance are rejected by this endpoint and need the transition plan. GitOps
     uses an explicitly typed credential-only operation with identical validation
     (design §7.3).
-12. Secret bytes never appear in configuration exports or logs (design §7.3).
-13. A compromised credential can separately trigger a deliberate
-    epoch-invalidating transition (design §7.3; T30.9).
+13. Secret bytes never appear in configuration exports or logs (design §7.3).
+14. A compromised credential can separately trigger a deliberate
+    epoch-invalidating transition (design §7.3; T30.9): the audited compromise
+    transition (item 8) or a full provider transition.
 
 ## Consequences and requirements
 
@@ -111,11 +123,18 @@ Existing contract questions that touch this ADR:
   namespace.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
   revision-checked, audited operation advances the tenant's `auth_generation`
-  without a provider change; to be specified before M1b and M3.
+  without a provider change; to be specified before M1b and M3. It is the
+  compromise transition of item 8.
 
 New questions raised by this ADR:
 
-- **OQ-ADR021-1 — Second epoch-advancing path.** The baseline makes the provider
+- **OQ-ADR021-1 — Second epoch-advancing path.** Decided (lead decision,
+  2026-11-19): the provider transition is the sole routine epoch-advancing
+  transition, and the audited compromise transition (OQ-TM-14) is the only
+  other one. It owns the tenant-wide `auth_generation` advance at `POST` on
+  `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, by tenant
+  `provider_admin` or instance `security_admin`, single actor with no second
+  approver (item 8). Original question: the baseline makes the provider
   transition the "sole epoch-advancing semantic transition", while the OQ-TM-14
   decision adds an operation that advances `auth_generation` without a provider
   change. The sources do not say whether that operation is a mode of the

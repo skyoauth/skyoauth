@@ -28,8 +28,8 @@ to freeze "app/native flow cookies". The logical model holds this state in
 `BrowserFlowBinding`, `OIDCTransaction`, `HumanAuthentication`, `Session`,
 `OAuthAuthorizationRequest`, `OAuthAuthorizationCode` and the refresh tables
 (tasks §3). This ADR records how that state is stored, bound and expired. Native
-refresh semantics are ADR-004; provider epochs and their sole writer are ADR-012
-and ADR-021; stream continuations are ADR-010.
+refresh semantics are ADR-004; provider epochs, their sole routine writer and the
+audited compromise transition are ADR-012 and ADR-021; stream continuations are ADR-010.
 
 ## Decision
 
@@ -113,7 +113,9 @@ and ADR-021; stream continuations are ADR-010.
     atomically and invalidate affected flow bindings, authentication contexts,
     sessions, pending requests and codes, refresh families and dependent
     continuations (design §8 step 4; T51.4). Credential-only rotation keeps the
-    epochs (design §7.3; ADR-021). Rollback uses fresh monotonic epochs and
+    epochs (design §7.3; ADR-021). The audited compromise transition advances
+    the tenant `auth_generation` without a provider change (OQ-TM-14; ADR-021).
+    Rollback uses fresh monotonic epochs and
     never resets generations (design §7.3; T10.6).
 16. **Logout targeting.** Local logout revokes the session and authentication
     context. Optional back-channel logout verifies signature, issuer, audience,

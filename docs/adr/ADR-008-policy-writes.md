@@ -85,7 +85,7 @@ design §7.2 and identity-registry §5.2.
     and is recorded in the atomic audit record. A widening write without the
     flag is rejected (inferred: the decision names the flag as required). A
     distinct second `adm_*` approver, as OQ-TM-7 requires for provider switch
-    commits, is optional and not required by default.
+    commits, is optional and off by default.
 13. **Deleting a predicate is widening.** Matcher predicates are ANDed; omitted
     optional predicates are unconstrained; required production GitHub predicates
     cannot be omitted; deleting a predicate is explicit privilege widening and
