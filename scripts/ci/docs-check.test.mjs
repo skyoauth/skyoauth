@@ -200,6 +200,25 @@ describe('fences', () => {
     const tasks = `${TASKS}\n\`\`\`js\nconst x = 1;\n`;
     expectError(run({ tasks }), { file: T, line: tasks.split('\n').length - 2, check: 'fence', match: /never closed/ });
   });
+  test('an unclosed fence runs to end of file: the rest is code, with no follow-on errors', () => {
+    // CommonMark: an unclosed fenced block ends with the document, so nothing
+    // after the opener is prose (no references, links, headings or comments).
+    const tail = '```js\nconst x = 1;\n\nT99.9 A99 ADR-999 [x](missing.md) [y][nolabel] tasks §99\n\n## After fence\n\n<!-- unclosed\n';
+    const tasks = `${TASKS}\n${tail}`;
+    const r = run({ tasks });
+    assert.deepEqual(r.errors.map((e) => [e.line, e.check, e.msg]), [
+      [lineOf(tasks, '```js'), 'fence', "fence ```js opened here is never closed (needs a line of 3+ '`')"],
+    ]);
+    // Its "heading" is code too, so it is no anchor.
+    const design = edit(DESIGN, '[their DAG](skyoauth-tasks.md#task-dag)', '[their DAG](skyoauth-tasks.md#after-fence)');
+    expectError(run({ tasks, design }), { file: D, line: 3, check: 'link', match: /anchor '#after-fence' not found/ });
+    // An unclosed Mermaid block is not parsed, and its labels are not scanned.
+    const t2 = `${TASKS}\n~~~mermaid\nflowchart TD\n  A --> B["T99.9"]\n`;
+    assert.deepEqual(run({ tasks: t2 }).errors.map((e) => [e.line, e.check]), [[TASKS.split('\n').length + 1, 'fence']]);
+    // Text before the opener is still checked.
+    const t3 = `${TASKS}\nSee T99.8.\n\n${tail}`;
+    expectError(run({ tasks: t3 }), { file: T, line: lineOf(t3, 'See T99.8'), check: 'task', match: /undefined task T99\.8/ });
+  });
   test('~~~ fence closed by ``` does not close', () => {
     const design = edit(DESIGN, 'U <--> DB\n~~~', 'U <--> DB\n```');
     expectError(run({ design }), { file: D, line: lineOf(design, '~~~mermaid'), check: 'fence', match: /cannot close it/ });
@@ -236,8 +255,11 @@ describe('fences', () => {
       blocks: [{ start: 4, end: 6, char: '`', len: 3, info: '', lang: '', body: ['x'] }],
       comments: [{ start: 1, end: 3, col: 0, closeCol: 0 }],
       errors: [],
+      unclosed: null,
     });
-    assert.deepEqual(scanFences(['> <!-- a --> ```', '```']).blocks.length, 0);
+    // The comment line opens no fence; the next line opens one that never closes.
+    const open = scanFences(['> <!-- a --> ```', '```']);
+    assert.deepEqual([open.blocks.length, open.unclosed?.start], [0, 2]);
   });
   test('comment-like text inside a real fence is code', () => {
     const design = edit(DESIGN, '## 3. Architecture\n', '## 3. Architecture\n\n```html\n<!-- open\n```\n\nStill checked: T00.9.\n');
@@ -702,6 +724,29 @@ describe('links and anchors', () => {
     const d2 = edit(design, '[sub](#setext-sub)', '[sub](#setext-subs)');
     expectError(run({ design: d2 }), { file: D, check: 'link', match: /anchor '#setext-subs' not found/ });
   });
+  test('a list item followed by --- or === is not a setext heading', () => {
+    // CommonMark: "1. x" then "---" is a list and a thematic break; with
+    // "===" the underline is lazy paragraph text. Neither is a heading.
+    const cases = [
+      ['9. Ordered dot', '---', '#9-ordered-dot'],
+      ['9) Ordered paren', '===', '#9-ordered-paren'],
+      ['   123456789. Nine digits', '---', '#123456789-nine-digits'],
+      ['- Bullet dash', '---', '#--bullet-dash'],
+      ['* Bullet star', '===', '#-bullet-star'],
+      ['+ Bullet plus', '---', '#-bullet-plus'],
+      ['-', '===', '#-'], // an empty list item
+    ];
+    for (const [text, underline, anchor] of cases) {
+      const design = edit(DESIGN, 'Back to [the summary](#1-summary).', `Back to [the summary](#1-summary) and [it](${anchor}).\n\n${text}\n${underline}\n`);
+      expectError(run({ design }), { file: D, check: 'link', match: new RegExp(`anchor '${anchor}' not found`) });
+    }
+    // Nor does an ordered item create a numbered section.
+    const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Back to [the summary](#1-summary); see design §9.\n\n9. Ordered\n---\n');
+    expectError(run({ design }), { file: D, check: 'section', match: /'design §9' names no numbered section/ });
+    // Ten digits is not a list marker, so that is a heading; so is "9.x".
+    const ok = edit(DESIGN, 'Back to [the summary](#1-summary).', 'Back to [the summary](#1-summary), [a](#1234567890-x) and [b](#9x-y).\n\n1234567890. x\n---\n\n9.x y\n---\n');
+    assert.deepEqual(run({ design: ok }).errors, []);
+  });
   test('githubSlug matches GitHub', () => {
     assert.equal(githubSlug('T00 — Protocol and threat model (M0)'), 't00--protocol-and-threat-model-m0');
     assert.equal(githubSlug('5.2.1 Match the browser approval to the initiating CLI'), '521-match-the-browser-approval-to-the-initiating-cli');
@@ -792,7 +837,10 @@ describe('command line', () => {
     assert.match(p.stdout, /^2 ADRs are never referenced by ID; --verbose lists them$/m);
     // Only the bare-§ note is left as a counted info line.
     assert.match(p.stdout, /^\(1 info notes; rerun with --verbose to list them\)$/m);
-    assert.match(p.stdout, /\nOK \(1 warning\(s\)\)/);
+    // The summary counts every ::warning line, the missing-row one included.
+    assert.match(p.stdout, /\nOK \(2 warning\(s\)\)/);
+    assert.equal(ann.filter((l) => l.startsWith('::warning ')).length, 2);
+    assert.match(local.stdout, /\nOK \(1 warning\(s\)\)/);
     // One unreferenced ADR reads in the singular (the base fixture's ADR-002).
     assert.match(cli(['--root', fixture()]).stdout, /^1 ADR is never referenced by ID; --verbose lists it$/m);
   });
@@ -805,6 +853,12 @@ describe('command line', () => {
       p.stdout,
       new RegExp(`^::error file=docs/skyoauth-tasks\\.md,line=${line},title=docs-check \\[task\\]::docs/skyoauth-tasks\\.md:${line}: error \\[task\\] range 'T00\\.1–T00\\.9'`, 'm'),
     );
+    // A missing-row annotation counts as a warning in the CI summary.
+    const r2 = fixture({ 'docs/adr/ADR-009-x.md': '# ADR-009: X\n' }, { tasks: edit(TASKS, 'after T00.1–T00.2', 'after T00.1–T00.9') });
+    const p2 = cli(['--root', r2], { env: { GITHUB_ACTIONS: 'true' } });
+    assert.equal(p2.stdout.split('\n').filter((l) => l.startsWith('::warning ')).length, 1);
+    assert.match(p2.stdout, /\nFAILED: 1 error\(s\), 1 warning\(s\)/);
+    assert.match(cli(['--root', r2]).stdout, /\nFAILED: 1 error\(s\), 0 warning\(s\)/);
   });
   test('formatAnnotation escapes workflow-command metacharacters', () => {
     assert.equal(
