@@ -11,11 +11,14 @@
   separation"), T10–T14, T20–T26, T30–T33, T40, T50–T52, §8 (conformance
   matrix), §11 (ADR-002, ADR-007, ADR-008, ADR-011, ADR-013, ADR-014, ADR-016,
   ADR-020, ADR-021, ADR-023).
-- **Related contracts (proposed on other branches, not yet on `main`):**
-  public API (`API-`), errors and retry (`ERR-`), token profiles (`TP-`) and
-  identity registry (`IR-`) on branch `claude/m0-public-contracts`; gateway
-  containment (`GW-`) and lifetimes (`LT-`) on branch
-  `claude/m0-gateway-containment`. They are cited by requirement ID only.
+- **Related contracts (proposed, M0; in [`docs/contracts/`](contracts/README.md)):**
+  [public API](contracts/public-api.md) (`API-`),
+  [errors and retry](contracts/errors-retry.md) (`ERR-`),
+  [token profiles](contracts/token-profiles.md) (`TP-`),
+  [identity registry](contracts/identity-registry.md) (`IR-`),
+  [gateway containment](contracts/gateway-containment.md) (`GW-`) and
+  [lifetimes](contracts/lifetimes.md) (`LT-`). They are cited by requirement
+  ID.
 
 ## Conventions
 
@@ -145,7 +148,7 @@ open questions match the sections in §5.
 | ID    | Primary specified mitigations                                                                          | Conformance references                           | Task tests                        | Open questions                                  |
 | ----- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------ | --------------------------------- | ----------------------------------------------- |
 | TM-01 | Push-only immutable-ID bindings, grant-directed evaluation, no WIF refresh, 300 s access cap           | A01, A02, A21, A25, A26, A36, A37, A50           | T22.5, T52.2                      | OQ-TM-2 (decided)                               |
-| TM-02 | Source ID selects one verifier; fixed TokenReview endpoint; no token-directed keys                     | A03–A07, A15, A19, A28, A29, A54                 | T11.10, T52.1                     | OQ-TM-13                                        |
+| TM-02 | Source ID selects one verifier; fixed TokenReview endpoint; no token-directed keys                     | A03–A07, A15, A19, A28, A29, A54                 | T11.10, T52.1                     | OQ-TM-13 (decided)                              |
 | TM-03 | Instance audience registry and assignments; signed tenant; backend canonical tenant check              | A13, A26, A29, A31, A43, A46, A48, A49           | T52.6                             | —                                               |
 | TM-04 | Checker identity separate from token subject; one audience per credential                              | A25, A31, A44, A45, A56                          | —                                 | —                                               |
 | TM-05 | Private `typ` plus signed profile plus ingress; disjoint key sets                                      | A10, A18, A30, A44, A55, A62                     | T52.1                             | —                                               |
@@ -158,13 +161,13 @@ open questions match the sections in §5.
 | TM-12 | Sole active-provider pointer; guarded switch; narrow credential-only rotation                          | A14, A15, A16, A17, A42, A47, A53, A63           | T51.11                            | OQ-TM-7 (decided)                               |
 | TM-13 | Route-level Cookie/CSRF and Set-Cookie removal on every non-SkyOAuth route                             | A08, A10, A18, A61                               | T52.4                             | —                                               |
 | TM-14 | Fail-closed admission guard, sole-writer controller, protected-scope projection, observation           | A18, A36, A58, A61                               | T52.4                             | OQ-TM-11 (decided)                              |
-| TM-15 | Durably closed bootstrap; instance- and argument-bound single-use recovery challenge; offline key      | A20, A22, A32, A48, A64                          | T13.6, T52.5                      | OQ-TM-8, OQ-TM-9 (decided), OQ-TM-15            |
-| TM-16 | Signer isolation, standby custody and tripwire, keyed hashes, fail-closed stores, sandboxed translator | A11, A19, A31, A35, A58, A62                     | T32.3, T50.3, T50.4, T52.5, T52.8 | OQ-TM-10–OQ-TM-12 (decided), OQ-TM-14, OQ-TM-16 |
-| TM-17 | Per-call credential and role check, scoped roles, workstation-held keys, operator disable, recovery    | A32, A48, A64                                    | T13.6, T52.5                      | OQ-TM-7, OQ-TM-8, OQ-TM-12 (decided), OQ-TM-15  |
+| TM-15 | Durably closed bootstrap; instance- and argument-bound single-use recovery challenge; offline key      | A20, A22, A32, A48, A64                          | T13.6, T52.5                      | OQ-TM-8, OQ-TM-9, OQ-TM-15 (decided)            |
+| TM-16 | Signer isolation, standby custody and tripwire, keyed hashes, fail-closed stores, sandboxed translator | A11, A19, A31, A35, A58, A62                     | T32.3, T50.3, T50.4, T52.5, T52.8 | OQ-TM-10–OQ-TM-12, OQ-TM-14, OQ-TM-16 (decided) |
+| TM-17 | Per-call credential and role check, scoped roles, workstation-held keys, operator disable, recovery    | A32, A48, A64                                    | T13.6, T52.5                      | OQ-TM-6–OQ-TM-8, OQ-TM-12, OQ-TM-15 (decided)   |
 | TM-18 | Audience-bound selected-source proofs, replay capability, request-bound private assertions, no logging | A10, A23, A24, A54, A61                          | T52.4                             | —                                               |
 | TM-19 | Origin plus CSRF, HttpOnly host-only cookies, no tokens in JavaScript, same-origin SPA transport       | A09, A39, A40                                    | T33.5, T33.7                      | —                                               |
 | TM-20 | Header stripping and overwrite, trusted-chain authority, no rewrites, unreachable backends             | A18, A36, A46, A61                               | T25.4, T25.5, T52.4               | —                                               |
-| TM-21 | Approved exact egress, fixed TokenReview endpoint, no token-directed URLs, bounded fetches             | A03, A05                                         | T11.2, T24.3, T30.3               | OQ-TM-13                                        |
+| TM-21 | Approved exact egress, fixed TokenReview endpoint, no token-directed URLs, bounded fetches             | A03, A05                                         | T11.2, T24.3, T30.3               | OQ-TM-13 (decided)                              |
 | TM-22 | Restore preserves consumed state or quarantines; fresh epochs; no revival on re-enable or promotion    | A17, A33, A34, A35                               | T51.8, T51.9                      | —                                               |
 | TM-23 | Bounded continuation leases, recheck before deadline, per-`jti` admission, bearer close at expiry      | A12, A56                                         | T32.12, T52.6                     | —                                               |
 
@@ -255,18 +258,20 @@ tenant `trust_admin` configuring a source.
 
 **Specified mitigations.**
 
-| Mitigation                                                                                                                                   | Source                                          |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| The source ID selects exactly one registered verifier; it is not proof of tenant or cluster; issuer is not a unique key; no probing          | Design §3.1, §5.4, §7.1; T11.7; API-013, IR-032 |
-| TokenReview uses a fixed endpoint, versioned CA, reviewer reference, explicit `spec.audiences`, timeout and private egress without redirects | Design §5.4; T11.8, T23.2                       |
-| Returned SA identity, UID and Pod evidence are bound to the selected cluster; no invented claims or `jti`                                    | Design §5.4; T23.3                              |
-| No degradation from failed TokenReview to local validation; local JWT mode is a separate enrollment                                          | Design §5.4; T23.6                              |
-| Reject `jku`, `x5u`, embedded keys, `alg=none`, weak substitution, private-key uploads and arbitrary redirects; bounded sizes and clocks     | Design §5.4; T11.5, T24.3                       |
-| Uploaded keysets are public-only, same-tenant, with explicit overlap; conflicting live `kid`/key pairs deny                                  | Design §5.4; T11.3, T11.9                       |
-| Discovery uses exact issuer, approved egress, algorithm/audience allowlists and bounded cache; no permissive fallback                        | Design §5.4; T11.2, T11.4                       |
-| Composite tenant references prevent cross-tenant source or keyset use                                                                        | Design §7.1; IR-031                             |
-| Verifier configurations, CA and reviewer references survive provider migration unchanged                                                     | Design §2 (C05), §8; T23.7                      |
-| SkyOAuth's own keys: ingress and profile select the trust set before `kid` lookup                                                            | Design §6.2; TP-010, TP-011                     |
+| Mitigation                                                                                                                                                                                                     | Source                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| The source ID selects exactly one registered verifier; it is not proof of tenant or cluster; issuer is not a unique key; no probing                                                                            | Design §3.1, §5.4, §7.1; T11.7; API-013, IR-032 |
+| TokenReview uses a fixed endpoint, versioned CA, reviewer reference, explicit `spec.audiences`, timeout and private egress without redirects                                                                   | Design §5.4; T11.8, T23.2                       |
+| Returned SA identity, UID and Pod evidence are bound to the selected cluster; no invented claims or `jti`                                                                                                      | Design §5.4; T23.3                              |
+| No degradation from failed TokenReview to local validation; local JWT mode is a separate enrollment                                                                                                            | Design §5.4; T23.6                              |
+| Reject `jku`, `x5u`, embedded keys, `alg=none`, weak substitution, private-key uploads and arbitrary redirects; bounded sizes and clocks                                                                       | Design §5.4; T11.5, T24.3                       |
+| Uploaded keysets are public-only, same-tenant, with explicit overlap; conflicting live `kid`/key pairs deny                                                                                                    | Design §5.4; T11.3, T11.9                       |
+| Discovery uses exact issuer, approved egress, algorithm/audience allowlists and bounded cache; no permissive fallback                                                                                          | Design §5.4; T11.2, T11.4                       |
+| Composite tenant references prevent cross-tenant source or keyset use                                                                                                                                          | Design §7.1; IR-031                             |
+| Verifier configurations, CA and reviewer references survive provider migration unchanged                                                                                                                       | Design §2 (C05), §8; T23.7                      |
+| SkyOAuth's own keys: ingress and profile select the trust set before `kid` lookup                                                                                                                              | Design §6.2; TP-010, TP-011                     |
+| Secret references (`ca_bundle_ref`, `reviewer_credential_ref`, provider `credential_ref`) resolve only within the tenant's own provisioned secret namespace (decided, OQ-TM-13)                                | Lead decision; spec amendment pending (§6.1)    |
+| Discovery, JWKS and TokenReview egress destinations, including `token_review_endpoint`, come from an allowlist approved by instance `security_admin`; tenant operators only choose from it (decided, OQ-TM-13) | Lead decision; spec amendment pending (§6.1)    |
 
 **Conformance references.** A03, A04, A05, A06, A07, A15, A19, A28, A29,
 A54.
@@ -282,16 +287,16 @@ A54.
   source; that is an independent operator action (design §2).
 - TokenReview revocation follows the cluster's documented semantics, not
   instantaneous revocation (design §5.4).
+- A tenant operator can still reference any secret in its own tenant's
+  namespace and choose any allowlisted egress destination; the allowlist and
+  the namespace provisioning are trusted (OQ-TM-13, decided).
 
 **Gaps.**
 
-- **Gap (OQ-TM-13):** a tenant `trust_admin` sets a TokenReview source's
-  `token_review_endpoint`, `ca_bundle_ref` and `reviewer_credential_ref`
-  (tasks §3), and a tenant `provider_admin` sets a provider's `credential_ref`
-  (design §7.3). The sources do not say which external secrets a tenant
-  operator may reference, whether a reference can name a secret provisioned
-  for another tenant, or who approves the "approved HTTPS egress" and
-  "private egress" destinations (T11.2, T11.8).
+- OQ-TM-13 is decided: secret references resolve only within a per-tenant
+  provisioned namespace, and egress destinations come from an allowlist that
+  instance `security_admin` approves. The spec amendment must land before
+  M1a (T11.8) (§6.1).
 - OQ-TP-3 (allowed algorithms for SkyOAuth's own tokens) remains open in the
   token-profiles contract.
 
@@ -888,7 +893,8 @@ holder.
 | The workstation verifies and displays the challenge context before signing with the offline key                                                                                                                                  | Design §7.2                                  |
 | Break-glass permits only bounded operator restoration or the validated provider switch/rollback; it cannot edit WIF, reassign audiences or mint tokens                                                                           | Design §7.2; API-152                         |
 | Operator restoration only enrolls a replacement `security_admin` credential and revokes operator credentials; the same signed transaction enrolls a replacement recovery public key; one recovery key in v0.1 (decided, OQ-TM-8) | Lead decision; spec amendment pending (§6.1) |
-| The bootstrap/recovery socket is owned by the service UID with mode 0600 (decided, OQ-TM-9)                                                                                                                                      | Lead decision                                |
+| The bootstrap/recovery socket is owned by the service UID with mode 0600 (decided, OQ-TM-9)                                                                                                                                      | Lead decision; spec amendment pending (§6.1) |
+| No online operation, including `security_admin` "signer/recovery policy", replaces the recovery key; only a transaction signed by the current recovery key over the local channel does (decided, OQ-TM-15)                       | Lead decision; spec amendment pending (§6.1) |
 | Private keys stay on the workstation or hardware signer; unsupported adapters fail without key export                                                                                                                            | Design §7.2; T13.7                           |
 | Independent `adm_*` identities; OIDC and WIF never grant operator authority; credential and role checked on every call                                                                                                           | Design §7.2; T13.1; API-002                  |
 | Audit and alert on recovery; rotate recovery keys after use                                                                                                                                                                      | Design §7.2                                  |
@@ -909,8 +915,7 @@ holder.
 - One recovery key is a single point of custody in v0.1; a quorum is
   deferred (OQ-TM-8, decided).
 
-**Gaps.** None open. OQ-TM-8 and OQ-TM-9 are decided. Online rotation of the
-recovery key is open (OQ-TM-15, TM-17).
+**Gaps.** None open. OQ-TM-8, OQ-TM-9 and OQ-TM-15 are decided.
 
 ### TM-16 — Runtime and database compromise
 
@@ -921,18 +926,18 @@ preparation supervisor or its translator helper, or a backend.
 
 **Specified limits by component.**
 
-| Compromised component                                                        | Spec limits                                                                                                                                                                                                                                                                                 | Residual                                                                                                                                                                                                                                                                                   | Source                                           |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| Check-serving auth replica (internal signer)                                 | No public access-signing permission (design §6.2; extended by OQ-TM-10, decided, to every process serving Check or holding internal keys); standby key in separate custody; live checks compare identity to stored records; disable and promote a clean standby; standby-use tripwire       | Can forge `human_session` evidence until the key is disabled; offline caches keep up to 60 s. Session cookies seen in Check metadata stay usable until those sessions are revoked or expire, not until the key is disabled; no bulk session revocation is specified (OQ-TM-14)             | Design §6.2; T32.14; TP-082                      |
-| Token-issuing replica (`/oauth/token`, `/oauth/authorize`, `/oauth/confirm`) | Needs public signing to issue access tokens; signer isolation keeps the private key out of the replica when the signer is separately deployed or uses KMS/HSM                                                                                                                               | Isolation protects the key, not the signing service: while compromised the replica can have the signer sign any access token the signer accepts, for any audience or tenant, unless the signer re-checks issuance policy (OQ-TM-16). Sees proofs, codes and refresh credentials in transit | Design §3.1, §6; T50.3                           |
-| Public signer                                                                | Isolated from public handlers; may be separately deployed or KMS/HSM; retired keys retained through TTL plus skew; emergency disable and rotation with a prepublished standby (decided, OQ-TM-10)                                                                                           | Can mint any access token for any audience or tenant until key disable propagates to verifier JWKS caches                                                                                                                                                                                  | Design §3.1, §6                                  |
-| PostgreSQL read                                                              | Secrets stored as keyed hashes; retry envelope encrypted with a key outside the database; reviewer and provider credentials are references; no private keys                                                                                                                                 | Exposes policy, subjects and audit                                                                                                                                                                                                                                                         | Design §5.2.2, §7; tasks §3                      |
-| PostgreSQL write                                                             | Store failure never expands privilege; restore preserves one-time state or quarantines; security events also go to an append-only external sink (decided, OQ-TM-12)                                                                                                                         | Can rewrite policy, role bindings, operator credentials and consumed state; design §9 calls this a separate high-impact risk                                                                                                                                                               | Design §7, §9                                    |
-| Envoy                                                                        | Holds no signing key; backends require the authenticated gateway channel                                                                                                                                                                                                                    | Sees cookies and tokens in transit; holds its channel credentials; can skip removals                                                                                                                                                                                                       | Design §3.1, §4                                  |
-| Route controller                                                             | No signer, WIF or human authority; approvals bind exact plans; old epochs cannot reopen a gate                                                                                                                                                                                              | Sole writer and sole reporter of observations for its scope; accepted for v0.1, with backend credential validation compensating (OQ-TM-11, decided)                                                                                                                                        | Design §4.2; GW-100–GW-106                       |
-| Preparation supervisor (credentialed)                                        | Scoped API calls and scoped Secret reads only; records only nonsecret dependency metadata; real key material never enters helper input, logs, plans, results or dumps                                                                                                                       | Reads the real Secrets in its scope (for example downstream TLS private keys) and is on the credentialed side of the sandbox (design §4.2), so it also carries the route-controller residual                                                                                               | Design §4.2; GW-084, GW-160–GW-163; T32.3, T50.4 |
-| Translator helper                                                            | Enforced sandbox: fixed binary and arguments, no shell, network, credentials, service-account automount or privileged sockets; bounded input and output through pipes; receives only deterministic nonproduction placeholder Secrets; the service binds its result to the pending operation | A wrong translation fails preparation or leaves observations unmatched, so the gate stays closed (availability). A sandbox escape gains the supervisor's position                                                                                                                          | Design §4.2; GW-080–GW-085, GW-162; T32.3, T50.4 |
-| Backend                                                                      | Receives no browser credentials; checker identity limited to its audience and tenants                                                                                                                                                                                                       | Can present received bearer tokens within its audience until expiry                                                                                                                                                                                                                        | Design §4, §6.1                                  |
+| Compromised component                                                        | Spec limits                                                                                                                                                                                                                                                                                                                             | Residual                                                                                                                                                                                                                                                                                                                                                                      | Source                                           |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| Check-serving auth replica (internal signer)                                 | No public access-signing permission (design §6.2; extended by OQ-TM-10, decided, to every process serving Check or holding internal keys); standby key in separate custody; live checks compare identity to stored records; disable and promote a clean standby; standby-use tripwire                                                   | Can forge `human_session` evidence until the key is disabled; offline caches keep up to 60 s. Session cookies seen in Check metadata stay usable until those sessions are revoked or expire, or the tenant's `auth_generation` is advanced (decided, OQ-TM-14), not until the key is disabled                                                                                 | Design §6.2; T32.14; TP-082                      |
+| Token-issuing replica (`/oauth/token`, `/oauth/authorize`, `/oauth/confirm`) | Needs public signing to issue access tokens; signer isolation keeps the private key out of the replica when the signer is separately deployed or uses KMS/HSM; the signer enforces structural limits (`typ`/profile, `iss`, registered audience, `exp`−`iat` ≤ 300 s) and logs every signature to the external sink (decided, OQ-TM-16) | Isolation protects the key, not the signing service: the signer does not re-check issuance policy, so while compromised the replica can have the signer sign any structurally valid access token for any registered audience or tenant; accepted for v0.1, and each signature is logged externally (OQ-TM-16, decided). Sees proofs, codes and refresh credentials in transit | Design §3.1, §6; T50.3                           |
+| Public signer                                                                | Isolated from public handlers; may be separately deployed or KMS/HSM; retired keys retained through TTL plus skew; emergency disable and rotation with a prepublished standby (decided, OQ-TM-10)                                                                                                                                       | Can mint any access token for any audience or tenant until key disable propagates to verifier JWKS caches                                                                                                                                                                                                                                                                     | Design §3.1, §6                                  |
+| PostgreSQL read                                                              | Secrets stored as keyed hashes; retry envelope encrypted with a key outside the database; reviewer and provider credentials are references; no private keys                                                                                                                                                                             | Exposes policy, subjects and audit                                                                                                                                                                                                                                                                                                                                            | Design §5.2.2, §7; tasks §3                      |
+| PostgreSQL write                                                             | Store failure never expands privilege; restore preserves one-time state or quarantines; security events also go to an append-only external sink (decided, OQ-TM-12)                                                                                                                                                                     | Can rewrite policy, role bindings, operator credentials and consumed state; design §9 calls this a separate high-impact risk                                                                                                                                                                                                                                                  | Design §7, §9                                    |
+| Envoy                                                                        | Holds no signing key; backends require the authenticated gateway channel                                                                                                                                                                                                                                                                | Sees cookies and tokens in transit; holds its channel credentials; can skip removals                                                                                                                                                                                                                                                                                          | Design §3.1, §4                                  |
+| Route controller                                                             | No signer, WIF or human authority; approvals bind exact plans; old epochs cannot reopen a gate                                                                                                                                                                                                                                          | Sole writer and sole reporter of observations for its scope; accepted for v0.1, with backend credential validation compensating (OQ-TM-11, decided)                                                                                                                                                                                                                           | Design §4.2; GW-100–GW-106                       |
+| Preparation supervisor (credentialed)                                        | Scoped API calls and scoped Secret reads only; records only nonsecret dependency metadata; real key material never enters helper input, logs, plans, results or dumps                                                                                                                                                                   | Reads the real Secrets in its scope (for example downstream TLS private keys) and is on the credentialed side of the sandbox (design §4.2), so it also carries the route-controller residual                                                                                                                                                                                  | Design §4.2; GW-084, GW-160–GW-163; T32.3, T50.4 |
+| Translator helper                                                            | Enforced sandbox: fixed binary and arguments, no shell, network, credentials, service-account automount or privileged sockets; bounded input and output through pipes; receives only deterministic nonproduction placeholder Secrets; the service binds its result to the pending operation                                             | A wrong translation fails preparation or leaves observations unmatched, so the gate stays closed (availability). A sandbox escape gains the supervisor's position                                                                                                                                                                                                             | Design §4.2; GW-080–GW-085, GW-162; T32.3, T50.4 |
+| Backend                                                                      | Receives no browser credentials; checker identity limited to its audience and tenants                                                                                                                                                                                                                                                   | Can present received bearer tokens within its audience until expiry                                                                                                                                                                                                                                                                                                           | Design §4, §6.1                                  |
 
 **Conformance references.** A11, A19, A31, A35, A58, A62. No conformance row
 targets database-write compromise; design §9 treats it as residual.
@@ -944,19 +949,23 @@ containment), T50.3 (signer isolation), T52.5 (signer separation), T52.8
 **Residual risk.** Root, runtime or database compromise remains a separate
 high-impact risk (design §9). Authorization cannot undo an operation already
 accepted. After an auth-replica compromise, exposed session cookies stay
-valid until their sessions are revoked or expire; only an epoch-advancing
-provider transition invalidates a tenant's sessions in bulk (design §7.3,
-§8).
+valid until their sessions are revoked or expire, or until the tenant's
+`auth_generation` advances: through an epoch-advancing provider transition
+(design §7.3, §8) or through the revision-checked operation that advances it
+without a provider change (decided, OQ-TM-14). That operation acts on one
+tenant: it cannot target a single origin, and an instance-wide response needs
+it for every tenant (inferred). A
+compromised token-issuing replica can have the public signer sign any
+structurally valid access token for a registered audience until the replica
+is contained; the external signature log supports detection and scoping, not
+prevention (OQ-TM-16, decided).
 
 **Gaps.**
 
-- **Gap (OQ-TM-14):** no operation revokes all sessions of a tenant, origin or
-  instance without a provider transition. Related: OQ-API-2 (no operator
-  session-revocation endpoint).
-- **Gap (OQ-TM-16):** the sources do not say whether a separately deployed
-  public signer re-validates what it is asked to sign, or signs whatever the
-  token-issuing replica submits.
-- OQ-TM-10, OQ-TM-11 and OQ-TM-12 are decided.
+- None open. OQ-TM-10, OQ-TM-11, OQ-TM-12, OQ-TM-14 and OQ-TM-16 are decided.
+  The OQ-TM-14 operation must be specified before M1b and M3 (§6.1). Related:
+  OQ-API-2 (no operator session-revocation endpoint) stays open in the
+  public-API contract.
 
 ### TM-17 — Operator-credential compromise
 
@@ -997,6 +1006,7 @@ or a tenant operator (`trust_admin`, `client_admin`, `provider_admin`,
 | If `security_admin` itself is compromised, recovery enrolls a replacement `security_admin` credential, revokes operator credentials and replaces the recovery public key (decided, OQ-TM-8; TM-15) | Lead decision; spec amendment pending (§6.1)            |
 | Provider switch/rollback commit and links to existing principals need a distinct second approver (decided, OQ-TM-7)                                                                                | Lead decision; spec amendment pending (§6.1)            |
 | Security events, including operator writes, recovery, key operations, switches and standby tripwire, also go to an append-only external sink (decided, OQ-TM-12)                                   | Lead decision; spec amendment pending (§6.1)            |
+| No online path, including a stolen `security_admin` credential, can replace the recovery key; only a transaction signed by the current recovery key over the local channel can (decided, OQ-TM-15) | Lead decision; spec amendment pending (§6.1)            |
 
 **Revocation and recovery.**
 
@@ -1022,13 +1032,13 @@ or a tenant operator (`trust_admin`, `client_admin`, `provider_admin`,
   role until it is disabled; detection depends on audit and alerts.
 - Under the explicit single-actor instance policy (OQ-TM-7), one stolen
   `provider_admin` credential can still switch providers and link accounts.
+- A stolen `security_admin` credential cannot disable break-glass recovery by
+  replacing the recovery key (OQ-TM-15, decided), but it can revoke
+  legitimate operators until recovery runs.
 
-**Gaps.**
-
-- **Gap (OQ-TM-15):** design §7.2 gives `security_admin` "signer/recovery
-  policy". The sources do not say whether an online `security_admin` can
-  replace or rotate the recovery public key. If it can, a stolen
-  `security_admin` credential can disable break-glass recovery.
+**Gaps.** None open. OQ-TM-15 is decided: design §7.2 "signer/recovery
+policy" does not include replacing the recovery key; the spec amendment is
+pending (§6.1).
 
 ### TM-18 — Assertion theft
 
@@ -1173,10 +1183,13 @@ a token presenter who controls JWT headers.
 
 **Task tests.** T11.2, T24.3, T30.3.
 
-**Residual risk.** An approved egress destination is trusted.
+**Residual risk.** An egress destination on the allowlist that instance
+`security_admin` approves is trusted; a tenant operator can choose any
+allowlisted destination (OQ-TM-13, decided).
 
-**Gaps.** Who may approve egress destinations and reference external
-secrets is open (OQ-TM-13, TM-02).
+**Gaps.** None open. OQ-TM-13 is decided: tenant operators only choose
+egress destinations from the approved allowlist, and secret references
+resolve only within the tenant's provisioned namespace (TM-02, §6.1).
 
 ### TM-22 — Credential resurrection
 
@@ -1335,7 +1348,7 @@ that ignores a denial keeps sending; the backend is trusted to stop.
 - **OQ-TM-10 — Public signer isolation and compromise response.** **Decided
   — lead decision, 2026-11-19:** processes that serve Check or hold internal
   keys get no public-signing permission, which is the separation T00.8 asks
-  to ratify. Public-key emergency disable and rotation is specified: a
+  to ratify. Public-key emergency disable and rotation is decided: a
   prepublished standby, a bound on JWKS cache max-age and an admin endpoint
   (this resolves OQ-API-3). The token-issuing replica is modelled in TM-16.
   Spec amendment follow-up (§6.1). Original question: what isolation is the
@@ -1358,21 +1371,40 @@ that ignores a denial keeps sending; the backend is trusted to stop.
   Spec amendment follow-up (§6.1). Original question: must audit events and
   alerts also be sent to a store outside PostgreSQL so a database-write
   compromise cannot erase them?
-- **OQ-TM-13 — External secret references and egress approval.** Which
-  external secrets may a tenant `trust_admin` (`token_review_endpoint`,
-  `ca_bundle_ref`, `reviewer_credential_ref`) or `provider_admin` (provider
-  `credential_ref`) reference, can a reference name a secret provisioned for
-  another tenant, and who approves discovery and TokenReview egress
-  destinations? (TM-02, TM-21)
-- **OQ-TM-14 — Bulk session revocation.** After an auth-replica compromise,
-  exposed session cookies stay valid until their sessions are revoked or
-  expire. Should there be an operation that revokes all sessions of a tenant,
-  origin or instance without a provider transition? Related: OQ-API-2.
-  (TM-16)
-- **OQ-TM-15 — Online recovery-key rotation.** May an online `security_admin`
-  replace or rotate the recovery public key ("signer/recovery policy", design
-  §7.2), or only the signed recovery transaction (OQ-TM-8)? (TM-17)
-- **OQ-TM-16 — Signer re-check.** Does a separately deployed public signer
+- **OQ-TM-13 — External secret references and egress approval.** **Decided
+  — lead decision, 2026-11-19:** secret references resolve only within a
+  per-tenant provisioned secret namespace, so a reference cannot name a
+  secret provisioned for another tenant. Discovery, JWKS and TokenReview
+  egress destinations come from an allowlist approved by instance
+  `security_admin`; tenant operators only choose from it. The amendment must
+  land before M1a (T11.8). Spec amendment follow-up (§6.1). Original
+  question: which external secrets may a tenant `trust_admin`
+  (`token_review_endpoint`, `ca_bundle_ref`, `reviewer_credential_ref`) or
+  `provider_admin` (provider `credential_ref`) reference, can a reference
+  name a secret provisioned for another tenant, and who approves discovery
+  and TokenReview egress destinations? (TM-02, TM-21)
+- **OQ-TM-14 — Bulk session revocation.** **Decided — lead decision,
+  2026-11-19:** add a revision-checked, audited operation that advances the
+  tenant's `auth_generation` without a provider change, which invalidates the
+  tenant's sessions in bulk. It must be specified before M1b and M3. Spec
+  amendment follow-up (§6.1). Original question: after an auth-replica
+  compromise, exposed session cookies stay valid until their sessions are
+  revoked or expire. Should there be an operation that revokes all sessions
+  of a tenant, origin or instance without a provider transition? Related:
+  OQ-API-2. (TM-16)
+- **OQ-TM-15 — Online recovery-key rotation.** **Decided — lead decision,
+  2026-11-19:** no online path replaces the recovery key. Only a transaction
+  signed by the recovery key over the deployment-local channel does
+  (OQ-TM-8). Spec amendment follow-up (§6.1). Original question: may an
+  online `security_admin` replace or rotate the recovery public key
+  ("signer/recovery policy", design §7.2), or only the signed recovery
+  transaction (OQ-TM-8)? (TM-15, TM-17)
+- **OQ-TM-16 — Signer re-check.** **Decided — lead decision, 2026-11-19:**
+  v0.1 accepts the residual risk that the public signer does not re-check
+  issuance policy. The signer enforces structural limits: `typ` and profile,
+  `iss`, a registered audience, and `exp` − `iat` ≤ 300 s. It logs every
+  signature to the external sink (OQ-TM-12). Spec amendment follow-up
+  (§6.1). Original question: does a separately deployed public signer
   re-validate issuance policy for what it signs, or sign whatever the
   token-issuing replica submits? (TM-16)
 
@@ -1390,10 +1422,26 @@ amendment to the design, tasks plan and contracts:
   `/human-links` entry; T30.4, T51.3.
 - **OQ-TM-7:** design §7.2, §7.3 and §8; API-148; the link operation; T13.9,
   T51.1.
-- **OQ-TM-8:** design §7.2; T13.5.
+- **OQ-TM-8:** design §7.2; T13.5; API-152 and T13.4 (scope of the recovery
+  transaction: replacement `security_admin` credential, operator-credential
+  revocation, replacement recovery public key).
+- **OQ-TM-9:** design §7.2 (recovery socket owned by the service UID, mode
+  0600; `pods/exec` on the SkyOAuth namespace restricted to trusted
+  infrastructure administrators); T13.4; T50.1.
 - **OQ-TM-10:** design §3.1, §6 and §6.2; T20.2, T50.3; ADR-002; a public
   access-token key administration endpoint (OQ-API-3).
 - **OQ-TM-12:** design §7 and §7.2; T50.6.
+- **OQ-TM-13:** design §5.4 and §7.3 (per-tenant secret namespace for
+  `ca_bundle_ref`, `reviewer_credential_ref` and provider `credential_ref`;
+  `security_admin`-approved egress allowlist); tasks §3 (`TrustSource`,
+  `HumanProvider`); T11.2, T11.8, T23.2; before M1a.
+- **OQ-TM-14:** design §5.1.1 and §7.3; tasks §3 (`TenantLoginState`); the
+  public-API operator endpoint matrix (OQ-API-2); the lifetimes contract §4
+  epochs table; T31.6; before M1b and M3.
+- **OQ-TM-15:** design §7.2 ("signer/recovery policy" excludes replacing the
+  recovery key); API-152; T13.5.
+- **OQ-TM-16:** design §3.1 and §6 (public signer structural limits and
+  signature logging); T20.2, T50.3; T50.6 (external sink).
 
 ## 7. Contradictions and deployment implications
 
@@ -1427,8 +1475,9 @@ and OQ-LT-14 (ADR-010 record).
    hold public signing permission (decided, OQ-TM-10). The replica that serves
    `/oauth/token` (which issues access tokens) together with `/oauth/authorize`
    and `/oauth/confirm` still needs public signing. Signer isolation protects
-   the key, not the signing service, unless the signer re-checks policy;
-   TM-16 models that replica and OQ-TM-16 records the gap.
+   the key, not the signing service. In v0.1 the signer enforces structural
+   limits and logs every signature but does not re-check issuance policy
+   (decided, OQ-TM-16); TM-16 models that replica and its residual risk.
 
 ## 8. Changing this model
 
