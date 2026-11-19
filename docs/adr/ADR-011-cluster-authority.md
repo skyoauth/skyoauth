@@ -26,12 +26,13 @@ two independently keyed shared-issuer clusters (design §8 step 6).
    ADR-001.
 2. **Each source selects exactly one cluster.** A `kubernetes_token_review`
    source carries a stable cluster ID and a fixed endpoint, CA, reviewer
-   reference, audiences and timeout (design §5.4; tasks §3 `TrustSource`).
-   The sources do not decide the reverse cardinality, how many sources may
-   name one cluster; the lead decision on OQ-ADR011-1 lets several tenants
-   enroll the same physical cluster through their own sources. The fixed `token_review_endpoint` must be a
-   destination on the instance egress allowlist that `security_admin`
-   approves (OQ-TM-13). The adapter details are ADR-005.
+   reference, audiences and timeout (design §5.4; tasks §3 `TrustSource`). The
+   sources do not decide the reverse cardinality, how many sources may name one
+   cluster; the lead decision on OQ-ADR011-1 lets several tenants enroll the
+   same physical cluster through their own sources. The fixed
+   `token_review_endpoint` must be a destination on the instance egress
+   allowlist that `security_admin` approves (OQ-TM-13). The adapter details are
+   ADR-005.
 3. **Source ID, not issuer, disambiguates.** The required generated source ID
    selects exactly one registered verifier. Multiple clusters may share an
    issuer, so the issuer is not a unique lookup key. SkyOAuth does not probe

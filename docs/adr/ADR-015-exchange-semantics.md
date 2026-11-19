@@ -72,7 +72,8 @@ unauthorized actor fall back onto another grant (design §5.7).
    registered API audience per credential (design §5.7; T21.1). `resource` is
    always rejected; `requested_token_type` is accepted only when absent or
    exactly `urn:ietf:params:oauth:token-type:access_token` (OQ-ADR015-1).
-9. **Error codes** (OQ-ERR-3, lead decision):
+9. **Error codes** (OQ-ERR-3; decided for the WIF exchange profiles, lead
+   decision, 2026-11-19):
    - `invalid_request` for malformed input, duplicate parameters, missing
      selectors, unsupported parameters and profile mismatch;
    - one uniform `invalid_grant` for any source, grant, binding or proof
@@ -127,9 +128,11 @@ unauthorized actor fall back onto another grant (design §5.7).
 Existing contract questions that touch this ADR:
 
 - **OQ-ERR-3** — OAuth `error` values for the denials other than
-  `invalid_scope`. Decided for `/oauth/token` (lead decision, 2026-11-19): the
-  mapping in item 9. The errors-retry contract entry for OQ-ERR-3 still reads
-  open and needs a follow-up amendment; this ADR does not edit the contract.
+  `invalid_scope`. Decided for the WIF exchange profiles (lead decision,
+  2026-11-19): the mapping in item 9. Other `/oauth/token` denials (refresh
+  overrides, unknown clients, revoked or expired families) stay open under
+  OQ-ERR-3. The errors-retry contract entry still reads open; the contracts
+  follow-up PR must update it. This ADR does not edit the contract.
 - **OQ-ERR-7** — HTTP status and OAuth error for an unavailable replay store at
   `/oauth/token` (open).
 - **OQ-API-8** — whether the private grant appears in the metadata's

@@ -151,22 +151,22 @@ New questions raised by this ADR:
   `uploaded_jwks` or `oidc_discovery` source with the
   `projected_service_account` assertion profile plus an explicit
   stale-revocation acknowledgment; fixed before the M1a schema. Original
-  question: the baseline names three source kinds, and design §5.4 calls Kubernetes local
-  JWT validation "a separately enrolled mode". Whether that mode is an
-  `oidc_discovery` or `uploaded_jwks` source with a projected-service-account
-  assertion profile, or a fourth kind, is not stated.
+  question: the baseline names three source kinds, and design §5.4 calls
+  Kubernetes local JWT validation "a separately enrolled mode". Whether that
+  mode is an `oidc_discovery` or `uploaded_jwks` source with a
+  projected-service-account assertion profile, or a fourth kind, is not stated.
 - **OQ-ADR005-2 — Assertion profile values.** Decided (lead decision,
   2026-11-19): `assertion_profile` takes `on_demand_jwt`, `reusable_jwt` or
   `projected_service_account`. `single_use` replay is allowed only with
-  `on_demand_jwt` on an `oidc_discovery` or `uploaded_jwks` source. The
-  binding `profile` field is a separate template name, not an assertion
-  profile. Original question: `TrustSource.assertion_profile` is a model
-  field (tasks §3). The design §5.7 export shows `on_demand_jwt`,
-  `reusable_jwt` and `projected_service_account`, and design §5.3 speaks of
-  "an on-demand assertion profile" and "any projected-service-account
-  assertion profile". The normative value set, and how it relates to the
-  binding `profile` field (`github_production` in the example), are not
-  stated. ADR-016 depends on this set.
+  `on_demand_jwt` on an `oidc_discovery` or `uploaded_jwks` source. The binding
+  `profile` field is a separate template name, not an assertion profile;
+  ADR-016 item 4 keys the required matcher predicates on it. Original question:
+  `TrustSource.assertion_profile` is a model field (tasks §3). The design §5.7
+  export shows `on_demand_jwt`, `reusable_jwt` and `projected_service_account`,
+  and design §5.3 speaks of "an on-demand assertion profile" and "any
+  projected-service-account assertion profile". The normative value set, and
+  how it relates to the binding `profile` field (`github_production` in the
+  example), are not stated. ADR-016 depends on this set.
 
 ## Tests
 

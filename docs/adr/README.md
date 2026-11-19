@@ -71,8 +71,8 @@ Every record has the same sections:
 
 - **Proposed, M0 — ratification pending maintainer review:** the record is
   written and awaits review.
-- **planned (next ADR PR):** the record is not written yet; the tasks §11 row is the
-  only statement of the baseline.
+- **planned (next ADR PR):** the record is not written yet; the tasks §11 row
+  is the only statement of the baseline.
 
 ## Changing a decision
 

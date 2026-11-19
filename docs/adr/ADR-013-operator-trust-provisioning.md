@@ -185,7 +185,9 @@ Existing contract questions that touch this ADR:
   in bulk; per-session and per-family revocation stay open.
 - **OQ-API-3** — no operator endpoint administers public issuer keys.
   Decided (lead decision, 2026-11-19) by OQ-TM-10: an admin endpoint for
-  public-key emergency disable and rotation is added (ADR-002).
+  public-key emergency disable and rotation is added (ADR-002 item 4). The
+  public-api contract entry still reads open; the contracts follow-up PR must
+  update it.
 - **OQ-API-6** — who may security-disable. Decided (lead decision,
   2026-11-19): tenant `client_admin` only (API-145).
 - **OQ-API-7** — roles that may read login state (open).
@@ -245,10 +247,11 @@ New questions raised by this ADR:
 - **OQ-ADR013-2 — Scope of "bounded operator restoration".** Decided (lead
   decision, 2026-11-19) by OQ-TM-8: restoration only enrolls a replacement
   `security_admin` credential and revokes operator credentials; v0.1 has one
-  recovery key. Original question: design §7.2 and T13.5 permit break-glass "operator restoration" and A32 requires "audited
-  independent restoration", but the permitted operations (for example
-  re-enrolling a `security_admin` credential, revoking a compromised operator,
-  restoring role bindings) are not enumerated.
+  recovery key. Original question: design §7.2 and T13.5 permit break-glass
+  "operator restoration" and A32 requires "audited independent restoration",
+  but the permitted operations (for example re-enrolling a `security_admin`
+  credential, revoking a compromised operator, restoring role bindings) are not
+  enumerated.
 - **OQ-ADR013-3 — Instance audit reader.** Decided (lead decision,
   2026-11-19): instance audit events are readable only through an explicit
   instance-scoped `auditor` assignment; no role inherits it. Original
