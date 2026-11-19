@@ -178,6 +178,8 @@ Implementation PRs adding/moving modules, workspace members or package entry poi
 
 Grouped sibling paths share the full prefix preceding them (rows need both a sibling and a child reading; open question OQ-API-11). Private listeners are never public gateway routes. All writes use validation, optimistic revision checks and audit; high-frequency observation refreshes are operational telemetry, not new policy-change events. Device and impersonation-activation endpoints are absent in v0.1; adding them requires a later reviewed feature contract. Native upstream callbacks are not app callbacks or loopback callbacks: the browser returns upstream -> issuer, confirms there, then receives a SkyOAuth code at its CLI loopback.
 
+Follow-up: the matrix needs a DELETE row for `/bindings` and `/grants`; a whole binding or grant may be deleted only when it is disabled and unreferenced (ADR-008; public-api §7.1).
+
 ### Exchange selection and scope
 
 Require one generated source ID, generated grant ID and exact registered audience. Load source/grant only as candidates; require same tenant, then verify the proof at that source. Filter matching bindings by **the selected grant's actor and nonempty allowed_binding_ids**. At least one eligible enabled binding must match. Bindings for other actors do not cause ambiguity or confer access. Bindings are identity-only in v0.1; multiple eligible matches choose a stable ID for provenance, never union permissions. Configuration rejects cross-actor/cross-tenant binding references.
