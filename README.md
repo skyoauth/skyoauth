@@ -48,6 +48,11 @@ GitHub Actions runs on pushes to `main` and on pull requests:
 - Rust: formatting, clippy, tests, doctests and rustdoc on x86_64 and aarch64
   Linux; the coverage gate; and a `cargo check` on the minimum supported Rust
   version declared in `Cargo.toml`.
+- Service tests (nextest): `cargo nextest run --workspace --all-features
+  --profile ci` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
+  profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
+  report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
+  even when tests fail. nextest skips doctests; the Rust job runs them.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
