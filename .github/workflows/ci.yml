@@ -51,6 +51,31 @@ jobs:
             echo code=true >> "$GITHUB_OUTPUT"
           fi
 
+  # Cross-reference checks for the specifications in docs/: fences, task,
+  # ADR and conformance IDs, Mermaid task DAGs, links and anchors. It runs
+  # for every change, docs-only ones included, so it does not need
+  # `changes`.
+  docs-check:
+    name: Docs consistency
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Check docs
+        run: node scripts/ci/docs-check.mjs
+
+      - name: Self-test the checker
+        if: success() || failure()
+        run: node --test scripts/ci/docs-check.test.mjs
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes
@@ -236,6 +261,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - docs-check
       - rust
       - rust-coverage
       - msrv

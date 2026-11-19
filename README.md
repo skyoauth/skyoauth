@@ -52,6 +52,10 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
   decided by `scripts/ci/docs-only.sh`) skips the build and test jobs.
+- Docs consistency runs on every change, docs-only ones included:
+  `node scripts/ci/docs-check.mjs` cross-checks fences, task, ADR and
+  conformance IDs, Mermaid task DAGs and links in `docs/`, and
+  `node --test scripts/ci/docs-check.test.mjs` is its self-test.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. To protect `main`, require the `CI passed` check: it passes when every
