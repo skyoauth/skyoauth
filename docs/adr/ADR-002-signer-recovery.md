@@ -55,8 +55,10 @@ recovery among the decisions requiring ratification.
    only by that group's authorized auth replicas, not a freshly generated key
    per replica. Scale-out loads the already-published active key from
    protected deployment secret storage or startup unwrapping; it enrolls no
-   new trust identity. Replicas have no public access-signing permission. A
-   shared compromise affects the whole signer group (design §6.2).
+   new trust identity. Every process that serves Check or holds internal
+   assertion keys, not only the signer-group replicas, has no public
+   access-signing permission (design §6.2; decided by OQ-TM-10). A shared
+   compromise affects the whole signer group (design §6.2).
 6. Only instance `security_admin`, through audited key administration
    (`/admin/v1/internal-assertion-keys`), enrolls, rotates and disables group
    keys and authorizes private-key distribution. Public clients and auth
@@ -95,7 +97,9 @@ recovery among the decisions requiring ratification.
     standby kid does not raise the verified-compromise alert. Offline
     signature verification alone cannot enforce this tripwire, because
     standby public keys are intentionally prepublished; SkyOAuth does not
-    claim otherwise (design §6.2).
+    claim otherwise (design §6.2). The tripwire alert, like every key
+    operation, is also emitted to the append-only external audit sink
+    (OQ-TM-12).
 11. **Clean promotion.** On compromise, instance `security_admin` disables the
     affected version and promotes an eligible unaffected standby through an
     audited, revision-checked key operation, then distributes it only to
@@ -142,6 +146,13 @@ recovery among the decisions requiring ratification.
   only their stated bound (design §6.2; lifetimes §8).
 - Zero static application secrets does not mean zero privileged keys: signer
   trust still needs protection (design §9).
+- The public signer does not re-check issuance policy; it enforces only
+  structural limits and logs every signature to the external sink. This is
+  accepted v0.1 residual risk (OQ-TM-16).
+- After an auth-replica compromise, exposed session cookies stay valid until
+  the tenant's `auth_generation` is advanced through the bulk session
+  revocation operation (OQ-TM-14); signer-key rotation alone does not end
+  them.
 - Conformance rows: A62 (signer scale-out, rotation, compromise and standby),
   A19 (issuer-key rotation), A55 (key-purpose and profile
   separation), A21 (residual offline TTL).
@@ -163,7 +174,10 @@ recovery among the decisions requiring ratification.
 
 Existing contract questions that touch this ADR:
 
-- **OQ-API-3** — no operator endpoint administers public issuer keys (open).
+- **OQ-API-3** — no operator endpoint administers public issuer keys.
+  Decided (lead decision, 2026-11-19) by OQ-TM-10: an admin endpoint for
+  public access-token key emergency disable and rotation is added (spec
+  amendment follow-up, threat model §6.1).
 - **OQ-API-12** — who may fetch `/internal/v1/assertion-jwks`: only
   registered checkers and gateway trust consumers, or other verifying
   backends (open; lead lean recorded, not decided).
@@ -173,20 +187,50 @@ Existing contract questions that touch this ADR:
 - **OQ-TP-10 / OQ-LT-16** — clock skew. Decided (lead decision, 2026-11-19):
   default 60 s, ceiling 120 s; used by every "plus skew" retention above.
 
+Threat-model decisions ([threat model](../threat-model.md) §6) that bind
+this ADR:
+
+- **OQ-TM-10** — public signer isolation and compromise response. Decided
+  (lead decision, 2026-11-19): processes that serve Check or hold internal
+  keys get no public-signing permission (item 5); public-key emergency
+  disable and rotation use a prepublished standby, a bound on JWKS cache
+  max-age and an admin endpoint. This resolves OQ-API-3, OQ-ADR002-1 and
+  OQ-ADR002-2.
+- **OQ-TM-12** — audit sink independence. Decided (lead decision,
+  2026-11-19): key operations and the standby-use tripwire (item 10) are also
+  emitted to an append-only external sink, at minimum structured logs; the
+  database audit stays authoritative; the sink is chosen by M1a and
+  implemented under T50.6.
+- **OQ-TM-14** — bulk session revocation. Decided (lead decision,
+  2026-11-19): a revision-checked, audited operation advances a tenant's
+  `auth_generation` without a provider change (see Consequences).
+- **OQ-TM-16** — signer re-check. Decided (lead decision, 2026-11-19): v0.1
+  accepts the residual risk that the public signer does not re-check issuance
+  policy. The signer enforces structural limits (`typ` and profile, `iss`, a
+  registered audience, and `exp` − `iat` ≤ 300 s) and logs every signature to
+  the external sink (OQ-TM-12).
+
 New questions raised by this ADR:
 
-- **OQ-ADR002-1 — Standby for the public signer.** Design §6.2 defines the
+- **OQ-ADR002-1 — Standby for the public signer.** Decided (lead decision,
+  2026-11-19) by OQ-TM-10: the public access-token signer also has a
+  prepublished standby for emergency disable and rotation. Original question:
+  design §6.2 defines the
   eligible standby, tripwire and clean promotion for the internal signer
   group. T50.3 ("Isolate public/internal signers ... Provision eligible
   standby in separate custody, audited clean promotion and replenishment") and
   A62 ("Signer scale-out/rotation, compromise/standby promotion") do not say
   which signer they mean. Whether the public access-token signer also needs a
   separately held standby is not stated.
-- **OQ-ADR002-2 — Public key compromise.** Design §6 bounds the retention of
-  retired public keys, and design §6.2 bounds the internal key-set cache at
-  60 seconds. No cache freshness bound is given for verifiers of the issuer
-  JWKS, and no procedure is given for removing a compromised public signing
-  key before its retention ends.
+- **OQ-ADR002-2 — Public JWKS cache cap and emergency-disable behavior.**
+  Decided (lead decision, 2026-11-19), following OQ-TM-10: the issuer JWKS
+  cache max-age is at most 300 s, and an emergency disable removes the key
+  from the published JWKS at once; both are specified before M2. Original
+  question: design §6 bounds the retention of retired public keys and design
+  §6.2 bounds the internal key-set cache at 60 seconds, but no cache
+  freshness cap is given for verifiers of the issuer JWKS, and the
+  emergency-disable endpoint does not say when a compromised key leaves the
+  JWKS.
 
 ## Tests
 

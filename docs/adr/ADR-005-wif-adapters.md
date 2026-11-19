@@ -45,6 +45,14 @@ human-provider migration without reset (design §2 C05).
      endpoint with TLS hostname/CA verification and no redirects. Reviewer
      secrets are externally managed, never plaintext exports (design §5.4;
      T11.8).
+   - For all three kinds, secret references (`ca_bundle_ref`,
+     `reviewer_credential_ref`) resolve only within a per-tenant provisioned
+     secret namespace, and discovery, JWKS and TokenReview egress
+     destinations come from an allowlist approved by instance
+     `security_admin`; tenant operators only choose from it (OQ-TM-13; before
+     M1a, T11.8).
+   - Kubernetes local JWT validation (item 7) is not a fourth kind
+     (OQ-ADR005-1).
 2. **Fixed source selector.** The required generated `skyoauth_trust_source`
    ID selects exactly one registered verifier. It is not proof of a tenant or
    cluster. No verifier is chosen by token content (`iss`, `kid`, `jku`,
@@ -77,7 +85,9 @@ human-provider migration without reset (design §2 C05).
    ADR-016.
 7. **Kubernetes local JWT validation** is a separately enrolled mode with
    explicit stale-object-revocation limits, never a fallback from a failed
-   TokenReview (design §5.4; T23.6).
+   TokenReview (design §5.4; T23.6). It is enrolled as an `uploaded_jwks` or
+   `oidc_discovery` source with the `projected_service_account` assertion
+   profile and an explicit stale-revocation acknowledgment (OQ-ADR005-1).
 8. **Common rejections.** Unregistered sources, token `jku`/`x5u`/embedded-key
    trust, `alg=none`, weak algorithm substitution, private-key uploads and
    arbitrary redirects are rejected. Input sizes, claim complexity, clocks and
@@ -129,16 +139,29 @@ Existing contract questions that touch this ADR:
   (open).
 - **OQ-TP-3** — allowed algorithm set (open; the sources fix it only for
   SkyOAuth's own keys as "allowed", and per source as an allowlist).
+- **OQ-TM-13** ([threat model](../threat-model.md) §6) — external secret
+  references and egress approval. Decided (lead decision, 2026-11-19):
+  per-tenant secret namespaces and a `security_admin`-approved egress
+  allowlist (item 1); the amendment lands before M1a (T11.8).
 
 New questions raised by this ADR:
 
-- **OQ-ADR005-1 — Source kind of Kubernetes local JWT validation.** The
-  baseline names three source kinds, and design §5.4 calls Kubernetes local
+- **OQ-ADR005-1 — Source kind of Kubernetes local JWT validation.** Decided
+  (lead decision, 2026-11-19): no fourth kind. Local validation uses an
+  `uploaded_jwks` or `oidc_discovery` source with the
+  `projected_service_account` assertion profile plus an explicit
+  stale-revocation acknowledgment; fixed before the M1a schema. Original
+  question: the baseline names three source kinds, and design §5.4 calls Kubernetes local
   JWT validation "a separately enrolled mode". Whether that mode is an
   `oidc_discovery` or `uploaded_jwks` source with a projected-service-account
   assertion profile, or a fourth kind, is not stated.
-- **OQ-ADR005-2 — Assertion profile values.** `TrustSource.assertion_profile`
-  is a model field (tasks §3). The design §5.7 export shows `on_demand_jwt`,
+- **OQ-ADR005-2 — Assertion profile values.** Decided (lead decision,
+  2026-11-19): `assertion_profile` takes `on_demand_jwt`, `reusable_jwt` or
+  `projected_service_account`. `single_use` replay is allowed only with
+  `on_demand_jwt` on an `oidc_discovery` or `uploaded_jwks` source. The
+  binding `profile` field is a separate template name, not an assertion
+  profile. Original question: `TrustSource.assertion_profile` is a model
+  field (tasks §3). The design §5.7 export shows `on_demand_jwt`,
   `reusable_jwt` and `projected_service_account`, and design §5.3 speaks of
   "an on-demand assertion profile" and "any projected-service-account
   assertion profile". The normative value set, and how it relates to the

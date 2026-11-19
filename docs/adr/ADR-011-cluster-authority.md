@@ -24,10 +24,14 @@ two independently keyed shared-issuer clusters (design §8 step 6).
    clusters' issuers (design §2 C08). A workload's cluster proof is exchanged
    at SkyOAuth for a SkyOAuth credential (design §1, §5.4). The issuer is
    ADR-001.
-2. **One registered source per cluster.** Each cluster is enrolled as its own
-   `kubernetes_token_review` source with a stable cluster ID and fixed
-   endpoint, CA, reviewer reference, audiences and timeout (design §5.4; tasks
-   §3 `TrustSource`). The adapter details are ADR-005.
+2. **Each source selects exactly one cluster.** A `kubernetes_token_review`
+   source carries a stable cluster ID and a fixed endpoint, CA, reviewer
+   reference, audiences and timeout (design §5.4; tasks §3 `TrustSource`).
+   The sources do not decide the reverse cardinality, how many sources may
+   name one cluster; the lead decision on OQ-ADR011-1 lets several tenants
+   enroll the same physical cluster through their own sources. The fixed `token_review_endpoint` must be a
+   destination on the instance egress allowlist that `security_admin`
+   approves (OQ-TM-13). The adapter details are ADR-005.
 3. **Source ID, not issuer, disambiguates.** The required generated source ID
    selects exactly one registered verifier. Multiple clusters may share an
    issuer, so the issuer is not a unique lookup key. SkyOAuth does not probe
@@ -74,10 +78,20 @@ Existing contract questions that touch this ADR:
 
 - **OQ-IR-6** — export names `issuer` and `api_server` versus model
   `exact_issuer` and `token_review_endpoint` (open).
+- **OQ-TM-13** ([threat model](../threat-model.md) §6) — external secret
+  references and egress approval. Decided (lead decision, 2026-11-19):
+  TokenReview endpoints come from a `security_admin`-approved egress
+  allowlist, and the CA and reviewer-credential references resolve only within
+  the tenant's provisioned secret namespace (item 2).
 
 New questions raised by this ADR:
 
-- **OQ-ADR011-1 — `cluster_id` identity.** `TrustSource.cluster_id` is a model
+- **OQ-ADR011-1 — `cluster_id` identity.** Decided (lead decision,
+  2026-11-19): `cluster_id` is an opaque, server-generated ID owned by the
+  tenant's source. Several tenants may enroll the same physical cluster, each
+  through its own source and ID. It is a separate identifier from the
+  route-control `cluster_id`. Original question: `TrustSource.cluster_id` is a
+  model
   field and the design §5.7 export shows a generated-looking
   `cluster_40ef...` value, but the logical model has no cluster entity. The
   sources do not say whether `cluster_id` is server-generated, tenant-scoped
@@ -85,7 +99,11 @@ New questions raised by this ADR:
   cluster may have several sources, or whether it shares an identifier space
   with the route-control `cluster_id` in `CredentialDependency` and
   `CredentialProtectionScope` (tasks §3).
-- **OQ-ADR011-2 — Cluster in the issued token.** A06 expects a "scoped token
+- **OQ-ADR011-2 — Cluster in the issued token.** Decided (lead decision,
+  2026-11-19), deferred: the `wif` profile has no cluster claim in v0.1. A
+  resource server that must distinguish clusters defines a constraint
+  dimension in its schema (IR-141). Original question: A06 expects a "scoped
+  token
   for selected tenant/cluster", but the `wif` claim set (token-profiles §5,
   TP-045) has no cluster or source claim. The cluster is recorded only through
   the selected source in the `PolicyRevision` dependencies (tasks §3 "Policy
@@ -102,5 +120,8 @@ New questions raised by this ADR:
 - A15 — migration keeps two shared-issuer TokenReview clusters' configurations
   and decisions.
 - A29 — tenants sharing an issuer coexist without crossover.
+- The same-issuer cross-tenant and cluster fixtures that T00.11 asks for are
+  the A28 and A29 rows of the
+  [conformance layout scenario map](../testing/conformance-layout.md#2-scenario-map).
 - Task tests: T10.8 (same-issuer cluster property tests), T11.10, T23.4,
   T52.2.

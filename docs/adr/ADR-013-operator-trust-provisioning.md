@@ -78,6 +78,14 @@ tenant preparation and instance approval (design §4.2).
    consumed durably, audited and alerted, and recovery keys are rotated after
    use. Recovery is rehearsed with the human IdP down (design §7.2; T13.5,
    T13.7).
+   - Operator restoration only enrolls a replacement `security_admin`
+     credential and revokes operator credentials (OQ-TM-8).
+   - The same signed recovery transaction enrolls the replacement recovery
+     public key. No online path, including an online `security_admin`, can
+     replace or rotate it (OQ-TM-8, OQ-TM-15).
+   - v0.1 has a single recovery key; a quorum is deferred (OQ-TM-8).
+   - The recovery socket is owned by the service UID with mode 0600;
+     `pods/exec` on the SkyOAuth namespace equals channel access (OQ-TM-9).
 
 ### Provisioning split
 
@@ -85,14 +93,26 @@ tenant preparation and instance approval (design §4.2).
    audience, checker identities, actions and explicit roles; `trust_admin`
    creates workload and service principals, sources, bindings and grants.
    This chain works without SQL edits and without human tables (T13.8; tasks
-   §9 "Slice assignment").
+   §9 "Slice assignment"). Secret references that `trust_admin` (and, in
+   M1b, `provider_admin`) configure resolve only within a per-tenant
+   provisioned secret namespace, and discovery, JWKS and TokenReview egress
+   destinations come from an allowlist approved by instance `security_admin`;
+   tenant operators only choose from it (OQ-TM-13).
 10. **M1b human provisioning.** M1b adds origin, route and bundle versions,
     scoped controller enrollment and deployment approval, separate capacity
     policy, client and human policy, enrollment, provider and link
     provisioning and initial provider activation (from a null pointer, through
     the switch operation) to the same operator client before M3 (design §7.2;
     T13.8, T13.9). One explicitly scoped operator and tenant is a valid small
-    deployment, not an implicit-tenant protocol (design §1.3, §7.2).
+    deployment, not an implicit-tenant protocol (design §1.3, §7.2), but only
+    under the explicit audited single-actor instance policy; otherwise
+    provider switch and rollback commit, and links to existing principals,
+    need a distinct second `adm_*` approver (OQ-TM-7). Provisioning a link to
+    an existing principal uses a browser-bound transaction that proves both
+    identities, or, when the old IdP is unavailable during migration, an
+    operator-asserted link with OQ-TM-7 approval and user notification;
+    operator enrollment of a new principal is operator-asserted and audited
+    (OQ-TM-6).
 
 ### Route preparation and approval
 
@@ -159,8 +179,13 @@ tenant preparation and instance approval (design §4.2).
 Existing contract questions that touch this ADR:
 
 - **OQ-API-2** — no operator endpoint revokes a human session, native refresh
-  family or authentication context (open).
-- **OQ-API-3** — no operator endpoint administers public issuer keys (open).
+  family or authentication context (open). Related: OQ-TM-14 decides a
+  revision-checked, audited operation that advances a tenant's
+  `auth_generation` without a provider change, revoking the tenant's sessions
+  in bulk; per-session and per-family revocation stay open.
+- **OQ-API-3** — no operator endpoint administers public issuer keys.
+  Decided (lead decision, 2026-11-19) by OQ-TM-10: an admin endpoint for
+  public-key emergency disable and rotation is added (ADR-002).
 - **OQ-API-6** — who may security-disable. Decided (lead decision,
   2026-11-19): tenant `client_admin` only (API-145).
 - **OQ-API-7** — roles that may read login state (open).
@@ -178,19 +203,56 @@ Existing contract questions that touch this ADR:
 - **OQ-LT-17** — recovery challenge TTL. Decided (lead decision, 2026-11-19):
   default 5 min, maximum 15 min (LT-107).
 
+Threat-model decisions ([threat model](../threat-model.md) §6) that bind
+this ADR, each Decided (lead decision, 2026-11-19):
+
+- **OQ-TM-6** — verified linking ceremony: operator enrollment of a new
+  principal is operator-asserted and audited; a link to an existing principal
+  uses a browser-bound transaction proving both identities, or an
+  operator-asserted link with OQ-TM-7 approval and user notification when the
+  old IdP is unavailable during migration (item 10).
+- **OQ-TM-7** — separation of duty: provider switch and rollback commit and
+  links to existing principals need a distinct second `adm_*` approver;
+  single-actor mode only through an explicit audited instance policy;
+  zero-privilege enrollment resume may be single-actor (item 10).
+- **OQ-TM-8** — recovery scope and key lifecycle: restoration only enrolls a
+  replacement `security_admin` credential and revokes operator credentials;
+  the same signed recovery transaction enrolls the replacement recovery
+  public key; one recovery key in v0.1, quorum deferred (item 8).
+- **OQ-TM-9** — local recovery channel access: socket owned by the service
+  UID, mode 0600; `pods/exec` on the SkyOAuth namespace limited to trusted
+  infrastructure administrators (item 8).
+- **OQ-TM-12** — operator writes, recovery, key operations and provider
+  switches are also emitted to an append-only external sink; the database
+  audit stays authoritative.
+- **OQ-TM-13** — per-tenant secret namespaces and a `security_admin`-approved
+  egress allowlist (item 9).
+- **OQ-TM-14** — bulk session revocation by advancing a tenant's
+  `auth_generation` (see OQ-API-2).
+- **OQ-TM-15** — no online path replaces the recovery key; only the signed
+  recovery transaction over the deployment-local channel does (item 8).
+
 New questions raised by this ADR:
 
-- **OQ-ADR013-1 — Recovery key rotation path.** Design §7.2 requires rotating
+- **OQ-ADR013-1 — Recovery key rotation path.** Decided (lead decision,
+  2026-11-19) by OQ-TM-8 and OQ-TM-15: the same signed local recovery
+  transaction enrolls the replacement recovery public key, and no online path
+  can replace it. Original question: design §7.2 requires rotating
   recovery keys after use, and `RecoveryState` holds `recovery_public_key` and
   `recovery_key_epoch` (tasks §3). Neither the endpoint matrix nor the local
   interface names the operation, channel or role that enrolls the
   replacement recovery public key.
-- **OQ-ADR013-2 — Scope of "bounded operator restoration".** Design §7.2 and
-  T13.5 permit break-glass "operator restoration" and A32 requires "audited
+- **OQ-ADR013-2 — Scope of "bounded operator restoration".** Decided (lead
+  decision, 2026-11-19) by OQ-TM-8: restoration only enrolls a replacement
+  `security_admin` credential and revokes operator credentials; v0.1 has one
+  recovery key. Original question: design §7.2 and T13.5 permit break-glass "operator restoration" and A32 requires "audited
   independent restoration", but the permitted operations (for example
   re-enrolling a `security_admin` credential, revoking a compromised operator,
   restoring role bindings) are not enumerated.
-- **OQ-ADR013-3 — Instance audit reader.** Design §7.2 grants tenant
+- **OQ-ADR013-3 — Instance audit reader.** Decided (lead decision,
+  2026-11-19): instance audit events are readable only through an explicit
+  instance-scoped `auditor` assignment; no role inherits it. Original
+  question: design §7.2 grants tenant
   `auditor` tenant reads and "separate instance audit authority where
   explicitly granted", and the endpoint matrix says "instance events
   separately authorized", but no role or endpoint for reading instance audit

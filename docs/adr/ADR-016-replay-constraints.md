@@ -41,14 +41,21 @@ that verifiers and live checks know exactly which policy authorized it
    reusable-workflow identity when used. A default-branch ref or workflow
    does not establish a safe event; the design example is push-only. GitHub's
    human `actor` is audit provenance, not a human SkyOAuth login (design
-   §5.3; T22.2).
+   §5.3; T22.2). SkyOAuth does not rely on GitHub environment or branch
+   protection: `environment` is an additional ANDed predicate, and
+   self-hosted runners shared across trust domains are out of scope and
+   residual risk ([threat model](../threat-model.md) OQ-TM-2).
+4. **Required predicates per source kind.** Each source kind has a fixed
+   profile enum entry with a required predicate set. GitHub's is item 3;
+   Kubernetes requires namespace, service-account name and service-account
+   UID; generic sources require an exact `sub` (OQ-ADR016-1).
 
 ### Replay is a source capability
 
-4. **Reusable (default).** Another otherwise-valid exchange of the same proof
+5. **Reusable (default).** Another otherwise-valid exchange of the same proof
    inside its lifetime is permitted only after fresh policy evaluation and
    rate limits, and produces a new output `jti` (design §5.3).
-5. **Single-use (opt-in, eligible sources only).** Permitted only for locally
+6. **Single-use (opt-in, eligible sources only).** Permitted only for locally
    signature-verified `oidc_discovery` or `uploaded_jwks` sources enrolled
    with an on-demand assertion profile and a client and issuer able to obtain
    a fresh signed nonempty `jti` per exchange. SkyOAuth atomically consumes a
@@ -56,34 +63,34 @@ that verifiers and live checks know exactly which policy authorized it
    replicas and grants; exactly one attempt may issue. A missing `jti`, a
    store failure or a replay denies; a crash may burn the proof, and a retry
    needs a fresh assertion (design §5.3; T21.6).
-6. **Retention.** Consumption is retained through proof `exp` plus skew and
+7. **Retention.** Consumption is retained through proof `exp` plus skew and
    across digest-key rotation; provider switch, rollback, failover and restore
    never reset it (design §5.3; T21.8).
-7. **Projected tokens are reusable only.** Kubernetes projected tokens,
+8. **Projected tokens are reusable only.** Kubernetes projected tokens,
    including TokenReview sources, use `reusable` in v0.1. Enrollment and
    import reject `single_use` for `kubernetes_token_review` or any
    projected-service-account assertion profile, even when keys could be
    verified locally. A `jti` is never invented from decoded input for replay
    enforcement (design §5.3, §5.4; T11.11, T23.6).
-8. **Generic JWT sources** require an explicit tested renewal capability
+9. **Generic JWT sources** require an explicit tested renewal capability
    before opting into single-use (design §5.3; T11.11).
 
 ### Profile-specific signed constraints and revisions
 
-9. Every credential carries signed `skyoauth_constraints` and
-   `skyoauth_policy_revision` (design §6).
-10. **`wif`** uses `authorization: allowlist`: values within a dimension are
+10. Every credential carries signed `skyoauth_constraints` and
+    `skyoauth_policy_revision` (design §6).
+11. **`wif`** uses `authorization: allowlist`: values within a dimension are
     alternatives; different dimensions are ANDed with tenant, audience, scope
     and RBAC. Missing or empty required dimensions deny; a grant ID alone is
     insufficient. The issued constraints are the profile-appropriate narrowed
     constraints within the grant (and, for delegation, the service) ceilings
     (design §6; T21.5).
-11. **Human profiles** use exactly `{"version":1,"authorization":"backend_rbac"}`,
+12. **Human profiles** use exactly `{"version":1,"authorization":"backend_rbac"}`,
     with no membership claim; the backend's RBAC decides. The WIF profile
     cannot use `backend_rbac` or omit allowlists (design §6).
-12. Unknown constraint fields or versions and the wrong authorization mode
+13. Unknown constraint fields or versions and the wrong authorization mode
     deny (design §6; A30).
-13. **Policy revisions** are immutable typed dependency sets: WIF snapshots
+14. **Policy revisions** are immutable typed dependency sets: WIF snapshots
     the tenant/resource assignment, chosen source and binding, grant and
     optional service. Live checks deny superseded or invalidated revisions and
     never reinterpret an old token under broader policy. Staging, observation
@@ -133,12 +140,23 @@ Existing contract questions that touch this ADR:
   default 15 min, ceiling 60 min; consumed state is preserved or the affected
   credentials are revoked (LT-100, LT-106).
 - **OQ-ADR005-2** — the assertion-profile value set this ADR's eligibility
-  rule depends on (open; raised by ADR-005).
+  rule depends on. Decided (lead decision, 2026-11-19; raised by ADR-005):
+  `on_demand_jwt`, `reusable_jwt` and `projected_service_account`;
+  `single_use` only with `on_demand_jwt` on an `oidc_discovery` or
+  `uploaded_jwks` source (item 6).
+- **OQ-TM-2** ([threat model](../threat-model.md) §6) — GitHub-side
+  preconditions. Decided (lead decision, 2026-11-19): no reliance on GitHub
+  environment or branch protection; bindings pin event, ref and workflow,
+  `environment` is an additional ANDed predicate, and shared self-hosted
+  runners are residual risk (item 3).
 
 New questions raised by this ADR:
 
-- **OQ-ADR016-1 — Required production predicates outside GitHub.** The
-  required set is given only for GitHub (design §5.3; T12.2). For
+- **OQ-ADR016-1 — Required production predicates outside GitHub.** Decided
+  (lead decision, 2026-11-19): each source kind gets a fixed profile enum
+  entry with a required predicate set; Kubernetes requires namespace,
+  service-account name and UID; generic sources require an exact `sub`
+  (item 4). Original question: the required set is given only for GitHub (design §5.3; T12.2). For
   `uploaded_jwks`, other `oidc_discovery` and Kubernetes bindings, the sources
   do not say which predicates are required, or how a binding is designated
   "production" (the design §5.7 example uses `profile: github_production`).
@@ -146,7 +164,7 @@ New questions raised by this ADR:
   privilege widening" (design §5.3), and the trust-source, keyset, binding and
   grant endpoints require "explicit widening approval" (tasks §2 "Endpoint
   matrix"; ADR-008 baseline), but the approving role, the operation and its
-  record are not defined.
+  record are not defined. Open here: it is decided in ADR-008 (next ADR PR).
 
 ## Tests
 

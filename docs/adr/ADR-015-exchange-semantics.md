@@ -69,17 +69,28 @@ unauthorized actor fall back onto another grant (design §5.7).
    trimmed or broadened (design §5.7; T12.8).
 8. **Other denials.** Duplicate parameters, missing selectors, profile
    mismatch, unsupported `resource` or requested token type deny. One exact
-   registered API audience per credential (design §5.7; T21.1).
-9. **Response.** Success returns `access_token`, `token_type=Bearer`,
-   `expires_in`, explicit `scope` and
-   `issued_token_type=urn:ietf:params:oauth:token-type:access_token`, with
-   no-store and never a WIF refresh token (design §5.7). Errors are
-   OAuth-shaped, with no redirects, and the private grant is clearly labeled
-   (T21.2).
-10. **Post-create IDs.** Job and client configuration uses the IDs returned by
+   registered API audience per credential (design §5.7; T21.1). `resource` is
+   always rejected; `requested_token_type` is accepted only when absent or
+   exactly `urn:ietf:params:oauth:token-type:access_token` (OQ-ADR015-1).
+9. **Error codes** (OQ-ERR-3, lead decision):
+   - `invalid_request` for malformed input, duplicate parameters, missing
+     selectors, unsupported parameters and profile mismatch;
+   - one uniform `invalid_grant` for any source, grant, binding or proof
+     failure, revealing no detail about which one failed (ERR-020);
+   - `invalid_target` for an `audience` not in the grant's set or not
+     assigned to the tenant;
+   - `invalid_scope` and `unsupported_grant_type` keep their existing
+     meaning.
+10. **Response.** Success returns `access_token`, `token_type=Bearer`,
+    `expires_in`, explicit `scope` and
+    `issued_token_type=urn:ietf:params:oauth:token-type:access_token`, with
+    no-store and never a WIF refresh token (design §5.7). Errors are
+    OAuth-shaped, with no redirects, and the private grant is clearly labeled
+    (T21.2).
+11. **Post-create IDs.** Job and client configuration uses the IDs returned by
     creation or export, not operator-chosen global identifiers (design §5.7,
     §7.4; tasks §2).
-11. **Separate upstream exchange.** The upstream-provider exchange adapter is
+12. **Separate upstream exchange.** The upstream-provider exchange adapter is
     separate from these profiles (design §5.5, §5.7; ADR-009).
 
 ## Consequences and requirements
@@ -116,7 +127,9 @@ unauthorized actor fall back onto another grant (design §5.7).
 Existing contract questions that touch this ADR:
 
 - **OQ-ERR-3** — OAuth `error` values for the denials other than
-  `invalid_scope` are not assigned (open).
+  `invalid_scope`. Decided for `/oauth/token` (lead decision, 2026-11-19): the
+  mapping in item 9. The errors-retry contract entry for OQ-ERR-3 still reads
+  open and needs a follow-up amendment; this ADR does not edit the contract.
 - **OQ-ERR-7** — HTTP status and OAuth error for an unavailable replay store at
   `/oauth/token` (open).
 - **OQ-API-8** — whether the private grant appears in the metadata's
@@ -129,9 +142,13 @@ Existing contract questions that touch this ADR:
 
 New questions raised by this ADR:
 
-- **OQ-ADR015-1 — `resource` and `requested_token_type`.** Design §5.7 denies
+- **OQ-ADR015-1 — `resource` and `requested_token_type`.** Decided (lead
+  decision, 2026-11-19): `resource` is always rejected; `requested_token_type`
+  is accepted only when absent or exactly
+  `urn:ietf:params:oauth:token-type:access_token` (item 8). Original
+  question: design §5.7 denies
   an "unsupported resource or requested token type", and T21.1 rejects
-  "unsupported target/subject/resource parameters". The sources do not say
+  "unsupported target/subject/resource parameters". The sources did not say
   whether any `resource` value is supported, or whether `requested_token_type`
   is accepted when it names
   `urn:ietf:params:oauth:token-type:access_token` or must be absent.

@@ -110,13 +110,19 @@ Existing contract questions that touch this ADR:
   `target_service_id` and `mode` (open).
 - **OQ-TP-5** — `act.iss`. Decided (lead decision, 2026-11-19): required and
   equal to the canonical issuer (TP-046).
-- **OQ-ERR-3** — OAuth error codes for mode mismatch and other denials are not
-  assigned (open).
+- **OQ-ERR-3** — OAuth error codes for mode mismatch and other denials.
+  Decided for `/oauth/token` (lead decision, 2026-11-19): a profile mismatch
+  is `invalid_request`; any source, grant, binding or proof failure is one
+  uniform `invalid_grant`, which covers a selected grant of the wrong mode
+  (inferred) (ADR-015).
 
 New questions raised by this ADR:
 
-- **OQ-ADR006-1 — Stored shape of a dormant impersonation grant.** Design §5.6
-  fixes `status: disabled` and `activation_state: requires_reapproval`, but the
+- **OQ-ADR006-1 — Stored shape of a dormant impersonation grant.** Decided
+  (lead decision, 2026-11-19): the record uses `mode: impersonation`,
+  `activation_state` takes `not_required` or `requires_reapproval`, and an
+  impersonation grant requires a same-tenant target service. Original
+  question: design §5.6 fixes `status: disabled` and `activation_state: requires_reapproval`, but the
   sources give neither the `ServiceGrant.mode` literal for impersonation nor
   the other `activation_state` values (for example the value an ordinary
   enabled direct or delegation grant carries), nor whether an impersonation

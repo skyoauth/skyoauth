@@ -72,7 +72,15 @@ even to a single-tenant installation (design §1.3).
    entity type and tenant; two tenants' identically named objects get
    different generated IDs with no global-name collision or probe (design
    §7.4; T14.8).
-10. **Multi-tenant applications** may serve several application organizations
+10. **Per-tenant secrets and egress.** Secret references configured by a
+    tenant operator resolve only within that tenant's provisioned secret
+    namespace, so a reference cannot name a secret provisioned for another
+    tenant. Discovery, JWKS and TokenReview egress destinations come from an
+    allowlist approved by instance `security_admin` (OQ-TM-13).
+11. **Tenant disable.** A disabled tenant denies issuance, live checks,
+    admission and refresh, and its `auth_generation` is advanced
+    (OQ-ADR014-1).
+12. **Multi-tenant applications** may serve several application organizations
     inside their one explicitly mapped SkyOAuth tenant; any different mapping
     needs a separate reviewed protocol (design §4).
 
@@ -111,10 +119,17 @@ Existing contract questions that touch this ADR:
   2026-11-19): a grant may hold several resource servers; each request selects
   one (IR-083).
 - **OQ-IR-9** — audience string syntax and comparison rules (open).
+- **OQ-TM-13** ([threat model](../threat-model.md) §6) — external secret
+  references and egress approval. Decided (lead decision, 2026-11-19):
+  per-tenant secret namespaces and a `security_admin`-approved egress
+  allowlist (item 10).
 
 New questions raised by this ADR:
 
-- **OQ-ADR014-1 — Effect of tenant disable.** `/admin/v1/tenants` lets
+- **OQ-ADR014-1 — Effect of tenant disable.** Decided (lead decision,
+  2026-11-19): a disabled tenant denies issuance, live checks, admission and
+  refresh, and advances the tenant's `auth_generation` (item
+  11). Original question: `/admin/v1/tenants` lets
   instance `security_admin` disable a tenant (tasks §2 "Endpoint matrix"), and
   the exchange validates current tenant status (design §5.7 step 5). The live
   check (design §6.1) and the human issuance paths do not name tenant status,
@@ -133,4 +148,7 @@ New questions raised by this ADR:
   Forwarded or tenant query denies before redirect.
 - A49 — identical labels in two tenants get distinct generated IDs.
 - A31, A45 — checker bound to its audience and tenant set.
+- The same-issuer cross-tenant and cluster fixtures that T00.11 asks for are
+  the A28 and A29 rows of the
+  [conformance layout scenario map](../testing/conformance-layout.md#2-scenario-map).
 - Task tests: T10.8 (cross-tenant property tests), T14.2, T14.8, T52.6.

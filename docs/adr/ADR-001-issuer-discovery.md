@@ -92,18 +92,23 @@ Existing contract questions that touch this ADR:
 - **OQ-API-8** — metadata content: the fields and whether the private grant
   URI appears in `grant_types_supported` are not specified (open).
 - **OQ-API-3** — no operator endpoint administers public issuer keys, although
-  A19 requires independent issuer-key rotation (open; shared with ADR-002).
+  A19 requires independent issuer-key rotation. Decided (lead decision,
+  2026-11-19) by [threat model](../threat-model.md) OQ-TM-10: an admin
+  endpoint for public-key emergency disable and rotation is added, with a
+  prepublished standby and a bounded JWKS cache max-age (ADR-002).
 - **OQ-TP-2** — `iss` of internal assertions. Decided (lead decision,
   2026-11-19): the canonical issuer (TP-031).
 - **OQ-TP-3** — the allowed JWS algorithm set is not fixed (open).
 
 New questions raised by this ADR:
 
-- **OQ-ADR001-1 — Changing the issuer URL.** Design §2 C01 calls the issuer
-  "stable", and T51.10 forbids issuer or certificate rotation only "solely for
-  a human provider change". The sources do not say whether the canonical
-  issuer URL itself may ever change (for example a domain change), or what
-  procedure would apply. This ADR does not choose.
+- **OQ-ADR001-1 — Changing the issuer URL.** Decided (lead decision,
+  2026-11-19): the canonical issuer URL cannot change in v0.1; any issuer
+  change procedure is deferred beyond v0.1. Original question: design §2 C01
+  calls the issuer "stable", and T51.10 forbids issuer or certificate
+  rotation only "solely for a human provider change". The sources did not say
+  whether the canonical issuer URL itself may ever change (for example a
+  domain change), or what procedure would apply.
 
 ## Tests
 
