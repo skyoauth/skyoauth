@@ -37,11 +37,14 @@ only writer is ADR-021, and the enrollment hold it sets is ADR-023.
 3. **Operator independence.** Operators authenticate independently of the
    upstream provider; a switch or rollback works during an IdP outage through
    the portable operator client and the local recovery verifier, with no
-   upstream-admin link (design §7.2, §8 step 2; T51.11). Under OQ-TM-7 a switch
-   or rollback commit needs a distinct second `adm_*` approver; a switch signed
-   with the recovery key through the local recovery verifier counts as its own
-   approval, the recovery key acting as the second factor, and is audited (lead
-   decision, 2026-11-19; OQ-TM-7, OQ-TM-8).
+   upstream-admin link (design §7.2, §8 step 2; T51.11). Under OQ-TM-7 every
+   plan commit except a disable-only commit needs a distinct second `adm_*`
+   approver unless an explicit audited instance policy allows single-actor
+   mode. Whether a switch signed with the recovery key during an IdP outage
+   needs a second approver or an audited single-actor exception is open
+   (OQ-ADR012-3). A recovery-signed transition enrolls a replacement recovery
+   public key in the same signed transaction and retires the used one
+   (OQ-TM-8; T13.5).
 
 ### Monotonic auth invalidation
 
@@ -118,17 +121,19 @@ Existing contract questions that touch this ADR:
   linking to an existing principal uses a browser-bound transaction proving both
   identities, and if the old IdP is unavailable during migration an
   operator-asserted link is allowed with OQ-TM-7 approval and user notification.
-- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19): the
-  switch, rollback and initial-activation commits (initial activation goes
-  through the switch commit) and links to existing principals need a distinct
-  second `adm_*` approver, unless an explicit audited instance policy allows
-  single-actor mode. Disabling the active provider is fail-safe and does not
-  need one (lead decision, 2026-11-19).
+- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19):
+  every plan commit except a disable-only commit (authentication-critical
+  changes to the active provider, activation from null, switch and rollback)
+  and links to existing principals need a distinct second `adm_*` approver,
+  unless an explicit audited instance policy allows single-actor mode; a
+  disable-only commit is fail-safe and does not.
 - **OQ-TM-8** — recovery scope and key lifecycle. Decided (lead decision,
   2026-11-19): recovery restores operators only by enrolling a replacement
   `security_admin` credential and revoking operator credentials; a single
-  recovery key in v0.1. A switch signed with the recovery key counts as its own
-  approval and is audited (lead decision, 2026-11-19; item 3).
+  recovery key in v0.1. Every recovery-signed transaction, including a provider
+  switch or rollback, enrolls a replacement recovery public key and retires the
+  used one (item 3). Whether such a switch needs a second approver is
+  OQ-ADR012-3.
 - **OQ-TM-12** — audit sink. Decided (lead decision, 2026-11-19): provider
   switches are also emitted to an append-only external sink.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
@@ -149,6 +154,14 @@ New questions raised by this ADR:
   allowed and denied decisions, but the content of the dry-run plan (affected
   session and family counts, the fixtures it evaluates) is not specified. Open;
   to be decided before M1b/M3 (lead decision, 2026-11-19).
+- **OQ-ADR012-3 — Recovery-signed switch and the second approver.** OQ-TM-7
+  requires a distinct second `adm_*` approver for every plan commit except a
+  disable-only commit. When the IdP is unavailable and a switch is signed with
+  the recovery key through the local recovery verifier (item 3), the sources do
+  not say whether the commit still needs a second approver or takes an audited
+  single-actor exception. Open; the lead decides before M1b (lead decision,
+  2026-11-19). Spec amendment follow-up: design §7.2 and §7.3, T13.5, T13.9
+  and threat-model OQ-TM-7.
 
 ## Tests
 

@@ -40,13 +40,15 @@ design §7.2 and identity-registry §5.2.
    and revision rules (tasks §3 "Policy revisions"; T10.1, T10.4).
 3. **Soft disable.** Records are disabled, not cascade-deleted; WIF, audience,
    client, origin and operator records cannot cascade-delete through
-   `HumanProvider` (design §7; T10.1). Removal is soft disable only; deleting a
-   whole binding or grant counts as widening and is approved as in item 12 (lead
-   decision, 2026-11-19, OQ-ADR008-2). A binding that is not referenced by any
-   grant, approval or audit-required record may be hard-deleted by an audited
-   admin write; "soft disable only" applies to anything referenced or enabled.
-   Deleting a whole binding or grant is still widening-class. Decided (lead
-   decision, 2026-11-19; reconciles OQ-ADR008-2 with OQ-ADR022-1).
+   `HumanProvider` (design §7; T10.1). Removal of anything referenced or
+   enabled is soft disable only (OQ-ADR008-2). A binding may be hard-deleted by
+   an audited admin write only when it is disabled and no grant, approval or
+   audit-required record references it; a disabled, unreferenced grant follows
+   the same rule. Soft disable of a binding or grant is fail-safe and is not
+   widening, so it needs no second approver even when the optional approver is
+   on; deleting a whole binding or grant is still widening-class and is
+   approved as in item 12. Decided (lead decision, 2026-11-19; reconciles
+   OQ-ADR008-2 with OQ-ADR022-1).
 4. **Fail closed.** Store failures never expand privilege, and conservative
    cache invalidation applies (design §7).
 
@@ -94,8 +96,9 @@ design §7.2 and identity-registry §5.2.
     write widens access; the flag only acknowledges that detection, and a write
     the server detects as widening without the flag is rejected (lead decision,
     2026-11-19, OQ-ADR008-3). A distinct second `adm_*` approver, as OQ-TM-7
-    requires for provider switch commits, is optional and off by default; how an
-    installation turns it on is open (OQ-ADR008-3).
+    requires for every provider plan commit except a disable-only commit, is
+    optional and off by default; how an installation turns it on is open
+    (OQ-ADR008-3).
 13. **Deleting a predicate is widening.** Matcher predicates are ANDed; omitted
     optional predicates are unconstrained; the required predicates of the
     binding `profile` template (ADR-016 item 4) cannot be omitted; deleting a
@@ -148,10 +151,11 @@ Existing contract questions that touch this ADR:
   explicit widening flag, the expected revision and an audit record; an
   OQ-TM-7-style second approver is optional. Recorded in Decision item 12.
 - **OQ-TM-7** — separation of duty for identity-critical writes. Decided (lead
-  decision, 2026-11-19): the switch, rollback and initial-activation commits
-  (initial activation goes through the switch commit) and links to existing
-  principals need a distinct second `adm_*` approver unless an explicit audited
-  instance policy allows single-actor mode; enrollment resume may be
+  decision, 2026-11-19): every plan commit except a disable-only commit
+  (authentication-critical changes to the active provider, activation from
+  null, switch and rollback) and links to existing principals need a distinct
+  second `adm_*` approver unless an explicit audited instance policy allows
+  single-actor mode; a disable-only commit and enrollment resume may be
   single-actor.
 - **OQ-TM-12** — audit sink independence. Decided (lead decision, 2026-11-19):
   operator writes and other security events are also emitted to an append-only
@@ -172,8 +176,9 @@ New questions raised by this ADR:
   drift between them is reported.
 - **OQ-ADR008-2 — Deletion versus disable.** Decided (lead decision,
   2026-11-19): soft disable only for anything referenced or enabled; a binding
-  not referenced by any grant, approval or audit-required record may be
-  hard-deleted by an audited admin write; deleting a whole binding or grant
+  or grant may be hard-deleted by an audited admin write only when it is
+  disabled and no grant, approval or audit-required record references it; soft
+  disable is fail-safe and not widening; deleting a whole binding or grant
   counts as widening (item 3; consistent with OQ-ADR022-1). Original question:
   The baseline names "deletion approval", while design §7 and T10.1 describe
   soft disable and immutable revisions. Which objects, if any, can be
@@ -182,7 +187,8 @@ New questions raised by this ADR:
 - **OQ-ADR008-3 — Widening classification and the optional second approver.**
   Decided in part (lead decision, 2026-11-19): the server detects widening; the
   flag only acknowledges it (item 12). Still open: how an installation turns on
-  the optional second approver. Original question: The OQ-ADR016-2 decision
+  the optional second approver; to be decided before the M1a schema (lead
+  decision, 2026-11-19). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a
   new keyset version or an added allowed binding), whether the server detects

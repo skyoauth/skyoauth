@@ -66,14 +66,16 @@ transition's effect on state is ADR-012.
    variant. Instance `security_admin` may only run the instance-wide response,
    which runs the tenant transition for every tenant; it has no per-tenant
    write, following the OQ-API-6 precedent (lead decision on OQ-TM-14 and
-   OQ-ADR021-1, 2026-11-19). The compromise transition advances both provider
-   `auth_epoch` and tenant `auth_generation` (lifetimes §4) and does not set the
-   enrollment hold (lead decision, 2026-11-19). The endpoint of the
-   instance-wide response is not named (OQ-ADR021-3). Spec amendment follow-ups:
-   the tasks §2 endpoint matrix (the compromise-transition endpoint and the
-   instance-wide response), public-api §7.1 (their endpoint rows) and §7.2
-   (their approval-boundary rows), and design §7.3 (the compromise transition as
-   the second epoch-advancing path).
+   OQ-ADR021-1, 2026-11-19). The compromise transition advances only tenant
+   `auth_generation`; it does not advance provider `auth_epoch` and does not
+   set the enrollment hold (tasks §3, design §7.3, T13.9 and the tasks §2
+   endpoint matrix). Decided (lead decision, 2026-11-19). The endpoint of the
+   instance-wide response is not named (OQ-ADR021-3). Spec amendment
+   follow-ups: only public-api §7.1 (the endpoint rows) and §7.2 (the
+   approval-boundary rows) remain; design §7.3, tasks §3 and the tasks §2
+   matrix are amended. A further contracts follow-up (contracts PR #19 list)
+   splits the lifetimes §4 row so that the compromise transition advances
+   `auth_generation` only.
 
 ### Separate audited credential-only rotation
 
@@ -123,12 +125,12 @@ Existing contract questions that touch this ADR:
 
 - **OQ-API-7** — the roles that may read login state are not named (open).
 - **OQ-API-11** — grouped-path shorthand (open; lead lean recorded).
-- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19): the
-  switch, rollback and initial-activation commits (initial activation goes
-  through the switch commit) need a distinct second `adm_*` approver unless an
-  explicit audited instance policy allows single-actor mode. Disabling the
-  active provider is fail-safe and does not need one (lead decision,
-  2026-11-19). The compromise transition is single actor (item 8).
+- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19):
+  every plan commit except a disable-only commit (authentication-critical
+  changes to the active provider, activation from null, switch and rollback)
+  needs a distinct second `adm_*` approver unless an explicit audited instance
+  policy allows single-actor mode; a disable-only commit is fail-safe and does
+  not. The compromise transition is single actor (item 8).
 - **OQ-TM-12** — audit sink. Decided (lead decision, 2026-11-19): provider
   switches are also emitted to an append-only external sink.
 - **OQ-TM-13** — secret references. Decided (lead decision, 2026-11-19): a
@@ -174,7 +176,7 @@ New questions raised by this ADR:
 - A63 — credential-only rotation preserves epochs, sessions and refresh; mixed
   semantic changes require the transition.
 - A17 — rollback after independent policy changes.
-- Compromise transition — advances provider `auth_epoch` and tenant
-  `auth_generation`, sets no enrollment hold, and is denied to instance
-  `security_admin` per tenant (item 8; lifetimes §4).
+- Compromise transition — advances tenant `auth_generation` only, leaves
+  provider `auth_epoch` unchanged, sets no enrollment hold, and is denied to
+  instance `security_admin` per tenant (item 8).
 - Task tests: T51.3, T51.11.

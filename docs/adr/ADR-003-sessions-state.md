@@ -67,8 +67,10 @@ are ADR-010.
    (design §5.1 step 2).
 5. **Callback.** `/_skyoauth/callback` requires both the correct one-time state
    and the initiating browser's matching flow cookie, the exact registered
-   origin and callback, the provider epoch, PKCE and a verified ID token. A
-   state or transaction ID alone is not browser authentication. A wrong or
+   origin and callback, the provider epoch, PKCE, the RFC 9207
+   authorization-response `iss` when the provider advertises it (OQ-TM-4) and a
+   verified ID token. A state or transaction ID alone is not browser
+   authentication. A wrong or
    missing browser binding denies without creating, replacing or linking a
    session (design §5.1 step 4; T30.7).
 6. **Distinct app and native bindings.** Bindings include origin and flow kind;
@@ -117,7 +119,8 @@ are ADR-010.
     sessions, pending requests and codes, refresh families and dependent
     continuations (design §8 step 4; T51.4). Credential-only rotation keeps the
     epochs (design §7.3; ADR-021). The audited compromise transition advances
-    the tenant `auth_generation` without a provider change (OQ-TM-14; ADR-021).
+    only the tenant `auth_generation`, not provider `auth_epoch`, without a
+    provider change (OQ-TM-14; ADR-021 item 8).
     Rollback uses fresh monotonic epochs and never resets generations (design
     §7.3; T10.6).
 16. **Logout targeting.** Local logout revokes the session and authentication

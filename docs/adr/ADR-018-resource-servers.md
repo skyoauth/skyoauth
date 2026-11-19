@@ -61,8 +61,10 @@ action-to-scope/profile/resource rules".
    never checker authority, whatever its allowed audiences; a resource server
    cannot use another audience's checker identity (design §7.1, §6.1; T14.3).
    The checker's tenant set must be a subset of the resource server's active
-   tenant assignments; disabling an assignment removes that tenant from it (lead
-   decision, 2026-11-19, OQ-ADR018-1).
+   tenant assignments. While an assignment is disabled its tenant is excluded
+   from the checker's effective set, with no edit to the stored set, so
+   re-enabling the assignment restores it (lead decision, 2026-11-19,
+   OQ-ADR018-1).
 7. **Direct grants work.** Direct workload credentials with no target service
    are fully supported by the live check (design §6.1; T14.3).
 
@@ -132,7 +134,8 @@ New questions raised by this ADR:
 
 - **OQ-ADR018-1 — Checker tenant set versus assignments.** Decided (lead
   decision, 2026-11-19): the checker tenant set must be a subset of active
-  assignments; disabling an assignment removes the tenant from it (item 6).
+  assignments; while an assignment is disabled its tenant is excluded without
+  editing the stored set, so re-enabling restores it (item 6).
   Original question: A checker's `allowed_tenant_ids` and the resource server's
   `AudienceTenantAssignment` records are separate. Whether the checker tenant
   set must be a subset of the currently assigned tenants, and what happens to a

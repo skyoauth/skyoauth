@@ -126,7 +126,15 @@ gate are ADR-010.
    before protected traffic (design §4.2). The enrolment is stored in a
    dedicated protected-set entity, separate from `CredentialProtectionScope`
    (lead decision, 2026-11-19, OQ-ADR020-1); adding it to the tasks §3 logical
-   model is a spec amendment follow-up (inferred).
+   model is a spec amendment follow-up (inferred). The issuer host, which is
+   not an `ApplicationOrigin`, is the single exception to one bundle per
+   origin: one instance-level system bundle, owned and prepared by instance
+   `security_admin`, carries its protected scope, projection and observations.
+   Adding a per-provider issuer callback path is a system-bundle apply (ADR-004
+   item 2). An origin cannot be security-enabled without an enrolled protected
+   scope: a new origin starts security-disabled with reason `not_enrolled`
+   until the first approved `gateway_apply` covering its verified scope enables
+   it (lead decision, 2026-11-19, OQ-GW-12; T14.5, T14.9).
 7. Non-cookie bearer, public, auth and health paths on a protected host are
    managed in the same bundle with explicit authentication classes. Shared
    Gateway-wide policy or listener changes need approval of all affected bundles
@@ -205,7 +213,7 @@ gate are ADR-010.
     otherwise they deny before any redirect, and all their own checks (API-050
     to API-052) still apply. They never mint an application assertion or
     forwarding authority (API-131). Decided (lead decision, 2026-11-19,
-    OQ-API-1; design §4.2 amendment pending).
+    OQ-API-1; design §4.2 amended).
 
 ### Approval, apply deadline, cancel and revoke
 
@@ -372,9 +380,10 @@ Existing contract questions that touch this ADR:
 - **OQ-GW-10** — cancel outside `applying`. Decided (lead decision, 2026-11-19):
   rejects with no state change.
 - **OQ-GW-11** — numeric helper bounds (open).
-- **OQ-GW-12** — enrolled host. Decided (lead decision, 2026-11-19) in part: the
-  issuer host is enrolled for containment; its bundle and pre-scope origins are
-  still open.
+- **OQ-GW-12** — enrolled host. Decided (lead decision, 2026-11-19): the issuer
+  host is enrolled for containment; (a) one instance-level system bundle
+  carries its protected scope, projection and observations; (b) an origin
+  cannot be security-enabled without an enrolled protected scope (item 6).
 - **OQ-GW-13** — supported exact-mode usages are not enumerated (open).
 - **OQ-GW-14** — admission exceptions. Decided (lead decision, 2026-11-19):
   exactly four.

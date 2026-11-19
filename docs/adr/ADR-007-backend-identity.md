@@ -80,8 +80,9 @@ admission procedure that enforces these rules is ADR-020.
    path is server-generated for a provider without RFC 9207 `iss`, is exempt in
    the same way as `/oauth/callback`, is listed by exact path in the approved
    issuer projection and routes to the verified SkyOAuth backend; no prefix or
-   pattern exemption covers these paths (OQ-TM-4; T00.5, T32.4, T40.12; spec
-   amendment pending, threat-model §6.1).
+   pattern exemption covers these paths (OQ-TM-4; T00.5, T32.4, T40.12). The
+   pending contract amendment is gateway-containment §1, §4.1, GW-030, GW-033
+   and GW-034, carried by contracts PR #19.
 8. **Projected and tested.** Both removals, their stage and order, and the exact
    exemptions are part of the approved semantic projection; a missing removal or
    unauthorized exemption rejects preparation or activation. Tests check actual
@@ -159,18 +160,20 @@ admission procedure that enforces these rules is ADR-020.
 
 Existing contract questions that touch this ADR:
 
-- **OQ-GW-3** — exact exemption list. Decided (lead decision, 2026-11-19): only
-  the seven cookie endpoints are exempt; the issuer host is not an
-  `ApplicationOrigin`. Still open: per exempt endpoint, which cookies and
-  headers are retained beyond those named.
+- **OQ-GW-3** — exact exemption list. Decided (lead decision, 2026-11-19): the
+  seven fixed cookie endpoints plus each exact registered per-provider issuer
+  callback path `/oauth/callback/{provider_id}` (OQ-TM-4) are exempt; the
+  issuer host is not an `ApplicationOrigin`. Still open: per exempt endpoint,
+  which cookies and headers are retained beyond those named.
 - **OQ-GW-4** — how the verified SkyOAuth backend identity is expressed and
   verified. Deferred (lead decision, 2026-11-19) to T32.4.
 - **OQ-GW-5** — the pinned adapter's literal per-route filter list and the stage
   at which client-supplied identity and assertion headers are removed (open).
-- **OQ-GW-12** — enrolled host. Decided (lead decision, 2026-11-19) in part: the
-  issuer host is enrolled for containment. Still open: which bundle carries the
-  issuer host's scope, and whether containment applies to an origin registered
-  before a protected scope is enrolled.
+- **OQ-GW-12** — enrolled host. Decided (lead decision, 2026-11-19): the issuer
+  host is enrolled for containment; (a) one instance-level system bundle
+  carries the issuer host's protected scope, projection and observations; (b)
+  an origin cannot be security-enabled without an enrolled protected scope
+  (T14.5, T14.9).
 - **OQ-API-10 / OQ-TP-11** — assertion header. Decided (lead decision,
   2026-11-19): `X-SkyOAuth-Assertion`.
 - **OQ-TP-1** — route revision claim. Decided (lead decision, 2026-11-19):

@@ -71,8 +71,10 @@ the selected grant scopes binding evaluation over their lifetime.
     T12.3; ADR-015). A disabled binding may stay in `allowed_binding_ids` but
     never matches; a grant with no enabled allowed binding denies; a binding is
     never hard-deleted while referenced (lead decision, 2026-11-19,
-    OQ-ADR022-1). An unreferenced binding may be hard-deleted only by an audited
-    admin write, as a widening-class change (ADR-008 item 3).
+    OQ-ADR022-1). A binding may be hard-deleted only when it is disabled and
+    unreferenced by any grant, approval or audit-required record, through an
+    audited widening-class admin write; disabled, unreferenced grants follow the
+    same rule (ADR-008 item 3).
 11. **Other actors are irrelevant.** A matching binding for another actor
     neither authorizes nor makes the request ambiguous (design §5.7; T12.7).
 12. **No union.** Several matching same-actor bindings select one by stable ID

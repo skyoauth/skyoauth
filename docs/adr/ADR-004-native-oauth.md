@@ -67,8 +67,8 @@ code) is stored as in ADR-003; the `human_cli` profile is ADR-019.
    and callback, PKCE, nonce, epoch and ID token, stores the verified human on
    the request, and rotates the issuer-local flow secret before confirmation.
    Native and app flow cookies are never interchangeable (design §5.2; T40.12).
-   Decided (lead decision, 2026-11-19, OQ-TM-4; spec amendment pending,
-   threat-model §6.1).
+   Decided (lead decision, 2026-11-19, OQ-TM-4; design §5.2 and the tasks are
+   amended; only the API-032 contract amendment is still pending).
 
 3. **Fresh explicit approval.** Every new loopback authorization requires
    explicit SkyOAuth approval at `/oauth/confirm`, showing the registered client
