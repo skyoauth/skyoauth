@@ -950,7 +950,11 @@ later task. All other items are not resolved by this contract.
   Set-Cookie removal (GW-033); the issuer host is not enrolled as an
   `ApplicationOrigin` (GW-034). Still open: per exempt endpoint, which cookies
   and headers are retained beyond those named in the §4.1 table. Follow-up:
-  list the exemptions in design §4. Original question: design §4 exempts
+  list the exemptions in design §4. Follow-up (not yet applied): §1, §4.1,
+  GW-030, GW-033 and GW-034 exempt only the literal `/oauth/callback`, but
+  design §4 and §5.2 (OQ-TM-4) also exempt each exact registered
+  per-provider issuer callback path for a provider without RFC 9207 `iss`;
+  amend them to match. Original question: design §4 exempts
   "fixed SkyOAuth authentication/session endpoints" without listing them, and
   whether the issuer host is an enrolled host and whether the non-cookie
   endpoints are exempt was not stated.
