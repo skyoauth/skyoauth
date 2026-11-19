@@ -70,12 +70,11 @@ transition's effect on state is ADR-012.
    `auth_generation`; it does not advance provider `auth_epoch` and does not
    set the enrollment hold (tasks §3, design §7.3, T13.9 and the tasks §2
    endpoint matrix). Decided (lead decision, 2026-11-19). The endpoint of the
-   instance-wide response is not named (OQ-ADR021-3). Spec amendment
-   follow-ups: only public-api §7.1 (the endpoint rows) and §7.2 (the
-   approval-boundary rows) remain; design §7.3, tasks §3 and the tasks §2
-   matrix are amended. A further contracts follow-up (contracts PR #19 list)
-   splits the lifetimes §4 row so that the compromise transition advances
-   `auth_generation` only.
+   instance-wide response is not named (OQ-ADR021-3). Spec amendments: design
+   §7.3, tasks §3 and the tasks §2 matrix are amended; public-api §7.1 (the
+   endpoint row) and §7.2 (API-154) carry the per-tenant operation, and the
+   lifetimes §4 epochs table has separate rows, so the compromise transition
+   advances `auth_generation` only.
 
 ### Separate audited credential-only rotation
 

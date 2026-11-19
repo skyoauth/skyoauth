@@ -96,8 +96,9 @@ Existing contract questions that touch this ADR:
   2026-11-19) by [threat model](../threat-model.md) OQ-TM-10: an admin
   endpoint for public-key emergency disable and rotation is added, with a
   prepublished standby and a bounded JWKS cache max-age (ADR-002 item 4). The
-  public-api contract entry still reads open; the contracts follow-up PR must
-  update it.
+  public-api contract now decides it: `/admin/v1/issuer-keys` (API-153), with
+  a JWKS cache max-age of at most 300 s and immediate removal of a disabled
+  key (API-042, API-043).
 - **OQ-TP-2** — `iss` of internal assertions. Decided (lead decision,
   2026-11-19): the canonical issuer (TP-031).
 - **OQ-TP-3** — the allowed JWS algorithm set is not fixed (open).

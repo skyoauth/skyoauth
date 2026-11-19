@@ -92,23 +92,34 @@ not been verified against the Connect protocol documentation.
 ## 3. OAuth endpoint errors
 
 Errors on `/oauth/token` and `/oauth/revoke` are OAuth-shaped (tasks T21.2).
-Only the codes below are fixed by the sources; see OQ-ERR-3 for the rest.
+Only the codes below are fixed, by the sources or, for the WIF exchange
+profiles, by the OQ-ERR-3 decision; see OQ-ERR-3 for the rest.
 
-| Condition                                                                                                 | Error                                                                          | Source                     |
-| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------- |
-| WIF `scope` omitted and the grant has no explicit nonempty `default_scopes`                               | `invalid_scope`                                                                | design §5.7; tasks A26     |
-| WIF `scope` explicitly empty or excessive                                                                 | Denied (code not specified)                                                    | design §5.7                |
-| `skyoauth_refresh_request_id` empty, malformed or duplicated                                              | `invalid_request`                                                              | design §5.2.2; tasks T40.5 |
-| Exact refresh retry whose successor was already consumed (inside the 30 s window)                         | `invalid_grant`; no credentials returned; healthy newer generation not revoked | design §5.2.2              |
-| Duplicate parameters, missing selectors, profile mismatch, unsupported `resource` or requested token type | Denied (code not specified)                                                    | design §5.7                |
-| Refresh with `audience`, `resource` or subject override, duplicate parameters or unknown client           | Rejected (code not specified)                                                  | design §5.2.2              |
-| Selected source, grant or tenant mismatch                                                                 | Denied without cross-tenant existence detail                                   | design §5.7                |
-| Revoke request for any token or client                                                                    | Non-enumerating response                                                       | design §5.2.2              |
+| Condition                                                                                                                                                                                                                                                                | Error                                                                          | Source                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| WIF `scope` absent and the grant has no explicit nonempty `default_scopes`                                                                                                                                                                                               | `invalid_scope`                                                                | design §5.7; tasks A26                                                    |
+| WIF `scope` absent and the grant has explicit nonempty `default_scopes`                                                                                                                                                                                                  | Not an error: those `default_scopes` apply                                     | design §5.7                                                               |
+| WIF `scope` explicitly empty                                                                                                                                                                                                                                             | `invalid_scope` (ERR-024)                                                      | design §5.7; tasks A26; lead decision (OQ-ERR-3)                          |
+| WIF `scope` unknown or excessive                                                                                                                                                                                                                                         | `invalid_scope` (ERR-024)                                                      | design §5.7; lead decision (OQ-ERR-3)                                     |
+| `skyoauth_refresh_request_id` empty, malformed or duplicated                                                                                                                                                                                                             | `invalid_request`                                                              | design §5.2.2; tasks T40.5                                                |
+| Exact refresh retry whose successor was already consumed (inside the 30 s window)                                                                                                                                                                                        | `invalid_grant`; no credentials returned; healthy newer generation not revoked | design §5.2.2                                                             |
+| WIF exchange, checked in this order (ERR-024). 1. Request shape, before any source or grant is used: a request carrying `resource`, which is never supported (an explicit exception to the `invalid_request` rule for unsupported parameters; RFC 8693 §2.2.2, RFC 8707) | `invalid_target`                                                               | design §5.7; lead decision (OQ-ERR-3, OQ-ADR015-1)                        |
+| WIF exchange: 2. Request shape: other unsupported parameters, including a `requested_token_type` other than absent or exactly `urn:ietf:params:oauth:token-type:access_token`; malformed request, duplicate parameters, missing selectors or profile mismatch            | `invalid_request`                                                              | design §5.7; lead decision (OQ-ERR-3, OQ-ADR015-1)                        |
+| WIF exchange: 3. Any source, grant (selection or validation), binding or proof failure, including source, grant or tenant mismatch (design §5.7 steps 1–5)                                                                                                               | Uniform `invalid_grant`, without cross-tenant existence detail (ERR-020)       | design §5.7; lead decision (OQ-ERR-3)                                     |
+| WIF exchange: 4. Only after step 3 passes: `audience` that does not exist, is registered but not assigned to the tenant, or is not in the selected grant's audience set                                                                                                  | `invalid_target`, identical for all three cases (ERR-020)                      | design §5.7 step 5; ADR-015 item 4; lead decision (OQ-ERR-3, OQ-ADR015-1) |
+| Unsupported `grant_type`                                                                                                                                                                                                                                                 | `unsupported_grant_type`                                                       | lead decision (OQ-ERR-3)                                                  |
+| Refresh with `audience`, `resource` or subject override, duplicate parameters or unknown client                                                                                                                                                                          | Rejected (code not specified)                                                  | design §5.2.2                                                             |
+| Revoke request for any token or client                                                                                                                                                                                                                                   | Non-enumerating response                                                       | design §5.2.2                                                             |
 
 - **ERR-020** Token endpoint failures MUST NOT reveal whether a source, grant,
   client or token exists in another tenant. (design §5.7 for sources and
   grants; clients and tokens inferred from the non-enumerating revoke response
-  in design §5.2.2)
+  in design §5.2.2) Any source, grant, binding or proof failure is the uniform
+  `invalid_grant`. An audience `invalid_target` and `invalid_scope` are
+  returned only after those checks pass, and the audience `invalid_target` is
+  identical whether the audience does not exist, is registered but not
+  assigned to the tenant, or is not in the selected grant's audience set, so
+  it reveals nothing beyond the caller's own grant set (ERR-024).
 - **ERR-021** Reuse of a consumed refresh credential outside an opted-in exact
   retry MUST revoke the whole family, including a replay that adds a request ID
   after the fact. (design §5.2.2)
@@ -117,6 +128,32 @@ Only the codes below are fixed by the sources; see OQ-ERR-3 for the rest.
   successor or fall back to plain rotation. (design §5.2.2)
 - **ERR-023** For `single_use` sources, single-use proof replay, a missing
   `jti` or a replay-store failure MUST deny. (design §5.3)
+- **ERR-024** For the WIF exchange profiles, denials MUST map to OAuth errors
+  in this order. (1) Request-shape errors, checked before any source or grant
+  is used (inferred from design §5.7 step 1 and ADR-015 item 4, which load
+  the source and grant only after the request is parsed): a request carrying
+  `resource` MUST return `invalid_target`, because `resource` is never
+  supported (an explicit exception to the `invalid_request` rule for
+  unsupported parameters; RFC 8693 §2.2.2, RFC 8707); other unsupported
+  parameters, including a `requested_token_type` other than absent or exactly
+  `urn:ietf:params:oauth:token-type:access_token`, and a malformed request,
+  duplicate parameters, missing selectors or profile mismatch MUST return
+  `invalid_request` (public-api API-015). (2) Every source, grant (selection
+  or validation), binding or proof failure MUST return the same
+  `invalid_grant` response, so the response does not reveal which check
+  failed or whether the object exists in another tenant (ERR-020). (3) An
+  audience `invalid_target` and `invalid_scope` MUST be returned only after the
+  source, grant, binding and proof checks pass (design §5.7 step 5; ADR-015
+  item 4). An `audience` that does not exist, is registered but not
+  assigned to the tenant, or is not in the selected grant's audience set MUST
+  get an identical `invalid_target` response in all three cases, so a caller
+  that has not passed the grant checks cannot probe a grant's audience set
+  (ERR-020). An absent `scope` means the grant's explicit nonempty
+  `default_scopes` apply, and MUST return `invalid_scope` if the grant has
+  none. An explicitly empty `scope` MUST be denied with `invalid_scope`
+  (identity-registry IR-063). An unknown or excessive `scope` MUST return
+  `invalid_scope`. (lead decision, OQ-ERR-3; ADR-015 items 4, 8 and 9,
+  OQ-ADR015-1)
 
 ## 4. Policy check, recheck and close results
 
@@ -286,8 +323,27 @@ follow-up. All other items are not resolved by this contract.
   documentation. Original question: the sources give Connect codes only for
   `too_many_open_streams` (`resource_exhausted`) and the 503 results
   (`unavailable`).
-- **OQ-ERR-3 — OAuth error codes for denials.** The token endpoint must deny
-  duplicate parameters, missing selectors, profile mismatch, unsupported
+- **OQ-ERR-3 — OAuth error codes for denials.** **Decided** (lead decision,
+  2026-11-19) in part, for the WIF exchange profiles (§3 table, ERR-024):
+  in order: request-shape errors first, `invalid_target` for a request
+  carrying `resource`, which is never supported (an explicit exception to the
+  `invalid_request` rule; RFC 8693 §2.2.2, RFC 8707), and `invalid_request`
+  for other unsupported parameters (including an unsupported
+  `requested_token_type`), malformed requests, duplicate parameters, missing
+  selectors and profile mismatch; then the uniform `invalid_grant` for any
+  source, grant (selection or validation), binding or proof failure
+  (ERR-020); only after those checks pass, `invalid_target` for an
+  `audience` that does not exist, is not assigned to the tenant or is not in
+  the selected grant's audience set, identical in all three cases, and
+  `invalid_scope`
+  and `unsupported_grant_type` keep their meanings. Scope is also **Decided**
+  (lead decision, 2026-11-19): an absent scope uses the grant's
+  `default_scopes`, or is `invalid_scope` if there are none; an explicitly
+  empty, unknown or excessive scope is `invalid_scope` (ERR-024, IR-063).
+  Still open: the codes for the other
+  `/oauth/token` denials (refresh overrides, unknown clients, revoked or
+  expired families). Original question:
+  the token endpoint must deny duplicate parameters, missing selectors, profile mismatch, unsupported
   `resource` or requested token type, explicit empty or excessive scope, refresh
   overrides, unknown clients and revoked or expired families, but the OAuth
   `error` values (for example `invalid_request`, `invalid_target`,
@@ -332,8 +388,7 @@ follow-up. All other items are not resolved by this contract.
   without a `Retry-After` the client falls back to backoff, while an invalid or
   over-300 s hint surfaces the error (ERR-014, ERR-047). The
   decision does not cover generic `auth_unavailable`, which stays unspecified.
-  Follow-up: tasks T32.6 reads as requiring `Retry-After` on every capacity and
-  rate result and needs to say MAY. Original question: design §4.2 requires a
+  Design §6.1.1 and tasks T32.6 now say so. Original question: design §4.2 requires a
   bounded `Retry-After` on `route_configuration_unavailable`, and tasks T32.6
   maps all of 429 `too_many_open_streams`/`rate_limited` and 503
   `stream_capacity_unavailable`/`route_configuration_unavailable` "to typed

@@ -146,14 +146,15 @@ Terms used in the tables:
 
 These values have no lifetime. They are monotonic and are never reset.
 
-| Value                                                          | Advances on                                                                     | Never                                                              | Source                        |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------- |
-| `HumanProvider.auth_epoch`, `TenantLoginState.auth_generation` | Provider switch, rollback, initial activation, deliberate compromise transition | Advanced by credential-only rotation; reset by rollback or restore | design §5.1.1, §7.3; tasks §3 |
-| Parent `security_revision`                                     | Security disable; re-enable through `reenable_targets`                          | Restored by rollback or abort                                      | design §4.2                   |
-| Runtime `active_generation`                                    | Activation, `complete_abort`                                                    | Reset by restore                                                   | design §4.2                   |
-| Controller and scope `owner_epoch`, observation `sequence`     | Claim; each report                                                              | Reset by failover                                                  | design §4.2                   |
-| TLS `material_sequence`                                        | Single-candidate convergence or recovery                                        | Reset by plan or pin change                                        | design §4.2                   |
-| `hold_generation`, guard `generation`                          | Hold and guard changes                                                          | Lowered; equal counters with a different spec are rejected         | design §4.2                   |
+| Value                                                      | Advances on                                                                                                                                                                                                                                                                                 | Never                                                                                                      | Source                                                                                |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `HumanProvider.auth_epoch`                                 | Every provider plan commit, including a disable-only commit: switch, rollback, initial activation from null, disable and an authentication-critical change to the active provider (issuer, `client_id`). A disable-only commit is exempt only from the second approver (public-api API-148) | Advanced by credential-only rotation or the deliberate compromise transition; reset by rollback or restore | design §5.1.1, §7.3; tasks §3; ADR-021 item 5; lead decision (OQ-TM-14)               |
+| `TenantLoginState.auth_generation`                         | Every provider plan commit, including a disable-only commit (as for `auth_epoch`); the deliberate compromise transition, which advances only this value, per tenant, without a provider change (public-api API-154)                                                                         | Advanced by credential-only rotation; reset by rollback or restore                                         | design §5.1.1, §7.3; tasks §3, T13.9; ADR-021 items 5 and 8; lead decision (OQ-TM-14) |
+| Parent `security_revision`                                 | Security disable; re-enable through `reenable_targets`; an origin's first enablement from `not_enrolled` (gateway-containment GW-236)                                                                                                                                                       | Restored by rollback or abort                                                                              | design §4.2; lead decision (OQ-GW-12)                                                 |
+| Runtime `active_generation`                                | Activation, `complete_abort`                                                                                                                                                                                                                                                                | Reset by restore                                                                                           | design §4.2                                                                           |
+| Controller and scope `owner_epoch`, observation `sequence` | Claim; each report                                                                                                                                                                                                                                                                          | Reset by failover                                                                                          | design §4.2                                                                           |
+| TLS `material_sequence`                                    | Single-candidate convergence or recovery                                                                                                                                                                                                                                                    | Reset by plan or pin change                                                                                | design §4.2                                                                           |
+| `hold_generation`, guard `generation`                      | Hold and guard changes                                                                                                                                                                                                                                                                      | Lowered; equal counters with a different spec are rejected                                                 | design §4.2                                                                           |
 
 - **LT-030** Rollback MUST use fresh monotonic epochs and MUST NOT reset
   generations. (design §7.3; tasks T10.6, T51.8)
@@ -258,17 +259,19 @@ These values have no lifetime. They are monotonic and are never reset.
 
 ## 8. Keys and verifier caches
 
-| Item                                            | Value                                                         | Source                          |
-| ----------------------------------------------- | ------------------------------------------------------------- | ------------------------------- |
-| Retired public signing key retention            | Through maximum issued TTL plus skew                          | design §6                       |
-| Retired internal assertion key retention        | 30 s assertion lifetime plus skew                             | design §6.2                     |
-| Internal key status and provenance records      | Through all dependent continuation deadlines                  | design §6.2; tasks §3           |
-| `/internal/v1/assertion-jwks` verifier cache    | Maximum 60 s freshness; no stale-on-error extension           | design §6.2; tasks §3           |
-| New internal key `activate_after`               | At least publication + maximum verifier cache interval + skew | design §6.2; tasks §3           |
-| Offline verifier lag after internal key disable | At most the remaining cache freshness (≤ 60 s)                | design §6.2                     |
-| Unknown-`kid` refetch and negative cache        | Bounded, rate-limited, single-flight; values not specified    | design §6.2                     |
-| `oidc_discovery` metadata and JWKS cache        | Bounded refresh, cache and staleness; values not specified    | design §5.4; tasks T11.2, T11.4 |
-| TokenReview `review_timeout_ms`                 | Configured per source; no default given                       | design §5.4; tasks §3           |
+| Item                                                | Value                                                                                                                 | Source                            |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| Retired public signing key retention                | Through maximum issued TTL plus skew                                                                                  | design §6                         |
+| Issuer `/.well-known/jwks.json` cache max-age       | At most 300 s (public-api API-042)                                                                                    | ADR-002; lead decision (OQ-API-3) |
+| Emergency-disabled public key in the published JWKS | Removed at once; verifiers stop accepting it when their cached copy expires, at most 300 s later (public-api API-043) | ADR-002; lead decision (OQ-API-3) |
+| Retired internal assertion key retention            | 30 s assertion lifetime plus skew                                                                                     | design §6.2                       |
+| Internal key status and provenance records          | Through all dependent continuation deadlines                                                                          | design §6.2; tasks §3             |
+| `/internal/v1/assertion-jwks` verifier cache        | Maximum 60 s freshness; no stale-on-error extension                                                                   | design §6.2; tasks §3             |
+| New internal key `activate_after`                   | At least publication + maximum verifier cache interval + skew                                                         | design §6.2; tasks §3             |
+| Offline verifier lag after internal key disable     | At most the remaining cache freshness (≤ 60 s)                                                                        | design §6.2                       |
+| Unknown-`kid` refetch and negative cache            | Bounded, rate-limited, single-flight; values not specified                                                            | design §6.2                       |
+| `oidc_discovery` metadata and JWKS cache            | Bounded refresh, cache and staleness; values not specified                                                            | design §5.4; tasks T11.2, T11.4   |
+| TokenReview `review_timeout_ms`                     | Configured per source; no default given                                                                               | design §5.4; tasks §3             |
 
 - **LT-070** Ordinary scale-out of an active signer group MUST NOT need a
   new-key delay; a newly enrolled key's `activate_after` MUST NOT be waived,
@@ -465,12 +468,12 @@ shows problems. All other items are not resolved by this contract.
   state can no longer be replayed"; the quarantine length and how it is
   computed were not stated.
 - **OQ-LT-14 — ADR-010 record (contradiction).** **Decided** (lead decision,
-  2026-11-19); to be recorded in the ADR PR. ADR-010 gains the clause: "Real
-  gateway apply/compensation closes origin cookie admissions; unchanged
-  contexts get unavailable only to their existing lease; fixed
+  2026-11-19) and resolved: ADR-010, published in `docs/adr` (item 19), carries
+  the clause "Real gateway
+  apply/compensation closes origin cookie admissions; unchanged contexts get
+  unavailable only to their existing lease; fixed
   session/logout/revoke/back-channel/security-disable cleanup stays
-  independent of the route gate." Until that PR lands, this item stays open
-  for tracking. Original question: T00.6 requires the full-origin apply
+  independent of the route gate." Original question: T00.6 requires the full-origin apply
   interruption and cleanup independence to be recorded in ADR-010 and
   ADR-020; ADR-020 in tasks §11 records both, ADR-010 records neither. The ADR
   table is outside this contract and was not changed.
@@ -487,6 +490,6 @@ shows problems. All other items are not resolved by this contract.
   retention row above that adds skew.
 - **OQ-LT-17 — Break-glass recovery challenge TTL.** **Decided** (lead
   decision, 2026-11-19): default 5 min, maximum 15 min (§11, LT-107).
-  Follow-up: add the values to design §7.2. Original question: design §7.2
+  Design §7.2 states the values. Original question: design §7.2
   calls the recovery challenge "short-lived" and single use without a
   number.
