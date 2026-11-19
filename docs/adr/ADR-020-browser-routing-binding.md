@@ -363,8 +363,10 @@ Existing contract questions that touch this ADR:
   2026-11-19): T00.5 freezes the shape; literals move to T32.3 and T50.4.
 - **OQ-GW-2** — pinned versions. Decided (lead decision, 2026-11-19): T00.5
   freezes what is pinned; the version pair is chosen in T32.3 and T50.4.
-- **OQ-GW-3** — exemptions. Decided (lead decision, 2026-11-19): seven cookie
-  endpoints; per-endpoint retained headers still open.
+- **OQ-GW-3** — exemptions. Decided (lead decision, 2026-11-19): the seven
+  fixed cookie endpoints plus each exact registered per-provider issuer
+  callback path `/oauth/callback/{provider_id}` (GW-036, OQ-TM-4);
+  per-endpoint retained headers still open.
 - **OQ-GW-4** — verified SkyOAuth backend identity. Deferred (lead decision,
   2026-11-19) to T32.4.
 - **OQ-GW-5** — literal filter chain and assertion-header stripping stage
