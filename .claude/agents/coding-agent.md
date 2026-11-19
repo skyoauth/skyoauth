@@ -1,6 +1,6 @@
 ---
 name: coding-agent
-description: Implementation subagent for a coding session. Use it to write, change or refactor code for a well-scoped coding task (a task ID, a spec section, or a clear change request) and to run the quick checks that prove the change works.
+description: "Implementation subagent for a coding session. Use it to write, change or refactor production code for a well-scoped coding task (a task ID, a spec section or a clear change request) and to run the quick checks that prove the change works. For writing or fixing test suites, harnesses, CI or workflows, use test-agent instead."
 model: claude-opus-5-5
 effort: high
 autoCompactWindow: 643210

@@ -1,6 +1,6 @@
 ---
 name: test-agent
-description: Testing subagent for a test session. Use it for testing tasks: writing and running tests, creating or fixing test harnesses, CI and workflow files, conformance and integration suites, reproducing failures, and reporting results.
+description: "Testing subagent for a test session. Use it for testing tasks, including writing and running tests, creating or fixing test harnesses, CI and workflow files, conformance and integration suites, and reproducing and reporting failures. It does not change production code; a diagnosed bug goes back to coding-agent."
 model: claude-opus-5-5
 effort: high
 autoCompactWindow: 643210
