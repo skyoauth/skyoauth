@@ -465,12 +465,11 @@ shows problems. All other items are not resolved by this contract.
   state can no longer be replayed"; the quarantine length and how it is
   computed were not stated.
 - **OQ-LT-14 — ADR-010 record (contradiction).** **Decided** (lead decision,
-  2026-11-19); to be recorded in the ADR PR. ADR-010 gains the clause: "Real
-  gateway apply/compensation closes origin cookie admissions; unchanged
-  contexts get unavailable only to their existing lease; fixed
+  2026-11-19) and resolved: ADR-010 carries the clause "Real gateway
+  apply/compensation closes origin cookie admissions; unchanged contexts get
+  unavailable only to their existing lease; fixed
   session/logout/revoke/back-channel/security-disable cleanup stays
-  independent of the route gate." Until that PR lands, this item stays open
-  for tracking. Original question: T00.6 requires the full-origin apply
+  independent of the route gate." Original question: T00.6 requires the full-origin apply
   interruption and cleanup independence to be recorded in ADR-010 and
   ADR-020; ADR-020 in tasks §11 records both, ADR-010 records neither. The ADR
   table is outside this contract and was not changed.
