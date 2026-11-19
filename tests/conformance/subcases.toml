@@ -1,0 +1,103 @@
+# Sub-ID annex of the conformance registry (layout doc §3, §5 Q1/Q3, §6).
+# Hand-authored except matrix_sha256 and comments, which
+# scripts/ci/gen-conformance-registry.mjs rewrites; see tests/conformance/README.md.
+
+[[subcase]]
+id = "A18.01"
+kind = "subcase"
+parent = "A18"
+conditional_on = "forwardauth"
+layers = ["security", "integration"]
+envs = ["envoy-k3s", "browser"]
+harness = ["ENV raw capture", "OIDC", "BR"]
+owners = ["T32.9"]
+positive = "credential containment and trusted forwarded chain: ForwardAuth preserves typed evidence, cookie consumption and decision/error semantics"
+negative = "plain public-client identity headers; forwarded chain not trusted"
+# matrix_sha256: SHA-256 of the whole docs/skyoauth-tasks.md line of T32.9, no trailing newline:
+#   - [ ] **T32.9** Optional private ForwardAuth preserves typed evidence, cookie consumption, trus…
+matrix_sha256 = "730c84f2ee1d1703faf8fdfb85a9384dccb8ff4a957e247849af55d560601499"
+
+[[subcase.stage]]
+milestone = "M3"
+scope = "full row"
+legs = [
+  "scenarios-envoy-k3s/x86_64",
+  "typescript-browser/chromium",
+  "typescript-browser/firefox",
+  "typescript-browser/webkit",
+]
+status = "planned"
+tests = []
+
+[[subcase]]
+id = "A27.01"
+kind = "subcase"
+parent = "A27"
+conditional_on = "device-flow"
+layers = ["security"]
+envs = ["browser", "native-3os"]
+harness = ["BR", "OIDC with live SSO", "RN", "attacker loopback process"]
+owners = ["T40.6"]
+positive = "user-code approval"
+negative = "expiry/polling abuse, no interaction bypass"
+# matrix_sha256: SHA-256 of the whole docs/skyoauth-tasks.md line of T40.6, no trailing newline:
+#   - [ ] **T40.6** Device flow conditional: user-code verification/explicit approval pages, expiry…
+matrix_sha256 = "02c64cdac8a18ddfb48397e703e048a59f5ea84e7867ab5c31998ee9df5a5fc9"
+
+[[subcase.stage]]
+milestone = "M4"
+scope = "full row"
+legs = [
+  "typescript-browser/chromium",
+  "typescript-browser/firefox",
+  "typescript-browser/webkit",
+  "clients-rust-native/ubuntu",
+  "clients-rust-native/macos",
+  "clients-rust-native/windows",
+]
+status = "planned"
+tests = []
+
+[[subcase]]
+id = "A33.01"
+kind = "subcase"
+parent = "A33"
+conditional_on = "back-channel-logout"
+layers = ["security"]
+envs = ["pg"]
+harness = ["PG", "UC"]
+owners = ["T30.6"]
+positive = "verified sid targeting"
+negative = "logout token failing issuer/audience/signature/events/time/replay verification; arbitrary claim/context lookup"
+# matrix_sha256: SHA-256 of the whole docs/skyoauth-tasks.md line of T30.6, no trailing newline:
+#   - [ ] **T30.6** Optional back-channel logout verifies issuer/audience/signature/events/time/rep…
+matrix_sha256 = "2d2144ba9a92926e04fb64197bd2f5ceacfbe059bb631bd3e187d19f298240b9"
+
+[[subcase.stage]]
+milestone = "M3"
+scope = "full row"
+legs = ["scenarios-pg/x86_64"]
+status = "planned"
+tests = []
+
+[[subcase]]
+id = "A58.01"
+kind = "subcase"
+parent = "A58"
+conditional_on = "forwardauth"
+layers = ["integration"]
+envs = ["pg", "envoy-k3s"]
+harness = ["K3", "ENV", "cert-manager", "VAP", "≥2 controllers", "UC"]
+owners = ["T32.9"]
+positive = "deployment-enforcer equivalence: a reviewed equivalent deployment enforcer for each gateway"
+negative = "gateway without a reviewed equivalent enforcer, including one hosted on Kubernetes; Envoy observer assumptions inherited automatically"
+# matrix_sha256: SHA-256 of the whole docs/skyoauth-tasks.md line of T32.9, no trailing newline:
+#   - [ ] **T32.9** Optional private ForwardAuth preserves typed evidence, cookie consumption, trus…
+matrix_sha256 = "730c84f2ee1d1703faf8fdfb85a9384dccb8ff4a957e247849af55d560601499"
+
+[[subcase.stage]]
+milestone = "M3"
+scope = "full row"
+legs = ["scenarios-pg/x86_64", "scenarios-envoy-k3s/x86_64"]
+status = "planned"
+tests = []
