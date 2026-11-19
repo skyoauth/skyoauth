@@ -49,8 +49,10 @@ recovery among the decisions requiring ratification.
    - The public signer has a prepublished standby key. It is separately
      held: its custody follows T50.3 (separate custody), as for the internal
      standby.
-   - Instance `security_admin` performs emergency disable and rotation of
-     public keys through an audited admin endpoint, `/admin/v1/issuer-keys`.
+   - Emergency disable and rotation of public keys go through an audited
+     admin endpoint, `/admin/v1/issuer-keys`. The performing role is
+     instance `security_admin` (inferred from how internal keys are run,
+     design §6.2; the lead named the endpoint but not the role).
    - The issuer JWKS cache max-age is at most 300 s, and a disabled key is
      removed from the published JWKS at once. Both are specified before M2.
    - The signer enforces structural limits on what it signs (`typ` and
