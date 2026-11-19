@@ -52,10 +52,20 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
   decided by `scripts/ci/docs-only.sh`) skips the build and test jobs.
+- Docs consistency runs on every change, docs-only ones included, and
+  `CI passed` requires it to pass (a skip does not count):
+  `node scripts/ci/docs-check.mjs` cross-checks fences, HTML comments, task,
+  ADR and conformance IDs, Mermaid task DAGs and links in `docs/`, and
+  `node --test scripts/ci/docs-check.test.mjs` is its self-test. Errors fail
+  the job. In CI, errors and warnings are also annotations. ADR numbering
+  gaps in the tasks §11 table and ADR files without a table row are
+  warning annotations that do not fail the job (locally the latter is an
+  info note); ADRs never referenced by ID are one info summary line, listed
+  with `--verbose`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
-page. To protect `main`, require the `CI passed` check: it passes when every
-other job passed or was skipped. Dependabot keeps actions, crates and npm
+page. To protect `main`, require the `CI passed` check: it passes when `Docs
+consistency` passed and every other job passed or was skipped. Dependabot keeps actions, crates and npm
 packages up to date.
 
 ## License
