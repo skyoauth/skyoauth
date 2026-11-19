@@ -70,16 +70,21 @@ unauthorized actor fall back onto another grant (design §5.7).
 8. **Other denials.** Duplicate parameters, missing selectors, profile
    mismatch, unsupported `resource` or requested token type deny. One exact
    registered API audience per credential (design §5.7; T21.1). `resource` is
-   always rejected; `requested_token_type` is accepted only when absent or
-   exactly `urn:ietf:params:oauth:token-type:access_token` (OQ-ADR015-1).
+   always rejected with `invalid_target`; `requested_token_type` is accepted
+   only when absent or exactly `urn:ietf:params:oauth:token-type:access_token`,
+   and any other value gets `invalid_request` (OQ-ADR015-1).
 9. **Error codes** (OQ-ERR-3; decided for the WIF exchange profiles, lead
    decision, 2026-11-19):
    - `invalid_request` for malformed input, duplicate parameters, missing
-     selectors, unsupported parameters and profile mismatch;
+     selectors, unsupported parameters, an unsupported `requested_token_type`
+     and profile mismatch;
    - one uniform `invalid_grant` for any source, grant, binding or proof
      failure, revealing no detail about which one failed (ERR-020);
    - `invalid_target` for an `audience` not in the grant's set or not
-     assigned to the tenant;
+     assigned to the tenant, and for any `resource` parameter, which is
+     always rejected. This is an explicit exception to the generic
+     `invalid_request` rule for unsupported parameters (RFC 8693 §2.2.2,
+     RFC 8707; Decided (lead decision, 2026-11-19), OQ-ADR015-1);
    - `invalid_scope` and `unsupported_grant_type` keep their existing
      meaning.
 10. **Response.** Success returns `access_token`, `token_type=Bearer`,
@@ -146,9 +151,12 @@ Existing contract questions that touch this ADR:
 New questions raised by this ADR:
 
 - **OQ-ADR015-1 — `resource` and `requested_token_type`.** Decided (lead
-  decision, 2026-11-19): `resource` is always rejected; `requested_token_type`
-  is accepted only when absent or exactly
-  `urn:ietf:params:oauth:token-type:access_token` (item 8). Original
+  decision, 2026-11-19): always reject `resource`, with the code
+  `invalid_target` (an explicit exception to the generic `invalid_request`
+  rule; RFC 8693 §2.2.2, RFC 8707). `requested_token_type` is accepted only
+  when absent or exactly `urn:ietf:params:oauth:token-type:access_token`; an
+  unsupported value gets `invalid_request`. An `audience` not in the grant's
+  set or not assigned gets `invalid_target` (items 8 and 9). Original
   question: design §5.7 denies
   an "unsupported resource or requested token type", and T21.1 rejects
   "unsupported target/subject/resource parameters". The sources did not say
@@ -164,6 +172,10 @@ New questions raised by this ADR:
 - A25 — several same-audience grants; the generated grant selector chooses the
   actor and target; override, wrong tenant or mode denies.
 - A26 — scope omitted with and without defaults, empty and excessive scopes.
+- `resource` and token type (OQ-ADR015-1) — any `resource` parameter gets
+  `invalid_target`; an unsupported `requested_token_type` gets
+  `invalid_request`; an audience outside the grant's set or unassigned gets
+  `invalid_target`.
 - A49 — exchange with names instead of IDs rejects.
 - A50 — overlapping bindings for different actors; only the grant actor's
   eligible bindings count; no union.
