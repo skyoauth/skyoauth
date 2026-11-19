@@ -239,6 +239,11 @@ jobs:
     services:
       postgres:
         # postgres:17 (17.12) pinned by its multi-arch index digest.
+        # Dependabot is not configured for this pin; bump it by hand
+        # (docs/testing/conformance-layout.md section 4): take the
+        # multi-arch index digest of the new 17.x tag from Docker Hub and
+        # change tag and digest together. Docker pulls by digest and
+        # ignores the tag, so the check step fails if they disagree.
         image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
         env:
           POSTGRES_USER: skyoauth
@@ -270,7 +275,9 @@ jobs:
           tool: cargo-nextest@0.9.151
 
       # Proves the service container is reachable from the runner with the
-      # URL the tests use, and that it is the pinned major version.
+      # URL the tests use, that it is the pinned major version, and that the
+      # server version matches the image tag (catches a tag bumped without
+      # its digest, or the reverse).
       - name: Check PostgreSQL is reachable
         run: |
           pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
@@ -278,6 +285,14 @@ jobs:
           echo "server_version_num: $version"
           if [ "${version%????}" != 17 ]; then
             echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
+            exit 1
+          fi
+          tag="$(sed -n 's/^ *image: postgres:\([0-9.]*\)@sha256:.*/\1/p' .github/workflows/ci.yml)"
+          server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
+          server="${server%% *}"
+          echo "image tag: $tag, server_version: $server"
+          if [ -z "$tag" ] || [ "$tag" != "$server" ]; then
+            echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
             exit 1
           fi
 

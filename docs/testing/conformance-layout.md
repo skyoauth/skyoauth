@@ -366,6 +366,8 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
 
 Coverage: the existing gates (Rust 85 % lines; TypeScript 85 % lines/functions/branches/statements) stay on unit tests. Scenario and integration coverage is uploaded and reported but not gated (Q9).
 
+**PostgreSQL image pin.** The `scenarios-pg` service container is pinned as `postgres:<17.x tag>@sha256:<digest>` in `ci.yml`. Dependabot is not configured to update this pin (`.github/dependabot.yml` covers GitHub Actions, Cargo and npm; its `docker` ecosystem is not documented here as reading workflow `services:` images), so it is bumped by hand: a maintainer opens a PR with each PostgreSQL 17 minor release (and at least quarterly), taking the multi-arch index digest of the new tag from Docker Hub and changing tag and digest together. The job's check step verifies both: the server must report major version 17, and its `server_version` must equal the image tag. Moving to a new major version is a design decision, not a bump.
+
 ## 5. Decisions
 
 The lead decided these on review. They replace the former open questions Q1–Q11.
