@@ -20,10 +20,21 @@ not implement any of them.
 - Each normative requirement has a stable ID (`API-`, `ERR-`, `TP-`, `IR-`)
   that tests and reviews can cite.
 - Each requirement cites the design or tasks section it comes from. The
-  contracts add no behavior beyond those sources.
+  contracts add no behavior beyond those sources, except where an open
+  question is marked **Decided**.
 - Where the sources are ambiguous or disagree, the contract does not choose.
   The gap is listed under **Open questions** (`OQ-API-`, `OQ-ERR-`, `OQ-TP-`,
   `OQ-IR-`) for maintainers to resolve.
+- An open question marked **Decided** records a lead decision with its date.
+  The normative text cites it as "lead decision". The design and tasks
+  documents still need the matching follow-up under design §12.
+- Text marked "(inferred)" is the contract's reading of the sources, not a
+  statement they make directly.
+- A requirement ID that is withdrawn (for example a duplicate) stays in place
+  as "Withdrawn" with a pointer to the canonical requirement, so that the ID
+  is never reused.
+- Tables write every path in full; the tasks matrix's grouped-path shorthand
+  is not used (OQ-API-11).
 
 ## Changing a contract
 

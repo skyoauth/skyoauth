@@ -15,18 +15,20 @@
 SkyOAuth issues a **private, versioned JWT profile**. It is not an RFC 9068
 JWT access token and makes no RFC 9068 conformance claim. This document
 freezes the protected types, the signed profile discriminator, the required
-claim set of each profile and the rejection rules a verifier applies.
+claim set of each profile and the rejection rules a verifier applies. Items
+marked **Decided** under [Open questions](#open-questions) record lead
+decisions that the normative text already reflects.
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in BCP 14 (RFC 2119,
 RFC 8174) when they appear in capitals. Requirement IDs use `TP-nnn`.
 
 ## 1. Profiles at a glance
 
-| Signed `skyoauth_profile` | Protected `typ`         | Issued by                                          | Accepted on                                            | Signed with                                               | Source                       |
-| ------------------------- | ----------------------- | -------------------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------- | ---------------------------- |
-| `wif`                     | `skyoauth-access+jwt`   | `/oauth/token` WIF exchange (direct or delegation) | Bearer path                                            | Public access-token key (issuer JWKS)                     | design §6; tasks T20.3       |
-| `human_cli`               | `skyoauth-access+jwt`   | `/oauth/token` native code exchange or refresh     | Bearer path                                            | Public access-token key (issuer JWKS)                     | design §6; tasks T40.13      |
-| `human_session`           | `skyoauth-internal+jwt` | SkyOAuth gateway Check after a live session check  | Authenticated gateway-only assertion header to backend | Internal signer-group key (`/internal/v1/assertion-jwks`) | design §6, §6.2; tasks T32.2 |
+| Signed `skyoauth_profile` | Protected `typ`         | Issued by                                          | Accepted on                                                                  | Signed with                                               | Source                       |
+| ------------------------- | ----------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------- | ---------------------------- |
+| `wif`                     | `skyoauth-access+jwt`   | `/oauth/token` WIF exchange (direct or delegation) | Bearer path                                                                  | Public access-token key (issuer JWKS)                     | design §6; tasks T20.3       |
+| `human_cli`               | `skyoauth-access+jwt`   | `/oauth/token` native code exchange or refresh     | Bearer path                                                                  | Public access-token key (issuer JWKS)                     | design §6; tasks T40.13      |
+| `human_session`           | `skyoauth-internal+jwt` | SkyOAuth gateway Check after a live session check  | Authenticated gateway-only header `X-SkyOAuth-Assertion` (decided, OQ-TP-11) | Internal signer-group key (`/internal/v1/assertion-jwks`) | design §6, §6.2; tasks T32.2 |
 
 - **TP-001** `skyoauth-access+jwt` and `skyoauth-internal+jwt` are proposed
   private identifiers, not registered media types. They MUST be matched
@@ -43,12 +45,12 @@ RFC 8174) when they appear in capitals. Requirement IDs use `TP-nnn`.
 
 ## 2. Protected header
 
-| Parameter           | Rule                                                                                                                          | Source                         |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
-| `typ`               | Exactly `skyoauth-access+jwt` or `skyoauth-internal+jwt`; any other value or absence MUST be rejected                         | design §6                      |
-| `alg`               | MUST be an allowed asymmetric algorithm for the selected trust set; `none` MUST be rejected (allowed set: OQ-TP-3)            | design §5.4, §6, §6.2          |
-| `kid`               | MUST identify a key in the trust set already selected by profile and ingress. Public and internal kid namespaces are disjoint | design §6, §6.2                |
-| `jku`, `x5u`, `jwk` | MUST NOT be used to locate or supply verification keys                                                                        | design §5.4, §6.2; tasks T11.5 |
+| ID     | Parameter           | Rule                                                                                                                          | Source                         |
+| ------ | ------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------ |
+| TP-012 | `typ`               | Exactly `skyoauth-access+jwt` or `skyoauth-internal+jwt`; any other value or absence MUST be rejected                         | design §6                      |
+| TP-013 | `alg`               | MUST be an allowed asymmetric algorithm for the selected trust set; `none` MUST be rejected (allowed set: OQ-TP-3)            | design §5.4, §6, §6.2          |
+| TP-014 | `kid`               | MUST identify a key in the trust set already selected by profile and ingress. Public and internal kid namespaces are disjoint | design §6, §6.2                |
+| TP-015 | `jku`, `x5u`, `jwk` | MUST NOT be used to locate or supply verification keys                                                                        | design §5.4, §6.2; tasks T11.5 |
 
 - **TP-010** The verifier MUST select the trust set from the expected ingress
   and profile **before** looking up `kid`. Changing `typ` MUST NOT cross key
@@ -62,25 +64,26 @@ RFC 8174) when they appear in capitals. Requirement IDs use `TP-nnn`.
 The protected `typ`, the signed `skyoauth_profile` and the expected ingress
 route jointly select the validation rules (design §6).
 
-| `typ`                          | `skyoauth_profile`                                               | Ingress                                                                   | Result                         | Source                                                              |
-| ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------------- |
-| `skyoauth-access+jwt`          | `wif`                                                            | Bearer path, route allows `wif`                                           | Validate as `wif`              | design §6                                                           |
-| `skyoauth-access+jwt`          | `human_cli`                                                      | Bearer path, route allows `human_cli`                                     | Validate as `human_cli`        | design §6                                                           |
-| `skyoauth-internal+jwt`        | `human_session`                                                  | Authenticated gateway-only assertion header, route allows `human_session` | Validate as `human_session`    | design §4, §6                                                       |
-| `skyoauth-internal+jwt`        | any                                                              | Public bearer ingress                                                     | Reject                         | design §6.1.1 ("Public bearer ingress rejects internal assertions") |
-| `skyoauth-access+jwt`          | `human_session`                                                  | Any                                                                       | Reject (type/profile mismatch) | design §6                                                           |
-| `skyoauth-internal+jwt`        | `wif` or `human_cli`                                             | Any                                                                       | Reject (type/profile mismatch) | design §6                                                           |
-| Any                            | Profile not allowed by the route or resource-server registration | Any                                                                       | Reject                         | design §4.1, §6                                                     |
-| `at+jwt`, `JWT`, absent, other | Any                                                              | Any                                                                       | Reject                         | design §6; tasks A55                                                |
+| `typ`                          | `skyoauth_profile`                                               | Ingress                                                                         | Result                         | Source                                                          |
+| ------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------- |
+| `skyoauth-access+jwt`          | `wif`                                                            | Bearer path, route allows `wif`                                                 | Validate as `wif`              | design §6                                                       |
+| `skyoauth-access+jwt`          | `human_cli`                                                      | Bearer path, route allows `human_cli`                                           | Validate as `human_cli`        | design §6                                                       |
+| `skyoauth-internal+jwt`        | `human_session`                                                  | Authenticated gateway-only `X-SkyOAuth-Assertion`, route allows `human_session` | Validate as `human_session`    | design §4, §6                                                   |
+| `skyoauth-internal+jwt`        | any                                                              | Public bearer ingress                                                           | Reject                         | design §6 ("Public bearer ingress rejects internal assertions") |
+| `skyoauth-access+jwt`          | `human_session`                                                  | Any                                                                             | Reject (type/profile mismatch) | design §6                                                       |
+| `skyoauth-internal+jwt`        | `wif` or `human_cli`                                             | Any                                                                             | Reject (type/profile mismatch) | design §6                                                       |
+| Any                            | Profile not allowed by the route or resource-server registration | Any                                                                             | Reject                         | design §4.1, §6                                                 |
+| `at+jwt`, `JWT`, absent, other | Any                                                              | Any                                                                             | Reject                         | design §6; tasks A55                                            |
 
 - **TP-020** A verifier MUST NOT infer a profile from a `usr_` prefix, a
   missing grant, the presence of `act` or an untrusted request header.
   (design §6)
 - **TP-021** A verifier MUST reject unknown profile values, unknown
   `skyoauth_profile_version` values and contradictory claim sets. (design §6)
-- **TP-022** A request that presents more than one credential (cookie plus
-  bearer, or bearer plus internal assertion) MUST be rejected. (design §4, §6;
-  tasks T31.4, A10)
+- **TP-022** Withdrawn as a duplicate. Mixed credentials (cookie plus bearer,
+  or bearer plus internal assertion) follow
+  [public-api.md API-062](public-api.md#4-private-gateway-endpoints), which is
+  canonical.
 - **TP-023** Bearer validation MUST NOT choose the expected audience from the
   token itself; the expected audience is pinned by gateway and backend
   configuration. (design §4.1)
@@ -89,45 +92,70 @@ route jointly select the validation rules (design §6).
 
 Every SkyOAuth credential carries these claims (design §6).
 
-| Claim                      | Type                                  | Rule                                                                                                   | Source                                 |
-| -------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------ | -------------------------------------- |
-| `iss`                      | String                                | MUST equal the canonical SkyOAuth issuer exactly (see OQ-TP-2 for internal assertions)                 | design §6                              |
-| `sub`                      | String                                | Local principal ID per profile (§5). Never an upstream subject                                         | design §3.1, §6                        |
-| `aud`                      | One registered audience               | MUST be exactly one registered audience, equal to the verifier's own registered audience (see OQ-TP-4) | design §6, §5.7                        |
-| `iat`                      | NumericDate                           | Required                                                                                               | design §6                              |
-| `nbf`                      | NumericDate                           | Required                                                                                               | design §6                              |
-| `exp`                      | NumericDate                           | Required; bounded TTL (§7) and bounded skew (OQ-TP-10)                                                 | design §6                              |
-| `jti`                      | String                                | Required; unique                                                                                       | design §6                              |
-| `scope`                    | Space-delimited string                | Required and explicit; see [identity-registry.md §6](identity-registry.md#6-scopes)                    | design §5.7, §6                        |
-| `skyoauth_tenant`          | Tenant ID                             | Required; signed                                                                                       | design §6                              |
-| `skyoauth_profile`         | `wif`, `human_cli` or `human_session` | Required; signed                                                                                       | design §6                              |
-| `skyoauth_profile_version` | Integer `1`                           | Required; signed                                                                                       | design §6                              |
-| `skyoauth_policy_revision` | String                                | Required; references the immutable policy decision snapshot (§5)                                       | design §6; tasks §3 "Policy revisions" |
-| `skyoauth_constraints`     | Object                                | Required; schema per profile in [identity-registry.md §8](identity-registry.md#8-constraints)          | design §6                              |
+| Claim                      | Type                                  | Rule                                                                                           | Source                                 |
+| -------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------- |
+| `iss`                      | String                                | MUST equal the canonical SkyOAuth issuer exactly, for every profile (TP-031)                   | design §6; lead decision               |
+| `sub`                      | String                                | Local principal ID per profile (§5). Never an upstream subject                                 | design §3.1, §6                        |
+| `aud`                      | JSON string                           | Exactly one registered audience, as a string, equal to the verifier's own audience (TP-032)    | design §6, §5.7; lead decision         |
+| `iat`                      | NumericDate                           | Required                                                                                       | design §6                              |
+| `nbf`                      | NumericDate                           | Required                                                                                       | design §6                              |
+| `exp`                      | NumericDate                           | Required; bounded TTL (§7) and bounded skew (OQ-TP-10)                                         | design §6                              |
+| `jti`                      | String                                | Required; unique per issued credential, an issuer property (TP-033); not a verifier replay key | design §6; tasks T20.2                 |
+| `scope`                    | Space-delimited string                | Required and explicit; canonical on issue, a set on verify (TP-034)                            | design §5.7, §6; lead decision         |
+| `skyoauth_tenant`          | Tenant ID                             | Required; signed                                                                               | design §6                              |
+| `skyoauth_profile`         | `wif`, `human_cli` or `human_session` | Required; signed                                                                               | design §6                              |
+| `skyoauth_profile_version` | Integer `1`                           | Required; signed                                                                               | design §6                              |
+| `skyoauth_policy_revision` | `PolicyRevision` ID                   | Required; the ID of the immutable policy decision snapshot (TP-035)                            | design §6; tasks §3 "Policy revisions" |
+| `skyoauth_constraints`     | Object                                | Required; schema per profile in [identity-registry.md §8](identity-registry.md#8-constraints)  | design §6                              |
 
 - **TP-030** A credential missing any common claim MUST be rejected. (design
   §6; tasks A30)
+- **TP-031** `iss` MUST equal the one canonical SkyOAuth issuer exactly. This
+  holds for `human_session` internal assertions too, even though they are
+  signed with the separate internal key set; the trust set, not `iss`,
+  separates key purposes (TP-010). (design §6; internal assertions: lead
+  decision, OQ-TP-2)
+- **TP-032** `aud` MUST be a single JSON string naming exactly one registered
+  audience, equal to the verifier's own registered audience. An array,
+  including a single-element array, MUST be rejected. (design §5.7, §6;
+  encoding: lead decision, OQ-TP-4)
+- **TP-033** The issuer MUST assign each issued credential a `jti` that is
+  unique among the credentials it issues, including each new output of a
+  reusable-proof exchange. Uniqueness is an issuer property, not a verifier
+  check. (design §5.3, §6; tasks T20.2)
+- **TP-034** Issuers MUST emit `scope` as the canonical scope string: unique
+  scope tokens, bytewise ASCII-sorted, joined by single spaces
+  ([identity-registry.md §6](identity-registry.md#6-scopes)). Verifiers MUST
+  treat the value as a set of scope tokens; order carries no meaning. (lead
+  decision, OQ-TP-8; canonical form from design §5.2.1)
+- **TP-035** `skyoauth_policy_revision` MUST hold the ID of the immutable
+  `PolicyRevision` record (for example `polrev_...`) for every profile. For
+  human profiles that record references the `HumanAccessPolicy` and its
+  revision among its dependencies; the claim does not carry the
+  `HumanAccessPolicy` revision number. (design §6; tasks §3 "Policy
+  revisions"; lead decision, OQ-TP-9)
 
 ## 5. Profile-specific claims
 
 Legend: **R** required, **X** MUST NOT be present, **–** not part of the
-profile (see OQ-TP-6 for how a verifier treats an unexpected claim).
+profile and therefore rejected as an extra claim (TP-045).
 
-| Claim                                | `wif` direct                            | `wif` delegation                                                      | `human_cli`                            | `human_session`                                                     | Source                 |
-| ------------------------------------ | --------------------------------------- | --------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------- | ---------------------- |
-| `sub`                                | R: workload principal (grant actor)     | R: the grant's preapproved service principal                          | R: human principal                     | R: human principal                                                  | design §5.6, §6        |
-| `act`                                | X (no target service)                   | R: object with `sub` = workload principal (see OQ-TP-5 for `act.iss`) | X                                      | X                                                                   | design §5.6, §6        |
-| `skyoauth_mode`                      | R: `direct`                             | R: `delegation`                                                       | X                                      | X                                                                   | design §6; tasks T20.3 |
-| `skyoauth_grant`                     | R: grant ID                             | R: grant ID                                                           | X                                      | X                                                                   | design §6              |
-| `client_id`                          | X (never invented from source or actor) | X                                                                     | R: actual registered OAuth `client_id` | X (no invented `client_id`)                                         | design §6; tasks T20.8 |
-| `auth_time`                          | –                                       | –                                                                     | R                                      | R                                                                   | design §6              |
-| `skyoauth_authentication`            | –                                       | –                                                                     | R: opaque authentication reference     | R: opaque authentication reference                                  | design §6              |
-| `skyoauth_application_origin`        | –                                       | –                                                                     | –                                      | R: application-origin ID                                            | design §6              |
-| `skyoauth_session`                   | –                                       | –                                                                     | –                                      | R: opaque internal session reference; never a cookie hash or ticket | design §6              |
-| `skyoauth_route` and route revision  | –                                       | –                                                                     | –                                      | R (claim shape: OQ-TP-1)                                            | design §4.1, §6        |
-| `skyoauth_request`                   | –                                       | –                                                                     | –                                      | R: request binding v1 (§6)                                          | design §4.1, §6        |
-| `skyoauth_policy_revision` refers to | Binding-backed WIF policy revision      | Binding-backed WIF policy revision                                    | `HumanAccessPolicy` revision (OQ-TP-9) | `HumanAccessPolicy` revision (OQ-TP-9)                              | design §6              |
-| `skyoauth_constraints.authorization` | `allowlist`                             | `allowlist`                                                           | `backend_rbac`                         | `backend_rbac`                                                      | design §6              |
+| Claim                                | `wif` direct                            | `wif` delegation                                                       | `human_cli`                            | `human_session`                                                     | Source                 |
+| ------------------------------------ | --------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------- | ---------------------- |
+| `sub`                                | R: workload principal (grant actor)     | R: the grant's preapproved service principal                           | R: human principal                     | R: human principal                                                  | design §5.6, §6        |
+| `act`                                | X (no target service)                   | R: object with `iss` = canonical issuer and `sub` = workload principal | X                                      | X                                                                   | design §5.6, §6        |
+| `skyoauth_mode`                      | R: `direct`                             | R: `delegation`                                                        | X                                      | X                                                                   | design §6; tasks T20.3 |
+| `skyoauth_grant`                     | R: grant ID                             | R: grant ID                                                            | X                                      | X                                                                   | design §6              |
+| `client_id`                          | X (never invented from source or actor) | X                                                                      | R: actual registered OAuth `client_id` | X (no invented `client_id`)                                         | design §6; tasks T20.8 |
+| `auth_time`                          | –                                       | –                                                                      | R                                      | R                                                                   | design §6              |
+| `skyoauth_authentication`            | –                                       | –                                                                      | R: opaque authentication reference     | R: opaque authentication reference                                  | design §6              |
+| `skyoauth_application_origin`        | –                                       | –                                                                      | –                                      | R: application-origin ID                                            | design §6              |
+| `skyoauth_session`                   | –                                       | –                                                                      | –                                      | R: opaque internal session reference; never a cookie hash or ticket | design §6              |
+| `skyoauth_route`                     | –                                       | –                                                                      | –                                      | R: `ApplicationRoute` ID (TP-047)                                   | design §4.1, §6        |
+| `skyoauth_route_version`             | –                                       | –                                                                      | –                                      | R: pinned `ApplicationRouteVersion` ID (TP-047)                     | design §4.1, §6        |
+| `skyoauth_request`                   | –                                       | –                                                                      | –                                      | R: request binding v1 (§6)                                          | design §4.1, §6        |
+| `skyoauth_policy_revision` refers to | Binding-backed WIF `PolicyRevision`     | Binding-backed WIF `PolicyRevision`                                    | `PolicyRevision` (TP-035)              | `PolicyRevision` (TP-035)                                           | design §6              |
+| `skyoauth_constraints.authorization` | `allowlist`                             | `allowlist`                                                            | `backend_rbac`                         | `backend_rbac`                                                      | design §6              |
 
 - **TP-040** A `wif` credential MUST carry `skyoauth_mode`, `skyoauth_grant`, a
   binding-backed policy revision and `allowlist` constraints. A delegation
@@ -144,6 +172,19 @@ profile (see OQ-TP-6 for how a verifier treats an unexpected claim).
 - **TP-044** A WIF exchange MUST NOT issue a refresh credential. WIF renewal
   uses a fresh or still-valid reusable proof according to the source's
   capability. (design §5.3, §5.7; tasks T20.5)
+- **TP-045** Each profile has an exact top-level claim set: the common claims
+  (§4) plus the claims marked R for that profile. A verifier MUST reject a
+  credential that carries any other top-level claim, including a claim marked
+  X or – for its profile and any unknown `skyoauth_*` claim. (lead decision,
+  OQ-TP-6)
+- **TP-046** In a delegation credential, `act.iss` MUST be present and MUST
+  equal the canonical SkyOAuth issuer (the same value as `iss`). (design §6
+  example; lead decision, OQ-TP-5)
+- **TP-047** A `human_session` assertion MUST carry `skyoauth_route`, the
+  stable `ApplicationRoute` ID, and the separate claim
+  `skyoauth_route_version`, the ID of the `ApplicationRouteVersion` pinned by
+  the active route bundle. (design §4.1 "skyoauth_route and its revision";
+  claim shape: lead decision, OQ-TP-1)
 
 ## 6. Request binding (`human_session` only)
 
@@ -174,6 +215,10 @@ profile (see OQ-TP-6 for how a verifier treats an unexpected claim).
 
 ## 7. Lifetimes
 
+This table summarizes the credential maxima from design §5.2.2, §6 and §6.1.
+The T00.6 lifetimes contract (`lifetimes.md`, PR #10) is authoritative for
+lifetimes and their interactions.
+
 | Credential                | Maximum lifetime                                                                     | Source                 |
 | ------------------------- | ------------------------------------------------------------------------------------ | ---------------------- |
 | `wif` access token        | 300 s; policy (grant `max_ttl`) may shorten                                          | design §5.7, §6.1      |
@@ -195,9 +240,17 @@ profile (see OQ-TP-6 for how a verifier treats an unexpected claim).
 Offline verification (backend or gateway):
 
 - **TP-070** Verify signature, allowed algorithm and `kid` in the selected
-  trust set; exact `iss`; exactly one `aud` equal to the verifier's own
-  registered audience; `iat`, `nbf`, `exp`; unique `jti`; explicit `scope`;
-  the common signed claims; and the profile's required claims. (design §6)
+  trust set; exact `iss` (TP-031); `aud` (TP-032); `iat`, `nbf`, `exp`; that
+  `jti` is present as a string; explicit `scope`; the common signed claims;
+  and the profile's exact claim set (TP-045). `jti` uniqueness is an issuer
+  property (TP-033), not a verifier check: an access token is a bearer
+  credential presented on every call within its lifetime, so a verifier MUST
+  NOT reject a credential only because it has seen its `jti` before. The only
+  per-`jti` one-use rules are continuation admission
+  ([public-api.md API-080](public-api.md#5-private-policy-and-trust-endpoints))
+  and the replay check on `single_use` external WIF proofs (design §5.3), which
+  applies to the incoming proof's `jti`, not to a SkyOAuth credential. (design
+  §5.3, §6, §6.1, §6.1.1)
 - **TP-071** Reject a profile that the resource-server registration or the
   ingress route does not allow. (design §4.1, §6)
 - **TP-072** Validate `skyoauth_constraints` against the profile's schema;
@@ -205,8 +258,10 @@ Offline verification (backend or gateway):
   deny. (design §6)
 - **TP-073** After profile validation, the backend MUST resolve the resource's
   canonical SkyOAuth tenant, compare it with `skyoauth_tenant`, check scope and
-  then apply allowlists (`wif`) or its own current RBAC (`backend_rbac`).
-  Credential validity alone MUST NOT authorize. (design §2 C09, §6; see
+  apply its own current RBAC. Backend RBAC is required for every profile; for
+  `wif` the backend MUST additionally check every allowlist dimension, which
+  is ANDed with tenant, audience, scope and RBAC. Credential validity alone
+  MUST NOT authorize. (design §2 C09, §3.1, §6; see
   [identity-registry.md §9](identity-registry.md#9-backend-authorization-order))
 
 Live verification (`/internal/v1/policy/check` and continuation rechecks):
@@ -287,41 +342,54 @@ Delegated `wif`, protected `typ=skyoauth-access+jwt`:
 
 ## Open questions
 
-- **OQ-TP-1 — Route revision claim.** Design §4.1 says the assertion "carries
-  `skyoauth_route` and its revision" and §6 says "`skyoauth_route`/route
-  revision". Whether the revision is a separate claim (and its name) or part of
-  a structured `skyoauth_route` value is not specified.
-- **OQ-TP-2 — `iss` of internal assertions.** All credentials require an exact
-  issuer, but the internal assertion is signed by a separate signer group and
-  verified against a private key set. Whether its `iss` is the canonical public
-  issuer URL or another value is not stated.
+Items marked **Decided** record a lead decision; the normative text above
+already reflects it, and the design and tasks documents still need the
+follow-up. All other items are not resolved by this contract.
+
+- **OQ-TP-1 — Route revision claim.** **Decided** (lead decision,
+  2026-11-19): `skyoauth_route` carries the `ApplicationRoute` ID and a
+  separate claim `skyoauth_route_version` carries the pinned
+  `ApplicationRouteVersion` ID (TP-047). Follow-up: the design names only
+  `skyoauth_route` and "its revision"; design §4.1, §6 and tasks T32.2 need the
+  new claim name. Original question: whether the revision is a separate claim
+  (and its name) or part of a structured `skyoauth_route` value.
+- **OQ-TP-2 — `iss` of internal assertions.** **Decided** (lead decision,
+  2026-11-19): internal assertions use the same canonical issuer as access
+  tokens (TP-031). Original question: whether the `iss` of an assertion signed
+  by the separate signer group is the canonical public issuer URL or another
+  value.
 - **OQ-TP-3 — Allowed algorithms.** Keys are asymmetric and verifiers check an
   "allowed algorithm", but the permitted JWS algorithm set for public and
   internal keys is not fixed.
-- **OQ-TP-4 — `aud` encoding.** Credentials carry "one registered audience"
-  and the examples use a JSON string. Whether a single-element array is
-  accepted or rejected is not stated.
-- **OQ-TP-5 — `act.iss`.** The delegation example includes `act.iss` equal to
-  the SkyOAuth issuer; the profile table requires only the workload `act`.
-  Whether `act.iss` is required, optional or fixed is not stated.
-- **OQ-TP-6 — Unexpected top-level claims.** Contradictory claim sets must be
-  rejected, but the treatment of other unexpected claims (for example
-  `auth_time` or `skyoauth_authentication` in a `wif` token, or an unknown
-  `skyoauth_*` claim) is not specified: reject or ignore.
+- **OQ-TP-4 — `aud` encoding.** **Decided** (lead decision, 2026-11-19): a
+  JSON string only; arrays, including single-element arrays, are rejected
+  (TP-032). Original question: whether a single-element array is accepted.
+- **OQ-TP-5 — `act.iss`.** **Decided** (lead decision, 2026-11-19): required
+  and equal to the canonical issuer (TP-046). Original question: the
+  delegation example includes `act.iss` but the profile table requires only
+  the workload `act`.
+- **OQ-TP-6 — Unexpected top-level claims.** **Decided** (lead decision,
+  2026-11-19): each profile has an exact claim set and extra claims are
+  rejected (TP-045). Original question: whether a verifier rejects or ignores
+  unexpected claims such as `auth_time` in a `wif` token or an unknown
+  `skyoauth_*` claim.
 - **OQ-TP-7 — Version scope.** `skyoauth_profile_version=1` and the
   constraints `version: 1` are separate fields. Whether they version
   independently, and whether `skyoauth_request.version` ties to either, is not
   stated.
-- **OQ-TP-8 — Scope claim ordering.** Comparison v1 defines a canonical sorted
-  scope string, and the examples are sorted, but whether the `scope` claim
-  itself must be canonical (sorted, unique) is not stated.
-- **OQ-TP-9 — Meaning of `skyoauth_policy_revision` for human profiles.** The
-  design §6 table calls it the "HumanAccessPolicy revision", the example value
-  is a `polrev_` ID and the tasks §3 model has a `PolicyRevision` record that
-  references the `HumanAccessPolicy`. Whether the claim holds the
-  `PolicyRevision` ID or the `HumanAccessPolicy` revision number is ambiguous.
+- **OQ-TP-8 — Scope claim ordering.** **Decided** (lead decision,
+  2026-11-19): issuers emit the canonical sorted unique scope string;
+  verifiers treat `scope` as a set (TP-034). Original question: whether the
+  `scope` claim itself must be canonical.
+- **OQ-TP-9 — Meaning of `skyoauth_policy_revision` for human profiles.**
+  **Decided** (lead decision, 2026-11-19): the claim holds the
+  `PolicyRevision` ID for every profile (TP-035). Follow-up: the design §6
+  table's "HumanAccessPolicy revision" wording should say it is the
+  `PolicyRevision` that snapshots the `HumanAccessPolicy`. Original question:
+  whether the claim holds the `PolicyRevision` ID or the `HumanAccessPolicy`
+  revision number.
 - **OQ-TP-10 — Clock skew.** "Bounded TTL/skew" is required, but the maximum
   allowed clock skew is not given.
-- **OQ-TP-11 — Assertion header.** The backend header carrying the
-  `human_session` assertion is described as "private, overwritten" but not
-  named (same as OQ-API-10).
+- **OQ-TP-11 — Assertion header.** **Decided** (lead decision, 2026-11-19):
+  `X-SkyOAuth-Assertion` (same decision as OQ-API-10; see
+  [public-api.md API-061](public-api.md#4-private-gateway-endpoints)).

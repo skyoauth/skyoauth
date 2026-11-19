@@ -16,7 +16,8 @@ This document freezes the issuer, identifier rules, principal kinds, the
 instance-owned audience registry, scopes, the SkyOAuth claim and parameter
 namespace, the constraint schemas, action-to-scope rules and the
 "unknown means deny" rule. It restates the sources; open details are listed
-under [Open questions](#open-questions).
+under [Open questions](#open-questions). Items marked **Decided** there record
+lead decisions that the normative text already reflects.
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in BCP 14 (RFC 2119,
 RFC 8174) when they appear in capitals. Requirement IDs use `IR-nnn`.
@@ -66,8 +67,12 @@ RFC 8174) when they appear in capitals. Requirement IDs use `IR-nnn`.
   authorized tenant. (design §7.4)
 - **IR-023** ID prefixes indicate type, not authority. A verifier MUST NOT
   derive a profile, role or authorization from a prefix. (design §6, §7.4)
+- **IR-024** IDs are opaque strings compared exactly (byte for byte). The
+  prefixes and the length seen in examples are not part of a frozen ID format;
+  clients and verifiers MUST NOT parse IDs or rely on a prefix or length.
+  (design §7.4; lead decision, OQ-IR-4)
 
-Prefixes seen in the design's examples (illustrative; see OQ-IR-4):
+Prefixes seen in the design's examples (illustrative only; see IR-024):
 
 | Prefix               | Object                         | Source            |
 | -------------------- | ------------------------------ | ----------------- |
@@ -138,8 +143,11 @@ Grant modes (design §5.6):
 
 Operators are independent `adm_*` identities with registered mTLS public
 credentials. They are not `Principal` records and never appear in issued
-tokens. OIDC roles, groups, emails, human sessions and WIF credentials MUST NOT
-grant operator authority (**IR-050**). (design §3.1, §7.2)
+tokens. (design §3.1, §7.2) Only an active local credential and role grant
+operator authority; OIDC roles, groups, emails, human sessions and WIF
+credentials never do. That rule is
+[public-api.md API-002](public-api.md#1-listener-classes), which is canonical;
+**IR-050** is withdrawn as a duplicate of it.
 
 | Role             | Scope    | Explicit rights (summary)                                                                                                                                                                                                               | Source      |
 | ---------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
@@ -149,14 +157,21 @@ grant operator authority (**IR-050**). (design §3.1, §7.2)
 | `provider_admin` | Tenant   | Inactive providers, enrollment policy and hold, verified links, credential-only rotation, switch and rollback plans                                                                                                                     | design §7.2 |
 | `auditor`        | Tenant   | Redacted configuration and audit reads                                                                                                                                                                                                  | design §7.2 |
 
-- **IR-051** Roles MUST NOT inherit one another. (design §7.2)
+- **IR-051** Withdrawn as a duplicate. Role non-inheritance follows
+  [public-api.md API-120](public-api.md#72-approval-boundaries), which is
+  canonical.
 
 ## 6. Scopes
 
 - **IR-060** A `scope` value is a space-separated list of scope tokens. The
   canonical scope string is the space-joined, bytewise ASCII-sorted unique
-  tokens; duplicates and invalid tokens MUST be rejected. (design §5.2.1; token
-  grammar: OQ-IR-3)
+  tokens. For comparison v1, and therefore for the `/oauth/authorize` request
+  whose comparison value it derives, duplicate and invalid tokens MUST be
+  rejected. Whether other request surfaces reject duplicate tokens is
+  OQ-IR-11. (design §5.2.1)
+- **IR-066** A scope token MUST match the RFC 6749 §3.3 `scope-token` grammar,
+  `1*( %x21 / %x23-5B / %x5D-7E )`; scope tokens are case-sensitive. A token
+  outside this grammar is invalid. (lead decision, OQ-IR-3)
 - **IR-061** Scopes MUST be explicit in every issued credential. (design §6)
 - **IR-062** Every scope a credential carries MUST lie within every applicable
   ceiling:
@@ -171,7 +186,8 @@ grant operator authority (**IR-050**). (design §3.1, §7.2)
 - **IR-063** An omitted WIF scope MUST use only the grant's explicit nonempty
   `default_scopes`, which MUST be a subset of every applicable ceiling;
   otherwise `invalid_scope`. Explicit empty or excessive scopes MUST be
-  denied, not trimmed or widened. (design §5.7; tasks T12.8, A26)
+  denied, not trimmed or widened. This requirement is canonical; public-api
+  API-016 refers to it. (design §5.7; tasks T12.8, A26)
 - **IR-064** Native refresh with omitted scope MUST keep the previous scope set
   only while it is still allowed. Explicit narrowing MAY succeed. Refresh MUST
   NOT exceed the originally approved scopes. (design §5.2.2)
@@ -208,6 +224,12 @@ allowed_scopes, constraint_versions, status, revision)` (tasks §3).
   policy check. (design §7.1; tasks T14.2)
 - **IR-082** A matching project name, scope or audience alone MUST NOT be
   sufficient authorization. (design §2 C09; tasks A43)
+- **IR-083** A `ServiceGrant` (and a `ServiceIdentity`) MAY hold several
+  resource servers in `resource_server_ids`. Each exchange MUST select exactly
+  one through its `audience` parameter; the selected audience MUST be in the
+  grant's set, in the target service's set for delegation, and covered by an
+  active same-tenant assignment. (tasks §3 model; design §5.7; lead decision,
+  OQ-IR-7)
 
 ### 7.3 Checkers
 
@@ -225,17 +247,17 @@ accepted_profiles, required_resource_dimensions, live_check_required,
 stream_capable, max_stream_duration_seconds?, stream_class,
 max_session_lease_seconds, status, revision)` (tasks §3).
 
-| Field                          | Meaning                                                                 | Milestone | Source                     |
-| ------------------------------ | ----------------------------------------------------------------------- | --------- | -------------------------- |
-| `action_name`                  | Canonical action coordinate sent by the checker                         | M1a       | design §6.1; tasks T14.4   |
-| `required_scopes`              | Scopes the credential must carry for this action (combination: OQ-IR-2) | M1a       | design §6.1                |
-| `accepted_profiles`            | Profiles that may perform this action                                   | M1a       | design §6.1                |
-| `required_resource_dimensions` | Resource dimensions that must be present and matched                    | M1a       | design §6.1                |
-| `live_check_required`          | Whether a live check is mandatory                                       | M1a       | design §6.1                |
-| `stream_capable`               | Whether a browser stream continuation may be admitted                   | M1b       | design §6.1.1; tasks T14.4 |
-| `max_stream_duration_seconds`  | Optional stream duration bound                                          | M1b       | tasks §3, T14.4            |
-| `stream_class`                 | Stream classification (values: OQ-IR-8)                                 | M1b       | tasks §3, T14.4            |
-| `max_session_lease_seconds`    | Ceiling for continuation leases; default 15                             | M1b       | design §6.1.1; tasks T14.4 |
+| Field                          | Meaning                                                       | Milestone | Source                     |
+| ------------------------------ | ------------------------------------------------------------- | --------- | -------------------------- |
+| `action_name`                  | Canonical action coordinate sent by the checker               | M1a       | design §6.1; tasks T14.4   |
+| `required_scopes`              | Scopes the credential must all carry for this action (IR-104) | M1a       | design §6.1                |
+| `accepted_profiles`            | Profiles that may perform this action                         | M1a       | design §6.1                |
+| `required_resource_dimensions` | Resource dimensions that must be present and matched          | M1a       | design §6.1                |
+| `live_check_required`          | Whether a live check is mandatory                             | M1a       | design §6.1                |
+| `stream_capable`               | Whether a browser stream continuation may be admitted         | M1b       | design §6.1.1; tasks T14.4 |
+| `max_stream_duration_seconds`  | Optional stream duration bound                                | M1b       | tasks §3, T14.4            |
+| `stream_class`                 | Stream classification (values: OQ-IR-8)                       | M1b       | tasks §3, T14.4            |
+| `max_session_lease_seconds`    | Ceiling for continuation leases; default 15                   | M1b       | design §6.1.1; tasks T14.4 |
 
 - **IR-100** Action rules MUST be persisted per resource server and
   administered only by instance `security_admin`. (design §7.1; tasks T14.4)
@@ -248,6 +270,9 @@ max_session_lease_seconds, status, revision)` (tasks §3).
   (design §6.1.1; tasks T14.4)
 - **IR-103** Out-of-range or contradictory action configuration MUST be
   rejected, not silently widened. (design §6.1.1; tasks T14.4)
+- **IR-104** A credential MUST carry every scope in the action's
+  `required_scopes` for the action to be allowed. (design §6.1; combination:
+  lead decision, OQ-IR-2)
 
 ### 7.5 Profile acceptance
 
@@ -260,13 +285,22 @@ A profile is usable for a request only if every layer below allows it.
 | Cookie route (pinned version) | `ApplicationRouteVersion.allowed_profiles`  | design §4.1     |
 | Action                        | `ResourceAction.accepted_profiles`          | design §6.1     |
 
-- **IR-110** A profile not allowed by any applicable layer MUST deny. (design
-  §4.1, §6, §6.1)
+- **IR-110** A profile that any applicable layer does not allow MUST be
+  denied. (design §4.1, §6, §6.1)
 
 ## 8. Constraints
 
 `skyoauth_constraints` is a signed object with a `version` and an
 `authorization` mode. v0.1 defines version `1` with two modes.
+
+- **IR-141** The v1 envelope, the members `version` and `authorization`, is
+  fixed for every resource server. Allowlist dimension names and their value
+  rules are defined per resource server by a versioned constraint schema (the
+  versions listed in `ResourceServer.constraint_versions` and
+  `AudienceTenantAssignment.constraint_versions`). A dimension that the
+  applicable schema version does not define is an unknown field (IR-140).
+  How the schema version relates to the `version` member is OQ-TP-7. (tasks §3
+  model; lead decision, OQ-IR-1)
 
 | Mode           | Profiles                     | Shape                                                                         | Source    |
 | -------------- | ---------------------------- | ----------------------------------------------------------------------------- | --------- |
@@ -276,6 +310,8 @@ A profile is usable for a request only if every layer below allows it.
 ### 8.1 Allowlists (`wif`)
 
 Design example: `{"version":1,"authorization":"allowlist","projects":["platform-production"],"environments":["production"]}`.
+The `projects` and `environments` dimensions are those of the example's
+resource server, not a global set (IR-141).
 
 - **IR-120** Values within one dimension are alternatives. Different
   dimensions are ANDed with each other and with tenant, audience, scope and
@@ -310,10 +346,13 @@ For every protected request the backend MUST perform these steps
    deny.
 3. Compare that tenant with signed `skyoauth_tenant`, and the signed audience
    with its own. A mismatch MUST deny.
-4. Check scope against the action's required scopes.
-5. For `allowlist`, check every required dimension. For `backend_rbac`,
-   evaluate the backend's current human membership and RBAC; no membership
-   MUST deny.
+4. Check that the credential carries every scope the action requires
+   (IR-104).
+5. Evaluate the backend's current RBAC for the principal and resource, for
+   every profile; no membership or permission MUST deny. `backend_rbac` makes
+   this the only resource authorization for human profiles. For `allowlist`
+   (`wif`), additionally check every required dimension; the dimensions are
+   ANDed with tenant, audience, scope and RBAC (IR-120).
 6. Where the action requires a live check, call `/internal/v1/policy/check`;
    unavailable is not an allow, and the backend still applies steps 2–5.
 
@@ -339,18 +378,18 @@ Other allowlists in the registry, each with the rule its source states:
   removing one MUST update the design, tasks, these contracts and the shared
   fixtures together. (design §12; tasks T00.4)
 
-| Kind                     | Names                                                                                                                                                                                                                                                                        | Source              |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| Private JWT claims       | `skyoauth_tenant`, `skyoauth_profile`, `skyoauth_profile_version`, `skyoauth_policy_revision`, `skyoauth_constraints`, `skyoauth_mode`, `skyoauth_grant`, `skyoauth_authentication`, `skyoauth_application_origin`, `skyoauth_session`, `skyoauth_route`, `skyoauth_request` | design §4.1, §6     |
-| Standard JWT claims used | `iss`, `sub`, `aud`, `iat`, `nbf`, `exp`, `jti`, `scope`, `act`, `client_id`, `auth_time`                                                                                                                                                                                    | design §6           |
-| Protected `typ` values   | `skyoauth-access+jwt`, `skyoauth-internal+jwt`                                                                                                                                                                                                                               | design §6           |
-| Profile values           | `wif`, `human_cli`, `human_session`                                                                                                                                                                                                                                          | design §6           |
-| OAuth parameters         | `skyoauth_trust_source`, `skyoauth_grant_id`, `skyoauth_refresh_request_id`                                                                                                                                                                                                  | design §5.2.2, §5.7 |
-| Private grant type       | `urn:skyoauth:params:oauth:grant-type:service-delegation`                                                                                                                                                                                                                    | design §5.7         |
-| Cookies                  | `__Host-skyoauth_login`, `__Host-skyoauth_session`, `__Host-skyoauth_native`                                                                                                                                                                                                 | design §5.1, §5.2   |
-| Request header           | `X-SkyOAuth-CSRF`                                                                                                                                                                                                                                                            | design §4, §5.1     |
-| App-origin path prefix   | `/_skyoauth/`                                                                                                                                                                                                                                                                | design §4           |
-| Comparison domain label  | `skyoauth-native-confirm-v1`                                                                                                                                                                                                                                                 | design §5.2.1       |
+| Kind                     | Names                                                                                                                                                                                                                                                                                                  | Source                                                             |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| Private JWT claims       | `skyoauth_tenant`, `skyoauth_profile`, `skyoauth_profile_version`, `skyoauth_policy_revision`, `skyoauth_constraints`, `skyoauth_mode`, `skyoauth_grant`, `skyoauth_authentication`, `skyoauth_application_origin`, `skyoauth_session`, `skyoauth_route`, `skyoauth_route_version`, `skyoauth_request` | design §4.1, §6; `skyoauth_route_version`: lead decision (OQ-TP-1) |
+| Standard JWT claims used | `iss`, `sub`, `aud`, `iat`, `nbf`, `exp`, `jti`, `scope`, `act`, `client_id`, `auth_time`                                                                                                                                                                                                              | design §6                                                          |
+| Protected `typ` values   | `skyoauth-access+jwt`, `skyoauth-internal+jwt`                                                                                                                                                                                                                                                         | design §6                                                          |
+| Profile values           | `wif`, `human_cli`, `human_session`                                                                                                                                                                                                                                                                    | design §6                                                          |
+| OAuth parameters         | `skyoauth_trust_source`, `skyoauth_grant_id`, `skyoauth_refresh_request_id`                                                                                                                                                                                                                            | design §5.2.2, §5.7                                                |
+| Private grant type       | `urn:skyoauth:params:oauth:grant-type:service-delegation`                                                                                                                                                                                                                                              | design §5.7                                                        |
+| Cookies                  | `__Host-skyoauth_login`, `__Host-skyoauth_session`, `__Host-skyoauth_native`                                                                                                                                                                                                                           | design §5.1, §5.2                                                  |
+| Request headers          | `X-SkyOAuth-CSRF` (browser to SkyOAuth); `X-SkyOAuth-Assertion` (Envoy to backend, `human_session` assertion)                                                                                                                                                                                          | design §4, §5.1; `X-SkyOAuth-Assertion`: lead decision (OQ-API-10) |
+| App-origin path prefix   | `/_skyoauth/`                                                                                                                                                                                                                                                                                          | design §4                                                          |
+| Comparison domain label  | `skyoauth-native-confirm-v1`                                                                                                                                                                                                                                                                           | design §5.2.1                                                      |
 
 ## 12. Unknown means deny
 
@@ -378,36 +417,63 @@ Other allowlists in the registry, each with the rule its source states:
 
 ## Open questions
 
-- **OQ-IR-1 — Constraint dimension catalogue.** The example uses `projects`
-  and `environments`. The sources say assignments carry a "constraint schema"
-  (`constraint_versions`) and actions carry `required_resource_dimensions`,
-  but do not say whether dimension names are a fixed global set for v1 or are
-  defined per resource server.
-- **OQ-IR-2 — `required_scopes` combination.** Whether a credential needs all
-  of an action's `required_scopes` or any one of them is not stated.
-- **OQ-IR-3 — Scope token grammar.** Comparison v1 rejects "invalid tokens",
-  but the valid scope-token syntax (for example RFC 6749 §3.3 `scope-token`)
-  is not specified.
-- **OQ-IR-4 — Normative ID format.** IDs are opaque and generated, and the
-  examples use `<prefix>_` plus 32 hex characters, but whether the prefixes or
-  length are part of the frozen format (or clients must treat IDs as fully
-  opaque strings) is not stated.
+Items marked **Decided** record a lead decision; the normative text above
+already reflects it, and the design and tasks documents still need the
+follow-up. All other items are not resolved by this contract.
+
+- **OQ-IR-1 — Constraint dimension catalogue.** **Decided** (lead decision,
+  2026-11-19): each resource server has a versioned constraint schema that
+  defines its dimensions; the v1 envelope (`version`, `authorization`) is fixed
+  (IR-141). Original question: whether dimension names are a fixed global set
+  for v1 or are defined per resource server.
+- **OQ-IR-2 — `required_scopes` combination.** **Decided** (lead decision,
+  2026-11-19): a credential needs all of an action's `required_scopes`
+  (IR-104). Original question: all or any one.
+- **OQ-IR-3 — Scope token grammar.** **Decided** (lead decision, 2026-11-19):
+  the RFC 6749 §3.3 `scope-token` grammar (IR-066). Original question:
+  comparison v1 rejects "invalid tokens", but the valid syntax was not given.
+- **OQ-IR-4 — Normative ID format.** **Decided** (lead decision, 2026-11-19):
+  IDs are opaque strings compared exactly; prefix and length are not frozen
+  (IR-024). Original question: whether the `<prefix>_` plus 32 hex characters
+  seen in examples is part of the frozen format.
 - **OQ-IR-5 — `Principal.kind` values.** The logical model has
   `Principal.kind`, and the design names human, workload and service
   principals, but the literal enum values are not given.
-- **OQ-IR-6 — Export field names versus the logical model.** The design §5.7
-  export fragment uses `actor`, `act_as`, `audience`, `constraints`,
-  `max_lifetime_seconds`, `principal_id`, `match` and `source_id`, while the
-  tasks §3 model uses `actor_principal_id`, `target_service_id`,
-  `resource_server_ids`, `resource_constraints`, `max_ttl`,
-  `workload_principal_id`, `claim_match_policy` and `trust_source_id`. Whether
-  the export schema intentionally differs from the storage model, and which
-  names are frozen, is not stated.
-- **OQ-IR-7 — Grants with several audiences.** `ServiceGrant` and
-  `ServiceIdentity` hold `resource_server_ids` (plural), the export example
-  shows one `audience`, and each credential carries exactly one audience
-  chosen by the request's `audience` parameter. Whether a grant may span
-  several audiences is not stated.
+- **OQ-IR-6 — Export field names versus the logical model (source
+  contradiction).** The design §5.7 export fragment and the tasks §3 logical
+  model name the same fields differently, and the sources do not say whether
+  the export schema intentionally differs from the storage model or which
+  names are frozen. The differences are:
+
+  | Design §5.7 export           | Tasks §3 model                           |
+  | ---------------------------- | ---------------------------------------- |
+  | `issuer`                     | `TrustSource.exact_issuer`               |
+  | `allowed_algs`               | `TrustSource.algorithms`                 |
+  | `api_server`                 | `TrustSource.token_review_endpoint`      |
+  | `keyset_id`                  | `TrustSource.jwks_keyset_id`             |
+  | `versions[].public_jwks_ref` | `TrustKeysetVersion.public_jwks`         |
+  | `source_id`                  | `PrincipalBinding.trust_source_id`       |
+  | `match`                      | `PrincipalBinding.claim_match_policy`    |
+  | `principal_id`               | `PrincipalBinding.workload_principal_id` |
+  | `actor`                      | `ServiceGrant.actor_principal_id`        |
+  | `act_as`                     | `ServiceGrant.target_service_id`         |
+  | `audience` (one string)      | `ServiceGrant.resource_server_ids`       |
+  | `constraints`                | `ServiceGrant.resource_constraints`      |
+  | `max_lifetime_seconds`       | `ServiceGrant.max_ttl`                   |
+
+  The `audience` row is also a contradiction in kind, not only in name: design
+  §7.1 says grants and other records "reference registered audience IDs",
+  while the export shows the audience string `control-plane-api`. Whether an
+  export carries audience strings or `ResourceServer` IDs is not stated.
+
+- **OQ-IR-7 — Grants with several audiences.** **Decided** (lead decision,
+  2026-11-19): a grant may hold several resource servers and each request
+  selects one through `audience` (IR-083). The design §5.7 export fragment
+  shows a grant with a single `audience: control-plane-api`; that is one
+  grant whose set happens to hold one resource server, not a rule that grants
+  hold exactly one (its field name and value kind are OQ-IR-6). Follow-up: the
+  design should describe the fragment that way. Original question: whether a
+  grant may span several audiences.
 - **OQ-IR-8 — Action criticality and `stream_class`.** Lease ceilings depend on
   whether an action is "critical", "mutating" or "noncritical read-only", but
   the `ResourceAction` model has no explicit field for that classification,
@@ -419,3 +485,8 @@ Other allowlists in the registry, each with the rule its source states:
   constraints carry no dimensions, while actions may list
   `required_resource_dimensions`. Whether required dimensions apply to human
   profiles (checked by backend RBAC) or only to `wif` allowlists is not stated.
+- **OQ-IR-11 — Duplicate scope tokens outside comparison v1.** Design §5.2.1
+  rejects duplicate and invalid scope tokens only when computing comparison
+  v1. Design §5.7 and §5.2.2 deny duplicate request parameters and excessive
+  scopes at `/oauth/token`, but do not say whether a WIF or refresh `scope`
+  parameter containing the same token twice is rejected or treated as a set.
