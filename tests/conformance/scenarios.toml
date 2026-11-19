@@ -411,9 +411,9 @@ layers = ["security", "integration"]
 envs = ["envoy-k3s", "browser"]
 harness = ["ENV raw capture", "OIDC", "BR", "deployed T50 topology (M5)"]
 owners = ["T25.4", "T32.4", "T50.4", "T52.4"]
-positive = "real SkyOAuth cookie flows work"
-negative = "Cookie, X-SkyOAuth-CSRF or Set-Cookie on any non-SkyOAuth route (including no-Check routes), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion"
-matrix_sha256 = "18f274a381c33d105b2dd99fe447d3e6d9fa8353e8168577ff707a7e68f38728"
+positive = "real SkyOAuth cookie flows work, including the native flow through `/oauth/callback/{provider_id}`"
+negative = "Cookie, X-SkyOAuth-CSRF or Set-Cookie on any enrolled-host route other than the exact exempt cookie paths (including no-Check routes and non-exempt SkyOAuth endpoints such as `/oauth/token`, `/oauth/revoke`, `/.well-known/*` and `/_skyoauth/oidc/backchannel-logout`), missing rule rejected, copies in logs/retries/mirrors, cross-audience assertion"
+matrix_sha256 = "e417f0c04c7896a2ef54bfb7b5e8abae89df4c6a412f40123259c94c62465239"
 
 [[scenario.stage]]
 milestone = "M2"
