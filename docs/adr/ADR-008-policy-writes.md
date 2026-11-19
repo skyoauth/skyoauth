@@ -137,7 +137,8 @@ Existing contract questions that touch this ADR:
   explicit widening flag, the expected revision and an audit record; an
   OQ-TM-7-style second approver is optional. Recorded in Decision item 12.
 - **OQ-TM-7** — separation of duty for identity-critical writes. Decided (lead
-  decision, 2026-11-19): switch and rollback commit and links to existing
+  decision, 2026-11-19): the switch, rollback and initial-activation commits
+  (initial activation goes through the switch commit) and links to existing
   principals need a distinct second `adm_*` approver unless an explicit audited
   instance policy allows single-actor mode; enrollment resume may be
   single-actor.

@@ -60,10 +60,13 @@ transition's effect on state is ADR-012.
 
 8. The compromise transition owns the tenant-wide `auth_generation` advance
    without a provider change: `POST` on
-   `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, by tenant
-   `provider_admin` or instance `security_admin`, revision-checked and audited.
-   It is a single-actor operation with no second approver (lead decision on
-   OQ-TM-14 and OQ-ADR021-1, 2026-11-19).
+   `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, run by
+   tenant `provider_admin` for that tenant, revision-checked and audited. It is
+   a single-actor operation with no second approver. There is no single-origin
+   variant. Instance `security_admin` may only run the instance-wide response,
+   which runs the tenant transition for every tenant; it has no per-tenant
+   write, following the OQ-API-6 precedent (lead decision on OQ-TM-14 and
+   OQ-ADR021-1, 2026-11-19).
 
 ### Separate audited credential-only rotation
 
@@ -113,9 +116,12 @@ Existing contract questions that touch this ADR:
 
 - **OQ-API-7** — the roles that may read login state are not named (open).
 - **OQ-API-11** — grouped-path shorthand (open; lead lean recorded).
-- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19): switch
-  and rollback commit need a distinct second `adm_*` approver unless an explicit
-  audited instance policy allows single-actor mode.
+- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19): the
+  switch, rollback and initial-activation commits (initial activation goes
+  through the switch commit) need a distinct second `adm_*` approver unless an
+  explicit audited instance policy allows single-actor mode. Disabling the
+  active provider is fail-safe and does not need one (lead decision,
+  2026-11-19). The compromise transition is single actor (item 8).
 - **OQ-TM-12** — audit sink. Decided (lead decision, 2026-11-19): provider
   switches are also emitted to an append-only external sink.
 - **OQ-TM-13** — secret references. Decided (lead decision, 2026-11-19): a
@@ -124,7 +130,8 @@ Existing contract questions that touch this ADR:
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
   revision-checked, audited operation advances the tenant's `auth_generation`
   without a provider change; to be specified before M1b and M3. It is the
-  compromise transition of item 8.
+  compromise transition of item 8: tenant `provider_admin` per tenant, no
+  single-origin variant; the instance-wide response runs it for every tenant.
 
 New questions raised by this ADR:
 
@@ -132,9 +139,10 @@ New questions raised by this ADR:
   2026-11-19): the provider transition is the sole routine epoch-advancing
   transition, and the audited compromise transition (OQ-TM-14) is the only
   other one. It owns the tenant-wide `auth_generation` advance at `POST` on
-  `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, by tenant
-  `provider_admin` or instance `security_admin`, single actor with no second
-  approver (item 8). Original question: the baseline makes the provider
+  `/admin/v1/tenants/{tenant}/login-state/compromise-transitions`, run by
+  tenant `provider_admin` for that tenant, single actor with no second
+  approver; instance `security_admin` may only run the instance-wide response,
+  which runs it for every tenant (item 8). Original question: the baseline makes the provider
   transition the "sole epoch-advancing semantic transition", while the OQ-TM-14
   decision adds an operation that advances `auth_generation` without a provider
   change. The sources do not say whether that operation is a mode of the

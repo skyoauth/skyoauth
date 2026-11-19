@@ -113,17 +113,20 @@ Existing contract questions that touch this ADR:
   linking to an existing principal uses a browser-bound transaction proving both
   identities, and if the old IdP is unavailable during migration an
   operator-asserted link is allowed with OQ-TM-7 approval and user notification.
-- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19): switch
-  and rollback commit and links to existing principals need a distinct second
-  `adm_*` approver, unless an explicit audited instance policy allows
-  single-actor mode.
+- **OQ-TM-7** — separation of duty. Decided (lead decision, 2026-11-19): the
+  switch, rollback and initial-activation commits (initial activation goes
+  through the switch commit) and links to existing principals need a distinct
+  second `adm_*` approver, unless an explicit audited instance policy allows
+  single-actor mode. Disabling the active provider is fail-safe and does not
+  need one (lead decision, 2026-11-19).
 - **OQ-TM-12** — audit sink. Decided (lead decision, 2026-11-19): provider
   switches are also emitted to an append-only external sink.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
   revision-checked, audited operation advances the tenant's `auth_generation`
   without a provider change; to be specified before M1b and M3. It is the
   audited compromise transition, the only epoch-advancing path besides the
-  provider transition (ADR-021).
+  provider transition: tenant `provider_admin` per tenant, no single-origin
+  variant; the instance-wide response runs it for every tenant (ADR-021).
 
 New questions raised by this ADR:
 

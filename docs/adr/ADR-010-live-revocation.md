@@ -235,7 +235,8 @@ Existing contract questions that touch this ADR:
   stays one per `jti`.
 - **OQ-TM-14** — bulk invalidation through `auth_generation`. Decided (lead
   decision, 2026-11-19) in the threat model; the audited compromise transition
-  of ADR-021 owns it.
+  of ADR-021 owns it (tenant `provider_admin` per tenant, no single-origin
+  variant; the instance-wide response runs it for every tenant).
 
 New questions raised by this ADR:
 

@@ -191,7 +191,10 @@ Existing contract questions that touch this ADR:
   paths.
 - **OQ-TM-14** — bulk session revocation. Decided (lead decision, 2026-11-19): a
   revision-checked, audited operation advances the tenant's `auth_generation`
-  without a provider change; to be specified before M1b and M3.
+  without a provider change; to be specified before M1b and M3. It is the
+  audited compromise transition of ADR-021: tenant `provider_admin` per tenant,
+  no single-origin variant; the instance-wide response runs it for every
+  tenant.
 
 New questions raised by this ADR:
 
