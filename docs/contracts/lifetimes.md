@@ -146,14 +146,15 @@ Terms used in the tables:
 
 These values have no lifetime. They are monotonic and are never reset.
 
-| Value                                                          | Advances on                                                                     | Never                                                              | Source                        |
-| -------------------------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------- |
-| `HumanProvider.auth_epoch`, `TenantLoginState.auth_generation` | Provider switch, rollback, initial activation, deliberate compromise transition | Advanced by credential-only rotation; reset by rollback or restore | design §5.1.1, §7.3; tasks §3 |
-| Parent `security_revision`                                     | Security disable; re-enable through `reenable_targets`                          | Restored by rollback or abort                                      | design §4.2                   |
-| Runtime `active_generation`                                    | Activation, `complete_abort`                                                    | Reset by restore                                                   | design §4.2                   |
-| Controller and scope `owner_epoch`, observation `sequence`     | Claim; each report                                                              | Reset by failover                                                  | design §4.2                   |
-| TLS `material_sequence`                                        | Single-candidate convergence or recovery                                        | Reset by plan or pin change                                        | design §4.2                   |
-| `hold_generation`, guard `generation`                          | Hold and guard changes                                                          | Lowered; equal counters with a different spec are rejected         | design §4.2                   |
+| Value                                                      | Advances on                                                                                                                                                                     | Never                                                                                                         | Source                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `HumanProvider.auth_epoch`                                 | Provider switch, rollback, initial activation                                                                                                                                   | Advanced by credential-only rotation or by the deliberate compromise transition; reset by rollback or restore | design §5.1.1, §7.3; tasks §3                                  |
+| `TenantLoginState.auth_generation`                         | Provider switch, rollback, initial activation; the deliberate compromise transition, which advances only this value, per tenant, without a provider change (public-api API-154) | Advanced by credential-only rotation; reset by rollback or restore                                            | design §5.1.1, §7.3; tasks §3, T13.9; lead decision (OQ-TM-14) |
+| Parent `security_revision`                                 | Security disable; re-enable through `reenable_targets`                                                                                                                          | Restored by rollback or abort                                                                                 | design §4.2                                                    |
+| Runtime `active_generation`                                | Activation, `complete_abort`                                                                                                                                                    | Reset by restore                                                                                              | design §4.2                                                    |
+| Controller and scope `owner_epoch`, observation `sequence` | Claim; each report                                                                                                                                                              | Reset by failover                                                                                             | design §4.2                                                    |
+| TLS `material_sequence`                                    | Single-candidate convergence or recovery                                                                                                                                        | Reset by plan or pin change                                                                                   | design §4.2                                                    |
+| `hold_generation`, guard `generation`                      | Hold and guard changes                                                                                                                                                          | Lowered; equal counters with a different spec are rejected                                                    | design §4.2                                                    |
 
 - **LT-030** Rollback MUST use fresh monotonic epochs and MUST NOT reset
   generations. (design §7.3; tasks T10.6, T51.8)
@@ -465,7 +466,10 @@ shows problems. All other items are not resolved by this contract.
   state can no longer be replayed"; the quarantine length and how it is
   computed were not stated.
 - **OQ-LT-14 — ADR-010 record (contradiction).** **Decided** (lead decision,
-  2026-11-19) and resolved: ADR-010 carries the clause "Real gateway
+  2026-11-19) and resolved, with ADR-010 publication pending in PR #18: this
+  contract text depends on PR #18 merging, because ADR-010 is not yet in
+  `docs/adr` on main. The decided clause, which ADR-010 carries in PR #18, is
+  "Real gateway
   apply/compensation closes origin cookie admissions; unchanged contexts get
   unavailable only to their existing lease; fixed
   session/logout/revoke/back-channel/security-disable cleanup stays
