@@ -1258,8 +1258,9 @@ describe('rule waivers', () => {
     for (const requireHistory of [false, true]) {
       expectOnly(check(root, { requireHistory }), 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
     }
-    // Nor does an inherited configuration that turns the commit-graph on.
-    for (const env of [{}, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }, { GIT_CONFIG_PARAMETERS: "'core.commitgraph'='true'" }]) {
+    // Nor does an inherited configuration that turns the commit-graph on, or
+    // GIT_TEST_COMMIT_GRAPH, which turns it on whatever the configuration says.
+    for (const env of [{}, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }, { GIT_CONFIG_PARAMETERS: "'core.commitgraph'='true'" }, { GIT_TEST_COMMIT_GRAPH: '1' }]) {
       const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
       assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
       assert.match(r.stderr, new RegExp(`commit ${side} is not on main`), Object.keys(env).join(', '));
@@ -1768,8 +1769,9 @@ describe('--gate-pr', () => {
     const res = checkGatePr(root);
     assert.equal(res.mergeBase, mb);
     expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
-    // Nor does an inherited configuration that turns the commit-graph on.
-    for (const env of [{}, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }, { GIT_CONFIG_PARAMETERS: "'core.commitgraph'='true'" }]) {
+    // Nor does an inherited configuration that turns the commit-graph on, or
+    // GIT_TEST_COMMIT_GRAPH, which turns it on whatever the configuration says.
+    for (const env of [{}, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }, { GIT_CONFIG_PARAMETERS: "'core.commitgraph'='true'" }, { GIT_TEST_COMMIT_GRAPH: '1' }]) {
       const r = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
       assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
       assert.equal(r.stderr, `${ONE_COMMIT(head, mb, first)}\ncheck-conformance-registry --gate-pr: 1 error(s)\n`, Object.keys(env).join(', '));

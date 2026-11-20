@@ -715,6 +715,14 @@ describe('large JUnit reports', () => {
     const listed = (spawnSync('locale', ['-a'], { encoding: 'utf8' }).stdout ?? '').split('\n');
     return listed.find((l) => /^C\.utf-?8$/i.test(l)) ?? listed.find((l) => /\.utf-?8$/i.test(l)) ?? 'C.UTF-8';
   })();
+  // UTF8_LOCALE must be one this system has: in a locale it does not have,
+  // the tests that use it would pass as in the C locale, whatever the script
+  // sets.
+  function assertUtf8Locale() {
+    const r = spawnSync('locale', ['charmap'], { encoding: 'utf8', env: { ...ENV, LC_ALL: UTF8_LOCALE } });
+    assert.equal(r.status, 0, `locale charmap: ${r.error ?? r.stderr}`);
+    assert.equal(r.stdout.trim(), 'UTF-8', `LC_ALL=${UTF8_LOCALE} is a UTF-8 locale here (locale charmap: ${r.stdout.trim()}; ${r.stderr.trim()})`);
+  }
 
   // Reports with bytes outside ASCII in their first 64 KiB, each with the
   // counts of ROOT_COUNTS. In a UTF-8 locale gawk warns about a character
@@ -773,18 +781,25 @@ describe('large JUnit reports', () => {
     }
 
     // The job's locale must not change how the report is read: awk reads
-    // bytes, whatever LANG and LC_ALL say.
+    // bytes, whatever LANG and LC_ALL say. A runner usually sets LANG
+    // alone, so LC_ALL=C must reach awk exported, not only set in the shell.
     for (const [what, report] of Object.entries(NON_ASCII_REPORTS)) {
-      test(`${what} is read as in the C locale, without an awk warning, in ${UTF8_LOCALE} (${label})`, async () => {
-        const { remote, sha, work, root } = setup();
-        const path = join(root, 'junit.xml');
-        writeFileSync(path, report);
-        const r = await publishWithin(work[0], ['main', sha, '--rust-junit', path], { PATH, LANG: UTF8_LOCALE, LC_ALL: UTF8_LOCALE });
-        assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
-        assert.equal(r.status, 0, r.stdout + r.stderr);
-        assert.doesNotMatch(r.stderr, /^[a-z]*awk:|multibyte/im);
-        assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
-      });
+      for (const [how, locale] of [
+        ['LANG and LC_ALL', { LANG: UTF8_LOCALE, LC_ALL: UTF8_LOCALE }],
+        ['LANG alone', { LANG: UTF8_LOCALE, LC_ALL: undefined, LC_CTYPE: undefined }],
+      ]) {
+        test(`${what} is read as in the C locale, without an awk warning, with ${how} ${UTF8_LOCALE} (${label})`, async () => {
+          assertUtf8Locale();
+          const { remote, sha, work, root } = setup();
+          const path = join(root, 'junit.xml');
+          writeFileSync(path, report);
+          const r = await publishWithin(work[0], ['main', sha, '--rust-junit', path], { PATH, ...locale });
+          assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
+          assert.equal(r.status, 0, r.stdout + r.stderr);
+          assert.doesNotMatch(r.stderr, /^[a-z]*awk:|multibyte/im);
+          assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
+        });
+      }
     }
   }
 

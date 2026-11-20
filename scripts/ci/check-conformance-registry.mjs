@@ -381,18 +381,25 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // lists wherever git walks to it, whatever the commit object says, and
 // neither of those turns it off, so every git run here also passes
 // -c core.commitGraph=false (which wins over the repository's configuration
-// and an inherited GIT_CONFIG_COUNT or GIT_CONFIG_PARAMETERS).
+// and an inherited GIT_CONFIG_COUNT or GIT_CONFIG_PARAMETERS). That does not
+// win over GIT_TEST_COMMIT_GRAPH (1, true or yes turns the commit-graph on
+// whatever the configuration says), and the other GIT_TEST_* variables of
+// git's own test suite change what git reads in other ways, so every git run
+// here also drops the inherited value of every variable that starts with
+// GIT_TEST_.
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
+// Whether git runs here without the inherited value of the variable `key`.
+const dropped = (key) => GIT_LOCATION.includes(key) || key.startsWith('GIT_TEST_');
 // The graft file git is pointed at: a path that does not exist, so git reads
 // no grafts (an existing empty file such as /dev/null would do as well, but
 // git then warns that grafts are deprecated on every run).
 export const NO_GRAFTS = '/nonexistent/skyoauth-no-grafts';
 
 // `git --no-replace-objects -c core.commitGraph=false -C root ...args`, run
-// without GIT_LOCATION and with GIT_GRAFT_FILE=NO_GRAFTS; `options`
-// (encoding, maxBuffer) are passed to spawnSync.
+// without GIT_LOCATION and GIT_TEST_*, and with GIT_GRAFT_FILE=NO_GRAFTS;
+// `options` (encoding, maxBuffer) are passed to spawnSync.
 export function gitIn(root, options = {}) {
-  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k))), GIT_GRAFT_FILE: NO_GRAFTS };
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !dropped(k))), GIT_GRAFT_FILE: NO_GRAFTS };
   return (...args) => spawnSync('git', ['--no-replace-objects', '-c', 'core.commitGraph=false', '-C', root, ...args], { encoding: 'utf8', ...options, env });
 }
 
