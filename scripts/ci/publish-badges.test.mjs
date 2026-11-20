@@ -708,9 +708,35 @@ describe('large JUnit reports', () => {
     return bigReport;
   }
 
+  // A UTF-8 locale, as a job's LANG or LC_ALL may name one: the first that
+  // `locale -a` lists, or C.UTF-8 (built into glibc from 2.35 on) when it
+  // lists none or cannot run.
+  const UTF8_LOCALE = (() => {
+    const listed = (spawnSync('locale', ['-a'], { encoding: 'utf8' }).stdout ?? '').split('\n');
+    return listed.find((l) => /^C\.utf-?8$/i.test(l)) ?? listed.find((l) => /\.utf-?8$/i.test(l)) ?? 'C.UTF-8';
+  })();
+
+  // Reports with bytes outside ASCII in their first 64 KiB, each with the
+  // counts of ROOT_COUNTS. In a UTF-8 locale gawk warns about a character
+  // that is not valid UTF-8 there ("Invalid multibyte data detected"), and
+  // does not match one with `[^?]`.
+  const ROOT_COUNTS = 'tests="12" failures="3" errors="0" skipped="1"';
+  const NON_ASCII_REPORTS = (() => {
+    const start = Buffer.from(`<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="café ✓" ${ROOT_COUNTS}>\n<testsuite name="s"><testcase name="t"><failure>`);
+    const end = Buffer.from(' output</failure></testcase></testsuite></testsuites>\n');
+    return {
+      // Valid UTF-8, with a three-byte character from byte 65535 on, so the
+      // 64 KiB that are read end inside it.
+      'a UTF-8 report cut inside a character at 64 KiB': Buffer.concat([start, Buffer.alloc(65535 - start.length, 'a'), Buffer.from('✓✓'), end]),
+      'a byte that is not UTF-8 in the XML declaration': Buffer.concat([Buffer.from('<?xml version="1.0" encoding="'), Buffer.from([0xff]), Buffer.from(`"?>\n<testsuites ${ROOT_COUNTS}><testsuite name="s"/></testsuites>\n`)]),
+    };
+  })();
+
   test('finds an awk to run', () => {
     assert.ok(AWKS.length > 0);
     assert.ok(Buffer.byteLength(REPORTS['a large report']) > 8_000_000);
+    const cut = NON_ASCII_REPORTS['a UTF-8 report cut inside a character at 64 KiB'];
+    assert.deepEqual([...cut.subarray(65535, 65538)], [0xe2, 0x9c, 0x93], 'the 64 KiB end after the first byte of ✓');
   });
 
   for (const awk of AWKS) {
@@ -743,6 +769,21 @@ describe('large JUnit reports', () => {
         assert.equal(r.status, 1, r.stdout + r.stderr);
         assert.match(r.stderr, /cannot parse the <testsuites> element in .*junit\.xml/);
         assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+      });
+    }
+
+    // The job's locale must not change how the report is read: awk reads
+    // bytes, whatever LANG and LC_ALL say.
+    for (const [what, report] of Object.entries(NON_ASCII_REPORTS)) {
+      test(`${what} is read as in the C locale, without an awk warning, in ${UTF8_LOCALE} (${label})`, async () => {
+        const { remote, sha, work, root } = setup();
+        const path = join(root, 'junit.xml');
+        writeFileSync(path, report);
+        const r = await publishWithin(work[0], ['main', sha, '--rust-junit', path], { PATH, LANG: UTF8_LOCALE, LC_ALL: UTF8_LOCALE });
+        assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.doesNotMatch(r.stderr, /^[a-z]*awk:|multibyte/im);
+        assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
       });
     }
   }

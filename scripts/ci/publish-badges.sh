@@ -282,7 +282,10 @@ gate() {
 # awk sees them, and is the only limit (a failed run can leave a report of
 # many megabytes, possibly on one line, which awk would hold whole as a
 # record, and joining many lines into one awk string is quadratic in mawk
-# and busybox awk), so the start tag must end within them.
+# and busybox awk), so the start tag must end within them. They are read
+# as bytes in the C locale: in a UTF-8 one, gawk warns about the character
+# the cut may end inside and does not match a byte that is not UTF-8 with
+# `[^?]`.
 # Fails when <testsuites> is not the first element, after nothing but
 # white space and an optional <?xml ...?> declaration (so a comment,
 # DOCTYPE or processing instruction before it fails: its text could
@@ -294,7 +297,9 @@ gate() {
 # trusted with.
 junit_attr() {
     rc=0
-    value=$(head -c 65536 <"$1" | tr '\r\t' '  ' | awk -v want="$2" -v sq="'" '
+    value=$(
+        export LC_ALL=C
+        head -c 65536 <"$1" | tr '\r\t' '  ' | awk -v want="$2" -v sq="'" '
         { s = s $0 " " }
         END {
             sub(/^ *<\?xml ([^?]|\?[^>])*\?>/, "", s)
