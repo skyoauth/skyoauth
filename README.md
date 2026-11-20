@@ -57,6 +57,20 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
   `CaUsedAsEndEntity`. Other `PG*` variables (`PGHOST`, `PGUSER`,
   `PGSSLROOTCERT` and so on) are still read for settings the URL omits; put
   what matters in the URL.
+- The URL is checked before sqlx reads it and rejected, with an error that
+  repeats none of it, if it has an unencoded `@`, `/`, `?` or `#` in the user
+  name or password, an unencoded `@` or `/` in the database name, an unencoded
+  `@` or a second `?` in the query, a `#` fragment, a `?` in the user or
+  database name, or a query key sqlx does not act on (sqlx would log that key
+  with its value). The accepted keys are `sslmode`, `ssl-mode`, `sslrootcert`,
+  `ssl-root-cert`, `ssl-ca`, `sslcert`, `ssl-cert`, `sslkey`, `ssl-key`,
+  `statement-cache-capacity`, `host`, `hostaddr`, `port`, `dbname`, `user`,
+  `password`, `application_name`, `options` and `options[NAME]`, so libpq
+  parameters that sqlx ignores (`connect_timeout`, `channel_binding`,
+  `target_session_attrs`, `keepalives` and so on) now fail at startup.
+  Percent-encode reserved characters in values too: an unencoded `&` in a
+  query `password` followed by a supported key (`?password=a&user=b`) cannot
+  be detected.
 - Conventions for writing migrations, and the limits of the append-only
   triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
 

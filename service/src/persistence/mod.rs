@@ -35,9 +35,16 @@
 //! separate CA and name that CA in `sslrootcert`.
 //!
 //! [`DatabaseConfig`]'s `Debug` shows the SSL mode and the `hostaddr` and
-//! omits the password, and a URL whose password has an unencoded `@`, `/`,
-//! `?` or `#` is rejected before sqlx parses it, so the password cannot
-//! surface as a database name or an unrecognized query parameter. The
+//! omits the password, and a URL whose user-info password has an unencoded
+//! `@`, `/`, `?` or `#` is rejected before sqlx parses it, so a password in
+//! the user-info part cannot surface as a database name or an unrecognized
+//! query parameter. A `password` in the query string is a value like any
+//! other, so the query is checked as well: a `#` fragment, a second `?`, a
+//! key sqlx does not act on (sqlx logs it with its value; see
+//! [`QUERY_KEYS`]) and a `?` in the user or database name are rejected, with
+//! errors that repeat nothing from the URL. An unencoded `&` in a query
+//! `password` followed by a supported key (`?password=a&user=b`) still
+//! splits there undetected; percent-encode `&` as `%26`. The
 //! connection-failure tests in `service/tests/redaction.rs` check that
 //! errors and trace-level logs do not contain the password.
 
@@ -45,6 +52,7 @@ mod config;
 
 pub use config::{
     ACQUIRE_TIMEOUT_VAR, ConfigError, DATABASE_URL_VAR, DatabaseConfig, MAX_CONNECTIONS_VAR,
+    QUERY_KEYS,
 };
 pub use sqlx::{PgPool, migrate::MigrateError};
 
