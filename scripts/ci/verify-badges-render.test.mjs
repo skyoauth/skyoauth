@@ -122,7 +122,8 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
 // runs in a checkout of the given kind (see checkout()), and README_REF
 // is its HEAD unless `args` says otherwise (SHA where there is no HEAD).
 // With `gitFails`, `git diff` exits 128, as on a corrupt repository.
-function verify({ pr, rules = {}, html = readme(), base = BASE_README, md = base, extra = {}, baseFiles = {}, repo = 'merge', gitFails = false, args }) {
+// With `sub`, the script runs in that subdirectory of the checkout.
+function verify({ pr, rules = {}, html = readme(), base = BASE_README, md = base, extra = {}, baseFiles = {}, repo = 'merge', gitFails = false, sub = '', args }) {
   const dir = join(TOP, `case-${++cases}`);
   const bin = join(dir, 'bin');
   const tmp = join(dir, 'tmp');
@@ -145,8 +146,9 @@ exec '${REAL_GIT}' "$@"
   const lines = Object.entries(all).map(([sub, responses]) => `${sub} ${responses}`);
   lines.push('https://raw.githubusercontent.com/ 200:image/svg+xml');
   writeFileSync(join(dir, 'rules'), `${lines.join('\n')}\n`);
+  mkdirSync(join(work, sub), { recursive: true });
   const r = spawnSync('sh', [SCRIPT, ...(pr ? ['--pull-request'] : []), ...args], {
-    cwd: work,
+    cwd: join(work, sub),
     encoding: 'utf8',
     timeout: 60_000,
     killSignal: 'SIGKILL',
@@ -389,6 +391,26 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.equal(r.calls.length, 1);
       });
     }
+
+    // The README paths are the checkout's top-level ones wherever the
+    // script runs; a subdirectory's own README.md is not one of them.
+    test('run from a subdirectory, a changed README still fails', () => {
+      const r = verify({ pr: true, rules: down, md: changed, sub: 'lib/inner', extra: { 'lib/inner/README.md': '# inner\n' }, baseFiles: { 'lib/inner/README.md': '# inner\n' } });
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /this pull request changes the README/);
+    });
+
+    test('run from a subdirectory, a symbolic-link README still fails', () => {
+      const r = verify({ pr: true, rules: down, sub: 'lib', baseFiles: { 'README.md': { link: 'doc/home.md' }, 'doc/home.md': BASE_README } });
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.ok(r.stderr.includes('a README path is not a regular file in HEAD or HEAD^1, so an unchanged README proves nothing: README.md (mode 120000)'), r.stderr);
+    });
+
+    test('run from a subdirectory, an unchanged README passes', () => {
+      const r = verify({ pr: true, rules: down, sub: 'lib' });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(warnings(r).length, 1);
+    });
 
     test('a directory that is not a git repository fails', () => {
       const r = verify({ pr: true, rules: down, repo: 'none' });

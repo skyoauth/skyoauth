@@ -37,8 +37,8 @@
 # non-SVG type fail in both modes. When the rendered README itself cannot
 # be fetched (transport error, 429 or 5xx after the retries), a pull
 # request passes with a warning only if it leaves the README byte for byte
-# as on the base branch: the current directory must be the checkout of the
-# merge commit README_REF (HEAD must be that commit, with exactly two
+# as on the base branch: the current directory must be in the checkout of
+# the merge commit README_REF (HEAD must be that commit, with exactly two
 # parents, both fetched: fetch-depth 2), every README path in HEAD and
 # HEAD^1 must be a regular file (no symbolic link, also not for .github/
 # or docs/), and `git diff --quiet HEAD^1 HEAD` must find no change to any
@@ -146,7 +146,7 @@ elif [ "$transient" -eq 1 ]; then
     # path, or in place of .github/ or docs/, can change what GitHub
     # renders without any change to the README paths themselves. Read from
     # the commits, not the working tree.
-    if ! trees=$(git ls-tree -r HEAD && git ls-tree -r 'HEAD^1'); then
+    if ! trees=$(git ls-tree -r --full-tree HEAD && git ls-tree -r --full-tree 'HEAD^1'); then
         problem "$unavailable, and git could not list the files of HEAD and HEAD^1"
         exit 1
     fi
@@ -163,7 +163,7 @@ elif [ "$transient" -eq 1 ]; then
         exit 1
     fi
     rc=0
-    git diff --quiet 'HEAD^1' HEAD -- ':(icase)README*' ':(icase).github/README*' ':(icase)docs/README*' || rc=$?
+    git diff --quiet 'HEAD^1' HEAD -- ':(top,icase)README*' ':(top,icase).github/README*' ':(top,icase)docs/README*' || rc=$?
     case $rc in
         0) ;;
         1)
