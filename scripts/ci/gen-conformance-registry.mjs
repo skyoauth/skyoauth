@@ -417,13 +417,22 @@ export function validDate(y, m, d) {
   return d <= (m === 2 && isLeap(y) ? 29 : DAYS[m - 1]);
 }
 
+// Arrays and inline tables nest at most this deep. value() recurses once per
+// level, so a deeper value would overflow the stack (exit 2) instead of being
+// an error; the registry files nest two levels at most.
+export const MAX_NESTING = 64;
+
 export function parseToml(text, file = 'toml') {
   let i = 0;
   let line = 1;
+  let depth = 0;
   const root = {};
   let cur = root;
   const err = (msg) => {
     throw new SpecError(`${file}:${line}: ${msg}`);
+  };
+  const nest = () => {
+    if (++depth > MAX_NESTING) err(`arrays and inline tables nest deeper than ${MAX_NESTING} levels`);
   };
   // The arrays that [[headers]] create; every other value is final.
   const headerArrays = new WeakSet();
@@ -477,12 +486,14 @@ export function parseToml(text, file = 'toml') {
       }
     }
     if (c === '[') {
+      nest();
       i++;
       const arr = [];
       for (;;) {
         ws(true);
         if (text[i] === ']') {
           i++;
+          depth--;
           return arr;
         }
         arr.push(value());
@@ -492,11 +503,13 @@ export function parseToml(text, file = 'toml') {
       }
     }
     if (c === '{') {
+      nest();
       i++;
       const obj = {};
       ws(false);
       if (text[i] === '}') {
         i++;
+        depth--;
         return obj;
       }
       for (;;) {
@@ -511,6 +524,7 @@ export function parseToml(text, file = 'toml') {
         if (text[i] === ',') i++;
         else if (text[i] === '}') {
           i++;
+          depth--;
           return obj;
         } else err('expected "," or "}"');
       }
