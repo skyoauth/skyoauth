@@ -58,6 +58,10 @@ const git = (cwd, ...args) => execFileSync(REAL_GIT, args, { cwd, env: GIT_ENV, 
 //   depth2   the same, cloned with --depth 2 (the job's fetch-depth)
 //   shallow  the same, cloned with --depth 1: HEAD has no parent
 //   root     a single commit with README `md`: no parent either
+//   linear   the pull request's own commit, fast-forwarded onto the base:
+//            one parent, which is not the base tip of a merge
+//   octopus  a merge of the pull request and a second branch: three
+//            parents
 //   none     a plain directory holding README `md`, not a repository
 // The base commit also holds the files in `baseFiles`, and the pull
 // request, which always changes another file so the merge is never empty,
@@ -78,7 +82,7 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
     writeFileSync(join(work, 'README.md'), md);
     return;
   }
-  const origin = kind === 'merge' || kind === 'root' ? work : join(dir, 'origin');
+  const origin = ['merge', 'root', 'linear', 'octopus'].includes(kind) ? work : join(dir, 'origin');
   mkdirSync(origin);
   git(origin, 'init', '-q', '-b', 'main');
   if (kind === 'root') {
@@ -96,6 +100,19 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
   git(origin, 'add', '-A');
   git(origin, 'commit', '-q', '-m', 'pull request');
   git(origin, 'checkout', '-q', 'main');
+  if (kind === 'linear') {
+    git(origin, 'merge', '-q', '--ff-only', 'pr');
+    return;
+  }
+  if (kind === 'octopus') {
+    git(origin, 'checkout', '-q', '-b', 'other', 'main');
+    put(origin, 'other.rs', '// other\n');
+    git(origin, 'add', '.');
+    git(origin, 'commit', '-q', '-m', 'other');
+    git(origin, 'checkout', '-q', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge', 'pr', 'other');
+    return;
+  }
   git(origin, 'merge', '-q', '--no-ff', '-m', 'merge', 'pr');
   if (kind !== 'merge') git(dir, 'clone', '-q', '--depth', kind === 'depth2' ? '2' : '1', `file://${origin}`, work);
 }
@@ -313,7 +330,7 @@ describe('verify-badges-render.sh with a stub curl', () => {
       assert.equal(warnings(r).length, 1);
       assert.match(warnings(r)[0], /could not fetch the rendered README at .* \(HTTP 503\); the README is unchanged from the base branch/);
       assert.deepEqual(r.calls.map((c) => c.split(' ').pop()), [`${README_URL}?ref=${r.head}`, ...BADGES.map(raw)]);
-      assert.deepEqual(r.gitCalls.map((c) => c.split(' ')[0]), ['rev-parse', 'rev-parse', 'rev-parse', 'ls-tree', 'ls-tree', 'diff']);
+      assert.deepEqual(r.gitCalls.map((c) => c.split(' ')[0]), ['rev-parse', 'show', 'rev-parse', 'rev-parse', 'rev-parse', 'ls-tree', 'ls-tree', 'diff']);
       assert.deepEqual(r.leftovers, []);
     });
 
@@ -359,6 +376,16 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.equal(r.status, 1);
         assert.deepEqual(warnings(r), []);
         assert.match(r.stderr, /cannot compare the README with the base branch: no parent commit of HEAD/);
+        assert.equal(r.calls.length, 1);
+      });
+    }
+
+    for (const [repo, what, parents] of [['linear', 'a non-merge (fast-forwarded) commit', 1], ['octopus', 'a merge commit with three parents', 3]]) {
+      test(`${what} fails, even with the README unchanged`, () => {
+        const r = verify({ pr: true, rules: down, repo });
+        assert.equal(r.status, 1, r.stdout + r.stderr);
+        assert.deepEqual(warnings(r), []);
+        assert.match(r.stderr, new RegExp(`HEAD is not a merge commit with two parents \\(${parents} parents\\), so HEAD\\^1 is not known to be the base tip`));
         assert.equal(r.calls.length, 1);
       });
     }
