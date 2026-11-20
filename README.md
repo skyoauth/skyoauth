@@ -43,8 +43,14 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
 - Runners serialize on a session-level advisory lock, so `migrate` needs a
   direct connection, not a transaction-pooling proxy such as PgBouncer in
   transaction mode. Waiting for the lock has no timeout yet (follow-up).
-- TLS follows the URL's `sslmode` (sqlx's default is `prefer`); enforcing
-  TLS is a follow-up recorded under T10.1 in `docs/skyoauth-tasks.md`.
+- TLS is strict by default. A URL without `sslmode` gets `verify-full` for a
+  remote host and sqlx's `prefer` for `localhost`, a loopback address or a Unix
+  socket; the ambient `PGSSLMODE` variable is ignored. An explicit `sslmode`
+  in the URL is used as written, and a mode weaker than `verify-full` for a
+  remote host logs a WARN. The server certificate is checked against the
+  public (webpki) roots, so a private CA needs `sslrootcert=/path/ca.pem` in
+  the URL. Other `PG*` variables (`PGHOST`, `PGUSER`, `PGSSLROOTCERT` and so
+  on) are still read for settings the URL omits; put what matters in the URL.
 - Conventions for writing migrations, and the limits of the append-only
   triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
 

@@ -1,8 +1,8 @@
 //! Validated database configuration.
 
-use std::{fmt, ops::RangeInclusive, str::FromStr, time::Duration};
+use std::{fmt, net::IpAddr, ops::RangeInclusive, str::FromStr, time::Duration};
 
-use sqlx::postgres::PgConnectOptions;
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 
 /// Environment variable holding the PostgreSQL connection URL.
 pub const DATABASE_URL_VAR: &str = "SKYOAUTH_DATABASE_URL";
@@ -18,14 +18,25 @@ const ACQUIRE_TIMEOUT_SECS: RangeInclusive<u32> = 1..=300;
 /// PostgreSQL connection settings with a bounded pool size and acquire
 /// timeout.
 ///
-/// TLS follows the URL's `sslmode` parameter, which defaults to sqlx's
-/// `prefer` (TLS if the server offers it, otherwise plaintext). Requiring TLS
-/// is a follow-up (docs/skyoauth-tasks.md, T10.1).
+/// # TLS
 ///
-/// `Debug` prints host, port, database, username and the pool limits, never
-/// the password or the URL. The parsed sqlx connect options are not exposed
-/// outside the `persistence` module, because their `Debug` includes the
-/// password.
+/// A URL that sets `sslmode` is used as written. Without `sslmode`, a remote
+/// host gets `verify-full` and a loopback or Unix-socket host gets sqlx's
+/// `prefer`. The ambient `PGSSLMODE` variable is ignored in both cases, so a
+/// stray environment value cannot weaken the default. An explicit mode weaker
+/// than `verify-full` for a remote host is accepted, with a WARN log. The
+/// certificate is checked against the public (webpki) roots; a private CA
+/// needs `sslrootcert=<path>` in the URL.
+///
+/// sqlx still reads the other `PG*` variables (`PGHOST`, `PGPORT`, `PGUSER`,
+/// `PGPASSWORD`, `PGDATABASE`, `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`,
+/// `PGOPTIONS`, `PGAPPNAME`, `PGHOSTADDR`) for settings the URL does not
+/// carry. Set what matters in the URL.
+///
+/// `Debug` prints host, port, database, username, the SSL mode and the pool
+/// limits, never the password or the URL. The parsed sqlx connect options are
+/// not exposed outside the `persistence` module, because their `Debug`
+/// includes the password.
 #[derive(Clone)]
 pub struct DatabaseConfig {
     connect: PgConnectOptions,
@@ -85,6 +96,13 @@ impl DatabaseConfig {
         {
             return Err(out_of_range(ACQUIRE_TIMEOUT_VAR, ACQUIRE_TIMEOUT_SECS));
         }
+        if is_remote(&connect) && !matches!(connect.get_ssl_mode(), PgSslMode::VerifyFull) {
+            tracing::warn!(
+                host = connect.get_host(),
+                ssl_mode = ?connect.get_ssl_mode(),
+                "database TLS is weaker than verify-full for a remote host"
+            );
+        }
         Ok(Self {
             connect: connect.application_name("skyoauth-service"),
             max_connections,
@@ -107,10 +125,13 @@ impl DatabaseConfig {
             return Err(ConfigError::InvalidUrl);
         }
         // The parse error is dropped: its message may echo part of the URL.
-        // TODO(tls): the follow-up appended to T10.1 in docs/skyoauth-tasks.md
-        // defaults sslmode to verify-full for remote hosts; until then the URL
-        // (or sqlx's `prefer`) decides.
         let connect = PgConnectOptions::from_str(&url).map_err(|_| ConfigError::InvalidUrl)?;
+        let mode = effective_ssl_mode(
+            url_sets_ssl_mode(&url),
+            is_remote(&connect),
+            connect.get_ssl_mode(),
+        );
+        let connect = connect.ssl_mode(mode);
         let number = |var, default: u32, bounds| match get(var) {
             None => Ok(default),
             Some(value) => value.parse().map_err(|_| out_of_range(var, bounds)),
@@ -148,9 +169,51 @@ impl fmt::Debug for DatabaseConfig {
             .field("port", &self.connect.get_port())
             .field("database", &self.connect.get_database())
             .field("username", &self.connect.get_username())
+            .field("ssl_mode", &self.connect.get_ssl_mode())
             .field("max_connections", &self.max_connections)
             .field("acquire_timeout", &self.acquire_timeout)
             .finish_non_exhaustive()
+    }
+}
+
+/// Whether the URL itself sets the SSL mode (`sslmode` or sqlx's `ssl-mode`
+/// alias), as opposed to the mode coming from `PGSSLMODE` or a default.
+fn url_sets_ssl_mode(url: &str) -> bool {
+    let url = url.split_once('#').map_or(url, |(url, _)| url);
+    url.split_once('?').is_some_and(|(_, query)| {
+        query.split('&').any(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            matches!(key, "sslmode" | "ssl-mode")
+        })
+    })
+}
+
+/// Whether the connection leaves the machine: false for a Unix socket and
+/// for `localhost` or a loopback address, true for every other host name or
+/// address.
+fn is_remote(connect: &PgConnectOptions) -> bool {
+    if connect.get_socket().is_some() {
+        return false;
+    }
+    let host = connect.get_host();
+    if host.starts_with('/') {
+        return false;
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return false;
+    }
+    !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// The SSL mode to use. An explicit URL value wins. Otherwise `parsed`, which
+/// may come from `PGSSLMODE`, is ignored: remote hosts get `verify-full`,
+/// local ones sqlx's default `prefer`.
+fn effective_ssl_mode(explicit: bool, remote: bool, parsed: PgSslMode) -> PgSslMode {
+    match (explicit, remote) {
+        (true, _) => parsed,
+        (false, true) => PgSslMode::VerifyFull,
+        (false, false) => PgSslMode::Prefer,
     }
 }
 
@@ -253,5 +316,154 @@ mod tests {
             assert!(!debug.contains(SECRET), "{debug}");
             assert!(debug.contains("db.example"), "{debug}");
         }
+    }
+
+    fn ssl_mode(url: &str) -> PgSslMode {
+        config(&[(DATABASE_URL_VAR, url)])
+            .unwrap()
+            .connect_options()
+            .get_ssl_mode()
+    }
+
+    #[test]
+    fn remote_hosts_default_to_verify_full() {
+        for host in [
+            "db.example",
+            "10.0.0.5",
+            "[2001:db8::1]",
+            "localhost.example",
+        ] {
+            let mode = ssl_mode(&format!("postgres://u@{host}/skyoauth"));
+            assert!(matches!(mode, PgSslMode::VerifyFull), "{host}: {mode:?}");
+        }
+    }
+
+    #[test]
+    fn local_hosts_default_to_prefer() {
+        for url in [
+            "postgres://u@localhost/skyoauth",
+            "postgres://u@LOCALHOST:5433/skyoauth",
+            "postgres://u@127.0.0.1/skyoauth",
+            "postgres://u@127.1.2.3/skyoauth",
+            "postgres://u@[::1]/skyoauth",
+            "postgres:///skyoauth?host=/var/run/postgresql",
+        ] {
+            let mode = ssl_mode(url);
+            assert!(matches!(mode, PgSslMode::Prefer), "{url}: {mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_mode_in_the_url_is_used_as_written() {
+        for (query, expected) in [
+            ("sslmode=disable", "Disable"),
+            ("sslmode=require", "Require"),
+            ("sslmode=verify-ca", "VerifyCa"),
+            ("sslmode=verify-full", "VerifyFull"),
+            ("ssl-mode=allow", "Allow"),
+            ("application_name=x&sslmode=prefer", "Prefer"),
+        ] {
+            let mode = ssl_mode(&format!("postgres://u@db.example/skyoauth?{query}"));
+            assert_eq!(format!("{mode:?}"), expected, "{query}");
+        }
+        let local = ssl_mode("postgres://u@localhost/skyoauth?sslmode=require");
+        assert!(matches!(local, PgSslMode::Require));
+    }
+
+    #[test]
+    fn only_the_url_query_counts_as_setting_the_mode() {
+        assert!(url_sets_ssl_mode("postgres://h/db?sslmode=require"));
+        assert!(url_sets_ssl_mode("postgres://h/db?a=b&ssl-mode=require#x"));
+        assert!(!url_sets_ssl_mode("postgres://h/db"));
+        assert!(!url_sets_ssl_mode("postgres://h/db?sslrootcert=/ca.pem"));
+        assert!(!url_sets_ssl_mode("postgres://u:sslmode=x@h/db"));
+        assert!(!url_sets_ssl_mode("postgres://h/db#sslmode=require"));
+        assert!(!url_sets_ssl_mode("postgres://h/db?xsslmode=require"));
+    }
+
+    #[test]
+    fn the_ambient_mode_never_overrides_the_default() {
+        // `parsed` stands for whatever PGSSLMODE produced.
+        for parsed in [
+            PgSslMode::Disable,
+            PgSslMode::Allow,
+            PgSslMode::Prefer,
+            PgSslMode::Require,
+            PgSslMode::VerifyCa,
+            PgSslMode::VerifyFull,
+        ] {
+            let remote = effective_ssl_mode(false, true, parsed);
+            assert!(matches!(remote, PgSslMode::VerifyFull), "{parsed:?}");
+            let local = effective_ssl_mode(false, false, parsed);
+            assert!(matches!(local, PgSslMode::Prefer), "{parsed:?}");
+            let explicit = effective_ssl_mode(true, true, parsed);
+            assert_eq!(format!("{explicit:?}"), format!("{parsed:?}"));
+        }
+    }
+
+    /// Runs `f` with WARN-and-above logs captured in memory.
+    fn warnings(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self {
+                self.clone()
+            }
+        }
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(sink.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_weak_explicit_mode_for_a_remote_host_logs_a_warning() {
+        for mode in ["disable", "allow", "prefer", "require", "verify-ca"] {
+            let url = format!("postgres://u:{SECRET}@db.example/skyoauth?sslmode={mode}");
+            let logs = warnings(|| {
+                config(&[(DATABASE_URL_VAR, &url)]).unwrap();
+            });
+            assert!(logs.contains("WARN"), "{mode}: {logs}");
+            assert!(logs.contains("db.example"), "{mode}: {logs}");
+            assert!(!logs.contains(SECRET), "{mode}: {logs}");
+        }
+    }
+
+    #[test]
+    fn strict_or_local_configurations_log_no_warning() {
+        for url in [
+            "postgres://u@db.example/skyoauth",
+            "postgres://u@db.example/skyoauth?sslmode=verify-full",
+            "postgres://u@localhost/skyoauth?sslmode=disable",
+            "postgres://u@localhost/skyoauth",
+            "postgres:///skyoauth?host=/var/run/postgresql&sslmode=disable",
+        ] {
+            let logs = warnings(|| {
+                config(&[(DATABASE_URL_VAR, url)]).unwrap();
+            });
+            assert!(logs.is_empty(), "{url}: {logs}");
+        }
+    }
+
+    #[test]
+    fn debug_shows_the_ssl_mode() {
+        let remote = config(&[(DATABASE_URL_VAR, "postgres://u@db.example/skyoauth")]).unwrap();
+        assert!(format!("{remote:?}").contains("ssl_mode: VerifyFull"));
+        let local = config(&[(DATABASE_URL_VAR, "postgres://u@localhost/skyoauth")]).unwrap();
+        assert!(format!("{local:?}").contains("ssl_mode: Prefer"));
     }
 }
