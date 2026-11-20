@@ -400,7 +400,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         "SELECT table_name::text, column_name::text FROM information_schema.columns
          WHERE table_schema = current_schema() AND table_name = ANY($1)
            AND data_type = 'text' AND collation_name IS DISTINCT FROM 'C'
-         ORDER BY 1, 2",
+         ORDER BY 1 USING ~<~, 2 USING ~<~",
     )
     .bind(&tables)
     .fetch_all(&pool)
@@ -541,7 +541,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         "SELECT c.relname::text, a.attname::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
          WHERE c.relnamespace = to_regnamespace(quote_ident(current_schema())) AND c.relname = ANY($1)
            AND a.attnum > 0 AND NOT a.attisdropped AND NOT a.attnotnull
-         ORDER BY 1, 2",
+         ORDER BY 1 USING ~<~, 2 USING ~<~",
     )
     .bind(&tables)
     .fetch_all(&pool)
@@ -571,7 +571,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
          FROM information_schema.columns
          WHERE table_schema = current_schema() AND table_name = ANY($1)
            AND column_default IS NOT NULL
-         ORDER BY 1, 2",
+         ORDER BY 1 USING ~<~, 2 USING ~<~",
     )
     .bind(&tables)
     .fetch_all(&pool)
@@ -605,7 +605,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         "WITH keys AS ({key_columns})
          SELECT k.rel::regclass::text, a.attname::text
          FROM keys k JOIN pg_attribute a ON a.attrelid = k.rel AND a.attnum = k.attnum
-         ORDER BY 1, 2"
+         ORDER BY 1 USING ~<~, 2 USING ~<~"
     )))
     .bind(&tables)
     .fetch_all(&pool)
@@ -651,7 +651,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
                   OR (c.conname = k.rel::regclass::text || '_' || a.attname || '_check'
                       AND pg_get_constraintdef(c.oid)
                           ~ ('^CHECK \(\(' || a.attname || ' = ANY \(ARRAY\[''[a-z_]+''::text(, ''[a-z_]+''::text)*\]\)\)\)$'))))
-          ORDER BY 1, 2"
+          ORDER BY 1 USING ~<~, 2 USING ~<~"
     )))
     .bind(&tables)
     .fetch_all(&pool)
