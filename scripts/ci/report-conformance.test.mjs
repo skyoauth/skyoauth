@@ -667,8 +667,13 @@ describe('waivers', () => {
   test('waiver file errors stop the report with exit 2', () => {
     const { dir, head } = gitRoot();
     const side = git(dir, 'commit-tree', 'HEAD^{tree}', '-p', head, '-m', 'side');
+    // Judging the side commit (same tree): its own waiver must be on main.
+    git(dir, 'checkout', '-q', '--detach', side);
+    const offMain = report(dir, ['--waivers', waiverFile(waiver(side))], { commit: side });
+    assert.equal(offMain.code, 2);
+    assert.match(offMain.err, /commit [0-9a-f]{40} is not on main/);
+    git(dir, 'checkout', '-q', '--detach', head);
     for (const [text, re] of [
-      [waiver(side), /commit [0-9a-f]{40} is not on main/],
       [waiver(head, { test: '"nextest:skyoauth-scenarios/pg/nope::a24_pos_x"' }), /is not registered in any stage's tests/],
       [waiver(head, { expires: '"2026-12-31"' }), /expires must be a TOML local date/],
       ['[[waiver]\n', /not valid TOML/],
@@ -682,6 +687,40 @@ describe('waivers', () => {
     const missing = report(dir, ['--waivers', join(dir, 'nope.toml')], { commit: head });
     assert.equal(missing.code, 2);
     assert.match(missing.err, /--waivers .*nope\.toml: no such file/);
+  });
+
+  test('waivers for other commits get only the shape checks; errors name the --waivers file and line', () => {
+    const { dir, head } = gitRoot();
+    const other = 'b'.repeat(40);
+    // A test and leg this registry does not have, for a commit that is not
+    // even in the history: main may hold it for an older or newer commit.
+    const foreign = waiver(other, { test: '"nextest:skyoauth-scenarios/pg/x::a24_neg_renamed_later"', leg: '"scenarios-pg/arm64"' });
+    const ok = report(dir, ['--require-history', '--waivers', waiverFile(`${foreign}\n${waiver(head)}`), '--artifacts', failedThenPassed()], { commit: head });
+    assert.equal(ok.code, 0, ok.err);
+    assert.deepEqual(ok.json.waivers.map((w) => [w.commit, w.applied, w.why ?? null]), [
+      [other, false, 'for another commit'],
+      [head, true, null],
+    ]);
+    assert.doesNotMatch(ok.out, /renamed_later/);
+    for (const [bad, re] of [
+      [{ commit: '"B"' }, /:1: error \[waivers\] commit must be a full 40-character lowercase hex SHA$/m],
+      [{ expires: '"2026-12-31"' }, /:1: error \[waivers\] expires must be a TOML local date/m],
+      [{ run_id: '0' }, /:1: error \[waivers\] run_id must be a positive integer/m],
+      [{ color: '"red"' }, /:1: error \[waivers\] unknown field color/m],
+    ]) {
+      const f = waiverFile(waiver(other, bad));
+      const r = report(dir, ['--waivers', f], { commit: head });
+      assert.equal(r.code, 2, JSON.stringify(bad));
+      assert.ok(r.err.startsWith(`${f}:`), r.err);
+      assert.match(r.err, re);
+      assert.doesNotMatch(r.err, /tests\/conformance\/waivers\.toml/);
+    }
+    // The waiver for the judged commit keeps its own line (10, after a
+    // foreign waiver of 8 lines and a blank line) and gets the full rule.
+    const f = waiverFile(`${foreign}\n${waiver(head, { leg: '"scenarios-pg/arm64"' })}`);
+    const mine = report(dir, ['--waivers', f], { commit: head });
+    assert.equal(mine.code, 2);
+    assert.ok(mine.err.startsWith(`${f}:10: error [waivers] leg "scenarios-pg/arm64" is not a leg of a stage that lists`), mine.err);
   });
 
   test('without history a waiver commit is not checked (note), unless --require-history', () => {

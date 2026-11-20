@@ -23,6 +23,8 @@
 //   --waivers FILE    tests/conformance/waivers.toml from the tip of main
 //                     (layout §3 "Waivers"); the caller fetches it, for
 //                     example with `git show origin/main:tests/conformance/waivers.toml`.
+//                     The waivers for --commit get the registry check's full
+//                     waiver rule, the others only its shape checks.
 //   --root DIR        Checkout of the judged commit (default: this
 //                     repository). Its registry is checked first with
 //                     check-conformance-registry.mjs; any error stops the
@@ -72,7 +74,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict } from 'smol-toml';
 
-import { checkRegistry, checkWaivers, formatError, history, load, locate, Report } from './check-conformance-registry.mjs';
+import { checkRegistry, checkWaivers, formatError, history, load, locate, Report, WAIVERS } from './check-conformance-registry.mjs';
 import { LAYOUT, MILESTONES, parseEnvironments, SCENARIOS, SUBCASES } from './gen-conformance-registry.mjs';
 
 // ---------------------------------------------------------------------------
@@ -622,13 +624,30 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
     if (doc) {
       const stagesByTest = new Map();
       for (const e of [...scenarios, ...subcases]) for (const s of e.stage) for (const t of s.tests) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: s.legs }]);
+      // The file is main's, the registry the judged commit's: a waiver for
+      // another commit may name a test this registry no longer (or not yet)
+      // has. Only the waivers for --commit get the full rule; the others get
+      // its shape checks (keys, types, commit format), with every test and leg
+      // accepted and no history lookup. Each part keeps its line numbers.
+      const at = locate(text);
+      const part = (keep) => {
+        const list = Array.isArray(doc.waiver) ? doc.waiver : [];
+        const idx = list.map((w, i) => i).filter((i) => keep(list[i]));
+        const lines = new Map(idx.map((i, j) => [`waiver/${j}`, at.get(`waiver/${i}`)]));
+        return { waiver: idx.map((i) => list[i]), lines };
+      };
+      const mine = part((w) => w?.commit === o.commit);
+      const others = part((w) => w?.commit !== o.commit);
       // As in checkRegistry: with --require-history the history was probed
       // (and its absence already failed the registry check above).
-      checkWaivers(doc, locate(text), stagesByTest, root, o.requireHistory, o.requireHistory ? history(root) : null, rep);
+      checkWaivers(Array.isArray(doc.waiver) ? { ...doc, waiver: mine.waiver } : doc, mine.lines, stagesByTest, root, o.requireHistory, o.requireHistory ? history(root) : null, rep);
+      const anyStage = { get: () => [{ legs: { includes: () => true } }] };
+      if (others.waiver.length) checkWaivers({ waiver: others.waiver }, others.lines, anyStage, root, true, { reason: 'not checked for other commits' }, rep);
     }
     for (const n of rep.notes) log(`note: ${n}`);
     if (rep.errors.length) {
-      for (const e of rep.errors) logErr(formatError(e));
+      // checkWaivers names main's path; this file is the --waivers one.
+      for (const e of rep.errors) logErr(formatError(e.file === WAIVERS ? { ...e, file: o.waivers } : e));
       logErr(`report-conformance: ${o.waivers} has ${rep.errors.length} error(s); no report`);
       return 2;
     }
