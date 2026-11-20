@@ -368,14 +368,17 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // objects). With an inherited GIT_DIR, a plain directory would pass as a
 // checkout of that repository, and with GIT_SHALLOW_FILE naming a missing
 // file a shallow clone would pass as complete, so every git run here goes
-// without them.
+// without them. Replace refs (refs/replace/*, in the repository itself) would
+// swap one object for another wherever git reads it, such as the gate
+// commit's parent or the history of origin/main, so every git run here also
+// passes --no-replace-objects.
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
 
-// `git -C root ...args`, run without GIT_LOCATION; `options` (encoding,
-// maxBuffer) are passed to spawnSync.
+// `git --no-replace-objects -C root ...args`, run without GIT_LOCATION;
+// `options` (encoding, maxBuffer) are passed to spawnSync.
 export function gitIn(root, options = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
-  return (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', ...options, env });
+  return (...args) => spawnSync('git', ['--no-replace-objects', '-C', root, ...args], { encoding: 'utf8', ...options, env });
 }
 
 // Whether origin/main's full history is available in `root`: { onMain(sha) }

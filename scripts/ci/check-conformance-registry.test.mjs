@@ -1168,6 +1168,23 @@ describe('rule waivers', () => {
     expectOnly(res, 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
   });
 
+  // A replace ref (refs/replace/<oid>) makes git read another object in place
+  // of the one named, so it can rewrite the history git walks. gitIn runs
+  // git with --no-replace-objects.
+  test('a replace ref that puts a side commit into the history of origin/main does not put it on main', () => {
+    const { root, head } = gitRoot();
+    const side = git(root, 'commit-tree', 'HEAD^{tree}', '-m', 'side');
+    // origin/main's commit replaced by one with the same tree on top of side.
+    git(root, 'replace', head, git(root, 'commit-tree', 'HEAD^{tree}', '-p', side, '-m', 'registry'));
+    assert.equal(spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', side, 'refs/remotes/origin/main'], { env: GIT_ENV }).status, 0, 'git itself sees side on main');
+    withWaiver(root, waiver({ commit: `"${side}"` }));
+    for (const requireHistory of [false, true]) {
+      expectOnly(check(root, { requireHistory }), 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
+    }
+    const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', root], { encoding: 'utf8', env: GIT_ENV });
+    assert.equal(r.status, 1, r.stdout);
+  });
+
   test('a commit that is not in the repository', () => {
     const { root } = gitRoot();
     const res = check(withWaiver(root, waiver({ commit: `"${'f'.repeat(40)}"` })));
@@ -1255,7 +1272,7 @@ describe('rule waivers', () => {
   // The git fixtures here with an absolute GIT_DIR exported (as in a git
   // hook): they pass and leave that repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr', '^a replace ref that puts a side commit', '^a replace ref that gives the gate commit']);
   });
 
   test('--require-history passes with the history and no waivers', () => {
@@ -1587,6 +1604,21 @@ describe('--gate-pr', () => {
     const first = commit(root, 'first');
     const head = gateCommit(root, '["M1a"]');
     expectOnly(checkGatePr(root), 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+  });
+
+  // A replace ref (refs/replace/<oid>) makes git read another commit in place
+  // of the gate commit; gitIn runs git with --no-replace-objects.
+  test('a replace ref that gives the gate commit the merge-base as its parent does not hide a second commit', () => {
+    const { root, mb } = mainRoot();
+    const first = commit(root, 'first');
+    const head = gateCommit(root, '["M1a"]');
+    git(root, 'replace', head, git(root, 'commit-tree', `${head}^{tree}`, '-p', mb, '-m', 'gate'));
+    assert.equal(git(root, 'rev-list', '--parents', '-n', '1', head), `${head} ${mb}`, 'git itself sees the merge-base as the only parent');
+    const res = checkGatePr(root);
+    assert.equal(res.mergeBase, mb);
+    expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+    const r = cli('--gate-pr', '--root', root);
+    assert.equal(r.status, 1, r.stdout);
   });
 
   test('a merge commit (main merged into the PR) is not one commit on the merge-base', () => {
