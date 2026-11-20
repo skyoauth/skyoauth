@@ -192,13 +192,17 @@ shows. Coverage percentages are truncated to one decimal, never rounded up
 as images from the rendered README (`scripts/ci/verify-badges-render.sh`);
 every pull request, and a docs-only push to `main`, which publishes nothing,
 run the same check against the badges already published for `main`. On a pull
-request, a fetch that still fails after curl's retries (a transport error, 429
-or 5xx) and a badge not yet published for `main` (404, as for a badge the pull
-request adds or renames) are warnings, not failures; what the README embeds is
-always checked. To protect `main`, require the `CI passed` check: it passes
-when `Docs consistency` and `Conformance registry` passed and every other job
-passed or was skipped. Dependabot keeps actions, crates and npm packages up to
-date.
+request, a badge fetch that still fails after curl's retries (a transport
+error, 429 or 5xx) and a badge not yet published for `main` (404, as for a
+badge the pull request adds or renames) are warnings, not failures.
+If the rendered README itself cannot be fetched, the pull request passes with a
+warning only when it leaves every README file GitHub could render (`README*` at
+the top level, in `.github/` and in `docs/`, none of them a symbolic link) byte
+for byte as on the base branch; a pull request that changes one fails, and is
+checked in full by re-running the job once the GitHub API recovers. To protect
+`main`, require the `CI passed` check: it passes when `Docs consistency` and
+`Conformance registry` passed and every other job passed or was skipped.
+Dependabot keeps actions, crates and npm packages up to date.
 
 ## License
 

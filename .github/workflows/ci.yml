@@ -662,10 +662,12 @@ jobs:
   # may have changed the README (other pushes to main check after
   # publishing, in publish-badges). On a pull request (--pull-request),
   # fetch failures it cannot have caused (transport errors, 429 and 5xx
-  # after retries) and a badge not published yet (404, as for one the
-  # pull request adds or renames) are warnings; the push to main is
-  # strict. Like publish-badges, only in skyoauth/skyoauth: the README
-  # embeds that repository's badges, which a fork does not publish.
+  # after retries; for the rendered README itself, only when the pull
+  # request leaves the README unchanged) and a badge not published yet
+  # (404, as for one the pull request adds or renames) are warnings; the
+  # push to main is strict. Like publish-badges, only in
+  # skyoauth/skyoauth: the README embeds that repository's badges, which a
+  # fork does not publish.
   verify-badges:
     name: Verify README badges
     needs: changes
@@ -674,12 +676,16 @@ jobs:
       (github.event_name == 'pull_request' ||
        (needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
+      # The merge commit and its first parent (the base tip), which the
+      # script compares the README with when the GitHub API is down.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 2
 
       - name: Verify the README badges render
         env:
@@ -724,6 +730,7 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [rust-coverage, service-nextest, typescript-coverage]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     concurrency:
