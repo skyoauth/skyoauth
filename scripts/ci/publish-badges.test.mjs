@@ -527,6 +527,8 @@ describe('numeric settings and counts', () => {
     ['no space between attributes', junit('tests="12"failures="3" errors="0" skipped="0"')],
     ['a repeated attribute', junit('tests="12" failures="0" errors="0" skipped="0" failures="3"')],
     ['no <testsuites> element', '<?xml version="1.0"?><testsuite name="s" tests="12" failures="3"/>'],
+    ['a stray character where an attribute name belongs', junit('tests="12" - failures="3" errors="0" skipped="0"')],
+    ['no end to the start tag', '<?xml version="1.0"?>\n<testsuites tests="12" errors="0"\n'],
   ]) {
     test(`rejects a JUnit root element with ${form}`, () => {
       const { remote, sha, work, file } = setup();
