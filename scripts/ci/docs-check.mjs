@@ -101,17 +101,28 @@ function sortDiagnostics(list) {
 // ---------------------------------------------------------------------------
 // File discovery
 
+// The variables that point git at another repository than the one it finds
+// from -C (a git hook or `git rebase --exec` exports some of them), or that
+// change the history it sees there; git runs here without them, so the
+// tracked files are root's own. The same list as
+// GIT_LOCATION in check-conformance-registry.mjs, which this script cannot
+// import (it has no dependencies).
+export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
+
 function gitTracked(root) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
   try {
     const out = execFileSync('git', ['-C', root, 'ls-files', '-z'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      env,
     });
     // A root that is only a subdirectory of some other repository is not a
     // repository root; fall back to the file system in that case.
     const top = execFileSync('git', ['-C', root, 'rev-parse', '--show-toplevel'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      env,
     }).trim();
     if (realpathSync(top) !== realpathSync(root)) return null;
     return new Set(out.split('\0').filter(Boolean));

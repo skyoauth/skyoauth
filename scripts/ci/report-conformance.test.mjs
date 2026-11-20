@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -19,8 +19,8 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { normaliseRegistry } from './registry-fixtures.mjs';
-import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { assertGitImmune, GIT_ENV, normaliseRegistry } from './registry-fixtures.mjs';
+import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -195,6 +195,26 @@ function report(rootDir, args = [], { commit = SHA } = {}) {
 }
 // The Markdown with text() escapes undone, for matching prose.
 const plain = (md) => md.replace(/\\([\\`*_[\]~|])/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const git = (dir, ...args) => {
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  return r.stdout.trim();
+};
+// Commits `dir` as a git repository on main, with origin/main at the same
+// commit, and returns HEAD: the root is then bound to that commit.
+const commitRoot = (dir) => {
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'add', '-A');
+  git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'registry');
+  git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  return git(dir, 'rev-parse', 'HEAD');
+};
+// report() on `rootDir` bound to its own commit (gate mode needs that), with
+// artifacts from `spec` (null: none) whose run.json names that commit.
+const boundReport = (rootDir, spec, args = []) => {
+  const head = commitRoot(rootDir);
+  return report(rootDir, [...(spec ? ['--artifacts', artifacts(spec, { commit: head })] : []), ...args], { commit: head });
+};
 const stage = (json, id, m) => json.stages.find((s) => s.id === id && s.milestone === m);
 const pair = (json, id, m, test, leg) => stage(json, id, m).pairs.find((p) => p.test === test.id && p.leg === leg);
 
@@ -235,10 +255,10 @@ describe('statuses', () => {
   });
 
   test('--require-milestone: exit 1 while any stage of the milestone is not passed', () => {
-    const r = report(root(withA24), ['--require-milestone', 'M1a', '--artifacts', artifacts([{ leg: PG, junit: allPass(A24) }])]);
+    const r = boundReport(root(withA24), [{ leg: PG, junit: allPass(A24) }], ['--require-milestone', 'M1a']);
     assert.equal(r.code, 1);
     assert.match(r.err, /milestone M1a is planned, not passed/);
-    const none = report(root(), ['--require-milestone', 'M0']);
+    const none = boundReport(root(), null, ['--require-milestone', 'M0']);
     assert.equal(none.code, 1);
     assert.match(none.err, /milestone M0 is no stages, not passed/);
   });
@@ -256,7 +276,7 @@ describe('statuses', () => {
     });
   const gateRun = (fails, args = []) => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
-    return report(gateRoot(), ['--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }]), ...args]);
+    return boundReport(gateRoot(), [{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }], args);
   };
 
   test('--require-milestone M: exit 0 iff the gate of M passed; failures elsewhere, conditional ones included, stay in the report only', () => {
@@ -297,7 +317,7 @@ describe('statuses', () => {
 
   test('--require-milestone with input errors: exit 2 even when the gate passed, and the JSON says trusted: false', () => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
-    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, t === A24_NEG ? 'failed' : 'passed'])) }, { leg: null, name: 'mystery', junit: null }])]);
+    const r = boundReport(gateRoot(), [{ leg: PG, junit: junit(all.map((t) => [t, t === A24_NEG ? 'failed' : 'passed'])) }, { leg: null, name: 'mystery', junit: null }], ['--require-milestone', 'M1b']);
     assert.equal(r.code, 2);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'failed');
     assert.doesNotMatch(r.err, /outside the M1b gate/, 'an untrusted report gets no note about the gate');
@@ -310,11 +330,68 @@ describe('statuses', () => {
 
   test('--require-milestone M: a gate with a not run stage is not passed (exit 1)', () => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')].filter((t) => t.id !== pgTest('A47', 'neg').id);
-    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }])]);
+    const r = boundReport(gateRoot(), [{ leg: PG, junit: allPass(all) }], ['--require-milestone', 'M1b']);
     assert.equal(r.code, 1);
     assert.equal(stage(r.json, 'A47', 'M1b').status, 'not run');
     assert.equal(r.json.milestones.M1b.gate, 'not run');
     assert.match(r.err, /milestone M1b is not run, not passed/);
+  });
+
+  test('the gate job (layout §3 Gates): --root a worktree of the merge-base, --commit the merge-base, --require-milestone', () => {
+    // main (origin/main) holds the registry; the gate PR is one commit on it.
+    const dir = gateRoot();
+    const mb = commitRoot(dir);
+    write(join(dir, SCENARIOS), replaceOnce(readFileSync(join(dir, SCENARIOS), 'utf8'), 'gates_passed = []', 'gates_passed = ["M1b"]'));
+    git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'gate M1b');
+    const wt = join(tmp('report-wt-'), 'merge-base');
+    git(dir, 'worktree', 'add', '-q', '--detach', wt, mb);
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const gate = (rootDir, tests, extra = []) => report(rootDir, ['--require-history', '--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(tests) }], { commit: mb }), ...extra], { commit: mb });
+    const passed = gate(wt, all);
+    assert.equal(passed.code, 0, passed.err);
+    assert.equal(passed.json.trusted, true);
+    assert.deepEqual(passed.json.notes, []);
+    // A leg of the merge-base without a result yet (a post-merge or live run
+    // that has not finished) is not run: the gate fails until it completes.
+    const waiting = gate(wt, all.filter((t) => t.id !== pgTest('A47', 'neg').id));
+    assert.equal(waiting.code, 1);
+    assert.match(waiting.err, /milestone M1b is not run, not passed/);
+    // The PR head is not the judged commit: no report, and with
+    // --allow-commit-mismatch an untrusted one (exit 2) though the gate passed.
+    const fromHead = gate(dir, all);
+    assert.equal(fromHead.code, 2);
+    assert.match(fromHead.err, /--root is a checkout of [0-9a-f]{40}, not of --commit/);
+    const loose = gate(dir, all, ['--allow-commit-mismatch']);
+    assert.equal(loose.code, 2);
+    assert.equal(loose.json.milestones.M1b.gate, 'passed');
+    assert.equal(loose.json.trusted, false);
+  });
+
+  test('--require-milestone on a root not bound to --commit is an input error (exit 2), never a gate verdict', () => {
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
+    // The gate would pass, and would fail: neither verdict is given.
+    for (const fails of [[], [pgTest('A47', 'neg')]]) {
+      const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }])]);
+      assert.equal(r.code, 2);
+      assert.equal(r.json.trusted, false);
+      assert.deepEqual(r.json.input_errors, [UNBOUND]);
+      assert.deepEqual(r.json.notes, []);
+      assert.match(r.err, /1 input error\(s\); the report cannot be trusted/);
+    }
+    assert.equal(report(root(), ['--require-milestone', 'M0']).code, 2);
+    // A checkout of another commit, printed with --allow-commit-mismatch, is
+    // unbound too.
+    const dir = gateRoot();
+    commitRoot(dir);
+    const other = 'b'.repeat(40);
+    const mismatch = report(dir, ['--allow-commit-mismatch', '--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }], { commit: other })], { commit: other });
+    assert.equal(mismatch.code, 2);
+    assert.equal(mismatch.json.milestones.M1b.gate, 'passed');
+    // Without the flag the same unbound root only gets a note.
+    const plainRun = report(gateRoot(), ['--artifacts', artifacts([{ leg: PG, junit: allPass(all) }])]);
+    assert.equal(plainRun.code, 0, plainRun.err);
+    assert.deepEqual(plainRun.json.notes, ['the registry is not bound to --commit: --root is not a git checkout']);
   });
 
   test('exitStatus', () => {
@@ -414,7 +491,7 @@ describe('legs', () => {
     'recovery-offline/macos': [OP_POS, OP_NEG],
     'recovery-offline/windows': [OP_POS, OP_NEG],
   };
-  const a64 = (skip = []) => artifacts(Object.entries(LEGS).filter(([leg]) => !skip.includes(leg)).map(([leg, tests]) => ({ leg, junit: allPass(tests) })));
+  const a64 = (skip = [], commit = SHA) => artifacts(Object.entries(LEGS).filter(([leg]) => !skip.includes(leg)).map(([leg, tests]) => ({ leg, junit: allPass(tests) })), { commit });
 
   test('A64 with every leg passed is passed', () => {
     const r = report(root(withA64), ['--artifacts', a64()]);
@@ -434,7 +511,9 @@ describe('legs', () => {
       [OP_NEG.id, 'operator/windows', 'not run'],
     ]);
     assert.match(r.out, /a64_pos_offline_recovery` on `operator\/windows`: not run<br>`nextest:skyoauth-operator\/recovery\/a64_neg_wrong_instance` on `operator\/windows`: not run \|/);
-    assert.equal(report(root(withA64), ['--artifacts', a64(['operator/windows']), '--require-milestone', 'M1a']).code, 1);
+    const dir = root(withA64);
+    const head = commitRoot(dir);
+    assert.equal(report(dir, ['--artifacts', a64(['operator/windows'], head), '--require-milestone', 'M1a'], { commit: head }).code, 1);
   });
 
   test('a stage whose job has no pos or no neg test, or a test of another entry or job, is not run', () => {
@@ -708,21 +787,11 @@ describe('test names', () => {
 });
 
 describe('waivers', () => {
-  const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
-  const git = (dir, ...args) => {
-    const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
-    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
-    return r.stdout.trim();
-  };
   // A git root (A24 M1a implemented, A24 M2 planned with tests) committed on
   // main; returns { dir, head }.
   const gitRoot = () => {
     const dir = root({ [SCENARIOS]: compose(implement('scenario', 'A24', 'M1a', ids(A24)), listPlanned('A24', 'M2', [A24_POS.id])) });
-    git(dir, 'init', '-q', '-b', 'main');
-    git(dir, 'add', '-A');
-    git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'registry');
-    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
-    return { dir, head: git(dir, 'rev-parse', 'HEAD') };
+    return { dir, head: commitRoot(dir) };
   };
   const waiver = (commit, over = {}) => {
     const w = { commit: `"${commit}"`, test: `"${A24_NEG.id}"`, leg: `"${PG}"`, run_id: '100', run_attempt: '1', reason: '"runner lost the database"', expires: '2026-12-31', ...over };
@@ -868,6 +937,17 @@ describe('waivers', () => {
     const missing = report(dir, ['--waivers', join(dir, 'nope.toml')], { commit: head });
     assert.equal(missing.code, 2);
     assert.match(missing.err, /--waivers .*nope\.toml: no such file/);
+    // A directory, such as tests/conformance instead of its waivers.toml, or
+    // a character device: a usage error with no report, not an internal
+    // error and not an empty waiver list.
+    for (const path of [join(dir, 'tests', 'conformance'), dir, '/dev/null']) {
+      const r = report(dir, ['--waivers', path, '--artifacts', failedThenPassed(head)], { commit: head });
+      assert.equal(r.code, 2, path);
+      assert.equal(r.err.split('\n')[0], `report-conformance: --waivers ${path}: not a regular file (give the waivers.toml file, not its directory)`);
+      assert.doesNotMatch(r.err, /internal error/);
+      assert.equal(r.out, '');
+      assert.equal(r.json, null);
+    }
   });
 
   test('waivers for other commits get only the shape checks; errors name the --waivers file and line', () => {
@@ -933,6 +1013,32 @@ describe('waivers', () => {
     assert.match(none.err, /--root is a checkout of no commit, not of --commit/);
   });
 
+  // A git hook or `git rebase --exec` exports GIT_DIR and its kin; git -C
+  // obeys them, so a plain directory would pass as a checkout of another
+  // repository's HEAD and get a gate verdict.
+  test('an inherited GIT_DIR does not bind a plain directory to --commit', () => {
+    const other = root(withA24);
+    const head = commitRoot(other);
+    const plainRoot = root(withA24);
+    const gitDir = join(other, '.git');
+    const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
+    for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: plainRoot }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
+      const j = join(tmp('report-out-'), 'r.json');
+      const p = spawnSync(process.execPath, [SCRIPT, '--root', plainRoot, '--commit', head, '--today', TODAY, '--require-milestone', 'M1a', '--json', j], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(p.status, 2, `${Object.keys(env)}: ${p.stderr}`);
+      const json = JSON.parse(readFileSync(j, 'utf8'));
+      assert.equal(json.trusted, false);
+      assert.deepEqual(json.input_errors, [UNBOUND]);
+    }
+  });
+
+  // The git fixtures above, and the run on the repository below, with an
+  // absolute GIT_DIR exported (as in a git hook): they pass and leave that
+  // repository alone.
+  test('the git fixtures are immune to an inherited GIT_DIR', () => {
+    assertGitImmune(fileURLToPath(import.meta.url), ['^in a git checkout, --root must be', '^an inherited GIT_DIR does not bind', '^the script runs on the repository', '^the gate job \\(layout']);
+  });
+
   test('without history a waiver commit is not checked (note), unless --require-history', () => {
     const dir = root(withA24);
     const soft = report(dir, ['--waivers', waiverFile(waiver(SHA)), '--artifacts', failedThenPassed()]);
@@ -963,7 +1069,7 @@ describe('docs-only', () => {
     assert.equal(r.json.headline, 'runtime conformance: not run (docs-only change)');
     assert.equal(r.json.docs_only, true);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
-    assert.equal(report(root(withA24), ['--docs-only', '--require-milestone', 'M1a']).code, 1);
+    assert.equal(boundReport(root(withA24), null, ['--docs-only', '--require-milestone', 'M1a']).code, 1);
   });
 });
 
@@ -1187,6 +1293,78 @@ describe('input errors', () => {
     assert.match(r.out, /note: 4 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/rust-coverage`/);
   });
 
+  // The upload-artifact steps of the workflow files `files` ([name, text]
+  // pairs): { at, name, paths } each, from a block-style step
+  // (`uses: actions/upload-artifact@...` on its own line, `with:` below).
+  // Fails closed: every line that names upload-artifact, other than a
+  // comment, must be the `uses:` line of a step parsed here.
+  const workflowUploads = (files) => {
+    const uploads = [];
+    for (const [wf, text] of files) {
+      const lines = text.split('\n');
+      const parsed = uploads.length;
+      lines.forEach((l, i) => {
+        if (!/^\s*(- )?uses: actions\/upload-artifact@/.test(l)) return;
+        // The step's `with:` block: the lines after `uses:` indented deeper
+        // than the step's keys.
+        const indent = l.search(/\S/) + (l.trimStart().startsWith('- ') ? 2 : 0);
+        const block = [];
+        for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++) {
+          if (lines[j].search(/\S/) === indent && !/^\s*with:/.test(lines[j])) break;
+          block.push(lines[j]);
+        }
+        const name = block.map((b) => b.match(/^\s*name:\s*(.+?)\s*$/)).find(Boolean)?.[1];
+        // `path:` is one path, or a `|` block of one per line.
+        const paths = [];
+        const p = block.findIndex((b) => /^\s*path:/.test(b));
+        if (p >= 0) {
+          paths.push(block[p].replace(/^\s*path:\s*\|?\s*/, ''));
+          for (let k = p + 1; k < block.length && block[k].search(/\S/) > block[p].search(/\S/); k++) paths.push(block[k].trim());
+        }
+        uploads.push({ at: `${wf}:${i + 1}`, name, paths });
+      });
+      const named = lines.filter((l) => /upload-artifact/i.test(l) && !/^\s*#/.test(l)).length;
+      assert.equal(named, uploads.length - parsed, `${wf}: ${named} non-comment line(s) name upload-artifact, ${uploads.length - parsed} upload step(s) parsed; write each upload step block-style (\`uses: actions/upload-artifact@...\` on its own line)`);
+    }
+    return uploads;
+  };
+  const repoWorkflows = () => readdirSync(join(REPO, '.github', 'workflows')).filter((f) => /\.ya?ml$/.test(f)).sort().map((wf) => [wf, repoText(join('.github', 'workflows', wf))]);
+
+  test('every artifact the workflows upload is a leg artifact or a known non-conformance artifact', () => {
+    // Fails when a workflow gains an artifact without a `leg` file: add it to
+    // NOT_CONFORMANCE (or upload a leg file with it), or the reporter calls
+    // it an input error. A NOT_CONFORMANCE entry no workflow uploads fails too.
+    const uploads = workflowUploads(repoWorkflows());
+    assert.ok(uploads.length > 0, 'no upload-artifact steps found');
+    const asNamed = (name) => name.replace(/\$\{\{\s*github\.run_attempt\s*\}\}/g, '1');
+    const bad = uploads.filter(({ name, paths }) => {
+      assert.ok(name, 'an upload step without a name');
+      const leg = paths.some((x) => /(^|\/)leg$/.test(x));
+      return leg ? !/-attempt-\$\{\{\s*github\.run_attempt\s*\}\}$/.test(name) : !NOT_CONFORMANCE.some((re) => re.test(asNamed(name)));
+    });
+    assert.deepEqual(bad, [], 'leg artifacts must end in attempt-${{ github.run_attempt }}; others need a NOT_CONFORMANCE entry');
+    assert.deepEqual(NOT_CONFORMANCE.filter((re) => !uploads.some(({ name }) => re.test(asNamed(name)))).map(String), [], 'NOT_CONFORMANCE entries no workflow uploads');
+  });
+
+  // The scan above only sees block-style steps, so it must not pass over an
+  // upload written another way: that artifact would escape the
+  // NOT_CONFORMANCE check the README and ci.yml promise.
+  test('the upload scan fails closed: an upload-artifact line it does not parse is an error', () => {
+    const [wf, text] = repoWorkflows().find(([f]) => f === 'ci.yml');
+    const n = workflowUploads([[wf, text]]).length;
+    assert.ok(n > 0);
+    for (const extra of [
+      '      - { name: Upload, uses: actions/upload-artifact@v7, with: { name: stray, path: x } }',
+      '      - name: Upload\n        uses: "actions/upload-artifact@v7"\n        with:\n          name: stray\n          path: x',
+      '      - name: Upload\n        uses: Actions/Upload-Artifact@v7\n        with:\n          name: stray\n          path: x',
+      '      -   uses: actions/upload-artifact@v7\n          with:\n            name: stray\n            path: x',
+    ]) {
+      assert.throws(() => workflowUploads([[wf, `${text}${extra}\n`]]), new RegExp(`^AssertionError.*${wf}: ${n + 1} non-comment line\\(s\\) name upload-artifact, ${n} upload step\\(s\\) parsed`, 's'), extra);
+    }
+    // A comment is not an upload.
+    assert.equal(workflowUploads([[wf, `${text}      # - uses: actions/upload-artifact@v7\n`]]).length, n);
+  });
+
   test('a failed attempt whose artifact lost its leg file does not vanish: input error, exit 2', () => {
     const r = report(root(withA24), [
       '--artifacts',
@@ -1292,6 +1470,117 @@ describe('XML and JUnit reader', () => {
       assert.throws(() => readJUnit(x), (ex) => ex instanceof InputError && re.test(ex.message), x);
     }
     assert.deepEqual(readJUnit('<j:testsuite xmlns:j="u"><j:testcase classname="c" name="n"><j:failure/></j:testcase></j:testsuite>'), [{ classname: 'c', name: 'n', status: 'failed' }]);
+  });
+
+  test('skipped, disabled and ignored attributes: a testcase flag or a suite count is not a pass', () => {
+    const tc = (attrs, body = '') => `<testcase classname="c" name="n"${attrs}>${body}</testcase>`;
+    const one = (attrs, body) => readJUnit(`<testsuite name="s">${tc(attrs, body)}</testsuite>`)[0].status;
+    // On a testcase: a flag. status="skipped" was already a skip.
+    for (const [attrs, want] of [
+      [' status="skipped"', 'skipped'],
+      [' skipped="true"', 'skipped'],
+      [' skipped="1"', 'skipped'],
+      [' disabled="true"', 'skipped'],
+      [' disabled="1"', 'skipped'],
+      [' ignored="true"', 'skipped'],
+      [' skipped="false"', 'passed'],
+      [' disabled="0"', 'passed'],
+      [' skipped="false" disabled="1"', 'skipped'],
+      [' disabled="true" status="failed"', 'failed'],
+    ]) {
+      assert.equal(one(attrs), want, attrs);
+    }
+    assert.equal(one(' disabled="true"', '<failure/>'), 'failed');
+    // On a suite: a count, which the skipped testcases under it must cover.
+    const cases = (x) => readJUnit(x).map((c) => c.status);
+    const pair = `${tc('')}<testcase classname="c" name="m"><skipped/></testcase>`;
+    assert.deepEqual(cases(`<testsuites skipped="1"><testsuite skipped="1" tests="2">${pair}</testsuite></testsuites>`), ['passed', 'skipped']);
+    assert.deepEqual(cases(`<testsuites><testsuite disabled="0">${tc('')}</testsuite></testsuites>`), ['passed']);
+    assert.deepEqual(cases(`<testsuites><testsuite disabled="1">${tc(' disabled="true"')}</testsuite></testsuites>`), ['skipped']);
+    assert.deepEqual(cases(`<testsuites disabled="2"><testsuite>${pair}</testsuite><testsuite>${tc(' skipped="1"')}</testsuite></testsuites>`), ['passed', 'skipped', 'skipped']);
+    assert.deepEqual(cases(`<testsuites><testsuite skipped="true">${pair}<testcase classname="c" name="f"><failure/></testcase></testsuite></testsuites>`), ['skipped', 'skipped', 'failed']);
+    assert.deepEqual(cases(`<testsuites skipped="false"><testsuite>${tc('')}</testsuite></testsuites>`), ['passed']);
+    for (const [x, re] of [
+      [`<testsuite name="s">${tc(' skipped="yes"')}</testsuite>`, /^testcase n: skipped="yes" is not true, false, 1 or 0$/],
+      [`<testsuite name="s">${tc(' disabled="2"')}</testsuite>`, /^testcase n: disabled="2" is not true, false, 1 or 0$/],
+      [`<testsuite name="s">${tc(' ignored=""')}</testsuite>`, /^testcase n: ignored="" is not true, false, 1 or 0$/],
+      [`<testsuite name="s">${tc(' skipped="True"')}</testsuite>`, /^testcase n: skipped="True" is not/],
+      // A count with no skipped testcase to match: one of them is skipped,
+      // but would read as passed.
+      [`<testsuite name="s" skipped="1">${tc('')}</testsuite>`, /^<testsuite name="s"> counts 1 skipped or disabled test\(s\), but only 0 of its testcases are marked skipped, so which are skipped cannot be told$/],
+      [`<testsuites disabled="2"><testsuite name="s">${pair}</testsuite></testsuites>`, /^<testsuites> counts 2 skipped or disabled test\(s\), but only 1 of its/],
+      [`<testsuite name="s" skipped="1" disabled="1">${pair}</testsuite>`, /^<testsuite name="s"> counts 2 skipped/],
+      [`<testsuite name="s" skipped="1"/>`, /^<testsuite name="s"> counts 1 skipped/],
+      [`<testsuite name="s" disabled="-1">${tc('')}</testsuite>`, /^<testsuite name="s">: disabled="-1" is not a count, true or false$/],
+      [`<testsuite name="s" skipped="01">${tc('')}</testsuite>`, /^<testsuite name="s">: skipped="01" is not a count/],
+      [`<testsuite name="s" skipped="">${tc('')}</testsuite>`, /^<testsuite name="s">: skipped="" is not a count/],
+      [`<testsuite name="s" ignored="1e3">${tc('')}</testsuite>`, /^<testsuite name="s">: ignored="1e3" is not a count/],
+    ]) {
+      assert.throws(() => readJUnit(x), (ex) => ex instanceof InputError && re.test(ex.message), x);
+    }
+  });
+
+  // A suite flagged skipped="true" (disabled, ignored) marks the cases under
+  // it before the counts of the suites inside it are checked.
+  const tcx = (name, body = '') => `<testcase classname="c" name="${name}">${body}</testcase>`;
+  const statuses = (x) => readJUnit(x).map((c) => [c.name, c.status]);
+  const unaccounted = (x, re) => assert.throws(() => readJUnit(x), (ex) => ex instanceof InputError && re.test(ex.message), x);
+
+  test('inherited skip flag: an enclosing "true" accounts for an inner count', () => {
+    assert.deepEqual(statuses(`<testsuites disabled="true"><testsuite skipped="1">${tcx('n')}</testsuite></testsuites>`), [['n', 'skipped']]);
+  });
+
+  test('inherited skip flag: through two levels, with counts at each level below it', () => {
+    assert.deepEqual(statuses(`<testsuites skipped="true"><testsuites disabled="2"><testsuite skipped="1">${tcx('a')}</testsuite><testsuite>${tcx('b')}</testsuite></testsuites></testsuites>`), [['a', 'skipped'], ['b', 'skipped']]);
+    assert.deepEqual(statuses(`<testsuites ignored="true"><testsuites><testsuite>${tcx('a')}${tcx('b', '<skipped/>')}</testsuite></testsuites></testsuites>`), [['a', 'skipped'], ['b', 'skipped']]);
+  });
+
+  test('inherited skip flag: a failed case stays failed and does not account for a count', () => {
+    assert.deepEqual(statuses(`<testsuites disabled="true"><testsuites><testsuite>${tcx('f', '<failure/>')}${tcx('e', '<error/>')}${tcx('r', '<flakyFailure/>')}${tcx('p')}</testsuite></testsuites></testsuites>`), [['f', 'failed'], ['e', 'failed'], ['r', 'failed'], ['p', 'skipped']]);
+    unaccounted(`<testsuites disabled="true"><testsuite name="s" skipped="1">${tcx('f', '<failure/>')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 1 skipped or disabled test\(s\), but only 0 of its testcases are marked skipped/);
+  });
+
+  test('inherited skip flag: a count with no flag above it, or a flag only on a sibling or "false", is still unaccounted', () => {
+    unaccounted(`<testsuites><testsuite disabled="true">${tcx('a')}</testsuite><testsuite name="t" skipped="1">${tcx('b')}</testsuite></testsuites>`, /^<testsuite name="t"> counts 1 skipped or disabled test\(s\), but only 0 of/);
+    unaccounted(`<testsuites disabled="false"><testsuite name="s" skipped="1">${tcx('n')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 1 skipped/);
+    unaccounted(`<testsuites skipped="true"><testsuite name="s" skipped="2">${tcx('n')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 2 skipped or disabled test\(s\), but only 1 of/);
+  });
+
+  test('inherited skip flag: a testcase skip attribute is still validated under it', () => {
+    unaccounted('<testsuite name="s" skipped="true"><testcase classname="c" name="n" skipped="yes"/></testsuite>', /^testcase n: skipped="yes" is not true, false, 1 or 0$/);
+    unaccounted('<testsuites disabled="true"><testsuite name="s"><testcase classname="c" name="n" ignored="yes"/></testsuite></testsuites>', /^testcase n: ignored="yes" is not true, false, 1 or 0$/);
+    unaccounted('<testsuites><testsuite name="s" ignored="true"><testcase classname="c" name="n" disabled="2"/></testsuite></testsuites>', /^testcase n: disabled="2" is not true, false, 1 or 0$/);
+  });
+
+  test('end to end: a bad testcase skip attribute under a suite flagged skipped is an input error', () => {
+    for (const [suiteAttr, caseAttr] of [['skipped="true"', 'skipped="yes"'], ['disabled="true"', 'ignored="yes"']]) {
+      const x = allPass(A24)
+        .replace('<testsuites name="nextest-run"', `<testsuites name="nextest-run" ${suiteAttr}`)
+        .replace(/(<testcase name="[^"]*a24_neg_replay")/, `$1 ${caseAttr}`);
+      const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: x }])]);
+      assert.equal(r.code, 2, suiteAttr);
+      assert.equal(r.json.trusted, false);
+      assert.equal(r.json.input_errors.length, 1);
+      assert.match(r.json.input_errors[0], new RegExp(`junit\\.xml: malformed JUnit: testcase [^ ]*a24_neg_replay: ${caseAttr} is not true, false, 1 or 0; its results are not used$`));
+      assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
+    }
+  });
+
+  test('end to end: a testcase marked disabled is not run, and an unaccounted suite count is an input error', () => {
+    const marked = allPass(A24).replace(/(<testcase name="[^"]*a24_neg_replay")/, '$1 disabled="true"');
+    assert.notEqual(marked, allPass(A24));
+    const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: marked }])]);
+    assert.equal(r.code, 0, r.err);
+    const st = stage(r.json, 'A24', 'M1a');
+    assert.equal(st.status, 'not run');
+    assert.deepEqual(st.pairs.map((p) => p.status), ['passed', 'not run']);
+    const counted = allPass(A24).replace('<testsuite name="skyoauth-scenarios::pg" tests="2">', '<testsuite name="skyoauth-scenarios::pg" tests="2" disabled="1">');
+    assert.notEqual(counted, allPass(A24));
+    const c = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: counted }])]);
+    assert.equal(c.code, 2);
+    assert.equal(c.json.trusted, false);
+    assert.match(c.json.input_errors[0], /<testsuite name="skyoauth-scenarios::pg"> counts 1 skipped or disabled test\(s\), but only 0 of its testcases are marked skipped/);
+    assert.equal(stage(c.json, 'A24', 'M1a').status, 'not run');
   });
 
   test('a suite-level error is an input error and the report is not used', () => {
@@ -1542,11 +1831,21 @@ describe('cli', () => {
       [['--commit', SHA, '--today', '2025-02-29'], /--today must be a calendar date/],
       [['--commit', SHA, '--require-milestone', 'M9'], /--require-milestone must be one of M0, M1a/],
       [['--commit', SHA, '--bogus'], /^usage: /],
+      [['--commit', SHA, '--commit', 'b'.repeat(40)], /^report-conformance: --commit given more than once\nusage: /],
+      [['--commit', SHA, '--today', TODAY, '--today', TODAY], /--today given more than once/],
+      [['--commit', SHA, '--require-milestone', 'M1a', '--require-milestone', 'M1b'], /--require-milestone given more than once/],
+      [['--commit', SHA, '--waivers', 'a', '--waivers', 'b'], /--waivers given more than once/],
+      [['--commit', SHA, '--artifacts', 'a', '--artifacts', 'b'], /--artifacts given more than once/],
+      [['--commit', SHA, '--json', 'a', '--json', 'b'], /--json given more than once/],
+      [['--commit', SHA, '--summary', 'a', '--summary', 'b'], /--summary given more than once/],
+      [['--root', '.', '--commit', SHA], /--root given more than once/],
       [['--commit'], /^usage: /],
     ]) {
       const err = [];
-      assert.equal(run(['--root', dir, ...args], { log: () => {}, logErr: (s) => err.push(s) }), 2, args.join(' '));
+      const out = [];
+      assert.equal(run(['--root', dir, ...args], { log: (s) => out.push(s), logErr: (s) => err.push(s) }), 2, args.join(' '));
       assert.match(err.join('\n'), re);
+      assert.deepEqual(out, [], 'no report');
     }
   });
 
@@ -1582,7 +1881,7 @@ describe('cli', () => {
   // so this case checks only that the report is produced and well-formed.
   test('the script runs on the repository: exit 0 and a milestone table', () => {
     // In a git checkout the judged commit must be HEAD.
-    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: GIT_ENV });
     const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8' });
     assert.equal(p.status, 0, p.stderr);
     for (const m of ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5']) {
