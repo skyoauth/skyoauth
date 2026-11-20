@@ -45,10 +45,10 @@ design §7.2 and identity-registry §5.2.
    an audited admin write only when it is disabled and no grant, approval or
    audit-required record references it; a disabled, unreferenced grant follows
    the same rule. Soft disable of a binding or grant is fail-safe and is not
-   widening, so it needs no second approver even when the optional approver is
-   on; deleting a whole binding or grant is still widening-class and is
-   approved as in item 12. Decided (lead decision, 2026-11-19; reconciles
-   OQ-ADR008-2 with OQ-ADR022-1).
+   widening, so it needs no second approver even when
+   `widening_second_approver` is on; deleting a whole binding or grant is
+   still widening-class and is approved as in item 12. Decided (lead
+   decision, 2026-11-19; reconciles OQ-ADR008-2 with OQ-ADR022-1).
 4. **Fail closed.** Store failures never expand privilege, and conservative
    cache invalidation applies (design §7).
 
@@ -101,13 +101,17 @@ design §7.2 and identity-registry §5.2.
     `widening_second_approver`; turning it on or off is itself an audited write
     that needs a distinct second `security_admin` approver, or one actor when
     the audited single-actor instance policy `single_actor_mode` is on. That
-    policy (default false) is deployment configuration, set at install or by
-    the local signed recovery transaction, so no online admin can enable it
-    alone; the database mirrors it read-only, with an audit event on change.
+    policy (default false) is deployment configuration, set at install, so no
+    online admin can enable it alone; the database mirrors it read-only, with
+    an audit event on change. Whether the local signed recovery transaction can
+    also set it is open (identity-registry OQ-IR-13; interim reading:
+    deployment configuration applied at restart and audited at startup).
     An approval is a second `AdministrativeOperation` of kind `approve` by a
     different actor, who holds `security_admin` for widening writes and
     security-domain toggles (tasks §3 `InstanceSecurityPolicy`; Decided (lead
-    decision, 2026-11-19), OQ-ADR008-3).
+    decision, 2026-11-19), OQ-ADR008-3). Adding or re-enabling an
+    `EgressAllowlistEntry` is also widening-class; disabling one is not
+    (Decided (lead decision, 2026-11-20), identity-registry OQ-IR-12).
 13. **Deleting a predicate is widening.** Matcher predicates are ANDed; omitted
     optional predicates are unconstrained; the required predicates of the
     binding `profile` template (ADR-016 item 4) cannot be omitted; deleting a
@@ -203,11 +207,14 @@ New questions raised by this ADR:
   off is an audited write that needs a distinct second `security_admin`
   approver, or one actor when `single_actor_mode` is on. `single_actor_mode`
   (default false) is the audited single-actor instance policy: deployment
-  configuration set at install or by the local signed recovery transaction,
-  mirrored read-only in the database with an audit event on change (lead
-  decision, 2026-11-19; item 12). Both are in the tasks §3 schema with the M1a
-  spec amendments. Still open: the audit sink TLS trust settings and alert
-  routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
+  configuration set at install, mirrored read-only in the database with an
+  audit event on change (lead decision, 2026-11-19; item 12); whether the
+  local signed recovery transaction can also set it is open
+  (identity-registry OQ-IR-13). Both are in the tasks §3 schema with the M1a
+  spec amendments. Contracts: identity-registry IR-052 (the setting and its
+  effect) and IR-054 (second-approver approvals), public-api API-156 and the
+  `/approve` operation endpoints (OQ-API-13). Still open: the audit sink TLS
+  trust settings and alert routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a
   new keyset version or an added allowed binding), whether the server detects
