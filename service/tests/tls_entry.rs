@@ -113,6 +113,15 @@ fn migrate_against_fake_server(
     url_for: impl Fn(u16) -> String,
     pgsslmode: Option<&str>,
 ) -> (Vec<Connection>, Output) {
+    migrate_with_env(url_for, pgsslmode, None)
+}
+
+/// As [`migrate_against_fake_server`], also setting `PGHOSTADDR` on the child.
+fn migrate_with_env(
+    url_for: impl Fn(u16) -> String,
+    pgsslmode: Option<&str>,
+    pghostaddr: Option<&str>,
+) -> (Vec<Connection>, Output) {
     let server = FakeServer::start();
     let mut command = Command::new(env!("CARGO_BIN_EXE_skyoauth-service"));
     command
@@ -121,9 +130,13 @@ fn migrate_against_fake_server(
         .env("SKYOAUTH_DATABASE_ACQUIRE_TIMEOUT_SECS", "1")
         .env("NO_COLOR", "1")
         .env("RUST_LOG", "info")
-        .env_remove("PGSSLMODE");
+        .env_remove("PGSSLMODE")
+        .env_remove("PGHOSTADDR");
     if let Some(mode) = pgsslmode {
         command.env("PGSSLMODE", mode);
+    }
+    if let Some(address) = pghostaddr {
+        command.env("PGHOSTADDR", address);
     }
     let started = Instant::now();
     let output = command.output().unwrap();
@@ -197,5 +210,64 @@ fn a_loopback_host_without_sslmode_uses_prefer_whatever_pgsslmode_says() {
         let text = all_output(&output);
         assert!(!text.contains("weaker than verify-full"), "{text}");
         assert!(!text.contains(SECRET), "{text}");
+    }
+}
+
+/// sqlx dials `hostaddr` in preference to the host name, so the TLS default
+/// follows the address: a loopback name with a non-loopback address is remote.
+#[test]
+fn a_loopback_name_with_a_remote_hostaddr_still_refuses_plaintext() {
+    let by_url = |port: u16| {
+        format!("postgres://skyoauth:{SECRET}@localhost:{port}/skyoauth?hostaddr=0.0.0.0")
+    };
+    let by_env = |port: u16| format!("postgres://skyoauth:{SECRET}@localhost:{port}/skyoauth");
+    for (what, (seen, output)) in [
+        ("hostaddr in the URL", migrate_with_env(by_url, None, None)),
+        (
+            "PGHOSTADDR in the environment",
+            migrate_with_env(by_env, Some("disable"), Some("0.0.0.0")),
+        ),
+    ] {
+        assert!(!seen.is_empty(), "{what}: the fixture was not dialed");
+        for connection in &seen {
+            assert!(connection.ssl_request, "{what}: {connection:?}");
+            assert!(!connection.startup_after_refusal, "{what}: {connection:?}");
+        }
+        assert!(!all_output(&output).contains(SECRET), "{what}");
+    }
+}
+
+/// The reverse: a remote-looking name whose address is loopback is local.
+#[test]
+fn a_remote_name_with_a_loopback_hostaddr_uses_prefer() {
+    let (seen, output) = migrate_against_fake_server(
+        |port| {
+            format!("postgres://skyoauth:{SECRET}@db.example:{port}/skyoauth?hostaddr=127.0.0.1")
+        },
+        None,
+    );
+    assert!(
+        seen.iter()
+            .any(|c| c.ssl_request && c.startup_after_refusal),
+        "{seen:?}"
+    );
+    let text = all_output(&output);
+    assert!(!text.contains("weaker than verify-full"), "{text}");
+    assert!(!text.contains(SECRET), "{text}");
+}
+
+/// An encoded `sslmode` key is still an explicit mode.
+#[test]
+fn an_encoded_sslmode_key_is_honored_on_a_loopback_host() {
+    let (seen, _) = migrate_against_fake_server(
+        |port| {
+            format!("postgres://skyoauth:{SECRET}@127.0.0.1:{port}/skyoauth?ssl%6Dode=verify-full")
+        },
+        Some("disable"),
+    );
+    assert!(!seen.is_empty());
+    for connection in &seen {
+        assert!(connection.ssl_request, "{connection:?}");
+        assert!(!connection.startup_after_refusal, "{connection:?}");
     }
 }

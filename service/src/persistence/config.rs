@@ -28,6 +28,11 @@ const ACQUIRE_TIMEOUT_SECS: RangeInclusive<u32> = 1..=300;
 /// certificate is checked against the public (webpki) roots; a private CA
 /// needs `sslrootcert=<path>` in the URL.
 ///
+/// "Remote" is judged on the address sqlx will dial: a `hostaddr` (from the
+/// URL, else `PGHOSTADDR`) when one is set, otherwise the host name. A
+/// loopback host name paired with a non-loopback `hostaddr` is therefore
+/// remote.
+///
 /// sqlx still reads the other `PG*` variables (`PGHOST`, `PGPORT`, `PGUSER`,
 /// `PGPASSWORD`, `PGDATABASE`, `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`,
 /// `PGOPTIONS`, `PGAPPNAME`, `PGHOSTADDR`) for settings the URL does not
@@ -82,8 +87,21 @@ impl std::error::Error for ConfigError {}
 impl DatabaseConfig {
     /// Builds a configuration from parsed connect options, enforcing the
     /// same bounds as [`DatabaseConfig::from_env`].
+    ///
+    /// The options carry no record of a `hostaddr` set through the URL, so
+    /// for the weak-TLS warning this reads `PGHOSTADDR` from the environment,
+    /// as sqlx does; [`DatabaseConfig::from_lookup`] sees the URL as well.
     pub fn new(
         connect: PgConnectOptions,
+        max_connections: u32,
+        acquire_timeout: Duration,
+    ) -> Result<Self, ConfigError> {
+        Self::build(connect, env_hostaddr(), max_connections, acquire_timeout)
+    }
+
+    fn build(
+        connect: PgConnectOptions,
+        hostaddr: Option<IpAddr>,
         max_connections: u32,
         acquire_timeout: Duration,
     ) -> Result<Self, ConfigError> {
@@ -96,7 +114,7 @@ impl DatabaseConfig {
         {
             return Err(out_of_range(ACQUIRE_TIMEOUT_VAR, ACQUIRE_TIMEOUT_SECS));
         }
-        if is_weaker_than_verify_full_for_remote(&connect) {
+        if is_weaker_than_verify_full_for_remote(&connect, hostaddr) {
             tracing::warn!(
                 host = connect.get_host(),
                 ssl_mode = ?connect.get_ssl_mode(),
@@ -126,9 +144,11 @@ impl DatabaseConfig {
         }
         // The parse error is dropped: its message may echo part of the URL.
         let connect = PgConnectOptions::from_str(&url).map_err(|_| ConfigError::InvalidUrl)?;
+        let pairs = query_pairs(&url).ok_or(ConfigError::InvalidUrl)?;
+        let hostaddr = url_hostaddr(&pairs).or_else(env_hostaddr);
         let mode = effective_ssl_mode(
-            url_sets_ssl_mode(&url),
-            is_remote(&connect),
+            url_sets_ssl_mode(&pairs),
+            is_remote(&connect, hostaddr),
             connect.get_ssl_mode(),
         );
         let connect = connect.ssl_mode(mode);
@@ -138,8 +158,9 @@ impl DatabaseConfig {
         };
         let max_connections = number(MAX_CONNECTIONS_VAR, 10, MAX_CONNECTIONS)?;
         let acquire_timeout = number(ACQUIRE_TIMEOUT_VAR, 10, ACQUIRE_TIMEOUT_SECS)?;
-        Self::new(
+        Self::build(
             connect,
+            hostaddr,
             max_connections,
             Duration::from_secs(acquire_timeout.into()),
         )
@@ -176,30 +197,58 @@ impl fmt::Debug for DatabaseConfig {
     }
 }
 
+/// The URL's decoded query pairs, which is how sqlx reads them (so an
+/// encoded key such as `ssl%6Dode` means the same to both). `None` if the URL
+/// does not parse.
+fn query_pairs(url: &str) -> Option<Vec<(String, String)>> {
+    let url = url::Url::parse(url).ok()?;
+    Some(
+        url.query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect(),
+    )
+}
+
 /// Whether the URL itself sets the SSL mode (`sslmode` or sqlx's `ssl-mode`
 /// alias), as opposed to the mode coming from `PGSSLMODE` or a default.
-fn url_sets_ssl_mode(url: &str) -> bool {
-    let url = url.split_once('#').map_or(url, |(url, _)| url);
-    url.split_once('?').is_some_and(|(_, query)| {
-        query.split('&').any(|pair| {
-            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
-            matches!(key, "sslmode" | "ssl-mode")
-        })
-    })
+fn url_sets_ssl_mode(pairs: &[(String, String)]) -> bool {
+    pairs
+        .iter()
+        .any(|(key, _)| matches!(key.as_str(), "sslmode" | "ssl-mode"))
+}
+
+/// The `hostaddr` set in the URL, if any. sqlx applies the last one and
+/// rejects a value that is not an IP address, so a value that does not parse
+/// here cannot reach a connection.
+fn url_hostaddr(pairs: &[(String, String)]) -> Option<IpAddr> {
+    pairs
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "hostaddr")
+        .and_then(|(_, value)| value.parse().ok())
+}
+
+/// The ambient `PGHOSTADDR`, read the way sqlx reads it (an unparsable value
+/// is ignored).
+fn env_hostaddr() -> Option<IpAddr> {
+    std::env::var("PGHOSTADDR").ok()?.parse().ok()
 }
 
 /// Whether the connection leaves the machine: false for a Unix socket and
-/// for `localhost` or a loopback address, true for every other host name or
-/// address.
-fn is_remote(connect: &PgConnectOptions) -> bool {
-    if connect.get_socket().is_some() {
+/// for a loopback target, true for every other host name or address. The
+/// target is the `hostaddr` when one is set, because sqlx dials that address
+/// in preference to the host name, and the host name otherwise.
+fn is_remote(connect: &PgConnectOptions, hostaddr: Option<IpAddr>) -> bool {
+    if connect.get_socket().is_some() || connect.get_host().starts_with('/') {
         return false;
     }
-    let host = connect.get_host();
-    if host.starts_with('/') {
-        return false;
+    if let Some(address) = hostaddr {
+        return !address.is_loopback();
     }
-    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let host = connect
+        .get_host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
     if host.eq_ignore_ascii_case("localhost") {
         return false;
     }
@@ -208,8 +257,11 @@ fn is_remote(connect: &PgConnectOptions) -> bool {
 
 /// Whether the connection leaves the machine with a mode weaker than
 /// `verify-full`, which is what [`DatabaseConfig::new`] logs a WARN for.
-fn is_weaker_than_verify_full_for_remote(connect: &PgConnectOptions) -> bool {
-    is_remote(connect) && !matches!(connect.get_ssl_mode(), PgSslMode::VerifyFull)
+fn is_weaker_than_verify_full_for_remote(
+    connect: &PgConnectOptions,
+    hostaddr: Option<IpAddr>,
+) -> bool {
+    is_remote(connect, hostaddr) && !matches!(connect.get_ssl_mode(), PgSslMode::VerifyFull)
 }
 
 /// The SSL mode to use. An explicit URL value wins. Otherwise `parsed`, which
@@ -376,15 +428,69 @@ mod tests {
         assert!(matches!(local, PgSslMode::Require));
     }
 
+    fn sets(url: &str) -> bool {
+        url_sets_ssl_mode(&query_pairs(url).unwrap())
+    }
+
     #[test]
     fn only_the_url_query_counts_as_setting_the_mode() {
-        assert!(url_sets_ssl_mode("postgres://h/db?sslmode=require"));
-        assert!(url_sets_ssl_mode("postgres://h/db?a=b&ssl-mode=require#x"));
-        assert!(!url_sets_ssl_mode("postgres://h/db"));
-        assert!(!url_sets_ssl_mode("postgres://h/db?sslrootcert=/ca.pem"));
-        assert!(!url_sets_ssl_mode("postgres://u:sslmode=x@h/db"));
-        assert!(!url_sets_ssl_mode("postgres://h/db#sslmode=require"));
-        assert!(!url_sets_ssl_mode("postgres://h/db?xsslmode=require"));
+        assert!(sets("postgres://h/db?sslmode=require"));
+        assert!(sets("postgres://h/db?a=b&ssl-mode=require#x"));
+        assert!(sets("postgres://h/db?ssl%6Dode=require"));
+        assert!(sets("postgres://h/db?%73slmode=require"));
+        assert!(!sets("postgres://h/db"));
+        assert!(!sets("postgres://h/db?sslrootcert=/ca.pem"));
+        assert!(!sets("postgres://u:sslmode=x@h/db"));
+        assert!(!sets("postgres://h/db#sslmode=require"));
+        assert!(!sets("postgres://h/db?xsslmode=require"));
+    }
+
+    #[test]
+    fn an_encoded_ssl_mode_key_is_an_explicit_mode() {
+        // sqlx decodes the key, so the URL asks for verify-full; the default
+        // for a loopback host (prefer) must not replace it.
+        let mode = ssl_mode("postgres://u@localhost/skyoauth?ssl%6Dode=verify-full");
+        assert!(matches!(mode, PgSslMode::VerifyFull), "{mode:?}");
+        let mode = ssl_mode("postgres://u@db.example/skyoauth?ssl%2Dmode=disable");
+        assert!(matches!(mode, PgSslMode::Disable), "{mode:?}");
+    }
+
+    #[test]
+    fn the_hostaddr_decides_what_counts_as_remote() {
+        // sqlx dials `hostaddr` in preference to the host name.
+        for (url, expected) in [
+            ("postgres://u@localhost/db?hostaddr=10.0.0.5", "VerifyFull"),
+            (
+                "postgres://u@localhost/db?hostaddr=%31%30.0.0.5",
+                "VerifyFull",
+            ),
+            (
+                "postgres://u@127.0.0.1/db?hostaddr=2001:db8::1",
+                "VerifyFull",
+            ),
+            ("postgres://u@db.example/db?hostaddr=127.0.0.1", "Prefer"),
+            ("postgres://u@db.example/db?hostaddr=::1", "Prefer"),
+            ("postgres://u@db.example/db?hostaddr=10.0.0.5", "VerifyFull"),
+            // The last `hostaddr` wins, as in sqlx.
+            (
+                "postgres://u@db.example/db?hostaddr=10.0.0.5&hostaddr=127.0.0.1",
+                "Prefer",
+            ),
+        ] {
+            let mode = ssl_mode(url);
+            assert_eq!(format!("{mode:?}"), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_loopback_name_with_a_remote_hostaddr_is_flagged_when_weak() {
+        assert!(warns(
+            "postgres://u@localhost/db?hostaddr=10.0.0.5&sslmode=prefer"
+        ));
+        assert!(!warns(
+            "postgres://u@db.example/db?hostaddr=127.0.0.1&sslmode=prefer"
+        ));
+        assert!(!warns("postgres://u@localhost/db?hostaddr=10.0.0.5"));
     }
 
     #[test]
@@ -413,7 +519,8 @@ mod tests {
     // subscriber races with other tests running in parallel threads.
     fn warns(url: &str) -> bool {
         let config = config(&[(DATABASE_URL_VAR, url)]).unwrap();
-        is_weaker_than_verify_full_for_remote(config.connect_options())
+        let hostaddr = url_hostaddr(&query_pairs(url).unwrap());
+        is_weaker_than_verify_full_for_remote(config.connect_options(), hostaddr)
     }
 
     #[test]
