@@ -61,10 +61,22 @@ impl TestDb {
         );
         let mut admin = PgConnection::connect(&admin_url).await.unwrap();
         // The name is generated above from digits and underscores only.
-        sqlx::raw_sql(AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&mut admin)
-            .await
-            .unwrap();
+        // UTF8 whatever the cluster's default encoding (inferred: the
+        // multibyte tests count characters and bytes as UTF8 does). Only
+        // `template0` may be copied with another encoding. The cluster's
+        // locale is kept, so it must be a UTF-8 one (CI's en_US.utf8) or
+        // C/POSIX.
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "CREATE DATABASE {name} TEMPLATE template0 ENCODING 'UTF8'"
+        )))
+        .execute(&mut admin)
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "CREATE DATABASE … ENCODING 'UTF8' failed: {err}; the \
+                 cluster's locale must be a UTF-8 one or C/POSIX"
+            )
+        });
         let connect = PgConnectOptions::from_str(&admin_url)
             .unwrap()
             .database(&name);

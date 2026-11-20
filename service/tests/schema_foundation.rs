@@ -104,7 +104,17 @@ async fn append(
     prev_hash: Option<&[u8]>,
     hash: &[u8],
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    append_on(&mut *pool.acquire().await?, sequence, prev_hash, hash).await
+}
+
+/// [`append`] on a given connection.
+async fn append_on(
+    conn: &mut PgConnection,
+    sequence: i64,
+    prev_hash: Option<&[u8]>,
+    hash: &[u8],
+) -> Result<(), sqlx::Error> {
+    let mut tx = conn.begin().await?;
     insert_event(&mut tx, sequence, prev_hash).await?;
     advance_head(&mut tx, sequence, hash).await?;
     tx.commit().await
@@ -648,6 +658,8 @@ async fn audit_chain_appends_in_order_and_head_tracks_the_last_event() {
         SK001 UPDATE audit_chain_head SET sequence = 1, head_hash = '\x01'
         SK001 UPDATE audit_chain_head SET head_hash = '\x09'
         23514 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_3', 3, '\x6832', now(), 'adm_1', 'x', 'ten_a', 'success'); UPDATE audit_chain_head SET sequence = 3, head_hash = NULL
+        23514 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_3', 3, '\x6832', now(), 'adm_1', 'x', 'ten_a', 'success'); UPDATE audit_chain_head SET sequence = 3, head_hash = '\x'
+        23514 INSERT INTO audit_chain_head (sequence, head_hash) VALUES (3, '\x')
         SK001 DELETE FROM audit_chain_head
         SK001 TRUNCATE audit_chain_head
     ",
@@ -731,6 +743,7 @@ async fn audit_event_references_its_tenant_and_needs_a_unique_sequence_and_times
     rejects(&pool, "
         23503 INSERT INTO audit_event (id, tenant_id, sequence, timestamp, actor, action, object_id, outcome) VALUES ('evt_1', 'ten_x', 1, now(), 'adm_1', 'principal_create', 'wld_1', 'success')
         23502 INSERT INTO audit_event (id, tenant_id, sequence, actor, action, object_id, outcome) VALUES ('evt_1', 'ten_a', 1, 'adm_1', 'principal_create', 'wld_1', 'success')
+        23502 INSERT INTO audit_event (id, tenant_id, sequence, timestamp, actor, action, object_id, outcome) VALUES ('evt_1', 'ten_a', 1, now(), NULL, 'principal_create', 'wld_1', 'success')
     ").await;
     let mut tx = pool.begin().await.unwrap();
     run(
@@ -1082,23 +1095,98 @@ async fn update_guards_ignore_operators_on_the_callers_search_path() {
     db.drop([pool]).await;
 }
 
-/// A schema name may contain `$$`, which must not end a function body early.
-/// The migration runs in that schema, and the chain works there.
+/// The chain guards compare with the built-in operators too: a login role
+/// that puts its own `=` and `>=` ahead of `pg_catalog` can neither append
+/// out of order nor leave the head behind.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn audit_chain_guards_ignore_operators_on_the_callers_search_path() {
+    let (mut db, pool) = migrated().await;
+    let (role, connect) = db.create_login_role().await;
+    run(&pool, "CREATE SCHEMA evil").await;
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "GRANT SELECT, INSERT, UPDATE ON audit_event, audit_chain_head TO {role};
+         GRANT USAGE, CREATE ON SCHEMA evil TO {role}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut writer = PgConnection::connect_with(&connect).await.unwrap();
+    let superuser: bool =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert!(!superuser);
+    run(
+        &mut writer,
+        "CREATE FUNCTION evil.same(bigint, bigint) RETURNS boolean LANGUAGE sql AS 'SELECT true';
+         CREATE OPERATOR evil.= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = evil.same);
+         CREATE OPERATOR evil.>= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = evil.same);
+         CREATE FUNCTION evil.same(bytea, bytea) RETURNS boolean LANGUAGE sql AS 'SELECT true';
+         CREATE OPERATOR evil.= (LEFTARG = bytea, RIGHTARG = bytea, FUNCTION = evil.same);
+         SET search_path = evil, pg_catalog, public",
+    )
+    .await;
+    // The shadow is in effect for the caller's own expressions.
+    let shadowed: bool = sqlx::query_scalar(
+        r"SELECT 1::bigint = 2::bigint AND 1::bigint >= 2::bigint AND '\x01'::bytea = '\x02'::bytea",
+    )
+    .fetch_one(&mut writer)
+    .await
+    .unwrap();
+    assert!(shadowed);
+
+    append_on(&mut writer, 1, None, b"h1").await.unwrap();
+    // Rule 1: the insert itself fails.
+    for (sequence, prev_hash) in [
+        (3, Some(&b"h1"[..])), // gap
+        (2, Some(&b"hx"[..])), // wrong previous hash
+    ] {
+        let mut tx = writer.begin().await.unwrap();
+        let err = insert_event(&mut tx, sequence, prev_hash)
+            .await
+            .unwrap_err();
+        assert_eq!(sqlstate(&err), "SK001", "{sequence} {prev_hash:?}: {err}");
+        tx.rollback().await.unwrap();
+    }
+    // Rule 2: the head does not skip an event.
+    let mut tx = writer.begin().await.unwrap();
+    insert_event(&mut tx, 2, Some(b"h1")).await.unwrap();
+    let err = advance_head(&mut tx, 3, b"h3").await.unwrap_err();
+    assert_eq!(sqlstate(&err), "SK001", "{err}");
+    tx.rollback().await.unwrap();
+    // Rule 3: the commit fails while the head is behind.
+    let mut tx = writer.begin().await.unwrap();
+    insert_event(&mut tx, 2, Some(b"h1")).await.unwrap();
+    let err = tx.commit().await.unwrap_err();
+    assert_eq!(sqlstate(&err), "SK001", "{err}");
+
+    append_on(&mut writer, 2, Some(b"h1"), b"h2").await.unwrap();
+    writer.close().await.unwrap();
+    assert_eq!(head(&pool).await, (2, Some(b"h2".to_vec())));
+    assert_eq!(count(&pool, "SELECT count(*) FROM audit_event").await, 2);
+    db.drop([pool]).await;
+}
+
+/// A schema name may contain `$$`, which must not end a function body early,
+/// and upper case and spaces, which only a quoted identifier (`%I`, not
+/// `%s`) keeps. The migration runs in that schema, and the chain works there.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn foundation_migrates_and_chains_in_a_schema_named_with_dollar_quotes() {
     let db = TestDb::create().await;
     let admin = db.pool().await;
-    run(&admin, r#"CREATE SCHEMA "audit$$2026""#).await;
-    let pool = db.pool_with_search_path(r#""audit$$2026""#).await;
+    run(&admin, r#"CREATE SCHEMA "Audit $$2026""#).await;
+    let pool = db.pool_with_search_path(r#""Audit $$2026""#).await;
     persistence::migrate(&pool).await.unwrap();
     let schema: String = sqlx::query_scalar("SELECT current_schema()")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(schema, "audit$$2026");
+    assert_eq!(schema, "Audit $$2026");
     assert_eq!(
-        count(&admin, "SELECT count(*) FROM pg_tables WHERE tablename = 'audit_event' AND schemaname = 'audit$$2026'").await,
+        count(&admin, "SELECT count(*) FROM pg_tables WHERE tablename = 'audit_event' AND schemaname = 'Audit $$2026'").await,
         1
     );
     assert_eq!(

@@ -93,9 +93,10 @@ egress rows are never deleted.
   (`[[:space:][:cntrl:]]`: under `"C"`, `[:space:]` is ASCII whitespace
   only, and `[:cntrl:]` is the C0 and C1 controls U+0000–U+001F and
   U+007F–U+009F in every collation) and values over 2048 bytes, well below
-  the btree limit of the unique index. Other Unicode spaces and format
-  characters, such as U+00A0, U+2028 and U+200B, pass; everything else about
-  the URL is validated by the service.
+  the btree limit of the unique index. In a UTF8 database, which the schema
+  assumes (inferred), other Unicode spaces and format characters, such as
+  U+00A0, U+2028 and U+200B, pass; everything else about the URL is
+  validated by the service.
 - **Audit chain.** It is enforced in order: an event must extend the chain
   head (`sequence` = head + 1, `prev_hash` = head hash; the first event has
   a `NULL` `prev_hash`), checked when the event is inserted; the head may
@@ -195,6 +196,11 @@ first gets the committed head and succeeds.
   subscription must use `run_as_owner = true`. The deferred trigger stays
   `ENABLE ALWAYS` (lead decision): logical replication of the audit chain is
   not a v0.1 requirement.
+- The database must use the `UTF8` encoding (inferred; the migrations do not
+  check it). The egress destination rules above hold only there: under
+  `SQL_ASCII` a multibyte character is matched byte by byte, so U+2028 and
+  U+200B (bytes `E2 80 A8` and `E2 80 8B`, each with the C1 byte `80`) are
+  rejected as controls.
 - The migration role must own the database, or at least have `CREATE` on
   the `public` schema (PostgreSQL 15 and later no longer grant that to
   every role).

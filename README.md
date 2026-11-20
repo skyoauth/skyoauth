@@ -42,8 +42,8 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
 | `SKYOAUTH_DATABASE_MAX_CONNECTIONS`      | Pool size, 1 to 100, default 10                |
 | `SKYOAUTH_DATABASE_ACQUIRE_TIMEOUT_SECS` | Connection wait, 1 to 300 seconds, default 10  |
 
-- The migration role must own the database, or at least have `CREATE` on
-  the `public` schema.
+- The database must use the `UTF8` encoding, and the migration role must own
+  it, or at least have `CREATE` on the `public` schema.
 - Runners serialize on a session-level advisory lock, so `migrate` needs a
   direct connection, not a transaction-pooling proxy such as PgBouncer in
   transaction mode. Waiting for the lock has no timeout yet (follow-up).
@@ -80,7 +80,8 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
 
 Tests that need PostgreSQL are `#[ignore]`d. To run them, point
 `SKYOAUTH_IT_DATABASE_URL` at a server whose role may create databases (each
-test creates and drops its own) and include ignored tests:
+test creates and drops its own, always `UTF8`, so the server's locale must be
+a UTF-8 one or C/POSIX) and include ignored tests:
 
 ```bash
 export SKYOAUTH_IT_DATABASE_URL=postgres://skyoauth:skyoauth@localhost:5432/skyoauth
