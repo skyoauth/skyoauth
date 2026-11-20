@@ -878,6 +878,23 @@ describe('rule table', () => {
     assert.deepEqual(res.notes, ['table: not compared, because some scenario or subcase fields are invalid']);
     assert.ok(!res.errors.some((e) => e.rule === 'table'), dump(res));
   });
+
+  // The comparison is skipped only for a table_text that is invalid (not table
+  // text, or not a sentence that parseConditional() reads). A valid sentence
+  // with a wrong number is still rendered into its row and compared, so the
+  // table rule fails on it too, independently of the subcases rule.
+  for (const [what, from, to, re] of [
+    ['sub-ID', 'Conditional sub-ID A33.90 (', 'Conditional sub-ID A33.91 (', /A33\.90: table_text names A33\.91$/],
+    ['task', '(back-channel logout, T30.6)', '(back-channel logout, T30.5)', /A33\.90: table_text names T30\.5, but the first owner is T30\.6$/],
+  ]) {
+    test(`a valid table_text with the wrong ${what} still fails the table rule: a failing check cannot pass silently`, () => {
+      const res = failing(SUBCASES, su('A33.90', from, to));
+      expectError(res, 'subcases', re);
+      const row = repoText(LAYOUT).split('\n').find((l) => l.startsWith('| A33 |')).replace(from, to);
+      expectError(res, 'table', new RegExp(`conformance-layout\\.md:${specLine(repoText(LAYOUT), 'A33')}: error \\[table\\] the §2 table row A33 differs from the one rendered from the registry; run node scripts/ci/gen-conformance-registry\\.mjs\\. Expected: ${row.replace(/[|.*+?()[\]\\]/g, '\\$&')}$`));
+      assert.deepEqual(res.notes, []);
+    });
+  }
 });
 
 describe('rule subcases', () => {
@@ -939,6 +956,17 @@ describe('rule subcases', () => {
       expectOk(res);
       assert.match(res.summary, /, 5 subcases,/);
     }
+  });
+
+  // A required sub-ID has no table_text and none is rendered for it, so it must
+  // not switch the table comparison off (conditional_on in the rendered check).
+  test('a required sub-ID leaves the table compared: no note, and a stale table still fails', () => {
+    const res = check(fixture({ [SUBCASES]: withSub('A58.05') }));
+    expectOk(res);
+    assert.deepEqual(res.notes, []);
+    const stale = check(fixture({ [SUBCASES]: withSub('A58.05'), [LAYOUT]: (t) => replaceOnce(t, 'Counts by first stage: M1a 20', 'Counts by first stage: M1a 21') }));
+    expectOnly(stale, 'table', /error \[table\] the counts sentences differ from the registry; expected: Counts by first stage: M1a 20 /);
+    assert.deepEqual(stale.notes, []);
   });
 
   for (const id of ['A58.00', 'A58.91', 'A58.99']) {
@@ -1433,6 +1461,18 @@ describe('conditional features belong to their tasks', () => {
     expectError(res, 'subcases', /A33\.90: conditional_on back-channel-logout is the feature of task T30\.6, but the first owner is T31\.2$/);
   });
 
+  test('two owners: the rule is about the first owner, so the feature task second does not make a sub-ID conditional', () => {
+    // table_text still names T30.6, the feature's task: only the order is wrong.
+    const second = fixture({ [SUBCASES]: su('A33.90', 'owners = ["T30.6"]', 'owners = ["T31.2", "T30.6"]') });
+    expectError(check(second), 'subcases', /subcases\.toml:\d+: error \[subcases\] A33\.90: conditional_on back-channel-logout is the feature of task T30\.6, but the first owner is T31\.2$/);
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', second], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /error \[subcases\] A33\.90: conditional_on back-channel-logout is the feature of task T30\.6, but the first owner is T31\.2$/m);
+    assert.doesNotMatch(r.stderr, /internal error/);
+    // The feature task first and another owner second is accepted.
+    expectOk(check(fixture({ [SUBCASES]: su('A33.90', 'owners = ["T30.6"]', 'owners = ["T30.6", "T31.2"]') })));
+  });
+
   test('the committed conditional sub-IDs are owned by their feature tasks', () => {
     const owners = Object.fromEntries(parseStrict(repoText(SUBCASES)).subcase.filter((s) => s.conditional_on).map((s) => [s.id, `${s.conditional_on} ${s.owners[0]}`]));
     assert.deepEqual(owners, { 'A18.90': 'forwardauth T32.9', 'A27.90': 'device-flow T40.6', 'A33.90': 'back-channel-logout T30.6', 'A58.90': 'forwardauth T32.9' });
@@ -1464,6 +1504,25 @@ describe('smol-toml and the generator reader', () => {
     }
     for (const d of ['2026-02-29', '2100-02-29', '2026-04-31', '2026-13-01', '2026-00-10', '2026-01-00']) assert.throws(() => parseToml(`d = ${d}\n`), /invalid date/, d);
     for (const d of ['2026-12-31T00:00:00', '2026-12-31T00:00:00Z', '2026-12-31 00:00:00', '2026-12-31t00:00:00']) assert.throws(() => parseToml(`d = ${d}\n`), /only local dates/, d);
+  });
+
+  // smol-toml stops at its own depth limit (1000); the subset reader at 64.
+  // Either way the check exits 1, as the generator does, never 2.
+  test('deep nesting: both readers agree up to 64 levels, and beyond it the check reports a toml error', () => {
+    const deep = (n) => `x = ${'['.repeat(n)}1${']'.repeat(n)}\n`;
+    assert.deepEqual(plain(parseToml(deep(64))), plain(parseStrict(deep(64))));
+    for (const [n, re] of [
+      [65, /^error \[toml\] tests\/conformance\/scenarios\.toml:\d+: arrays and inline tables nest deeper than 64 levels \(outside the TOML subset that gen-conformance-registry\.mjs reads\)$/],
+      [10000, /^tests\/conformance\/scenarios\.toml:\d+: error \[toml\] not valid TOML: /],
+    ]) {
+      const root = fixture({ [SCENARIOS]: (t) => replaceOnce(t, 'gates_passed = []', `gates_passed = []\n${deep(n).trimEnd()}`) });
+      expectOnly(check(root), 'toml', re);
+      const r = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+      assert.equal(r.status, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /internal error|RangeError/);
+      const g = spawnSync(process.execPath, [join(dirname(SCRIPT), 'gen-conformance-registry.mjs'), '--root', root, '--check'], { encoding: 'utf8' });
+      assert.equal(g.status, 1, g.stderr);
+    }
   });
 
   test('plain()', () => {

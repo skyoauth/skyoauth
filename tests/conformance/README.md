@@ -112,7 +112,11 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
 | `waivers` | The waiver format below. |
 
-The generator reports the same spec and registry errors; the check adds `toml`, `gates`, `fixtures`, `waivers` and line numbers, and is what CI gates on.
+The check adds `toml`, `gates`, `fixtures` and `waivers`, names the rule of each error, and is what CI gates on. For the other rules, the generator reports the same spec and registry errors, in both modes, except for these, which hold only in the check:
+
+- a `|` or line break in a subcase's `harness`, `positive` or `negative`, and an empty test ID (`tests = [""]`) in any stage: both generator modes exit 0 and keep the value;
+- a `|` in a conditional sub-ID's `table_text`: the write mode renders it into the §2 row, and `--check` passes after that. A `|` with a space on each side fails both modes only because the rendered row then no longer names the sub-ID; a line break there is a generator error;
+- a subcase `kind` that is missing or not `"subcase"`, and an unknown subcase field (`note` included): the write mode rewrites the entry with `kind = "subcase"` and without the field, and `--check` reports only that the field "differs from the specs".
 
 ### Waivers
 
@@ -129,7 +133,7 @@ reason = "PostgreSQL service container lost mid-test; runner fault, not product 
 expires = 2026-12-31                                   # a TOML local date, not a string
 ```
 
-The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays, inline tables, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI: that probes the history up front, so a checkout without it fails even when there are no waivers. Expiry against the current date and the reporter's use of waivers are not part of the static check.
+The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays and inline tables nested at most 64 levels deep, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI: that probes the history up front, so a checkout without it fails even when there are no waivers. Expiry against the current date and the reporter's use of waivers are not part of the static check.
 
 ## Legs
 
