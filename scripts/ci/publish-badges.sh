@@ -278,6 +278,9 @@ gate() {
 # <testsuites> element, without leading zeros (which `$(( ))` reads as
 # octal), or nothing when it is absent. The element may span lines, and
 # its attributes may be single- or double-quoted with spaces around `=`.
+# Only the first 64 KiB of FILE are read (a failed run can leave a report
+# of many megabytes, and building it into one awk string is quadratic in
+# mawk and busybox awk), so the start tag must end within them.
 # Fails when there is no such element or it cannot be read attribute by
 # attribute (an unquoted or unterminated value, a missing space between
 # attributes, a repeated attribute), for a value that is not a whole
@@ -288,7 +291,9 @@ junit_attr() {
     rc=0
     value=$(tr '\r\t' '  ' <"$1" | awk -v want="$2" -v sq="'" '
         { s = s $0 " " }
+        length(s) > 65536 { exit }
         END {
+            s = substr(s, 1, 65536)
             if (!match(s, /<testsuites[ \/>]/)) exit 2
             s = substr(s, RSTART + 11)
             for (;;) {

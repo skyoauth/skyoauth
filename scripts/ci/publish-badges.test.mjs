@@ -21,9 +21,9 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -566,6 +566,120 @@ describe('numeric settings and counts', () => {
       assert.equal(r.status, 1, r.stdout + r.stderr);
       assert.match(r.stderr, /cannot read typescript test results/);
       assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+    });
+  }
+});
+
+// A failed nextest run keeps the test output in its JUnit report, so the
+// report of a red run can be many megabytes. Reading its counts must take
+// seconds with every awk the publish job might run, or the job's timeout
+// expires before the red badge is published. A run still going after
+// LIMIT_MS is killed with its process group, and the test fails.
+describe('large JUnit reports', () => {
+  const LIMIT_MS = 30_000;
+
+  // The awk on PATH, and mawk, gawk and busybox awk wherever installed:
+  // one entry per distinct binary, each run as the only `awk` on PATH.
+  const AWKS = (() => {
+    const dirs = (ENV.PATH ?? '').split(':').filter(Boolean);
+    const which = (name) => {
+      for (const dir of dirs) {
+        try {
+          accessSync(join(dir, name), constants.X_OK);
+          if (statSync(join(dir, name)).isFile()) return join(dir, name);
+        } catch {
+          // Not in this directory.
+        }
+      }
+      return null;
+    };
+    const found = new Map();
+    for (const [name, argv] of [['awk', []], ['mawk', []], ['gawk', []], ['busybox', ['awk']]]) {
+      const path = which(name);
+      if (!path || spawnSync(path, [...argv, 'BEGIN { exit 0 }']).status !== 0) continue;
+      const key = [realpathSync(path), ...argv].join(' ');
+      if (found.has(key)) continue;
+      const bin = join(TOP, `awk-${found.size}`);
+      mkdirSync(bin);
+      assert.ok(!path.includes("'"), path);
+      writeFileSync(join(bin, 'awk'), `#!/bin/sh\nexec '${path}' ${argv.join(' ')} "$@"\n`);
+      chmodSync(join(bin, 'awk'), 0o755);
+      found.set(key, { label: name === 'awk' ? `awk on PATH (${basename(realpathSync(path))})` : name, PATH: `${bin}:${ENV.PATH}` });
+    }
+    return [...found.values()];
+  })();
+
+  function publishWithin(cwd, args, env) {
+    return new Promise((resolve) => {
+      const child = spawn('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env }, detached: true });
+      children.add(child);
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => (stdout += d));
+      child.stderr.on('data', (d) => (stderr += d));
+      const timer = setTimeout(() => {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
+      }, LIMIT_MS);
+      child.on('close', (status, signal) => {
+        clearTimeout(timer);
+        children.delete(child);
+        resolve({ status, signal, stdout, stderr });
+      });
+    });
+  }
+
+  // About 8 MB of test output, one line per test case, as a failed run
+  // leaves it.
+  const BODY = Array.from({ length: 80_000 }, (_, i) => `<testcase classname="crate::module" name="test_${i}"><system-out>output line ${i} of a failed run</system-out></testcase>\n`).join('');
+  const REPORTS = {
+    'a large report': `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nextest-run" tests="12" failures="3" errors="0" skipped="1">\n<testsuite name="s">\n${BODY}</testsuite>\n</testsuites>\n`,
+    'a large comment before the root element': `<?xml version="1.0"?>\n<!--\n${BODY}-->\n<testsuites name="t" tests="12" failures="0" errors="0" skipped="0"><testsuite name="s"/></testsuites>\n`,
+    'a large DOCTYPE before the root element': `<?xml version="1.0"?>\n<!DOCTYPE testsuites [\n${BODY.replace(/^.*?test_(\d+).*$/gm, '<!ENTITY e$1 "output line $1 of a failed run">')}]>\n<testsuites name="t" tests="12" failures="0" errors="0" skipped="0"><testsuite name="s"/></testsuites>\n`,
+  };
+
+  test('finds an awk to run', () => {
+    assert.ok(AWKS.length > 0);
+    assert.ok(Buffer.byteLength(REPORTS['a large report']) > 8_000_000);
+  });
+
+  for (const { label, PATH } of AWKS) {
+    test(`a large report with failures publishes a red badge in time (${label})`, async () => {
+      const { remote, sha, work, file } = setup();
+      const r = await publishWithin(work[0], ['main', sha, '--rust-junit', file('junit.xml', REPORTS['a large report'])], { PATH });
+      assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
+    });
+
+    for (const what of ['a large comment before the root element', 'a large DOCTYPE before the root element']) {
+      test(`${what} fails closed in time (${label})`, async () => {
+        const { remote, sha, work, file } = setup();
+        const r = await publishWithin(work[0], ['main', sha, '--rust-junit', file('junit.xml', REPORTS[what])], { PATH });
+        assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
+        assert.equal(r.status, 1, r.stdout + r.stderr);
+        assert.match(r.stderr, /cannot parse the <testsuites> element in .*junit\.xml/);
+        assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+      });
+    }
+  }
+
+  // Only the first 64 KiB are read: a start tag that ends within them is
+  // read, one that does not is not guessed at.
+  for (const [length, status] of [[60_000, 0], [70_000, 1]]) {
+    test(`a ${length}-character start tag ${status === 0 ? 'is read' : 'fails closed'}`, () => {
+      const { remote, sha, work, file } = setup();
+      const xml = `<?xml version="1.0"?>\n<testsuites name="${'x'.repeat(length)}" tests="12" failures="3" errors="0" skipped="1"><testsuite name="s"/></testsuites>\n`;
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', xml)]);
+      assert.equal(r.status, status, r.stdout + r.stderr);
+      if (status === 0) {
+        assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
+      } else {
+        assert.match(r.stderr, /cannot parse the <testsuites> element in .*junit\.xml/);
+      }
     });
   }
 });
