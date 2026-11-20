@@ -39,6 +39,13 @@
 # 84.9 %, 85 as 85.0 %, 100 as 100.0 %. A percentage outside 0..100 is an
 # error.
 #
+# A report that cannot be used (a missing or malformed figure, a percentage
+# outside 0..100, a count that is not a whole number of at most 9 digits, or
+# counts that add up to fewer than none passed) never yields a badge: when
+# its tests job is marked as failed, the tests badge is a red `failing` one;
+# otherwise that badge is left as it was, the other badges are published,
+# and the script then exits 1 (at once when there is no other badge).
+#
 # Only the badges whose inputs are passed are regenerated; any other files
 # already on the badges branch under `<branch>/` are preserved, and each
 # entry in `summary.json` records its own source commit so partial updates
@@ -263,16 +270,32 @@ gate() {
 
 # `junit_attr FILE NAME`: the count in the NAME attribute of FILE's
 # <testsuites> element, without leading zeros (which `$(( ))` reads as
-# octal), or nothing when it is absent. Fails for a count of more than 9
-# digits, which `test` and `$(( ))` cannot be trusted with.
+# octal), or nothing when it is absent. Fails for a value that is not a
+# whole number (empty, negative, fractional, with other characters), and
+# for a count of more than 9 digits, which `test` and `$(( ))` cannot be
+# trusted with.
 junit_attr() {
-    value=$(sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([0-9][0-9]*\)\".*/\1/p" "$1" | head -n 1 |
-        sed 's/^0*\([0-9]\)/\1/')
+    value=$(sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([^\"]*\)\".*/=\1/p" "$1" | head -n 1)
+    [ -n "$value" ] || return 0
+    value=${value#=}
+    case $value in
+        '' | *[!0-9]*)
+            echo "publish-badges: $2=\"$value\" in $1 is not a count" >&2
+            return 1 ;;
+    esac
+    value=$(printf '%s' "$value" | sed 's/^0*\([0-9]\)/\1/')
     if [ "${#value}" -gt 9 ]; then
         echo "publish-badges: $2=\"$value\" in $1 is out of range" >&2
         return 1
     fi
     printf '%s' "$value"
+}
+
+# `unusable MESSAGE`: a report cannot be used; see the top.
+unusable=0
+unusable() {
+    echo "publish-badges: $1" >&2
+    unusable=1
 }
 
 sha=$(git rev-parse --short "$source_sha")
@@ -282,19 +305,22 @@ rust_cov_value=
 rust_cov_color=
 rust_cov_json=
 if [ -n "$rust_coverage" ]; then
+    rust_percent=
     if ! jq -e '.data[0].totals.lines.percent | type == "number"' "$rust_coverage" >/dev/null; then
-        echo "publish-badges: cannot read line coverage percentage from $rust_coverage" >&2
-        exit 1
+        unusable "cannot read line coverage percentage from $rust_coverage"
+    else
+        rust_raw=$(jq -r '.data[0].totals.lines.percent' "$rust_coverage")
+        rust_percent=$(percent_1dp "$rust_raw") || {
+            rust_percent=
+            unusable "line coverage percentage '$rust_raw' in $rust_coverage is not a number from 0 to 100"
+        }
     fi
-    rust_raw=$(jq -r '.data[0].totals.lines.percent' "$rust_coverage")
-    if ! rust_percent=$(percent_1dp "$rust_raw"); then
-        echo "publish-badges: line coverage percentage '$rust_raw' in $rust_coverage is not a number from 0 to 100" >&2
-        exit 1
+    if [ -n "$rust_percent" ]; then
+        rust_cov_value="${rust_percent}%"
+        rust_cov_color=$(coverage_color "$rust_percent" "$rust_coverage_result")
+        rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg g "$(gate "$rust_coverage_result")" --arg c "$sha" \
+            '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
     fi
-    rust_cov_value="${rust_percent}%"
-    rust_cov_color=$(coverage_color "$rust_percent" "$rust_coverage_result")
-    rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg g "$(gate "$rust_coverage_result")" --arg c "$sha" \
-        '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
 elif [ "$rust_coverage_failed" -eq 1 ]; then
     rust_cov_value=failing
     rust_cov_color=red
@@ -306,52 +332,47 @@ rust_tests_value=
 rust_tests_color=
 rust_tests_json=
 if [ -n "$rust_junit" ]; then
-    j_tests=
-    if [ -f "$rust_junit" ]; then
-        j_tests=$(junit_attr "$rust_junit" tests)
-    fi
-    if [ -z "$j_tests" ]; then
-        if [ "$rust_tests_failed" -eq 1 ]; then
-            rust_tests_value=failing
-            rust_tests_color=red
-            rust_tests_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
-        else
-            echo "publish-badges: cannot read tests count from $rust_junit" >&2
-            exit 1
-        fi
+    # Why the counts cannot be used, if they cannot (junit_attr reports a
+    # malformed count itself).
+    why=
+    if [ ! -f "$rust_junit" ] || ! j_tests=$(junit_attr "$rust_junit" tests) || [ -z "$j_tests" ]; then
+        why="cannot read tests count from $rust_junit"
+    elif ! j_skipped=$(junit_attr "$rust_junit" skipped) ||
+        ! j_failures=$(junit_attr "$rust_junit" failures) ||
+        ! j_errors=$(junit_attr "$rust_junit" errors); then
+        why="cannot read the counts in $rust_junit"
     else
-        j_skipped=$(junit_attr "$rust_junit" skipped)
-        j_failures=$(junit_attr "$rust_junit" failures)
-        j_errors=$(junit_attr "$rust_junit" errors)
         j_skipped=${j_skipped:-0}
         j_failures=${j_failures:-0}
         j_errors=${j_errors:-0}
         rust_failed=$((j_failures + j_errors))
         rust_passed=$((j_tests - j_skipped - rust_failed))
         if [ "$rust_passed" -lt 0 ]; then
-            if [ "$rust_tests_failed" -eq 1 ]; then
-                rust_tests_value=failing
-                rust_tests_color=red
-                rust_tests_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
-            else
-                echo "publish-badges: invalid counts in $rust_junit (tests=$j_tests skipped=$j_skipped failed=$rust_failed)" >&2
-                exit 1
-            fi
-        elif [ "$rust_failed" -gt 0 ]; then
-            rust_tests_value="$rust_failed failed"
-            rust_tests_color=red
-            rust_tests_json=$(jq -nc --argjson p "$rust_passed" --argjson f "$rust_failed" --arg c "$sha" \
-                '{status: "failed", passed: $p, failed: $f, commit: $c}')
-        elif [ "$rust_tests_failed" -eq 1 ]; then
+            why="invalid counts in $rust_junit (tests=$j_tests skipped=$j_skipped failed=$rust_failed)"
+        fi
+    fi
+    if [ -n "$why" ]; then
+        if [ "$rust_tests_failed" -eq 1 ]; then
             rust_tests_value=failing
             rust_tests_color=red
             rust_tests_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
         else
-            rust_tests_value="$rust_passed passed"
-            rust_tests_color=brightgreen
-            rust_tests_json=$(jq -nc --argjson p "$rust_passed" --arg c "$sha" \
-                '{status: "passed", passed: $p, failed: 0, commit: $c}')
+            unusable "$why"
         fi
+    elif [ "$rust_failed" -gt 0 ]; then
+        rust_tests_value="$rust_failed failed"
+        rust_tests_color=red
+        rust_tests_json=$(jq -nc --argjson p "$rust_passed" --argjson f "$rust_failed" --arg c "$sha" \
+            '{status: "failed", passed: $p, failed: $f, commit: $c}')
+    elif [ "$rust_tests_failed" -eq 1 ]; then
+        rust_tests_value=failing
+        rust_tests_color=red
+        rust_tests_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
+    else
+        rust_tests_value="$rust_passed passed"
+        rust_tests_color=brightgreen
+        rust_tests_json=$(jq -nc --argjson p "$rust_passed" --arg c "$sha" \
+            '{status: "passed", passed: $p, failed: 0, commit: $c}')
     fi
 elif [ "$rust_tests_failed" -eq 1 ]; then
     rust_tests_value=failing
@@ -364,19 +385,22 @@ ts_cov_value=
 ts_cov_color=
 ts_cov_json=
 if [ -n "$ts_coverage" ]; then
+    ts_percent=
     if ! jq -e '.total.lines.pct | type == "number"' "$ts_coverage" >/dev/null; then
-        echo "publish-badges: cannot read line coverage percentage from $ts_coverage" >&2
-        exit 1
+        unusable "cannot read line coverage percentage from $ts_coverage"
+    else
+        ts_raw=$(jq -r '.total.lines.pct' "$ts_coverage")
+        ts_percent=$(percent_1dp "$ts_raw") || {
+            ts_percent=
+            unusable "line coverage percentage '$ts_raw' in $ts_coverage is not a number from 0 to 100"
+        }
     fi
-    ts_raw=$(jq -r '.total.lines.pct' "$ts_coverage")
-    if ! ts_percent=$(percent_1dp "$ts_raw"); then
-        echo "publish-badges: line coverage percentage '$ts_raw' in $ts_coverage is not a number from 0 to 100" >&2
-        exit 1
+    if [ -n "$ts_percent" ]; then
+        ts_cov_value="${ts_percent}%"
+        ts_cov_color=$(coverage_color "$ts_percent" "$ts_coverage_result")
+        ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg g "$(gate "$ts_coverage_result")" --arg c "$sha" \
+            '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
     fi
-    ts_cov_value="${ts_percent}%"
-    ts_cov_color=$(coverage_color "$ts_percent" "$ts_coverage_result")
-    ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg g "$(gate "$ts_coverage_result")" --arg c "$sha" \
-        '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
 elif [ "$ts_coverage_failed" -eq 1 ]; then
     ts_cov_value=failing
     ts_cov_color=red
@@ -415,13 +439,17 @@ if [ -n "$ts_results" ]; then
         ts_tests_color=red
         ts_tests_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
     else
-        echo "publish-badges: cannot read typescript test results from $ts_results" >&2
-        exit 1
+        unusable "cannot read typescript test results from $ts_results"
     fi
 elif [ "$ts_tests_failed" -eq 1 ]; then
     ts_tests_value=failing
     ts_tests_color=red
     ts_tests_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
+fi
+
+if [ -z "$rust_cov_value$rust_tests_value$ts_cov_value$ts_tests_value" ]; then
+    echo "publish-badges: no usable report; nothing published" >&2
+    exit 1
 fi
 
 details=
@@ -535,7 +563,7 @@ while :; do
     git -C "$work" add -A
     if git -C "$work" diff --cached --quiet; then
         echo "badges unchanged for $branch ($details)"
-        exit 0
+        exit "$unusable"
     fi
     git -C "$work" commit -q -m "badges: $branch at $sha ($details)"
     source_is_current
@@ -543,7 +571,7 @@ while :; do
     if git -C "$work" push -q "$remote" "HEAD:refs/heads/$badges_branch" 2>"$push_err"; then
         rm -f "$push_err"
         echo "published $branch to $remote/$badges_branch ($details, commit $sha, attempt $n)"
-        exit 0
+        exit "$unusable"
     fi
     cat "$push_err" >&2
     rm -f "$push_err"

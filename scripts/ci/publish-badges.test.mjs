@@ -455,6 +455,100 @@ describe('numeric settings and counts', () => {
     assert.equal(r.status, 1);
     assert.match(r.stderr, /cannot read typescript test results/);
   });
+
+  // A count that is present but not a whole number is not read as absent
+  // (zero): `skipped="2x"` would otherwise show all 12 tests as passed.
+  for (const [attr, value] of [
+    ['skipped', '2x'], ['skipped', ''], ['failures', 'abc'], ['failures', '1.5'], ['errors', '-1'], ['errors', ' 1'], ['tests', '12x'], ['tests', '-12'],
+  ]) {
+    test(`rejects a malformed JUnit count ${attr}="${value}"`, () => {
+      const { remote, sha, work, file } = setup();
+      const attrs = { tests: '12', failures: '0', errors: '0', skipped: '0', [attr]: value };
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', junit(Object.entries(attrs).map(([k, v]) => `${k}="${v}"`).join(' ')))]);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.ok(r.stderr.includes(`${attr}="${value}" in `) && /is not a count/.test(r.stderr), r.stderr);
+      assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+    });
+  }
+
+  for (const value of ['99999999999999999999', 'abc']) {
+    test(`a JUnit count failures="${value}" from a failed job publishes a red failing badge`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', junit(`tests="12" failures="${value}" errors="0" skipped="0"`)), '--rust-tests-failed']);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: failing' });
+    });
+  }
+
+  // Vitest counts were already checked strictly: none of these reads as a
+  // count, so a job that did not fail gets no badge and an error.
+  for (const [field, literal] of [
+    ['numPassedTests', '-1'], ['numPassedTests', '1.5'], ['numPassedTests', '"7"'], ['numPassedTests', 'null'], ['numPassedTests', '1e9'],
+    ['numFailedTests', '-1'], ['numFailedTests', '"0"'],
+  ]) {
+    test(`rejects a Vitest ${field} of ${literal}`, () => {
+      const { remote, sha, work, file } = setup();
+      const counts = { numPassedTests: '7', numFailedTests: '0', [field]: literal };
+      const r = publish(work[0], ['main', sha, '--ts-results', file('results.json', `{"success":true,"numPassedTests":${counts.numPassedTests},"numFailedTests":${counts.numFailedTests}}`)]);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /cannot read typescript test results/);
+      assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+    });
+  }
+});
+
+// A report that cannot be used must not hold back the other badges: a
+// failure among them would otherwise leave a stale green badge on main.
+describe('an unusable report fails after the other badges are published', () => {
+  const failedJunit = '<testsuites name="t" tests="5" failures="2" errors="0" skipped="0"><testsuite name="s"/></testsuites>';
+  const failedTs = { success: false, numPassedTests: 6, numFailedTests: 1 };
+  // [what, the unusable input, its badge, the badge that fails meanwhile]
+  const CASES = [
+    ['a Rust coverage percentage above 100', (file) => ['--rust-coverage', file('bad.json', rustReportText('150')), '--rust-coverage-result', 'success'],
+      'rust-coverage', 'typescript-tests', /'150' .* is not a number from 0 to 100/],
+    ['a TypeScript coverage percentage written as a string', (file) => ['--ts-coverage', file('bad.json', tsSummaryText('"85"')), '--ts-coverage-result', 'success'],
+      'typescript-coverage', 'rust-tests', /cannot read line coverage percentage/],
+    ['a negative Vitest count', (file) => ['--ts-results', file('bad.json', '{"success":true,"numPassedTests":-1,"numFailedTests":0}')],
+      'typescript-tests', 'rust-tests', /cannot read typescript test results/],
+    ['a malformed JUnit count', (file) => ['--rust-junit', file('bad.xml', '<testsuites name="t" tests="5" failures="0" errors="0" skipped="x"><testsuite name="s"/></testsuites>')],
+      'rust-tests', 'typescript-tests', /skipped="x" .* is not a count/],
+  ];
+  const green = (file) => [
+    '--rust-coverage', file('rust.json', rustReport(90)), '--rust-coverage-result', 'success',
+    '--rust-junit', file('junit.xml', '<testsuites name="t" tests="5" failures="0" errors="0" skipped="0"><testsuite name="s"/></testsuites>'),
+    '--ts-coverage', file('ts.json', tsSummary(90)), '--ts-coverage-result', 'success',
+    '--ts-results', file('results.json', JSON.stringify({ success: true, numPassedTests: 7, numFailedTests: 0 })),
+  ];
+  const failing = (file, name) => (name === 'rust-tests'
+    ? ['--rust-junit', file('failed.xml', failedJunit), '--rust-tests-failed']
+    : ['--ts-results', file('failed.json', JSON.stringify(failedTs)), '--ts-tests-failed']);
+
+  for (const [what, unusable, itsBadge, other, message] of CASES) {
+    test(what, () => {
+      const { remote, sha, work, file } = setup();
+      assert.equal(publish(work[0], ['main', sha, ...green(file)]).status, 0);
+      const before = badge(remote, `main/${itsBadge}.svg`);
+      assert.equal(before.color, BRIGHTGREEN);
+      const r = publish(work[0], ['main', sha, ...unusable(file), ...failing(file, other)]);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, message);
+      assert.match(r.stdout, /published main/);
+      assert.equal(badge(remote, `main/${other}.svg`).color, RED, `${other} went red`);
+      assert.deepEqual(badge(remote, `main/${itsBadge}.svg`), before, `${itsBadge} is left as it was`);
+      assertNoScriptLeftovers();
+    });
+  }
+
+  test('unchanged badges still fail', () => {
+    const { remote, sha, work, file } = setup();
+    const args = ['main', sha, ...failing(file, 'rust-tests'), '--ts-results', file('bad.json', '{"success":true,"numPassedTests":-1,"numFailedTests":0}')];
+    assert.equal(publish(work[0], args).status, 1);
+    const tip = git(remote, 'rev-parse', 'badges');
+    const r = publish(work[0], args);
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /badges unchanged/);
+    assert.equal(git(remote, 'rev-parse', 'badges'), tip);
+  });
 });
 
 describe('the CI job (publish-badges-ci.sh)', () => {
@@ -508,6 +602,23 @@ describe('the CI job (publish-badges-ci.sh)', () => {
     assert.match(r.stderr, /service-nextest succeeded without a junit\.xml/);
     assert.match(r.stderr, /typescript-coverage succeeded without a complete coverage report/);
     assert.equal(badge(remote, 'main/rust-coverage.svg').title, 'rust coverage: 97.7%');
+  });
+
+  // A succeeded job whose report is present and passes the job's own
+  // completeness check, but holds a count that cannot be used.
+  test('an unusable TypeScript report fails after a red Rust tests badge is published', () => {
+    const { remote, sha, work } = setup();
+    const r = run(
+      work[0], sha,
+      { RUST_TESTS_RESULT: 'failure', TS_OK: 'true', TS_RESULT: 'success' },
+      { junit: failedJunit, tsCoverage: 90, tsResults: { success: true, numPassedTests: -1, numFailedTests: 0 } },
+    );
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /cannot read typescript test results/);
+    assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 2 failed' });
+    assert.equal(badge(remote, 'main/typescript-coverage.svg').title, 'typescript coverage: 90.0%');
+    assert.equal(published(remote, 'main/typescript-tests.svg'), false);
+    assertNoScriptLeftovers();
   });
 
   test('with nothing known it publishes nothing and still fails', () => {
