@@ -67,7 +67,9 @@
 //   * A pair (test, leg) is checked for every leg of an implemented stage
 //     whose job produces the test (TEST_JOBS). Passed needs a passing case
 //     from that leg; a missing or skipped case, or a leg without a report,
-//     is not run.
+//     is not run. A test of an implemented stage in the report of a leg
+//     whose job does not produce it is not counted; it is listed as "seen
+//     outside its job, not counted" and changes no status or exit status.
 //   * Stage = worst pair, failed > not run > passed. A stage that cannot be
 //     judged (a listed test that is not a scenario test of this entry, that
 //     no job among its legs produces, or a job without a pos and a neg test)
@@ -684,12 +686,21 @@ export function judge({ scenarios, subcases, contracts, reports, waivers = [], c
     }
   }
 
-  // Results that no implemented stage counts.
-  const uncounted = { planned: [], unregistered: [], unknown: [] };
+  // Results that no implemented stage counts. outside_job: a test that an
+  // implemented stage lists, reported by a leg whose job does not produce
+  // it. Only the jobs that produce a test judge it (a job of its own that
+  // does not report it leaves the pair not run), so such a result is listed
+  // for information and never changes a status or the exit status.
+  const uncounted = { planned: [], unregistered: [], unknown: [], outside_job: [] };
   for (const r of reports) {
     for (const [id, status] of r.cases) {
       const reg = registered.get(id);
-      if (reg?.includes('implemented')) continue;
+      if (reg?.includes('implemented')) {
+        const job = jobOf(r.leg);
+        const producedBy = testInfo(id)?.jobs ?? [];
+        if (!producedBy.includes(job)) uncounted.outside_job.push({ test: id, leg: r.leg, job, produced_by: producedBy, run_id: r.run_id, run_attempt: r.run_attempt, status });
+        continue;
+      }
       const info = testInfo(id);
       let bucket;
       let why = null;
@@ -819,12 +830,14 @@ export function renderMarkdown(res, { inputErrors = [], notes = [], ignored = []
     out.push('');
   }
   const u = res.uncounted;
-  if (u.planned.length || u.unregistered.length || u.unknown.length) {
+  if (u.planned.length || u.unregistered.length || u.unknown.length || u.outside_job.length) {
     out.push('### Results not counted', '');
     const at = (x) => `${code(x.test)} on ${code(x.leg)} ${x.status} (run ${x.run_id} attempt ${x.run_attempt})`;
     out.push(...capped(u.planned, (x) => `- planned stage, stays planned: ${at(x)}`, 'results of planned stages'));
     out.push(...capped(u.unregistered, (x) => `- not in any stage's tests: ${at(x)}`, 'unregistered results'));
     out.push(...capped(u.unknown, (x) => `- unknown scenario test (${text(x.why)}): ${at(x)}`, 'unknown scenario tests'));
+    const owners = (x) => (x.produced_by.length ? `job ${code(x.job)} does not produce it, ${x.produced_by.map(code).join(', ')} ${x.produced_by.length > 1 ? 'do' : 'does'}` : 'no job produces it');
+    out.push(...capped(u.outside_job, (x) => `- seen outside its job, not counted: ${at(x)}; ${owners(x)}`, 'results seen outside their job'));
     out.push('');
   }
   out.push(...capped(notes, (n) => `- note: ${text(n)}`, 'notes'));
