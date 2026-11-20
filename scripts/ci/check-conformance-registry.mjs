@@ -528,6 +528,9 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
     if (owner === undefined || !tasksById.has(owner)) err('hash', 'the first owner must be a task, whose tasks.md line matrix_sha256 hashes');
     else if (s.matrix_sha256 !== sha256(tasksById.get(owner))) err('hash', `matrix_sha256 is ${show(s.matrix_sha256)}, but the ${TASKS} line of ${owner} hashes to ${sha256(tasksById.get(owner))}; review the entry and run the generator`);
     const parent = scenarios.find((e) => e.id === s.parent);
+    // A conditional sub-ID's table_text ends its parent's §2 row, whatever else
+    // is wrong with the entry, so the table is rendered only from table text.
+    if (s.conditional_on !== undefined && !isCell(s.table_text)) rendered = false;
     if (s.conditional_on === undefined) {
       if (s.table_text !== undefined) err('subcases', 'table_text is only for a conditional sub-ID');
       const r = annexRange(s.parent, parent?.note);

@@ -14,6 +14,7 @@ import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  annexRange,
   checkNamedSubcases,
   DESIGN,
   generate,
@@ -615,6 +616,17 @@ describe('required and conditional sub-ID numbering', () => {
       rel === SUBCASES ? t + REQUIRED_A58('A58.02').replace('owners = ["T32.3"]', 'table_text = "x"\nowners = ["T32.3"]') : t,
     );
     failsBothModes(root, /A58\.02: table_text is only for a conditional sub-ID/);
+  });
+
+  test('annexRange: only a scenario ID declares a range, and no ID is built into a regex', () => {
+    assert.deepEqual(annexRange('A58', 'x A58.01–A58.89 y'), { from: 1, to: 89, text: 'A58.01–A58.89' });
+    assert.equal(annexRange('A58', undefined), null);
+    assert.equal(annexRange('A58', 1), null);
+    assert.equal(annexRange(58, 'A58.01–A58.89'), null);
+    // Regex metacharacters: "(" used to throw a SyntaxError, "." to match any digit.
+    for (const id of ['A5(', 'A5(.05', 'A58.0(', 'A.8', 'A5.', '.*', 'A58.90', 'A58 ', 'xA58', 'A588']) {
+      assert.equal(annexRange(id, 'A58.01–A58.89 A5(.01–A5(.89 A.8.01–A.8.89'), null, id);
+    }
   });
 });
 

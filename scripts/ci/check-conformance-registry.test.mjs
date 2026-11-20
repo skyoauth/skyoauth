@@ -1285,6 +1285,54 @@ describe('values of the wrong type', () => {
   });
 });
 
+describe('malformed subcases are diagnostics, not crashes', () => {
+  const tt = /table_text = .*/.exec(entryBlock(repoText(SUBCASES), 'subcase', 'A33.90'))[0];
+  const notCompared = (res) => {
+    assert.deepEqual(res.notes, ['table: not compared, because some scenario or subcase fields are invalid']);
+    assert.ok(!res.errors.some((e) => e.rule === 'table'), dump(res));
+  };
+  // Each conditional branch that does not parse table_text still renders it
+  // into the parent row; a table there used to crash the table rule (exit 2).
+  for (const [name, edit, re] of [
+    ['a conditional sub-ID numbered outside .90–.99', (t) => su('A33.90', tt, 'table_text = {}')(t).replaceAll('A33.90', 'A33.50'), /A33\.50: a conditional sub-ID is numbered A33\.90–A33\.99$/],
+    ['an unknown conditional_on', (t) => su('A33.90', tt, 'table_text = { a = 1 }')(su('A33.90', 'conditional_on = "back-channel-logout"', 'conditional_on = "magic"')(t)), /A33\.90: conditional_on must be one of /],
+  ]) {
+    test(`${name} with a table as table_text`, () => {
+      const res = failing(SUBCASES, edit);
+      expectError(res, 'subcases', re);
+      notCompared(res);
+    });
+  }
+
+  test('the CLI exits 1 for one', () => {
+    const root = fixture({ [SUBCASES]: (t) => su('A33.90', tt, 'table_text = {}')(su('A33.90', 'conditional_on = "back-channel-logout"', 'conditional_on = "magic"')(t)) });
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /error \[subcases\] A33\.90: conditional_on must be one of /);
+    assert.doesNotMatch(r.stderr, /internal error/);
+  });
+
+  // annexRange() used to build a regex from the ID or parent.
+  for (const [name, id, parent, re] of [
+    ['a parent with a regex metacharacter', 'A58.05', 'A5(', /A58\.05: parent must be the registered scenario A58$/],
+    ['an ID with a regex metacharacter', 'A5(.05', 'A58', /A5\(\.05: a sub-ID looks like A58\.07$/],
+    ['an ID with a regex metacharacter in its number', 'A58.0(', 'A58', /A58\.0\(: a sub-ID looks like A58\.07$/],
+  ]) {
+    test(`a required sub-ID: ${name}`, () => {
+      const root = fixture({ [SUBCASES]: (t) => t + requiredA58(id).replace(`id = "${id}"\nkind = "subcase"\nparent = "A58"`, `id = "${id}"\nkind = "subcase"\nparent = "${parent}"`) });
+      expectError(check(root), id === 'A58.05' ? 'subcases' : 'ids', re);
+      const r = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+      assert.equal(r.status, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /internal error/);
+    });
+  }
+
+  test('a required sub-ID under an unregistered parent has no annex range', () => {
+    const res = failing(SUBCASES, (t) => t + requiredA58('A58.05').replace('parent = "A58"', 'parent = "A.8"'));
+    expectError(res, 'subcases', /A58\.05: required sub-ID, but the note of A\.8 declares no annex range$/);
+  });
+});
+
 describe('names of Object.prototype members in the specs', () => {
   test('a feature label such as toString is not a feature', () => {
     for (const label of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {

@@ -271,9 +271,11 @@ const COND_RE = /^Conditional sub-ID(?: (A\d\d\.\d\d))? \(([^,()]+), (T\d\d\.\d+
 export const isConditionalNumber = (id) => Number(id.slice(4)) >= 90;
 
 // The annex range for required sub-IDs that a scenario's note declares, such
-// as "A58.01–A58.89" (en dash): { from, to, text }, or null.
+// as "A58.01–A58.89" (en dash): { from, to, text }, or null. Only a scenario
+// ID such as A58 has one; any other ID (a sub-ID, or a malformed one that may
+// hold regex metacharacters) has none, and is never built into the regex.
 export function annexRange(id, note) {
-  if (typeof id !== 'string' || (note !== undefined && typeof note !== 'string')) return null;
+  if (typeof id !== 'string' || !/^A\d\d$/.test(id) || (note !== undefined && typeof note !== 'string')) return null;
   const r = new RegExp(`\\b${id}\\.(\\d\\d)–${id}\\.(\\d\\d)\\b`).exec(note ?? '');
   return r ? { from: Number(r[1]), to: Number(r[2]), text: r[0] } : null;
 }
