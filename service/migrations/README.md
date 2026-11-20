@@ -119,12 +119,13 @@ egress rows are never deleted.
   and `new_revision`. `instance_id` is a lowercase hyphenated UUIDv7,
   generated once at first bootstrap and immutable (IR-057). Events the
   service writes on its own record the reserved actor
-  `{"type": "system", "id": "system"}`, never a principal (IR-058). `action`
-  is a dotted lowercase `<resource>.<verb>` name (identity-registry IR-059).
-  The decision fixes only that syntax: IR-059 lists examples, and the action
-  names, including those of these two events, are open until the audit
-  writer (OQ-IR-15). These are lead decisions (2026-11-20, OQ-IR-14),
-  provisional until the audit writer ships.
+  `{"type": "system", "id": "system"}`, never a principal or an operator
+  identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
+  (identity-registry IR-059). The decision fixes only that syntax: IR-059
+  lists examples, and the action names, including those of these two
+  events, are open until the audit writer (OQ-IR-15). These are lead
+  decisions (2026-11-20, OQ-IR-14), provisional until the audit writer
+  ships.
 
 The database does not enforce these rules; the service must:
 
@@ -245,3 +246,22 @@ Not done in `0002`:
   (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
   startup-mirror and sink-change events.
   Tests assert chain linkage and verification outcomes, never hash values.
+- Errata for comments and checks in `0002`, which is frozen (its checksum
+  covers comments), so they are corrected here and not in the file:
+  - Lines 116–118, on `instance_security_policy.instance_id`: "No format or
+    source is given for the instance ID" is superseded by identity-registry
+    IR-057: a lowercase hyphenated UUIDv7, generated once at first
+    bootstrap. The column still checks only `instance_id <> ''`; the
+    database does not enforce the format, and the immutability trigger
+    keeps it unchanged.
+  - Lines 244–246, on the chain genesis: "the genesis representation is not
+    specified" is superseded for the first event by IR-056, under which its
+    stored `prev_hash` is `NULL` and enters the hash as zero bytes. The
+    empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
+  - Line 259, on `audit_event.tenant_id`: OQ-IR-14 is decided; the
+    instance-scope event rules are IR-057 to IR-059 and "Instance-scope
+    events" above.
+  - `audit_chain_head.head_hash` and `audit_event.prev_hash` check
+    `octet_length(…) > 0`, but IR-056 makes every hash a raw 32-byte
+    SHA-256 digest. The database accepts any non-empty value; checking
+    `= 32` needs a later migration.

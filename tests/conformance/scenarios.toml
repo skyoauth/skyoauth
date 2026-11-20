@@ -361,7 +361,7 @@ kind = "scenario"
 layers = ["integration"]
 envs = ["pg"]
 harness = ["PG", "OIDC×2"]
-owners = ["T10.11", "T12.10", "T51.6"]
+owners = ["T10.11", "T12.10", "T13.9", "T51.6"]
 positive = "IDs, modes, defaults, constraints and revisions equal"
 negative = "dormant impersonation still disabled and not issuable"
 matrix_sha256 = "ff7aa8610ecb822db2b9f609be4a0c62bd83fae4b01a52ecd22c9d1bcf60b77d"
@@ -883,7 +883,7 @@ envs = ["hermetic", "pg"]
 harness = ["UC", "PG", "metadata fixture"]
 owners = ["T10.11", "T12.5", "T20.1"]
 positive = "disabled record stored"
-negative = "device or impersonation not advertised, issuance rejected, capability gain does not activate"
+negative = "a disable/re-enable cycle cannot revive old evidence: re-enabling a disabled record does not resurrect its prior revision or evidence (M1a, tasks §3); device or impersonation not advertised, issuance rejected, capability gain does not activate"
 matrix_sha256 = "58b5705933e5a591405976faa07ecbef2527b2a217f11ca6bdbb296a533d7d0a"
 
 [[scenario.stage]]
