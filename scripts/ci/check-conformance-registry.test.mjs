@@ -1437,6 +1437,21 @@ describe('--gate-pr', () => {
     assert.deepEqual([res.added, res.reporter], [['M1a'], ['M1a']]);
   });
 
+  // A gate PR only adds milestones: one that adds a milestone and drops
+  // another would revoke a gate without its own review.
+  test('a gate PR that adds a milestone and drops another', () => {
+    const lineOf = (root) => read(root, SCENARIOS).split('\n').findIndex((l) => l.startsWith('gates_passed = ')) + 1;
+    for (const [base, head, dropped] of [['["M1a"]', '["M0"]', 'M1a'], ['["M0", "M1a"]', '["M1a", "M1b"]', 'M0'], ['["M0", "M1a"]', '["M1b"]', 'M0, M1a']]) {
+      const { root, mb } = mainRoot((t) => setGates(base)(implementAll(allM1a(t), 'scenario', 'M1b')));
+      gateCommit(root, head);
+      const res = checkGatePr(root);
+      expectOnly(res, 'gate-pr', new RegExp(`^tests/conformance/scenarios\\.toml:${lineOf(root)}: error \\[gate-pr\\] the gate PR removes ${dropped} from gates_passed; a gate PR only adds milestones \\(a revocation is an ordinary reviewed PR, which --gate-pr does not check\\)$`));
+      assert.equal(res.mergeBase, mb);
+      const r = cli('--gate-pr', '--root', root);
+      assert.equal(r.status, 1, `${base} -> ${head}: ${r.stdout}`);
+    }
+  });
+
   test('not a gate PR: gates_passed does not grow (unchanged, or a milestone dropped): nothing else is checked', () => {
     const { root, mb } = mainRoot((t) => setGates('["M0", "M1a"]')(allM1a(t)));
     writeFileSync(join(root, 'other.txt'), 'x');

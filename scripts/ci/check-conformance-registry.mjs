@@ -684,7 +684,10 @@ export function checkGatePr(root) {
   const baseText = blob(mb, SCENARIOS)?.toString('utf8') ?? null;
   const headText = blob(head, SCENARIOS)?.toString('utf8') ?? null;
   const before = gatesOf(baseText);
-  out.added = [...new Set(gatesOf(headText).filter((g) => !before.includes(g)))];
+  const after = gatesOf(headText);
+  out.added = [...new Set(after.filter((g) => !before.includes(g)))];
+  // A PR that only drops milestones (a revocation) is an ordinary reviewed
+  // PR, not a gate PR: nothing here applies to it.
   if (!out.added.length) {
     report.note(`gate-pr: gates_passed at HEAD adds no milestone to the merge-base ${mb}; not a gate PR`);
     return out;
@@ -720,6 +723,9 @@ export function checkGatePr(root) {
     const line = k === undefined ? Math.max(hi, 0) + 1 : hi >= 0 && k >= hi ? k + 2 : k + 1;
     err('the gate PR changes this file outside the gates_passed line; a gate PR changes only that line', SCENARIOS, line);
   }
+  // A gate PR only adds milestones: it may not also revoke one.
+  const dropped = [...new Set(before.filter((g) => !after.includes(g)))];
+  if (dropped.length) err(`the gate PR removes ${dropped.join(', ')} from gates_passed; a gate PR only adds milestones (a revocation is an ordinary reviewed PR, which --gate-pr does not check)`, SCENARIOS, hi >= 0 ? hi + 1 : null);
 
   // The registry check on the merge-base's files with HEAD's gates_passed.
   if (bi >= 0 && hi >= 0) {

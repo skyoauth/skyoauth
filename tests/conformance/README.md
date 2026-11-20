@@ -43,7 +43,7 @@ IDs and hashes are still derived from the specs: the tasks §8 rows decide which
 | | `covered_by` | Derived from the "Covered by" table in layout §5, decision Q11 |
 | Subcases | `matrix_sha256` | Derived from the task line of the subcase's first owner (below) |
 | | every other field | Hand-authored |
-| File | `gates_passed` | Hand-authored: a plain list of milestones. A gate PR adds to it and changes nothing else ([Gate PRs](#gate-prs), layout §3 **Gates**). |
+| File | `gates_passed` | Hand-authored: a plain list of milestones. A gate PR adds to it and changes nothing else ([Gate PRs](#gate-prs), layout §3 **Gates**); a PR that only removes milestones (a revocation) is an ordinary reviewed PR, not a gate PR. |
 | File | comments | Generated; hand-written comments are dropped |
 | Layout §2 | the scenario table and its counts sentences | Rendered from the registry |
 
@@ -140,11 +140,11 @@ The file must stay inside the TOML subset the generator reads (basic strings, in
 
 ### Gate PRs
 
-`node scripts/ci/check-conformance-registry.mjs --gate-pr` checks a gate PR (layout §3 **Gates**, decided by the lead on 2026-11-20) instead of running the plain check. `--root` (default: this checkout) must be a full, non-shallow checkout of the PR head with `origin/main`: the judged commit is `git merge-base origin/main HEAD`, so without that history the mode fails (rule `gate-pr`). Only commits are read; uncommitted changes do not count. When `gates_passed` at `HEAD` adds no milestone to the merge-base's list, the PR is not a gate PR and nothing else is checked. Otherwise every error names its rule:
+`node scripts/ci/check-conformance-registry.mjs --gate-pr` checks a gate PR (layout §3 **Gates**, decided by the lead on 2026-11-20) instead of running the plain check. `--root` (default: this checkout) must be a full, non-shallow checkout of the PR head with `origin/main`: the judged commit is `git merge-base origin/main HEAD`, so without that history the mode fails (rule `gate-pr`). Only commits are read; uncommitted changes do not count. When `gates_passed` at `HEAD` adds no milestone to the merge-base's list, the PR is not a gate PR and nothing else is checked; that includes a revocation, a PR that only removes milestones, which is an ordinary reviewed PR. Otherwise every error names its rule:
 
 | Rule | Checks |
 | --- | --- |
-| `gate-pr` | `HEAD` is a single commit whose only parent is the merge-base (`HEAD <sha> is not a single commit on top of the merge-base <sha> with origin/main (its parents: …)`); its diff (`git diff-tree --raw --no-renames`, so a rename, copy, deletion, mode or type change counts too) changes no path but `scenarios.toml` (`the gate PR changes <path>; …`), not that file's mode or type (`the gate PR changes the mode of tests/conformance/scenarios.toml from 100644 to 100755; …`), and no line of it but `gates_passed` (`scenarios.toml:<line>: … the gate PR changes this file outside the gates_passed line; …`). |
+| `gate-pr` | `HEAD` is a single commit whose only parent is the merge-base (`HEAD <sha> is not a single commit on top of the merge-base <sha> with origin/main (its parents: …)`); its diff (`git diff-tree --raw --no-renames`, so a rename, copy, deletion, mode or type change counts too) changes no path but `scenarios.toml` (`the gate PR changes <path>; …`), not that file's mode or type (`the gate PR changes the mode of tests/conformance/scenarios.toml from 100644 to 100755; …`), and no line of it but `gates_passed` (`scenarios.toml:<line>: … the gate PR changes this file outside the gates_passed line; …`); and that line removes no milestone of the merge-base's list (`scenarios.toml:<line>: … the gate PR removes <milestones> from gates_passed; a gate PR only adds milestones …`). |
 | every rule of the plain check | Run on the specs and `tests/conformance` of the **merge-base**, with `HEAD`'s `gates_passed` line, and the waiver commits checked against this repository's `origin/main`. So `gates` requires every stage of each new milestone to be `implemented`, with a valid stamp, at the merge-base, even if the PR's own registry differs. |
 
 On success stdout ends with two lines for the gate job, `merge_base=<sha>` and `reporter_milestones=<milestones>`: the added milestones except M0, which has no stages and is gated by ADR ratification and the doc checks. For each of them the job runs the reporter on the merge-base, with `--root` a checkout of it, since `--allow-commit-mismatch` makes a report untrusted (exit 2):
