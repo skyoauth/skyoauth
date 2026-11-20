@@ -666,11 +666,11 @@ function duplicateErrors(doc, file, table) {
   const errors = [];
   const ids = new Map();
   for (const e of doc[table] ?? []) {
-    if (ids.has(e.id)) errors.push(`${file}:${e[LINE]}: duplicate ${table} ${e.id} (first at line ${ids.get(e.id)})`);
+    if (ids.has(e.id)) errors.push(`${file}:${e[LINE]}: duplicate ${table} ${show(e.id)} (first at line ${ids.get(e.id)})`);
     else ids.set(e.id, e[LINE]);
     const ms = new Map();
     for (const s of Array.isArray(e.stage) ? e.stage : []) {
-      if (ms.has(s.milestone)) errors.push(`${file}:${s[LINE]}: duplicate stage ${e.id} ${s.milestone} (first at line ${ms.get(s.milestone)})`);
+      if (ms.has(s.milestone)) errors.push(`${file}:${s[LINE]}: duplicate stage ${show(e.id)} ${show(s.milestone)} (first at line ${ms.get(s.milestone)})`);
       else ms.set(s.milestone, s[LINE]);
     }
   }
@@ -861,9 +861,9 @@ export function generate(root) {
     const registered = new Map();
     for (const e of old.scenario ?? []) {
       if (e.kind === 'scenario') registered.set(e.id, e);
-      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e[LINE]}: ${e.id}: kind must be scenario or contract`);
+      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e[LINE]}: ${show(e.id)}: kind must be scenario or contract`);
     }
-    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e[LINE]}: scenario ${id} is not a row of ${TASKS} §8`);
+    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e[LINE]}: scenario ${show(id)} is not a row of ${TASKS} §8`);
     const scenarios = [];
     for (const r of a.rows) {
       const s = registered.get(r.id);
@@ -874,7 +874,7 @@ export function generate(root) {
       const where = `${SCENARIOS}:${s[LINE]}: ${r.id}`;
       if (!validScenario(s, where, codes, tasksById, errors)) continue;
       const e = { id: r.id, layers: s.layers, envs: s.envs, harness: s.harness, owners: s.owners, note: s.note, positive: s.positive, negative: s.negative, matrix_sha256: sha256(r.line) };
-      const at = (st) => `${SCENARIOS}:${st[LINE]}: ${r.id} ${st.milestone}`;
+      const at = (st) => `${SCENARIOS}:${st[LINE]}: ${r.id} ${show(st.milestone)}`;
       const before = errors.length;
       e.stages = s.stage.map((st) => {
         const full = { ...st, legs: st.legs ?? defaultLegs(e, st, catalogue), status: st.status ?? 'planned', tests: st.tests ?? [] };
@@ -895,7 +895,7 @@ export function generate(root) {
     const byId = new Map([...registered].filter(([id]) => aIds.includes(id)));
     const subBlocks = [];
     for (const s of subs) {
-      const where = `${SUBCASES}:${s[LINE]}: ${s.id}`;
+      const where = `${SUBCASES}:${s[LINE]}: ${show(s.id)}`;
       const before = errors.length;
       if (typeof s.id !== 'string' || !/^A\d\d\.\d\d$/.test(s.id)) errors.push(`${where}: id must look like A58.07`);
       else if (s.parent !== s.id.slice(0, 3) || !byId.has(s.parent)) errors.push(`${where}: parent must be the registered scenario ${s.id.slice(0, 3)}`);
@@ -907,7 +907,7 @@ export function generate(root) {
       if (errors.length > before) continue;
       for (const x of s.layers) if (!Object.values(LAYERS).includes(x)) errors.push(`${where}: unknown layer "${x}"`);
       for (const x of s.envs) if (!Object.values(codes).includes(x)) errors.push(`${where}: unknown env "${x}"`);
-      const stageAt = (st) => `${SUBCASES}:${st[LINE]}: ${s.id} ${st.milestone}`;
+      const stageAt = (st) => `${SUBCASES}:${st[LINE]}: ${s.id} ${show(st.milestone)}`;
       for (const st of s.stage) {
         stageErrors(st, stageAt(st), errors);
         if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${stageAt(st)}: implemented_sha256 must be a string`);
@@ -1007,14 +1007,14 @@ export function describeDiff(path, committed, regenerated) {
   for (const table of ['scenario', 'subcase']) {
     const o = new Map((oldDoc[table] ?? []).map((e) => [e.id, e]));
     const n = new Map((newDoc[table] ?? []).map((e) => [e.id, e]));
-    for (const id of n.keys()) if (!o.has(id)) out.push(`${path}: ${id} is missing`);
-    for (const id of o.keys()) if (!n.has(id)) out.push(`${path}: ${id} is not in the specs`);
+    for (const id of n.keys()) if (!o.has(id)) out.push(`${path}: ${show(id)} is missing`);
+    for (const id of o.keys()) if (!n.has(id)) out.push(`${path}: ${show(id)} is not in the specs`);
     for (const [id, ne] of n) {
       const oe = o.get(id);
       if (!oe) continue;
       for (const k of new Set([...Object.keys(oe), ...Object.keys(ne)])) {
         if (same(oe[k], ne[k])) continue;
-        if (k === 'matrix_sha256') out.push(`${path}: ${id}: matrix_sha256 is ${oe[k]}, but its spec line hashes to ${ne[k]} (spec row changed; review the entry)`);
+        if (k === 'matrix_sha256') out.push(`${path}: ${id}: matrix_sha256 is ${show(oe[k])}, but its spec line hashes to ${ne[k]} (spec row changed; review the entry)`);
         else out.push(`${path}: ${id}: ${k} differs from the specs`);
       }
     }

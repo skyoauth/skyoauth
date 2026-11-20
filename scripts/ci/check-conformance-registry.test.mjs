@@ -20,7 +20,7 @@ import { parse as parseStrict, TomlDate } from 'smol-toml';
 
 import { checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { normaliseRegistry } from './registry-fixtures.mjs';
+import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -1274,6 +1274,27 @@ describe('values of the wrong type', () => {
   for (const [name, rel, edit, rule, re] of cases) {
     test(`an inline table as ${name} is a diagnostic, not a crash`, () => {
       expectError(failing(rel, edit), rule, re);
+    });
+  }
+
+  // The generator's fuzz of the same keys (gen-conformance-registry.test.mjs):
+  // smol-toml's tables have no prototype, so an own toString key is an
+  // ordinary key there and show() prints the table as JSON.
+  for (const value of ['{ toString = 1 }', '{ toString = "x", valueOf = 1 }', '[{ toString = 1 }]']) {
+    test(`every key of A24, C07 and A33.90 as ${value}`, () => {
+      const cases = [
+        ['gates_passed', SCENARIOS, replaceOnce(repoText(SCENARIOS), 'gates_passed = []', `gates_passed = ${value}`)],
+        ...valueSwaps(repoText(SCENARIOS), 'scenario', 'A24', value, { entry: ['note'], stage: ['implemented_sha256'] }).map(([l, t]) => [l, SCENARIOS, t]),
+        ...valueSwaps(repoText(SCENARIOS), 'scenario', 'C07', value).map(([l, t]) => [l, SCENARIOS, t]),
+        ...valueSwaps(repoText(SUBCASES), 'subcase', 'A33.90', value, { stage: ['implemented_sha256'] }).map(([l, t]) => [l, SUBCASES, t]),
+      ];
+      assert.ok(cases.length >= 40, String(cases.length));
+      for (const [label, rel, text] of cases) {
+        const res = failing(rel, () => text);
+        assert.ok(res.errors.length > 0, label);
+        assert.ok(!res.errors.some((e) => e.rule === 'toml'), `${label}\n${dump(res)}`);
+        assert.doesNotMatch(dump(res), /\[object /, label);
+      }
     });
   }
 

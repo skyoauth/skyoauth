@@ -35,7 +35,7 @@ import {
   SUBCASES,
   TASKS,
 } from './gen-conformance-registry.mjs';
-import { normaliseRegistry } from './registry-fixtures.mjs';
+import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'gen-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -1065,6 +1065,57 @@ describe('TOML', () => {
       });
       assert.equal(r.status, 0, r.stderr);
       assert.deepEqual(JSON.parse(r.stdout), parseToml(read(REPO, rel)));
+    }
+  });
+});
+
+describe('a value with an own toString key is a diagnostic, not a crash', () => {
+  // The subset reader returns ordinary objects, and a template literal calls an
+  // own toString key of one; a value that is not a function used to throw
+  // "Cannot convert object to primitive value" (exit 2) wherever the generator
+  // put an unvalidated value into a message. Each key of a scenario with two
+  // stages, a contract and a conditional subcase gets each value in turn.
+  const VALUES = ['{ toString = 1 }', '{ toString = "x", valueOf = 1 }', '[{ toString = 1 }]'];
+  const swaps = (value) => [
+    ['gates_passed', SCENARIOS, replaceOnce(registry(SCENARIOS), 'gates_passed = []', `gates_passed = ${value}`)],
+    ...valueSwaps(registry(SCENARIOS), 'scenario', 'A24', value, { entry: ['note'], stage: ['implemented_sha256'] }).map(([l, t]) => [l, SCENARIOS, t]),
+    ...valueSwaps(registry(SCENARIOS), 'scenario', 'C07', value).map(([l, t]) => [l, SCENARIOS, t]),
+    ...valueSwaps(registry(SUBCASES), 'subcase', 'A33.90', value, { stage: ['implemented_sha256'] }).map(([l, t]) => [l, SUBCASES, t]),
+  ];
+  // run() in-process: an internal error throws out of it.
+  const runIn = (root, ...args) => {
+    const out = [];
+    const code = run(['--root', root, ...args], (m) => out.push(m), (m) => out.push(m));
+    return { code, out: out.join('\n') };
+  };
+  for (const value of VALUES) {
+    test(`every key of A24, C07 and A33.90 as ${value}`, () => {
+      const cases = swaps(value);
+      assert.ok(cases.length >= 40, String(cases.length));
+      for (const [label, rel, text] of cases) {
+        const root = fixture((r, t) => (r === rel ? text : t));
+        const c = runIn(root, '--check');
+        assert.equal(c.code, 1, `${label}: --check\n${c.out}`);
+        assert.doesNotMatch(c.out, /\[object /, label);
+        const w = runIn(root);
+        assert.ok(w.code === 0 || w.code === 1, `${label}: write mode exited ${w.code}\n${w.out}`);
+      }
+    });
+  }
+
+  test('the CLI exits 1, and names the value as JSON', () => {
+    for (const [edit, re] of [
+      [(rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'milestone = "M1a"', 'milestone = { toString = 1 }') : t), /A24 \{"toString":1\}: milestone must be one of /],
+      [(rel, t) => (rel === SUBCASES ? replaceOnce(t, 'id = "A33.90"', 'id = { toString = 1 }') : t), /subcases\.toml:\d+: \{"toString":1\}: id must look like A58\.07$/m],
+      [(rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'id = "C07"', 'id = { toString = 1 }') : t), /scenarios\.toml: C07 is missing\n.*scenarios\.toml: \{"toString":1\} is not in the specs$/m],
+      // Two keys at once, which the fuzz above does not reach.
+      [(rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'id = "A24"\nkind = "scenario"', 'id = { toString = 1 }\nkind = "x"') : t), /scenarios\.toml:\d+: \{"toString":1\}: kind must be scenario or contract$/m],
+      [(rel, t) => (rel === SCENARIOS ? replaceOnce(t, `matrix_sha256 = "${A24_HASH}"`, 'matrix_sha256 = { toString = 1 }') : t), /A24: matrix_sha256 is \{"toString":1\}, but its spec line hashes to /],
+    ]) {
+      const r = cli('--root', fixture(edit), '--check');
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, re);
+      assert.doesNotMatch(r.stderr, /internal error/);
     }
   });
 });
