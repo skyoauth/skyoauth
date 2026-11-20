@@ -648,3 +648,14 @@ follow-up. All other items are not resolved by this contract.
   deployment-configuration change applied at restart alone can flip the
   value. Interim reading (lead, 2026-11-20): deployment configuration,
   applied at restart and audited at startup (IR-053).
+- **OQ-IR-14 — Identity of instance-scope audit events.** The T10.1 schema
+  records the startup event that mirrors `single_actor_mode` (IR-053) and the
+  sink-change event with `tenant_id` null, the `InstanceSecurityPolicy`
+  `instance_id` as `object_id`, and the row's revisions before and after the
+  write (lead decision, 2026-11-20; `service/migrations/README.md`). Not
+  stated: where `instance_id` comes from (generated at bootstrap or set in
+  deployment configuration) and its format; which reserved system actor
+  records events that the service writes on its own at startup, when no
+  administrator acts; and the namespace and syntax of `AuditEvent.action`,
+  whose values must name the entity, since `object_id` alone does not say
+  what kind of object it identifies.

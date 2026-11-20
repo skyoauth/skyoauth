@@ -197,7 +197,9 @@ async fn append_only_guard_rejects_update_delete_and_truncate() {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
-    assert_append_only(&pool, "SET session_replication_role = origin").await;
+    // No session setup: this runs in the default replication mode and
+    // needs no superuser.
+    assert_append_only(&pool, "SELECT 1").await;
     db.drop([pool]).await;
 }
 
