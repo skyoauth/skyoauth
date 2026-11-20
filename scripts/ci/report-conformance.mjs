@@ -16,9 +16,13 @@
 //                     `gh run download RUN_ID -D DIR/RUN_ID` writes):
 //                       DIR/<run_id>/<artifact name ending in attempt-N>/junit.xml
 //                       DIR/<run_id>/<artifact name ending in attempt-N>/leg
-//                     `leg` holds one layout §1.1 leg string. An artifact
-//                     without a `leg` file (service-nextest-junit-N, coverage
-//                     reports) is not a conformance leg and is ignored.
+//                     `leg` holds one layout §1.1 leg string; a leg artifact
+//                     holds nothing else. Only the known artifacts of other
+//                     jobs (NOT_CONFORMANCE: service-nextest-junit-N,
+//                     rust-coverage, typescript-coverage) may lack a `leg`
+//                     file; they are ignored. Any other artifact without one,
+//                     and a leg or junit.xml in a subdirectory, is an input
+//                     error.
 //                     Omitted: no results at all.
 //   --waivers FILE    tests/conformance/waivers.toml from the tip of main
 //                     (layout §3 "Waivers"); the caller fetches it, for
@@ -321,6 +325,12 @@ export function testInfo(id) {
 
 const RANK = { passed: 0, skipped: 1, failed: 2 };
 
+// The files of a conformance (leg) artifact.
+const LEG_FILES = ['leg', 'junit.xml'];
+// Artifacts of jobs that are not conformance legs (ci.yml): the only ones
+// that may lack a leg file. Any other artifact without one is an input error.
+export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/];
+
 // Reads DIR/<run_id>/<artifact>/{junit.xml,leg}. Returns { reports, ignored,
 // notes, errors }; a report is { run_id, run_attempt, leg, artifact, cases:
 // Map(test ID -> passed | failed | skipped) }.
@@ -343,8 +353,25 @@ export function readArtifacts(dir, catalogue) {
         out.errors.push(`${rel}: a run directory holds only artifact directories`);
         continue;
       }
-      if (!existsSync(join(path, 'leg'))) {
-        out.ignored.push(rel);
+      const entries = readdirSync(path).sort();
+      // A leg or junit.xml one level down (an upload whose paths had another
+      // common ancestor) would otherwise go unread.
+      const nested = entries.filter((x) => statSync(join(path, x)).isDirectory() && LEG_FILES.some((f) => existsSync(join(path, x, f))));
+      if (nested.length) {
+        out.errors.push(`${rel}: ${nested.map((x) => `${x}/`).join(', ')} holds a leg or junit.xml file; they belong at the top of the artifact`);
+        continue;
+      }
+      if (!entries.includes('leg')) {
+        // Only the known artifacts of other jobs may lack a leg file; any
+        // other one (a leg artifact that lost its leg file, say) could hide
+        // a failed attempt.
+        if (NOT_CONFORMANCE.some((re) => re.test(artifact))) out.ignored.push(rel);
+        else out.errors.push(`${rel}: no leg file, and not a known artifact of a non-conformance job (${NOT_CONFORMANCE.map((re) => re.source).join(', ')}); its results cannot be placed`);
+        continue;
+      }
+      const extra = entries.filter((x) => !LEG_FILES.includes(x));
+      if (extra.length) {
+        out.errors.push(`${rel}: a leg artifact holds only leg and junit.xml, not ${extra.join(', ')}`);
         continue;
       }
       const leg = readFileSync(join(path, 'leg'), 'utf8').trim();

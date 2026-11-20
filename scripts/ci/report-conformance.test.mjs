@@ -820,18 +820,71 @@ describe('input errors', () => {
     assert.match(r.json.input_errors[0], /the artifacts directory does not exist/);
   });
 
-  test('artifacts without a leg file (service-nextest-junit-N, coverage) are ignored with a note', () => {
+  test('only the known non-conformance artifacts (service-nextest-junit-N, coverage) may lack a leg file; they are ignored with a note', () => {
+    const d = artifacts([
+      { leg: null, name: 'service-nextest-junit-1', junit: junit([[A24_NEG, 'failed']]) },
+      { leg: null, name: 'service-nextest-junit-12', junit: null },
+      { leg: null, name: 'rust-coverage', junit: null },
+      { leg: null, name: 'typescript-coverage', junit: null },
+      { leg: PG, junit: allPass(A24) },
+    ]);
+    write(join(d, '100', 'rust-coverage', 'html', 'index.html'), '<html/>');
+    write(join(d, '100', 'typescript-coverage', 'lcov.info'), '');
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 0, r.err);
+    assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
+    assert.deepEqual(r.json.ignored_artifacts, ['100/rust-coverage', '100/service-nextest-junit-1', '100/service-nextest-junit-12', '100/typescript-coverage']);
+    assert.match(r.out, /note: 4 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/rust-coverage`/);
+  });
+
+  test('a failed attempt whose artifact lost its leg file does not vanish: input error, exit 2', () => {
     const r = report(root(withA24), [
       '--artifacts',
       artifacts([
-        { leg: null, name: 'service-nextest-junit-1', junit: junit([[A24_NEG, 'failed']]) },
-        { leg: PG, junit: allPass(A24) },
+        { leg: null, name: 'junit-scenarios-pg-x86_64-attempt-1', junit: junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]) },
+        { leg: PG, attempt: 2, junit: allPass(A24) },
       ]),
     ]);
-    assert.equal(r.code, 0, r.err);
-    assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
-    assert.deepEqual(r.json.ignored_artifacts, ['100/service-nextest-junit-1']);
-    assert.match(r.out, /note: 1 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/service-nextest-junit-1`/);
+    assert.equal(r.code, 2);
+    assert.deepEqual(r.json.input_errors, [
+      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$); its results cannot be placed',
+    ]);
+    assert.deepEqual(r.json.ignored_artifacts, []);
+    assert.match(r.out, /\*\*Input errors: this report cannot be trusted \(1\)\.\*\*/);
+  });
+
+  test('an unknown artifact without a leg file, a leg or junit.xml one level down, or an extra file in a leg artifact is an input error', () => {
+    const d = artifacts([
+      { leg: null, name: 'stray', junit: allPass(A24) },
+      { leg: null, name: 'empty-dir', junit: null },
+      { leg: null, name: 'service-nextest-junit-0', junit: null },
+      { leg: null, name: 'rust-coverage-attempt-1', junit: null },
+      { leg: null, name: 'nested-attempt-1', junit: null },
+      { leg: null, name: 'nested-junit-attempt-1', junit: null },
+      { leg: PG, name: 'both-attempt-1', junit: allPass(A24) },
+      { leg: PG, name: 'extra-attempt-1', junit: allPass(A24) },
+      { leg: null, name: 'rust-coverage', junit: null },
+    ]);
+    write(join(d, '100', 'nested-attempt-1', 'ci', 'leg'), `${PG}\n`);
+    write(join(d, '100', 'nested-junit-attempt-1', 'ci', 'junit.xml'), allPass(A24));
+    write(join(d, '100', 'both-attempt-1', 'ci', 'junit.xml'), junit([[A24_NEG, 'failed']]));
+    write(join(d, '100', 'extra-attempt-1', 'notes.txt'), 'x');
+    write(join(d, '100', 'rust-coverage', 'sub', 'junit.xml'), junit([[A24_NEG, 'failed']]));
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 2);
+    const NO_LEG = 'no leg file, and not a known artifact of a non-conformance job';
+    assert.deepEqual(r.json.input_errors.map((e) => e.replace(/ \(\^service.*$/, '')), [
+      '100/both-attempt-1: ci/ holds a leg or junit.xml file; they belong at the top of the artifact',
+      `100/empty-dir: ${NO_LEG}`,
+      '100/extra-attempt-1: a leg artifact holds only leg and junit.xml, not notes.txt',
+      '100/nested-attempt-1: ci/ holds a leg or junit.xml file; they belong at the top of the artifact',
+      '100/nested-junit-attempt-1: ci/ holds a leg or junit.xml file; they belong at the top of the artifact',
+      '100/rust-coverage: sub/ holds a leg or junit.xml file; they belong at the top of the artifact',
+      `100/rust-coverage-attempt-1: ${NO_LEG}`,
+      `100/service-nextest-junit-0: ${NO_LEG}`,
+      `100/stray: ${NO_LEG}`,
+    ]);
+    assert.deepEqual(r.json.reports, []);
   });
 });
 
