@@ -631,11 +631,15 @@ jobs:
 
   # A docs-only push to main publishes no badges but may have changed the
   # README that embeds them, so check that it still renders the badges
-  # already published for main.
+  # already published for main. Like publish-badges, only in
+  # skyoauth/skyoauth: the README embeds that repository's badges, which a
+  # fork does not publish.
   verify-badges:
     name: Verify README badges
     needs: changes
-    if: needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'skyoauth/skyoauth' &&
+      needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -665,11 +669,14 @@ jobs:
   # `failing` badges so stale passing figures never
   # remain on a red `main`. A docs-only change skips coverage and tests and
   # publishes nothing; the script keeps publishing for a commit that only
-  # such changes followed.
+  # such changes followed. Only in skyoauth/skyoauth, whose badges the README
+  # embeds: a fork would otherwise create a badges branch of its own, and its
+  # render check would fail on the README's links to this repository.
   publish-badges:
     name: Publish badges
     if: >-
       !cancelled() &&
+      github.repository == 'skyoauth/skyoauth' &&
       (needs.rust-coverage.result != 'skipped' ||
        needs.service-nextest.result != 'skipped' ||
        needs.typescript-coverage.result != 'skipped') &&

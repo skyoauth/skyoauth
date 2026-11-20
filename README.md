@@ -161,7 +161,8 @@ Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. On pushes to `main`, CI generates separate Rust and TypeScript tests and
 line-coverage badges as SVG files on the `badges` branch
 (`scripts/ci/publish-badges.sh`, rendered by `scripts/ci/badge.sh`), so they
-need no external service and render in a private repository too. Rust test
+need no external service and render in a private repository too (only
+`skyoauth/skyoauth` publishes and checks them; a fork does neither). Rust test
 counts come from `service-nextest` (all workspace tests, including PostgreSQL
 tests) and Rust line coverage comes from `rust-coverage` (which excludes the
 PostgreSQL-backed tests); TypeScript test counts and line coverage come from
