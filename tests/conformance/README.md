@@ -167,28 +167,39 @@ The default legs are used only when a stage has none committed. For each env of 
 
 ## The reporter
 
-`node scripts/ci/report-conformance.mjs` implements the layout §3 result join for **one commit**. It first runs the registry check on `--root` (default: this checkout, which should be the judged commit) and stops with exit 2 on any error. It runs no git command itself; only the registry check's waiver rule does (`origin/main` reachability).
+`node scripts/ci/report-conformance.mjs` implements the layout §3 result join for **one commit**. `--root` (default: this checkout) must be a checkout of the judged commit: when it is a git checkout, its `HEAD` must equal `--commit`, or the reporter stops with exit 2 and no report (`--allow-commit-mismatch` prints the report anyway, as untrusted). A root that is not a git checkout cannot be compared, which the report notes; `--require-history`, as in CI, makes it an error. The reporter then runs the registry check on `--root` and stops with exit 2 on any error. Its only git commands are `git rev-parse` for that comparison and the registry check's `origin/main` reachability check for waivers.
 
 ### Input
 
 ```text
+<artifacts>/<run_id>/run.json
 <artifacts>/<run_id>/<artifact name ending in attempt-N>/junit.xml
 <artifacts>/<run_id>/<artifact name ending in attempt-N>/leg
 ```
 
-One directory per workflow run of the commit (CI, live, nightly, release), named by its numeric run ID, holding that run's artifacts as `gh run download` writes them. The run attempt comes from the artifact name suffix `attempt-N` (`junit-scenarios-pg-x86_64-attempt-2`); the leg comes from the `leg` file, which must hold a layout §1.1 leg string. A leg artifact holds `leg` and `junit.xml` at its top and nothing else. Only the known artifacts of jobs that are not conformance legs, `service-nextest-junit-N`, `rust-coverage` and `typescript-coverage` (`NOT_CONFORMANCE` in the script), may lack a `leg` file; they are ignored with a note. Any other artifact without a `leg` file is an input error, because it may be a leg artifact whose failed attempt would otherwise vanish; so is a `leg` or `junit.xml` one directory down, and any other file in a leg artifact. A new non-conformance artifact in `ci.yml` needs an entry in that list. Nothing in the tree is trusted: a symbolic link anywhere in it, a directory or special file where `leg` or `junit.xml` belongs, a file system error, and XML nested more than 100 elements deep are input errors too, reported with the rest, never an internal error. A leg artifact without `junit.xml` (a job that stopped before its tests) gives that leg no result for that attempt.
+One directory per workflow run of the commit (CI, live, nightly, release), named by its numeric run ID, holding that run's artifacts as `gh run download` writes them and the run's metadata, `run.json`, as `gh run view RUN_ID --json databaseId,headSha,attempt,workflowName` writes it. `run.json` binds the run to the commit: `headSha` must equal `--commit`, `databaseId` the directory name, and no artifact may come from an attempt after `attempt` (the run's latest). A run directory without a valid, matching `run.json` is an input error, and none of its artifacts are used. The run attempt comes from the artifact name suffix `attempt-N` (`junit-scenarios-pg-x86_64-attempt-2`); the leg comes from the `leg` file, which must hold a layout §1.1 leg string. A leg artifact holds `leg` and `junit.xml` at its top and nothing else. Only the known artifacts of jobs that are not conformance legs, `service-nextest-junit-N`, `rust-coverage` and `typescript-coverage` (`NOT_CONFORMANCE` in the script), may lack a `leg` file; they are ignored with a note. Any other artifact without a `leg` file is an input error, because it may be a leg artifact whose failed attempt would otherwise vanish; so is a `leg` or `junit.xml` one directory down, and any other file in a leg artifact. A new non-conformance artifact in `ci.yml` needs an entry in that list. Nothing in the tree is trusted: a symbolic link anywhere in it, a directory or special file where `leg` or `junit.xml` belongs, a file system error, and XML nested more than 100 elements deep are input errors too, reported with the rest, never an internal error. A leg artifact without `junit.xml` (a job that stopped before its tests) gives that leg no result for that attempt.
 
 ```sh
+set -eu
 sha=<40-hex commit>
+git rev-parse HEAD | grep -qx "$sha"   # --root must be a checkout of the judged commit
 mkdir artifacts
-for id in $(gh run list --commit "$sha" --limit 100 --json databaseId --jq '.[].databaseId'); do
-  gh run download "$id" --dir "artifacts/$id" || true   # a run without artifacts fails here
-done
-git show origin/main:tests/conformance/waivers.toml > waivers.toml 2>/dev/null || rm -f waivers.toml
-node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts \
-  $( [ -f waivers.toml ] && echo --waivers waivers.toml ) \
+gh run list --commit "$sha" --limit 1000 --json databaseId --jq '.[].databaseId' > runs.txt
+while read -r id; do
+  mkdir "artifacts/$id"
+  gh run view "$id" --json databaseId,headSha,attempt,workflowName > "artifacts/$id/run.json"
+  # gh run download fails for a run without artifacts, so ask first.
+  if [ "$(gh api "repos/{owner}/{repo}/actions/runs/$id/artifacts" --jq .total_count)" -gt 0 ]; then
+    gh run download "$id" --dir "artifacts/$id"
+  fi
+done < runs.txt
+set --   # waivers.toml is optional on main
+if git show origin/main:tests/conformance/waivers.toml > waivers.toml 2>/dev/null; then set -- --waivers waivers.toml; fi
+node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts --require-history "$@" \
   --json conformance.json --summary "$GITHUB_STEP_SUMMARY"
 ```
+
+A partial download is an input error, not a smaller result: the script stops at the first failed `gh` call (`set -eu`) instead of judging what arrived. The reporter itself cannot yet tell an artifact that failed to download from one that was never uploaded; checking the downloads against the artifacts the Actions API lists for each run and attempt is an open question (layout §6). `--limit 1000` is far above the number of runs one commit gets; if `runs.txt` ever holds 1000 lines, raise it.
 
 | Option | Meaning |
 | --- | --- |
@@ -199,6 +210,7 @@ node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts \
 | `--docs-only` | The docs-only classifier skipped the build jobs: the summary starts with `runtime conformance: not run (docs-only change)`. |
 | `--require-milestone M` | Gate mode: the exit status answers only whether the gate of milestone M passed (below). M0 has no stages, so its gate is `no stages` and `--require-milestone M0` always exits 1: M0 is gated by ADR ratification and the doc checks, not by this reporter. |
 | `--require-history` | Passed to the registry check: no history is an error. |
+| `--allow-commit-mismatch` | Print the report although `--root` is a git checkout of another commit than `--commit`. The mismatch is an input error, so the report is untrusted and the exit status is 2. For looking at results locally, never for a gate. |
 | `--json FILE`, `--summary FILE` | Write the JSON result; append the Markdown summary (stdout always gets it). |
 
 ### Rules

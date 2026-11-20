@@ -6,16 +6,23 @@
 //
 //   node scripts/ci/report-conformance.mjs --commit SHA [--artifacts DIR]
 //        [--waivers FILE] [--root DIR] [--today YYYY-MM-DD] [--docs-only]
-//        [--require-milestone M] [--require-history] [--json FILE]
-//        [--summary FILE]
+//        [--require-milestone M] [--require-history]
+//        [--allow-commit-mismatch] [--json FILE] [--summary FILE]
 //
 // Input
 //   --artifacts DIR   Downloaded artifacts of every run for the commit, one
 //                     directory per run named by its numeric run ID, one
 //                     directory per artifact inside it (what
-//                     `gh run download RUN_ID -D DIR/RUN_ID` writes):
+//                     `gh run download RUN_ID -D DIR/RUN_ID` writes), and
+//                     the run's metadata in run.json:
+//                       DIR/<run_id>/run.json
 //                       DIR/<run_id>/<artifact name ending in attempt-N>/junit.xml
 //                       DIR/<run_id>/<artifact name ending in attempt-N>/leg
+//                     run.json is `gh run view RUN_ID --json
+//                     databaseId,headSha,attempt,workflowName`: headSha must
+//                     be --commit, databaseId the directory name, and no
+//                     artifact may be from a later attempt; otherwise the
+//                     run is an input error and is not used.
 //                     `leg` holds one layout §1.1 leg string; a leg artifact
 //                     holds nothing else. Only the known artifacts of other
 //                     jobs (NOT_CONFORMANCE: service-nextest-junit-N,
@@ -30,9 +37,11 @@
 //                     The waivers for --commit get the registry check's full
 //                     waiver rule, the others only its shape checks.
 //   --root DIR        Checkout of the judged commit (default: this
-//                     repository). Its registry is checked first with
-//                     check-conformance-registry.mjs; any error stops the
-//                     report.
+//                     repository). In a git checkout, HEAD must be --commit
+//                     (else exit 2, no report; --allow-commit-mismatch
+//                     prints the report as untrusted). Its registry is
+//                     checked first with check-conformance-registry.mjs; any
+//                     error stops the report.
 //   --today DATE      Judging date for waiver expiry (default: today, UTC);
 //                     an impossible date is a usage error.
 //   --docs-only       The docs-only classifier skipped the build jobs: the
@@ -79,6 +88,7 @@
 //      included, has a failed (unwaived) pair;
 //   0  none has.
 
+import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -431,12 +441,43 @@ function readArtifact(dir, run, artifact, catalogue) {
   return { report };
 }
 
+// Every run directory holds run.json, the run's metadata as
+//   gh run view RUN_ID --json databaseId,headSha,attempt,workflowName
+// writes it. It binds the artifacts to the judged commit: headSha must be
+// --commit, databaseId the directory name, and no artifact may come from an
+// attempt after `attempt` (the run's latest). Returns { attempt,
+// workflowName } or { error }; a run with an error is not read at all.
+const RUN_JSON = 'run.json';
+const MAX_RUN_JSON = 64 * 1024;
+function readRunJson(runDir, run, commit) {
+  const rel = `${run}/${RUN_JSON}`;
+  const bad = (msg) => ({ error: `${rel}: ${msg}; the run's artifacts are not used` });
+  const k = kindOf(join(runDir, RUN_JSON));
+  if (k === 'missing') return bad('missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName), so the run cannot be bound to the commit');
+  if (k !== 'file') return bad(`${KIND[k]}, not a regular file`);
+  if (lstatSync(join(runDir, RUN_JSON)).size > MAX_RUN_JSON) return bad(`more than ${MAX_RUN_JSON} bytes`);
+  let m;
+  try {
+    m = JSON.parse(readFileSync(join(runDir, RUN_JSON), 'utf8'));
+  } catch (ex) {
+    if (!(ex instanceof SyntaxError)) throw ex;
+    return bad(`not JSON (${ex.message})`);
+  }
+  if (m === null || typeof m !== 'object' || Array.isArray(m)) return bad('not a JSON object');
+  const count = (v) => Number.isSafeInteger(v) && v > 0;
+  if (m.headSha !== commit) return bad(`headSha is ${JSON.stringify(m.headSha)}, not the judged commit ${commit}`);
+  if (!count(m.databaseId) || String(m.databaseId) !== run) return bad(`databaseId is ${JSON.stringify(m.databaseId)}, not the directory's run ID ${run}`);
+  if (!count(m.attempt)) return bad(`attempt is ${JSON.stringify(m.attempt)}, not a positive integer`);
+  if (typeof m.workflowName !== 'string' || m.workflowName === '') return bad('workflowName is not a non-empty string');
+  return { attempt: m.attempt, workflowName: m.workflowName };
+}
+
 // Reads DIR/<run_id>/<artifact>/{junit.xml,leg}. Returns { reports, ignored,
 // notes, errors }; a report is { run_id, run_attempt, leg, artifact, cases:
 // Map(test ID -> passed | failed | skipped) }. Nothing in the tree is
 // trusted: a symbolic link, a directory where a file belongs or a file
 // system error is an input error, never an internal one.
-export function readArtifacts(dir, catalogue) {
+export function readArtifacts(dir, catalogue, commit) {
   const out = { reports: [], ignored: [], notes: [], errors: [] };
   const fsError = (where, ex) => {
     if (typeof ex?.code !== 'string') throw ex;
@@ -458,14 +499,22 @@ export function readArtifacts(dir, catalogue) {
   const seen = new Map();
   for (const run of runs) {
     let artifacts;
+    let meta;
     try {
       if (!/^[1-9]\d*$/.test(run) || kindOf(join(dir, run)) !== 'dir') {
         out.errors.push(`${run}: every entry of the artifacts directory is a directory named by a workflow run ID`);
         continue;
       }
-      artifacts = readdirSync(join(dir, run)).sort();
+      artifacts = readdirSync(join(dir, run))
+        .filter((x) => x !== RUN_JSON)
+        .sort();
+      meta = readRunJson(join(dir, run), run, commit);
     } catch (ex) {
       fsError(run, ex);
+      continue;
+    }
+    if (meta.error) {
+      out.errors.push(meta.error);
       continue;
     }
     for (const artifact of artifacts) {
@@ -477,6 +526,11 @@ export function readArtifacts(dir, catalogue) {
         fsError(rel, ex);
         continue;
       }
+      if (a.report && a.report.run_attempt > meta.attempt) {
+        out.errors.push(`${rel}: attempt ${a.report.run_attempt}, but ${run}/${RUN_JSON} says the run has ${meta.attempt} attempt(s); its results are not used`);
+        continue;
+      }
+      if (a.report) a.report.workflow = meta.workflowName;
       if (a.error) out.errors.push(a.error);
       if (a.ignored) out.ignored.push(rel);
       if (a.note) out.notes.push(a.note);
@@ -631,7 +685,7 @@ export function judge({ scenarios, subcases, contracts, reports, waivers = [], c
     judged_on: today,
     docs_only: docsOnly,
     headline: docsOnly ? 'runtime conformance: not run (docs-only change)' : null,
-    reports: reports.map((r) => ({ run_id: r.run_id, run_attempt: r.run_attempt, leg: r.leg, artifact: r.artifact, cases: r.cases.size })),
+    reports: reports.map((r) => ({ run_id: r.run_id, run_attempt: r.run_attempt, workflow: r.workflow ?? null, leg: r.leg, artifact: r.artifact, cases: r.cases.size })),
     milestones,
     stages,
     scenarios: scenarioOut,
@@ -732,7 +786,17 @@ export function renderMarkdown(res, { inputErrors = [], notes = [], ignored = []
 
 const USAGE =
   'usage: report-conformance.mjs --commit SHA [--artifacts DIR] [--waivers FILE] [--root DIR] [--today YYYY-MM-DD] ' +
-  '[--docs-only] [--require-milestone M] [--require-history] [--json FILE] [--summary FILE]';
+  '[--docs-only] [--require-milestone M] [--require-history] [--allow-commit-mismatch] [--json FILE] [--summary FILE]';
+
+// HEAD of the git checkout whose top level is `root`; undefined when root is
+// not one (or git is missing), null when HEAD names no commit.
+export function checkoutHead(root) {
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  const top = git('rev-parse', '--show-toplevel');
+  if (top.status !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(root)) return undefined;
+  const head = git('rev-parse', '--verify', '--quiet', 'HEAD^{commit}');
+  return head.status === 0 ? head.stdout.trim() : null;
+}
 
 const VALUE_FLAGS = ['--commit', '--artifacts', '--waivers', '--root', '--today', '--require-milestone', '--json', '--summary'];
 
@@ -752,6 +816,7 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
     const a = argv[i];
     if (a === '--docs-only') o.docsOnly = true;
     else if (a === '--require-history') o.requireHistory = true;
+    else if (a === '--allow-commit-mismatch') o.allowCommitMismatch = true;
     else if (VALUE_FLAGS.includes(a) && argv[i + 1] !== undefined) o[a.slice(2).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = argv[++i];
     else {
       logErr(USAGE);
@@ -770,6 +835,22 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   if (!/^\d{4}-\d\d-\d\d$/.test(today) || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== today) return usage('--today must be a calendar date YYYY-MM-DD');
   if (o.requireMilestone !== undefined && !MILESTONES.includes(o.requireMilestone)) return usage(`--require-milestone must be one of ${MILESTONES.join(', ')}`);
   const root = resolve(o.root);
+
+  // The registry judged is the checkout at --root: in a git checkout, its
+  // HEAD must be --commit. --allow-commit-mismatch still prints the report,
+  // as untrusted (an input error). Outside a git checkout there is nothing
+  // to compare (a note); --require-history makes that an error below.
+  const bound = { errors: [], notes: [] };
+  const head = checkoutHead(root);
+  if (head === undefined) bound.notes.push('the registry is not bound to --commit: --root is not a git checkout');
+  else if (head !== o.commit) {
+    const msg = `--root is a checkout of ${head ?? 'no commit'}, not of --commit ${o.commit}, so its registry is not the judged commit's`;
+    if (!o.allowCommitMismatch) {
+      logErr(`report-conformance: ${msg}; no report (--allow-commit-mismatch prints it as untrusted)`);
+      return 2;
+    }
+    bound.errors.push(`${msg} (--allow-commit-mismatch)`);
+  }
 
   // The registry of the judged commit must pass the static check first.
   const chk = checkRegistry(root, { requireHistory: o.requireHistory });
@@ -826,7 +907,9 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
     waivers = (doc.waiver ?? []).map((w) => ({ ...w, expires: w.expires.toISOString().slice(0, 10) }));
   }
 
-  const art = o.artifacts === undefined ? { reports: [], ignored: [], notes: [], errors: [] } : readArtifacts(resolve(o.artifacts), catalogue);
+  const art = o.artifacts === undefined ? { reports: [], ignored: [], notes: [], errors: [] } : readArtifacts(resolve(o.artifacts), catalogue, o.commit);
+  art.errors.unshift(...bound.errors);
+  art.notes.unshift(...bound.notes);
   const res = judge({ scenarios, subcases, contracts, reports: art.reports, waivers, commit: o.commit, today, docsOnly: o.docsOnly });
   res.input_errors = art.errors;
   res.trusted = art.errors.length === 0;

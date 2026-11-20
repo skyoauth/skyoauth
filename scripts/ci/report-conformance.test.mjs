@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -151,18 +151,28 @@ function junit(cases) {
 }
 const allPass = (tests) => junit(tests.map((t) => [t, 'passed']));
 
+// Writes a run's run.json as `gh run view RUN --json
+// databaseId,headSha,attempt,workflowName` does; `over` replaces fields.
+const runJson = (d, run, over = {}) => write(join(d, String(run), 'run.json'), JSON.stringify({ attempt: 1, databaseId: Number(run), headSha: SHA, workflowName: 'CI', ...over }));
+
 // Writes artifacts. `spec` is a list of { run, leg, attempt, junit, name }:
 // junit is the file text (null: no junit.xml), leg null: no leg file. The
-// artifact name defaults to the scenarios-pg pattern.
-function artifacts(spec) {
+// artifact name defaults to the scenarios-pg pattern. Each run gets a
+// run.json for `commit` whose attempt is the run's highest artifact attempt
+// (from the name), unless `runs[run]` replaces fields (null: no run.json).
+function artifacts(spec, { commit = SHA, runs = {} } = {}) {
   const d = tmp('report-art-');
+  const attempts = new Map();
   for (const a of spec) {
     const name = a.name ?? `junit-${(a.leg ?? 'none').replace('/', '-')}-attempt-${a.attempt ?? 1}`;
-    const dir = join(d, String(a.run ?? 100), name);
+    const run = String(a.run ?? 100);
+    const dir = join(d, run, name);
     mkdirSync(dir, { recursive: true });
     if (a.leg !== null) writeFileSync(join(dir, 'leg'), `${a.leg}\n`);
     if (a.junit !== null) writeFileSync(join(dir, 'junit.xml'), a.junit);
+    attempts.set(run, Math.max(attempts.get(run) ?? 1, Number(/attempt-(\d+)$/.exec(name)?.[1] ?? 1)));
   }
+  for (const [run, attempt] of attempts) if (runs[run] !== null) runJson(d, run, { attempt, headSha: commit, ...runs[run] });
   return d;
 }
 
@@ -215,8 +225,10 @@ describe('statuses', () => {
     const m5 = gateStages('M5');
     assert.ok(r.out.includes(`| M5 | ${m5} | 0 | 0 | 0 | ${m5} | planned |\n\nThe counts`), r.out);
     assert.match(r.out, /\| planned \|\n\nThe counts cover required stages\. Stages of conditional sub-IDs are listed with the implemented stages but gate no milestone\.\n\n### Implemented stages \(1\)\n\n\| Stage \| Status \| Details \|\n\| --- \| --- \| --- \|\n\| A24 M1a/);
-    for (const re of [/docs-only/, /Input errors/, /Results not counted/, /Waivers for this commit/, /note:/, /\*\*null\*\*/]) assert.doesNotMatch(r.out, re);
-    assert.ok(r.out.endsWith('| A24 M1a: consume primitive | passed | 2 pair(s) passed |\n'), JSON.stringify(r.out.slice(-80)));
+    for (const re of [/docs-only/, /Input errors/, /Results not counted/, /Waivers for this commit/, /\*\*null\*\*/]) assert.doesNotMatch(r.out, re);
+    assert.ok(r.out.endsWith('| A24 M1a: consume primitive | passed | 2 pair(s) passed |\n\n- note: the registry is not bound to --commit: --root is not a git checkout\n'), JSON.stringify(r.out.slice(-160)));
+    assert.deepEqual(r.json.notes, ['the registry is not bound to --commit: --root is not a git checkout']);
+    assert.deepEqual(r.json.reports, [{ run_id: 100, run_attempt: 1, workflow: 'CI', leg: PG, artifact: '100/junit-scenarios-pg-x86_64-attempt-1', cases: 2 }]);
   });
 
   test('--require-milestone: exit 1 while any stage of the milestone is not passed', () => {
@@ -680,15 +692,18 @@ describe('waivers', () => {
     writeFileSync(f, text);
     return f;
   };
-  const failedThenPassed = () =>
-    artifacts([
-      { leg: PG, attempt: 1, junit: junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]) },
-      { leg: PG, attempt: 2, junit: allPass(A24) },
-    ]);
+  const failedThenPassed = (commit = SHA) =>
+    artifacts(
+      [
+        { leg: PG, attempt: 1, junit: junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]) },
+        { leg: PG, attempt: 2, junit: allPass(A24) },
+      ],
+      { commit },
+    );
 
   test('a waiver discards the one failed attempt it names; the re-run pass then counts, and the waiver is listed next to it', () => {
     const { dir, head } = gitRoot();
-    const r = report(dir, ['--require-history', '--waivers', waiverFile(waiver(head)), '--artifacts', failedThenPassed()], { commit: head });
+    const r = report(dir, ['--require-history', '--waivers', waiverFile(waiver(head)), '--artifacts', failedThenPassed(head)], { commit: head });
     assert.equal(r.code, 0, r.err);
     const p = pair(r.json, 'A24', 'M1a', A24_NEG, PG);
     assert.equal(p.status, 'passed');
@@ -701,7 +716,7 @@ describe('waivers', () => {
 
   test('a waiver never turns a failure into a pass: without another passing attempt the pair is not run', () => {
     const { dir, head } = gitRoot();
-    const r = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', artifacts([{ leg: PG, junit: junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]) }])], { commit: head });
+    const r = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', artifacts([{ leg: PG, junit: junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]) }], { commit: head })], { commit: head });
     assert.equal(r.code, 0);
     assert.equal(pair(r.json, 'A24', 'M1a', A24_NEG, PG).status, 'not run');
   });
@@ -715,20 +730,20 @@ describe('waivers', () => {
       [{ test: `"${A24_POS.id}"` }, /matches no failed attempt/],
     ];
     for (const [over, re] of cases) {
-      const r = report(dir, ['--waivers', waiverFile(waiver(head, over)), '--artifacts', failedThenPassed()], { commit: head });
+      const r = report(dir, ['--waivers', waiverFile(waiver(head, over)), '--artifacts', failedThenPassed(head)], { commit: head });
       assert.equal(r.code, 1, JSON.stringify(over));
       assert.equal(pair(r.json, 'A24', 'M1a', A24_NEG, PG).status, 'failed');
       assert.equal(r.json.waivers[0].applied, false);
       assert.match(r.json.waivers[0].why, re);
       assert.match(r.out, /- \*\*not applied\*\*: /);
     }
-    const same = report(dir, ['--waivers', waiverFile(waiver(head, { expires: TODAY })), '--artifacts', failedThenPassed()], { commit: head });
+    const same = report(dir, ['--waivers', waiverFile(waiver(head, { expires: TODAY })), '--artifacts', failedThenPassed(head)], { commit: head });
     assert.equal(same.code, 0, 'a waiver is valid through its expiry date');
     // A waiver for another commit on main is reported as such, not listed.
     git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'next');
     git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
     const next = git(dir, 'rev-parse', 'HEAD');
-    const other = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', failedThenPassed()], { commit: next });
+    const other = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', failedThenPassed(next)], { commit: next });
     assert.equal(other.code, 1);
     assert.equal(other.json.waivers[0].why, 'for another commit');
     assert.equal(other.json.waivers[0].applied, false);
@@ -738,7 +753,7 @@ describe('waivers', () => {
   test('a waiver for one attempt leaves another failed attempt of the same run failed', () => {
     const { dir, head } = gitRoot();
     const fail = junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]);
-    const r = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', artifacts([1, 2].map((attempt) => ({ leg: PG, attempt, junit: fail })).concat([{ leg: PG, attempt: 3, junit: allPass(A24) }]))], {
+    const r = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', artifacts([1, 2].map((attempt) => ({ leg: PG, attempt, junit: fail })).concat([{ leg: PG, attempt: 3, junit: allPass(A24) }]), { commit: head })], {
       commit: head,
     });
     assert.equal(r.code, 1);
@@ -748,19 +763,19 @@ describe('waivers', () => {
 
   test('an expired and a valid waiver for the same attempt: the valid one applies', () => {
     const { dir, head } = gitRoot();
-    const r = report(dir, ['--waivers', waiverFile(`${waiver(head, { expires: '2026-01-01' })}\n${waiver(head)}`), '--artifacts', failedThenPassed()], { commit: head });
+    const r = report(dir, ['--waivers', waiverFile(`${waiver(head, { expires: '2026-01-01' })}\n${waiver(head)}`), '--artifacts', failedThenPassed(head)], { commit: head });
     assert.equal(r.code, 0);
     assert.deepEqual(r.json.waivers.map((w) => w.applied), [false, true]);
   });
 
   test('a waiver for a not-run pair or a planned stage is rejected', () => {
     const { dir, head } = gitRoot();
-    const notRun = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', artifacts([{ leg: PG, junit: allPass([A24_POS]) }])], { commit: head });
+    const notRun = report(dir, ['--waivers', waiverFile(waiver(head)), '--artifacts', artifacts([{ leg: PG, junit: allPass([A24_POS]) }], { commit: head })], { commit: head });
     assert.equal(notRun.code, 0);
     assert.equal(pair(notRun.json, 'A24', 'M1a', A24_NEG, PG).status, 'not run');
     assert.match(notRun.json.waivers[0].why, /a waiver never applies to not run or planned/);
     assert.match(notRun.out, /- \*\*not applied\*\*: `nextest:.*a24_neg_replay` on `scenarios-pg\/x86_64`, run 100 attempt 1: matches no failed attempt/);
-    const planned = report(dir, ['--waivers', waiverFile(waiver(head, { test: `"${A24_POS.id}"` })), '--artifacts', artifacts([{ leg: PG, junit: junit([[A24_POS, 'failed'], [A24_NEG, 'passed']]) }])], { commit: head });
+    const planned = report(dir, ['--waivers', waiverFile(waiver(head, { test: `"${A24_POS.id}"` })), '--artifacts', artifacts([{ leg: PG, junit: junit([[A24_POS, 'failed'], [A24_NEG, 'passed']]) }], { commit: head })], { commit: head });
     // A24_POS is in the implemented M1a stage too, where the waiver applies;
     // the planned M2 stage stays planned.
     assert.equal(stage(planned.json, 'A24', 'M2').status, 'planned');
@@ -781,7 +796,7 @@ describe('waivers', () => {
       [waiver(head, { expires: '"2026-12-31"' }), /expires must be a TOML local date/],
       ['[[waiver]\n', /not valid TOML/],
     ]) {
-      const r = report(dir, ['--waivers', waiverFile(text), '--artifacts', failedThenPassed()], { commit: head });
+      const r = report(dir, ['--waivers', waiverFile(text), '--artifacts', failedThenPassed(head)], { commit: head });
       assert.equal(r.code, 2, text);
       assert.match(r.err, re);
       assert.match(r.err, /has \d+ error\(s\); no report/);
@@ -798,7 +813,7 @@ describe('waivers', () => {
     // A test and leg this registry does not have, for a commit that is not
     // even in the history: main may hold it for an older or newer commit.
     const foreign = waiver(other, { test: '"nextest:skyoauth-scenarios/pg/x::a24_neg_renamed_later"', leg: '"scenarios-pg/arm64"' });
-    const ok = report(dir, ['--require-history', '--waivers', waiverFile(`${foreign}\n${waiver(head)}`), '--artifacts', failedThenPassed()], { commit: head });
+    const ok = report(dir, ['--require-history', '--waivers', waiverFile(`${foreign}\n${waiver(head)}`), '--artifacts', failedThenPassed(head)], { commit: head });
     assert.equal(ok.code, 0, ok.err);
     assert.deepEqual(ok.json.waivers.map((w) => [w.commit, w.applied, w.why ?? null]), [
       [other, false, 'for another commit'],
@@ -824,6 +839,32 @@ describe('waivers', () => {
     const mine = report(dir, ['--waivers', f], { commit: head });
     assert.equal(mine.code, 2);
     assert.ok(mine.err.startsWith(`${f}:10: error [waivers] leg "scenarios-pg/arm64" is not a leg of a stage that lists`), mine.err);
+  });
+
+  test('in a git checkout, --root must be a checkout of --commit, unless --allow-commit-mismatch, which makes the report untrusted', () => {
+    const { dir, head } = gitRoot();
+    const other = 'b'.repeat(40);
+    const stop = report(dir, ['--artifacts', failedThenPassed(other)], { commit: other });
+    assert.equal(stop.code, 2);
+    assert.equal(stop.json, null);
+    assert.equal(stop.err, `report-conformance: --root is a checkout of ${head}, not of --commit ${other}, so its registry is not the judged commit's; no report (--allow-commit-mismatch prints it as untrusted)`);
+    const loose = report(dir, ['--allow-commit-mismatch', '--artifacts', failedThenPassed(other)], { commit: other });
+    assert.equal(loose.code, 2);
+    assert.equal(loose.json.trusted, false);
+    assert.deepEqual(loose.json.input_errors, [`--root is a checkout of ${head}, not of --commit ${other}, so its registry is not the judged commit's (--allow-commit-mismatch)`]);
+    assert.equal(stage(loose.json, 'A24', 'M1a').status, 'failed');
+    const same = report(dir, ['--artifacts', failedThenPassed(head)], { commit: head });
+    assert.equal(same.code, 1);
+    assert.equal(same.json.trusted, true);
+    assert.deepEqual(same.json.notes, []);
+    assert.equal(checkoutHead(dir), head);
+    assert.equal(checkoutHead(join(dir, 'tests')), undefined, 'a subdirectory is not the checkout');
+    const empty = tmp('report-git-');
+    git(empty, 'init', '-q');
+    assert.equal(checkoutHead(empty), null);
+    const none = report(empty, [], { commit: head });
+    assert.equal(none.code, 2);
+    assert.match(none.err, /--root is a checkout of no commit, not of --commit/);
   });
 
   test('without history a waiver commit is not checked (note), unless --require-history', () => {
@@ -898,6 +939,7 @@ describe('input errors', () => {
     writeFileSync(join(d, '7'), '');
     writeFileSync(join(d, '100', 'stray.txt'), '');
     write(join(d, '9', 'junit-scenarios-pg-x86_64-attempt-9', 'leg'), `${PG}\n`);
+    runJson(d, 9, { attempt: 9 });
     write(join(d, '9', 'junit-scenarios-pg-x86_64-attempt-9', 'junit.xml'), allPass(A24));
     const r = report(root(withA24), ['--artifacts', d]);
     assert.equal(r.code, 2);
@@ -968,6 +1010,59 @@ describe('input errors', () => {
     const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: deep(100000) }])]);
     assert.equal(r.code, 2);
     assert.match(r.json.input_errors[0], /junit\.xml: malformed JUnit: line 1: elements nested more than 100 deep; its results are not used$/);
+  });
+
+  test('run.json binds each run to the judged commit: a missing or mismatched one is an input error and the run is not used', () => {
+    const fail = junit([[A24_POS, 'passed'], [A24_NEG, 'failed']]);
+    const runs = {
+      1: null,
+      2: { headSha: 'b'.repeat(40) },
+      3: { databaseId: 33 },
+      4: { databaseId: '4' },
+      5: { attempt: 0 },
+      6: { attempt: 1.5 },
+      7: { workflowName: '' },
+      8: { workflowName: 7 },
+      9: { attempt: 1 },
+    };
+    const spec = Object.keys(runs).map((run) => ({ run: Number(run), leg: PG, attempt: run === '9' ? 2 : 1, junit: fail }));
+    const d = artifacts([...spec, { run: 9, leg: PG, attempt: 1, junit: allPass(A24) }, { run: 10, leg: PG, junit: allPass(A24) }, { run: 11, leg: PG, junit: fail }, { run: 12, leg: PG, junit: fail }, { run: 13, leg: PG, junit: fail }, { run: 14, leg: PG, junit: fail }], { runs });
+    write(join(d, '11', 'run.json'), '{"headSha": ');
+    write(join(d, '12', 'run.json'), '[]');
+    rmSync(join(d, '13', 'run.json'));
+    mkdirSync(join(d, '13', 'run.json'));
+    write(join(d, '14', 'run.json'), `{"x": "${'y'.repeat(64 * 1024)}"}`);
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 2);
+    const NOT = "; the run's artifacts are not used";
+    assert.deepEqual(r.json.input_errors, [
+      `1/run.json: missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName), so the run cannot be bound to the commit${NOT}`,
+      `11/run.json: not JSON (${r.json.input_errors[1].replace(/^11\/run\.json: not JSON \((.*)\); the run.*$/, '$1')})${NOT}`,
+      `12/run.json: not a JSON object${NOT}`,
+      `13/run.json: a directory, not a regular file${NOT}`,
+      `14/run.json: more than 65536 bytes${NOT}`,
+      `2/run.json: headSha is "${'b'.repeat(40)}", not the judged commit ${SHA}${NOT}`,
+      `3/run.json: databaseId is 33, not the directory's run ID 3${NOT}`,
+      `4/run.json: databaseId is "4", not the directory's run ID 4${NOT}`,
+      `5/run.json: attempt is 0, not a positive integer${NOT}`,
+      `6/run.json: attempt is 1.5, not a positive integer${NOT}`,
+      `7/run.json: workflowName is not a non-empty string${NOT}`,
+      `8/run.json: workflowName is not a non-empty string${NOT}`,
+      "9/junit-scenarios-pg-x86_64-attempt-2: attempt 2, but 9/run.json says the run has 1 attempt(s); its results are not used",
+    ]);
+    assert.match(r.json.input_errors[1], /^11\/run\.json: not JSON \(.+\); the run's artifacts are not used$/);
+    // Only run 10 and attempt 1 of run 9, both passing, are joined.
+    assert.deepEqual(r.json.reports.map((x) => x.artifact), ['10/junit-scenarios-pg-x86_64-attempt-1', '9/junit-scenarios-pg-x86_64-attempt-1']);
+    assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
+    assert.equal(r.json.trusted, false);
+  });
+
+  test('a run directory with only run.json is a run without artifacts', () => {
+    const d = tmp('report-art-');
+    runJson(d, 5);
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.json.input_errors, []);
   });
 
   test('a missing artifacts directory is an input error', () => {
@@ -1359,7 +1454,9 @@ describe('cli', () => {
   // The committed registry changes as stages are implemented and gates pass,
   // so this case checks only that the report is produced and well-formed.
   test('the script runs on the repository: exit 0 and a milestone table', () => {
-    const p = spawnSync(process.execPath, [SCRIPT, '--commit', SHA, '--today', TODAY], { encoding: 'utf8' });
+    // In a git checkout the judged commit must be HEAD.
+    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8' });
     assert.equal(p.status, 0, p.stderr);
     for (const m of ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5']) {
       assert.match(p.stdout, new RegExp(`^\\| ${m} \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| (?:passed|failed|not run|planned|no stages) \\|$`, 'm'));
