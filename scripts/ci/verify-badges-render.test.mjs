@@ -58,6 +58,10 @@ const git = (cwd, ...args) => execFileSync(REAL_GIT, args, { cwd, env: GIT_ENV, 
 //   depth2   the same, cloned with --depth 2 (the job's fetch-depth)
 //   shallow  the same, cloned with --depth 1: HEAD has no parent
 //   root     a single commit with README `md`: no parent either
+//   linear   the pull request's own commit, fast-forwarded onto the base:
+//            one parent, which is not the base tip of a merge
+//   octopus  a merge of the pull request and a second branch: three
+//            parents
 //   none     a plain directory holding README `md`, not a repository
 // The base commit also holds the files in `baseFiles`, and the pull
 // request, which always changes another file so the merge is never empty,
@@ -78,7 +82,7 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
     writeFileSync(join(work, 'README.md'), md);
     return;
   }
-  const origin = kind === 'merge' || kind === 'root' ? work : join(dir, 'origin');
+  const origin = ['merge', 'root', 'linear', 'octopus'].includes(kind) ? work : join(dir, 'origin');
   mkdirSync(origin);
   git(origin, 'init', '-q', '-b', 'main');
   if (kind === 'root') {
@@ -96,6 +100,19 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
   git(origin, 'add', '-A');
   git(origin, 'commit', '-q', '-m', 'pull request');
   git(origin, 'checkout', '-q', 'main');
+  if (kind === 'linear') {
+    git(origin, 'merge', '-q', '--ff-only', 'pr');
+    return;
+  }
+  if (kind === 'octopus') {
+    git(origin, 'checkout', '-q', '-b', 'other', 'main');
+    put(origin, 'other.rs', '// other\n');
+    git(origin, 'add', '.');
+    git(origin, 'commit', '-q', '-m', 'other');
+    git(origin, 'checkout', '-q', 'main');
+    git(origin, 'merge', '-q', '--no-ff', '-m', 'merge', 'pr', 'other');
+    return;
+  }
   git(origin, 'merge', '-q', '--no-ff', '-m', 'merge', 'pr');
   if (kind !== 'merge') git(dir, 'clone', '-q', '--depth', kind === 'depth2' ? '2' : '1', `file://${origin}`, work);
 }
@@ -105,7 +122,8 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
 // runs in a checkout of the given kind (see checkout()), and README_REF
 // is its HEAD unless `args` says otherwise (SHA where there is no HEAD).
 // With `gitFails`, `git diff` exits 128, as on a corrupt repository.
-function verify({ pr, rules = {}, html = readme(), base = BASE_README, md = base, extra = {}, baseFiles = {}, repo = 'merge', gitFails = false, args }) {
+// With `sub`, the script runs in that subdirectory of the checkout.
+function verify({ pr, rules = {}, html = readme(), base = BASE_README, md = base, extra = {}, baseFiles = {}, repo = 'merge', gitFails = false, sub = '', env = {}, args }) {
   const dir = join(TOP, `case-${++cases}`);
   const bin = join(dir, 'bin');
   const tmp = join(dir, 'tmp');
@@ -128,8 +146,9 @@ exec '${REAL_GIT}' "$@"
   const lines = Object.entries(all).map(([sub, responses]) => `${sub} ${responses}`);
   lines.push('https://raw.githubusercontent.com/ 200:image/svg+xml');
   writeFileSync(join(dir, 'rules'), `${lines.join('\n')}\n`);
+  mkdirSync(join(work, sub), { recursive: true });
   const r = spawnSync('sh', [SCRIPT, ...(pr ? ['--pull-request'] : []), ...args], {
-    cwd: work,
+    cwd: join(work, sub),
     encoding: 'utf8',
     timeout: 60_000,
     killSignal: 'SIGKILL',
@@ -143,6 +162,7 @@ exec '${REAL_GIT}' "$@"
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CEILING_DIRECTORIES: dir,
       ...(gitFails ? { GIT_STUB_FAIL_DIFF: '1' } : {}),
+      ...env,
     },
   });
   assert.equal(r.error, undefined);
@@ -174,6 +194,8 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.deepEqual(warnings(r), []);
         assert.equal(r.calls.length, 5);
         for (const badge of BADGES) assert.match(r.stdout, new RegExp(`${raw(badge)} -> 200 image/svg\\+xml`));
+        assert.equal(r.stdout.match(/^README embeds https:\/\/github\.com\/.*\.svg$/gm)?.length, 4, r.stdout);
+        assert.doesNotMatch(r.stdout, /^badge file /m);
         assert.deepEqual(r.leftovers, []);
       });
 
@@ -313,7 +335,7 @@ describe('verify-badges-render.sh with a stub curl', () => {
       assert.equal(warnings(r).length, 1);
       assert.match(warnings(r)[0], /could not fetch the rendered README at .* \(HTTP 503\); the README is unchanged from the base branch/);
       assert.deepEqual(r.calls.map((c) => c.split(' ').pop()), [`${README_URL}?ref=${r.head}`, ...BADGES.map(raw)]);
-      assert.deepEqual(r.gitCalls.map((c) => c.split(' ')[0]), ['rev-parse', 'rev-parse', 'rev-parse', 'ls-tree', 'ls-tree', 'diff']);
+      assert.deepEqual(r.gitCalls.map((c) => c.split(' ')[0]), ['rev-parse', 'show', 'rev-parse', 'rev-parse', 'rev-parse', 'ls-tree', 'ls-tree', 'diff']);
       assert.deepEqual(r.leftovers, []);
     });
 
@@ -362,6 +384,70 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.equal(r.calls.length, 1);
       });
     }
+
+    for (const [repo, what, parents] of [['linear', 'a non-merge (fast-forwarded) commit', 1], ['octopus', 'a merge commit with three parents', 3]]) {
+      test(`${what} fails, even with the README unchanged`, () => {
+        const r = verify({ pr: true, rules: down, repo });
+        assert.equal(r.status, 1, r.stdout + r.stderr);
+        assert.deepEqual(warnings(r), []);
+        assert.match(r.stderr, new RegExp(`HEAD is not a merge commit with two parents \\(${parents} parents\\), so HEAD\\^1 is not known to be the base tip`));
+        assert.equal(r.calls.length, 1);
+      });
+    }
+
+    // The README paths are the checkout's top-level ones wherever the
+    // script runs; a subdirectory's own README.md is not one of them.
+    // The fallback never reads the README, so its log must not claim to
+    // report what the README embeds.
+    test('logs the badge files it checks, not what the README embeds', () => {
+      const r = verify({ pr: true, rules: down });
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /README embeds/);
+      for (const file of ['rust-tests', 'rust-coverage', 'typescript-tests', 'typescript-coverage']) {
+        assert.ok(r.stdout.includes(`badge file ${file}.svg (not read from the README, which is unchanged from the base branch)\n  published file https://raw.githubusercontent.com/${REPO}/badges/main/${file}.svg -> 200 image/svg+xml\n`), r.stdout);
+      }
+    });
+
+    // git applies these exported variables to every pathspec: literal or
+    // noglob pathspecs name no file, so the README would compare as
+    // unchanged. The script clears exactly these two before it compares.
+    test('clears GIT_LITERAL_PATHSPECS and GIT_NOGLOB_PATHSPECS before comparing the README', () => {
+      const unsets = readFileSync(SCRIPT, 'utf8').match(/^\s*unset\b.*$/gm) ?? [];
+      assert.deepEqual(unsets.map((line) => line.trim()), ['unset GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS']);
+    });
+
+    for (const env of [
+      { GIT_LITERAL_PATHSPECS: '1' },
+      { GIT_NOGLOB_PATHSPECS: '1' },
+      { GIT_LITERAL_PATHSPECS: '1', GIT_NOGLOB_PATHSPECS: '1' },
+      { GIT_GLOB_PATHSPECS: '1' },
+      { GIT_ICASE_PATHSPECS: '1' },
+    ]) {
+      const what = Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ');
+      test(`an exported ${what} does not make a changed README pass`, () => {
+        const r = verify({ pr: true, rules: down, md: changed, env });
+        assert.equal(r.status, 1, r.stdout + r.stderr);
+        assert.match(r.stderr, /this pull request changes the README/);
+      });
+    }
+
+    test('run from a subdirectory, a changed README still fails', () => {
+      const r = verify({ pr: true, rules: down, md: changed, sub: 'lib/inner', extra: { 'lib/inner/README.md': '# inner\n' }, baseFiles: { 'lib/inner/README.md': '# inner\n' } });
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /this pull request changes the README/);
+    });
+
+    test('run from a subdirectory, a symbolic-link README still fails', () => {
+      const r = verify({ pr: true, rules: down, sub: 'lib', baseFiles: { 'README.md': { link: 'doc/home.md' }, 'doc/home.md': BASE_README } });
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.ok(r.stderr.includes('a README path is not a regular file in HEAD or HEAD^1, so an unchanged README proves nothing: README.md (mode 120000)'), r.stderr);
+    });
+
+    test('run from a subdirectory, an unchanged README passes', () => {
+      const r = verify({ pr: true, rules: down, sub: 'lib' });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(warnings(r).length, 1);
+    });
 
     test('a directory that is not a git repository fails', () => {
       const r = verify({ pr: true, rules: down, repo: 'none' });

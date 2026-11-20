@@ -276,12 +276,59 @@ gate() {
 
 # `junit_attr FILE NAME`: the count in the NAME attribute of FILE's
 # <testsuites> element, without leading zeros (which `$(( ))` reads as
-# octal), or nothing when it is absent. Fails for a value that is not a
-# whole number (empty, negative, fractional, with other characters), and
-# for a count of more than 9 digits, which `test` and `$(( ))` cannot be
+# octal), or nothing when it is absent. The element may span lines, and
+# its attributes may be single- or double-quoted with spaces around `=`.
+# Only the first 64 KiB of FILE are read, and they are cut off before awk
+# sees them (a failed run can leave a report of many megabytes, possibly
+# on one line, which awk would hold whole as a record, and joining many
+# lines into one awk string is quadratic in mawk and busybox awk), so the
+# start tag must end within them.
+# Fails when <testsuites> is not the first element, after nothing but
+# white space and an optional <?xml ...?> declaration (so a comment,
+# DOCTYPE or processing instruction before it fails: its text could
+# hold another <testsuites>), when the start tag cannot be read attribute
+# by attribute (an unquoted or unterminated value, a missing space between
+# attributes, NAME given twice), for a value that is not a whole
+# number (empty, negative, fractional, with other characters), and for a
+# count of more than 9 digits, which `test` and `$(( ))` cannot be
 # trusted with.
 junit_attr() {
-    value=$(sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([^\"]*\)\".*/=\1/p" "$1" | head -n 1)
+    rc=0
+    value=$(head -c 65536 <"$1" | tr '\r\t' '  ' | awk -v want="$2" -v sq="'" '
+        { s = s $0 " " }
+        END {
+            s = substr(s, 1, 65536)
+            sub(/^ *<\?xml ([^?]|\?[^>])*\?>/, "", s)
+            if (s !~ /^ *<testsuites[ \/>]/) exit 2
+            sub(/^ *<testsuites/, "", s)
+            for (;;) {
+                sub(/^ +/, "", s)
+                if (s ~ /^\/?>/) break
+                if (!match(s, /^[A-Za-z_:][-A-Za-z0-9_:.]*/)) exit 2
+                name = substr(s, 1, RLENGTH)
+                s = substr(s, RLENGTH + 1)
+                if (!match(s, /^ *= */)) exit 2
+                s = substr(s, RLENGTH + 1)
+                q = substr(s, 1, 1)
+                if (q != "\"" && q != sq) exit 2
+                s = substr(s, 2)
+                e = index(s, q)
+                if (e == 0) exit 2
+                v = substr(s, 1, e - 1)
+                s = substr(s, e + 1)
+                if (s !~ /^( |\/?>)/) exit 2
+                if (name == want) {
+                    if (found) exit 2
+                    found = 1
+                    out = v
+                }
+            }
+            if (found) printf "=%s", out
+        }') || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "publish-badges: cannot parse the <testsuites> element in $1" >&2
+        return 1
+    fi
     [ -n "$value" ] || return 0
     value=${value#=}
     case $value in
