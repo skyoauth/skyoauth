@@ -783,6 +783,12 @@ The database does not enforce these rules; the service must:
   the rows it references, which wait only for a delete or key change of
   those rows. Later writes to the operation (consume, revoke, outcome) are
   domain-row writes and keep the `0002` order.
+- `0005` makes two `0002` tables foreign-key targets, so a bare `TRUNCATE`
+  of them now fails with `0A000` (a table referenced in a foreign key) before
+  the `0002` truncate guard can raise `SK001`:
+  `TRUNCATE audit_event` needs `administrative_operation` in the same
+  statement, and `TRUNCATE instance_security_policy` needs `recovery_state`.
+  The `0002` guard tests list those tables; the guard itself is unchanged.
 
 ## Limits
 

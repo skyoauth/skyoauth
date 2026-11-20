@@ -461,7 +461,7 @@ async fn instance_security_policy_revision_advances_by_one_and_row_is_kept() {
         SK001 UPDATE instance_security_policy SET revision = 1
         SK001 UPDATE instance_security_policy SET instance_id = 'x', revision = revision + 1
         SK001 DELETE FROM instance_security_policy
-        SK001 TRUNCATE instance_security_policy
+        SK001 TRUNCATE instance_security_policy, recovery_state
     ",
     )
     .await;
@@ -1229,7 +1229,7 @@ async fn assert_guards_hold(pool: &PgPool, setup: &'static str) {
     assert_rejected(&mut conn, r"
         SK001 UPDATE audit_event SET outcome = 'denied'
         SK001 DELETE FROM audit_event
-        SK001 TRUNCATE audit_event
+        SK001 TRUNCATE audit_event, administrative_operation
         SK001 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_9', 9, '\x09', now(), 'adm_1', 'x', 'ten_a', 'success')
         SK001 UPDATE audit_chain_head SET sequence = 5, head_hash = '\x05'
         SK001 DELETE FROM audit_chain_head
