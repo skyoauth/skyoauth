@@ -1783,11 +1783,16 @@ fn loser_codes(level: &str) -> &'static [&'static str] {
     }
 }
 
+/// Runs `sql`, which must not wait for a lock: a check that fires too
+/// early fails the test instead of hanging it.
 async fn run_owned(conn: &mut PgConnection, sql: String) {
-    if let Err(err) = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
-        .execute(conn)
-        .await
-    {
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::raw_sql(AssertSqlSafe(sql.clone())).execute(conn),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{sql}: waited for a lock"));
+    if let Err(err) = result {
         panic!("{sql}: {err}");
     }
 }
