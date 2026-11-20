@@ -1298,6 +1298,25 @@ describe('values of the wrong type', () => {
     });
   }
 
+  // An implemented stage is stamped from its milestone and scope whatever their
+  // type: stageStamp() formats each with show(), as a stamp of the value's JSON.
+  for (const [name, from, to, m, scope, re] of [
+    ['milestone', 'milestone = "M1a"', 'milestone = {}', {}, 'consume primitive', /A24 \{\}: unknown milestone/],
+    ['scope', 'scope = "consume primitive"', 'scope = { a = 1 }', 'M1a', { a: 1 }, /A24 M1a: scope must be non-empty table text$/],
+  ]) {
+    test(`an implemented stage with a table as ${name}`, () => {
+      const t = st('A24', 'M1a', from, to)(implementedA24(repoText(SCENARIOS)));
+      const res = failing(SCENARIOS, () => t);
+      expectError(res, 'stages', re);
+      const j = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+      const want = sha256(['A24', j(m), j(scope), A24_HASH].join('\n'));
+      expectError(res, 'stages', new RegExp(`: implemented_sha256 is [0-9a-f]{64}, but the stage's \\(id, milestone, scope, matrix_sha256\\) stamps to ${want}; `));
+      const r = spawnSync(process.execPath, [SCRIPT, '--root', fixture({ [SCENARIOS]: () => t })], { encoding: 'utf8' });
+      assert.equal(r.status, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /internal error/);
+    });
+  }
+
   test('the CLI exits 1 for one', () => {
     const r = spawnSync(process.execPath, [SCRIPT, '--root', fixture({ [SCENARIOS]: st('A24', 'M1a', 'milestone = "M1a"', 'milestone = {}') })], { encoding: 'utf8' });
     assert.equal(r.status, 1, r.stderr);
@@ -1369,6 +1388,42 @@ describe('names of Object.prototype members in the specs', () => {
     assert.equal(JOB_FROM.toString, undefined);
     const res = failing(LAYOUT, (t) => replaceOnce(t, '`typescript/node24`, ', '`typescript/node24`, `constructor`, '));
     expectError(res, 'legs', /job constructor of the layout §1\.1 Leg strings column has no known first milestone \(add it to JOB_FROM\)$/);
+  });
+
+  // The env codes of the layout §1.1 Code column are a table without a
+  // prototype: a code such as __proto__ is an ordinary code, and an env value
+  // such as toString is unknown, not a member of Object.prototype.
+  const PROTO = ['__proto__', 'constructor', 'toString'];
+  const protoBefore = Object.getOwnPropertyNames(Object.prototype).sort();
+  const protoUnchanged = () => {
+    assert.deepEqual(Object.getOwnPropertyNames(Object.prototype).sort(), protoBefore);
+    assert.equal(Object.getPrototypeOf({}), Object.prototype);
+    assert.equal({}.live, undefined);
+  };
+  const liveCode = (code) => (t) => replaceOnce(t, '| `live` | LV | ', `| \`live\` | ${code} | `);
+
+  for (const code of PROTO) {
+    test(`a §1.1 code named ${code} is an ordinary code`, () => {
+      // The committed §2 table still shows LV: the only errors are its rows.
+      const res = failing(LAYOUT, liveCode(code));
+      assert.ok(res.errors.length > 0 && res.errors.every((e) => e.rule === 'table'), dump(res));
+      expectError(res, 'table', new RegExp(`row A01 differs .*Expected: \\| A01 \\| C\\+I \\| PG, EK, ${code} \\| `));
+      // Rendered with the code, the table passes.
+      const root = fixture({ [LAYOUT]: liveCode(code) });
+      assert.equal(generateRun(['--root', root], () => {}, () => {}), 0);
+      assert.match(read(root, LAYOUT), new RegExp(`^\\| A02 \\| [^|]+ \\| [^|]*${code}`, 'm'));
+      expectOk(check(root));
+      protoUnchanged();
+    });
+  }
+
+  test('an env named after an Object.prototype member is an unknown env', () => {
+    for (const env of PROTO) {
+      const res = failing(SCENARIOS, sc('A24', 'envs = ["pg"]', `envs = ["${env}"]`));
+      expectError(res, 'fields', /A24: envs must be a non-empty list of hermetic, pg, envoy-k3s, browser, native-3os, live$/);
+      assert.deepEqual(res.notes, ['table: not compared, because some scenario or subcase fields are invalid']);
+      protoUnchanged();
+    }
   });
 });
 
