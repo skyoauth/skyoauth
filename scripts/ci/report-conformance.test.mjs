@@ -53,6 +53,12 @@ const registryText = (rel) => ([SCENARIOS, SUBCASES].includes(rel) ? normaliseRe
 const REG = parseStrict(registryText(SCENARIOS));
 const SUB = parseStrict(registryText(SUBCASES));
 const matrix = (id) => [...REG.scenario, ...SUB.subcase].find((e) => e.id === id).matrix_sha256;
+// The number of stages a milestone gate covers (scenario stages and stages of
+// required sub-IDs), counted from the fixture, so no expectation hardcodes the
+// size of the committed registry.
+const gateStages = (m) =>
+  [...REG.scenario.filter((e) => e.kind === 'scenario'), ...SUB.subcase.filter((e) => e.conditional_on === undefined)].flatMap((e) => e.stage).filter((s) => s.milestone === m).length;
+const M1A = gateStages('M1a');
 
 function replaceOnce(text, from, to) {
   const i = text.indexOf(from);
@@ -192,18 +198,21 @@ describe('statuses', () => {
       [A24_POS.id, PG, 'passed'],
       [A24_NEG.id, PG, 'passed'],
     ]);
-    assert.deepEqual(r.json.milestones.M1a, { stages: 20, passed: 1, 'not run': 0, planned: 19, failed: 0, gate: 'planned' });
+    assert.ok(M1A > 1, 'the fixture has more than one M1a stage');
+    assert.deepEqual(r.json.milestones.M1a, { stages: M1A, passed: 1, 'not run': 0, planned: M1A - 1, failed: 0, gate: 'planned' });
     const a24 = r.json.scenarios.find((s) => s.id === 'A24');
     assert.deepEqual(a24.by_milestone, { M1a: 'passed', M1b: 'passed', M2: 'planned', M3: 'planned', M4: 'planned', M5: 'planned' });
     assert.equal(a24.status, 'planned');
     assert.match(r.out, /\| A24 M1a: consume primitive \| passed \| 2 pair\(s\) passed \|/);
-    assert.match(r.out, /\| M1a \| 20 \| 1 \| 0 \| 0 \| 19 \| planned \|/);
+    assert.ok(r.out.includes(`| M1a | ${M1A} | 1 | 0 | 0 | ${M1A - 1} | planned |`), r.out);
     assert.equal(r.json.headline, null);
     assert.equal(r.json.format, 1);
     assert.deepEqual(r.json.uncounted, { planned: [], unregistered: [], unknown: [] });
     assert.ok(r.out.startsWith(`## Conformance results for \`${SHA}\`\n\nJudged on ${TODAY} from 1 JUnit report(s).`), r.out);
     assert.match(r.out, /\| Milestone \| Stages \| Passed \| Failed \| Not run \| Planned \| Gate \|\n\| --- \| --- \| --- \| --- \| --- \| --- \| --- \|\n\| M0 \|/);
-    assert.match(r.out, /\| M5 \| 11 \| 0 \| 0 \| 0 \| 11 \| planned \|\n\nThe counts cover required stages\. Stages of conditional sub-IDs are listed with the implemented stages but gate no milestone\.\n\n### Implemented stages \(1\)\n\n\| Stage \| Status \| Details \|\n\| --- \| --- \| --- \|\n\| A24 M1a/);
+    const m5 = gateStages('M5');
+    assert.ok(r.out.includes(`| M5 | ${m5} | 0 | 0 | 0 | ${m5} | planned |\n\nThe counts`), r.out);
+    assert.match(r.out, /\| planned \|\n\nThe counts cover required stages\. Stages of conditional sub-IDs are listed with the implemented stages but gate no milestone\.\n\n### Implemented stages \(1\)\n\n\| Stage \| Status \| Details \|\n\| --- \| --- \| --- \|\n\| A24 M1a/);
     for (const re of [/docs-only/, /Input errors/, /Results not counted/, /Waivers for this commit/, /note:/, /\*\*null\*\*/]) assert.doesNotMatch(r.out, re);
     assert.ok(r.out.endsWith('| A24 M1a: consume primitive | passed | 2 pair(s) passed |\n'), JSON.stringify(r.out.slice(-80)));
   });
@@ -403,7 +412,7 @@ id = "A58.90"`,
     assert.equal(ok.code, 0, ok.err);
     assert.equal(stage(ok.json, 'A58.01', 'M1b').status, 'passed');
     assert.equal(ok.json.milestones.M1b.passed, 1);
-    assert.equal(ok.json.milestones.M1b.stages, 7);
+    assert.equal(ok.json.milestones.M1b.stages, gateStages('M1b') + 1);
     const bad = report(root({ [SUBCASES]: sub01 }), ['--artifacts', artifacts([{ leg: PG, junit: junit([[A58_01, 'passed'], [A58_01N, 'failed']]) }])]);
     assert.equal(bad.code, 1);
     assert.equal(bad.json.scenarios.find((s) => s.id === 'A58').by_milestone.M1b, 'failed');
@@ -428,7 +437,7 @@ id = "A58.90"`,
     assert.equal(st.conditional_on, 'device-flow');
     assert.equal(r.json.scenarios.find((s) => s.id === 'A27').status, 'planned');
     assert.equal(r.json.milestones.M4.failed, 0);
-    assert.equal(r.json.milestones.M4.stages, 15);
+    assert.equal(r.json.milestones.M4.stages, gateStages('M4'));
     assert.match(r.out, /\| A27\.90 \(conditional: device-flow\) M4: full row \| failed \|/);
   });
 
@@ -994,10 +1003,15 @@ describe('cli', () => {
     assert.match(text, /Judged on 2027-03-04 from 0 JUnit report\(s\)\. Only \*\*passed\*\* counts; `CI passed` is not a conformance signal\./);
   });
 
-  test('the script runs on the repository: exit 0, every stage planned', () => {
+  // The committed registry changes as stages are implemented and gates pass,
+  // so this case checks only that the report is produced and well-formed.
+  test('the script runs on the repository: exit 0 and a milestone table', () => {
     const p = spawnSync(process.execPath, [SCRIPT, '--commit', SHA, '--today', TODAY], { encoding: 'utf8' });
     assert.equal(p.status, 0, p.stderr);
-    assert.match(p.stdout, /\| M1a \| 20 \| 0 \| 0 \| 0 \| 20 \| planned \|/);
+    for (const m of ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5']) {
+      assert.match(p.stdout, new RegExp(`^\\| ${m} \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| (?:passed|failed|not run|planned|no stages) \\|$`, 'm'));
+    }
+    assert.match(p.stdout, /^### Implemented stages \(\d+\)$/m);
     const bad = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
     assert.equal(bad.status, 2);
   });
