@@ -60,6 +60,8 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
+  DB-backed tests reach a PostgreSQL 17 service container, with the same
+  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
