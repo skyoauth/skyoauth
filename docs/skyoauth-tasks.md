@@ -230,7 +230,7 @@ InstanceCapacityPolicy(instance_id, max_session_continuations_ceiling,
                        tenant_context_limits, checker_context_limits,
                        global_context_limit, request_rate_limits, revision)
 InstanceSecurityPolicy(instance_id, widening_second_approver, single_actor_mode,
-                       audit_sink_config_digest, audit_sink_validated_at?, revision)
+                       audit_sink_config_digest?, audit_sink_validated_at?, revision)
 EgressAllowlistEntry(id, purpose, exact_destination, status, revision)
 RouteControllerIdentity(id, public_mtls_identity, kubernetes_principal,
                         gateway_deployment_refs,
@@ -380,8 +380,8 @@ IssuerKeyVersion(kid, algorithm, public_key, signing_key_reference, published_at
 InternalAssertionKeyVersion(kid, signer_group_id, algorithm, public_key,
                             internal_key_reference, published_at, activate_after,
                             signing_state, validity, status, revision)
-AuditEvent(id, tenant_id?, sequence, prev_hash, timestamp, actor, action, object_id,
-           previous_revision, new_revision, outcome)
+AuditEvent(id, tenant_id?, sequence, prev_hash?, timestamp, actor, action, object_id,
+           previous_revision?, new_revision?, outcome)
 ~~~
 
 **Ownership:** ResourceServer/audience namespace, ResourceServerChecker/Action and origin ownership enrollment are instance authority; AudienceTenantAssignment grants named tenants bounded issuance rights. Composite same-tenant references protect all tenant-owned objects and their immutable versions. ServiceIdentity.id references a svc principal and contains no checker credentials. Direct grants require null target; delegated grants require a same-tenant service. ApplicationOrigin has globally unique canonical origin, assigned rather than claimed by tenant admins. OAuth client_id is globally unique and generated, so issuer-native authorization deterministically resolves its tenant. HumanAccessPolicy has exactly one client/origin consumer and one registered audience, unique per consumer/audience. The active bundle pins the origin/route versions used to resolve a cookie request; exact paths beat longest segment-prefix paths for the method, ties reject and disabled winners deny rather than falling back. Canonical request/route matching and no-rewrite rules are normative in design §4.1.
