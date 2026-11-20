@@ -80,7 +80,7 @@ kind = "scenario"
 layers = ["conformance"]
 envs = ["pg"]
 harness = ["PG", "UC"]
-owners = ["T11.6", "T11.9", "T24.2"]
+owners = ["T11.3", "T11.6", "T11.9", "T24.2"]
 positive = "old and new keys valid in the overlap, with parent/source/binding/grant IDs unchanged"
 negative = "each key outside its window"
 matrix_sha256 = "6696cc6b4667526db2eac6068e43c2d5a887700924c91acf93c425950af442a2"
@@ -361,14 +361,14 @@ kind = "scenario"
 layers = ["integration"]
 envs = ["pg"]
 harness = ["PG", "OIDC×2"]
-owners = ["T10.11", "T12.10", "T51.6"]
+owners = ["T10.11", "T12.10", "T13.9", "T51.6"]
 positive = "IDs, modes, defaults, constraints and revisions equal"
 negative = "dormant impersonation still disabled and not issuable"
 matrix_sha256 = "ff7aa8610ecb822db2b9f609be4a0c62bd83fae4b01a52ecd22c9d1bcf60b77d"
 
 [[scenario.stage]]
-milestone = "M1a"
-scope = "preservation"
+milestone = "M1b"
+scope = "T13.9 transition"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = []
@@ -517,7 +517,7 @@ layers = ["security"]
 envs = ["pg"]
 harness = ["UC", "OIDC", "OP"]
 owners = ["T13.1", "T13.6", "T30.4", "T52.3"]
-positive = "explicit verified link"
+positive = "registered mTLS adm credential with active role (M1a); explicit verified link (M3)"
 negative = "email-only match, upstream admin-role claim"
 matrix_sha256 = "153d162687572075c2155403b0554e662174fccad7a60a2685adf791ec02b128"
 
@@ -586,7 +586,7 @@ envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.3", "T12.8", "T21.4", "T21.7"]
 positive = "selector picks the authorized actor/target"
-negative = "subject/target/mode override, wrong tenant"
+negative = "mode override, wrong tenant; subject/target override (M2)"
 matrix_sha256 = "702f79d7b2cc709c2b2ebba85fcf14485bce61fdf887e2d819abe90f13a579af"
 
 [[scenario.stage]]
@@ -611,7 +611,7 @@ envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.8", "T21.5"]
 positive = "omitted scope → explicit defaults"
-negative = "omitted with no defaults, empty or excessive scope → invalid_scope"
+negative = "omitted with no defaults, empty or excessive scope → invalid_scope; any `resource` parameter → invalid_target, an audience not in the grant's audience set or not assigned → invalid_target, an unsupported requested_token_type → invalid_request (M2)"
 matrix_sha256 = "f96a812349dd5f50643a92137aab75b92ee22867ff411870b7a8a5b5c5c23c9a"
 
 [[scenario.stage]]
@@ -883,13 +883,13 @@ envs = ["hermetic", "pg"]
 harness = ["UC", "PG", "metadata fixture"]
 owners = ["T10.11", "T12.5", "T20.1"]
 positive = "disabled record stored"
-negative = "device or impersonation not advertised, issuance rejected, capability gain does not activate"
+negative = "a disable/re-enable cycle cannot revive old evidence: re-enabling a disabled record does not resurrect its prior revision or evidence (M1a, tasks §3); device or impersonation not advertised, issuance rejected, capability gain does not activate (M2)"
 matrix_sha256 = "58b5705933e5a591405976faa07ecbef2527b2a217f11ca6bdbb296a533d7d0a"
 
 [[scenario.stage]]
 milestone = "M1a"
 scope = "storage"
-legs = ["scenarios-hermetic/x86_64", "scenarios-hermetic/aarch64", "scenarios-pg/x86_64"]
+legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = []
 
@@ -1240,13 +1240,20 @@ layers = ["security"]
 envs = ["pg"]
 harness = ["PG", "UC", "OP", "restore fixture"]
 owners = ["T10.11", "T12.10"]
-positive = "disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart and forward migration"
-negative = "enabled/approved create or import rejected, enabling PATCH rejected, startup/import with an active unsupported record (seeded by restore fixture) rejected without rewriting it"
+positive = "disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart and forward migration (M1b)"
+negative = "enabled/approved create or import rejected, enabling PATCH rejected, startup/import with an active unsupported record (seeded by restore fixture) rejected without rewriting it; the same restore-fixture startup/import case after forward migration (M1b)"
 matrix_sha256 = "e21a9edc840e10b9906382c02f18bcf6a2297ecbf922a85b8600021e94a7a8c3"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "full row"
+scope = "disabled-record lifecycle"
+legs = ["scenarios-pg/x86_64"]
+status = "planned"
+tests = []
+
+[[scenario.stage]]
+milestone = "M1b"
+scope = "forward migration"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = []
@@ -1258,7 +1265,7 @@ layers = ["conformance", "integration"]
 envs = ["pg", "envoy-k3s"]
 harness = ["TRm with token-file swap (PR)", "K3 kubelet rotation (nightly)"]
 owners = ["T11.11", "T21.6", "T23.1", "T23.5", "T23.6"]
-positive = "renews with the same token, then with the rotated token"
+positive = "reusable enrollment/import of a TokenReview/projected source accepted (M1a); renews with the same token, then with the rotated token (M2)"
 negative = "single_use enrollment/import on a TokenReview/projected source"
 matrix_sha256 = "ccb6b97d5650f0cf6392ecccfc8ba44cc76c77f21283f86115b6335d30f478e3"
 
@@ -1534,7 +1541,7 @@ layers = ["integration"]
 envs = ["hermetic", "pg", "native-3os"]
 harness = ["OP on 3 OSes", "Linux service", "SoftHSM2"]
 owners = ["T13.3", "T13.5", "T13.7", "T13.10"]
-positive = "remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6)"
+positive = "remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6); a challenge signed within its TTL accepted (hermetic)"
 negative = "key export into the pod, wrong-instance challenge, expired challenge at the TTL boundary (hermetic), unsupported adapter fails explicitly"
 matrix_sha256 = "078ca6a19a34b32f05d2982cb296c71cf5a182e64f2e6589767807fd36eaeec3"
 

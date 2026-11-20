@@ -109,17 +109,23 @@ egress rows are never deleted.
   previous revision; tenants and principals carry none yet), as are
   `prev_hash` for the first event and `tenant_id` for instance-scope events.
   There is no sentinel: revisions start at 1 and 0 is rejected. The event
-  hash encoding, not yet specified, must encode an absent value differently
-  from every present one (for example JSON `null` against a number), so
-  that adding or dropping a value changes the hash.
+  hash encoding (identity-registry IR-056; see Follow-ups) must encode an absent
+  value differently from every present one (for example JSON `null` against
+  a number), so that adding or dropping a value changes the hash.
 - **Instance-scope events** (lead decision): the startup event that records
   the `single_actor_mode` mirror (IR-053) and the sink-change event have
   `tenant_id` `NULL`, the policy row's `instance_id` as `object_id`, and the
   row's real revisions before and after the write in `previous_revision`
-  and `new_revision`. The source and format of `instance_id`, the reserved
-  actor for events the service writes on its own, and the `action` names
-  (which must name the entity, since `object_id` alone does not) are open:
-  identity-registry OQ-IR-14.
+  and `new_revision`. `instance_id` is a lowercase hyphenated UUIDv7,
+  generated once at first bootstrap and immutable (IR-057). Events the
+  service writes on its own record the reserved actor
+  `{"type": "system", "id": "system"}`, never a principal or an operator
+  identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
+  (identity-registry IR-059). The decision fixes only that syntax: IR-059
+  lists examples, and the action names, including those of these two
+  events, are open until the audit writer (OQ-IR-15). These are lead
+  decisions (2026-11-20, OQ-IR-14), provisional until the audit writer
+  ships.
 
 The database does not enforce these rules; the service must:
 
@@ -423,9 +429,44 @@ Not done in `0002`:
   the audit event of an egress entry write lists (IR-152, OQ-IR-12).
 - A `revision` on `tenant` and `principal`: updates require
   ID, tenant and revision (tasks §3 "IDs/names").
-- Who computes the audit event hash, with which algorithm and over which
-  input (including the encoding of absent values above). This needs a spec
-  decision before the first code that writes events.
+- The audit writer. The service computes the event hash (lead decision,
+  2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
+  writer ships). The hash is SHA-256 over the concatenation of:
+  1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
+  2. `prev_hash` as 32 raw bytes, or zero bytes for the first event, whose
+     `prev_hash` column is `NULL`;
+  3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
+     `hash` and `prev_hash` fields.
+
+  `prev_hash` and `head_hash` store the raw 32-byte digest as `bytea`;
+  lowercase hex is only the JSONL and API output form. `audit_event` has no
+  column for an event's own hash, so verification recomputes it and compares
+  it with the next event's `prev_hash` or the head's `head_hash`. Still open
+  before the writer ships (identity-registry OQ-IR-15): the text
+  serialization of an object `actor`, the envelope's member names, the
+  timestamp format, the encoding of absent values, and the action names
+  (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
+  startup-mirror and sink-change events.
+  Tests assert chain linkage and verification outcomes, never hash values.
+- Errata for comments and checks in `0002`, which is frozen (its checksum
+  covers comments), so they are corrected here and not in the file:
+  - Lines 116–118, on `instance_security_policy.instance_id`: "No format or
+    source is given for the instance ID" is superseded by identity-registry
+    IR-057: a lowercase hyphenated UUIDv7, generated once at first
+    bootstrap. The column still checks only `instance_id <> ''`; the
+    database does not enforce the format, and the immutability trigger
+    keeps it unchanged.
+  - Lines 244–246, on the chain genesis: "the genesis representation is not
+    specified" is superseded for the first event by IR-056, under which its
+    stored `prev_hash` is `NULL` and enters the hash as zero bytes. The
+    empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
+  - Line 259, on `audit_event.tenant_id`: OQ-IR-14 is decided; the
+    instance-scope event rules are IR-057 to IR-059 and "Instance-scope
+    events" above.
+  - `audit_chain_head.head_hash` and `audit_event.prev_hash` check
+    `octet_length(…) > 0`, but IR-056 makes every hash a raw 32-byte
+    SHA-256 digest. The database accepts any non-empty value; checking
+    `= 32` needs a later migration.
 
 Not done in `0003`:
 

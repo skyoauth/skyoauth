@@ -239,6 +239,49 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   The external sink receives the chain as an append-only JSONL stream over
   syslog-over-TLS or OTLP logs. (design §7; tasks §3 "Instance security
   policy", Gate M1a; lead decision, OQ-TM-12)
+- **IR-056** The audit event `hash` is SHA-256 over the concatenation of:
+  1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
+  2. `prev_hash` as 32 raw bytes, or zero bytes for the first event of a
+     chain, whose stored `prev_hash` is null;
+  3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
+     `hash` and `prev_hash` fields.
+
+  The database stores the raw 32-byte digest (`bytea`); lowercase hex is only
+  its output form in the JSONL stream and the API. Conformance scenarios MUST NOT assert
+  hash values, only chain linkage and verification outcomes. Provisional until
+  the audit writer ships; the details still open are OQ-IR-15. (lead
+  decision, 2026-11-20, OQ-IR-14)
+- **IR-057** `instance_id` is a UUIDv7 in lowercase hyphenated form. It is
+  generated once, at first bootstrap, and stored immutably on the
+  `InstanceSecurityPolicy` row. Instance-scope audit events use it as
+  `object_id`. Provisional until the audit writer ships. (lead decision,
+  2026-11-20, OQ-IR-14)
+- **IR-058** Events that the service writes on its own, with no
+  administrator acting (such as the startup event of IR-053), record the
+  fixed reserved actor `{"type": "system", "id": "system"}`. The system actor
+  is never a principal or an operator identity. Provisional until the audit
+  writer ships. (lead decision, 2026-11-20, OQ-IR-14)
+- **IR-059** `AuditEvent.action` is a dotted lowercase `<resource>.<verb>`
+  name, such as `tenant.create`. `<resource>` is the audited entity's name
+  in lowercase snake case: `Tenant` gives `tenant`,
+  `InstanceSecurityPolicy` gives `instance_security_policy` and
+  `EgressAllowlistEntry` gives `egress_allowlist_entry` (inferred). The
+  decision fixes only this syntax, not the set of actions. The table below
+  gives examples and is incomplete until OQ-IR-15 is answered and the audit
+  writer PR names the actions: events this registry already requires, such
+  as the startup event of IR-053, the sink-change event, the IR-152 egress
+  entry writes and the T13.3 administrative events, are written whether or
+  not they are listed here. Provisional until the audit writer ships. (lead
+  decision, 2026-11-20, OQ-IR-14)
+
+  | Action                            | Event                                               |
+  | --------------------------------- | --------------------------------------------------- |
+  | `tenant.create`                   | Tenant created                                      |
+  | `instance_security_policy.update` | The online IR-052 `widening_second_approver` toggle |
+  | `egress_allowlist_entry.enable`   | `EgressAllowlistEntry` enabled or re-enabled        |
+
+  The startup mirror of IR-053 and the sink-change event also write the
+  `InstanceSecurityPolicy` row, but their action names are open (OQ-IR-15).
 
 ## 6. Scopes
 
@@ -648,14 +691,35 @@ follow-up. All other items are not resolved by this contract.
   deployment-configuration change applied at restart alone can flip the
   value. Interim reading (lead, 2026-11-20): deployment configuration,
   applied at restart and audited at startup (IR-053).
-- **OQ-IR-14 — Identity of instance-scope audit events.** The T10.1 schema
+- **OQ-IR-14 — Identity of instance-scope audit events.** **Decided** (lead
+  decision, 2026-11-20; provisional until the audit writer ships): the event
+  hash (IR-056), `instance_id` (IR-057), the reserved system actor (IR-058)
+  and the `action` syntax (IR-059). Already decided before that (lead
+  decision, 2026-11-20; `service/migrations/README.md`): the T10.1 schema
   records the startup event that mirrors `single_actor_mode` (IR-053) and the
   sink-change event with `tenant_id` null, the `InstanceSecurityPolicy`
   `instance_id` as `object_id`, and the row's revisions before and after the
-  write (lead decision, 2026-11-20; `service/migrations/README.md`). Not
-  stated: where `instance_id` comes from (generated at bootstrap or set in
-  deployment configuration) and its format; which reserved system actor
-  records events that the service writes on its own at startup, when no
-  administrator acts; and the namespace and syntax of `AuditEvent.action`,
-  whose values must name the entity, since `object_id` alone does not say
-  what kind of object it identifies.
+  write. Original question: where `instance_id` comes from and its format;
+  which reserved system actor records events that the service writes on its
+  own; and the namespace and syntax of `AuditEvent.action`.
+- **OQ-IR-15 — Audit hash details left open by the IR-056 to IR-059
+  decision.**
+  - **No own-hash column.** `audit_event` has no column for an event's own
+    hash. The hash is visible only as the next event's `prev_hash` or as
+    `audit_chain_head.head_hash`, so verification recomputes it from the
+    event. (Raw `bytea` storage with lowercase hex as the JSONL and API output
+    form is not a conflict: IR-056.)
+  - **Actor form.** IR-058 gives the actor as an object `{type, id}`, but
+    `AuditEvent.actor` is a text column. Not stated: the text serialization
+    of an object actor, in the column and in the envelope.
+  - **Envelope.** Not stated: the exact member names (the `AuditEvent` fields
+    of tasks §3 are the evident candidates); how `timestamp` is serialized
+    (format and precision); whether an absent value is a JSON `null` or an
+    omitted member. `service/migrations/README.md` requires only that absent
+    and present values hash differently.
+  - **Action names.** IR-059 fixes only the `<resource>.<verb>` syntax, and
+    its table is incomplete. Not stated: the full set of action names,
+    including those of the startup event that mirrors `single_actor_mode`,
+    of the sink-change event, of the IR-152 egress entry writes other than
+    enabling and of the T13.3 administrative events. The audit writer PR
+    names them.
