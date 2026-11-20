@@ -20,7 +20,7 @@ import { parse as parseStrict, TomlDate } from 'smol-toml';
 
 import { checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { normaliseRegistry } from './registry-fixtures.mjs';
+import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -1277,11 +1277,99 @@ describe('values of the wrong type', () => {
     });
   }
 
+  // The generator's fuzz of the same keys (gen-conformance-registry.test.mjs):
+  // smol-toml's tables have no prototype, so an own toString key is an
+  // ordinary key there and show() prints the table as JSON.
+  for (const value of ['{ toString = 1 }', '{ toString = "x", valueOf = 1 }', '[{ toString = 1 }]']) {
+    test(`every key of A24, C07 and A33.90 as ${value}`, () => {
+      const cases = [
+        ['gates_passed', SCENARIOS, replaceOnce(repoText(SCENARIOS), 'gates_passed = []', `gates_passed = ${value}`)],
+        ...valueSwaps(repoText(SCENARIOS), 'scenario', 'A24', value, { entry: ['note'], stage: ['implemented_sha256'] }).map(([l, t]) => [l, SCENARIOS, t]),
+        ...valueSwaps(repoText(SCENARIOS), 'scenario', 'C07', value).map(([l, t]) => [l, SCENARIOS, t]),
+        ...valueSwaps(repoText(SUBCASES), 'subcase', 'A33.90', value, { stage: ['implemented_sha256'] }).map(([l, t]) => [l, SUBCASES, t]),
+      ];
+      assert.ok(cases.length >= 40, String(cases.length));
+      for (const [label, rel, text] of cases) {
+        const res = failing(rel, () => text);
+        assert.ok(res.errors.length > 0, label);
+        assert.ok(!res.errors.some((e) => e.rule === 'toml'), `${label}\n${dump(res)}`);
+        assert.doesNotMatch(dump(res), /\[object /, label);
+      }
+    });
+  }
+
+  // An implemented stage is stamped from its milestone and scope whatever their
+  // type: stageStamp() formats each with show(), as a stamp of the value's JSON.
+  for (const [name, from, to, m, scope, re] of [
+    ['milestone', 'milestone = "M1a"', 'milestone = {}', {}, 'consume primitive', /A24 \{\}: unknown milestone/],
+    ['scope', 'scope = "consume primitive"', 'scope = { a = 1 }', 'M1a', { a: 1 }, /A24 M1a: scope must be non-empty table text$/],
+  ]) {
+    test(`an implemented stage with a table as ${name}`, () => {
+      const t = st('A24', 'M1a', from, to)(implementedA24(repoText(SCENARIOS)));
+      const res = failing(SCENARIOS, () => t);
+      expectError(res, 'stages', re);
+      const j = (v) => (typeof v === 'string' ? v : JSON.stringify(v));
+      const want = sha256(['A24', j(m), j(scope), A24_HASH].join('\n'));
+      expectError(res, 'stages', new RegExp(`: implemented_sha256 is [0-9a-f]{64}, but the stage's \\(id, milestone, scope, matrix_sha256\\) stamps to ${want}; `));
+      const r = spawnSync(process.execPath, [SCRIPT, '--root', fixture({ [SCENARIOS]: () => t })], { encoding: 'utf8' });
+      assert.equal(r.status, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /internal error/);
+    });
+  }
+
   test('the CLI exits 1 for one', () => {
     const r = spawnSync(process.execPath, [SCRIPT, '--root', fixture({ [SCENARIOS]: st('A24', 'M1a', 'milestone = "M1a"', 'milestone = {}') })], { encoding: 'utf8' });
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /error \[stages\] A24 \{\}: unknown milestone/);
     assert.doesNotMatch(r.stderr, /internal error/);
+  });
+});
+
+describe('malformed subcases are diagnostics, not crashes', () => {
+  const tt = /table_text = .*/.exec(entryBlock(repoText(SUBCASES), 'subcase', 'A33.90'))[0];
+  const notCompared = (res) => {
+    assert.deepEqual(res.notes, ['table: not compared, because some scenario or subcase fields are invalid']);
+    assert.ok(!res.errors.some((e) => e.rule === 'table'), dump(res));
+  };
+  // Each conditional branch that does not parse table_text still renders it
+  // into the parent row; a table there used to crash the table rule (exit 2).
+  for (const [name, edit, re] of [
+    ['a conditional sub-ID numbered outside .90–.99', (t) => su('A33.90', tt, 'table_text = {}')(t).replaceAll('A33.90', 'A33.50'), /A33\.50: a conditional sub-ID is numbered A33\.90–A33\.99$/],
+    ['an unknown conditional_on', (t) => su('A33.90', tt, 'table_text = { a = 1 }')(su('A33.90', 'conditional_on = "back-channel-logout"', 'conditional_on = "magic"')(t)), /A33\.90: conditional_on must be one of /],
+  ]) {
+    test(`${name} with a table as table_text`, () => {
+      const res = failing(SUBCASES, edit);
+      expectError(res, 'subcases', re);
+      notCompared(res);
+    });
+  }
+
+  test('the CLI exits 1 for one', () => {
+    const root = fixture({ [SUBCASES]: (t) => su('A33.90', tt, 'table_text = {}')(su('A33.90', 'conditional_on = "back-channel-logout"', 'conditional_on = "magic"')(t)) });
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /error \[subcases\] A33\.90: conditional_on must be one of /);
+    assert.doesNotMatch(r.stderr, /internal error/);
+  });
+
+  // annexRange() used to build a regex from the ID or parent.
+  for (const [name, id, parent, re] of [
+    ['a parent with a regex metacharacter', 'A58.05', 'A5(', /A58\.05: parent must be the registered scenario A58$/],
+    ['an ID with a regex metacharacter', 'A5(.05', 'A58', /A5\(\.05: a sub-ID looks like A58\.07$/],
+    ['an ID with a regex metacharacter in its number', 'A58.0(', 'A58', /A58\.0\(: a sub-ID looks like A58\.07$/],
+  ]) {
+    test(`a required sub-ID: ${name}`, () => {
+      const root = fixture({ [SUBCASES]: (t) => t + requiredA58(id).replace(`id = "${id}"\nkind = "subcase"\nparent = "A58"`, `id = "${id}"\nkind = "subcase"\nparent = "${parent}"`) });
+      expectError(check(root), id === 'A58.05' ? 'subcases' : 'ids', re);
+      const r = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+      assert.equal(r.status, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /internal error/);
+    });
+  }
+
+  test('a required sub-ID under an unregistered parent has no annex range', () => {
+    const res = failing(SUBCASES, (t) => t + requiredA58('A58.05').replace('parent = "A58"', 'parent = "A.8"'));
+    expectError(res, 'subcases', /A58\.05: required sub-ID, but the note of A\.8 declares no annex range$/);
   });
 });
 
@@ -1300,6 +1388,42 @@ describe('names of Object.prototype members in the specs', () => {
     assert.equal(JOB_FROM.toString, undefined);
     const res = failing(LAYOUT, (t) => replaceOnce(t, '`typescript/node24`, ', '`typescript/node24`, `constructor`, '));
     expectError(res, 'legs', /job constructor of the layout §1\.1 Leg strings column has no known first milestone \(add it to JOB_FROM\)$/);
+  });
+
+  // The env codes of the layout §1.1 Code column are a table without a
+  // prototype: a code such as __proto__ is an ordinary code, and an env value
+  // such as toString is unknown, not a member of Object.prototype.
+  const PROTO = ['__proto__', 'constructor', 'toString'];
+  const protoBefore = Object.getOwnPropertyNames(Object.prototype).sort();
+  const protoUnchanged = () => {
+    assert.deepEqual(Object.getOwnPropertyNames(Object.prototype).sort(), protoBefore);
+    assert.equal(Object.getPrototypeOf({}), Object.prototype);
+    assert.equal({}.live, undefined);
+  };
+  const liveCode = (code) => (t) => replaceOnce(t, '| `live` | LV | ', `| \`live\` | ${code} | `);
+
+  for (const code of PROTO) {
+    test(`a §1.1 code named ${code} is an ordinary code`, () => {
+      // The committed §2 table still shows LV: the only errors are its rows.
+      const res = failing(LAYOUT, liveCode(code));
+      assert.ok(res.errors.length > 0 && res.errors.every((e) => e.rule === 'table'), dump(res));
+      expectError(res, 'table', new RegExp(`row A01 differs .*Expected: \\| A01 \\| C\\+I \\| PG, EK, ${code} \\| `));
+      // Rendered with the code, the table passes.
+      const root = fixture({ [LAYOUT]: liveCode(code) });
+      assert.equal(generateRun(['--root', root], () => {}, () => {}), 0);
+      assert.match(read(root, LAYOUT), new RegExp(`^\\| A02 \\| [^|]+ \\| [^|]*${code}`, 'm'));
+      expectOk(check(root));
+      protoUnchanged();
+    });
+  }
+
+  test('an env named after an Object.prototype member is an unknown env', () => {
+    for (const env of PROTO) {
+      const res = failing(SCENARIOS, sc('A24', 'envs = ["pg"]', `envs = ["${env}"]`));
+      expectError(res, 'fields', /A24: envs must be a non-empty list of hermetic, pg, envoy-k3s, browser, native-3os, live$/);
+      assert.deepEqual(res.notes, ['table: not compared, because some scenario or subcase fields are invalid']);
+      protoUnchanged();
+    }
   });
 });
 
