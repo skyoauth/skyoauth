@@ -738,10 +738,37 @@ describe('links and anchors', () => {
       assert.match(p.stdout + p.stderr, /docs\/notes\.md:3: .*'nowhere\.md' does not exist as a git-tracked file/);
     }
   });
+  // A replace ref (refs/replace/<oid>) makes git read another object in place
+  // of the one named. ls-files reads the index, but a sparse index keeps a
+  // directory outside the sparse checkout as one tree entry and lists its
+  // files from that tree, so a replaced tree can make an untracked file look
+  // tracked. docs-check runs git with --no-replace-objects.
+  test('a replace ref does not make an untracked file look tracked', () => {
+    const design = edit(DESIGN, '[the tasks](skyoauth-tasks.md)', '[b](../sub/b.md)');
+    const root = fixture({ 'sub/a.md': '# a\n' }, { design });
+    const g = (args, input) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env: GIT_ENV, input }).trim();
+    g(['init', '-q', '-b', 'main']);
+    g(['add', '-A']);
+    g(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'docs']);
+    g(['config', 'index.sparse', 'true']);
+    g(['sparse-checkout', 'set', '--cone', 'docs']);
+    assert.match(g(['ls-files', '--sparse']), /^sub\/$/m, 'sub/ is a sparse directory entry of the index');
+    // An untracked sub/b.md, and sub's tree replaced by one that lists it.
+    mkdirSync(join(root, 'sub'), { recursive: true });
+    writeFileSync(join(root, 'sub', 'b.md'), '# b\n');
+    const fake = g(['mktree'], `100644 blob ${g(['rev-parse', 'HEAD:sub/a.md'])}\ta.md\n100644 blob ${g(['hash-object', '-w', 'sub/b.md'])}\tb.md\n`);
+    g(['replace', g(['rev-parse', 'HEAD:sub']), fake]);
+    assert.match(g(['ls-files']), /^sub\/b\.md$/m, 'git itself lists sub/b.md as tracked');
+    const r = checkDocs({ root });
+    expectError(r, { file: D, line: 3, check: 'link', match: /'\.\.\/sub\/b\.md' does not exist as a git-tracked file/ });
+    assert.equal(r.errors.length, 1, JSON.stringify(r.errors));
+    const p = cli(['--root', root]);
+    assert.equal(p.status, 1, p.stdout + p.stderr);
+  });
   // The git fixtures here with an absolute GIT_DIR exported (as in a git
   // hook): they pass and leave that repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^link to a file outside docs that is not tracked$', '^an inherited GIT_DIR does not replace']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^link to a file outside docs that is not tracked$', '^an inherited GIT_DIR does not replace', '^a replace ref does not make an untracked file look tracked$']);
   });
   test('reference links need a definition', () => {
     const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'See [the tasks][tasks], [Tasks][] and [the plan][plan].\n\n[tasks]: skyoauth-tasks.md#task-dag');
