@@ -71,7 +71,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict } from 'smol-toml';
 
-import { checkRegistry, checkWaivers, formatError, load, locate, Report } from './check-conformance-registry.mjs';
+import { checkRegistry, checkWaivers, formatError, history, load, locate, Report } from './check-conformance-registry.mjs';
 import { LAYOUT, MILESTONES, parseEnvironments, SCENARIOS, SUBCASES } from './gen-conformance-registry.mjs';
 
 // ---------------------------------------------------------------------------
@@ -406,7 +406,8 @@ export function judge({ scenarios, subcases, contracts, reports, waivers = [], c
         id: e.id,
         kind,
         parent: e.parent ?? null,
-        conditional_on: e.conditional_on ?? null,
+        // The checker's gates rule: only a subcase can be conditional.
+        conditional_on: kind === 'subcase' ? (e.conditional_on ?? null) : null,
         milestone: s.milestone,
         scope: s.scope,
         legs: s.legs,
@@ -617,7 +618,9 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
     if (doc) {
       const stagesByTest = new Map();
       for (const e of [...scenarios, ...subcases]) for (const s of e.stage) for (const t of s.tests) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: s.legs }]);
-      checkWaivers(doc, locate(text), stagesByTest, root, o.requireHistory, rep);
+      // As in checkRegistry: with --require-history the history was probed
+      // (and its absence already failed the registry check above).
+      checkWaivers(doc, locate(text), stagesByTest, root, o.requireHistory, o.requireHistory ? history(root) : null, rep);
     }
     for (const n of rep.notes) log(`note: ${n}`);
     if (rep.errors.length) {

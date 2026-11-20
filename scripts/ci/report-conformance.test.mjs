@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
+import { normaliseRegistry } from './registry-fixtures.mjs';
 import { InputError, judge, parseXml, readJUnit, renderMarkdown, run, testId, testInfo, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
@@ -45,8 +46,12 @@ const write = (path, text) => {
 // ---------------------------------------------------------------------------
 // Registry fixtures
 
-const REG = parseStrict(repoText(SCENARIOS));
-const SUB = parseStrict(repoText(SUBCASES));
+// The registry files with every stage planned and no gate passed (the
+// registry self-tests' helper), so implementing a real stage or passing a gate
+// does not change what these tests see.
+const registryText = (rel) => ([SCENARIOS, SUBCASES].includes(rel) ? normaliseRegistry(repoText(rel)) : repoText(rel));
+const REG = parseStrict(registryText(SCENARIOS));
+const SUB = parseStrict(registryText(SUBCASES));
 const matrix = (id) => [...REG.scenario, ...SUB.subcase].find((e) => e.id === id).matrix_sha256;
 
 function replaceOnce(text, from, to) {
@@ -90,7 +95,7 @@ const compose = (...fs) => (t) => fs.reduce((x, f) => f(x), t);
 // A temporary root with FILES; `edits` maps a file to a function of its text.
 function root(edits = {}) {
   const r = tmp('report-root-');
-  for (const rel of FILES) write(join(r, rel), (edits[rel] ?? ((t) => t))(repoText(rel)));
+  for (const rel of FILES) write(join(r, rel), (edits[rel] ?? ((t) => t))(registryText(rel)));
   return r;
 }
 
@@ -439,6 +444,11 @@ id = "A58.90"`,
     const none = res([]);
     assert.deepEqual(none.contracts.map((c) => [c.id, c.status]), [['C01', 'not run'], ['C02', 'planned']]);
     const unknown = judge({ ...base, scenarios: [], contracts: [{ id: 'C03', covered_by: ['A99'] }], reports: [] });
+    // As in the checker's gates rule, only a subcase is conditional: a stray
+    // conditional_on on a scenario keeps its stage in the milestone gate.
+    const stray = judge({ ...base, scenarios: [{ ...e('A24', 'planned'), conditional_on: 'device-flow' }], contracts: [], reports: [] });
+    assert.equal(stray.stages[0].conditional_on, null);
+    assert.equal(stray.milestones.M1a.stages, 1);
     assert.equal(unknown.contracts[0].status, 'not run');
   });
 });
@@ -672,7 +682,8 @@ describe('waivers', () => {
     assert.match(soft.out, /^note: waivers: commit reachability not checked: the root is not a git checkout/m);
     const strict = report(dir, ['--require-history', '--waivers', waiverFile(waiver(SHA))]);
     assert.equal(strict.code, 2);
-    assert.match(strict.err, /cannot check that commit a{40} is on main: the root is not a git checkout/);
+    assert.match(strict.err, /--require-history: cannot check waiver commits against origin\/main: the root is not a git checkout/);
+    assert.match(strict.err, /the registry has 1 error\(s\); no report/);
   });
 });
 

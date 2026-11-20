@@ -1,11 +1,16 @@
 # skyoauth
 
 [![CI](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![Rust tests](https://github.com/skyoauth/skyoauth/raw/badges/main/rust-tests.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![Rust coverage](https://github.com/skyoauth/skyoauth/raw/badges/main/rust-coverage.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![TypeScript tests](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-tests.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![TypeScript coverage](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-coverage.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 
-| Path                 | Description                                     |
-| -------------------- | ----------------------------------------------- |
-| `service/`           | Rust service (`skyoauth-service`, axum + tokio) |
-| `clients/typescript` | TypeScript client library (`@skyoauth/client`)  |
+| Path                  | Description                                          |
+| --------------------- | ---------------------------------------------------- |
+| `service/`            | Rust service (`skyoauth-service`, axum + tokio)      |
+| `service/migrations/` | Forward-only PostgreSQL migrations (sqlx, embedded)  |
+| `clients/typescript`  | TypeScript client library (`@skyoauth/client`)       |
 
 ## Service
 
@@ -20,6 +25,70 @@ cargo run -p skyoauth-service   # listens on $SKYOAUTH_ADDR (default 127.0.0.1:8
 `cargo coverage` is an alias (in `.cargo/config.toml`) for `cargo llvm-cov`
 that fails if line coverage is below 85%. It needs `cargo install
 cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
+
+### Database migrations
+
+The server does not need a database yet and never migrates on start.
+Migrations are an explicit deploy step:
+
+```bash
+SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
+  cargo run -p skyoauth-service -- migrate
+```
+
+| Variable                                 | Meaning                                        |
+| ---------------------------------------- | ---------------------------------------------- |
+| `SKYOAUTH_DATABASE_URL`                  | `postgres://` or `postgresql://` URL, required |
+| `SKYOAUTH_DATABASE_MAX_CONNECTIONS`      | Pool size, 1 to 100, default 10                |
+| `SKYOAUTH_DATABASE_ACQUIRE_TIMEOUT_SECS` | Connection wait, 1 to 300 seconds, default 10  |
+
+- The migration role must own the database, or at least have `CREATE` on
+  the `public` schema.
+- Runners serialize on a session-level advisory lock, so `migrate` needs a
+  direct connection, not a transaction-pooling proxy such as PgBouncer in
+  transaction mode. Waiting for the lock has no timeout yet (follow-up).
+- TLS is strict by default. A URL without `sslmode` gets `verify-full` for a
+  remote host and sqlx's `prefer` for `localhost`, a loopback address or a Unix
+  socket; the ambient `PGSSLMODE` variable is ignored. An explicit `sslmode`
+  in the URL is used as written, and a mode weaker than `verify-full` for a
+  remote host logs a WARN. A host is remote by its `hostaddr` when one is set
+  (sqlx dials that address), else by its name. sqlx's `sslmode=allow` is
+  plaintext only; it never negotiates TLS. The server certificate is checked
+  against the public (webpki) roots, so a private CA needs
+  `sslrootcert=/path/ca.pem` in the URL. Under `verify-ca` and `verify-full`
+  the server needs a leaf certificate issued by a CA: the self-signed
+  `CA:TRUE` certificate from a default `openssl req -x509` fails with
+  `CaUsedAsEndEntity`. Other `PG*` variables (`PGHOST`, `PGUSER`,
+  `PGSSLROOTCERT` and so on) are still read for settings the URL omits; put
+  what matters in the URL.
+- The URL is checked before sqlx reads it and rejected, with an error that
+  repeats none of it, if it has an unencoded `@`, `/`, `?` or `#` in the user
+  name or password, an unencoded `@` or `/` in the database name, an unencoded
+  `@` or a second `?` in the query, a `#` fragment, a `?` in the user or
+  database name, or a query key sqlx does not act on (sqlx would log that key
+  with its value). The accepted keys are `sslmode`, `ssl-mode`, `sslrootcert`,
+  `ssl-root-cert`, `ssl-ca`, `sslcert`, `ssl-cert`, `sslkey`, `ssl-key`,
+  `statement-cache-capacity`, `host`, `hostaddr`, `port`, `dbname`, `user`,
+  `password`, `application_name`, `options` and `options[NAME]`, so libpq
+  parameters that sqlx ignores (`connect_timeout`, `channel_binding`,
+  `target_session_attrs`, `keepalives` and so on) now fail at startup.
+  Percent-encode reserved characters in values too: an unencoded `&` in a
+  query `password` followed by a supported key (`?password=a&user=b`) cannot
+  be detected.
+- Conventions for writing migrations, and the limits of the append-only
+  triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
+
+Tests that need PostgreSQL are `#[ignore]`d. To run them, point
+`SKYOAUTH_IT_DATABASE_URL` at a server whose role may create databases (each
+test creates and drops its own) and include ignored tests:
+
+```bash
+export SKYOAUTH_IT_DATABASE_URL=postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+cargo nextest run --workspace --all-features --run-ignored all
+# or: cargo test --workspace --all-features -- --include-ignored
+```
+
+The replica-role append-only test needs a superuser role.
 
 ## TypeScript client
 
@@ -56,10 +125,13 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   exists, the job passes with a warning annotation: no scenario ran, which
   is not a conformance pass.
 - Service tests (nextest): `cargo nextest run --workspace --all-features
-  --profile ci` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
+  --profile ci --run-ignored all` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
+  DB-backed tests reach a PostgreSQL 17 service container, with the same
+  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`. They
+  are `#[ignore]`d, so jobs without a database report them as ignored.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
@@ -90,10 +162,21 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   See `tests/conformance/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
-page. To protect `main`, require the `CI passed` check: it passes when `Docs
-consistency` and `Conformance registry` passed and every other job passed or
-was skipped. Dependabot keeps actions, crates and npm
-packages up to date.
+page. On pushes to `main`, CI generates separate Rust and TypeScript tests and
+line-coverage badges as SVG files on the `badges` branch
+(`scripts/ci/publish-badges.sh`, rendered by `scripts/ci/badge.sh`), so they
+need no external service and render in a private repository too. Rust test
+counts come from `service-nextest` (all workspace tests, including PostgreSQL
+tests) and Rust line coverage comes from `rust-coverage` (which excludes the
+PostgreSQL-backed tests); TypeScript test counts and line coverage come from
+`typescript-coverage`. When a suite fails on `main`, CI publishes red failure
+badges (`N failed` or `failing`) rather than leaving stale passing figures. The
+publishing job checks that GitHub serves them as images from the rendered
+README (`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`,
+which publishes nothing, runs the same check. To protect `main`, require the
+`CI passed` check: it passes when `Docs consistency` and `Conformance registry`
+passed and every other job passed or was skipped. Dependabot keeps actions,
+crates and npm packages up to date.
 
 ## License
 

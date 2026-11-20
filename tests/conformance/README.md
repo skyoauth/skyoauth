@@ -92,7 +92,7 @@ for example `printf '%s\n%s\n%s\n%s' A24 M1a 'consume primitive' "$matrix_sha256
 
 Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, inside the annex range that the parent's `note` declares; today only A58 declares one (`A58.01–A58.89`), and a declared range must itself lie within .01–.89. The T32.3 owner drafts A58's required sub-IDs; none exist yet.
 
-`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
+`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner, and that owner must be the feature's own task (layout §2: `device-flow` T40.6, `back-channel-logout` T30.6, `forwardauth` T32.9), since `conditional_on` keeps the sub-ID out of the gates. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
 
 ## The registry check
 
@@ -107,13 +107,14 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `hash` | Every `matrix_sha256` matches its source line. |
 | `owners` | Every owner is a task in tasks.md. |
 | `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
-| `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, no leg repeats in a stage, and every env has a leg. |
+| `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, its job exists at the stage's milestone, no leg repeats in a stage, and every env has a leg. |
+| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The reporter half of layout §3 **Gates** (every such stage **passed** on `main`) is not part of the static check. |
 | `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
 | `subcases` | The sub-ID rules above. |
 | `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
 | `waivers` | The waiver format below. |
 
-The generator reports the same spec and registry errors; the check adds `toml`, `fixtures`, `waivers` and line numbers, and is what CI gates on.
+The generator reports the same spec and registry errors; the check adds `toml`, `gates`, `fixtures`, `waivers` and line numbers, and is what CI gates on.
 
 ### Waivers
 
@@ -130,7 +131,7 @@ reason = "PostgreSQL service container lost mid-test; runner fault, not product 
 expires = 2026-12-31                                   # a TOML local date, not a string
 ```
 
-The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays, inline tables, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI, which makes it an error. Expiry against the current date and the reporter's use of waivers are not part of the static check.
+The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays, inline tables, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI: that probes the history up front, so a checkout without it fails even when there are no waivers. Expiry against the current date and the reporter's use of waivers are not part of the static check.
 
 ## Legs
 
@@ -202,13 +203,13 @@ node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts \
 
 ### Rules
 
-- **Test IDs.** A JUnit testcase maps to a registry test ID by the runner of its leg's job (`typescript`: vitest, `typescript-browser`: Playwright, every other job: cargo-nextest): nextest classname `<package>::<binary>` and name `<path>` give `nextest:<package>/<binary>/<path>` (a lib unit test, classname `<package>`, gives `nextest:<package>/<path>`); vitest and Playwright give `vitest:<file>/<name>` and `playwright:<file>/<name>`, where the file ends in `.test.*` or `.spec.*`.
+- **Test IDs (provisional, layout §6 question 5).** Layout §3 fixes only `nextest:<package>/<target>/<path>`; the vitest, Playwright, lib and bin forms below and the runner of each job are proposals, not ratified. A JUnit testcase maps to a registry test ID by the runner of its leg's job (`typescript`: vitest, `typescript-browser`: Playwright, every other job: cargo-nextest): nextest classname `<package>::<binary>` and name `<path>` give `nextest:<package>/<binary>/<path>` (a lib unit test, classname `<package>`, gives `nextest:<package>/<path>`); vitest and Playwright give `vitest:<file>/<name>` and `playwright:<file>/<name>`, where the file ends in `.test.*` or `.spec.*`.
 - **Scenario names** (layout §3): Rust `a<NN>_<pos|neg>_…` or `a<NN>_<SS>_<pos|neg>_…` on the last `::` segment; vitest `A40 pos: …` or `A58.07 neg: …` after the start or a ` > `; Playwright the same on the own title (the last ` › ` segment). The name gives the entry (`A24`, `A58.07`) and the polarity.
-- **Jobs of a test** (layout §3 "Which job produces a test", `TEST_JOBS` in the script): `skyoauth-scenarios` targets `hermetic`, `pg`, `envoy_k3s`, `live`; `skyoauth-client`; `skyoauth-operator`; vitest; Playwright. `skyoauth-service` has no job: it is not registrable. A test whose package fixes several jobs is expected from each of them that its stage lists.
+- **Jobs of a test** (layout §3 "Which job produces a test", `TEST_JOBS` in the script): `skyoauth-scenarios` targets `hermetic`, `pg`, `envoy_k3s`, `live`; `skyoauth-client`; `skyoauth-operator`; vitest; Playwright. `skyoauth-service` has no job: `service/` tests are not conformance evidence for now (layout §6 question 3, provisional), so `service-nextest` stays a unit-and-DB job and service-consumer fixtures are replayed from `skyoauth-scenarios`. `bundle-check` has no test source yet. Where one source maps to several jobs (`skyoauth-operator`: `operator` and `recovery-offline`; target `envoy_k3s`: four jobs; target `live`: two jobs), the reporter reads layout §3 literally: the test must pass in every one of those jobs that its stage lists, until a per-target job mapping is defined (layout §6 question 4).
 - **Testcase status.** `<failure>`, `<error>` or a retry marker (`<flakyFailure>`, `<flakyError>`, `<rerunFailure>`, `<rerunError>`) is failed: retries are 0, so a pass after a retry is a failure. `<skipped>` is not run. A testcase listed twice in one report keeps its worst status.
 - **Pairs.** For each implemented stage, every (test, leg) whose leg's job produces the test. Any unwaived failed attempt, in any run, makes the pair failed for good; otherwise a passing attempt makes it passed; otherwise it is not run (missing or skipped case, leg without a report).
 - **Stages.** Worst pair, failed > not run > passed. A stage that lists a test that is not a pos/neg test of its own entry, a test that no job of its legs produces, or a job with no pos or no neg test, is not run (or failed, if a pair failed). A planned stage is planned whatever results exist; results for its tests are listed as not counted.
-- **Aggregates.** A scenario at milestone M takes the worst of its stages up to M and those of its required sub-IDs; a contract is passed only when every covered scenario is. Aggregates rank failed > planned > not run > passed. A milestone's gate is passed only when every required stage of that milestone is; conditional sub-IDs are reported but gate nothing.
+- **Aggregates.** A scenario at milestone M takes the worst of its stages up to M and those of its required sub-IDs; a contract is passed only when every covered scenario is. Aggregates rank **failed > planned > not run > passed** (layout §3): a planned stage never counts as passed. A milestone's gate is passed only when every stage that the registry check's `gates` rule covers is passed: scenario stages and required sub-IDs. Conditional sub-IDs are reported, and a failed one still makes the run exit 1, but they gate nothing while no release manifest exists.
 - **Waivers.** A waiver discards one failed attempt only when commit, test, leg, `run_id` and `run_attempt` all match and it has not expired; the pair still needs a passing attempt. A waiver never applies to a not-run pair or a planned stage. Every waiver for the commit is listed as applied (next to the pair it affected) or not applied, with the reason.
 - **Results not counted.** Testcases with a scenario-like name that no implemented stage lists are listed: tests of planned stages, well-formed names not in any stage's `tests`, and unknown names (malformed, or no such entry). Other testcases are ignored.
 

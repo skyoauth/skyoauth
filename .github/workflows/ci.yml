@@ -167,12 +167,18 @@ jobs:
           RUSTDOCFLAGS: -D warnings
 
   # Line coverage gate. The threshold lives in the `coverage` alias in
-  # .cargo/config.toml. Reports are uploaded even when the gate fails.
+  # .cargo/config.toml. Reports are uploaded even when the gate fails. The
+  # job has read-only access; badge publication is a separate job.
   rust-coverage:
     name: Rust coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    env:
+      # Keep in sync with the `coverage` alias in .cargo/config.toml.
+      COVERAGE_IGNORE_REGEX: 'main\.rs'
+    outputs:
+      report: ${{ steps.report.outputs.complete }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -191,12 +197,21 @@ jobs:
 
       - name: Check coverage threshold
         run: |
+          set -o pipefail
           mkdir -p target/coverage
-          cargo coverage --locked --lcov --output-path target/coverage/lcov.info
+          cargo coverage --locked --json --summary-only --output-path target/coverage/coverage.json 2>&1 \
+            | tee target/coverage/coverage.log
+
+      - name: Export LCOV report
+        if: always()
+        run: |
+          if [ -s target/coverage/coverage.json ]; then
+            cargo llvm-cov report --lcov --ignore-filename-regex "$COVERAGE_IGNORE_REGEX" --output-path target/coverage/lcov.info
+          fi
 
       - name: Coverage summary
         if: always()
-        run: cargo llvm-cov report --summary-only --ignore-filename-regex 'main\.rs' | tee -a "$GITHUB_STEP_SUMMARY"
+        run: cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage reports
         if: always()
@@ -206,11 +221,28 @@ jobs:
           path: target/coverage/
           if-no-files-found: warn
 
+      # Tells publish-badges whether there are figures to publish: a
+      # coverage report from a run whose tests all passed. That holds when
+      # only the threshold was missed, but not when the tests failed.
+      - name: Check for a complete coverage report
+        id: report
+        if: always()
+        run: |
+          if [ -s target/coverage/coverage.json ] &&
+            jq -e '.data[0].totals.lines.percent | type == "number"' target/coverage/coverage.json >/dev/null &&
+            ! grep -q '^test result: FAILED' target/coverage/coverage.log; then
+            echo complete=true >> "$GITHUB_OUTPUT"
+          fi
+
   # Runs the workspace tests under cargo-nextest with the `ci` profile in
   # .config/nextest.toml (no retries, no fail-fast) and uploads the JUnit
   # report, even when tests fail. nextest does not run doctests; the
   # `rust` job does. The artifact name carries the run attempt so a
-  # re-run never replaces an earlier attempt's report.
+  # re-run never replaces an earlier attempt's report. DB-backed tests
+  # reach the same pinned PostgreSQL service container as `scenarios-pg`
+  # through SKYOAUTH_IT_DATABASE_URL; the official image's user is a
+  # superuser, so tests can create a database each (the check step
+  # proves it). No test filter: every workspace test runs here.
   service-nextest:
     name: Service tests (nextest)
     needs: changes
@@ -218,6 +250,33 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    env:
+      SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+    services:
+      postgres:
+        # postgres:17 (17.12) pinned by its multi-arch index digest. The
+        # same pin is in the `service-nextest` and `scenarios-pg` jobs;
+        # bump both together. Dependabot is not configured for this pin;
+        # bump it by hand (docs/testing/conformance-layout.md section 4):
+        # take the multi-arch index digest of the new 17.x tag from Docker
+        # Hub and change tag and digest together. Docker pulls by digest
+        # and ignores the tag, so the check step fails if they disagree or
+        # if the two jobs' pins differ.
+        image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+        env:
+          POSTGRES_USER: skyoauth
+          POSTGRES_PASSWORD: skyoauth
+          POSTGRES_DB: skyoauth
+        ports:
+          - 5432:5432
+        # Probe over TCP: the image's init-time server listens on the Unix
+        # socket only, so a socket probe can report ready before the real
+        # server starts.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U skyoauth -d skyoauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
         with:
@@ -233,8 +292,62 @@ jobs:
         with:
           tool: cargo-nextest@0.9.151
 
+      # Proves the service container is reachable from the runner with the
+      # URL the tests use and is the pinned major version; that every
+      # `postgres` service in this file has the same tag@digest pin and the
+      # server version matches that tag (catches a tag bumped without its
+      # digest, or the reverse, or a pin bumped in one job only); and that
+      # the role can create, connect to and drop a database, as tests that
+      # create a database each need. The step is identical in
+      # `service-nextest` and `scenarios-pg`.
+      - name: Check PostgreSQL is reachable
+        run: |
+          pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
+          version="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version_num')"
+          echo "server_version_num: $version"
+          if [ "${version%????}" != 17 ]; then
+            echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
+            exit 1
+          fi
+          workflow=.github/workflows/ci.yml
+          services="$(grep -c '^ *postgres: *$' "$workflow" || true)"
+          images="$(grep '^ *image: .*postgres' "$workflow" | sed 's/^ *image: *//; s/ *$//')"
+          count="$(printf '%s' "$images" | grep -c '' || true)"
+          pinned="$(printf '%s' "$images" | grep -cx 'postgres:[0-9][0-9.]*@sha256:[0-9a-f]\{64\}' || true)"
+          echo "postgres services in $workflow: $services"
+          printf '%s\n' "$images" | sed 's/^/  image: /'
+          if [ "$services" -eq 0 ] || [ "$count" != "$services" ] || [ "$pinned" != "$services" ]; then
+            echo "::error::Each of the $services postgres services in $workflow needs an image 'postgres:<tag>@sha256:<digest>'; $pinned of $count postgres image lines have that form"
+            exit 1
+          fi
+          pin="$(printf '%s\n' "$images" | sort -u)"
+          if [ "$(printf '%s\n' "$pin" | grep -c '')" != 1 ]; then
+            echo "::error::The postgres pins in $workflow differ ($(printf '%s\n' "$pin" | paste -sd ' ' -)); every job must use the same tag and digest, bump them together"
+            exit 1
+          fi
+          tag="${pin#postgres:}"
+          tag="${tag%%@*}"
+          server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
+          server="${server%% *}"
+          echo "image tag: $tag, server_version: $server"
+          if [ "$tag" != "$server" ]; then
+            echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
+            exit 1
+          fi
+          db="skyoauth_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          trap 'psql "$SKYOAUTH_IT_DATABASE_URL" -qc "DROP DATABASE IF EXISTS $db" || echo "::warning::Could not drop $db"' EXIT
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $db"
+          current="$(psql "${SKYOAUTH_IT_DATABASE_URL%/*}/$db" -v ON_ERROR_STOP=1 -tAc 'SELECT current_database()')"
+          if [ "$current" != "$db" ]; then
+            echo "::error::Connected to '$current' instead of the new database '$db'"
+            exit 1
+          fi
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE $db"
+          trap - EXIT
+          echo "The role can create, connect to and drop a database ($db)"
+
       - name: Run tests
-        run: cargo nextest run --locked --workspace --all-features --profile ci
+        run: cargo nextest run --locked --workspace --all-features --profile ci --run-ignored all
 
       - name: Upload JUnit report
         if: always()
@@ -289,12 +402,14 @@ jobs:
       SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
     services:
       postgres:
-        # postgres:17 (17.12) pinned by its multi-arch index digest.
-        # Dependabot is not configured for this pin; bump it by hand
-        # (docs/testing/conformance-layout.md section 4): take the
-        # multi-arch index digest of the new 17.x tag from Docker Hub and
-        # change tag and digest together. Docker pulls by digest and
-        # ignores the tag, so the check step fails if they disagree.
+        # postgres:17 (17.12) pinned by its multi-arch index digest. The
+        # same pin is in the `service-nextest` and `scenarios-pg` jobs;
+        # bump both together. Dependabot is not configured for this pin;
+        # bump it by hand (docs/testing/conformance-layout.md section 4):
+        # take the multi-arch index digest of the new 17.x tag from Docker
+        # Hub and change tag and digest together. Docker pulls by digest
+        # and ignores the tag, so the check step fails if they disagree or
+        # if the two jobs' pins differ.
         image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
         env:
           POSTGRES_USER: skyoauth
@@ -326,9 +441,13 @@ jobs:
           tool: cargo-nextest@0.9.151
 
       # Proves the service container is reachable from the runner with the
-      # URL the tests use, that it is the pinned major version, and that the
-      # server version matches the image tag (catches a tag bumped without
-      # its digest, or the reverse).
+      # URL the tests use and is the pinned major version; that every
+      # `postgres` service in this file has the same tag@digest pin and the
+      # server version matches that tag (catches a tag bumped without its
+      # digest, or the reverse, or a pin bumped in one job only); and that
+      # the role can create, connect to and drop a database, as tests that
+      # create a database each need. The step is identical in
+      # `service-nextest` and `scenarios-pg`.
       - name: Check PostgreSQL is reachable
         run: |
           pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
@@ -338,14 +457,42 @@ jobs:
             echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
             exit 1
           fi
-          tag="$(sed -n 's/^ *image: postgres:\([0-9.]*\)@sha256:.*/\1/p' .github/workflows/ci.yml)"
+          workflow=.github/workflows/ci.yml
+          services="$(grep -c '^ *postgres: *$' "$workflow" || true)"
+          images="$(grep '^ *image: .*postgres' "$workflow" | sed 's/^ *image: *//; s/ *$//')"
+          count="$(printf '%s' "$images" | grep -c '' || true)"
+          pinned="$(printf '%s' "$images" | grep -cx 'postgres:[0-9][0-9.]*@sha256:[0-9a-f]\{64\}' || true)"
+          echo "postgres services in $workflow: $services"
+          printf '%s\n' "$images" | sed 's/^/  image: /'
+          if [ "$services" -eq 0 ] || [ "$count" != "$services" ] || [ "$pinned" != "$services" ]; then
+            echo "::error::Each of the $services postgres services in $workflow needs an image 'postgres:<tag>@sha256:<digest>'; $pinned of $count postgres image lines have that form"
+            exit 1
+          fi
+          pin="$(printf '%s\n' "$images" | sort -u)"
+          if [ "$(printf '%s\n' "$pin" | grep -c '')" != 1 ]; then
+            echo "::error::The postgres pins in $workflow differ ($(printf '%s\n' "$pin" | paste -sd ' ' -)); every job must use the same tag and digest, bump them together"
+            exit 1
+          fi
+          tag="${pin#postgres:}"
+          tag="${tag%%@*}"
           server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
           server="${server%% *}"
           echo "image tag: $tag, server_version: $server"
-          if [ -z "$tag" ] || [ "$tag" != "$server" ]; then
+          if [ "$tag" != "$server" ]; then
             echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
             exit 1
           fi
+          db="skyoauth_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          trap 'psql "$SKYOAUTH_IT_DATABASE_URL" -qc "DROP DATABASE IF EXISTS $db" || echo "::warning::Could not drop $db"' EXIT
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $db"
+          current="$(psql "${SKYOAUTH_IT_DATABASE_URL%/*}/$db" -v ON_ERROR_STOP=1 -tAc 'SELECT current_database()')"
+          if [ "$current" != "$db" ]; then
+            echo "::error::Connected to '$current' instead of the new database '$db'"
+            exit 1
+          fi
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE $db"
+          trap - EXIT
+          echo "The role can create, connect to and drop a database ($db)"
 
       - name: Run scenario tests
         run: >-
@@ -429,12 +576,15 @@ jobs:
         run: npm run build
 
   # Coverage gate. The thresholds live in vitest.config.ts. Reports are
-  # uploaded even when the gate fails.
+  # uploaded even when the gate fails. The job has read-only access; badge
+  # publication is a separate job.
   typescript-coverage:
     name: TypeScript coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    outputs:
+      report: ${{ steps.report.outputs.complete }}
     defaults:
       run:
         working-directory: clients/typescript
@@ -452,7 +602,7 @@ jobs:
       - run: npm ci
 
       - name: Check coverage thresholds
-        run: npm run coverage
+        run: npm run coverage -- --reporter=default --reporter=json --outputFile.json=coverage/test-results.json
 
       - name: Coverage summary
         if: always()
@@ -469,6 +619,148 @@ jobs:
           name: typescript-coverage
           path: clients/typescript/coverage/
           if-no-files-found: warn
+
+      # Tells publish-badges whether there are figures to publish: a
+      # coverage report from a run whose tests all passed. That holds when
+      # only a coverage threshold was missed, but not when tests failed.
+      - name: Check for a complete coverage report
+        id: report
+        if: always()
+        run: |
+          if [ -s coverage/coverage-summary.json ] &&
+            [ -s coverage/test-results.json ] &&
+            jq -e '.success == true and .numFailedTests == 0' coverage/test-results.json >/dev/null &&
+            jq -e '.total.lines.pct | type == "number"' coverage/coverage-summary.json >/dev/null; then
+            echo complete=true >> "$GITHUB_OUTPUT"
+          fi
+
+  # A docs-only push to main publishes no badges but may have changed the
+  # README that embeds them, so check that it still renders the badges
+  # already published for main.
+  verify-badges:
+    name: Verify README badges
+    needs: changes
+    if: needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Verify the README badges render
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/ci/verify-badges-render.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+
+  # Publishes the Rust and TypeScript coverage and test-count badges for the
+  # pushed branch to the `badges` branch (path `<branch>/`) as SVG files; the
+  # README embeds `main/` through github.com, so the badges also render in a
+  # private repository and need no external service. A separate job so that
+  # only this step, which runs no project code, holds a write-capable token.
+  # Runs on pushes to main and on manual dispatch (any branch, so the
+  # mechanism can be exercised before merge). scripts/ci/publish-badges.sh
+  # skips figures for a commit that is no longer its branch's tip. Runs on
+  # both passing and failing coverage/test jobs: a threshold-only miss
+  # publishes the below-threshold percentage, and test or build failures
+  # publish red `N failed` / `failing` badges so stale passing figures never
+  # remain on a red `main`. A docs-only change skips coverage and tests and
+  # publishes nothing; the script keeps publishing for a commit that only
+  # such changes followed.
+  publish-badges:
+    name: Publish badges
+    if: >-
+      !cancelled() &&
+      (needs.rust-coverage.result == 'success' || needs.rust-coverage.result == 'failure' ||
+       needs.service-nextest.result == 'success' || needs.service-nextest.result == 'failure' ||
+       needs.typescript-coverage.result == 'success' || needs.typescript-coverage.result == 'failure') &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+    needs: [rust-coverage, service-nextest, typescript-coverage]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: badges-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download Rust coverage report
+        if: needs.rust-coverage.outputs.report == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: rust-coverage
+          path: target/coverage
+
+      - name: Download Rust test report
+        if: needs.service-nextest.result == 'success' || needs.service-nextest.result == 'failure'
+        continue-on-error: ${{ needs.service-nextest.result == 'failure' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: service-nextest-junit-*
+          path: target/nextest-artifacts
+
+      - name: Download TypeScript coverage report
+        if: needs.typescript-coverage.result == 'success' || needs.typescript-coverage.result == 'failure'
+        continue-on-error: ${{ needs.typescript-coverage.result == 'failure' && needs.typescript-coverage.outputs.report != 'true' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: typescript-coverage
+          path: clients/typescript/coverage
+
+      - name: Publish
+        env:
+          RUST_COVERAGE_OK: ${{ needs.rust-coverage.outputs.report }}
+          RUST_COVERAGE_RESULT: ${{ needs.rust-coverage.result }}
+          RUST_TESTS_RESULT: ${{ needs.service-nextest.result }}
+          TS_OK: ${{ needs.typescript-coverage.outputs.report }}
+          TS_RESULT: ${{ needs.typescript-coverage.result }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -- "$GITHUB_REF_NAME" "$GITHUB_SHA"
+          if [ "$RUST_COVERAGE_OK" = true ]; then
+            set -- "$@" --rust-coverage target/coverage/coverage.json
+          elif [ "$RUST_COVERAGE_RESULT" = failure ]; then
+            set -- "$@" --rust-coverage-failed
+          fi
+          if [ "$RUST_TESTS_RESULT" = success ] || [ "$RUST_TESTS_RESULT" = failure ]; then
+            junit=
+            if [ -d target/nextest-artifacts ]; then
+              junit=$(find target/nextest-artifacts -maxdepth 2 -name junit.xml | sort -V | tail -n 1)
+            fi
+            if [ -n "$junit" ]; then
+              set -- "$@" --rust-junit "$junit"
+            elif [ "$RUST_TESTS_RESULT" = success ]; then
+              echo "publish-badges: missing service-nextest junit.xml" >&2
+              exit 1
+            fi
+            if [ "$RUST_TESTS_RESULT" = failure ]; then
+              set -- "$@" --rust-tests-failed
+            fi
+          fi
+          if [ "$TS_OK" = true ]; then
+            set -- "$@" --ts-coverage clients/typescript/coverage/coverage-summary.json \
+              --ts-results clients/typescript/coverage/test-results.json
+          elif [ "$TS_RESULT" = failure ]; then
+            set -- "$@" --ts-coverage-failed --ts-tests-failed
+            if [ -s clients/typescript/coverage/test-results.json ]; then
+              set -- "$@" --ts-results clients/typescript/coverage/test-results.json
+            fi
+          fi
+          sh scripts/ci/publish-badges.sh "$@"
+
+      # Fetches the README as GitHub renders it and checks that it embeds
+      # all four badges once each and that GitHub serves the files just
+      # published as SVG images.
+      - name: Verify the README badges render
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/ci/verify-badges-render.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
 
   # The one check to require in branch protection. A job skipped for a
   # docs-only change satisfies a required check, except a matrix job: it
@@ -490,6 +782,7 @@ jobs:
       - scenarios-pg
       - typescript
       - typescript-coverage
+      - verify-badges
     runs-on: ubuntu-24.04
     steps:
       - name: Check job results
