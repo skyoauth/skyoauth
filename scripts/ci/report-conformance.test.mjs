@@ -849,6 +849,57 @@ describe('XML and JUnit reader', () => {
     assert.equal(parseXml('<a b="&#x30;&#90;&#1;&#x10FFFF;"/>').attrs.b, '0Z\u0001\u{10FFFF}');
   });
 
+  test('passed is an allow-list: skip markers, skip statuses and namespaced failures do not pass', () => {
+    const one = (body, attrs = '') => readJUnit(`<testsuite name="s"><testcase classname="c" name="n"${attrs}>${body}</testcase></testsuite>`)[0].status;
+    for (const [body, attrs, want] of [
+      ['', '', 'passed'],
+      ['<system-out>x</system-out><system-err/><properties><property name="a" value="b"/></properties>', '', 'passed'],
+      ['', ' status="passed"', 'passed'],
+      ['', ' status="success"', 'passed'],
+      ['', ' status="run"', 'passed'],
+      ['<skipped/>', '', 'skipped'],
+      ['<ignored/>', '', 'skipped'],
+      ['<disabled/>', '', 'skipped'],
+      ['', ' status="skipped"', 'skipped'],
+      ['', ' status="notrun"', 'skipped'],
+      ['', ' status="disabled"', 'skipped'],
+      ['', ' status="ignored"', 'skipped'],
+      ['', ' status="failed"', 'failed'],
+      ['', ' status="failure"', 'failed'],
+      ['', ' status="error"', 'failed'],
+      ['<skipped/>', ' status="failed"', 'failed'],
+      ['', ' status="skipped"', 'skipped'],
+      ['<j:failure/>', '', 'failed'],
+      ['<x:flakyError/>', '', 'failed'],
+      ['<x:skipped/>', '', 'skipped'],
+      ['<flakyError/>', '', 'failed'],
+      ['<rerunError/>', '', 'failed'],
+    ]) {
+      assert.equal(one(body, attrs), want, `${attrs} ${body}`);
+    }
+    for (const [x, re] of [
+      ['<testsuite><testcase classname="c" name="n"><weird/></testcase></testsuite>', /^testcase n: unknown element <weird>$/],
+      ['<testsuite><testcase classname="c" name="n" status="maybe"/></testsuite>', /^testcase n: unknown status="maybe"$/],
+      ['<testsuite name="s"><error message="setup crashed"/><testcase classname="c" name="n"/></testsuite>', /^a suite-level <error> in <testsuite name="s">: it fails no particular testcase$/],
+      ['<testsuites><testsuite><testcase classname="c" name="n"/></testsuite><j:failure/></testsuites>', /^a suite-level <j:failure> in <testsuites>: /],
+      ['<testsuite><flakyFailure/></testsuite>', /^a suite-level <flakyFailure> in <testsuite>: /],
+      ['<testsuite><skipped/></testsuite>', /^unknown element <skipped> in <testsuite>$/],
+      ['<testsuite><testcase classname="c" name="n"/><foo/></testsuite>', /^unknown element <foo> in <testsuite>$/],
+    ]) {
+      assert.throws(() => readJUnit(x), (ex) => ex instanceof InputError && re.test(ex.message), x);
+    }
+    assert.deepEqual(readJUnit('<j:testsuite xmlns:j="u"><j:testcase classname="c" name="n"><j:failure/></j:testcase></j:testsuite>'), [{ classname: 'c', name: 'n', status: 'failed' }]);
+  });
+
+  test('a suite-level error is an input error and the report is not used', () => {
+    const x = allPass(A24).replace('<testsuite name="skyoauth-scenarios::pg" tests="2">', '<testsuite name="skyoauth-scenarios::pg" tests="2"><error message="binary crashed"/>');
+    assert.notEqual(x, allPass(A24));
+    const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: x }])]);
+    assert.equal(r.code, 2);
+    assert.match(r.out, /junit\.xml: malformed JUnit: a suite-level <error> in <testsuite name="skyoauth-scenarios::pg">/);
+    assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
+  });
+
   test('a duplicate testcase within one report keeps its worst status: failed > skipped > passed', () => {
     const C = rust('skyoauth-scenarios', 'pg', 'security::a24::a24_pos_c');
     const D = rust('skyoauth-scenarios', 'pg', 'security::a24::a24_neg_d');

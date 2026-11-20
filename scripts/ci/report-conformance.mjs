@@ -37,8 +37,12 @@
 //
 // Rules (layout §3, §4)
 //   * A testcase is failed when it has <failure>, <error> or a retry marker
-//     (<flakyFailure>, <flakyError>, <rerunFailure>, <rerunError>): retries
-//     are 0, so a pass after a retry is a failure. <skipped> is not run.
+//     (<flakyFailure>, <flakyError>, <rerunFailure>, <rerunError>), matched
+//     by local name: retries are 0, so a pass after a retry is a failure.
+//     <skipped>, <ignored>, <disabled> or a skipped status attribute is not
+//     run. Passed is an allow-list (only <system-out>, <system-err>,
+//     <properties>); an unknown element or a suite-level failure is an input
+//     error.
 //   * A failed attempt is permanent for (commit, test, leg): a later passing
 //     attempt does not overwrite it. Only a waiver that names that exact
 //     attempt (commit, test, leg, run_id, run_attempt) and has not expired
@@ -189,27 +193,49 @@ export function parseXml(text) {
 // what nextest writes for retries; with retries = 0 they mean a retry ran,
 // and a pass after a retry counts as failed (layout §3).
 export const FAILED_ELEMENTS = new Set(['failure', 'error', 'flakyFailure', 'flakyError', 'rerunFailure', 'rerunError']);
+// Children that make a testcase not run.
+export const SKIPPED_ELEMENTS = new Set(['skipped', 'ignored', 'disabled']);
+// Children that carry no verdict. "Passed" is an allow-list: a testcase is
+// passed only when every child is one of these and its status attribute, if
+// any, is a passing one. Any other element is an input error, so a reporter
+// that starts writing a new verdict element cannot be read as a pass.
+const QUIET_ELEMENTS = new Set(['system-out', 'system-err', 'properties']);
+const STATUS_ATTR = { passed: 'passed', success: 'passed', run: 'passed', skipped: 'skipped', notrun: 'skipped', disabled: 'skipped', ignored: 'skipped', failed: 'failed', failure: 'failed', error: 'failed' };
+// Elements are matched by local name, so a namespaced <j:failure> is a
+// failure too.
+const local = (n) => n.slice(n.lastIndexOf(':') + 1);
 
 // The testcases of a JUnit report: [{ classname, name, status }], status one
-// of passed, failed, skipped. Throws InputError for a malformed report.
+// of passed, failed, skipped. Throws InputError for a malformed report, for
+// an element it does not know inside a <testsuite> or <testcase>, and for a
+// suite-level failure (a <failure>, <error> or retry marker directly in a
+// <testsuite>, such as a setup crash): it cannot be pinned to a testcase, so
+// the report is not used and the result cannot be trusted.
 export function readJUnit(text) {
   const root = parseXml(text);
-  if (root.name !== 'testsuites' && root.name !== 'testsuite') throw new InputError(`the root element is <${root.name}>, not <testsuites> or <testsuite>`);
+  if (local(root.name) !== 'testsuites' && local(root.name) !== 'testsuite') throw new InputError(`the root element is <${root.name}>, not <testsuites> or <testsuite>`);
   const cases = [];
   const walk = (el, inSuite) => {
     for (const c of el.children) {
-      if (c.name === 'testsuite' || c.name === 'testsuites') walk(c, c.name === 'testsuite' || inSuite);
-      else if (c.name === 'testcase') {
+      const n = local(c.name);
+      if (n === 'testsuite' || n === 'testsuites') walk(c, n === 'testsuite' || inSuite);
+      else if (n === 'testcase') {
         if (!inSuite) throw new InputError('a <testcase> outside any <testsuite>');
         const { name, classname } = c.attrs;
         if (!name || classname === undefined) throw new InputError(`a <testcase> without a name or classname attribute${name ? ` (${name})` : ''}`);
-        const kids = c.children.map((k) => k.name);
-        const status = kids.some((k) => FAILED_ELEMENTS.has(k)) ? 'failed' : kids.includes('skipped') ? 'skipped' : 'passed';
+        const st = c.attrs.status;
+        if (st !== undefined && !Object.hasOwn(STATUS_ATTR, st)) throw new InputError(`testcase ${name}: unknown status="${st}"`);
+        const kids = c.children.map((k) => local(k.name));
+        const odd = kids.find((k) => !FAILED_ELEMENTS.has(k) && !SKIPPED_ELEMENTS.has(k) && !QUIET_ELEMENTS.has(k));
+        if (odd !== undefined) throw new InputError(`testcase ${name}: unknown element <${odd}>`);
+        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
+        const status = verdicts.includes('failed') ? 'failed' : verdicts.includes('skipped') ? 'skipped' : 'passed';
         cases.push({ classname, name, status });
-      }
+      } else if (FAILED_ELEMENTS.has(n)) throw new InputError(`a suite-level <${c.name}> in <${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>: it fails no particular testcase`);
+      else if (!QUIET_ELEMENTS.has(n)) throw new InputError(`unknown element <${c.name}> in <${el.name}>`);
     }
   };
-  walk(root, root.name === 'testsuite');
+  walk(root, local(root.name) === 'testsuite');
   return cases;
 }
 
