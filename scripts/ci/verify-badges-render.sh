@@ -162,6 +162,9 @@ elif [ "$transient" -eq 1 ]; then
         problem "$unavailable, and a README path is not a regular file in HEAD or HEAD^1, so an unchanged README proves nothing: $(printf '%s' "$odd" | tr '\n' ' ')"
         exit 1
     fi
+    # Either would make git read the pathspecs below as literal names that
+    # match no file, so that a changed README compares as unchanged.
+    unset GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS
     rc=0
     git diff --quiet 'HEAD^1' HEAD -- ':(top,icase)README*' ':(top,icase).github/README*' ':(top,icase)docs/README*' || rc=$?
     case $rc in

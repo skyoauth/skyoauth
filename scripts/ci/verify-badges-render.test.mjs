@@ -123,7 +123,7 @@ function checkout(dir, work, kind, base, md, extra, baseFiles) {
 // is its HEAD unless `args` says otherwise (SHA where there is no HEAD).
 // With `gitFails`, `git diff` exits 128, as on a corrupt repository.
 // With `sub`, the script runs in that subdirectory of the checkout.
-function verify({ pr, rules = {}, html = readme(), base = BASE_README, md = base, extra = {}, baseFiles = {}, repo = 'merge', gitFails = false, sub = '', args }) {
+function verify({ pr, rules = {}, html = readme(), base = BASE_README, md = base, extra = {}, baseFiles = {}, repo = 'merge', gitFails = false, sub = '', env = {}, args }) {
   const dir = join(TOP, `case-${++cases}`);
   const bin = join(dir, 'bin');
   const tmp = join(dir, 'tmp');
@@ -162,6 +162,7 @@ exec '${REAL_GIT}' "$@"
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CEILING_DIRECTORIES: dir,
       ...(gitFails ? { GIT_STUB_FAIL_DIFF: '1' } : {}),
+      ...env,
     },
   });
   assert.equal(r.error, undefined);
@@ -406,6 +407,29 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.ok(r.stdout.includes(`badge file ${file}.svg (not read from the README, which is unchanged from the base branch)\n  published file https://raw.githubusercontent.com/${REPO}/badges/main/${file}.svg -> 200 image/svg+xml\n`), r.stdout);
       }
     });
+
+    // git applies these exported variables to every pathspec: literal or
+    // noglob pathspecs name no file, so the README would compare as
+    // unchanged. The script clears exactly these two before it compares.
+    test('clears GIT_LITERAL_PATHSPECS and GIT_NOGLOB_PATHSPECS before comparing the README', () => {
+      const unsets = readFileSync(SCRIPT, 'utf8').match(/^\s*unset\b.*$/gm) ?? [];
+      assert.deepEqual(unsets.map((line) => line.trim()), ['unset GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS']);
+    });
+
+    for (const env of [
+      { GIT_LITERAL_PATHSPECS: '1' },
+      { GIT_NOGLOB_PATHSPECS: '1' },
+      { GIT_LITERAL_PATHSPECS: '1', GIT_NOGLOB_PATHSPECS: '1' },
+      { GIT_GLOB_PATHSPECS: '1' },
+      { GIT_ICASE_PATHSPECS: '1' },
+    ]) {
+      const what = Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ');
+      test(`an exported ${what} does not make a changed README pass`, () => {
+        const r = verify({ pr: true, rules: down, md: changed, env });
+        assert.equal(r.status, 1, r.stdout + r.stderr);
+        assert.match(r.stderr, /this pull request changes the README/);
+      });
+    }
 
     test('run from a subdirectory, a changed README still fails', () => {
       const r = verify({ pr: true, rules: down, md: changed, sub: 'lib/inner', extra: { 'lib/inner/README.md': '# inner\n' }, baseFiles: { 'lib/inner/README.md': '# inner\n' } });
