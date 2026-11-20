@@ -30,7 +30,7 @@ while [ $# -gt 0 ]; do
         -w) fmt=$2; shift 2 ;;
         -D) headers=$2; shift 2 ;;
         --retry) retry=$2; shift 2 ;;
-        -H | --retry-delay | --max-time) shift 2 ;;
+        -H | --retry-delay | --retry-max-time | --max-time) shift 2 ;;
         -f | --fail) fail_on_error=1; shift ;;
         -*f*) case $1 in --*) ;; *) fail_on_error=1 ;; esac; shift ;;
         -*) shift ;;
