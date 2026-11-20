@@ -246,7 +246,8 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
      `hash` and `prev_hash` fields.
 
-  The hash is stored as lowercase hex. Conformance scenarios MUST NOT assert
+  The database stores the raw 32-byte digest (`bytea`); lowercase hex is only
+  its output form in the JSONL stream and the API. Conformance scenarios MUST NOT assert
   hash values, only chain linkage and verification outcomes. Provisional until
   the audit writer ships; the details still open are OQ-IR-15. (lead
   decision, 2026-11-20, OQ-IR-14)
@@ -693,15 +694,14 @@ follow-up. All other items are not resolved by this contract.
   own; and the namespace and syntax of `AuditEvent.action`.
 - **OQ-IR-15 — Audit hash details left open by the IR-056 to IR-059
   decision.**
-  - **Stored form.** IR-056 says the hash is stored as lowercase hex, but the
-    0002 schema stores `prev_hash` and `audit_chain_head.head_hash` as raw
-    `bytea`, and `audit_event` has no column for an event's own hash: it
-    appears only as the next event's `prev_hash` and in the chain head. Not
-    stated: whether hex is the text form (JSONL, API) over raw columns, or
-    whether the columns change.
-  - **Actor form.** IR-058 gives the actor as an object, but
-    `AuditEvent.actor` is a text column. Not stated: how an actor is written
-    in the column and in the envelope.
+  - **No own-hash column.** `audit_event` has no column for an event's own
+    hash. The hash is visible only as the next event's `prev_hash` or as
+    `audit_chain_head.head_hash`, so verification recomputes it from the
+    event. (Raw `bytea` storage with lowercase hex as the JSONL and API output
+    form is not a conflict: IR-056.)
+  - **Actor form.** IR-058 gives the actor as an object `{type, id}`, but
+    `AuditEvent.actor` is a text column. Not stated: the text serialization
+    of an object actor, in the column and in the envelope.
   - **Envelope.** Not stated: the exact member names (the `AuditEvent` fields
     of tasks §3 are the evident candidates); how `timestamp` is serialized
     (format and precision); whether an absent value is a JSON `null` or an

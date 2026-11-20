@@ -233,9 +233,12 @@ Not done in `0002`:
   3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
      `hash` and `prev_hash` fields.
 
-  The decision stores the hash as lowercase hex, but `prev_hash` and
-  `head_hash` here are raw `bytea`, and `audit_event` has no column for an
-  event's own hash. That mismatch, the text form of `actor`, the envelope's
-  member names, the timestamp format and the encoding of absent values are
-  identity-registry OQ-IR-15; they need an answer before the writer ships.
+  `prev_hash` and `head_hash` store the raw 32-byte digest as `bytea`;
+  lowercase hex is only the JSONL and API output form. `audit_event` has no
+  column for an event's own hash, so verification recomputes it and compares
+  it with the next event's `prev_hash` or the head's `head_hash`. Still open
+  before the writer ships (identity-registry OQ-IR-15): the text
+  serialization of an object `actor`, the envelope's member names, the
+  timestamp format, the encoding of absent values, and the action names of
+  the startup-mirror and sink-change events.
   Tests assert chain linkage and verification outcomes, never hash values.
