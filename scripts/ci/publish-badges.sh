@@ -5,24 +5,39 @@
 # service.
 #
 #   scripts/ci/publish-badges.sh BRANCH SHA \
-#       [--rust-coverage coverage.json | --rust-coverage-failed] \
+#       [--rust-coverage coverage.json --rust-coverage-result RESULT |
+#        --rust-coverage-failed] \
 #       [--rust-junit junit.xml] [--rust-tests-failed] \
-#       [--ts-coverage coverage-summary.json | --ts-coverage-failed] \
+#       [--ts-coverage coverage-summary.json --ts-coverage-result RESULT |
+#        --ts-coverage-failed] \
 #       [--ts-results test-results.json] [--ts-tests-failed]
 #
 # BRANCH is the source branch the figures were measured on and SHA the
 # full commit they were measured at. At least one metric input must be
 # passed:
 #   --rust-coverage         `cargo llvm-cov --json --summary-only` report (line %)
+#   --rust-coverage-result  result of the job that measured it (`success`,
+#                           `failure` or `cancelled`), required with
+#                           --rust-coverage. Anything but `success` means the
+#                           coverage gate did not pass: the badge is red
+#                           whatever the percentage
 #   --rust-coverage-failed  publish a red `failing` rust coverage badge
 #   --rust-junit            `cargo nextest` JUnit report (passed or failed tests)
 #   --rust-tests-failed     mark the rust tests job as failed (uses the JUnit
 #                           failure count when present, else red `failing`)
 #   --ts-coverage           Vitest `coverage-summary.json` report (line %)
+#   --ts-coverage-result    as --rust-coverage-result, for --ts-coverage (the
+#                           gate also covers branches, functions and
+#                           statements, which the badge does not show)
 #   --ts-coverage-failed    publish a red `failing` typescript coverage badge
 #   --ts-results            Vitest `--reporter=json` test report
 #   --ts-tests-failed       mark the typescript tests job as failed (uses the
 #                           JSON failure count when present, else red `failing`)
+#
+# Coverage percentages are shown truncated to one decimal, never rounded,
+# so a figure below a threshold never reads as reaching it: 84.96 shows as
+# 84.9 %, 85 as 85.0 %, 100 as 100.0 %. A percentage outside 0..100 is an
+# error.
 #
 # Only the badges whose inputs are passed are regenerated; any other files
 # already on the badges branch under `<branch>/` are preserved, and each
@@ -40,14 +55,17 @@
 # branch that no longer exists on the remote counts as superseded.
 #
 # Every publication is generated on top of the current tip of the badges
-# branch and pushed with a plain fast-forward. If the push is rejected as a
-# non-fast-forward because another publication landed meanwhile, the tip is
-# fetched again and the files are regenerated on top of it; non-retryable
-# push errors fail immediately with stderr intact. Environment:
+# branch and pushed with a plain fast-forward. If the push fails and the
+# badges branch has moved since it was fetched (another publication landed
+# meanwhile, whatever wording the remote used for the rejection), the tip
+# is fetched again and the files are regenerated on top of it, up to
+# BADGES_ATTEMPTS times; a push that fails while the branch did not move
+# fails immediately with stderr intact. Environment:
 #   BADGES_REMOTE       git remote to push to (default: origin)
 #   BADGES_BRANCH       branch that holds the badges (default: badges)
-#   BADGES_ATTEMPTS     push attempts before giving up (default: 5)
-#   BADGES_RETRY_SLEEP  seconds to sleep before retrying a rejected push (default: 1)
+#   BADGES_ATTEMPTS     push attempts before giving up, 1 to 99 (default: 5)
+#   BADGES_RETRY_SLEEP  seconds to sleep before retrying a rejected push,
+#                       0 to 60 (default: 1)
 #   GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL (and COMMITTER) for the commit
 set -eu
 
@@ -56,10 +74,12 @@ source_sha=${2:?source commit}
 shift 2
 
 rust_coverage=
+rust_coverage_result=
 rust_coverage_failed=0
 rust_junit=
 rust_tests_failed=0
 ts_coverage=
+ts_coverage_result=
 ts_coverage_failed=0
 ts_results=
 ts_tests_failed=0
@@ -67,6 +87,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --rust-coverage)
             rust_coverage=${2:?--rust-coverage requires a path}
+            shift 2 ;;
+        --rust-coverage-result)
+            rust_coverage_result=${2:?--rust-coverage-result requires a job result}
             shift 2 ;;
         --rust-coverage-failed)
             rust_coverage_failed=1
@@ -79,6 +102,9 @@ while [ "$#" -gt 0 ]; do
             shift ;;
         --ts-coverage)
             ts_coverage=${2:?--ts-coverage requires a path}
+            shift 2 ;;
+        --ts-coverage-result)
+            ts_coverage_result=${2:?--ts-coverage-result requires a job result}
             shift 2 ;;
         --ts-coverage-failed)
             ts_coverage_failed=1
@@ -102,6 +128,26 @@ if [ -n "$ts_coverage" ] && [ "$ts_coverage_failed" -eq 1 ]; then
     echo "publish-badges: --ts-coverage and --ts-coverage-failed are mutually exclusive" >&2
     exit 2
 fi
+# `check_result NAME COVERAGE RESULT`: a coverage report needs the result
+# of the job that measured it, and only a report needs one.
+check_result() {
+    if [ -n "$2" ]; then
+        case $3 in
+            success | failure | cancelled) ;;
+            '')
+                echo "publish-badges: --$1 requires --$1-result" >&2
+                exit 2 ;;
+            *)
+                echo "publish-badges: --$1-result must be success, failure or cancelled, got '$3'" >&2
+                exit 2 ;;
+        esac
+    elif [ -n "$3" ]; then
+        echo "publish-badges: --$1-result requires --$1" >&2
+        exit 2
+    fi
+}
+check_result rust-coverage "$rust_coverage" "$rust_coverage_result"
+check_result ts-coverage "$ts_coverage" "$ts_coverage_result"
 if [ -z "$rust_coverage" ] && [ "$rust_coverage_failed" -eq 0 ] &&
     [ -z "$rust_junit" ] && [ "$rust_tests_failed" -eq 0 ] &&
     [ -z "$ts_coverage" ] && [ "$ts_coverage_failed" -eq 0 ] &&
@@ -114,6 +160,22 @@ remote=${BADGES_REMOTE:-origin}
 badges_branch=${BADGES_BRANCH:-badges}
 attempts=${BADGES_ATTEMPTS:-5}
 retry_sleep=${BADGES_RETRY_SLEEP:-1}
+# Numeric settings are checked by pattern, before any `test` compares them:
+# `[ 9223372036854775808 -lt 1 ]` fails with an error, which an `if` takes
+# for false, and a leading zero reads as octal in `$(( ))`. An empty value
+# means the default, as for an unset one.
+case $attempts in
+    [1-9] | [1-9][0-9]) ;;
+    *)
+        echo "publish-badges: BADGES_ATTEMPTS must be a whole number from 1 to 99 without leading zeros, got '$attempts'" >&2
+        exit 2 ;;
+esac
+case $retry_sleep in
+    [0-9] | [1-5][0-9] | 60) ;;
+    *)
+        echo "publish-badges: BADGES_RETRY_SLEEP must be a whole number of seconds from 0 to 60 without leading zeros, got '$retry_sleep'" >&2
+        exit 2 ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 
 # Exits 0 (nothing to do) unless the source branch on the remote still
@@ -136,9 +198,12 @@ source_is_current() {
 }
 source_is_current
 
+# `coverage_color PERCENT RESULT`: red whenever the gate did not pass (a
+# job result other than `success`), otherwise by band.
 coverage_color() {
     whole=${1%.*}
-    if [ "$whole" -ge 90 ]; then printf '%s' brightgreen
+    if [ "$2" != success ]; then printf '%s' red
+    elif [ "$whole" -ge 90 ]; then printf '%s' brightgreen
     elif [ "$whole" -ge 80 ]; then printf '%s' green
     elif [ "$whole" -ge 70 ]; then printf '%s' yellowgreen
     elif [ "$whole" -ge 60 ]; then printf '%s' yellow
@@ -146,8 +211,68 @@ coverage_color() {
     fi
 }
 
+# `percent_1dp NUMBER`: NUMBER, a JSON number as jq prints it, truncated to
+# one decimal. jq (1.7 or later) prints a number it read unchanged, so this
+# works on the report's own decimal literal, and does so by string
+# arithmetic only: no float conversion can round 84.99999 or 84.9 up or
+# down. Exponent forms (`1E+2`, `5E-324`) are accepted. Fails unless
+# 0 <= NUMBER <= 100.
+percent_1dp() {
+    PERCENT=$1 awk 'BEGIN {
+        s = ENVIRON["PERCENT"]
+        if (s !~ /^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) exit 1
+        m = s
+        e = 0
+        if (match(s, /[eE]/)) {
+            m = substr(s, 1, RSTART - 1)
+            x = substr(s, RSTART + 1)
+        }
+        if (m ~ /^[0.]+$/) { print "0.0"; exit 0 }
+        if (x != "") {
+            negative = (x ~ /^-/)
+            sub(/^[-+]/, "", x)
+            sub(/^0+/, "", x)
+            # An exponent this long is far below 0.1 or far above 100.
+            if (length(x) > 9) { if (negative) { print "0.0"; exit 0 } exit 1 }
+            e = (x == "" ? 0 : x + 0)
+            if (negative) e = -e
+        }
+        # The digits of the mantissa, and where the decimal point falls
+        # among them once the exponent is applied.
+        dot = index(m, ".")
+        if (dot) { d = substr(m, 1, dot - 1) substr(m, dot + 1); p = dot - 1 + e }
+        else { d = m; p = length(m) + e }
+        while (substr(d, 1, 1) == "0") { d = substr(d, 2); p-- }
+        # Now d starts with a non-zero digit, so the value has p integer
+        # digits; more than 3 is above 100.
+        if (p > 3) exit 1
+        if (p < 0) { print "0.0"; exit 0 }
+        if (p == 0) { print "0." substr(d, 1, 1); exit 0 }
+        while (length(d) <= p) d = d "0"
+        whole = substr(d, 1, p)
+        rest = substr(d, p + 1)
+        if (whole + 0 > 100 || (whole + 0 == 100 && rest ~ /[1-9]/)) exit 1
+        print whole "." substr(rest, 1, 1)
+    }'
+}
+
+# `gate RESULT`: the coverage gate outcome recorded in summary.json.
+gate() {
+    if [ "$1" = success ]; then printf '%s' passed; else printf '%s' failed; fi
+}
+
+# `junit_attr FILE NAME`: the count in the NAME attribute of FILE's
+# <testsuites> element, without leading zeros (which `$(( ))` reads as
+# octal), or nothing when it is absent. Fails for a count of more than 9
+# digits, which `test` and `$(( ))` cannot be trusted with.
 junit_attr() {
-    sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([0-9][0-9]*\)\".*/\1/p" "$1" | head -n 1
+    value=$(sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([0-9][0-9]*\)\".*/\1/p" "$1" | head -n 1 |
+        sed 's/^0*\([0-9]\)/\1/')
+    if [ "${#value}" -gt 9 ]; then
+        echo "publish-badges: $2=\"$value\" in $1 is out of range" >&2
+        return 1
+    fi
+    printf '%s' "$value"
 }
 
 sha=$(git rev-parse --short "$source_sha")
@@ -161,11 +286,15 @@ if [ -n "$rust_coverage" ]; then
         echo "publish-badges: cannot read line coverage percentage from $rust_coverage" >&2
         exit 1
     fi
-    rust_percent=$(jq '.data[0].totals.lines.percent' "$rust_coverage" | awk '{printf "%.1f", $1}')
+    rust_raw=$(jq -r '.data[0].totals.lines.percent' "$rust_coverage")
+    if ! rust_percent=$(percent_1dp "$rust_raw"); then
+        echo "publish-badges: line coverage percentage '$rust_raw' in $rust_coverage is not a number from 0 to 100" >&2
+        exit 1
+    fi
     rust_cov_value="${rust_percent}%"
-    rust_cov_color=$(coverage_color "$rust_percent")
-    rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg c "$sha" \
-        '{status: "ok", lines_percent: ($p | tonumber), commit: $c}')
+    rust_cov_color=$(coverage_color "$rust_percent" "$rust_coverage_result")
+    rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg g "$(gate "$rust_coverage_result")" --arg c "$sha" \
+        '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
 elif [ "$rust_coverage_failed" -eq 1 ]; then
     rust_cov_value=failing
     rust_cov_color=red
@@ -239,11 +368,15 @@ if [ -n "$ts_coverage" ]; then
         echo "publish-badges: cannot read line coverage percentage from $ts_coverage" >&2
         exit 1
     fi
-    ts_percent=$(jq '.total.lines.pct' "$ts_coverage" | awk '{printf "%.1f", $1}')
+    ts_raw=$(jq -r '.total.lines.pct' "$ts_coverage")
+    if ! ts_percent=$(percent_1dp "$ts_raw"); then
+        echo "publish-badges: line coverage percentage '$ts_raw' in $ts_coverage is not a number from 0 to 100" >&2
+        exit 1
+    fi
     ts_cov_value="${ts_percent}%"
-    ts_cov_color=$(coverage_color "$ts_percent")
-    ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg c "$sha" \
-        '{status: "ok", lines_percent: ($p | tonumber), commit: $c}')
+    ts_cov_color=$(coverage_color "$ts_percent" "$ts_coverage_result")
+    ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg g "$(gate "$ts_coverage_result")" --arg c "$sha" \
+        '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
 elif [ "$ts_coverage_failed" -eq 1 ]; then
     ts_cov_value=failing
     ts_cov_color=red
@@ -256,10 +389,12 @@ ts_tests_color=
 ts_tests_json=
 if [ -n "$ts_results" ]; then
     if [ -s "$ts_results" ] &&
-        jq -e '(.success | type == "boolean") and (.numPassedTests | type == "number" and . >= 0 and . == floor) and (.numFailedTests | type == "number" and . >= 0 and . == floor)' "$ts_results" >/dev/null 2>&1; then
+        jq -e '(.success | type == "boolean") and (.numPassedTests | type == "number" and . >= 0 and . < 1e9 and . == floor) and (.numFailedTests | type == "number" and . >= 0 and . < 1e9 and . == floor)' "$ts_results" >/dev/null 2>&1; then
         ts_success=$(jq -r '.success' "$ts_results")
-        ts_passed=$(jq '.numPassedTests' "$ts_results")
-        ts_failed=$(jq '.numFailedTests' "$ts_results")
+        # `floor` makes jq print a computed integer (`7`), not the
+        # report's literal (`7.0`, which `test` rejects).
+        ts_passed=$(jq '.numPassedTests | floor' "$ts_results")
+        ts_failed=$(jq '.numFailedTests | floor' "$ts_results")
         if [ "$ts_failed" -gt 0 ]; then
             ts_tests_value="$ts_failed failed"
             ts_tests_color=red
@@ -411,19 +546,24 @@ while :; do
         exit 0
     fi
     cat "$push_err" >&2
-    is_non_ff=0
-    if grep -Eiq 'non-fast-forward|fetch first' "$push_err"; then
-        is_non_ff=1
-    fi
     rm -f "$push_err"
-    if [ "$is_non_ff" -eq 0 ]; then
-        echo "publish-badges: push failed with a non-retryable error; giving up" >&2
+    # A push that lost a race with another publication is rejected in
+    # several ways: as a non-fast-forward, or, when both updates reach the
+    # remote at once, with "cannot lock ref ... is at X but expected Y" /
+    # "(failed to update ref)". Rather than matching the wording, re-read
+    # the tip: if it moved, another publication landed and the files are
+    # regenerated on top of it. If it did not move, the error is not a
+    # race (authentication, permissions, a protected branch, ...).
+    new_ref=$(git ls-remote "$remote" "refs/heads/$badges_branch")
+    new_tip=$(printf '%s\n' "$new_ref" | awk 'NR == 1 { print $1 }')
+    if [ "$new_tip" = "$badges_tip" ]; then
+        echo "publish-badges: push failed and $badges_branch did not move (still ${badges_tip:-absent}); not a race, giving up" >&2
         exit 1
     fi
     if [ "$n" -ge "$attempts" ]; then
         echo "publish-badges: push rejected $n times; giving up" >&2
         exit 1
     fi
-    echo "publish-badges: push rejected (another publication landed); regenerating on the new tip (attempt $n/$attempts)"
+    echo "publish-badges: push rejected ($badges_branch moved from ${badges_tip:-absent} to ${new_tip:-absent}: another publication landed); regenerating on the new tip (attempt $n/$attempts)"
     sleep "$retry_sleep"
 done
