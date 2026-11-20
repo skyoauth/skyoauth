@@ -294,8 +294,9 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
     .unwrap();
     assert!(actions.is_empty(), "{actions:?}");
 
-    // Every foreign key of 0004 is named <table>_<description>_fkey, is
-    // NO ACTION on update and delete, MATCH SIMPLE and not deferrable.
+    // Every foreign key of 0004 is named, for the service's 23503 mapping,
+    // takes no action on update or delete, is MATCH SIMPLE and is checked at
+    // once.
     let mut fkeys: Vec<(String, String, String, bool, String)> = sqlx::query_as(
         "SELECT c.relname::text, k.conname::text, pg_get_constraintdef(k.oid),
                 k.condeferrable OR k.condeferred,
@@ -312,85 +313,98 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
     let fkey = |table: &str, name: &str, def: &str| {
         (
             table.to_string(),
-            format!("{table}_{name}_fkey"),
+            name.to_string(),
             format!("FOREIGN KEY {def}"),
             false,
             "aas".to_string(),
         )
     };
     let tenant = "(tenant_id) REFERENCES tenant(id)";
+    let assignment = "(tenant_id, resource_server_id) REFERENCES audience_tenant_assignment(tenant_id, resource_server_id)";
     let mut expected = vec![
         fkey(
             "principal_binding",
-            "source",
+            "principal_binding_trust_source_id_fkey",
             "(tenant_id, trust_source_id) REFERENCES trust_source(tenant_id, id)",
         ),
-        fkey("principal_binding", "tenant", tenant),
         fkey(
             "principal_binding",
-            "workload",
+            "principal_binding_tenant_id_fkey",
+            tenant,
+        ),
+        fkey(
+            "principal_binding",
+            "principal_binding_workload_principal_id_fkey",
             "(tenant_id, workload_principal_id, workload_principal_kind) REFERENCES principal(tenant_id, id, kind)",
         ),
         fkey(
             "service_grant",
-            "actor",
+            "service_grant_actor_principal_id_fkey",
             "(tenant_id, actor_principal_id, actor_principal_kind) REFERENCES principal(tenant_id, id, kind)",
         ),
         fkey(
             "service_grant",
-            "target",
+            "service_grant_target_service_id_fkey",
             "(tenant_id, target_service_id) REFERENCES service_identity(tenant_id, id)",
         ),
-        fkey("service_grant", "tenant", tenant),
+        fkey("service_grant", "service_grant_tenant_id_fkey", tenant),
         fkey(
             "service_grant_binding",
-            "binding",
+            "service_grant_binding_binding_id_fkey",
             "(tenant_id, binding_id, actor_principal_id) REFERENCES principal_binding(tenant_id, id, workload_principal_id)",
         ),
         fkey(
             "service_grant_binding",
-            "grant",
+            "service_grant_binding_grant_id_fkey",
             "(tenant_id, grant_id, actor_principal_id) REFERENCES service_grant(tenant_id, id, actor_principal_id)",
         ),
         fkey(
             "service_grant_resource_server",
-            "assignment",
-            "(tenant_id, resource_server_id) REFERENCES audience_tenant_assignment(tenant_id, resource_server_id)",
+            "service_grant_resource_server_assignment_fkey",
+            assignment,
         ),
         fkey(
             "service_grant_resource_server",
-            "grant",
+            "service_grant_resource_server_grant_id_fkey",
             "(tenant_id, grant_id) REFERENCES service_grant(tenant_id, id)",
         ),
         fkey(
             "service_identity",
-            "principal",
+            "service_identity_id_fkey",
             "(tenant_id, id, principal_kind) REFERENCES principal(tenant_id, id, kind)",
         ),
-        fkey("service_identity", "tenant", tenant),
         fkey(
-            "service_identity_resource_server",
-            "assignment",
-            "(tenant_id, resource_server_id) REFERENCES audience_tenant_assignment(tenant_id, resource_server_id)",
+            "service_identity",
+            "service_identity_tenant_id_fkey",
+            tenant,
         ),
         fkey(
             "service_identity_resource_server",
-            "service",
+            "service_identity_resource_server_assignment_fkey",
+            assignment,
+        ),
+        fkey(
+            "service_identity_resource_server",
+            "service_identity_resource_server_service_id_fkey",
             "(tenant_id, service_id) REFERENCES service_identity(tenant_id, id)",
         ),
-        fkey("trust_keyset", "tenant", tenant),
+        fkey("trust_keyset", "trust_keyset_tenant_id_fkey", tenant),
         fkey(
             "trust_keyset_version",
-            "keyset",
+            "trust_keyset_version_keyset_id_fkey",
             "(tenant_id, keyset_id) REFERENCES trust_keyset(tenant_id, id)",
         ),
-        fkey("trust_keyset_version", "tenant", tenant),
+        fkey(
+            "trust_keyset_version",
+            "trust_keyset_version_tenant_id_fkey",
+            tenant,
+        ),
         fkey(
             "trust_source",
-            "keyset",
+            "trust_source_jwks_keyset_id_fkey",
             "(tenant_id, jwks_keyset_id) REFERENCES trust_keyset(tenant_id, id)",
         ),
-        fkey("trust_source", "tenant", tenant),
+        fkey("trust_source", "trust_source_tenant_id_fkey", tenant),
     ];
     expected.sort();
     assert_eq!(fkeys, expected);
@@ -429,68 +443,373 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
         .collect();
     assert_eq!(nullable, optional);
 
-    // Every ID and reference is a skyoauth_id; issuers, URLs, secret
-    // references and fingerprints are skyoauth_exact_string. Both domains
-    // compare byte-wise and leave NULL to the column.
-    let typed: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod)
-         FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
-         WHERE c.relnamespace = to_regnamespace(quote_ident(current_schema())) AND c.relname = ANY($1)
-           AND a.attnum > 0 AND NOT a.attisdropped
-           AND (a.attname = 'id' OR a.attname LIKE '%\\_id'
-                OR format_type(a.atttypid, a.atttypmod) LIKE 'skyoauth\\_%\\_string')
-         ORDER BY 1, 2",
+    // Every column of a primary key, unique constraint, unique index or
+    // foreign key of the 0004 tables has a named bound: an
+    // <table>_<column>_octet_length_check of at most 255 or 2048 bytes (the
+    // name may abbreviate the column), or, for a constant kind column, its
+    // named equality check.
+    let unbounded: Vec<(String, String)> = sqlx::query_as(
+        r"WITH keys AS (
+              SELECT i.indrelid AS rel, k.attnum FROM pg_index i, unnest(i.indkey::int2[]) AS k(attnum)
+              WHERE i.indrelid = ANY($1::text[]::regclass[])
+              UNION
+              SELECT c.conrelid, k.attnum FROM pg_constraint c, unnest(c.conkey) AS k(attnum)
+              WHERE c.contype = 'f' AND c.conrelid = ANY($1::text[]::regclass[]))
+          SELECT k.rel::regclass::text, a.attname::text
+          FROM keys k JOIN pg_attribute a ON a.attrelid = k.rel AND a.attnum = k.attnum
+          WHERE NOT EXISTS (
+              SELECT FROM pg_constraint c
+              WHERE c.conrelid = k.rel AND c.contype = 'c' AND c.conkey = ARRAY[k.attnum]
+                AND ((c.conname ~ ('^' || k.rel::regclass::text || '_[a-z_]+_octet_length_check$')
+                      AND pg_get_constraintdef(c.oid)
+                          ~ ('^CHECK \(\(octet_length\(' || a.attname || '\) <= (255|2048)\)\)$'))
+                  OR (c.conname = k.rel::regclass::text || '_' || a.attname || '_check'
+                      AND a.attname LIKE '%\_kind'
+                      AND pg_get_constraintdef(c.oid) ~ ('^CHECK \(\(' || a.attname || ' = ''[a-z]+''::text\)\)$'))))
+          ORDER BY 1, 2",
     )
     .bind(&tables)
     .fetch_all(&pool)
     .await
     .unwrap();
-    let exact = [
-        ("trust_keyset_version", "fingerprint"),
-        ("trust_source", "ca_bundle_ref"),
-        ("trust_source", "ca_fingerprint"),
-        ("trust_source", "discovery_url"),
-        ("trust_source", "exact_issuer"),
-        ("trust_source", "reviewer_credential_ref"),
-        ("trust_source", "token_review_endpoint"),
-    ];
-    let wrong: Vec<&(String, String, String)> = typed
-        .iter()
-        .filter(|(t, c, ty)| {
-            let want = if exact.contains(&(t.as_str(), c.as_str())) {
-                "skyoauth_exact_string"
-            } else {
-                "skyoauth_id"
-            };
-            ty != want
-        })
-        .collect();
-    assert!(wrong.is_empty(), "{wrong:?}");
-    assert_eq!(
-        typed
-            .iter()
-            .filter(|(_, _, ty)| ty == "skyoauth_exact_string")
-            .count(),
-        exact.len(),
-        "{typed:?}"
-    );
-    let domains: Vec<(String, String, bool)> = sqlx::query_as(
-        "SELECT t.typname::text, co.collname::text, t.typnotnull FROM pg_type t
-         JOIN pg_collation co ON co.oid = t.typcollation
-         WHERE t.typnamespace = to_regnamespace(quote_ident(current_schema()))
-           AND t.typname IN ('skyoauth_id', 'skyoauth_exact_string')
-         ORDER BY 1",
+    assert!(unbounded.is_empty(), "{unbounded:?}");
+
+    // The full set of checks on the 0004 tables, and the bounds 0004 adds to
+    // the 0002 principal. The bounds, character rules and multi-column rules
+    // are named for the service's 23514 mapping (README.md); the other checks
+    // of one column keep generated names. The definitions of the rules that
+    // the behaviour tests exercise are not repeated here (None).
+    let mut checks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname::text, pg_get_constraintdef(oid) FROM pg_constraint
+         WHERE contype = 'c' AND (conrelid = ANY($1::text[]::regclass[])
+           OR conname IN ('principal_id_octet_length_check', 'principal_tenant_id_octet_length_check'))",
     )
+    .bind(&tables)
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(
-        domains,
-        [
-            ("skyoauth_exact_string".to_string(), "C".to_string(), false),
-            ("skyoauth_id".to_string(), "C".to_string(), false),
-        ]
-    );
+    checks.sort();
+    let non_empty = |column: &str| format!("CHECK (({column} <> ''::text))");
+    let at_most = |column: &str, bytes: u32| format!("CHECK ((octet_length({column}) <= {bytes}))");
+    let no_space = |column: &str| format!("CHECK (({column} !~ '[[:space:][:cntrl:]]'::text))");
+    let constant = |column: &str, value: &str| format!("CHECK (({column} = '{value}'::text))");
+    let status = "CHECK ((status = ANY (ARRAY['enabled'::text, 'disabled'::text])))".to_string();
+    let revision = "CHECK ((revision >= 1))".to_string();
+    let expected: Vec<(&str, Option<String>)> = vec![
+        ("principal_binding_claim_match_policy_check", None),
+        ("principal_binding_id_check", Some(non_empty("id"))),
+        (
+            "principal_binding_id_octet_length_check",
+            Some(at_most("id", 255)),
+        ),
+        ("principal_binding_name_check", Some(non_empty("name"))),
+        (
+            "principal_binding_name_no_space_check",
+            Some(no_space("name")),
+        ),
+        (
+            "principal_binding_name_octet_length_check",
+            Some(at_most("name", 2048)),
+        ),
+        ("principal_binding_profile_check", None),
+        ("principal_binding_revision_check", Some(revision.clone())),
+        ("principal_binding_status_check", Some(status.clone())),
+        (
+            "principal_binding_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        (
+            "principal_binding_trust_source_id_octet_length_check",
+            Some(at_most("trust_source_id", 255)),
+        ),
+        (
+            "principal_binding_workload_principal_id_octet_length_check",
+            Some(at_most("workload_principal_id", 255)),
+        ),
+        (
+            "principal_binding_workload_principal_kind_check",
+            Some(constant("workload_principal_kind", "workload")),
+        ),
+        ("principal_id_octet_length_check", Some(at_most("id", 255))),
+        (
+            "principal_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("service_grant_activation_mode_check", None),
+        ("service_grant_activation_state_check", None),
+        (
+            "service_grant_actor_principal_id_octet_length_check",
+            Some(at_most("actor_principal_id", 255)),
+        ),
+        (
+            "service_grant_actor_principal_kind_check",
+            Some(constant("actor_principal_kind", "workload")),
+        ),
+        (
+            "service_grant_binding_actor_principal_id_octet_length_check",
+            Some(at_most("actor_principal_id", 255)),
+        ),
+        (
+            "service_grant_binding_binding_id_octet_length_check",
+            Some(at_most("binding_id", 255)),
+        ),
+        (
+            "service_grant_binding_grant_id_octet_length_check",
+            Some(at_most("grant_id", 255)),
+        ),
+        (
+            "service_grant_binding_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("service_grant_default_scopes_check", None),
+        ("service_grant_id_check", Some(non_empty("id"))),
+        (
+            "service_grant_id_octet_length_check",
+            Some(at_most("id", 255)),
+        ),
+        ("service_grant_impersonation_disabled_check", None),
+        ("service_grant_max_ttl_check", None),
+        ("service_grant_mode_check", None),
+        ("service_grant_name_check", Some(non_empty("name"))),
+        ("service_grant_name_no_space_check", Some(no_space("name"))),
+        (
+            "service_grant_name_octet_length_check",
+            Some(at_most("name", 2048)),
+        ),
+        ("service_grant_resource_constraints_check", None),
+        (
+            "service_grant_resource_server_grant_id_octet_length_check",
+            Some(at_most("grant_id", 255)),
+        ),
+        (
+            "service_grant_resource_server_server_id_octet_length_check",
+            Some(at_most("resource_server_id", 255)),
+        ),
+        (
+            "service_grant_resource_server_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("service_grant_revision_check", Some(revision.clone())),
+        ("service_grant_status_check", Some(status.clone())),
+        ("service_grant_target_mode_check", None),
+        (
+            "service_grant_target_service_id_octet_length_check",
+            Some(at_most("target_service_id", 255)),
+        ),
+        (
+            "service_grant_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("service_identity_id_check", Some(non_empty("id"))),
+        (
+            "service_identity_id_octet_length_check",
+            Some(at_most("id", 255)),
+        ),
+        ("service_identity_max_resource_constraints_check", None),
+        ("service_identity_name_check", Some(non_empty("name"))),
+        (
+            "service_identity_name_no_space_check",
+            Some(no_space("name")),
+        ),
+        (
+            "service_identity_name_octet_length_check",
+            Some(at_most("name", 2048)),
+        ),
+        (
+            "service_identity_principal_kind_check",
+            Some(constant("principal_kind", "service")),
+        ),
+        (
+            "service_identity_resource_server_server_id_octet_length_check",
+            Some(at_most("resource_server_id", 255)),
+        ),
+        (
+            "service_identity_resource_server_service_id_octet_length_check",
+            Some(at_most("service_id", 255)),
+        ),
+        (
+            "service_identity_resource_server_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("service_identity_revision_check", Some(revision.clone())),
+        ("service_identity_status_check", Some(status.clone())),
+        (
+            "service_identity_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("trust_keyset_id_check", Some(non_empty("id"))),
+        (
+            "trust_keyset_id_octet_length_check",
+            Some(at_most("id", 255)),
+        ),
+        ("trust_keyset_name_check", Some(non_empty("name"))),
+        ("trust_keyset_name_no_space_check", Some(no_space("name"))),
+        (
+            "trust_keyset_name_octet_length_check",
+            Some(at_most("name", 2048)),
+        ),
+        ("trust_keyset_revision_check", Some(revision.clone())),
+        ("trust_keyset_status_check", Some(status.clone())),
+        (
+            "trust_keyset_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        (
+            "trust_keyset_version_fingerprint_check",
+            Some(non_empty("fingerprint")),
+        ),
+        (
+            "trust_keyset_version_fingerprint_no_space_check",
+            Some(no_space("fingerprint")),
+        ),
+        (
+            "trust_keyset_version_fingerprint_octet_length_check",
+            Some(at_most("fingerprint", 2048)),
+        ),
+        ("trust_keyset_version_id_check", Some(non_empty("id"))),
+        (
+            "trust_keyset_version_id_octet_length_check",
+            Some(at_most("id", 255)),
+        ),
+        (
+            "trust_keyset_version_keyset_id_octet_length_check",
+            Some(at_most("keyset_id", 255)),
+        ),
+        ("trust_keyset_version_provenance_check", None),
+        ("trust_keyset_version_public_jwks_check", None),
+        ("trust_keyset_version_status_check", Some(status.clone())),
+        (
+            "trust_keyset_version_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        ("trust_keyset_version_validity_check", None),
+        ("trust_source_algorithms_check", None),
+        ("trust_source_algorithms_kind_check", None),
+        ("trust_source_assertion_profile_check", None),
+        ("trust_source_audiences_check", None),
+        (
+            "trust_source_ca_bundle_ref_check",
+            Some(non_empty("ca_bundle_ref")),
+        ),
+        (
+            "trust_source_ca_bundle_ref_no_space_check",
+            Some(no_space("ca_bundle_ref")),
+        ),
+        (
+            "trust_source_ca_bundle_ref_octet_length_check",
+            Some(at_most("ca_bundle_ref", 2048)),
+        ),
+        (
+            "trust_source_ca_fingerprint_check",
+            Some(non_empty("ca_fingerprint")),
+        ),
+        (
+            "trust_source_ca_fingerprint_no_space_check",
+            Some(no_space("ca_fingerprint")),
+        ),
+        (
+            "trust_source_ca_fingerprint_octet_length_check",
+            Some(at_most("ca_fingerprint", 2048)),
+        ),
+        (
+            "trust_source_cluster_id_check",
+            Some(non_empty("cluster_id")),
+        ),
+        (
+            "trust_source_cluster_id_octet_length_check",
+            Some(at_most("cluster_id", 255)),
+        ),
+        (
+            "trust_source_discovery_url_check",
+            Some(non_empty("discovery_url")),
+        ),
+        ("trust_source_discovery_url_kind_check", None),
+        (
+            "trust_source_discovery_url_no_space_check",
+            Some(no_space("discovery_url")),
+        ),
+        (
+            "trust_source_discovery_url_octet_length_check",
+            Some(at_most("discovery_url", 2048)),
+        ),
+        (
+            "trust_source_exact_issuer_check",
+            Some(non_empty("exact_issuer")),
+        ),
+        (
+            "trust_source_exact_issuer_no_space_check",
+            Some(no_space("exact_issuer")),
+        ),
+        (
+            "trust_source_exact_issuer_octet_length_check",
+            Some(at_most("exact_issuer", 2048)),
+        ),
+        ("trust_source_id_check", Some(non_empty("id"))),
+        (
+            "trust_source_id_octet_length_check",
+            Some(at_most("id", 255)),
+        ),
+        ("trust_source_jwks_keyset_id_kind_check", None),
+        (
+            "trust_source_jwks_keyset_id_octet_length_check",
+            Some(at_most("jwks_keyset_id", 255)),
+        ),
+        ("trust_source_kind_check", None),
+        ("trust_source_name_check", Some(non_empty("name"))),
+        ("trust_source_name_no_space_check", Some(no_space("name"))),
+        (
+            "trust_source_name_octet_length_check",
+            Some(at_most("name", 2048)),
+        ),
+        ("trust_source_proof_bounds_check", None),
+        ("trust_source_replay_mode_check", None),
+        ("trust_source_review_timeout_ms_check", None),
+        (
+            "trust_source_reviewer_credential_ref_check",
+            Some(non_empty("reviewer_credential_ref")),
+        ),
+        (
+            "trust_source_reviewer_credential_ref_no_space_check",
+            Some(no_space("reviewer_credential_ref")),
+        ),
+        (
+            "trust_source_reviewer_credential_ref_octet_length_check",
+            Some(at_most("reviewer_credential_ref", 2048)),
+        ),
+        ("trust_source_revision_check", Some(revision.clone())),
+        ("trust_source_single_use_replay_check", None),
+        ("trust_source_stale_revocation_acknowledged_check", None),
+        ("trust_source_stale_revocation_kind_check", None),
+        ("trust_source_status_check", Some(status.clone())),
+        (
+            "trust_source_tenant_id_octet_length_check",
+            Some(at_most("tenant_id", 255)),
+        ),
+        (
+            "trust_source_token_review_endpoint_check",
+            Some(non_empty("token_review_endpoint")),
+        ),
+        (
+            "trust_source_token_review_endpoint_no_space_check",
+            Some(no_space("token_review_endpoint")),
+        ),
+        (
+            "trust_source_token_review_endpoint_octet_length_check",
+            Some(at_most("token_review_endpoint", 2048)),
+        ),
+        ("trust_source_token_review_fields_kind_check", None),
+        ("trust_source_token_review_profile_check", None),
+    ];
+    let names: Vec<&str> = checks.iter().map(|(name, _)| name.as_str()).collect();
+    let mut expected_names: Vec<&str> = expected.iter().map(|(name, _)| *name).collect();
+    expected_names.sort();
+    assert_eq!(names, expected_names);
+    for (name, def) in &expected {
+        if let Some(def) = def {
+            let actual = &checks.iter().find(|(n, _)| n == name).unwrap().1;
+            assert_eq!(actual, def, "{name}");
+        }
+    }
     db.drop([pool]).await;
 }
 
@@ -538,71 +857,230 @@ async fn composite_reference_columns_reject_null() {
     db.drop([pool]).await;
 }
 
-/// IDs and references are at most 255 bytes, names and exact strings at
-/// most 2048 bytes, so an over-long value is a check violation (23514) and
-/// never a btree size error (54000); IDs, references and exact strings hold
-/// no whitespace or control characters, names may hold spaces.
+/// Checks that `sql` fails with 23514 from the check named `constraint`.
+async fn violates(pool: &PgPool, sql: String, constraint: &str) {
+    let err = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
+        .execute(pool)
+        .await
+        .expect_err(&sql);
+    assert_eq!(sqlstate(&err), "23514", "{sql}: {err}");
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.constraint()),
+        Some(constraint),
+        "{sql}: {err}"
+    );
+}
+
+/// SQL for incompressible text: the md5 hex digests of `blocks` consecutive
+/// integers from `first`, 32 bytes each.
+fn md5_hex(first: u32, blocks: u32) -> String {
+    format!(
+        "(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series({first}, {}) i)",
+        first + blocks - 1
+    )
+}
+
+/// SQL for an incompressible 255-byte ID.
+fn md5_id(first: u32) -> String {
+    format!("left({}, 255)", md5_hex(first, 8))
+}
+
+/// Every ID and reference column is at most 255 bytes: an over-long value,
+/// 256 or 3008 incompressible bytes or 256 bytes in 128 characters, fails
+/// with 23514 from its named check, also when it names a missing row (a
+/// CHECK runs before the row enters any index and before the foreign key
+/// check), never with 54000 or 23503.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn keys_names_and_exact_strings_are_bounded() {
+async fn ids_and_references_are_bounded() {
     let (db, pool) = seeded().await;
-    rejects(&pool, r#"
-        23514 INSERT INTO trust_keyset VALUES (repeat('k', 256), 'ten_a', 'x', 'enabled')
-        23514 INSERT INTO trust_keyset VALUES (repeat('é', 128), 'ten_a', 'x', 'enabled')
-        23514 INSERT INTO trust_keyset VALUES ('ks 2', 'ten_a', 'x', 'enabled')
-        23514 INSERT INTO trust_keyset VALUES (E'ks_2\t', 'ten_a', 'x', 'enabled')
-        23514 INSERT INTO trust_keyset VALUES (E'ks_2\n', 'ten_a', 'x', 'enabled')
-        23514 INSERT INTO trust_keyset VALUES (E'ks_2\u0085', 'ten_a', 'x', 'enabled')
-        23514 INSERT INTO trust_keyset VALUES ('ks_2', 'ten_a', repeat('n', 2049), 'enabled')
-        23514 INSERT INTO trust_keyset VALUES ('ks_2', 'ten_a', repeat('€', 683), 'enabled')
-        23514 INSERT INTO trust_keyset_version VALUES ('kv_2', 'ten_a', 'ks_1', '{"keys": [{"kty": "EC"}]}', repeat('f', 2049), '2026-01-01Z', NULL, 'enabled', '{}')
-        23514 INSERT INTO trust_keyset_version VALUES ('kv_2', 'ten_a', 'ks_1', '{"keys": [{"kty": "EC"}]}', 'sha256: 02', '2026-01-01Z', NULL, 'enabled', '{}')
-        23514 INSERT INTO trust_keyset_version VALUES ('kv_2', 'ten_a', repeat('k', 256), '{"keys": [{"kty": "EC"}]}', 'f', '2026-01-01Z', NULL, 'enabled', '{}')
-        23514 INSERT INTO trust_source VALUES ('src_x', 'ten_a', 'x', 'kubernetes_token_review', 'https://x', NULL, NULL, repeat('c', 256), 'https://x:6443', 'ca', 'fp', 'rv', 1, '["aud"]', NULL, '{}', 'projected_service_account', NULL, 'reusable', 'enabled')
-        23514 INSERT INTO trust_source VALUES ('src_x', 'ten_a', 'x', 'kubernetes_token_review', 'https://x', NULL, NULL, 'cluster 2', 'https://x:6443', 'ca', 'fp', 'rv', 1, '["aud"]', NULL, '{}', 'projected_service_account', NULL, 'reusable', 'enabled')
-        23514 UPDATE trust_source SET exact_issuer = 'https://x/' || repeat('d', 2039), revision = revision + 1 WHERE id = 'src_gh'
-        23514 UPDATE trust_source SET exact_issuer = 'https://x/ d', revision = revision + 1 WHERE id = 'src_gh'
-        23514 UPDATE trust_source SET exact_issuer = E'https://x\r', revision = revision + 1 WHERE id = 'src_gh'
-        23514 UPDATE trust_source SET ca_bundle_ref = repeat('c', 2049), revision = revision + 1 WHERE id = 'src_k8s'
-        23514 UPDATE trust_source SET ca_bundle_ref = 'ca k3s', revision = revision + 1 WHERE id = 'src_k8s'
-        23514 UPDATE trust_source SET ca_fingerprint = repeat('c', 2049), revision = revision + 1 WHERE id = 'src_k8s'
-        23514 UPDATE trust_source SET ca_fingerprint = 'sha256: ca', revision = revision + 1 WHERE id = 'src_k8s'
-        23514 UPDATE trust_source SET reviewer_credential_ref = repeat('r', 2049), revision = revision + 1 WHERE id = 'src_k8s'
-        23514 UPDATE trust_source SET reviewer_credential_ref = E'reviewer\u0001', revision = revision + 1 WHERE id = 'src_k8s'
-        23514 UPDATE trust_source SET name = repeat('n', 2049), revision = revision + 1 WHERE id = 'src_gh'
-        23514 UPDATE principal_binding SET name = repeat('n', 2049), revision = revision + 1 WHERE id = 'bnd_1'
-        23514 INSERT INTO principal_binding VALUES ('bnd_x', 'ten_a', 'x', repeat('s', 256), 'generic_production', '{"sub": "a"}', 'wld_1', 'enabled')
-        23514 INSERT INTO principal_binding VALUES ('bnd_x', 'ten_a', 'x', 'src_gh', 'generic_production', '{"sub": "a"}', 'wld 1', 'enabled')
-        23514 UPDATE service_identity SET name = repeat('n', 2049), revision = revision + 1 WHERE id = 'svc_1'
-        23514 INSERT INTO service_identity_resource_server VALUES ('svc_1', 'ten_a', repeat('r', 256))
-        23514 UPDATE service_grant SET name = repeat('n', 2049), revision = revision + 1 WHERE id = 'grt_1'
-        23514 INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', 'wld_1', repeat('s', 256), 'delegation', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required')
-        23514 INSERT INTO service_grant_binding VALUES ('grt_1', repeat('b', 256), 'ten_a', 'wld_1')
-        23514 INSERT INTO service_grant_resource_server VALUES ('grt_1', 'ten_a', repeat('r', 256))
-    "#).await;
-    // The largest values that fit, from data that does not compress: a
-    // 255-byte ID and a 2048-byte name of two-byte characters in the
-    // (tenant_id, name) index; 2048-byte exact strings; a name with spaces.
-    run(
-        &pool,
-        r#"INSERT INTO trust_keyset VALUES
-               (left((SELECT string_agg(md5(i::text), '') FROM generate_series(1, 8) i), 255), 'ten_a',
-                (SELECT string_agg(md5(i::text), '') FROM generate_series(1, 32) i) || repeat('é', 512), 'enabled'),
-               ('ks_2', 'ten_a', 'release train', 'enabled');
-           INSERT INTO trust_keyset_version VALUES ('kv_2', 'ten_a', 'ks_2', '{"keys": [{"kty": "EC"}]}',
-               (SELECT string_agg(md5(i::text), '') FROM generate_series(1, 64) i), '2026-01-01Z', NULL, 'enabled', '{}');
-           UPDATE trust_source SET exact_issuer = 'https://x/' || repeat('d', 2038),
-               ca_bundle_ref = repeat('c', 2048), ca_fingerprint = repeat('c', 2048), reviewer_credential_ref = repeat('r', 2048),
-               revision = revision + 1 WHERE id = 'src_k8s'"#,
-    )
-    .await;
+    let version = r#"'{"keys": [{"kty": "EC"}]}', 'f', '2026-01-01Z', NULL, 'enabled', '{}'"#;
+    let uploaded = r#"'x', 'uploaded_jwks', 'https://x', NULL, {k}, NULL, NULL, NULL, NULL, NULL, NULL, '["aud"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled'"#;
+    let binding = r#"'generic_production', '{"sub": "a"}'"#;
+    let grant = "'[]', NULL, '{}', 300, NULL, 'enabled', 'not_required'";
+    let cases = [
+        ("INSERT INTO principal VALUES ({v}, 'ten_a', 'workload', 'w', 'enabled')".to_string(), "principal_id_octet_length_check"),
+        ("INSERT INTO principal VALUES ('wld_x', {v}, 'workload', 'w', 'enabled')".to_string(), "principal_tenant_id_octet_length_check"),
+        ("INSERT INTO trust_keyset VALUES ({v}, 'ten_a', 'other', 'enabled')".to_string(), "trust_keyset_id_octet_length_check"),
+        ("INSERT INTO trust_keyset VALUES ('ks_2', {v}, 'other', 'enabled')".to_string(), "trust_keyset_tenant_id_octet_length_check"),
+        (format!("INSERT INTO trust_keyset_version VALUES ({{v}}, 'ten_a', 'ks_1', {version})"), "trust_keyset_version_id_octet_length_check"),
+        (format!("INSERT INTO trust_keyset_version VALUES ('kv_2', {{v}}, 'ks_1', {version})"), "trust_keyset_version_tenant_id_octet_length_check"),
+        (format!("INSERT INTO trust_keyset_version VALUES ('kv_2', 'ten_a', {{v}}, {version})"), "trust_keyset_version_keyset_id_octet_length_check"),
+        (format!("INSERT INTO trust_source VALUES ({{v}}, 'ten_a', {})", uploaded.replace("{k}", "'ks_1'")), "trust_source_id_octet_length_check"),
+        (format!("INSERT INTO trust_source VALUES ('src_x', {{v}}, {})", uploaded.replace("{k}", "'ks_1'")), "trust_source_tenant_id_octet_length_check"),
+        (format!("INSERT INTO trust_source VALUES ('src_x', 'ten_a', {})", uploaded.replace("{k}", "{v}")), "trust_source_jwks_keyset_id_octet_length_check"),
+        (r#"INSERT INTO trust_source VALUES ('src_x', 'ten_a', 'x', 'kubernetes_token_review', 'https://x', NULL, NULL, {v}, 'https://x:6443', 'ca', 'fp', 'rv', 1, '["aud"]', NULL, '{}', 'projected_service_account', NULL, 'reusable', 'enabled')"#.to_string(), "trust_source_cluster_id_octet_length_check"),
+        (format!("INSERT INTO principal_binding VALUES ({{v}}, 'ten_a', 'x', 'src_gh', {binding}, 'wld_1', 'enabled')"), "principal_binding_id_octet_length_check"),
+        (format!("INSERT INTO principal_binding VALUES ('bnd_x', {{v}}, 'x', 'src_gh', {binding}, 'wld_1', 'enabled')"), "principal_binding_tenant_id_octet_length_check"),
+        (format!("INSERT INTO principal_binding VALUES ('bnd_x', 'ten_a', 'x', {{v}}, {binding}, 'wld_1', 'enabled')"), "principal_binding_trust_source_id_octet_length_check"),
+        (format!("INSERT INTO principal_binding VALUES ('bnd_x', 'ten_a', 'x', 'src_gh', {binding}, {{v}}, 'enabled')"), "principal_binding_workload_principal_id_octet_length_check"),
+        ("INSERT INTO service_identity VALUES ({v}, 'ten_a', 'x', '[]', '{}', 'enabled')".to_string(), "service_identity_id_octet_length_check"),
+        ("INSERT INTO service_identity VALUES ('svc_2', {v}, 'x', '[]', '{}', 'enabled')".to_string(), "service_identity_tenant_id_octet_length_check"),
+        ("INSERT INTO service_identity_resource_server VALUES ({v}, 'ten_a', 'rs_1')".to_string(), "service_identity_resource_server_service_id_octet_length_check"),
+        ("INSERT INTO service_identity_resource_server VALUES ('svc_1', {v}, 'rs_1')".to_string(), "service_identity_resource_server_tenant_id_octet_length_check"),
+        ("INSERT INTO service_identity_resource_server VALUES ('svc_1', 'ten_a', {v})".to_string(), "service_identity_resource_server_server_id_octet_length_check"),
+        (format!("INSERT INTO service_grant VALUES ({{v}}, 'ten_a', 'x', 'wld_1', NULL, 'direct', {grant})"), "service_grant_id_octet_length_check"),
+        (format!("INSERT INTO service_grant VALUES ('grt_x', {{v}}, 'x', 'wld_1', NULL, 'direct', {grant})"), "service_grant_tenant_id_octet_length_check"),
+        (format!("INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', {{v}}, NULL, 'direct', {grant})"), "service_grant_actor_principal_id_octet_length_check"),
+        (format!("INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', 'wld_1', {{v}}, 'delegation', {grant})"), "service_grant_target_service_id_octet_length_check"),
+        ("INSERT INTO service_grant_binding VALUES ({v}, 'bnd_2', 'ten_a', 'wld_1')".to_string(), "service_grant_binding_grant_id_octet_length_check"),
+        ("INSERT INTO service_grant_binding VALUES ('grt_1', {v}, 'ten_a', 'wld_1')".to_string(), "service_grant_binding_binding_id_octet_length_check"),
+        ("INSERT INTO service_grant_binding VALUES ('grt_1', 'bnd_2', {v}, 'wld_1')".to_string(), "service_grant_binding_tenant_id_octet_length_check"),
+        ("INSERT INTO service_grant_binding VALUES ('grt_1', 'bnd_2', 'ten_a', {v})".to_string(), "service_grant_binding_actor_principal_id_octet_length_check"),
+        ("INSERT INTO service_grant_resource_server VALUES ({v}, 'ten_a', 'rs_1')".to_string(), "service_grant_resource_server_grant_id_octet_length_check"),
+        ("INSERT INTO service_grant_resource_server VALUES ('grt_3', {v}, 'rs_1')".to_string(), "service_grant_resource_server_tenant_id_octet_length_check"),
+        ("INSERT INTO service_grant_resource_server VALUES ('grt_3', 'ten_a', {v})".to_string(), "service_grant_resource_server_server_id_octet_length_check"),
+    ];
+    for value in [
+        md5_hex(1, 8),
+        md5_hex(1, 94),
+        "repeat('é', 128)".to_string(),
+    ] {
+        for (sql, constraint) in &cases {
+            violates(&pool, sql.replace("{v}", &value), constraint).await;
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// Names and the exact strings of sources and versions are at most 2048
+/// bytes and hold no whitespace or control character; each rule is a named
+/// check, so an over-long name is 23514, not 54000 from the (tenant_id,
+/// name) index.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
+    let (db, pool) = seeded().await;
+    let mut cases: Vec<(String, String)> = [
+        ("trust_keyset", "name", "ks_1"),
+        ("trust_source", "name", "src_gh"),
+        ("principal_binding", "name", "bnd_1"),
+        ("service_identity", "name", "svc_1"),
+        ("service_grant", "name", "grt_1"),
+        ("trust_source", "exact_issuer", "src_gh"),
+        ("trust_source", "discovery_url", "src_gh"),
+        ("trust_source", "token_review_endpoint", "src_k8s"),
+        ("trust_source", "ca_bundle_ref", "src_k8s"),
+        ("trust_source", "ca_fingerprint", "src_k8s"),
+        ("trust_source", "reviewer_credential_ref", "src_k8s"),
+    ]
+    .iter()
+    .map(|(table, column, id)| {
+        (
+            format!(
+                "UPDATE {table} SET {column} = {{v}}, revision = revision + 1 WHERE id = '{id}'"
+            ),
+            format!("{table}_{column}"),
+        )
+    })
+    .collect();
+    cases.push((
+        r#"INSERT INTO trust_keyset_version VALUES ('kv_2', 'ten_a', 'ks_1', '{"keys": [{"kty": "EC"}]}', {v}, '2026-01-01Z', NULL, 'enabled', '{}')"#.to_string(),
+        "trust_keyset_version_fingerprint".to_string(),
+    ));
+    for (sql, prefix) in &cases {
+        for value in [
+            "repeat('a', 2049)".to_string(),
+            "repeat('é', 1025)".to_string(),
+            md5_hex(1, 94),
+        ] {
+            violates(
+                &pool,
+                sql.replace("{v}", &value),
+                &format!("{prefix}_octet_length_check"),
+            )
+            .await;
+        }
+        for value in [
+            "'a b'",
+            "' a'",
+            r"E'a\t'",
+            r"E'a\n'",
+            "'a' || chr(1)",
+            "'a' || chr(127)",
+            "'a' || chr(133)",
+        ] {
+            violates(
+                &pool,
+                sql.replace("{v}", value),
+                &format!("{prefix}_no_space_check"),
+            )
+            .await;
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// The largest values fit every key, even when they do not compress:
+/// 255-byte IDs in every composite key and 2048-byte names next to a
+/// 255-byte tenant ID in the (tenant_id, name) indexes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_largest_keys_fit_their_indexes() {
+    let (db, pool) = seeded().await;
+    let (t, w, s, k, v, src, tr, b, g, d) = (
+        md5_id(1000),
+        md5_id(2000),
+        md5_id(3000),
+        md5_id(4000),
+        md5_id(5000),
+        md5_id(6000),
+        md5_id(6500),
+        md5_id(7000),
+        md5_id(8000),
+        md5_id(9000),
+    );
+    let name = |first: u32| md5_hex(first, 64);
+    let exact = |first: u32| md5_hex(first, 64);
+    let sql = format!(
+        r#"INSERT INTO tenant VALUES ({t}, 'big', 'ns_big', 'enabled');
+           INSERT INTO principal VALUES ({w}, {t}, 'workload', 'w', 'enabled'), ({s}, {t}, 'service', 's', 'enabled');
+           INSERT INTO audience_tenant_assignment VALUES ('ata_big', 'rs_1', {t}, '["wif"]', '["read"]', '[]', 'enabled');
+           INSERT INTO trust_keyset VALUES ({k}, {t}, {}, 'enabled');
+           INSERT INTO trust_keyset_version VALUES ({v}, {t}, {k}, '{{"keys": [{{"kty": "EC"}}]}}', {}, '2026-01-01Z', NULL, 'enabled', '{{}}');
+           INSERT INTO trust_source VALUES ({src}, {t}, {}, 'uploaded_jwks', {}, NULL, {k}, NULL, NULL, NULL, NULL, NULL, NULL,
+               '["aud"]', '["RS256"]', '{{}}', 'on_demand_jwt', NULL, 'single_use', 'enabled');
+           INSERT INTO trust_source VALUES ({tr}, {t}, {}, 'kubernetes_token_review', 'https://x', NULL, NULL, {}, {}, {}, {}, {}, 1,
+               '["aud"]', NULL, '{{}}', 'projected_service_account', NULL, 'reusable', 'enabled');
+           INSERT INTO principal_binding VALUES ({b}, {t}, {}, {src}, 'generic_production', '{{"sub": "a"}}', {w}, 'enabled');
+           INSERT INTO service_identity VALUES ({s}, {t}, {}, '["read"]', '{{}}', 'enabled');
+           INSERT INTO service_identity_resource_server VALUES ({s}, {t}, 'rs_1');
+           INSERT INTO service_grant VALUES ({g}, {t}, {}, {w}, NULL, 'direct', '["read"]', NULL, '{{}}', 300, NULL, 'enabled', 'not_required'),
+               ({d}, {t}, {}, {w}, {s}, 'delegation', '["read"]', NULL, '{{}}', 300, NULL, 'enabled', 'not_required');
+           INSERT INTO service_grant_binding VALUES ({g}, {b}, {t}, {w}), ({d}, {b}, {t}, {w});
+           INSERT INTO service_grant_resource_server VALUES ({g}, {t}, 'rs_1'), ({d}, {t}, 'rs_1')"#,
+        name(10001),
+        exact(20001),
+        name(30001),
+        exact(40001),
+        name(50001),
+        md5_id(60001),
+        exact(70001),
+        exact(80001),
+        exact(90001),
+        exact(100001),
+        name(110001),
+        name(120001),
+        name(130001),
+        name(140001),
+    );
+    sqlx::raw_sql(AssertSqlSafe(sql))
+        .execute(&pool)
+        .await
+        .unwrap();
     let lengths: Vec<(i32, i32)> = sqlx::query_as(
-        "SELECT octet_length(id), octet_length(name) FROM trust_keyset ORDER BY 1 DESC, 2 DESC",
+        "SELECT octet_length(tenant_id), octet_length(name) FROM trust_keyset
+         UNION ALL SELECT octet_length(id), octet_length(name) FROM trust_source
+         UNION ALL SELECT octet_length(workload_principal_id), octet_length(name) FROM principal_binding
+         UNION ALL SELECT octet_length(id), octet_length(name) FROM service_identity
+         UNION ALL SELECT octet_length(actor_principal_id), octet_length(name) FROM service_grant
+         UNION ALL SELECT octet_length(tenant_id), octet_length(fingerprint) FROM trust_keyset_version
+         ORDER BY 1 DESC, 2 DESC LIMIT 8",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(lengths[0], (255, 2048), "{lengths:?}");
+    assert_eq!(lengths, vec![(255, 2048); 8]);
     db.drop([pool]).await;
 }
 

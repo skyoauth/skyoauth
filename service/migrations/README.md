@@ -339,46 +339,60 @@ The database does not enforce these rules; the service must:
 (T10.1): `trust_keyset`, `trust_keyset_version`, `trust_source`,
 `principal_binding`, `service_identity` and `service_grant`, with the list
 tables `service_identity_resource_server`, `service_grant_binding` and
-`service_grant_resource_server`. It requires `0003` (the
-`audience_tenant_assignment` key and the list domains). All of them are
-tenant-owned, `status` is `enabled` or `disabled` (inferred, as in `0003`),
-and every table but the keyset versions and the list tables carries a
-`revision` checked by `skyoauth_check_revision()`. Immutable columns fail
-with `SK001` through `skyoauth_reject_immutable_change(…)`; every trigger is
-`ENABLE ALWAYS`. The replay table (T10.9) and the policy revision are not
-part of it.
+`service_grant_resource_server`. All of them are tenant-owned, and every
+reference between them is a composite foreign key over the
+`(tenant_id, id)` unique of the target, so no reference crosses tenants
+(IR-031). It reuses `skyoauth_reject_immutable_change(…)` and
+`skyoauth_check_revision()` from `0002` and the list domains of `0003`, and
+adds one function, `skyoauth_service_grant_has_binding()`. Every trigger is
+`ENABLE ALWAYS`. `status` is `enabled` or `disabled` (inferred, as in
+`0003`), and every table but the keyset versions and the list tables carries
+a `revision`. The single-use replay table (T10.9) and the policy revision are
+not part of it.
 
-- **Keys and exact strings.** Two domains, both `text COLLATE "C"`, reject
-  an empty value and `[[:space:][:cntrl:]]` as the egress destinations of
-  `0002` do, and bound the length in bytes, so an over-long value fails with
-  `23514`, never with the btree size error `54000`: `skyoauth_id` (at most
-  255 bytes, inferred) holds every ID and every reference to one, including
-  `cluster_id`; `skyoauth_exact_string` (at most 2048 bytes, inferred) holds
-  the values compared exactly that the service does not generate:
-  `exact_issuer`, `discovery_url`, `token_review_endpoint`, `ca_bundle_ref`,
-  `ca_fingerprint`, `reviewer_credential_ref` and the keyset version
-  `fingerprint`. IDs are bounded at 255 rather than 2048 bytes because
-  several keys combine three of them, or a tenant ID and a name, and must
-  stay below the btree limit of 2704 bytes for any content.
-- **Names** are human labels: default collation, non-empty, at most 2048
-  bytes, spaces allowed (inferred), unique per table and tenant (IR-021),
-  disabled rows included (inferred).
-- **Unicode normalisation is a service rule.** The database compares bytes:
-  it neither normalises nor rejects unnormalised IDs, names, issuers or
-  claim values, so two spellings of the same text are two values.
+- **Keys and bounds** follow `0003`. Every ID column, own ID or reference,
+  is at most 255 bytes; every name, a unique free-text key per table and
+  tenant (IR-021; disabled rows included, inferred), is non-empty, at most
+  2048 bytes and free of whitespace and control characters
+  (`[[:space:][:cntrl:]]`; inferred from the `0003` rule for names, lead
+  decision 2026-11-20). So an over-long value fails with `23514` from its
+  named check, also when it names a missing row, never with the btree error
+  `54000`, and every composite key stays below the btree limit even for
+  values that do not compress: three IDs at most 765 bytes, a tenant ID and
+  a name at most 2303 bytes. Names keep the database collation; IDs and the
+  exact strings below are `COLLATE "C"`. IDs reject only an empty value, as
+  in `0003`.
+- **Exact strings.** `exact_issuer`, `discovery_url`, `token_review_endpoint`,
+  `ca_bundle_ref`, `ca_fingerprint`, `reviewer_credential_ref` and the
+  version `fingerprint` are compared or resolved exactly. They get the
+  egress destination rules of `0002`: non-empty, no whitespace or control
+  character, at most 2048 bytes (inferred; none of them is indexed).
+  `cluster_id` is an opaque server-generated ID owned by its source
+  (OQ-ADR011-1), so it is bounded as an ID and unique across sources
+  (inferred).
+- **Unicode normalization is a service rule.** The database compares bytes:
+  it neither normalizes nor rejects unnormalized names, issuers or claim
+  values, so two spellings of the same text are two values.
+- **`principal`.** `0004` adds `principal_tenant_id_id_kind_key`
+  (`UNIQUE (tenant_id, id, kind)`) to the frozen `0002` table, and, because
+  that is a new key, the forward-only bounds `principal_id_octet_length_check`
+  and `principal_tenant_id_octet_length_check` (255 bytes, inferred, as
+  `0003` bounds `tenant`). A binding and a grant actor reference
+  `(tenant_id, id, kind)` with a constant `'workload'` column, and a service
+  identity with a constant `'service'` column, so the database pins the
+  principal kind as well as the tenant (inferred mechanism).
 - **Trust sources** (ADR-005 item 1). `kind` fixes which fields are set:
   `discovery_url` exactly for `oidc_discovery`, `jwks_keyset_id` exactly for
   `uploaded_jwks`, and `cluster_id`, `token_review_endpoint`,
   `ca_bundle_ref`, `ca_fingerprint`, `reviewer_credential_ref` and
   `review_timeout_ms` all for `kubernetes_token_review` and none otherwise;
   `algorithms` is set for every kind but TokenReview, which also requires
-  `projected_service_account` (each inferred). `stale_revocation_acknowledged`
-  is `true` exactly for `projected_service_account` on `oidc_discovery` or
-  `uploaded_jwks`, and `NULL` elsewhere (IR-151; `false` is rejected,
-  inferred). `single_use` replay needs `on_demand_jwt` on `oidc_discovery`
-  or `uploaded_jwks` (OQ-ADR005-2). `cluster_id` is unique across tenants
-  (inferred). `kind`, `cluster_id` and `jwks_keyset_id` are immutable
-  (inferred). `discovery_url` and `token_review_endpoint` are not foreign
+  `projected_service_account` (each inferred).
+  `stale_revocation_acknowledged` is `true` exactly for
+  `projected_service_account` on `oidc_discovery` or `uploaded_jwks`, and
+  `NULL` elsewhere (IR-151; `false` is rejected, inferred). `single_use`
+  replay needs `on_demand_jwt` on `oidc_discovery` or `uploaded_jwks`
+  (OQ-ADR005-2). `discovery_url` and `token_review_endpoint` are not foreign
   keys to egress entries: a write that leaves them unchanged must not fail
   for a missing or disabled entry (IR-152).
 - **Keysets and versions.** A version holds a JWK Set whose `keys` is a
@@ -386,102 +400,156 @@ part of it.
   symmetric member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k`), so a
   private-key upload is rejected here too (ADR-005 items 2 and 8). Versions
   are immutable (tasks §3 "Ownership"); that `status` alone may change is
-  inferred. `expires_at`, when set, is after `effective_at`; versions may
-  overlap.
-- **Workload and service kinds.** `principal` gains
-  `principal_tenant_id_id_kind_key UNIQUE (tenant_id, id, kind)`. A binding
-  and a grant actor reference `(tenant_id, id, kind)` with a constant
-  `'workload'` column, and a service identity with a constant `'service'`
-  column, so the database pins the principal kind as well as the tenant.
+  inferred. `expires_at`, when set, is after `effective_at` (inferred);
+  versions may overlap.
 - **Bindings.** `profile` is `github_production`, `kubernetes_production`
-  or `generic_production` (the source's examples, taken as the whole set,
-  inferred); `claim_match_policy` is a nonempty object of string values.
-  The source and principal of a binding are immutable (inferred).
+  or `generic_production` (the examples of ADR-016 item 4, taken as the
+  whole set, inferred); `claim_match_policy` is a nonempty object of string
+  values (string values only, inferred).
 - **Grants.** A direct grant has no `target_service_id`; delegation and
-  impersonation name a same-tenant service identity. An impersonation grant
-  is stored only `disabled` with `activation_state = 'requires_reapproval'`,
-  and the other modes carry `not_required` (inferred). `default_scopes`,
-  when set, is nonempty and within the grant's `scopes` (IR-063). `max_ttl`
-  is in seconds, 1 to 300 (inferred unit). `actor_principal_id`,
-  `target_service_id` and `mode` are immutable (inferred).
+  impersonation name a same-tenant service identity (IR-045,
+  OQ-ADR006-1). An impersonation grant is stored only `disabled` with
+  `activation_state = 'requires_reapproval'` (design §5.6), and the other
+  modes carry `not_required` (inferred). `default_scopes`, when set, is
+  nonempty and within the grant's `scopes` (IR-063). `max_ttl` is in
+  seconds, 1 to 300 (unit inferred from the export name, OQ-IR-6).
+- **Immutable selectors** (`SK001`): the IDs (tasks §3 "IDs/names"), every
+  column of a keyset version but `status` (versions are immutable, tasks §3
+  "Ownership"), and (inferred) the owning tenant everywhere, a source's
+  `kind`, `cluster_id` and `jwks_keyset_id`, a binding's source and
+  principal, a grant's actor, target and mode, and every column of a list
+  row.
 - **List tables.** `ServiceIdentity.resource_server_ids`,
   `ServiceGrant.resource_server_ids` and `ServiceGrant.allowed_binding_ids`
-  are rows with composite keys, as checker tenants in `0003`. An audience
-  row references `audience_tenant_assignment (tenant_id,
-  resource_server_id)`, so it names an audience assigned to the owner's own
-  tenant. A binding row carries the grant's actor in both references, so it
-  can only name a same-tenant binding of that actor (ADR-022 item 13). A
+  are rows, as checker tenants are in `0003`; they have no status or
+  revision of their own (inferred), and a row is added or deleted, never
+  updated. An audience row references
+  `audience_tenant_assignment (tenant_id, resource_server_id)`, so it names
+  an audience assigned to the owner's own tenant (the existence half of
+  IR-080). A binding row carries the grant's actor in both references, so
+  it names only a same-tenant binding of that actor (ADR-022 item 13). A
   deferred, `ENABLE ALWAYS` constraint trigger
   (`skyoauth_service_grant_has_binding()`, pinned `search_path`, tables
   named with the schema) fails the commit with `SK001` when a grant created
-  in the transaction has no binding row, or the last binding row of a
-  surviving grant was deleted. It locks the grant row with
-  `FOR NO KEY UPDATE`, so a role that deletes binding rows needs `UPDATE` on
-  `service_grant`. List rows are added or deleted, never updated.
-- **Empty arrays.** These must be nonempty: `trust_source.audiences`,
-  `algorithms` when set, `default_scopes` when set, the JWK Set `keys`,
-  `claim_match_policy` and a grant's binding rows. These may be empty:
-  `service_grant.scopes`, `service_identity.max_scopes` and the audience
-  rows of a service or grant. An empty set always allows nothing; it never
-  means "unconstrained" (inferred). A `NULL` `default_scopes` means the
-  grant has no defaults.
-- **Not NULL.** Every column is `NOT NULL` except the fields the model
-  marks optional (`expires_at`, `target_service_id`, `default_scopes`,
-  `valid_until`) and the kind-specific trust source fields above. In
-  particular no column of a composite foreign key is nullable, since a
-  `NULL` there would make `MATCH SIMPLE` skip the check; the two nullable
-  references, `jwks_keyset_id` and `target_service_id`, are tied to `kind`
-  and `mode` by `CHECK`s.
-- **Foreign keys** are all `NO ACTION`, not deferrable, and named
-  `<table>_<description>_fkey`:
-  - `trust_keyset_tenant_fkey`;
-  - `trust_keyset_version_tenant_fkey`, `trust_keyset_version_keyset_fkey`;
-  - `trust_source_tenant_fkey`, `trust_source_keyset_fkey`;
-  - `principal_binding_tenant_fkey`, `principal_binding_source_fkey`,
-    `principal_binding_workload_fkey`;
-  - `service_identity_tenant_fkey`, `service_identity_principal_fkey`;
-  - `service_identity_resource_server_service_fkey`,
-    `service_identity_resource_server_assignment_fkey`;
-  - `service_grant_tenant_fkey`, `service_grant_actor_fkey`,
-    `service_grant_target_fkey`;
-  - `service_grant_binding_grant_fkey`, `service_grant_binding_binding_fkey`;
-  - `service_grant_resource_server_grant_fkey`,
-    `service_grant_resource_server_assignment_fkey`.
+  in the transaction has no binding row, or the last binding row of a grant
+  that still exists was deleted (identity-registry §10). It locks the grant
+  row with `FOR NO KEY UPDATE`, so a role that deletes binding rows needs
+  `UPDATE` on `service_grant`, and of two concurrent removals under
+  `READ COMMITTED` the second waits and then sees the first.
+- **Empty arrays.** Nonempty: `trust_source.audiences`, `algorithms` when
+  set, `default_scopes` when set, the JWK Set `keys`, `claim_match_policy`
+  and a grant's binding rows. May be empty: `service_grant.scopes`,
+  `service_identity.max_scopes` and the audience rows of a service or
+  grant. An empty ceiling or audience set allows nothing, so it fails
+  closed; it never means "unconstrained" (inferred). A `NULL`
+  `default_scopes` means the grant has no defaults, so a request without
+  scopes fails (IR-063).
+- **Not NULL.** Every column is `NOT NULL` except the fields the model marks
+  optional (`trust_keyset_version.expires_at`,
+  `service_grant.target_service_id`, `default_scopes` and `valid_until`)
+  and the kind-specific trust source fields above. No column of a composite
+  foreign key is nullable except `jwks_keyset_id` and `target_service_id`,
+  which `CHECK`s tie to `kind` and `mode`; a `NULL` elsewhere would make
+  `MATCH SIMPLE` skip the check.
+- **References.** Every foreign key takes no action on delete or update, is
+  not deferrable and is named, so the service can map a `23503` by its
+  constraint name:
+
+  | Constraint                                         | Columns                                                                   |
+  | -------------------------------------------------- | ------------------------------------------------------------------------- |
+  | `trust_keyset_tenant_id_fkey`                      | `tenant_id` → `tenant`                                                    |
+  | `trust_keyset_version_tenant_id_fkey`              | `tenant_id` → `tenant`                                                    |
+  | `trust_keyset_version_keyset_id_fkey`              | `(tenant_id, keyset_id)` → the keyset                                     |
+  | `trust_source_tenant_id_fkey`                      | `tenant_id` → `tenant`                                                    |
+  | `trust_source_jwks_keyset_id_fkey`                 | `(tenant_id, jwks_keyset_id)` → the keyset                                |
+  | `principal_binding_tenant_id_fkey`                 | `tenant_id` → `tenant`                                                    |
+  | `principal_binding_trust_source_id_fkey`           | `(tenant_id, trust_source_id)` → the source                               |
+  | `principal_binding_workload_principal_id_fkey`     | `(tenant_id, workload_principal_id, workload_principal_kind)` → principal |
+  | `service_identity_tenant_id_fkey`                  | `tenant_id` → `tenant`                                                    |
+  | `service_identity_id_fkey`                         | `(tenant_id, id, principal_kind)` → principal                             |
+  | `service_identity_resource_server_service_id_fkey` | `(tenant_id, service_id)` → the service identity                          |
+  | `service_identity_resource_server_assignment_fkey` | `(tenant_id, resource_server_id)` → the assignment                        |
+  | `service_grant_tenant_id_fkey`                     | `tenant_id` → `tenant`                                                    |
+  | `service_grant_actor_principal_id_fkey`            | `(tenant_id, actor_principal_id, actor_principal_kind)` → principal       |
+  | `service_grant_target_service_id_fkey`             | `(tenant_id, target_service_id)` → the service identity                   |
+  | `service_grant_binding_grant_id_fkey`              | `(tenant_id, grant_id, actor_principal_id)` → the grant                   |
+  | `service_grant_binding_binding_id_fkey`            | `(tenant_id, binding_id, actor_principal_id)` → the binding               |
+  | `service_grant_resource_server_grant_id_fkey`      | `(tenant_id, grant_id)` → the grant                                       |
+  | `service_grant_resource_server_assignment_fkey`    | `(tenant_id, resource_server_id)` → the assignment                        |
+
+- **Named checks.** The bounds, character rules and multi-column rules are
+  named, so the service can map a `23514` by its constraint name. Each
+  table has `<table>_<column>_octet_length_check` (255 bytes) on every ID
+  and reference column, and `<table>_name_no_space_check` and
+  `<table>_name_octet_length_check` (2048 bytes) on its name, where it has
+  one. Two names abbreviate `resource_server_id` to `server_id` to fit the
+  63-byte identifier limit:
+  `service_identity_resource_server_server_id_octet_length_check` and
+  `service_grant_resource_server_server_id_octet_length_check`. The others:
+
+  | Constraint                                                                         | Rule                                                                 |
+  | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+  | `principal_id_octet_length_check`                                                  | `principal.id` at most 255 bytes                                     |
+  | `principal_tenant_id_octet_length_check`                                           | `principal.tenant_id` at most 255 bytes                              |
+  | `trust_keyset_version_fingerprint_no_space_check`                                  | `fingerprint` has no whitespace or controls                          |
+  | `trust_keyset_version_fingerprint_octet_length_check`                              | `fingerprint` at most 2048 bytes                                     |
+  | `trust_keyset_version_validity_check`                                              | `expires_at` after `effective_at`                                    |
+  | `trust_source_<column>_no_space_check`, `trust_source_<column>_octet_length_check` | for each exact string: no whitespace or controls, at most 2048 bytes |
+  | `trust_source_discovery_url_kind_check`                                            | `discovery_url` set exactly for `oidc_discovery`                     |
+  | `trust_source_jwks_keyset_id_kind_check`                                           | `jwks_keyset_id` set exactly for `uploaded_jwks`                     |
+  | `trust_source_token_review_fields_kind_check`                                      | the TokenReview fields set exactly for `kubernetes_token_review`     |
+  | `trust_source_algorithms_kind_check`                                               | `algorithms` set exactly for the locally verified kinds              |
+  | `trust_source_token_review_profile_check`                                          | TokenReview takes `projected_service_account`                        |
+  | `trust_source_stale_revocation_kind_check`                                         | IR-151                                                               |
+  | `trust_source_single_use_replay_check`                                             | OQ-ADR005-2                                                          |
+  | `principal_binding_workload_principal_kind_check`                                  | the constant `'workload'`                                            |
+  | `service_identity_principal_kind_check`                                            | the constant `'service'`                                             |
+  | `service_grant_actor_principal_kind_check`                                         | the constant `'workload'`                                            |
+  | `service_grant_target_mode_check`                                                  | a target exactly for delegation and impersonation                    |
+  | `service_grant_activation_mode_check`                                              | `requires_reapproval` exactly for impersonation                      |
+  | `service_grant_impersonation_disabled_check`                                       | impersonation only `disabled`                                        |
+  | `service_grant_default_scopes_check`                                               | `default_scopes` nonempty and within `scopes`                        |
+
+  The other single-column checks keep the names PostgreSQL generates
+  (`<table>_<column>_check`); the catalog test in
+  `service/tests/schema_trust_binding_grant.rs` pins the full set.
 
 The database does not enforce these rules; the service must:
 
 - refuse an audience outside an enabled same-tenant assignment at write and
   at issuance (IR-080, IR-081): the composite key proves only that the
-  assignment exists; and keep a delegation grant's audiences within its
-  target service's audiences;
-- check `discovery_url` and `token_review_endpoint` by value against an
-  enabled egress entry of the matching purpose when they are written
-  (IR-152), and validate them as URLs;
+  assignment exists, whatever its status; and keep a delegation grant's
+  audience within its target service's audiences (IR-083);
+- check `discovery_url` and `token_review_endpoint` against an enabled
+  egress entry of the matching purpose when they are written (IR-152), and
+  validate them as URLs;
 - resolve `ca_bundle_ref` and `reviewer_credential_ref` only within the
   tenant's secret namespace (IR-034);
-- require the predicates each binding profile demands (ADR-016 item 4) and
-  never match a disabled binding;
+- check that a binding's template fits its source, require the predicates
+  each template demands (ADR-016 item 4), and never match a disabled
+  binding;
 - check JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
   upload (T11.3);
-- keep scopes within the service, assignment and resource server ceilings
-  beyond `default_scopes ⊆ scopes` (IR-063), and check resource constraints
+- keep `default_scopes` and `scopes` within every other ceiling (service,
+  assignment, resource server; IR-063) and check resource constraints
   against their schemas (IR-123, IR-141);
-- keep an impersonation grant dormant and unchanged in meaning when it is
-  reapproved (design §5.6; T10.11): the `CHECK`s only fix its stored state;
+- keep an impersonation grant dormant when it is edited or reapproved
+  (design §5.6; T10.11): the `CHECK`s fix only its stored state;
 - create a service principal and its service identity in one transaction
   (identity-registry §5.1);
+- generate every ID, `cluster_id` included, and normalize the Unicode form
+  of names, issuers and claim values where a source requires it;
 - advance the parent's revision when its list rows change, check the
   expected revision of every write and write the audit event in the same
   transaction;
 - hard-delete a binding or grant only under ADR-008 item 3, deleting a
-  grant's list rows first; disable the other records instead;
-- normalise Unicode where a source requires it (see above).
+  grant's list rows first; disable the other records instead.
 
 The binding-set check sees committed rows under `READ COMMITTED`. Under
-`REPEATABLE READ` two transactions that each delete a different last-but-one
-binding row of the same grant can both commit if neither changes the grant
-row; the revision compare-and-set on the grant, which the service performs
-for every list change, makes the second one fail.
+`REPEATABLE READ` two transactions that each delete a different one of a
+grant's last two binding rows can both commit, since each checks its own
+snapshot; the revision compare-and-set on the grant, which the service
+performs for every list change, makes the second one fail.
 
 ## Limits
 
@@ -566,6 +634,15 @@ Open for all registry tables:
   write, when no grant, approval or audit-required record references it,
   and for a disabled, unreferenced grant; for the other tables it is open,
   and the admin endpoints of `0003` have no `DELETE` (public-api §7).
+  The nine `0004` tables are part of the same pending migration. Until it
+  lands, keyset versions, list rows and any keyset, source, binding, service
+  identity or grant that nothing references can be deleted. The guard must
+  let through the hard delete ADR-008 item 3 allows for disabled,
+  unreferenced bindings and grants, with a grant's list rows deleted first,
+  and keep `service_identity_resource_server`, `service_grant_binding` and
+  `service_grant_resource_server` rows deletable, since deleting a row is
+  how such a set shrinks (the binding set stays nonempty by the deferred
+  check).
 
 Not done in `0002`:
 
@@ -588,11 +665,6 @@ Not done in `0003`:
 
 Not done in `0004`:
 
-- Delete and truncate guards for its tables, decided with those of the
-  other registry tables. Bindings and grants allow a conditional hard delete
-  (ADR-008 item 3), so their guard must let that through; until then only
-  foreign keys hold back a delete.
 - The single-use replay table (T10.9) and the policy revision.
-- A name-unique key on `principal`, which `0002` does not have
-  (IR-021).
+- A name-unique key on `principal` (IR-021), which `0002` does not have.
 - Rejecting duplicate list elements, as for `0003`.
