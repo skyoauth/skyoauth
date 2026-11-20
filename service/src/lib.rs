@@ -3,6 +3,8 @@
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
 
+pub mod persistence;
+
 /// Response body of `GET /healthz`.
 #[derive(Debug, Serialize)]
 pub struct Health {
