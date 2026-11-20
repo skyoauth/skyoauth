@@ -1540,6 +1540,35 @@ describe('--gate-pr', () => {
     }
   });
 
+  // The rest of the file stays line for line; a gates_passed line at another
+  // index than at the merge-base moves it, which is a change outside it.
+  test('the gates_passed line moved to another line', () => {
+    const top = '# Conformance scenario registry';
+    for (const [name, move, line] of [
+      ['to the first line', (t) => `gates_passed = ["M1a"]\n${replaceOnce(t, '\ngates_passed = []\n', '\n')}`, 1],
+      ['one line up, over the blank line before it', (t) => replaceOnce(t, '\n\ngates_passed = []\n', '\ngates_passed = ["M1a"]\n\n'), null],
+      ['one line down, under the blank line after it', (t) => replaceOnce(t, '\ngates_passed = []\n\n', '\n\ngates_passed = ["M1a"]\n'), null],
+    ]) {
+      const { root, mb } = mainRoot();
+      const text = read(root, SCENARIOS);
+      assert.ok(text.startsWith(top));
+      const bi = text.split('\n').indexOf('gates_passed = []');
+      edit(root, SCENARIOS, move);
+      const after = read(root, SCENARIOS).split('\n');
+      const hi = after.indexOf('gates_passed = ["M1a"]');
+      assert.notEqual(hi, bi, name);
+      // Without the gates_passed line, the two texts are the same.
+      assert.deepEqual(after.filter((_, j) => j !== hi), text.split('\n').filter((_, j) => j !== bi), name);
+      commit(root, 'gate');
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.deepEqual(res.added, ['M1a'], name);
+      // The first line where the two texts differ.
+      const n = line ?? Math.min(bi, hi) + 1;
+      expectOnly(res, 'gate-pr', new RegExp(`^tests/conformance/scenarios\\.toml:${n}: error \\[gate-pr\\] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line$`));
+    }
+  });
+
   test('a comment that quotes a gates_passed line is not the gates_passed line', () => {
     const { root, mb } = mainRoot((t) => replaceOnce(allM1a(t), 'gates_passed = []', '# was: gates_passed = []\ngates_passed = []'));
     gateCommit(root, '["M1a"]');

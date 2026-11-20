@@ -59,7 +59,8 @@
 // the merge-base of HEAD with origin/main. When gates_passed at HEAD adds a
 // milestone to the one at the merge-base, it requires (rule gate-pr) that HEAD
 // is a single commit whose only parent is that merge-base, and that its diff
-// changes nothing but the gates_passed line of scenarios.toml. It then runs
+// changes nothing but the gates_passed line of scenarios.toml, which stays at
+// the same line. It then runs
 // the whole check above on the specs and tests/conformance AS OF THE
 // MERGE-BASE, with HEAD's gates_passed, so every stage of each gated
 // milestone must be implemented, with a valid stamp, at the merge-base (rule
@@ -739,9 +740,13 @@ export function checkGatePr(root) {
   const rest = (ls, i) => ls.filter((_, j) => j !== i);
   const [br, hr] = [rest(b, bi), rest(h, hi)];
   const k = Array.from({ length: Math.max(br.length, hr.length) }, (_, j) => j).find((j) => br[j] !== hr[j]);
-  if (k !== undefined || bi < 0 || hi < 0) {
-    // The first changed line of HEAD's file, counting its gates_passed line.
-    const line = k === undefined ? Math.max(hi, 0) + 1 : hi >= 0 && k >= hi ? k + 2 : k + 1;
+  // The gates_passed line stays where it is: with the rest of the file the
+  // same line for line, a line at another index than at the merge-base has
+  // moved, which is a change outside it.
+  if (k !== undefined || bi < 0 || hi < 0 || bi !== hi) {
+    // The first changed line of HEAD's file, counting its gates_passed line
+    // (for a moved one, the first line where the two files differ).
+    const line = k !== undefined ? (hi >= 0 && k >= hi ? k + 2 : k + 1) : bi >= 0 && hi >= 0 ? Math.min(bi, hi) + 1 : Math.max(hi, 0) + 1;
     err('the gate PR changes this file outside the gates_passed line; a gate PR changes only that line', SCENARIOS, line);
   }
   // A gate PR only adds milestones: it may not also revoke one.
