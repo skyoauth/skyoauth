@@ -2,7 +2,8 @@
 # Exits 0 when every path that differs between two commits is
 # documentation, and 1 when anything else differs or the commits cannot
 # be compared. CI uses it to skip the build and test jobs for a
-# docs-only change.
+# docs-only change; publish-badges.sh uses it to keep publishing figures
+# for a commit that its branch has moved past only by such changes.
 #
 #   scripts/ci/docs-only.sh BASE HEAD
 #

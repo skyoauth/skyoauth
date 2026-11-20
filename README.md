@@ -1,6 +1,10 @@
 # skyoauth
 
 [![CI](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![Rust tests](https://github.com/skyoauth/skyoauth/raw/badges/main/rust-tests.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![Rust coverage](https://github.com/skyoauth/skyoauth/raw/badges/main/rust-coverage.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![TypeScript tests](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-tests.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
+[![TypeScript coverage](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-coverage.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 
 | Path                  | Description                                          |
 | --------------------- | ---------------------------------------------------- |
@@ -134,10 +138,19 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   See `tests/conformance/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
-page. To protect `main`, require the `CI passed` check: it passes when `Docs
-consistency` and `Conformance registry` passed and every other job passed or
-was skipped. Dependabot keeps actions, crates and npm
-packages up to date.
+page. On pushes to `main`, CI generates separate Rust and TypeScript tests and
+line-coverage badges as SVG files on the `badges` branch
+(`scripts/ci/publish-badges.sh`, rendered by `scripts/ci/badge.sh`) — Rust test
+counts come from `service-nextest` (all workspace tests, including PostgreSQL
+tests) and Rust line coverage from `rust-coverage`; TypeScript test counts and
+line coverage come from `typescript-coverage` — so they need no external
+service and render in a private repository too. The publishing job checks that
+GitHub serves them as images from the rendered README
+(`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`, which
+publishes nothing, runs the same check. To protect `main`, require the `CI
+passed` check: it passes when `Docs consistency` and `Conformance registry`
+passed and every other job passed or was skipped. Dependabot keeps actions,
+crates and npm packages up to date.
 
 ## License
 
