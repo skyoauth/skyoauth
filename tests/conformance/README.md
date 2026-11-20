@@ -217,6 +217,8 @@ A partial download is an input error, not a smaller result: the script stops at 
 | `--allow-commit-mismatch` | Print the report although `--root` is a git checkout of another commit than `--commit`. The mismatch is an input error, so the report is untrusted and the exit status is 2. For looking at results locally, never for a gate. |
 | `--json FILE`, `--summary FILE` | Write the JSON result; append the Markdown summary (stdout always gets it). |
 
+Each option that takes a value may be given once; a repeated one (`--commit A --commit B`) is a usage error (exit 2, no report), not last-one-wins.
+
 ### Rules
 
 - **Test IDs (provisional, layout §6 "Still open", item 5).** Layout §3 fixes only `nextest:<package>/<target>/<path>`; the vitest, Playwright, lib and bin forms below and the runner of each job are proposals, not ratified. A JUnit testcase maps to a registry test ID by the runner of its leg's job (`JOB_RUNNER` in the script: `typescript`: vitest, `typescript-browser`: Playwright, the other test jobs: cargo-nextest). `bundle-check` and `migration-rehearsal` have no decided runner, and nothing defaults to nextest: their artifacts are input errors, and a stage with one of their legs cannot pass, until layout §6 decides. nextest classname `<package>::<binary>` and name `<path>` give `nextest:<package>/<binary>/<path>` (a lib unit test, classname `<package>`, gives `nextest:<package>/<path>`); vitest and Playwright give `vitest:<file>/<name>` and `playwright:<file>/<name>`, where the file ends in `.test.*` or `.spec.*`.

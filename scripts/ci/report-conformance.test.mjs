@@ -1542,11 +1542,21 @@ describe('cli', () => {
       [['--commit', SHA, '--today', '2025-02-29'], /--today must be a calendar date/],
       [['--commit', SHA, '--require-milestone', 'M9'], /--require-milestone must be one of M0, M1a/],
       [['--commit', SHA, '--bogus'], /^usage: /],
+      [['--commit', SHA, '--commit', 'b'.repeat(40)], /^report-conformance: --commit given more than once\nusage: /],
+      [['--commit', SHA, '--today', TODAY, '--today', TODAY], /--today given more than once/],
+      [['--commit', SHA, '--require-milestone', 'M1a', '--require-milestone', 'M1b'], /--require-milestone given more than once/],
+      [['--commit', SHA, '--waivers', 'a', '--waivers', 'b'], /--waivers given more than once/],
+      [['--commit', SHA, '--artifacts', 'a', '--artifacts', 'b'], /--artifacts given more than once/],
+      [['--commit', SHA, '--json', 'a', '--json', 'b'], /--json given more than once/],
+      [['--commit', SHA, '--summary', 'a', '--summary', 'b'], /--summary given more than once/],
+      [['--root', '.', '--commit', SHA], /--root given more than once/],
       [['--commit'], /^usage: /],
     ]) {
       const err = [];
-      assert.equal(run(['--root', dir, ...args], { log: () => {}, logErr: (s) => err.push(s) }), 2, args.join(' '));
+      const out = [];
+      assert.equal(run(['--root', dir, ...args], { log: (s) => out.push(s), logErr: (s) => err.push(s) }), 2, args.join(' '));
       assert.match(err.join('\n'), re);
+      assert.deepEqual(out, [], 'no report');
     }
   });
 

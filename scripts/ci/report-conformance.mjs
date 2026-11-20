@@ -9,6 +9,8 @@
 //        [--require-milestone M] [--require-history]
 //        [--allow-commit-mismatch] [--json FILE] [--summary FILE]
 //
+// Each value option may be given once; a repeat is a usage error.
+//
 // Input
 //   --artifacts DIR   Downloaded artifacts of every run for the commit, one
 //                     directory per run named by its numeric run ID, one
@@ -812,8 +814,16 @@ export function exitStatus(res, requireMilestone) {
 
 export function run(argv, { log = console.log, logErr = console.error, now = new Date() } = {}) {
   const o = { root: resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'), docsOnly: false, requireHistory: false };
+  const given = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // A value flag given twice is ambiguous (which --commit is judged?), so
+    // it is a usage error rather than last-one-wins.
+    if (VALUE_FLAGS.includes(a) && given.has(a)) {
+      logErr(`report-conformance: ${a} given more than once\n${USAGE}`);
+      return 2;
+    }
+    given.add(a);
     if (a === '--docs-only') o.docsOnly = true;
     else if (a === '--require-history') o.requireHistory = true;
     else if (a === '--allow-commit-mismatch') o.allowCommitMismatch = true;
