@@ -544,6 +544,40 @@ describe('numeric settings and counts', () => {
     });
   }
 
+  // The counts are read from the root element only: markup before it could
+  // hold a <testsuites> of its own, here one with no failures in front of
+  // a root with three, so anything but the <?xml ...?> declaration fails.
+  const DECOY = '<testsuites tests="12" failures="0" errors="0" skipped="0">';
+  const ROOT = '<testsuites name="t" tests="12" failures="3" errors="0" skipped="1"><testsuite name="s"/></testsuites>\n';
+  for (const [form, before] of [
+    ['a comment', `<!-- ${DECOY} -->\n`],
+    ['a DOCTYPE', `<!DOCTYPE testsuites [ <!ENTITY decoy '${DECOY}'> ]>\n`],
+    ['a processing instruction', `<?decoy ${DECOY}?>\n`],
+  ]) {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>\n${before}${ROOT}`;
+    test(`rejects a JUnit report with ${form} before the root element`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', xml)]);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /cannot parse the <testsuites> element in .*junit\.xml/);
+      assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+    });
+
+    test(`a JUnit report with ${form} before the root element from a failed job publishes a red failing badge`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', xml), '--rust-tests-failed']);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: failing' });
+    });
+  }
+
+  test('reads the root element after a multi-line XML declaration and blank lines', () => {
+    const { remote, sha, work, file } = setup();
+    const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', `<?xml version='1.0'\n  encoding='UTF-8'?>\n\n  ${ROOT}`)]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
+  });
+
   for (const value of ['99999999999999999999', 'abc']) {
     test(`a JUnit count failures="${value}" from a failed job publishes a red failing badge`, () => {
       const { remote, sha, work, file } = setup();

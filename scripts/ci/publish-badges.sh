@@ -281,9 +281,12 @@ gate() {
 # Only the first 64 KiB of FILE are read (a failed run can leave a report
 # of many megabytes, and building it into one awk string is quadratic in
 # mawk and busybox awk), so the start tag must end within them.
-# Fails when there is no such element or it cannot be read attribute by
-# attribute (an unquoted or unterminated value, a missing space between
-# attributes, a repeated attribute), for a value that is not a whole
+# Fails when <testsuites> is not the first element, after nothing but
+# white space and an optional <?xml ...?> declaration (so a comment,
+# DOCTYPE or processing instruction before it fails: its text could
+# hold another <testsuites>), when the start tag cannot be read attribute
+# by attribute (an unquoted or unterminated value, a missing space between
+# attributes, NAME given twice), for a value that is not a whole
 # number (empty, negative, fractional, with other characters), and for a
 # count of more than 9 digits, which `test` and `$(( ))` cannot be
 # trusted with.
@@ -294,8 +297,9 @@ junit_attr() {
         length(s) > 65536 { exit }
         END {
             s = substr(s, 1, 65536)
-            if (!match(s, /<testsuites[ \/>]/)) exit 2
-            s = substr(s, RSTART + 11)
+            sub(/^ *<\?xml ([^?]|\?[^>])*\?>/, "", s)
+            if (s !~ /^ *<testsuites[ \/>]/) exit 2
+            sub(/^ *<testsuites/, "", s)
             for (;;) {
                 sub(/^ +/, "", s)
                 if (s ~ /^\/?>/) break
