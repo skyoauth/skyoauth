@@ -203,7 +203,11 @@ jobs:
   # .config/nextest.toml (no retries, no fail-fast) and uploads the JUnit
   # report, even when tests fail. nextest does not run doctests; the
   # `rust` job does. The artifact name carries the run attempt so a
-  # re-run never replaces an earlier attempt's report.
+  # re-run never replaces an earlier attempt's report. DB-backed tests
+  # reach the same pinned PostgreSQL service container as `scenarios-pg`
+  # through SKYOAUTH_IT_DATABASE_URL; the official image's user is a
+  # superuser, so tests can create a database each (the check step
+  # proves it). No test filter: every workspace test runs here.
   service-nextest:
     name: Service tests (nextest)
     needs: changes
@@ -211,6 +215,33 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    env:
+      SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+    services:
+      postgres:
+        # postgres:17 (17.12) pinned by its multi-arch index digest. The
+        # same pin is in the `service-nextest` and `scenarios-pg` jobs;
+        # bump both together. Dependabot is not configured for this pin;
+        # bump it by hand (docs/testing/conformance-layout.md section 4):
+        # take the multi-arch index digest of the new 17.x tag from Docker
+        # Hub and change tag and digest together. Docker pulls by digest
+        # and ignores the tag, so the check step fails if they disagree or
+        # if the two jobs' pins differ.
+        image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+        env:
+          POSTGRES_USER: skyoauth
+          POSTGRES_PASSWORD: skyoauth
+          POSTGRES_DB: skyoauth
+        ports:
+          - 5432:5432
+        # Probe over TCP: the image's init-time server listens on the Unix
+        # socket only, so a socket probe can report ready before the real
+        # server starts.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U skyoauth -d skyoauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
         with:
@@ -225,6 +256,60 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.151
+
+      # Proves the service container is reachable from the runner with the
+      # URL the tests use and is the pinned major version; that every
+      # `postgres` service in this file has the same tag@digest pin and the
+      # server version matches that tag (catches a tag bumped without its
+      # digest, or the reverse, or a pin bumped in one job only); and that
+      # the role can create, connect to and drop a database, as tests that
+      # create a database each need. The step is identical in
+      # `service-nextest` and `scenarios-pg`.
+      - name: Check PostgreSQL is reachable
+        run: |
+          pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
+          version="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version_num')"
+          echo "server_version_num: $version"
+          if [ "${version%????}" != 17 ]; then
+            echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
+            exit 1
+          fi
+          workflow=.github/workflows/ci.yml
+          services="$(grep -c '^ *postgres: *$' "$workflow" || true)"
+          images="$(grep '^ *image: .*postgres' "$workflow" | sed 's/^ *image: *//; s/ *$//')"
+          count="$(printf '%s' "$images" | grep -c '' || true)"
+          pinned="$(printf '%s' "$images" | grep -cx 'postgres:[0-9][0-9.]*@sha256:[0-9a-f]\{64\}' || true)"
+          echo "postgres services in $workflow: $services"
+          printf '%s\n' "$images" | sed 's/^/  image: /'
+          if [ "$services" -eq 0 ] || [ "$count" != "$services" ] || [ "$pinned" != "$services" ]; then
+            echo "::error::Each of the $services postgres services in $workflow needs an image 'postgres:<tag>@sha256:<digest>'; $pinned of $count postgres image lines have that form"
+            exit 1
+          fi
+          pin="$(printf '%s\n' "$images" | sort -u)"
+          if [ "$(printf '%s\n' "$pin" | grep -c '')" != 1 ]; then
+            echo "::error::The postgres pins in $workflow differ ($(printf '%s\n' "$pin" | paste -sd ' ' -)); every job must use the same tag and digest, bump them together"
+            exit 1
+          fi
+          tag="${pin#postgres:}"
+          tag="${tag%%@*}"
+          server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
+          server="${server%% *}"
+          echo "image tag: $tag, server_version: $server"
+          if [ "$tag" != "$server" ]; then
+            echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
+            exit 1
+          fi
+          db="skyoauth_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          trap 'psql "$SKYOAUTH_IT_DATABASE_URL" -qc "DROP DATABASE IF EXISTS $db" || echo "::warning::Could not drop $db"' EXIT
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $db"
+          current="$(psql "${SKYOAUTH_IT_DATABASE_URL%/*}/$db" -v ON_ERROR_STOP=1 -tAc 'SELECT current_database()')"
+          if [ "$current" != "$db" ]; then
+            echo "::error::Connected to '$current' instead of the new database '$db'"
+            exit 1
+          fi
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE $db"
+          trap - EXIT
+          echo "The role can create, connect to and drop a database ($db)"
 
       - name: Run tests
         run: cargo nextest run --locked --workspace --all-features --profile ci
@@ -282,12 +367,14 @@ jobs:
       SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
     services:
       postgres:
-        # postgres:17 (17.12) pinned by its multi-arch index digest.
-        # Dependabot is not configured for this pin; bump it by hand
-        # (docs/testing/conformance-layout.md section 4): take the
-        # multi-arch index digest of the new 17.x tag from Docker Hub and
-        # change tag and digest together. Docker pulls by digest and
-        # ignores the tag, so the check step fails if they disagree.
+        # postgres:17 (17.12) pinned by its multi-arch index digest. The
+        # same pin is in the `service-nextest` and `scenarios-pg` jobs;
+        # bump both together. Dependabot is not configured for this pin;
+        # bump it by hand (docs/testing/conformance-layout.md section 4):
+        # take the multi-arch index digest of the new 17.x tag from Docker
+        # Hub and change tag and digest together. Docker pulls by digest
+        # and ignores the tag, so the check step fails if they disagree or
+        # if the two jobs' pins differ.
         image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
         env:
           POSTGRES_USER: skyoauth
@@ -319,9 +406,13 @@ jobs:
           tool: cargo-nextest@0.9.151
 
       # Proves the service container is reachable from the runner with the
-      # URL the tests use, that it is the pinned major version, and that the
-      # server version matches the image tag (catches a tag bumped without
-      # its digest, or the reverse).
+      # URL the tests use and is the pinned major version; that every
+      # `postgres` service in this file has the same tag@digest pin and the
+      # server version matches that tag (catches a tag bumped without its
+      # digest, or the reverse, or a pin bumped in one job only); and that
+      # the role can create, connect to and drop a database, as tests that
+      # create a database each need. The step is identical in
+      # `service-nextest` and `scenarios-pg`.
       - name: Check PostgreSQL is reachable
         run: |
           pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
@@ -331,14 +422,42 @@ jobs:
             echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
             exit 1
           fi
-          tag="$(sed -n 's/^ *image: postgres:\([0-9.]*\)@sha256:.*/\1/p' .github/workflows/ci.yml)"
+          workflow=.github/workflows/ci.yml
+          services="$(grep -c '^ *postgres: *$' "$workflow" || true)"
+          images="$(grep '^ *image: .*postgres' "$workflow" | sed 's/^ *image: *//; s/ *$//')"
+          count="$(printf '%s' "$images" | grep -c '' || true)"
+          pinned="$(printf '%s' "$images" | grep -cx 'postgres:[0-9][0-9.]*@sha256:[0-9a-f]\{64\}' || true)"
+          echo "postgres services in $workflow: $services"
+          printf '%s\n' "$images" | sed 's/^/  image: /'
+          if [ "$services" -eq 0 ] || [ "$count" != "$services" ] || [ "$pinned" != "$services" ]; then
+            echo "::error::Each of the $services postgres services in $workflow needs an image 'postgres:<tag>@sha256:<digest>'; $pinned of $count postgres image lines have that form"
+            exit 1
+          fi
+          pin="$(printf '%s\n' "$images" | sort -u)"
+          if [ "$(printf '%s\n' "$pin" | grep -c '')" != 1 ]; then
+            echo "::error::The postgres pins in $workflow differ ($(printf '%s\n' "$pin" | paste -sd ' ' -)); every job must use the same tag and digest, bump them together"
+            exit 1
+          fi
+          tag="${pin#postgres:}"
+          tag="${tag%%@*}"
           server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
           server="${server%% *}"
           echo "image tag: $tag, server_version: $server"
-          if [ -z "$tag" ] || [ "$tag" != "$server" ]; then
+          if [ "$tag" != "$server" ]; then
             echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
             exit 1
           fi
+          db="skyoauth_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          trap 'psql "$SKYOAUTH_IT_DATABASE_URL" -qc "DROP DATABASE IF EXISTS $db" || echo "::warning::Could not drop $db"' EXIT
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $db"
+          current="$(psql "${SKYOAUTH_IT_DATABASE_URL%/*}/$db" -v ON_ERROR_STOP=1 -tAc 'SELECT current_database()')"
+          if [ "$current" != "$db" ]; then
+            echo "::error::Connected to '$current' instead of the new database '$db'"
+            exit 1
+          fi
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE $db"
+          trap - EXIT
+          echo "The role can create, connect to and drop a database ($db)"
 
       - name: Run scenario tests
         run: >-
