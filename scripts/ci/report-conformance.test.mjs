@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -199,8 +199,23 @@ function report(rootDir, args = [], { commit = SHA } = {}) {
 }
 // The Markdown with text() escapes undone, for matching prose.
 const plain = (md) => md.replace(/\\([\\`*_[\]~|])/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+// The variables of a CI runner (GITHUB_*, RUNNER_*, ACTIONS_*, CI) and of
+// the conformance-report job (COMMIT, ARTIFACTS, REPORT_JSON, DOWNLOAD_DIR,
+// DOWNLOADS). Every child that this file spawns gets an environment without
+// them, so a test sees on a runner what it sees on a laptop, and never
+// writes into the real step summary of the job that runs the tests.
+const RUNNER_VAR = /^(?:GITHUB_|RUNNER_|ACTIONS_)|^(?:CI|COMMIT|ARTIFACTS|REPORT_JSON|DOWNLOAD_DIR|DOWNLOADS)$/;
+const withoutRunner = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !RUNNER_VAR.test(k)));
+// GIT_ENV built at the call, not at load: this process's environment as it
+// is now (a test may have changed it) without its GIT_* variables, plus
+// GIT_ENV's git settings, less the runner's variables.
+const childEnv = () =>
+  withoutRunner({
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
+    ...Object.fromEntries(Object.entries(GIT_ENV).filter(([k]) => k.startsWith('GIT_'))),
+  });
 const git = (dir, ...args) => {
-  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: childEnv() });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 };
@@ -1248,7 +1263,7 @@ describe('waivers', () => {
     const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
     for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: plainRoot }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
       const j = join(tmp('report-out-'), 'r.json');
-      const p = spawnSync(process.execPath, [SCRIPT, '--root', plainRoot, '--commit', head, '--today', TODAY, '--require-milestone', 'M1a', '--json', j], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      const p = spawnSync(process.execPath, [SCRIPT, '--root', plainRoot, '--commit', head, '--today', TODAY, '--require-milestone', 'M1a', '--json', j], { encoding: 'utf8', env: { ...childEnv(), ...env } });
       assert.equal(p.status, 2, `${Object.keys(env)}: ${p.stderr}`);
       const json = JSON.parse(readFileSync(j, 'utf8'));
       assert.equal(json.trusted, false);
@@ -1500,59 +1515,24 @@ describe('input errors', () => {
     assert.match(r.json.input_errors[0], /the artifacts directory does not exist/);
   });
 
-  test('only the known non-conformance artifacts (service-nextest-junit-N, coverage) may lack a leg file; they are ignored with a note', () => {
+  test('only the known non-conformance artifacts (service-nextest-junit-N, coverage, conformance-report-N) may lack a leg file; they are ignored with a note', () => {
     const d = artifacts([
       { leg: null, name: 'service-nextest-junit-1', junit: junit([[A24_NEG, 'failed']]) },
       { leg: null, name: 'service-nextest-junit-12', junit: null },
       { leg: null, name: 'rust-coverage', junit: null },
       { leg: null, name: 'typescript-coverage', junit: null },
+      { leg: null, name: 'conformance-report-3', junit: null },
       { leg: PG, junit: allPass(A24) },
     ]);
     write(join(d, '100', 'rust-coverage', 'html', 'index.html'), '<html/>');
     write(join(d, '100', 'typescript-coverage', 'lcov.info'), '');
+    write(join(d, '100', 'conformance-report-3', 'conformance-report.json'), '{}\n');
     const r = report(root(withA24), ['--artifacts', d]);
     assert.equal(r.code, 0, r.err);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
-    assert.deepEqual(r.json.ignored_artifacts, ['100/rust-coverage', '100/service-nextest-junit-1', '100/service-nextest-junit-12', '100/typescript-coverage']);
-    assert.match(r.out, /note: 4 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/rust-coverage`/);
+    assert.deepEqual(r.json.ignored_artifacts, ['100/conformance-report-3', '100/rust-coverage', '100/service-nextest-junit-1', '100/service-nextest-junit-12', '100/typescript-coverage']);
+    assert.match(r.out, /note: 5 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/conformance-report-3`/);
   });
-
-  // The upload-artifact steps of the workflow files `files` ([name, text]
-  // pairs): { at, name, paths } each, from a block-style step
-  // (`uses: actions/upload-artifact@...` on its own line, `with:` below).
-  // Fails closed: every line that names upload-artifact, other than a
-  // comment, must be the `uses:` line of a step parsed here.
-  const workflowUploads = (files) => {
-    const uploads = [];
-    for (const [wf, text] of files) {
-      const lines = text.split('\n');
-      const parsed = uploads.length;
-      lines.forEach((l, i) => {
-        if (!/^\s*(- )?uses: actions\/upload-artifact@/.test(l)) return;
-        // The step's `with:` block: the lines after `uses:` indented deeper
-        // than the step's keys.
-        const indent = l.search(/\S/) + (l.trimStart().startsWith('- ') ? 2 : 0);
-        const block = [];
-        for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++) {
-          if (lines[j].search(/\S/) === indent && !/^\s*with:/.test(lines[j])) break;
-          block.push(lines[j]);
-        }
-        const name = block.map((b) => b.match(/^\s*name:\s*(.+?)\s*$/)).find(Boolean)?.[1];
-        // `path:` is one path, or a `|` block of one per line.
-        const paths = [];
-        const p = block.findIndex((b) => /^\s*path:/.test(b));
-        if (p >= 0) {
-          paths.push(block[p].replace(/^\s*path:\s*\|?\s*/, ''));
-          for (let k = p + 1; k < block.length && block[k].search(/\S/) > block[p].search(/\S/); k++) paths.push(block[k].trim());
-        }
-        uploads.push({ at: `${wf}:${i + 1}`, name, paths });
-      });
-      const named = lines.filter((l) => /upload-artifact/i.test(l) && !/^\s*#/.test(l)).length;
-      assert.equal(named, uploads.length - parsed, `${wf}: ${named} non-comment line(s) name upload-artifact, ${uploads.length - parsed} upload step(s) parsed; write each upload step block-style (\`uses: actions/upload-artifact@...\` on its own line)`);
-    }
-    return uploads;
-  };
-  const repoWorkflows = () => readdirSync(join(REPO, '.github', 'workflows')).filter((f) => /\.ya?ml$/.test(f)).sort().map((wf) => [wf, repoText(join('.github', 'workflows', wf))]);
 
   test('every artifact the workflows upload is a leg artifact or a known non-conformance artifact', () => {
     // Fails when a workflow gains an artifact without a `leg` file: add it to
@@ -1599,7 +1579,7 @@ describe('input errors', () => {
     ]);
     assert.equal(r.code, 2);
     assert.deepEqual(r.json.input_errors, [
-      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$); its results cannot be placed',
+      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$, ^conformance-report-[1-9]\\d*$); its results cannot be placed',
     ]);
     assert.deepEqual(r.json.ignored_artifacts, []);
     assert.match(r.out, /\*\*Input errors: this report cannot be trusted \(1\)\.\*\*/);
@@ -1637,6 +1617,625 @@ describe('input errors', () => {
       `100/stray: ${NO_LEG}`,
     ]);
     assert.deepEqual(r.json.reports, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow upload steps (also used by the artifact tests above).
+
+// The upload-artifact steps of the workflow files `files` ([name, text]
+// pairs): { at, name, paths } each, from a block-style step
+// (`uses: actions/upload-artifact@...` on its own line, `with:` below).
+// Fails closed: every line that names upload-artifact, other than a
+// comment, must be the `uses:` line of a step parsed here.
+const workflowUploads = (files) => {
+  const uploads = [];
+  for (const [wf, text] of files) {
+    const lines = text.split('\n');
+    const parsed = uploads.length;
+    lines.forEach((l, i) => {
+      if (!/^\s*(- )?uses: actions\/upload-artifact@/.test(l)) return;
+      // The step's `with:` block: the lines after `uses:` indented deeper
+      // than the step's keys.
+      const indent = l.search(/\S/) + (l.trimStart().startsWith('- ') ? 2 : 0);
+      const block = [];
+      for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++) {
+        if (lines[j].search(/\S/) === indent && !/^\s*with:/.test(lines[j])) break;
+        block.push(lines[j]);
+      }
+      const name = block.map((b) => b.match(/^\s*name:\s*(.+?)\s*$/)).find(Boolean)?.[1];
+      // `path:` is one path, or a `|` block of one per line.
+      const paths = [];
+      const p = block.findIndex((b) => /^\s*path:/.test(b));
+      if (p >= 0) {
+        paths.push(block[p].replace(/^\s*path:\s*\|?\s*/, ''));
+        for (let k = p + 1; k < block.length && block[k].search(/\S/) > block[p].search(/\S/); k++) paths.push(block[k].trim());
+      }
+      uploads.push({ at: `${wf}:${i + 1}`, name, paths });
+    });
+    const named = lines.filter((l) => /upload-artifact/i.test(l) && !/^\s*#/.test(l)).length;
+    assert.equal(named, uploads.length - parsed, `${wf}: ${named} non-comment line(s) name upload-artifact, ${uploads.length - parsed} upload step(s) parsed; write each upload step block-style (\`uses: actions/upload-artifact@...\` on its own line)`);
+  }
+  return uploads;
+};
+const repoWorkflows = () => readdirSync(join(REPO, '.github', 'workflows')).filter((f) => /\.ya?ml$/.test(f)).sort().map((wf) => [wf, repoText(join('.github', 'workflows', wf))]);
+
+// ---------------------------------------------------------------------------
+// The informational `conformance-report` job in ci.yml and its script,
+// scripts/ci/report-conformance-ci.sh (layout §3 "Leg artifacts").
+
+const CI_SH = join(dirname(SCRIPT), 'report-conformance-ci.sh');
+const REPORT_JOB = 'conformance-report';
+const REPORT_STEP = /^ {8}run: sh scripts\/ci\/report-conformance-ci\.sh$/m;
+// The lines of a `key: |` block at `indent` spaces in a step.
+const blockOf = (text, key, indent = 10) => {
+  const m = new RegExp(`^ {${indent}}${key}: \\|\\n((?: {${indent + 2}}.*\\n)*)`, 'm').exec(text ?? '');
+  return m ? m[1].split('\n').filter(Boolean).map((l) => l.trim()) : null;
+};
+const ciText = () => repoText(join('.github', 'workflows', 'ci.yml'));
+// The jobs of a workflow: id -> the job's body (its lines indented four or
+// more spaces), from the top-level `jobs:` key.
+const workflowJobs = (text) => {
+  const at = text.search(/^jobs:\n/m);
+  assert.ok(at >= 0, 'no top-level jobs: key');
+  const jobs = new Map();
+  for (const m of text.slice(at).matchAll(/^ {2}([A-Za-z0-9_-]+):\n((?:(?: {4}.*)?\n)*)/gm)) jobs.set(m[1], m[2]);
+  return jobs;
+};
+// A job's `needs`: inline (`needs: x`, `needs: [x, y]`) or a block list.
+const needsOf = (body) => {
+  const inline = /^ {4}needs: *(.+)$/m.exec(body);
+  if (inline && inline[1].trim() !== '') return inline[1].replace(/^\[|\]$/g, '').split(',').map((s) => s.trim()).filter(Boolean);
+  const block = /^ {4}needs:\n((?: {6}- .*\n)+)/m.exec(body);
+  return block ? block[1].split('\n').filter(Boolean).map((l) => l.replace(/^ {6}- /, '').trim()) : [];
+};
+// A job's `if:` as one expression: a plain value, or a folded (`>-`) block
+// joined with single spaces as YAML folds it, with a surrounding `${{ }}`
+// removed.
+const jobIf = (body) => {
+  const m = /^ {4}if: *(.*)\n((?: {6}.*\n)*)/m.exec(body);
+  if (!m) return null;
+  const expr = m[1] === '>-' ? m[2].split('\n').map((l) => l.trim()).filter(Boolean).join(' ') : m[1].trim();
+  return /^\$\{\{\s*(.*?)\s*\}\}$/.exec(expr)?.[1] ?? expr;
+};
+// The steps of a job body, each as its text from `- ` to the next step.
+const stepsOf = (body) => body.split(/^(?= {6}- )/m).filter((s) => s.startsWith('      - '));
+const stepNamed = (body, re) => stepsOf(body).filter((s) => re.test(s));
+// The value of `key:` at `indent` spaces in a step or job text (values such
+// as `${{ runner.temp }}/x` hold spaces).
+const value = (text, key, indent = 10) => new RegExp(`^ {${indent}}${key}: *(.+?) *$`, 'm').exec(text ?? '')?.[1];
+// The artifact name an upload step gives in attempt `n`.
+const inAttempt = (name, n = 1) => name.replace(/\$\{\{\s*github\.run_attempt\s*\}\}/g, String(n));
+// A download-artifact pattern (`*` only, as used here) as a RegExp.
+const globRe = (glob) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')}$`);
+// The leg id of a leg string (layout §3 "Leg artifacts").
+const legId = (leg) => leg.replaceAll('/', '-');
+// The leg artifacts of workflow file `wf`, per job: [{ wf, job, at, name,
+// paths, leg }].
+const legUploads = (text, wf = 'ci.yml') =>
+  [...workflowJobs(text)].flatMap(([job, body]) =>
+    workflowUploads([[`${wf}#${job}`, body]])
+      .filter(({ paths }) => paths.some((x) => /(^|\/)leg$/.test(x)))
+      .map((u) => ({ wf, job, ...u, body, leg: /^ {6}SKYOAUTH_CONFORMANCE_LEG: *(\S+)$/m.exec(body)?.[1] ?? null })),
+  );
+
+describe('the conformance-report CI job', () => {
+  const catalogue = parseEnvironments(repoText(LAYOUT), []).catalogue;
+
+  test('leg artifacts follow the layout §3 naming contract in every workflow, and the layout lists the legs that upload', () => {
+    // Every workflow file: a leg of a schedule-only workflow follows the same
+    // contract, although conformance-report cannot need its job.
+    const uploads = repoWorkflows().flatMap(([wf, text]) => legUploads(text, wf));
+    assert.ok(uploads.some((u) => u.wf === 'ci.yml'), 'no leg artifact in ci.yml');
+    for (const u of uploads) {
+      // A matrix leg would come from an expression; extend this test then.
+      assert.ok(u.leg, `${u.at}: job ${u.job} uploads a leg artifact but sets no literal SKYOAUTH_CONFORMANCE_LEG`);
+      assert.ok(catalogue.has(u.leg), `${u.at}: ${u.leg} is not a layout §1.1 leg string`);
+      assert.equal(u.name, `junit-${legId(u.leg)}-attempt-\${{ github.run_attempt }}`, `${u.at}: the artifact name`);
+      // Both files at the top of the artifact: one directory holds them. (A
+      // `path: |` block starts with an empty entry.)
+      const paths = u.paths.filter(Boolean);
+      const dirs = new Set(paths.map((x) => dirname(x)));
+      assert.deepEqual(paths.map((x) => x.slice(x.lastIndexOf('/') + 1)).sort(), ['junit.xml', 'leg'], `${u.at}: a leg artifact uploads exactly junit.xml and leg`);
+      assert.equal(dirs.size, 1, `${u.at}: junit.xml and leg come from one directory, so both land at the top of the artifact`);
+      const step = stepNamed(u.body, /uses: actions\/upload-artifact@/)[0];
+      assert.match(step, /^ {8}if: always\(\)$/m, `${u.at}: the upload runs whatever the tests did`);
+    }
+    // Leg ids are distinct across the whole §1.1 column, so no two legs can
+    // ever upload under one name.
+    const byId = new Map();
+    for (const leg of catalogue.keys()) byId.set(legId(leg), [...(byId.get(legId(leg)) ?? []), leg]);
+    assert.deepEqual([...byId.values()].filter((l) => l.length > 1), [], 'leg strings with the same leg id');
+    // "Legs that upload today" names exactly the legs ci.yml uploads.
+    const line = repoText(LAYOUT)
+      .split('\n')
+      .find((l) => l.startsWith('  - **Legs that upload today.**'));
+    assert.ok(line, 'layout §3 has no "Legs that upload today" bullet');
+    const listed = [...line.matchAll(/`([^`]+)`/g)].map((m) => m[1]).filter((x) => catalogue.has(x));
+    assert.deepEqual(listed.sort(), uploads.map((u) => u.leg).sort());
+    for (const u of uploads) assert.ok(line.includes(`\`${inAttempt(u.name, 'N')}\``), `the layout names ${inAttempt(u.name, 'N')}`);
+  });
+
+  test('it needs every ci.yml job that uploads a leg artifact and downloads each by the name that job gives, never by a pattern', () => {
+    const text = ciText();
+    const jobs = workflowJobs(text);
+    const body = jobs.get(REPORT_JOB);
+    assert.ok(body, `no ${REPORT_JOB} job`);
+    const needs = needsOf(body);
+    assert.ok(needs.includes('changes'), 'needs changes, for its classification');
+    const legs = legUploads(text);
+    const [report, ...moreReports] = stepNamed(body, REPORT_STEP);
+    assert.ok(report && moreReports.length === 0, 'one report step');
+    const downloadDir = value(report, 'DOWNLOAD_DIR');
+    const artifactsDir = value(report, 'ARTIFACTS');
+    assert.ok(downloadDir && artifactsDir, 'the report step sets DOWNLOAD_DIR and ARTIFACTS');
+    assert.ok(!`${downloadDir}/`.startsWith(`${artifactsDir}/`) && !`${artifactsDir}/`.startsWith(`${downloadDir}/`), 'the downloads and the artifacts tree the script builds are apart');
+    const downloads = stepNamed(body, /uses: actions\/download-artifact@/);
+    assert.equal(downloads.length, legs.length, 'one download step per leg job');
+    const lines = [];
+    for (const u of legs) {
+      const out = `needs.${u.job}.outputs.junit-artifact`;
+      assert.ok(needs.includes(u.job), `${REPORT_JOB} must need ${u.job}, which uploads a leg artifact: it would race the upload and could not read its output`);
+      // The leg job names what it uploaded, from the attempt it ran in, and
+      // nothing when the upload produced no artifact.
+      const upload = stepNamed(u.body, /uses: actions\/upload-artifact@/)[0];
+      const id = /^ {8}id: *(\S+)$/m.exec(upload)?.[1];
+      assert.ok(id, `${u.at}: the upload step has an id`);
+      const outputs = /^ {4}outputs:\n((?: {6}.*\n)+)/m.exec(u.body)?.[1] ?? '';
+      const fmt = u.name.replace('${{ github.run_attempt }}', '{0}');
+      assert.ok(!fmt.includes('${{'), `${u.at}: the name holds no other expression`);
+      assert.equal(value(outputs, 'junit-artifact', 6), `\${{ steps.${id}.outputs.artifact-id && format('${fmt}', github.run_attempt) || '' }}`, `${u.at}: the junit-artifact output`);
+      // Downloaded by exactly that name, into a directory of its own.
+      const mine = downloads.filter((d) => value(d, 'name') === `\${{ ${out} }}`);
+      assert.equal(mine.length, 1, `one download of ${out}`);
+      const [d] = mine;
+      assert.match(d, new RegExp(`^ {8}if: ${out.replaceAll('.', '\\.')} != ''$`, 'm'), `${u.job}: no download when the job named nothing`);
+      assert.doesNotMatch(d, /^ {10}(pattern|merge-multiple|artifact-ids|run-id|github-token):/m, `${u.job}: by name, from this run only`);
+      assert.equal(value(d, 'path'), `${downloadDir}/${u.job}`);
+      assert.ok(stepsOf(body).indexOf(d) < stepsOf(body).indexOf(report), 'downloads come before the report');
+      lines.push(`${u.job}=\${{ ${out} }}`);
+    }
+    assert.deepEqual(blockOf(report, 'DOWNLOADS'), lines, 'DOWNLOADS names each leg job and its output, nothing else');
+  });
+
+  test('it is informational: after its legs unless the run is cancelled or classified docs-only, not required, read-only, no secrets, no gate flags', () => {
+    const jobs = workflowJobs(ciText());
+    const body = jobs.get(REPORT_JOB);
+    // Runs whatever its legs did, except in a cancelled run, and is skipped
+    // with the jobs that a docs-only classification skips.
+    const cond = jobIf(body);
+    assert.match(cond, /^!cancelled\(\) && /, 'the condition starts with !cancelled(), so a cancelled run gets no report');
+    assert.doesNotMatch(/^ {4}if:.*\n(?: {6}.*\n)*/m.exec(body)[0], /always\(\)/, 'always() would also run it in a cancelled run');
+    assert.equal(cond, "!cancelled() && needs.changes.outputs.code == 'true'");
+    assert.match(body, /^ {4}if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.code == 'true' \}\}$/m, 'one line, inside ${{ }}');
+    assert.ok(!needsOf(jobs.get('ci-passed')).includes(REPORT_JOB), 'ci-passed must not need it: it is not a required check');
+    assert.match(body, /^ {4}permissions:\n {6}contents: read\n(?! {6})/m, 'permissions: contents: read only');
+    for (const bad of [/secrets\./, /github\.token/, /GH_TOKEN/, /id-token/, /continue-on-error/, /--require-milestone/, /--require-history/, /--allow-commit-mismatch/, /--docs-only/]) {
+      assert.doesNotMatch(body, bad, `${REPORT_JOB} must not use ${bad.source}`);
+    }
+    // The checkout is the judged commit: the PR head on a pull request.
+    assert.match(body, /^ {6}COMMIT: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}$/m);
+    const [checkout] = stepNamed(body, /uses: actions\/checkout@/);
+    assert.match(checkout, /^ {10}ref: \$\{\{ env\.COMMIT \}\}$/m);
+    assert.match(checkout, /^ {10}persist-credentials: false$/m);
+    const [report] = stepNamed(body, REPORT_STEP);
+    assert.match(report, /^ {8}run: sh scripts\/ci\/report-conformance-ci\.sh$/m);
+    assert.doesNotMatch(report, /^ {8}if:/m, 'the report step runs only when the download succeeded: a partial download is not judged');
+    const [upload] = stepNamed(body, /uses: actions\/upload-artifact@/);
+    assert.match(upload, /^ {8}if: always\(\)$/m);
+    assert.ok(value(upload, 'path'), 'the upload has a path');
+    assert.equal(value(upload, 'path'), value(report, 'REPORT_JSON'), 'it uploads the JSON the report wrote');
+    assert.ok(NOT_CONFORMANCE.some((r) => r.test(inAttempt(value(upload, 'name')))), 'its JSON artifact is a known non-conformance artifact');
+    // Actions pinned as elsewhere in the file.
+    const elsewhere = new Set([...jobs].filter(([j]) => j !== REPORT_JOB).flatMap(([, b]) => [...b.matchAll(/uses: (\S+)/g)].map((m) => m[1])));
+    for (const [, action] of body.matchAll(/uses: (\S+)/g)) assert.ok(elsewhere.has(action), `${action} is not pinned as the other jobs pin it`);
+  });
+
+  const PG_ARTIFACT = 'junit-scenarios-pg-x86_64-attempt-1';
+  // A fake `node` first on PATH: the run.json writer (`node -e`) runs the
+  // real node; the reporter call records its arguments and exits STUB_STATUS.
+  const stubbed = (status, env = {}, downloads = undefined) => {
+    const bin = tmp('report-ci-bin-');
+    write(join(bin, 'node'), '#!/bin/sh\nif [ "$1" = -e ]; then exec "$REAL_NODE" "$@"; fi\nprintf \'%s\\n\' "$@" > "$STUB_ARGS"\nexit "$STUB_STATUS"\n');
+    chmodSync(join(bin, 'node'), 0o755);
+    const out = tmp('report-ci-out-');
+    const e = { PATH: `${bin}:${process.env.PATH}`, REAL_NODE: process.execPath, STUB_ARGS: join(out, 'args'), STUB_STATUS: String(status) };
+    return ciScript(REPO, { ...e, ...env }, out, downloads);
+  };
+  // The leg downloads of a case as the job's download steps leave them: a
+  // download by name puts the artifact's files directly into
+  // DOWNLOAD_DIR/<job>/. Each is { job, name, files, link }: `files` maps a
+  // path under that directory to its text, { link: target } (a symbolic
+  // link) or { dir: true }; `link` makes DOWNLOAD_DIR/<job> itself a link;
+  // name '' is a job that uploaded nothing (no directory). Returns the
+  // DOWNLOADS value naming them.
+  const stageDownloads = (dir, downloads) => {
+    mkdirSync(dir, { recursive: true });
+    for (const { job, files = {}, link } of downloads) {
+      if (link) symlinkSync(link, join(dir, job));
+      for (const [rel, v] of Object.entries(files)) {
+        const p = join(dir, job, rel);
+        mkdirSync(dirname(p), { recursive: true });
+        if (typeof v === 'string') writeFileSync(p, v);
+        else if (v.link) symlinkSync(v.link, p);
+        else mkdirSync(p, { recursive: true });
+      }
+    }
+    return downloads.map(({ job, name }) => `${job}=${name}\n`).join('');
+  };
+  const pgDownload = (files = { leg: `${PG}\n`, 'junit.xml': '<testsuites/>\n' }, name = PG_ARTIFACT) => [{ job: 'scenarios-pg', name, files }];
+  // Every entry under `dir`, without following links: `x/` a directory,
+  // `x@` a symbolic link, `x` anything else; null when `dir` is missing.
+  const tree = (dir) => {
+    if (!existsSync(dir)) return null;
+    const out = [];
+    const walk = (rel) => {
+      for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+        const r = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isSymbolicLink()) out.push(`${r}@`);
+        else if (e.isDirectory()) {
+          out.push(`${r}/`);
+          walk(r);
+        } else out.push(r);
+      }
+    };
+    walk('');
+    return out.sort();
+  };
+  // Runs report-conformance-ci.sh from checkout `dir` as the job does: this
+  // process's environment with GIT_ENV's git settings, less the runner's
+  // and the job's variables (childEnv), then this fixture's values for
+  // those, then exactly what the case sets (undefined unsets). On GitHub
+  // Actions the runner's GITHUB_RUN_ID and GITHUB_STEP_SUMMARY reached the
+  // script before, replacing the fixture's.
+  const ciScript = (dir, env, out = tmp('report-ci-out-'), downloads = pgDownload()) => {
+    const base = childEnv();
+    delete base.NODE_TEST_CONTEXT;
+    const downloadDir = join(out, 'download');
+    const e = {
+      ...base,
+      COMMIT: SHA,
+      DOWNLOAD_DIR: downloadDir,
+      DOWNLOADS: downloads === null ? undefined : stageDownloads(downloadDir, downloads),
+      ARTIFACTS: join(out, 'artifacts'),
+      REPORT_JSON: join(out, 'report.json'),
+      GITHUB_RUN_ID: '100',
+      GITHUB_RUN_ATTEMPT: '1',
+      GITHUB_WORKFLOW: 'CI',
+      GITHUB_EVENT_NAME: 'push',
+      GITHUB_REF_NAME: 'main',
+      GITHUB_STEP_SUMMARY: join(out, 'summary.md'),
+      ...env,
+    };
+    for (const [k, v] of Object.entries(e)) if (v === undefined) delete e[k];
+    const r = spawnSync('sh', [join(dir, 'scripts', 'ci', 'report-conformance-ci.sh')], { cwd: dir, encoding: 'utf8', env: e });
+    const read = (p) => (p && existsSync(p) ? readFileSync(p, 'utf8') : null);
+    return { status: r.status, out: r.stdout, err: r.stderr, summary: read(e.GITHUB_STEP_SUMMARY), json: read(e.REPORT_JSON) && JSON.parse(read(e.REPORT_JSON)), args: read(env.STUB_ARGS)?.split('\n').slice(0, -1) ?? null, runJson: read(join(e.ARTIFACTS ?? '', String(e.GITHUB_RUN_ID), 'run.json')), env: e, tree: e.ARTIFACTS ? tree(e.ARTIFACTS) : null, left: tree(downloadDir) };
+  };
+
+  test('exit status: only a reporter error fails the job; a failed stage is a warning', () => {
+    for (const [status, want, annotation] of [
+      [0, 0, null],
+      [1, 0, /^::warning title=Conformance report::An implemented conformance stage has a failed result/m],
+      [2, 2, /^::error title=Conformance report::The conformance reporter found usage, registry or input errors, or crashed \(exit 2\)/m],
+      [137, 137, /^::error title=Conformance report::The conformance reporter died with exit status 137\.$/m],
+    ]) {
+      const r = stubbed(status);
+      assert.equal(r.status, want, `reporter ${status}: ${r.out}${r.err}`);
+      if (annotation) assert.match(r.out, annotation);
+      else assert.doesNotMatch(r.out, /^::(warning|error)/m);
+      // The reporter gets the commit, the artifacts, the JSON and the step
+      // summary, and nothing that would make it a gate.
+      assert.deepEqual(r.args, [join(dirname(SCRIPT), 'report-conformance.mjs'), '--commit', SHA, '--artifacts', r.env.ARTIFACTS, '--json', r.env.REPORT_JSON, '--summary', r.env.GITHUB_STEP_SUMMARY]);
+      assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'push', headBranch: 'main' });
+      assert.match(r.summary, /^> \*\*Informational\.\*\* This conformance report covers only the leg artifacts of this workflow run \(run 100\) that its leg jobs named, one per leg job from the attempt that job last ran in; [^\n]*\n>\n> - `scenarios-pg`: `junit-scenarios-pg-x86_64-attempt-1`\n/);
+      assert.doesNotMatch(r.summary, /attempts 1 to/);
+      assert.doesNotMatch(r.summary, /PR head/);
+    }
+    // In a pull_request run GITHUB_REF_NAME is the merge ref; headBranch is
+    // the PR's head branch, as gh run view gives it.
+    const pr = stubbed(0, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_HEAD_REF: 'claude/x "y"', GITHUB_REF_NAME: '52/merge', GITHUB_RUN_ID: '98765432101', GITHUB_RUN_ATTEMPT: '3', GITHUB_WORKFLOW: 'CI "x"' });
+    assert.equal(pr.status, 0);
+    assert.match(pr.summary, /^> In a pull request run the judged commit is the PR head, while the leg jobs tested its merge with the base branch\.$/m);
+    assert.deepEqual(JSON.parse(pr.runJson), { databaseId: 98765432101, headSha: SHA, attempt: 3, workflowName: 'CI "x"', event: 'pull_request', headBranch: 'claude/x "y"' });
+    // An empty GITHUB_HEAD_REF (any other event) falls back to the ref name.
+    const dispatch = stubbed(0, { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_HEAD_REF: '' });
+    assert.equal(dispatch.status, 0);
+    assert.deepEqual(JSON.parse(dispatch.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'workflow_dispatch', headBranch: 'main' });
+  });
+
+  // The regression on GitHub Actions (PR 52, head cf35ed7): the runner's
+  // variables leaked into the script, so GITHUB_RUN_ID replaced the
+  // fixture's and an unset variable was not unset. Reproduced here by
+  // setting them in this process.
+  test('the script sees only the variables a case sets, not those of the runner that runs the tests', () => {
+    const real = join(tmp('report-ci-leak-'), 'step-summary.md');
+    const LEAK = { GITHUB_RUN_ID: '44833181735', GITHUB_RUN_ATTEMPT: '7', GITHUB_WORKFLOW: 'Leaked', GITHUB_STEP_SUMMARY: real, GITHUB_EVENT_NAME: 'pull_request', GITHUB_HEAD_REF: 'leaked/branch', GITHUB_REF_NAME: '52/merge', GITHUB_ACTIONS: 'true', ACTIONS_RUNTIME_TOKEN: 'leaked', CI: 'true', COMMIT: 'b'.repeat(40), ARTIFACTS: '/nonexistent/a', REPORT_JSON: '/nonexistent/r.json', DOWNLOAD_DIR: '/nonexistent/d', DOWNLOADS: 'leaked=junit-leaked-attempt-1', RUNNER_TEMP: '/nonexistent/t' };
+    const saved = Object.fromEntries(Object.keys(LEAK).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, LEAK);
+    try {
+      const r = stubbed(0);
+      assert.equal(r.status, 0, r.out + r.err);
+      assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'push', headBranch: 'main' });
+      assert.doesNotMatch(r.summary, /PR head/);
+      for (const k of ['GITHUB_ACTIONS', 'GITHUB_HEAD_REF', 'ACTIONS_RUNTIME_TOKEN', 'CI', 'RUNNER_TEMP']) assert.equal(r.env[k], undefined, k);
+      for (const k of ['DOWNLOAD_DIR', 'DOWNLOADS']) assert.notEqual(r.env[k], LEAK[k], k);
+      assert.deepEqual(r.tree, ['100/', `100/${PG_ARTIFACT}/`, `100/${PG_ARTIFACT}/junit.xml`, `100/${PG_ARTIFACT}/leg`, '100/run.json']);
+      const unset = stubbed(0, { GITHUB_STEP_SUMMARY: undefined });
+      assert.equal(unset.status, 2);
+      assert.match(unset.out, /GITHUB_STEP_SUMMARY is not set/);
+      assert.equal(existsSync(real), false, 'nothing was written into the runner\'s step summary');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  test('a missing or malformed variable, or an existing run.json, is a usage error before the reporter runs', () => {
+    for (const [env, msg] of [
+      [{ COMMIT: undefined }, /COMMIT must be a full 40-character lowercase hex SHA, not ''/],
+      [{ COMMIT: 'A'.repeat(40) }, /COMMIT must be/],
+      [{ COMMIT: 'a'.repeat(39) }, /COMMIT must be/],
+      [{ COMMIT: `${'a'.repeat(40)}\n` }, /COMMIT must be/],
+      [{ ARTIFACTS: '' }, /ARTIFACTS is not set/],
+      [{ REPORT_JSON: undefined }, /REPORT_JSON is not set/],
+      [{ GITHUB_STEP_SUMMARY: undefined }, /GITHUB_STEP_SUMMARY is not set/],
+      [{ GITHUB_RUN_ID: '0' }, /GITHUB_RUN_ID must be a positive integer, not '0'/],
+      [{ GITHUB_RUN_ID: '12a' }, /GITHUB_RUN_ID must be a positive integer/],
+      [{ GITHUB_RUN_ATTEMPT: '' }, /GITHUB_RUN_ATTEMPT must be a positive integer, not ''/],
+      [{ GITHUB_RUN_ATTEMPT: '01' }, /GITHUB_RUN_ATTEMPT must be a positive integer/],
+      [{ GITHUB_WORKFLOW: undefined }, /GITHUB_WORKFLOW is not set/],
+      [{ GITHUB_EVENT_NAME: undefined }, /GITHUB_EVENT_NAME must be an event name \(a-z and _\), not ''/],
+      [{ GITHUB_EVENT_NAME: 'Push' }, /GITHUB_EVENT_NAME must be an event name/],
+      [{ GITHUB_EVENT_NAME: 'push x' }, /GITHUB_EVENT_NAME must be an event name/],
+      [{ GITHUB_REF_NAME: undefined }, /GITHUB_HEAD_REF and GITHUB_REF_NAME are both unset or empty/],
+      [{ GITHUB_REF_NAME: '', GITHUB_HEAD_REF: '' }, /GITHUB_HEAD_REF and GITHUB_REF_NAME are both unset or empty/],
+      [{ DOWNLOAD_DIR: undefined }, /DOWNLOAD_DIR is not set/],
+    ]) {
+      const r = stubbed(0, env);
+      assert.equal(r.status, 2, JSON.stringify(env));
+      assert.match(r.out, /^::error title=Conformance report::report-conformance-ci: /m);
+      assert.match(r.out, msg);
+      assert.equal(r.args, null, 'the reporter did not run');
+    }
+    // An existing run directory, with or without a run.json in it: nothing
+    // in the run directory may predate this script.
+    for (const pre of ['run.json', `${PG_ARTIFACT}/leg`]) {
+      const out = tmp('report-ci-out-');
+      write(join(out, 'artifacts', '100', pre), '{"stale":true}\n');
+      const r = stubbed(0, { ARTIFACTS: join(out, 'artifacts') });
+      assert.equal(r.status, 2, pre);
+      assert.match(r.out, /report-conformance-ci: .*\/artifacts\/100 exists already$/m, pre);
+      assert.equal(r.args, null, pre);
+      assert.equal(readFileSync(join(out, 'artifacts', '100', pre), 'utf8'), '{"stale":true}\n', pre);
+      assert.deepEqual(r.left, ['scenarios-pg/', 'scenarios-pg/junit.xml', 'scenarios-pg/leg'], 'nothing was moved');
+    }
+  });
+
+  // The leg downloads (layout §3 "Leg artifacts"): the name each leg job
+  // gave, never one guessed from the files or from GITHUB_RUN_ATTEMPT; files
+  // moved, not copied, into ARTIFACTS/<run_id>/<name>/; run.json last.
+  const PG_FILES = [`100/${PG_ARTIFACT}/`, `100/${PG_ARTIFACT}/junit.xml`, `100/${PG_ARTIFACT}/leg`, '100/run.json'];
+  test('leg downloads: one artifact is moved under the name its job gave, whatever the attempt of this job', () => {
+    // A re-run of this job alone: attempt 3 here, the artifact from 1.
+    const r = stubbed(0, { GITHUB_RUN_ATTEMPT: '3' }, [{ job: 'scenarios-pg', name: PG_ARTIFACT, files: { leg: `${PG}\n`, 'junit.xml': '<testsuites/>\n' } }]);
+    assert.equal(r.status, 0, r.out + r.err);
+    assert.deepEqual(r.tree, ['100/', ...PG_FILES]);
+    assert.deepEqual(r.left, [], 'the download directory is emptied: moved, not copied');
+    assert.equal(readFileSync(join(r.env.ARTIFACTS, '100', PG_ARTIFACT, 'leg'), 'utf8'), `${PG}\n`);
+    assert.equal(JSON.parse(r.runJson).attempt, 3);
+    // Moved: the same file (inode), not a copy.
+    const out = tmp('report-ci-out-');
+    const downloads = pgDownload();
+    const before = (() => {
+      const d = join(out, 'download');
+      stageDownloads(d, downloads);
+      return lstatSync(join(d, 'scenarios-pg', 'junit.xml')).ino;
+    })();
+    const moved = ciScript(REPO, { PATH: r.env.PATH, REAL_NODE: process.execPath, STUB_ARGS: join(out, 'args'), STUB_STATUS: '0', DOWNLOADS: `scenarios-pg=${PG_ARTIFACT}\n` }, out, []);
+    assert.equal(moved.status, 0, moved.out + moved.err);
+    assert.equal(lstatSync(join(out, 'artifacts', '100', PG_ARTIFACT, 'junit.xml')).ino, before);
+    // Without junit.xml (the job stopped before its tests): leg alone.
+    const legOnly = stubbed(0, {}, pgDownload({ leg: `${PG}\n` }));
+    assert.equal(legOnly.status, 0, legOnly.out + legOnly.err);
+    assert.deepEqual(legOnly.tree, ['100/', `100/${PG_ARTIFACT}/`, `100/${PG_ARTIFACT}/leg`, '100/run.json']);
+  });
+
+  test('leg downloads: two leg jobs give two artifact directories; a job that uploaded nothing is a warning and not run', () => {
+    const TS = 'junit-typescript-node22-attempt-2';
+    const two = stubbed(0, {}, [...pgDownload(), { job: 'typescript', name: TS, files: { leg: 'typescript/node22\n', 'junit.xml': '<testsuites/>\n' } }]);
+    assert.equal(two.status, 0, two.out + two.err);
+    assert.deepEqual(two.tree, ['100/', ...PG_FILES.slice(0, 3), `100/${TS}/`, `100/${TS}/junit.xml`, `100/${TS}/leg`, '100/run.json'].sort());
+    assert.deepEqual(two.left, []);
+    assert.match(two.summary, /^> - `scenarios-pg`: `junit-scenarios-pg-x86_64-attempt-1`\n> - `typescript`: `junit-typescript-node22-attempt-2`$/m);
+    // Zero: the leg job's output was empty, so the workflow downloaded
+    // nothing and the run directory holds run.json alone.
+    const zero = stubbed(0, {}, [{ job: 'scenarios-pg', name: '' }]);
+    assert.equal(zero.status, 0, zero.out + zero.err);
+    assert.deepEqual(zero.tree, ['100/', '100/run.json']);
+    assert.match(zero.out, /^::warning title=Conformance report::Job scenarios-pg uploaded no leg artifact in this run \(it stopped before its upload, or did not run\), so its legs are not run here\.$/m);
+    assert.match(zero.summary, /^> - `scenarios-pg`: no leg artifact$/m);
+    assert.ok(zero.args, 'the reporter ran');
+  });
+
+  test('leg downloads: anything but the regular files leg and junit.xml, a bad name or a bad leg file is an error before run.json and the reporter', () => {
+    const LEG = `${PG}\n`;
+    const linkTo = (target) => {
+      const l = join(tmp('report-ci-link-'), 'd');
+      symlinkSync(target, l);
+      return l;
+    };
+    const J = '<testsuites/>\n';
+    const pg = (files, name) => pgDownload(files, name);
+    for (const [what, downloads, err, env = {}] of [
+      // A pattern download with several matches: one directory per artifact.
+      ['nested (a directory per artifact)', pg({ [`${PG_ARTIFACT}/leg`]: LEG, [`${PG_ARTIFACT}/junit.xml`]: J }), /holds 'junit-scenarios-pg-x86_64-attempt-1'; a leg artifact holds only the files leg and junit\.xml, at its top/],
+      // A forged attempt planted beside the real files.
+      ['flat with a subdirectory', pg({ leg: LEG, 'junit.xml': J, 'junit-x-attempt-9/leg': LEG, 'junit-x-attempt-9/junit.xml': J }), /holds 'junit-x-attempt-9'/],
+      ['mixed', pg({ leg: LEG, [`${PG_ARTIFACT}/leg`]: LEG }), /holds 'junit-scenarios-pg-x86_64-attempt-1'/],
+      ['an empty subdirectory', pg({ leg: LEG, sub: { dir: true } }), /holds 'sub'/],
+      ['a planted run.json', pg({ leg: LEG, 'junit.xml': J, 'run.json': '{}' }), /holds 'run\.json'/],
+      ['a dot file', pg({ leg: LEG, '.hidden': 'x' }), /holds '\.hidden'/],
+      ['another file', pg({ leg: LEG, 'junit.xml': J, 'extra.xml': J }), /holds 'extra\.xml'/],
+      ['leg a symbolic link', pg({ leg: { link: '/etc/hostname' }, 'junit.xml': J }), /junit-scenarios-pg-x86_64-attempt-1\/leg is not a regular file/],
+      ['junit.xml a symbolic link', pg({ leg: LEG, 'junit.xml': { link: '/etc/hostname' } }), /attempt-1\/junit\.xml is not a regular file/],
+      ['a dangling symbolic link', pg({ leg: LEG, 'junit.xml': { link: '/nonexistent' } }), /attempt-1\/junit\.xml is not a regular file/],
+      ['junit.xml a directory', pg({ leg: LEG, 'junit.xml': { dir: true } }), /attempt-1\/junit\.xml is not a regular file/],
+      ['the download directory a symbolic link', [{ job: 'scenarios-pg', name: PG_ARTIFACT, link: tmp('report-ci-elsewhere-') }], /scenarios-pg: the download of junit-scenarios-pg-x86_64-attempt-1 is not a directory/],
+      ['no download directory', [{ job: 'scenarios-pg', name: PG_ARTIFACT }], /the download of junit-scenarios-pg-x86_64-attempt-1 is not a directory/],
+      ['no leg file', pg({ 'junit.xml': J }), /junit-scenarios-pg-x86_64-attempt-1 has no leg file/],
+      ['an empty leg file', pg({ leg: '' }), /attempt-1\/leg is not one line holding a leg string/],
+      ['a leg without its newline', pg({ leg: PG }), /leg is not one line holding a leg string/],
+      ['a leg of two lines', pg({ leg: `${PG}\n${PG}\n` }), /leg is not one line holding a leg string/],
+      ['a leg with a carriage return', pg({ leg: `${PG}\r\n` }), /leg is not one line holding a leg string/],
+      ['a leg with a space', pg({ leg: ' scenarios-pg/x86_64\n' }), /leg is not one line holding a leg string/],
+      ['an oversized leg', pg({ leg: `${'a'.repeat(300)}\n` }), /leg holds 301 bytes, more than one leg string/],
+      ['a leg of another artifact name', pg({ leg: 'typescript/node22\n' }), /attempt-1\/leg names leg typescript\/node22, whose artifact is junit-typescript-node22-attempt-N/],
+      ['a name that is not a leg artifact name', pg({ leg: LEG }, 'junit-scenarios-pg-x86_64'), /'junit-scenarios-pg-x86_64' is not a leg artifact name junit-<leg id>-attempt-N/],
+      ['a name with a path', pg({ leg: LEG }, '../junit-scenarios-pg-x86_64-attempt-1'), /is not a leg artifact name/],
+      ['a name with a slash', pg({ leg: LEG }, 'junit-scenarios-pg/x86_64-attempt-1'), /is not a leg artifact name/],
+      ['attempt 0', pg({ leg: LEG }, 'junit-scenarios-pg-x86_64-attempt-0'), /is not a leg artifact name/],
+      ['an upper-case name', pg({ leg: LEG }, 'junit-Scenarios-pg-x86_64-attempt-1'), /is not a leg artifact name/],
+      ['no = in a line', null, /DOWNLOADS line 'scenarios-pg' is not <job>=<artifact name>/, { DOWNLOADS: 'scenarios-pg\n' }],
+      ['a bad job id', null, /'\.\.\/x' is not a job id/, { DOWNLOADS: `../x=${PG_ARTIFACT}\n` }],
+      ['a job twice', [...pgDownload(), { job: 'scenarios-pg', name: '' }], /DOWNLOADS names job scenarios-pg twice/],
+      ['no line', null, /DOWNLOADS names no leg job/, { DOWNLOADS: '\n' }],
+      ['DOWNLOAD_DIR a symbolic link', null, /\/d is a symbolic link$/m, { DOWNLOAD_DIR: linkTo(tmp('report-ci-elsewhere-')), DOWNLOADS: 'scenarios-pg=\n' }],
+      ['DOWNLOADS unset', null, /DOWNLOADS names no leg job/],
+      ['a directory for a job that named nothing', [{ job: 'scenarios-pg', name: '', files: { leg: LEG } }], /scenarios-pg exists, but job scenarios-pg named no leg artifact/],
+      ['a download no line names', [...pgDownload(), { job: 'other', name: PG_ARTIFACT, files: { leg: LEG } }], /holds 'other', which no line of DOWNLOADS names/, { DOWNLOADS: `scenarios-pg=${PG_ARTIFACT}\n` }],
+    ]) {
+      const r = stubbed(0, env, downloads);
+      assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
+      assert.match(r.out, /^::error title=Conformance report::report-conformance-ci: /m, what);
+      assert.match(r.out, err, what);
+      assert.equal(r.args, null, `${what}: the reporter did not run`);
+      assert.equal(r.runJson, null, `${what}: run.json is written only after every download was checked and moved`);
+      for (const f of r.tree ?? []) assert.ok(f === '100/' || f.startsWith(`100/${PG_ARTIFACT}`), `${what}: ${f} was created`);
+    }
+  });
+
+  // End to end, as the job runs: a committed checkout of the judged commit
+  // holding the specs, the registry and the reporter scripts, the leg
+  // artifact as a download by name leaves it (DOWNLOAD_DIR/scenarios-pg/
+  // holding junit.xml and leg), and the real reporter.
+  const checkout = (edits = {}) => {
+    const dir = root(edits);
+    for (const f of ['report-conformance-ci.sh', 'report-conformance.mjs', 'check-conformance-registry.mjs', 'gen-conformance-registry.mjs']) write(join(dir, 'scripts', 'ci', f), repoText(join('scripts', 'ci', f)));
+    symlinkSync(join(REPO, 'scripts', 'ci', 'node_modules'), join(dir, 'scripts', 'ci', 'node_modules'));
+    return { dir, head: commitRoot(dir) };
+  };
+  // `spec`: { leg, attempt, junit, name } of the artifact scenarios-pg
+  // named (leg or junit null: that file is missing), or null when it named
+  // none.
+  const job = (co, spec, env = {}) => {
+    const downloads =
+      spec === null
+        ? [{ job: 'scenarios-pg', name: '' }]
+        : [{ job: 'scenarios-pg', name: spec.name ?? `junit-${legId(spec.leg)}-attempt-${spec.attempt ?? 1}`, files: { ...(spec.leg === null ? {} : { leg: `${spec.leg}\n` }), ...(spec.junit === null ? {} : { 'junit.xml': spec.junit }) } }];
+    return ciScript(co.dir, { COMMIT: co.head, ...env }, tmp('report-ci-out-'), downloads);
+  };
+  // What `cargo nextest run --profile ci` writes to
+  // target/nextest/ci/junit.xml in the scenarios-pg job (quick-junit's
+  // format: a <testsuite> per binary, classname <package>::<binary>, the
+  // disabled count, failures with type and output). Modelled on that
+  // format, not captured from a run.
+  const nextestJUnit = (cases) => {
+    const fails = cases.filter(([, s]) => s === 'failed').length;
+    const head = `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nextest-run" tests="${cases.length}" failures="${fails}" errors="0" uuid="0b8a4c4e-1f0e-4c55-9d43-6c1d2f0e7a11" timestamp="2026-11-20T10:00:00.000+00:00" time="0.412">\n`;
+    if (!cases.length) return `${head}</testsuites>\n`;
+    const tc = ([name, s]) =>
+      `        <testcase name="${name}" classname="skyoauth-scenarios::pg" timestamp="2026-11-20T10:00:00.100+00:00" time="0.105">\n` +
+      (s === 'failed' ? `            <failure type="test failure with exit code 101">thread '${name}' panicked at tests/pg/security/a24.rs:42:5:\nassertion failed: issued == 1</failure>\n            <system-out>running 1 test\ntest ${name} ... FAILED\n</system-out>\n            <system-err>note: run with \`RUST_BACKTRACE=1\`</system-err>\n` : '') +
+      '        </testcase>\n';
+    return `${head}    <testsuite name="skyoauth-scenarios::pg" tests="${cases.length}" disabled="0" errors="0" failures="${fails}">\n${cases.map(tc).join('')}    </testsuite>\n</testsuites>\n`;
+  };
+  const POS = 'security::a24::a24_pos_single_issuance_across_replicas';
+  const NEG = 'security::a24::a24_neg_concurrent_single_use';
+  const realA24 = { [SCENARIOS]: implement('scenario', 'A24', 'M1a', [POS, NEG].map((n) => `nextest:skyoauth-scenarios/pg/${n}`)) };
+
+  test('end to end on today\'s artifact (an empty nextest selection): exit 0, every stage planned, the JSON and the summary written', () => {
+    const co = checkout();
+    const r = job(co, { leg: PG, junit: nextestJUnit([]) });
+    assert.equal(r.status, 0, r.out + r.err);
+    assert.doesNotMatch(r.out, /^::(warning|error)/m);
+    // The reporter checks four of run.json's fields and ignores event and
+    // headBranch.
+    assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: co.head, attempt: 1, workflowName: 'CI', event: 'push', headBranch: 'main' });
+    assert.equal(r.json.trusted, true);
+    assert.deepEqual(r.json.input_errors, []);
+    assert.deepEqual(r.json.reports, [{ run_id: 100, run_attempt: 1, workflow: 'CI', leg: PG, artifact: `100/${PG_ARTIFACT}`, cases: 0 }]);
+    assert.ok(r.json.stages.every((s) => s.status === 'planned'));
+    assert.equal(r.json.failed, false);
+    assert.match(r.summary, /^> \*\*Informational\.\*\*[^\n]*\n>\n> - `scenarios-pg`: `junit-scenarios-pg-x86_64-attempt-1`\n\n## Conformance results for `[0-9a-f]{40}`\n/);
+    assert.match(r.summary, /Judged on \d{4}-\d\d-\d\d from 1 JUnit report\(s\)/);
+  });
+
+  test('end to end with scenario tests: a pass is passed; a failure is a warning, not a job failure, under the attempt its job named', () => {
+    const co = checkout(realA24);
+    const pass = job(co, { leg: PG, junit: nextestJUnit([[POS, 'passed'], [NEG, 'passed']]) });
+    assert.equal(pass.status, 0, pass.out + pass.err);
+    assert.equal(stage(pass.json, 'A24', 'M1a').status, 'passed');
+    assert.doesNotMatch(pass.out, /^::(warning|error)/m);
+    // A re-run of this job alone (attempt 2) over the attempt-1 artifact:
+    // the failure stays attempt 1's, as scenarios-pg named it.
+    const rerun = job(co, { leg: PG, attempt: 1, junit: nextestJUnit([[POS, 'passed'], [NEG, 'failed']]) }, { GITHUB_RUN_ATTEMPT: '2' });
+    assert.equal(rerun.status, 0, rerun.out + rerun.err);
+    assert.match(rerun.out, /^::warning title=Conformance report::An implemented conformance stage has a failed result/m);
+    assert.equal(stage(rerun.json, 'A24', 'M1a').status, 'failed');
+    assert.equal(rerun.json.trusted, true);
+    assert.match(rerun.summary, /failed in run 100 attempt 1/);
+    assert.deepEqual(rerun.json.reports.map((x) => [x.run_attempt, x.artifact]), [[1, `100/${PG_ARTIFACT}`]]);
+  });
+
+  test('end to end: a leg job that uploaded no junit.xml, or no artifact at all, is not run, not an error', () => {
+    const co = checkout(realA24);
+    const noJunit = job(co, { leg: PG, junit: null });
+    assert.equal(noJunit.status, 0, noJunit.out + noJunit.err);
+    assert.equal(stage(noJunit.json, 'A24', 'M1a').status, 'not run');
+    assert.match(noJunit.summary, /note: 100\/junit-scenarios-pg-x86\\_64-attempt-1: no junit\.xml/);
+    const nothing = job(co, null);
+    assert.equal(nothing.status, 0, nothing.out + nothing.err);
+    assert.match(nothing.out, /^::warning title=Conformance report::Job scenarios-pg uploaded no leg artifact/m);
+    assert.deepEqual(nothing.json.reports, []);
+    assert.equal(stage(nothing.json, 'A24', 'M1a').status, 'not run');
+  });
+
+  test('end to end: bad input fails the job (exit 2)', () => {
+    const co = checkout();
+    // Bad downloads stop the script before the reporter.
+    for (const [what, spec, err] of [
+      ['a leg artifact without its leg file', { leg: null, name: PG_ARTIFACT, junit: nextestJUnit([]) }, /junit-scenarios-pg-x86_64-attempt-1 has no leg file/],
+      ['a leg string the layout does not know, under its own name', { leg: 'scenarios-pg/arm64', junit: nextestJUnit([]) }, null],
+    ]) {
+      const r = job(co, spec);
+      assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
+      if (err) {
+        assert.match(r.out, err, what);
+        assert.equal(r.json, null, what);
+      } else {
+        // Well-formed, so the reporter judges it: an unknown leg string.
+        assert.equal(r.json.trusted, false, what);
+        assert.ok(r.json.input_errors.some((e) => /leg file names "scenarios-pg\/arm64", which is not a layout §1\.1 leg string/.test(e)), `${what}: ${r.json.input_errors.join('; ')}`);
+      }
+    }
+    for (const [what, spec, env, err] of [
+      ['malformed JUnit', { leg: PG, junit: '<testsuites><testsuite>' }, {}, /junit\.xml: malformed JUnit/],
+      ['an artifact from a later attempt', { leg: PG, attempt: 3, junit: nextestJUnit([]) }, { GITHUB_RUN_ATTEMPT: '2' }, /attempt 3, but 100\/run\.json says the run has 2 attempt\(s\)/],
+    ]) {
+      const r = job(co, spec, env);
+      assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
+      assert.match(r.out, /^::error title=Conformance report::The conformance reporter found usage, registry or input errors/m, what);
+      assert.equal(r.json.trusted, false, what);
+      assert.ok(r.json.input_errors.some((e) => err.test(e)), `${what}: ${r.json.input_errors.join('; ')}`);
+    }
+    // A checkout of another commit than COMMIT: no report at all.
+    const wrong = job(co, { leg: PG, junit: nextestJUnit([]) }, { COMMIT: 'b'.repeat(40) });
+    assert.equal(wrong.status, 2);
+    assert.match(wrong.err, /--root is a checkout of [0-9a-f]{40}, not of --commit b{40}/);
+    assert.equal(wrong.json, null);
   });
 });
 
@@ -2192,14 +2791,16 @@ describe('cli', () => {
   // so this case checks only that the report is produced and well-formed.
   test('the script runs on the repository: exit 0 and a milestone table', () => {
     // In a git checkout the judged commit must be HEAD.
-    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: GIT_ENV });
-    const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8' });
+    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() });
+    // The inherited environment, GIT_DIR included (assertGitImmune runs this
+    // test with one exported), less the runner's variables.
+    const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8', env: withoutRunner(process.env) });
     assert.equal(p.status, 0, p.stderr);
     for (const m of ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5']) {
       assert.match(p.stdout, new RegExp(`^\\| ${m} \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| (?:passed|failed|not run|planned|no stages) \\|$`, 'm'));
     }
     assert.match(p.stdout, /^### Implemented stages \(\d+\)$/m);
-    const bad = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
+    const bad = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8', env: withoutRunner(process.env) });
     assert.equal(bad.status, 2);
   });
 });
