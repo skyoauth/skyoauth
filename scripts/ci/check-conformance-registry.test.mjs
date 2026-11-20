@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
 import { checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
+import { GIT_LOCATION as DOCS_GIT_LOCATION } from './docs-check.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
@@ -1224,6 +1225,7 @@ describe('rule waivers', () => {
   // history (and its origin/main) for the waiver rule.
   test('an inherited GIT_DIR does not make a plain directory a checkout', () => {
     assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES']);
+    assert.deepEqual(DOCS_GIT_LOCATION, GIT_LOCATION, 'docs-check.mjs keeps its own copy of the list');
     const other = gitRoot();
     const plainRoot = withWaiver(fixture({ [SCENARIOS]: implementedA24 }), waiver({ commit: `"${other.head}"` }));
     const gitDir = join(other.root, '.git');
