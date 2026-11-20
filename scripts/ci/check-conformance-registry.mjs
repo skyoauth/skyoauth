@@ -368,17 +368,26 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // change the history it sees there (another shallow file, grafts, replace
 // objects). With an inherited GIT_DIR, a plain directory would pass as a
 // checkout of that repository, and with GIT_SHALLOW_FILE naming a missing
-// file a shallow clone would pass as complete, so every git run here goes
-// without them. Replace refs (refs/replace/*, in the repository itself) would
-// swap one object for another wherever git reads it, such as the gate
-// commit's parent or the history of origin/main, so every git run here also
-// passes --no-replace-objects.
+// file a shallow clone would pass as complete, so every git run here drops
+// the inherited values of all of them. GIT_GRAFT_FILE is then set again, to
+// NO_GRAFTS: without it git reads the grafts in .git/info/grafts (in the
+// repository itself), which give a commit other parents wherever git reads
+// it, such as the gate commit's parent or the history of origin/main, and
+// which --no-replace-objects does not turn off. Replace refs
+// (refs/replace/*, in the repository itself) would swap one object for
+// another in the same way, so every git run here also passes
+// --no-replace-objects.
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
+// The graft file git is pointed at: a path that does not exist, so git reads
+// no grafts (an existing empty file such as /dev/null would do as well, but
+// git then warns that grafts are deprecated on every run).
+export const NO_GRAFTS = '/nonexistent/skyoauth-no-grafts';
 
-// `git --no-replace-objects -C root ...args`, run without GIT_LOCATION;
-// `options` (encoding, maxBuffer) are passed to spawnSync.
+// `git --no-replace-objects -C root ...args`, run without GIT_LOCATION and
+// with GIT_GRAFT_FILE=NO_GRAFTS; `options` (encoding, maxBuffer) are passed
+// to spawnSync.
 export function gitIn(root, options = {}) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k))), GIT_GRAFT_FILE: NO_GRAFTS };
   return (...args) => spawnSync('git', ['--no-replace-objects', '-C', root, ...args], { encoding: 'utf8', ...options, env });
 }
 
