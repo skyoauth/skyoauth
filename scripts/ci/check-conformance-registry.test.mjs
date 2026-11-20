@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
-import { checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
+import { checkGatePr, checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
@@ -258,7 +258,7 @@ describe('cli', () => {
     test(`usage error exits 2: ${args.join(' ')}`, () => {
       const r = cli(...args);
       assert.equal(r.status, 2);
-      assert.equal(r.stderr, 'usage: check-conformance-registry.mjs [--root DIR] [--require-history]\n');
+      assert.equal(r.stderr, 'usage: check-conformance-registry.mjs [--root DIR] [--require-history] [--gate-pr]\n');
     });
   }
 
@@ -1273,6 +1273,245 @@ describe('rule waivers', () => {
     const a01 = (x) => editStage(x, 'scenario', 'A01', 'M2', 'tests = []', `tests = ["${A24_NEG}"]`);
     writeFileSync(join(root, SCENARIOS), a01(t));
     expectOk(check(withWaiver(root, waiver({ commit: `"${head}"`, leg: '"live-wif-push"' }))));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// --gate-pr (layout §3 Gates): the judged commit is the merge-base of the PR
+// head with origin/main. Each case builds a throwaway repository: main (and
+// refs/remotes/origin/main) holds the registry, and the PR commits go on top.
+
+describe('--gate-pr', () => {
+  const commit = (root, msg) => {
+    git(root, 'add', '-A');
+    git(root, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', msg);
+    return git(root, 'rev-parse', 'HEAD');
+  };
+  const edit = (root, rel, f) => writeFileSync(join(root, rel), f(read(root, rel)));
+  const setGates = (v) => (t) => t.replace(/^gates_passed = \[.*\]$/m, `gates_passed = ${v}`);
+  const allM1a = (t) => implementAll(t, 'scenario', 'M1a');
+  // A24 M1a implemented on a registry where every other M1a stage already is.
+  const lastA24 = (t) => implementedA24(t, { tests: 'tests = ["nextest:gate::a24_pos_x"]' });
+  // A git root whose main is the registry edited by `base` (default: every
+  // M1a scenario stage implemented), with origin/main at it: { root, mb }.
+  function mainRoot(base = allM1a) {
+    const root = fixture({ [SCENARIOS]: base });
+    git(root, 'init', '-q', '-b', 'main');
+    const mb = commit(root, 'main');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    return { root, mb };
+  }
+  // One gate PR commit on HEAD: `also` edits the tree, then gates_passed = v.
+  const gateCommit = (root, v, also = () => {}) => {
+    also(root);
+    edit(root, SCENARIOS, setGates(v));
+    return commit(root, 'gate');
+  };
+  const NOTE_AT = (mb) => `gate-pr: registry checked at the merge-base ${mb}, with the gates_passed of HEAD`;
+  const NOT_A_GATE = (mb) => `gate-pr: gates_passed at HEAD adds no milestone to the merge-base ${mb}; not a gate PR`;
+  const ONE_COMMIT = (head, mb, parents) =>
+    `error [gate-pr] HEAD ${head} is not a single commit on top of the merge-base ${mb} with origin/main (its parents: ${parents}); a gate PR is one commit on the main commit it certifies`;
+  const cli = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+
+  test('a gate PR: one commit on the merge-base that only adds M1a to gates_passed, every M1a stage implemented there', () => {
+    const { root, mb } = mainRoot();
+    gateCommit(root, '["M1a"]');
+    // Uncommitted changes are not the PR: only commits are read.
+    writeFileSync(join(root, 'untracked.txt'), 'x');
+    edit(root, LAYOUT, (t) => `${t}\nlocal edit\n`);
+    const res = checkGatePr(root);
+    expectOk(res);
+    assert.equal(res.mergeBase, mb);
+    assert.deepEqual(res.added, ['M1a']);
+    assert.deepEqual(res.reporter, ['M1a']);
+    assert.deepEqual(res.notes, [NOTE_AT(mb)]);
+  });
+
+  test('cli: exit 0 with the merge-base and the reporter milestones on stdout', () => {
+    const { root, mb } = mainRoot();
+    gateCommit(root, '["M1a"]');
+    const r = cli('--gate-pr', '--root', root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, '');
+    assert.equal(r.stdout, `note: ${NOTE_AT(mb)}\ncheck-conformance-registry --gate-pr: OK (adds M1a; judged commit: the merge-base ${mb})\nmerge_base=${mb}\nreporter_milestones=M1a\n`);
+  });
+
+  test('cli: exit 1 with the errors and a count', () => {
+    const { root, mb } = mainRoot();
+    commit(root, 'first');
+    const head = gateCommit(root, '["M1a"]');
+    const r = cli('--gate-pr', '--root', root);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr, `${ONE_COMMIT(head, mb, git(root, 'rev-parse', 'HEAD^'))}\ncheck-conformance-registry --gate-pr: 1 error(s)\n`);
+    assert.equal(r.stdout, `note: ${NOTE_AT(mb)}\n`);
+  });
+
+  test('M0 only: passes with no reporter milestone (ADR ratification and the doc checks gate M0)', () => {
+    const { root, mb } = mainRoot((t) => t);
+    gateCommit(root, '["M0"]');
+    const res = checkGatePr(root);
+    expectOk(res);
+    assert.deepEqual([res.added, res.reporter], [['M0'], []]);
+    assert.deepEqual(res.notes, [NOTE_AT(mb), 'gate-pr: M0 has no stages: ADR ratification and the doc checks gate it, not the reporter']);
+    const r = cli('--gate-pr', '--root', root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /\nreporter_milestones=\n$/);
+  });
+
+  test('a later gate adds only the new milestone; the earlier one is re-checked at the merge-base too', () => {
+    const { root, mb } = mainRoot((t) => setGates('["M0"]')(allM1a(t)));
+    gateCommit(root, '["M0", "M1a"]');
+    const res = checkGatePr(root);
+    expectOk(res);
+    assert.equal(res.mergeBase, mb);
+    assert.deepEqual([res.added, res.reporter], [['M1a'], ['M1a']]);
+  });
+
+  test('not a gate PR: gates_passed does not grow (unchanged, or a milestone dropped): nothing else is checked', () => {
+    const { root, mb } = mainRoot((t) => setGates('["M0", "M1a"]')(allM1a(t)));
+    writeFileSync(join(root, 'other.txt'), 'x');
+    commit(root, 'first');
+    commit(root, 'second');
+    for (const res of [checkGatePr(root), (gateCommit(root, '["M0"]'), checkGatePr(root))]) {
+      expectOk(res);
+      assert.deepEqual(res.notes, [NOT_A_GATE(mb)]);
+      assert.deepEqual([res.mergeBase, res.added, res.reporter], [mb, [], []]);
+    }
+    const r = cli('--gate-pr', '--root', root);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `note: ${NOT_A_GATE(mb)}\ncheck-conformance-registry --gate-pr: OK (not a gate PR)\nmerge_base=${mb}\nreporter_milestones=\n`);
+  });
+
+  test('two commits on top of the merge-base', () => {
+    const { root, mb } = mainRoot();
+    const first = commit(root, 'first');
+    const head = gateCommit(root, '["M1a"]');
+    expectOnly(checkGatePr(root), 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+  });
+
+  test('a merge commit (main merged into the PR) is not one commit on the merge-base', () => {
+    const { root } = mainRoot();
+    const g = gateCommit(root, '["M1a"]');
+    // main moves on: one more commit on origin/main, merged into the PR.
+    const tip = git(root, 'commit-tree', 'HEAD~1^{tree}', '-p', 'HEAD~1', '-m', 'main moves on');
+    git(root, 'update-ref', 'refs/remotes/origin/main', tip);
+    git(root, '-c', 'commit.gpgsign=false', 'merge', '-q', '--no-ff', '--no-edit', tip);
+    const head = git(root, 'rev-parse', 'HEAD');
+    const res = checkGatePr(root);
+    assert.equal(res.mergeBase, tip);
+    expectOnly(res, 'gate-pr', new RegExp(`^error \\[gate-pr\\] HEAD ${head} is not a single commit on top of the merge-base ${tip} with origin/main \\(its parents: ${g}, ${tip}\\)`));
+  });
+
+  test('the diff touches another file', () => {
+    const { root } = mainRoot();
+    gateCommit(root, '["M1a"]', (r) => {
+      writeFileSync(join(r, 'notes.txt'), 'x');
+      edit(r, TASKS, (t) => `${t}\n`);
+    });
+    const res = checkGatePr(root);
+    assert.deepEqual(res.errors.map(formatError), [
+      `error [gate-pr] the gate PR changes ${TASKS}; it may change only the gates_passed line of ${SCENARIOS}`,
+      `error [gate-pr] the gate PR changes notes.txt; it may change only the gates_passed line of ${SCENARIOS}`,
+    ]);
+  });
+
+  test('the PR implements a stage itself: the registry is read at the merge-base, where that stage is planned', () => {
+    const { root, mb } = mainRoot((t) => implementAll(t, 'scenario', 'M1a', 'A24'));
+    const mbText = read(root, SCENARIOS);
+    gateCommit(root, '["M1a"]', (r) => edit(r, SCENARIOS, lastA24));
+    const headText = read(root, SCENARIOS);
+    // HEAD's own registry passes the static check...
+    expectOk(check(root));
+    // ...but the gate PR does not.
+    const res = checkGatePr(root);
+    assert.deepEqual(res.errors.map(formatError), [
+      `${SCENARIOS}:${lineOf(headText, 'status = "implemented"', head('scenario', 'A24'))}: error [gate-pr] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line`,
+      `${SCENARIOS}:${stageLine(mbText, 'scenario', 'A24', 'M1a')}: error [gates] A24 M1a: gates_passed lists M1a, but this stage is planned, not implemented`,
+    ]);
+    assert.equal(res.mergeBase, mb);
+  });
+
+  test('a change above the gates_passed line (the header comment) is outside it too', () => {
+    const { root } = mainRoot();
+    gateCommit(root, '["M1a"]', (r) => edit(r, SCENARIOS, (t) => replaceOnce(t, '# Conformance scenario registry', '# The conformance scenario registry')));
+    expectOnly(checkGatePr(root), 'gate-pr', /^tests\/conformance\/scenarios\.toml:1: error \[gate-pr\] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line$/);
+  });
+
+  test('a later tip of main is not certified: the PR is rebased onto it to name it', () => {
+    // A24 M1a is planned at the PR's merge-base and implemented on main's tip.
+    const { root, mb } = mainRoot((t) => implementAll(t, 'scenario', 'M1a', 'A24'));
+    git(root, 'checkout', '-q', '-b', 'tip');
+    edit(root, SCENARIOS, lastA24);
+    const tip = commit(root, 'implement A24');
+    git(root, 'update-ref', 'refs/remotes/origin/main', tip);
+    git(root, 'checkout', '-q', 'main');
+    gateCommit(root, '["M1a"]');
+    const res = checkGatePr(root);
+    assert.equal(res.mergeBase, mb);
+    expectOnly(res, 'gates', /A24 M1a: gates_passed lists M1a, but this stage is planned, not implemented$/);
+    // Rebased onto the tip, the PR names the tip, and passes.
+    git(root, 'reset', '-q', '--hard', tip);
+    gateCommit(root, '["M1a"]');
+    const rebased = checkGatePr(root);
+    expectOk(rebased);
+    assert.equal(rebased.mergeBase, tip);
+  });
+
+  test('a stage implemented at the merge-base with a stale stamp', () => {
+    const { root, mb } = mainRoot((t) => implementedA24(implementAll(t, 'scenario', 'M1a', 'A24'), { stamp: '0'.repeat(64) }));
+    const mbText = read(root, SCENARIOS);
+    gateCommit(root, '["M1a"]');
+    const res = checkGatePr(root);
+    expectOnly(res, 'stages', new RegExp(`^tests/conformance/scenarios\\.toml:${stageLine(mbText, 'scenario', 'A24', 'M1a')}: error \\[stages\\] A24 M1a: implemented_sha256 is 0{64}, but`));
+    assert.equal(res.mergeBase, mb);
+  });
+
+  test('an unknown milestone in gates_passed', () => {
+    const { root } = mainRoot();
+    gateCommit(root, '["M9"]');
+    const res = checkGatePr(root);
+    expectOnly(res, 'fields', /gates_passed must be a list of distinct milestones \(M0, M1a, M1b, M2, M3, M4, M5\)$/);
+    assert.deepEqual([res.added, res.reporter], [['M9'], []]);
+  });
+
+  test('waivers at the merge-base are checked against the history of the repository', () => {
+    const { root } = mainRoot();
+    const first = git(root, 'rev-parse', 'HEAD');
+    const leg = '"scenarios-pg/x86_64"';
+    writeFileSync(join(root, WAIVERS), waiver({ commit: `"${first}"`, test: '"nextest:gate::a24_pos_x"', leg }));
+    const mb = commit(root, 'waiver');
+    git(root, 'update-ref', 'refs/remotes/origin/main', mb);
+    gateCommit(root, '["M1a"]');
+    const res = checkGatePr(root);
+    expectOk(res);
+    assert.deepEqual(res.notes, [NOTE_AT(mb)]);
+    // A waiver for a commit that is not on main fails there.
+    const side = git(root, 'commit-tree', `${first}^{tree}`, '-p', first, '-m', 'side');
+    git(root, 'reset', '-q', '--hard', first);
+    writeFileSync(join(root, WAIVERS), waiver({ commit: `"${side}"`, test: '"nextest:gate::a24_pos_x"', leg }));
+    git(root, 'update-ref', 'refs/remotes/origin/main', commit(root, 'bad waiver'));
+    gateCommit(root, '["M1a"]');
+    expectOnly(checkGatePr(root), 'waivers', new RegExp(`commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
+  });
+
+  for (const [name, setup, reason] of [
+    ['not a git checkout', () => fixture(), 'the root is not a git checkout'],
+    ['no origin/main', () => {
+      const { root } = mainRoot();
+      git(root, 'update-ref', '-d', 'refs/remotes/origin/main');
+      return root;
+    }, 'there is no refs/remotes/origin/main'],
+  ]) {
+    test(`history unavailable: ${name}`, () => {
+      expectOnly(checkGatePr(setup()), 'gate-pr', new RegExp(`^error \\[gate-pr\\] --gate-pr: cannot find the merge-base with origin/main: ${reason} \\(the gate job checks out the PR head with fetch-depth: 0\\)$`));
+    });
+  }
+
+  test('a HEAD with no merge-base with origin/main', () => {
+    const { root } = mainRoot();
+    git(root, 'checkout', '-q', '--orphan', 'other');
+    const head = gateCommit(root, '["M1a"]');
+    expectOnly(checkGatePr(root), 'gate-pr', new RegExp(`^error \\[gate-pr\\] HEAD ${head} has no merge-base with origin/main$`));
   });
 });
 

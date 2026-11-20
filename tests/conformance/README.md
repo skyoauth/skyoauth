@@ -22,6 +22,7 @@ node --test scripts/ci/gen-conformance-registry.test.mjs
 
 (cd scripts/ci && npm ci --ignore-scripts)              # once: installs the pinned smol-toml
 node scripts/ci/check-conformance-registry.mjs          # add --require-history to fail without git history
+node scripts/ci/check-conformance-registry.mjs --gate-pr   # on a gate PR's head: see "Gate PRs" below
 node --test scripts/ci/check-conformance-registry.test.mjs
 node --test scripts/ci/report-conformance.test.mjs
 ```
@@ -42,7 +43,7 @@ IDs and hashes are still derived from the specs: the tasks §8 rows decide which
 | | `covered_by` | Derived from the "Covered by" table in layout §5, decision Q11 |
 | Subcases | `matrix_sha256` | Derived from the task line of the subcase's first owner (below) |
 | | every other field | Hand-authored |
-| File | `gates_passed` | Hand-authored. A gate PR changes it (layout §3). |
+| File | `gates_passed` | Hand-authored: a plain list of milestones. A gate PR adds to it and changes nothing else ([Gate PRs](#gate-prs), layout §3 **Gates**). |
 | File | comments | Generated; hand-written comments are dropped |
 | Layout §2 | the scenario table and its counts sentences | Rendered from the registry |
 
@@ -108,7 +109,7 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `owners` | Every owner is a task in tasks.md. |
 | `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
 | `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, its job exists at the stage's milestone, no leg repeats in a stage, and every env has a leg. |
-| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The reporter half of layout §3 **Gates** (every such stage **passed** on `main`) is not part of the static check. |
+| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The rest of layout §3 **Gates** is `--gate-pr` ([below](#gate-prs)) and the reporter (every such stage **passed** on the gate PR's merge-base). |
 | `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
 | `subcases` | The sub-ID rules above. |
 | `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
@@ -136,6 +137,25 @@ expires = 2026-12-31                                   # a TOML local date, not 
 ```
 
 The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays and inline tables nested at most 64 levels deep, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI: that probes the history up front, so a checkout without it fails even when there are no waivers. Expiry against the current date and the reporter's use of waivers are not part of the static check.
+
+### Gate PRs
+
+`node scripts/ci/check-conformance-registry.mjs --gate-pr` checks a gate PR (layout §3 **Gates**, decided by the lead on 2026-11-20) instead of running the plain check. `--root` (default: this checkout) must be a full, non-shallow checkout of the PR head with `origin/main`: the judged commit is `git merge-base origin/main HEAD`, so without that history the mode fails (rule `gate-pr`). Only commits are read; uncommitted changes do not count. When `gates_passed` at `HEAD` adds no milestone to the merge-base's list, the PR is not a gate PR and nothing else is checked. Otherwise every error names its rule:
+
+| Rule | Checks |
+| --- | --- |
+| `gate-pr` | `HEAD` is a single commit whose only parent is the merge-base (`HEAD <sha> is not a single commit on top of the merge-base <sha> with origin/main (its parents: …)`); its diff changes no file but `scenarios.toml` (`the gate PR changes <path>; …`) and no line of it but `gates_passed` (`scenarios.toml:<line>: … the gate PR changes this file outside the gates_passed line; …`). |
+| every rule of the plain check | Run on the specs and `tests/conformance` of the **merge-base**, with `HEAD`'s `gates_passed` line, and the waiver commits checked against this repository's `origin/main`. So `gates` requires every stage of each new milestone to be `implemented`, with a valid stamp, at the merge-base, even if the PR's own registry differs. |
+
+On success stdout ends with two lines for the gate job, `merge_base=<sha>` and `reporter_milestones=<milestones>`: the added milestones except M0, which has no stages and is gated by ADR ratification and the doc checks. For each of them the job runs the reporter on the merge-base, with `--root` a checkout of it, since `--allow-commit-mismatch` makes a report untrusted (exit 2):
+
+```sh
+git worktree add --detach "$RUNNER_TEMP/merge-base" "$merge_base"
+node scripts/ci/report-conformance.mjs --root "$RUNNER_TEMP/merge-base" --commit "$merge_base" \
+  --require-milestone "$m" --require-history --artifacts artifacts "$@"   # "$@": --waivers, as in the reporter script below
+```
+
+A post-merge or live leg of the merge-base without a result is not run, so that run exits 1 until the leg has completed and passed. The gate job is not in `ci.yml` yet (layout §6 "Still open", item 7).
 
 ## Legs
 
@@ -248,7 +268,7 @@ Only **passed** counts; `CI passed` is never read and is not a conformance signa
 ## Not here yet
 
 - Runtime tests, fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry`.
-- A workflow job that downloads the artifacts of a commit, runs the reporter and posts or uploads its result; the gate check that reads the reporter result for a gate PR's base commit (layout §3 "Gates"); the release check.
+- A workflow job that downloads the artifacts of a commit, runs the reporter and posts or uploads its result; the gate job that runs `--gate-pr` and the reporter for the gate PR's merge-base ([Gate PRs](#gate-prs), layout §6 "Still open", item 7); the release check.
 - The artifact manifest check (layout §6 "Still open", item 6): comparing the downloaded runs, attempts and artifacts with what the Actions API lists, so that a missing download is an input error.
 - A check that the `--root` checkout is clean: the reporter compares `HEAD` with `--commit`, but uncommitted changes to the registry files are not detected.
 - The reporter's fixture count check of layout §1.3 (per consumer and kind, executed JUnit cases equal fixtures on disk). Each fixture case is listed as its own registered test, so a missing case already makes its pair not run.

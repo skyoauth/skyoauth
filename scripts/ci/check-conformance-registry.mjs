@@ -43,15 +43,36 @@
 //   waivers   tests/conformance/waivers.toml (optional): every waiver has all
 //             fields; commit is a 40-hex SHA on origin/main; test is registered
 //             and leg is one of its stages' legs; expires is a TOML date.
+//   gate-pr   (--gate-pr only) The gate PR is one commit on its merge-base
+//             with origin/main and changes only the gates_passed line.
 //
 // The commit check needs the full history and origin/main. Without them it is
 // skipped with a note, unless --require-history is given (CI): that probes
 // the history up front and makes its absence an error, waivers or not.
 //
+//   node scripts/ci/check-conformance-registry.mjs [--root DIR] --gate-pr
+//
+// --gate-pr checks a gate PR (layout §3 Gates) instead: the root must be a
+// full checkout of the PR head (HEAD) with origin/main. The judged commit is
+// the merge-base of HEAD with origin/main. When gates_passed at HEAD adds a
+// milestone to the one at the merge-base, it requires (rule gate-pr) that HEAD
+// is a single commit whose only parent is that merge-base, and that its diff
+// changes nothing but the gates_passed line of scenarios.toml. It then runs
+// the whole check above on the specs and tests/conformance AS OF THE
+// MERGE-BASE, with HEAD's gates_passed, so every stage of each gated
+// milestone must be implemented, with a valid stamp, at the merge-base (rule
+// gates). When gates_passed does not grow, the PR is not a gate PR and
+// nothing is checked. On success stdout ends with `merge_base=<sha>` and
+// `reporter_milestones=<added milestones but M0>`, for the gate job's
+// report-conformance.mjs --commit <merge_base> --require-milestone <M> runs.
+// M0 has no stages; ADR ratification and the doc checks gate it, not the
+// reporter.
+//
 // Errors exit 1. Usage and internal errors exit 2.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -393,13 +414,15 @@ export function checkWaivers(doc, at, stagesByTest, root, requireHistory, hist, 
 
 const readMaybe = (root, rel) => (existsSync(join(root, rel)) ? readFileSync(join(root, rel), 'utf8') : null);
 
-// Returns { errors, notes, summary }.
-export function checkRegistry(root, { requireHistory = false } = {}) {
+// Returns { errors, notes, summary }. `hist`, when given, is the history()
+// that waiver commits are checked against instead of root's (--gate-pr
+// checks a copy of the merge-base's files against the repository's).
+export function checkRegistry(root, { requireHistory = false, hist: given = null } = {}) {
   const report = new Report();
   const done = (summary = null) => ({ errors: report.errors, notes: report.notes, summary });
   // CI asks for the history whether or not a waiver needs it, so a checkout
   // that lost it (fetch-depth) fails before the first waiver lands.
-  const hist = requireHistory ? history(root) : null;
+  const hist = given ?? (requireHistory ? history(root) : null);
   if (hist && !hist.onMain) report.error(null, null, 'waivers', `--require-history: cannot check waiver commits against origin/main: ${hist.reason} (CI checks out with fetch-depth: 0)`);
   const texts = {};
   for (const rel of [TASKS, DESIGN, LAYOUT, SCENARIOS, SUBCASES]) {
@@ -588,17 +611,143 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   return done(`${scenarios.length} scenarios, ${contracts.length} contracts, ${subs.length} subcases, ${fixtures} fixtures, ${waivers} waivers`);
 }
 
+// ---------------------------------------------------------------------------
+// Gate PRs (layout §3 Gates)
+
+// What the registry check reads, copied from the merge-base: the three specs
+// and tests/conformance (registry, waivers, fixtures, schemas).
+const GATE_PATHS = [TASKS, DESIGN, LAYOUT, 'tests/conformance'];
+// The generator writes gates_passed on one line (at most 7 short milestones).
+const GATES_LINE = /^gates_passed = \[.*\]$/;
+
+// The milestone strings of gates_passed in a scenarios.toml text, or [] when
+// the text has no such list (the registry check reports what is wrong).
+function gatesOf(text) {
+  try {
+    const g = text === null ? undefined : parseStrict(text).gates_passed;
+    return Array.isArray(g) ? g.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+// Returns { errors, notes, mergeBase, added, reporter }: the merge-base of
+// HEAD with origin/main (null if there is none), the milestones HEAD's
+// gates_passed adds to the merge-base's, and those of them that the reporter
+// must show passed on the merge-base (every known one but M0).
+export function checkGatePr(root) {
+  const report = new Report();
+  const out = { errors: report.errors, notes: report.notes, mergeBase: null, added: [], reporter: [] };
+  const err = (msg, file = null, line = null) => report.error(file, line, 'gate-pr', msg);
+  const hist = history(root);
+  if (!hist.onMain) {
+    err(`--gate-pr: cannot find the merge-base with origin/main: ${hist.reason} (the gate job checks out the PR head with fetch-depth: 0)`);
+    return out;
+  }
+  const git = (args, encoding = 'utf8') => spawnSync('git', ['-C', root, ...args], { encoding, maxBuffer: 1 << 30 });
+  const ok = (args) => {
+    const r = git(args);
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout;
+  };
+  const head = ok(['rev-parse', '--verify', 'HEAD^{commit}']).trim();
+  const mbr = git(['merge-base', MAIN, head]);
+  if (mbr.status === 1) {
+    err(`HEAD ${head} has no merge-base with origin/main`);
+    return out;
+  }
+  if (mbr.status !== 0) throw new Error(`git merge-base: ${mbr.stderr}`);
+  const mb = mbr.stdout.trim();
+  out.mergeBase = mb;
+  const blob = (rev, rel) => {
+    const r = git(['cat-file', 'blob', `${rev}:${rel}`], 'buffer');
+    return r.status === 0 ? r.stdout : null;
+  };
+  const baseText = blob(mb, SCENARIOS)?.toString('utf8') ?? null;
+  const headText = blob(head, SCENARIOS)?.toString('utf8') ?? null;
+  const before = gatesOf(baseText);
+  out.added = [...new Set(gatesOf(headText).filter((g) => !before.includes(g)))];
+  if (!out.added.length) {
+    report.note(`gate-pr: gates_passed at HEAD adds no milestone to the merge-base ${mb}; not a gate PR`);
+    return out;
+  }
+  out.reporter = out.added.filter((m) => MILESTONES.includes(m) && m !== 'M0');
+
+  // One commit, on the merge-base.
+  const parents = ok(['rev-list', '--parents', '-n', '1', head]).trim().split(' ').slice(1);
+  if (parents.length !== 1 || parents[0] !== mb) {
+    err(`HEAD ${head} is not a single commit on top of the merge-base ${mb} with origin/main (its parents: ${parents.join(', ')}); a gate PR is one commit on the main commit it certifies`);
+  }
+  // Its diff: the gates_passed line of scenarios.toml and nothing else.
+  for (const p of ok(['diff', '--name-only', '-z', '--no-renames', mb, head]).split('\0').filter(Boolean)) {
+    if (p !== SCENARIOS) err(`the gate PR changes ${p}; it may change only the gates_passed line of ${SCENARIOS}`);
+  }
+  const lines = (text) => (text ?? '').split('\n');
+  const at = (ls) => ls.findIndex((l) => GATES_LINE.test(l));
+  const [b, h] = [lines(baseText), lines(headText)];
+  const [bi, hi] = [at(b), at(h)];
+  const rest = (ls, i) => ls.filter((_, j) => j !== i);
+  const [br, hr] = [rest(b, bi), rest(h, hi)];
+  const k = Array.from({ length: Math.max(br.length, hr.length) }, (_, j) => j).find((j) => br[j] !== hr[j]);
+  if (k !== undefined || bi < 0 || hi < 0) {
+    // The first changed line of HEAD's file, counting its gates_passed line.
+    const line = k === undefined ? Math.max(hi, 0) + 1 : hi >= 0 && k >= hi ? k + 2 : k + 1;
+    err('the gate PR changes this file outside the gates_passed line; a gate PR changes only that line', SCENARIOS, line);
+  }
+
+  // The registry check on the merge-base's files with HEAD's gates_passed.
+  if (bi >= 0 && hi >= 0) {
+    const dir = mkdtempSync(join(tmpdir(), 'gate-pr-'));
+    try {
+      for (const entry of ok(['ls-tree', '-r', '-z', mb, '--', ...GATE_PATHS]).split('\0').filter(Boolean)) {
+        const [meta, rel] = entry.split('\t');
+        if (meta.split(' ')[1] !== 'blob') continue;
+        mkdirSync(dirname(join(dir, rel)), { recursive: true });
+        writeFileSync(join(dir, rel), blob(mb, rel));
+      }
+      b[bi] = h[hi];
+      writeFileSync(join(dir, SCENARIOS), b.join('\n'));
+      const res = checkRegistry(dir, { hist });
+      report.note(`gate-pr: registry checked at the merge-base ${mb}, with the gates_passed of HEAD`);
+      report.notes.push(...res.notes);
+      report.errors.push(...res.errors);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  if (out.added.includes('M0')) report.note('gate-pr: M0 has no stages: ADR ratification and the doc checks gate it, not the reporter');
+  return out;
+}
+
+function runGatePr(root, log, logErr) {
+  const r = checkGatePr(root);
+  for (const n of r.notes) log(`note: ${n}`);
+  for (const e of r.errors) logErr(formatError(e));
+  if (r.errors.length) {
+    logErr(`check-conformance-registry --gate-pr: ${r.errors.length} error(s)`);
+    return 1;
+  }
+  log(`check-conformance-registry --gate-pr: OK (${r.added.length ? `adds ${r.added.join(', ')}; judged commit: the merge-base ${r.mergeBase}` : 'not a gate PR'})`);
+  log(`merge_base=${r.mergeBase}`);
+  log(`reporter_milestones=${r.reporter.join(' ')}`);
+  return 0;
+}
+
 export function run(argv, log = console.log, logErr = console.error) {
   let root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   let requireHistory = false;
+  let gatePr = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--require-history') requireHistory = true;
+    else if (argv[i] === '--gate-pr') gatePr = true;
     else if (argv[i] === '--root' && argv[i + 1]) root = resolve(argv[++i]);
     else {
-      logErr('usage: check-conformance-registry.mjs [--root DIR] [--require-history]');
+      logErr('usage: check-conformance-registry.mjs [--root DIR] [--require-history] [--gate-pr]');
       return 2;
     }
   }
+  // --gate-pr always needs the history; --require-history adds nothing to it.
+  if (gatePr) return runGatePr(root, log, logErr);
   const { errors, notes, summary } = checkRegistry(root, { requireHistory });
   for (const n of notes) log(`note: ${n}`);
   for (const e of errors) logErr(formatError(e));

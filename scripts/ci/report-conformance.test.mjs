@@ -317,6 +317,46 @@ describe('statuses', () => {
     assert.match(r.err, /milestone M1b is not run, not passed/);
   });
 
+  test('the gate job (layout §3 Gates): --root a worktree of the merge-base, --commit the merge-base, --require-milestone', () => {
+    const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
+    const git = (dir, ...args) => {
+      const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
+      assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    // main (origin/main) holds the registry; the gate PR is one commit on it.
+    const dir = gateRoot();
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'add', '-A');
+    git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'main');
+    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    const mb = git(dir, 'rev-parse', 'HEAD');
+    write(join(dir, SCENARIOS), replaceOnce(readFileSync(join(dir, SCENARIOS), 'utf8'), 'gates_passed = []', 'gates_passed = ["M1b"]'));
+    git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'gate M1b');
+    const wt = join(tmp('report-wt-'), 'merge-base');
+    git(dir, 'worktree', 'add', '-q', '--detach', wt, mb);
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const gate = (rootDir, tests, extra = []) => report(rootDir, ['--require-history', '--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(tests) }], { commit: mb }), ...extra], { commit: mb });
+    const passed = gate(wt, all);
+    assert.equal(passed.code, 0, passed.err);
+    assert.equal(passed.json.trusted, true);
+    assert.deepEqual(passed.json.notes, []);
+    // A leg of the merge-base without a result yet (a post-merge or live run
+    // that has not finished) is not run: the gate fails until it completes.
+    const waiting = gate(wt, all.filter((t) => t.id !== pgTest('A47', 'neg').id));
+    assert.equal(waiting.code, 1);
+    assert.match(waiting.err, /milestone M1b is not run, not passed/);
+    // The PR head is not the judged commit: no report, and with
+    // --allow-commit-mismatch an untrusted one (exit 2) though the gate passed.
+    const fromHead = gate(dir, all);
+    assert.equal(fromHead.code, 2);
+    assert.match(fromHead.err, /--root is a checkout of [0-9a-f]{40}, not of --commit/);
+    const loose = gate(dir, all, ['--allow-commit-mismatch']);
+    assert.equal(loose.code, 2);
+    assert.equal(loose.json.milestones.M1b.gate, 'passed');
+    assert.equal(loose.json.trusted, false);
+  });
+
   test('exitStatus', () => {
     const ms = (gate) => Object.fromEntries(['M0', 'M1a'].map((m) => [m, { gate: m === 'M1a' ? gate : 'no stages' }]));
     const res = (o) => ({ input_errors: [], failed: false, milestones: ms('passed'), ...o });
