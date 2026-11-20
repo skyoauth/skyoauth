@@ -2,9 +2,10 @@
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL`, a URL for a role that may
 //! create databases; each test creates and drops its own database. They are
-//! ordinary service tests, not `pg` conformance scenarios, so when the
-//! variable is unset they pass after printing a skip notice instead of
-//! failing loudly.
+//! `#[ignore]`d, so runs without a database report them as ignored; run them
+//! with `cargo nextest run --run-ignored all` (as the `service-nextest` CI
+//! job does) or `cargo test -- --include-ignored`. An ignored test that is
+//! run without the variable fails loudly instead of passing vacuously.
 //!
 //! No test name here may match the scenario pattern
 //! `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, so `scenarios-pg` never selects them.
@@ -27,13 +28,21 @@ struct TestDb {
 }
 
 impl TestDb {
-    /// Creates a fresh, empty database, or returns `None` when no server is
-    /// configured.
-    async fn create(test: &str) -> Option<Self> {
-        let Ok(admin_url) = std::env::var(IT_DATABASE_URL_VAR) else {
-            eprintln!("skipping {test}: {IT_DATABASE_URL_VAR} is not set");
-            return None;
-        };
+    /// Creates a fresh, empty database.
+    ///
+    /// # Panics
+    ///
+    /// When `SKYOAUTH_IT_DATABASE_URL` is unset or empty.
+    async fn create() -> Self {
+        let admin_url = std::env::var(IT_DATABASE_URL_VAR)
+            .ok()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{IT_DATABASE_URL_VAR} must be set to run this database test \
+                     (a postgres:// URL for a role that may create databases)"
+                )
+            });
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -54,11 +63,11 @@ impl TestDb {
             .unwrap()
             .database(&name);
         let config = DatabaseConfig::new(connect, 4, Duration::from_secs(10)).unwrap();
-        Some(Self {
+        Self {
             admin_url,
             name,
             config,
-        })
+        }
     }
 
     async fn pool(&self) -> PgPool {
@@ -94,10 +103,9 @@ fn embedded_versions() -> Vec<i64> {
 }
 
 #[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn applies_in_order_exactly_once_and_rerun_is_a_no_op() {
-    let Some(db) = TestDb::create("applies_in_order").await else {
-        return;
-    };
+    let db = TestDb::create().await;
     let pool = db.pool().await;
 
     persistence::migrate(&pool).await.unwrap();
@@ -118,10 +126,9 @@ async fn applies_in_order_exactly_once_and_rerun_is_a_no_op() {
 }
 
 #[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn modified_applied_migration_is_refused() {
-    let Some(db) = TestDb::create("modified_applied_migration").await else {
-        return;
-    };
+    let db = TestDb::create().await;
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
 
@@ -135,10 +142,9 @@ async fn modified_applied_migration_is_refused() {
 }
 
 #[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn database_newer_than_the_binary_is_refused() {
-    let Some(db) = TestDb::create("database_newer_than_binary").await else {
-        return;
-    };
+    let db = TestDb::create().await;
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
 
@@ -160,11 +166,28 @@ async fn database_newer_than_the_binary_is_refused() {
     db.drop([pool]).await;
 }
 
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn partially_applied_migration_is_refused() {
+    let db = TestDb::create().await;
+    let pool = db.pool().await;
+    persistence::migrate(&pool).await.unwrap();
+
+    // As if migration 1 had failed part-way on a store without
+    // transactional DDL.
+    sqlx::query("UPDATE _sqlx_migrations SET success = false WHERE version = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let err = persistence::migrate(&pool).await.unwrap_err();
+    assert!(matches!(err, MigrateError::Dirty(1)), "{err:?}");
+    db.drop([pool]).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn concurrent_runners_apply_each_migration_once() {
-    let Some(db) = TestDb::create("concurrent_runners").await else {
-        return;
-    };
+    let db = TestDb::create().await;
     let mut pools = Vec::new();
     for _ in 0..4 {
         pools.push(db.pool().await);
@@ -189,10 +212,9 @@ async fn concurrent_runners_apply_each_migration_once() {
 }
 
 #[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn append_only_guard_rejects_update_delete_and_truncate() {
-    let Some(db) = TestDb::create("append_only_guard").await else {
-        return;
-    };
+    let db = TestDb::create().await;
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
 

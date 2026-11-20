@@ -56,12 +56,13 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   exists, the job passes with a warning annotation: no scenario ran, which
   is not a conformance pass.
 - Service tests (nextest): `cargo nextest run --workspace --all-features
-  --profile ci` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
+  --profile ci --run-ignored all` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
   DB-backed tests reach a PostgreSQL 17 service container, with the same
-  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`.
+  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`. They
+  are `#[ignore]`d, so jobs without a database report them as ignored.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
