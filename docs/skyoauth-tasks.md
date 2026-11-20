@@ -230,7 +230,7 @@ InstanceCapacityPolicy(instance_id, max_session_continuations_ceiling,
                        tenant_context_limits, checker_context_limits,
                        global_context_limit, request_rate_limits, revision)
 InstanceSecurityPolicy(instance_id, widening_second_approver, single_actor_mode,
-                       audit_sink_config_digest, audit_sink_validated_at?, revision)
+                       audit_sink_config_digest?, audit_sink_validated_at?, revision)
 EgressAllowlistEntry(id, purpose, exact_destination, status, revision)
 RouteControllerIdentity(id, public_mtls_identity, kubernetes_principal,
                         gateway_deployment_refs,
