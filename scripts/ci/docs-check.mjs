@@ -103,17 +103,20 @@ function sortDiagnostics(list) {
 
 // The variables that point git at another repository than the one it finds
 // from -C (a git hook or `git rebase --exec` exports some of them), or that
-// change the history it sees there; git runs here without them, so the
-// tracked files are root's own. The same list as
-// GIT_LOCATION in check-conformance-registry.mjs, which this script cannot
-// import (it has no dependencies). Replace refs (refs/replace/*, in the
-// repository itself) would swap objects git reads, such as the tree of a
-// sparse index's directory entry that ls-files lists, so git also runs with
-// --no-replace-objects.
+// change the history it sees there; git runs here without their inherited
+// values, so the tracked files are root's own. GIT_GRAFT_FILE is then set
+// again, to NO_GRAFTS, a path that does not exist, so git reads no grafts
+// (.git/info/grafts, which --no-replace-objects does not turn off). The same
+// list and path as GIT_LOCATION and NO_GRAFTS in check-conformance-registry.mjs,
+// which this script cannot import (it has no dependencies). Replace refs
+// (refs/replace/*, in the repository itself) would swap objects git reads,
+// such as the tree of a sparse index's directory entry that ls-files lists,
+// so git also runs with --no-replace-objects.
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
+export const NO_GRAFTS = '/nonexistent/skyoauth-no-grafts';
 
 function gitTracked(root) {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
+  const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k))), GIT_GRAFT_FILE: NO_GRAFTS };
   try {
     const out = execFileSync('git', ['--no-replace-objects', '-C', root, 'ls-files', '-z'], {
       encoding: 'utf8',

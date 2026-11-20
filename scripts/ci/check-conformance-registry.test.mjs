@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -18,8 +18,8 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
-import { checkGatePr, checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
-import { GIT_LOCATION as DOCS_GIT_LOCATION } from './docs-check.mjs';
+import { checkGatePr, checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, NO_GRAFTS, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
+import { GIT_LOCATION as DOCS_GIT_LOCATION, NO_GRAFTS as DOCS_NO_GRAFTS } from './docs-check.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { assertGitImmune, GIT_ENV, normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
@@ -1185,6 +1185,30 @@ describe('rule waivers', () => {
     assert.equal(r.status, 1, r.stdout);
   });
 
+  // A graft (a line `<commit> <parent>...` in .git/info/grafts) gives a
+  // commit other parents wherever git reads it, and --no-replace-objects
+  // does not turn it off; gitIn points GIT_GRAFT_FILE at a path that does
+  // not exist, so git reads no grafts.
+  test('a graft that puts a side commit into the history of origin/main does not put it on main', () => {
+    const { root, head } = gitRoot();
+    const side = git(root, 'commit-tree', 'HEAD^{tree}', '-m', 'side');
+    // origin/main's commit grafted on top of side.
+    writeFileSync(join(root, '.git', 'info', 'grafts'), `${head} ${side}\n`);
+    writeFileSync(join(root, '.git', 'other-grafts'), `${head} ${side}\n`);
+    assert.equal(spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', side, 'refs/remotes/origin/main'], { env: GIT_ENV }).status, 0, 'git itself sees side on main');
+    assert.equal(spawnSync('git', ['--no-replace-objects', '-C', root, 'merge-base', '--is-ancestor', side, 'refs/remotes/origin/main'], { env: GIT_ENV }).status, 0, 'so does git --no-replace-objects');
+    withWaiver(root, waiver({ commit: `"${side}"` }));
+    for (const requireHistory of [false, true]) {
+      expectOnly(check(root, { requireHistory }), 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
+    }
+    // Nor does an inherited GIT_GRAFT_FILE that names a grafts file.
+    for (const env of [{}, { GIT_GRAFT_FILE: join(root, '.git', 'other-grafts') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.match(r.stderr, new RegExp(`commit ${side} is not on main`), Object.keys(env).join(', '));
+    }
+  });
+
   test('a commit that is not in the repository', () => {
     const { root } = gitRoot();
     const res = check(withWaiver(root, waiver({ commit: `"${'f'.repeat(40)}"` })));
@@ -1242,6 +1266,10 @@ describe('rule waivers', () => {
   test('an inherited GIT_DIR does not make a plain directory a checkout', () => {
     assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS']);
     assert.deepEqual(DOCS_GIT_LOCATION, GIT_LOCATION, 'docs-check.mjs keeps its own copy of the list');
+    // GIT_GRAFT_FILE is dropped and then forced to a path that does not exist.
+    assert.equal(NO_GRAFTS, '/nonexistent/skyoauth-no-grafts');
+    assert.equal(DOCS_NO_GRAFTS, NO_GRAFTS, 'docs-check.mjs keeps its own copy of the path');
+    assert.equal(existsSync(NO_GRAFTS), false, `${NO_GRAFTS} does not exist`);
     const other = gitRoot();
     const plainRoot = withWaiver(fixture({ [SCENARIOS]: implementedA24 }), waiver({ commit: `"${other.head}"` }));
     const gitDir = join(other.root, '.git');
@@ -1272,7 +1300,7 @@ describe('rule waivers', () => {
   // The git fixtures here with an absolute GIT_DIR exported (as in a git
   // hook): they pass and leave that repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr', '^a replace ref that puts a side commit', '^a replace ref that gives the gate commit']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr', '^a replace ref that puts a side commit', '^a replace ref that gives the gate commit', '^a graft that puts a side commit', '^a graft that gives the gate commit']);
   });
 
   test('--require-history passes with the history and no waivers', () => {
@@ -1648,6 +1676,28 @@ describe('--gate-pr', () => {
     expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
     const r = cli('--gate-pr', '--root', root);
     assert.equal(r.status, 1, r.stdout);
+  });
+
+  // A graft (.git/info/grafts) gives the gate commit other parents, and
+  // --no-replace-objects does not turn it off; gitIn points GIT_GRAFT_FILE
+  // at a path that does not exist, so git reads no grafts.
+  test('a graft that gives the gate commit the merge-base as its parent does not hide a second commit', () => {
+    const { root, mb } = mainRoot();
+    const first = commit(root, 'first');
+    const head = gateCommit(root, '["M1a"]');
+    writeFileSync(join(root, '.git', 'info', 'grafts'), `${head} ${mb}\n`);
+    writeFileSync(join(root, '.git', 'other-grafts'), `${head} ${mb}\n`);
+    assert.equal(git(root, 'rev-list', '--parents', '-n', '1', head), `${head} ${mb}`, 'git itself sees the merge-base as the only parent');
+    assert.equal(git(root, '--no-replace-objects', 'rev-list', '--parents', '-n', '1', head), `${head} ${mb}`, 'so does git --no-replace-objects');
+    const res = checkGatePr(root);
+    assert.equal(res.mergeBase, mb);
+    expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+    // Nor does an inherited GIT_GRAFT_FILE that names a grafts file.
+    for (const env of [{}, { GIT_GRAFT_FILE: join(root, '.git', 'other-grafts') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.equal(r.stderr, `${ONE_COMMIT(head, mb, first)}\ncheck-conformance-registry --gate-pr: 1 error(s)\n`, Object.keys(env).join(', '));
+    }
   });
 
   test('a merge commit (main merged into the PR) is not one commit on the merge-base', () => {
