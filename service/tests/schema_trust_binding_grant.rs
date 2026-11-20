@@ -491,7 +491,11 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
     checks.sort();
     let non_empty = |column: &str| format!("CHECK (({column} <> ''::text))");
     let at_most = |column: &str, bytes: u32| format!("CHECK ((octet_length({column}) <= {bytes}))");
-    let no_space = |column: &str| format!("CHECK (({column} !~ '[[:space:][:cntrl:]]'::text))");
+    // Evaluated under "C" whatever the collation, so the accepted values do
+    // not depend on the database the schema lives in.
+    let no_space = |column: &str| {
+        format!(r#"CHECK ((({column} COLLATE "C") !~ '[[:space:][:cntrl:]]'::text))"#)
+    };
     let constant = |column: &str, value: &str| format!("CHECK (({column} = '{value}'::text))");
     let status = "CHECK ((status = ANY (ARRAY['enabled'::text, 'disabled'::text])))".to_string();
     let revision = "CHECK ((revision >= 1))".to_string();
@@ -944,9 +948,10 @@ async fn ids_and_references_are_bounded() {
 }
 
 /// Names and the exact strings of sources and versions are at most 2048
-/// bytes and hold no whitespace or control character; each rule is a named
-/// check, so an over-long name is 23514, not 54000 from the (tenant_id,
-/// name) index.
+/// bytes and hold no ASCII whitespace or control character (U+0085
+/// included); each rule is a named check, so an over-long name is 23514, not
+/// 54000 from the (tenant_id, name) index. Other Unicode spaces pass,
+/// whatever the collation.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
@@ -1008,7 +1013,60 @@ async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
             .await;
         }
     }
+    accepts_unicode_spaces(&pool, &cases).await;
+
+    // The checks evaluate under "C", so the result does not follow the
+    // collation: U+3000 passes and U+0085 fails even where the column's
+    // collation counts U+3000 as a space, as en_US.utf8 does for names in a
+    // database created with it.
+    let icu_space: bool =
+        sqlx::query_scalar(r#"SELECT chr(12288) COLLATE "und-x-icu" ~ '[[:space:]]'"#)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(icu_space, "und-x-icu must count U+3000 as a space");
+    for table in [
+        "trust_keyset",
+        "trust_source",
+        "principal_binding",
+        "service_identity",
+        "service_grant",
+    ] {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            r#"ALTER TABLE {table} ALTER COLUMN name TYPE text COLLATE "und-x-icu""#
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    accepts_unicode_spaces(&pool, &cases).await;
+    for (sql, prefix) in &cases {
+        violates(
+            &pool,
+            sql.replace("{v}", "'a' || chr(133)"),
+            &format!("{prefix}_no_space_check"),
+        )
+        .await;
+    }
     db.drop([pool]).await;
+}
+
+/// Each case accepts a value with a Unicode space that is not ASCII
+/// (U+3000, U+1680, U+2000, U+2028, U+2029); each runs in a transaction
+/// that is rolled back.
+async fn accepts_unicode_spaces(pool: &PgPool, cases: &[(String, String)]) {
+    let mut conn = pool.acquire().await.unwrap();
+    for (sql, _) in cases {
+        for code in [12288, 5760, 8192, 8232, 8233] {
+            let sql = sql.replace("{v}", &format!("'a' || chr({code}) || 'b'"));
+            if let Err(err) = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK")))
+                .execute(&mut *conn)
+                .await
+            {
+                panic!("{sql}: {err}");
+            }
+        }
+    }
 }
 
 /// The largest values fit every key, even when they do not compress:
@@ -1713,12 +1771,66 @@ async fn backend_pid(conn: &mut PgConnection) -> i32 {
         .unwrap()
 }
 
-/// The binding-set check locks the grant row, so of two transactions that
-/// each remove one of a grant's last two bindings, the second waits for the
-/// first and then sees its delete (READ COMMITTED, the default).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn grant_binding_check_serializes_concurrent_removals() {
+/// The SQLSTATEs the losing remover of a grant's last two bindings may get:
+/// SK001 from the binding-set check under READ COMMITTED; under REPEATABLE
+/// READ and SERIALIZABLE 40001 (`serialization_failure`) or 40P01
+/// (`deadlock_detected`).
+fn loser_codes(level: &str) -> &'static [&'static str] {
+    if level == "READ COMMITTED" {
+        &["SK001"]
+    } else {
+        &["40001", "40P01"]
+    }
+}
+
+async fn run_owned(conn: &mut PgConnection, sql: String) {
+    if let Err(err) = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
+        .execute(conn)
+        .await
+    {
+        panic!("{sql}: {err}");
+    }
+}
+
+/// Runs `sql` in a task, then ends whatever transaction is left open, so the
+/// test cannot hang on whichever statement waits for a lock.
+fn spawn_sql(
+    mut conn: PgConnection,
+    sql: &'static str,
+) -> tokio::task::JoinHandle<(PgConnection, Result<(), sqlx::Error>)> {
+    tokio::spawn(async move {
+        let result = sqlx::raw_sql(sql).execute(&mut conn).await.map(|_| ());
+        sqlx::raw_sql("ROLLBACK").execute(&mut conn).await.unwrap();
+        (conn, result)
+    })
+}
+
+async fn finished(
+    task: tokio::task::JoinHandle<(PgConnection, Result<(), sqlx::Error>)>,
+) -> (PgConnection, Result<(), sqlx::Error>) {
+    tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("a remover never finished")
+        .unwrap()
+}
+
+async fn bindings_left(pool: &PgPool) -> Vec<(String, String)> {
+    rows(
+        pool,
+        "SELECT grant_id, binding_id FROM service_grant_binding WHERE grant_id = 'grt_2'",
+    )
+    .await
+}
+
+const REMOVE_FIRST: &str =
+    "DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_1'";
+
+/// Two connections at `level` each remove one of grt_2's two bindings. The
+/// first runs the check at once (`SET CONSTRAINTS ... IMMEDIATE`) and stays
+/// open; the second waits for it (for the grant lock under READ COMMITTED,
+/// for the lock on its binding row otherwise) and loses once the first
+/// commits. The grant keeps the second's binding.
+async fn removal_after_an_immediate_check(level: &str) {
     let (db, pool) = seeded().await;
     let mut first = pool.acquire().await.unwrap().detach();
     let mut second = pool.acquire().await.unwrap().detach();
@@ -1726,46 +1838,203 @@ async fn grant_binding_check_serializes_concurrent_removals() {
         backend_pid(&mut first).await,
         backend_pid(&mut second).await,
     );
-    run(
+    run_owned(
         &mut first,
-        "BEGIN;
-         DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_1';
-         SET CONSTRAINTS service_grant_binding_keeps_one IMMEDIATE",
+        format!(
+            "BEGIN ISOLATION LEVEL {level}; {REMOVE_FIRST};
+             SET CONSTRAINTS service_grant_binding_keeps_one IMMEDIATE"
+        ),
     )
     .await;
-    // The whole second transaction runs in a task, so the test cannot hang
-    // whichever statement waits for the lock.
-    let commit = tokio::spawn(async move {
-        let result = sqlx::raw_sql(
-            "BEGIN;
-             DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_2';
-             COMMIT",
-        )
-        .execute(&mut second)
-        .await;
-        sqlx::raw_sql("ROLLBACK")
-            .execute(&mut second)
-            .await
-            .unwrap();
-        (second, result)
-    });
+    run_owned(&mut second, format!("BEGIN ISOLATION LEVEL {level}")).await;
+    let commit = spawn_sql(
+        second,
+        "DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_2';
+         COMMIT",
+    );
     wait_until_blocked(&pool, second_pid, first_pid).await;
     assert!(!commit.is_finished());
     run(&mut first, "COMMIT").await;
-    let (second, result) = tokio::time::timeout(Duration::from_secs(30), commit)
-        .await
-        .expect("the second remover never finished")
-        .unwrap();
-    let err = result.unwrap_err();
-    assert_eq!(sqlstate(&err), "SK001", "{err}");
-    let left = rows(
-        &pool,
-        "SELECT grant_id, binding_id FROM service_grant_binding WHERE grant_id = 'grt_2'",
-    )
-    .await;
-    assert_eq!(left, [("grt_2".to_string(), "bnd_2".to_string())]);
+    let (second, result) = finished(commit).await;
+    let err = result.expect_err("both removers committed");
+    assert!(
+        loser_codes(level).contains(&sqlstate(&err).as_str()),
+        "{level}: {err}"
+    );
+    assert_eq!(
+        bindings_left(&pool).await,
+        [("grt_2".to_string(), "bnd_2".to_string())],
+        "{level}"
+    );
     first.close().await.unwrap();
     second.close().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// Two connections at `level` each remove one of grt_2's two bindings and
+/// then both commit, the first first. Exactly one commits; the other fails
+/// with a code of `loser_codes`, and the grant keeps one binding.
+async fn removals_committed_together(level: &str) {
+    let (db, pool) = seeded().await;
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    run_owned(
+        &mut first,
+        format!("BEGIN ISOLATION LEVEL {level}; {REMOVE_FIRST}"),
+    )
+    .await;
+    run_owned(
+        &mut second,
+        format!(
+            "BEGIN ISOLATION LEVEL {level};
+             DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_2'"
+        ),
+    )
+    .await;
+    let first_commit = spawn_sql(first, "COMMIT");
+    // The first commit either ends at once or waits for the second's row.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(second_pid)
+                .bind(first_pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if waiting || first_commit.is_finished() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first commit neither ended nor waited");
+    let second_commit = spawn_sql(second, "COMMIT");
+    let (first, first_result) = finished(first_commit).await;
+    let (second, second_result) = finished(second_commit).await;
+    let failures: Vec<String> = [&first_result, &second_result]
+        .into_iter()
+        .filter_map(|result| result.as_ref().err())
+        .map(sqlstate)
+        .collect();
+    assert_eq!(
+        failures.len(),
+        1,
+        "{level}: {first_result:?} {second_result:?}"
+    );
+    assert!(
+        loser_codes(level).contains(&failures[0].as_str()),
+        "{level}: {failures:?}"
+    );
+    assert_eq!(bindings_left(&pool).await.len(), 1, "{level}");
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// READ COMMITTED: the binding-set check locks the grant row, so the later
+/// remover waits for the earlier one, then sees its delete and fails with
+/// SK001.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn concurrent_binding_removals_under_read_committed() {
+    removal_after_an_immediate_check("READ COMMITTED").await;
+    removals_committed_together("READ COMMITTED").await;
+}
+
+/// REPEATABLE READ: the snapshot still shows the binding the other remover
+/// deleted, so the check also locks the remaining binding rows and the later
+/// remover fails with 40001 or 40P01 instead of leaving no binding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn concurrent_binding_removals_under_repeatable_read() {
+    removal_after_an_immediate_check("REPEATABLE READ").await;
+    removals_committed_together("REPEATABLE READ").await;
+}
+
+/// SERIALIZABLE behaves as REPEATABLE READ.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn concurrent_binding_removals_under_serializable() {
+    removal_after_an_immediate_check("SERIALIZABLE").await;
+    removals_committed_together("SERIALIZABLE").await;
+}
+
+/// The binding-set check runs with the caller's privileges (observed by the
+/// review of #47): creating a grant needs UPDATE on service_grant for the
+/// grant lock and SELECT on service_grant_binding, and under REPEATABLE READ
+/// removing a binding also needs UPDATE on service_grant_binding for the
+/// row locks. Each missing privilege fails the commit with 42501.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn grant_binding_check_needs_the_callers_privileges() {
+    let (mut db, pool) = seeded().await;
+    let (role, connect) = db.create_login_role().await;
+    let grant = |privileges: &str| format!("GRANT {privileges} TO {role}");
+    let as_admin = |sql: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::raw_sql(AssertSqlSafe(sql))
+                .execute(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    as_admin(grant("SELECT, INSERT ON service_grant")).await;
+    as_admin(grant("INSERT ON service_grant_binding")).await;
+    let mut writer = PgConnection::connect_with(&connect).await.unwrap();
+    let create = "BEGIN;
+        INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', 'wld_2', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
+        INSERT INTO service_grant_binding VALUES ('grt_x', 'bnd_3', 'ten_a', 'wld_2')";
+    for (missing, then_grant) in [
+        ("UPDATE on service_grant", "UPDATE ON service_grant"),
+        (
+            "SELECT on service_grant_binding",
+            "SELECT ON service_grant_binding",
+        ),
+    ] {
+        run(&mut writer, create).await;
+        let err = sqlx::raw_sql("COMMIT")
+            .execute(&mut writer)
+            .await
+            .unwrap_err();
+        assert_eq!(sqlstate(&err), "42501", "without {missing}: {err}");
+        as_admin(grant(then_grant)).await;
+    }
+    run(&mut writer, create).await;
+    run(&mut writer, "COMMIT").await;
+
+    as_admin(grant("DELETE ON service_grant_binding")).await;
+    let remove = "BEGIN ISOLATION LEVEL REPEATABLE READ;
+        DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_2'";
+    run(&mut writer, remove).await;
+    let err = sqlx::raw_sql("COMMIT")
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        sqlstate(&err),
+        "42501",
+        "without UPDATE on service_grant_binding: {err}"
+    );
+    run(
+        &mut writer,
+        "DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_2';
+         INSERT INTO service_grant_binding VALUES ('grt_2', 'bnd_2', 'ten_a', 'wld_1')",
+    )
+    .await;
+    as_admin(grant("UPDATE ON service_grant_binding")).await;
+    run(&mut writer, remove).await;
+    run(&mut writer, "COMMIT").await;
+    writer.close().await.unwrap();
+    assert_eq!(
+        bindings_left(&pool).await,
+        [("grt_2".to_string(), "bnd_1".to_string())]
+    );
     db.drop([pool]).await;
 }
 

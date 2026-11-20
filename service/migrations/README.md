@@ -346,8 +346,8 @@ The database does not enforce these rules; the service must:
 `principal_binding`, `service_identity` and `service_grant`, with the list
 tables `service_identity_resource_server`, `service_grant_binding` and
 `service_grant_resource_server`. All of them are tenant-owned, and every
-reference between them is a composite foreign key over the
-`(tenant_id, id)` unique of the target, so no reference crosses tenants
+reference between them is a composite foreign key to a unique key of the
+target that starts with `(tenant_id, id)`, so no reference crosses tenants
 (IR-031). It reuses `skyoauth_reject_immutable_change(…)` and
 `skyoauth_check_revision()` from `0002` and the list domains of `0003`, and
 adds one function, `skyoauth_service_grant_has_binding()`. Every trigger is
@@ -368,6 +368,16 @@ not part of it.
   a name at most 2303 bytes. Names keep the database collation; IDs and the
   exact strings below are `COLLATE "C"`. IDs reject only an empty value, as
   in `0003`.
+- **The character rule does not follow the collation.** Each
+  `<table>_<column>_no_space_check` is
+  `CHECK ((<column> COLLATE "C") !~ '[[:space:][:cntrl:]]')`, so it judges a
+  name by the same classes on every instance: `[:space:]` is ASCII
+  whitespace and `[:cntrl:]` U+0000–U+001F and U+007F–U+009F. U+0085 is
+  rejected and U+3000 accepted everywhere. Without the `COLLATE "C"`, a
+  name column, which has the database collation, would reject U+3000,
+  U+1680, U+2000 and U+2028/U+2029 under `en_US.utf8` and accept them under
+  `C`, so a dump of a `C` database could fail to restore into an
+  `en_US.utf8` one.
 - **Exact strings.** `exact_issuer`, `discovery_url`, `token_review_endpoint`,
   `ca_bundle_ref`, `ca_fingerprint`, `reviewer_credential_ref` and the
   version `fingerprint` are compared or resolved exactly. They get the
@@ -382,11 +392,17 @@ not part of it.
 - **`principal`.** `0004` adds `principal_tenant_id_id_kind_key`
   (`UNIQUE (tenant_id, id, kind)`) to the frozen `0002` table, and, because
   that is a new key, the forward-only bounds `principal_id_octet_length_check`
-  and `principal_tenant_id_octet_length_check` (255 bytes, inferred, as
-  `0003` bounds `tenant`). A binding and a grant actor reference
-  `(tenant_id, id, kind)` with a constant `'workload'` column, and a service
-  identity with a constant `'service'` column, so the database pins the
-  principal kind as well as the tenant (inferred mechanism).
+  and `principal_tenant_id_octet_length_check` (255 bytes). A binding and a
+  grant actor reference `(tenant_id, id, kind)` with a constant `'workload'`
+  column, and a service identity with a constant `'service'` column, so the
+  database pins the principal kind as well as the tenant (inferred
+  mechanism). The 255-byte bound is a lead decision, consistent with tenant
+  IDs in `0003`: IDs are server-generated, and no M1a database is deployed.
+  Up to `0003` the database accepts longer principal IDs, and `0004`
+  validates the new checks against existing rows. Upgrade precondition:
+  before `0004` is applied to a populated database,
+  `select count(*) from principal where octet_length(id) > 255 or octet_length(tenant_id) > 255`
+  must return 0.
 - **Trust sources** (ADR-005 item 1). `kind` fixes which fields are set:
   `discovery_url` exactly for `oidc_discovery`, `jwks_keyset_id` exactly for
   `uploaded_jwks`, and `cluster_id`, `token_review_endpoint`,
@@ -439,9 +455,9 @@ not part of it.
   named with the schema) fails the commit with `SK001` when a grant created
   in the transaction has no binding row, or the last binding row of a grant
   that still exists was deleted (identity-registry §10). It locks the grant
-  row with `FOR NO KEY UPDATE`, so a role that deletes binding rows needs
-  `UPDATE` on `service_grant`, and of two concurrent removals under
-  `READ COMMITTED` the second waits and then sees the first.
+  row with `FOR NO KEY UPDATE`, and under `REPEATABLE READ` and
+  `SERIALIZABLE` also the grant's remaining binding rows with
+  `FOR KEY SHARE`; see "Concurrent binding removals" below.
 - **Empty arrays.** Nonempty: `trust_source.audiences`, `algorithms` when
   set, `default_scopes` when set, the JWK Set `keys`, `claim_match_policy`
   and a grant's binding rows. May be empty: `service_grant.scopes`,
@@ -450,6 +466,12 @@ not part of it.
   closed; it never means "unconstrained" (inferred). A `NULL`
   `default_scopes` means the grant has no defaults, so a request without
   scopes fails (IR-063).
+- **Empty objects.** The database accepts `'{}'` for `proof_bounds`,
+  `service_identity.max_resource_constraints` and
+  `service_grant.resource_constraints`; it checks only that each is an
+  object. For the two constraint ceilings IR-121 and IR-140 already make the
+  service fail closed. For `proof_bounds` the service applies its defaults:
+  an empty object never means unbounded.
 - **Not NULL.** Every column is `NOT NULL` except the fields the model marks
   optional (`trust_keyset_version.expires_at`,
   `service_grant.target_service_id`, `default_scopes` and `valid_until`)
@@ -551,11 +573,23 @@ The database does not enforce these rules; the service must:
 - hard-delete a binding or grant only under ADR-008 item 3, deleting a
   grant's list rows first; disable the other records instead.
 
-The binding-set check sees committed rows under `READ COMMITTED`. Under
-`REPEATABLE READ` two transactions that each delete a different one of a
-grant's last two binding rows can both commit, since each checks its own
-snapshot; the revision compare-and-set on the grant, which the service
-performs for every list change, makes the second one fail.
+Concurrent binding removals: of two transactions that each delete a
+different one of a grant's last two binding rows, at most one commits, at
+every isolation level. Under `READ COMMITTED` (the default) the check sees
+committed rows: the grant lock makes the later transaction wait for the
+earlier one, see its delete and fail with `SK001`. Under `REPEATABLE READ`
+and `SERIALIZABLE` the check reads the transaction's snapshot, which still
+shows the other transaction's deleted row, so it also locks the grant's
+remaining binding rows with `FOR KEY SHARE`: the later transaction fails
+with `40001`, or `40P01` when the two wait for each other. That lock is
+taken only outside `READ COMMITTED`, where it would turn the `SK001` into a
+deadlock. The database does not retry. Because the check runs with the
+caller's privileges, a role that creates grants or deletes binding rows
+needs `UPDATE` and `SELECT` on `service_grant` and `SELECT` on
+`service_grant_binding`, and under `REPEATABLE READ` or `SERIALIZABLE` also
+`UPDATE` on `service_grant_binding` (see Follow-ups). The service's revision
+compare-and-set on the grant, done for every list change, remains the
+first line.
 
 ## Limits
 
@@ -601,6 +635,19 @@ performs for every list change, makes the second one fail.
   subscription must use `run_as_owner = true`. The deferred trigger stays
   `ENABLE ALWAYS` (lead decision): logical replication of the audit chain is
   not a v0.1 requirement.
+- The deferred binding-set check of `0004` works under logical replication
+  when the subscription owner owns the tables. Its limits:
+  - When the table owner differs from the subscription owner, a replicated
+    `INSERT` into `service_grant` fails with "cannot fire deferred trigger
+    within security-restricted operation", and the apply worker retries it
+    forever.
+  - The initial table sync copies each table in its own transaction, so the
+    sync of `service_grant` fails with `SK001` if it runs before that of
+    `service_grant_binding`. A retry after the binding rows are in recovers;
+    with `disable_on_error` the subscription is disabled instead.
+  - A data-only `pg_dump` replayed in autocommit fails at the
+    `service_grant` `COPY` for the same reason; replaying it with
+    `--single-transaction` works (T10.6).
 - The database must use the `UTF8` encoding (inferred; the migrations do not
   check it). The egress destination rules above hold only there: under
   `SQL_ASCII` a multibyte character is matched byte by byte, so U+2028 and
@@ -647,8 +694,35 @@ Open for all registry tables:
   unreferenced bindings and grants, with a grant's list rows deleted first,
   and keep `service_identity_resource_server`, `service_grant_binding` and
   `service_grant_resource_server` rows deletable, since deleting a row is
-  how such a set shrinks (the binding set stays nonempty by the deferred
-  check).
+  how such a set shrinks (`DELETE` cannot empty a grant's binding set: the
+  deferred check rejects it). `TRUNCATE` skips that check:
+  `TRUNCATE service_grant_binding` and `TRUNCATE principal_binding CASCADE`
+  leave grants with no binding, so the pending guard must cover these
+  tables, including a `TRUNCATE … CASCADE` that reaches them from another
+  table.
+- Indexes on the referencing side of several `0004` foreign keys:
+  `principal_binding (tenant_id, trust_source_id)`,
+  `trust_keyset_version (tenant_id, keyset_id)`,
+  `service_grant_binding.binding_id`,
+  `service_grant (tenant_id, target_service_id)` and the assignment foreign
+  keys of the two audience list tables. Without them a delete or key update
+  of the referenced row scans the referencing table. They go in the same
+  forward-only migration as the delete and truncate guards.
+- Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
+  binding-set check runs with the caller's privileges: creating a grant
+  needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
+  grant lock) and `SELECT` on `service_grant_binding`; with only `INSERT`
+  and `SELECT` on `service_grant` the commit fails with `42501`. Deleting a
+  binding row under `REPEATABLE READ` or `SERIALIZABLE` also needs `UPDATE`
+  on `service_grant_binding` (the row locks). The test
+  `grant_binding_check_needs_the_callers_privileges` checks each case.
+- The `no_space` checks of `0002` (`exact_destination`) and `0003`
+  (`audience`, `action_name`) do not name a collation in the expression;
+  they rely on their columns being `COLLATE "C"`, so they hold the same
+  values on every instance today. If such a column ever gets another
+  collation, a later forward-only migration replaces the check with the
+  `0004` form, `CHECK ((<column> COLLATE "C") !~ '[[:space:][:cntrl:]]')`;
+  the frozen files stay unchanged.
 
 Not done in `0002`:
 
@@ -709,3 +783,7 @@ Not done in `0004`:
 - The single-use replay table (T10.9) and the policy revision.
 - A name-unique key on `principal` (IR-021), which `0002` does not have.
 - Rejecting duplicate list elements, as for `0003`.
+- An upper bound on `review_timeout_ms`: a service rule.
+- Rejecting the private-key member names of post-quantum JWK types in a
+  keyset version (T11.3); the check covers the RFC 7518 and RFC 8037
+  members only.

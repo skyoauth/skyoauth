@@ -4,8 +4,8 @@
 -- identity-registry sections 5.1 and 10; ADR-005, ADR-006, ADR-016,
 -- ADR-022). All of them are tenant-owned (design section 7.1), and every
 -- reference between them is a composite (tenant_id, ...) foreign key to a
--- (tenant_id, id) unique, so no cross-tenant reference can exist (IR-031;
--- tasks section 3 "Ownership"). The conventions of 0002 and 0003 apply:
+-- unique key that starts with (tenant_id, id), so no cross-tenant reference
+-- can exist (IR-031; tasks section 3 "Ownership"). The conventions of 0002 and 0003 apply:
 -- README.md in this directory has them and the rules left to the service.
 -- "(inferred)" marks a choice the specifications do not dictate.
 --
@@ -16,8 +16,10 @@
 -- speak of disabling these records, ADR-008 item 3). revision defaults to 1,
 -- the only value skyoauth_check_revision() accepts on insert. Delete and
 -- truncate guards come with the one follow-up migration for all registry
--- tables (README.md "Follow-ups"); until then only foreign keys hold back a
--- delete.
+-- tables (README.md "Follow-ups"); until then only foreign keys and the
+-- deferred service_grant_binding_keeps_one check, which rejects deleting a
+-- grant's last binding, hold back a DELETE, and nothing holds back a
+-- TRUNCATE.
 --
 -- Bounds, as in 0003 (lead decision, 2026-11-20): every ID column, own ID or
 -- reference, is at most 255 bytes, and every unique free-text key at most
@@ -29,8 +31,13 @@
 -- Where the full name would exceed the 63-byte identifier limit,
 -- resource_server_id is abbreviated to server_id, as in 0003. Names and the
 -- exact strings below also reject whitespace and control characters
--- (<table>_<column>_no_space_check; [:space:] is ASCII whitespace under
--- "C", [:cntrl:] is U+0000-U+001F and U+007F-U+009F in every collation).
+-- (<table>_<column>_no_space_check). The check evaluates the value under
+-- "C", whatever the column's or the database's collation, so it accepts
+-- the same values on every instance and a dump restores anywhere: there
+-- [:space:] is ASCII whitespace and [:cntrl:] U+0000-U+001F and
+-- U+007F-U+009F, so U+0085 is rejected and U+3000 accepted (a database
+-- collation such as en_US.utf8 would also reject Unicode spaces such as
+-- U+3000, U+1680, U+2000 and U+2028/U+2029).
 -- Other syntax and Unicode normalization stay with the service. The other
 -- checks of a single column keep the names PostgreSQL generates; the rules
 -- that tie several columns together are named.
@@ -41,9 +48,9 @@
 -- (identity-registry section 5.1; design section 5.6), a service identity a
 -- service principal (tasks section 3 "Ownership"). The constant column and
 -- its default are the mechanism (inferred). 0002 is frozen, so 0004 bounds
--- the key columns of principal forward-only, as 0003 bounds tenant
--- (inferred, as a consequence of the new key), validated against existing
--- rows.
+-- the key columns of principal forward-only, as 0003 bounds tenant (lead
+-- decision, consistent with tenant IDs in 0003), validated against existing
+-- rows: README.md has the upgrade precondition.
 ALTER TABLE principal ADD CONSTRAINT principal_id_octet_length_check
     CHECK (octet_length(id) <= 255);
 ALTER TABLE principal ADD CONSTRAINT principal_tenant_id_octet_length_check
@@ -70,7 +77,7 @@ CREATE TABLE trust_keyset (
         CONSTRAINT trust_keyset_tenant_id_fkey REFERENCES tenant (id),
     name       text        NOT NULL CHECK (name <> '')
         CONSTRAINT trust_keyset_name_no_space_check
-        CHECK (name !~ '[[:space:][:cntrl:]]')
+        CHECK ((name COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_keyset_name_octet_length_check
         CHECK (octet_length(name) <= 2048),
     status     text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
@@ -113,7 +120,7 @@ CREATE TABLE trust_keyset_version (
     -- (inferred: not unique, compared exactly).
     fingerprint   text COLLATE "C" NOT NULL CHECK (fingerprint <> '')
         CONSTRAINT trust_keyset_version_fingerprint_no_space_check
-        CHECK (fingerprint !~ '[[:space:][:cntrl:]]')
+        CHECK ((fingerprint COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_keyset_version_fingerprint_octet_length_check
         CHECK (octet_length(fingerprint) <= 2048),
     effective_at  timestamptz NOT NULL,
@@ -141,7 +148,7 @@ CREATE TABLE trust_source (
         CONSTRAINT trust_source_tenant_id_fkey REFERENCES tenant (id),
     name                           text        NOT NULL CHECK (name <> '')
         CONSTRAINT trust_source_name_no_space_check
-        CHECK (name !~ '[[:space:][:cntrl:]]')
+        CHECK ((name COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_name_octet_length_check
         CHECK (octet_length(name) <= 2048),
     kind                           text COLLATE "C" NOT NULL
@@ -153,7 +160,7 @@ CREATE TABLE trust_source (
     -- 0002 (inferred: they are compared or resolved exactly).
     exact_issuer                   text COLLATE "C" NOT NULL CHECK (exact_issuer <> '')
         CONSTRAINT trust_source_exact_issuer_no_space_check
-        CHECK (exact_issuer !~ '[[:space:][:cntrl:]]')
+        CHECK ((exact_issuer COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_exact_issuer_octet_length_check
         CHECK (octet_length(exact_issuer) <= 2048),
     -- discovery_url and token_review_endpoint are matched by value against
@@ -162,7 +169,7 @@ CREATE TABLE trust_source (
     -- rejected for a missing or disabled entry (IR-152).
     discovery_url                  text COLLATE "C" CHECK (discovery_url <> '')
         CONSTRAINT trust_source_discovery_url_no_space_check
-        CHECK (discovery_url !~ '[[:space:][:cntrl:]]')
+        CHECK ((discovery_url COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_discovery_url_octet_length_check
         CHECK (octet_length(discovery_url) <= 2048),
     jwks_keyset_id                 text COLLATE "C"
@@ -175,24 +182,24 @@ CREATE TABLE trust_source (
         CHECK (octet_length(cluster_id) <= 255),
     token_review_endpoint          text COLLATE "C" CHECK (token_review_endpoint <> '')
         CONSTRAINT trust_source_token_review_endpoint_no_space_check
-        CHECK (token_review_endpoint !~ '[[:space:][:cntrl:]]')
+        CHECK ((token_review_endpoint COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_token_review_endpoint_octet_length_check
         CHECK (octet_length(token_review_endpoint) <= 2048),
     -- Secret references resolve within the tenant's secret_namespace
     -- (IR-034); their syntax is not specified.
     ca_bundle_ref                  text COLLATE "C" CHECK (ca_bundle_ref <> '')
         CONSTRAINT trust_source_ca_bundle_ref_no_space_check
-        CHECK (ca_bundle_ref !~ '[[:space:][:cntrl:]]')
+        CHECK ((ca_bundle_ref COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_ca_bundle_ref_octet_length_check
         CHECK (octet_length(ca_bundle_ref) <= 2048),
     ca_fingerprint                 text COLLATE "C" CHECK (ca_fingerprint <> '')
         CONSTRAINT trust_source_ca_fingerprint_no_space_check
-        CHECK (ca_fingerprint !~ '[[:space:][:cntrl:]]')
+        CHECK ((ca_fingerprint COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_ca_fingerprint_octet_length_check
         CHECK (octet_length(ca_fingerprint) <= 2048),
     reviewer_credential_ref        text COLLATE "C" CHECK (reviewer_credential_ref <> '')
         CONSTRAINT trust_source_reviewer_credential_ref_no_space_check
-        CHECK (reviewer_credential_ref !~ '[[:space:][:cntrl:]]')
+        CHECK ((reviewer_credential_ref COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT trust_source_reviewer_credential_ref_octet_length_check
         CHECK (octet_length(reviewer_credential_ref) <= 2048),
     -- No default or bound is given (lifetimes section 8; inferred:
@@ -271,7 +278,7 @@ CREATE TABLE principal_binding (
         CONSTRAINT principal_binding_tenant_id_fkey REFERENCES tenant (id),
     name                     text        NOT NULL CHECK (name <> '')
         CONSTRAINT principal_binding_name_no_space_check
-        CHECK (name !~ '[[:space:][:cntrl:]]')
+        CHECK ((name COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT principal_binding_name_octet_length_check
         CHECK (octet_length(name) <= 2048),
     trust_source_id          text COLLATE "C" NOT NULL
@@ -325,7 +332,7 @@ CREATE TABLE service_identity (
         CONSTRAINT service_identity_tenant_id_fkey REFERENCES tenant (id),
     name                      text        NOT NULL CHECK (name <> '')
         CONSTRAINT service_identity_name_no_space_check
-        CHECK (name !~ '[[:space:][:cntrl:]]')
+        CHECK ((name COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT service_identity_name_octet_length_check
         CHECK (octet_length(name) <= 2048),
     max_scopes                skyoauth_scope_list NOT NULL,
@@ -381,7 +388,7 @@ CREATE TABLE service_grant (
         CONSTRAINT service_grant_tenant_id_fkey REFERENCES tenant (id),
     name                  text        NOT NULL CHECK (name <> '')
         CONSTRAINT service_grant_name_no_space_check
-        CHECK (name !~ '[[:space:][:cntrl:]]')
+        CHECK ((name COLLATE "C") !~ '[[:space:][:cntrl:]]')
         CONSTRAINT service_grant_name_octet_length_check
         CHECK (octet_length(name) <= 2048),
     -- The workload actor (design section 5.6).
@@ -589,8 +596,16 @@ ALTER TABLE service_grant ENABLE ALWAYS TRIGGER service_grant_revision;
 -- still exists. A hard delete of a grant (ADR-008 item 3) deletes its rows
 -- and then the grant. The check locks the grant row (FOR NO KEY UPDATE, so
 -- the caller needs UPDATE on service_grant), so concurrent removals under
--- READ COMMITTED wait for each other and then see each other's deletes
--- (inferred). The function reads tables, so it is created as the 0002 chain
+-- READ COMMITTED wait for each other and then see each other's deletes:
+-- the later one fails with SK001 (inferred). Under REPEATABLE READ and
+-- SERIALIZABLE the check reads the transaction's snapshot, which still
+-- shows a binding a concurrent transaction has deleted and committed, so
+-- it also locks the grant's remaining binding rows (FOR KEY SHARE, so the
+-- caller needs UPDATE on service_grant_binding too): such a row fails the
+-- later transaction with 40001, or 40P01 when both wait for each other.
+-- Under READ COMMITTED that lock is skipped, as two removers would then
+-- deadlock (40P01) instead of the later one failing with SK001. The
+-- function reads tables, so it is created as the 0002 chain
 -- functions are: schema resolved by current_schema(), pinned search_path,
 -- tables named with the schema, body passed as a quoted literal (%L).
 DO $migration$
@@ -616,7 +631,15 @@ BEGIN
     PERFORM FROM @schema@.service_grant g
         WHERE g.tenant_id = grant_tenant AND g.id = grant_key
         FOR NO KEY UPDATE;
-    IF FOUND AND NOT EXISTS (
+    IF NOT FOUND THEN
+        -- The grant was deleted in this transaction too.
+        RETURN NULL;
+    END IF;
+    IF current_setting('transaction_isolation') <> 'read committed' THEN
+        PERFORM FROM @schema@.service_grant_binding b WHERE b.grant_id = grant_key
+            FOR KEY SHARE;
+    END IF;
+    IF NOT EXISTS (
         SELECT FROM @schema@.service_grant_binding b WHERE b.grant_id = grant_key
     ) THEN
         RAISE EXCEPTION 'service grant % has no allowed binding', grant_key
