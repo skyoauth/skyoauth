@@ -185,20 +185,37 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   configuration are instance deployment configuration, read-only online; an
   online operator write MUST NOT change them. `single_actor_mode` is set at
   install or by the local signed recovery transaction; the row mirrors it, and
-  a change emits an audit event. The sink endpoint, protocol and TLS trust or credential
-  reference are not stored in the database: the row holds only
+  a change emits an audit event. The sink endpoint, protocol and TLS trust or
+  credential reference are not stored in the database: the row holds only
   `audit_sink_config_digest` and `audit_sink_validated_at`, and observed sink
   health is a metric and health signal, not a revisioned row. A sink
   configuration change takes effect only on restart and first emits a sink
-  changed event to the old sink, plus an audit event. (design §7, §7.2; tasks
-  §3 "Instance security policy", Gate M1a; ADR-002 item 4; lead decision,
+  changed event to the old sink, plus an audit event. A sink is configured
+  only when its endpoint is set and the current configuration passed
+  validation at startup: `audit_sink_validated_at` MUST correspond to the
+  current `audit_sink_config_digest`, so an endpoint that is present but
+  failed validation, or a changed configuration not yet validated, is not
+  configured (the digest correspondence is inferred from "validated at
+  startup" and restart-only changes). Public-signer key enrollment,
+  activation and publication MUST be refused while no sink is configured;
+  emergency disable and standby promotion MUST NOT be refused for a missing,
+  unvalidated or unavailable sink, which raises an alert and a local
+  append-only record (public-api API-153). (design §7, §7.2; tasks §3
+  "Instance security policy", Gate M1a; ADR-002 item 4; lead decision,
   OQ-TM-7, OQ-TM-12, OQ-ADR008-3)
-- **IR-054** An approval is a second `AdministrativeOperation` of kind
-  `approve` whose `approves_operation_id` names the approved operation and
-  whose `actor_id` differs from that operation's `actor_id`. For widening
-  writes and security-domain toggles, including IR-052, the approver MUST hold
-  `security_admin`. (tasks §3 "Instance security policy"; ADR-008 item 12;
-  lead decision, OQ-ADR008-3)
+- **IR-054** This rule covers the operations that need a distinct second
+  `security_admin` approver: the IR-052 toggle, widening writes while
+  `widening_second_approver` is on (ADR-008 item 12) and other
+  security-domain toggles. For them an approval is a second
+  `AdministrativeOperation` of kind `approve` whose `approves_operation_id`
+  names the approved operation and whose `actor_id` differs from that
+  operation's `actor_id`, and the approver MUST hold `security_admin`. It does
+  not change other approval boundaries: a route-bundle approval follows
+  gateway-containment GW-130 and GW-131, where one person MAY hold both the
+  preparer and approver roles by explicit assignment, and the second
+  approvers of public-api API-148 and API-155 (`security_admin` or another
+  `provider_admin`) keep their own rules. (tasks §3 "Instance security
+  policy"; ADR-008 item 12; lead decision, OQ-ADR008-3)
 - **IR-055** Audit events form one hash chain per instance.
   `AuditEvent.sequence` is assigned in the same transaction as the audited
   write and strictly increases; `prev_hash` links each event to the previous

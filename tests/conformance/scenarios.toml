@@ -450,7 +450,7 @@ envs = ["hermetic", "envoy-k3s"]
 harness = ["FX", "UC", "ENV JWKS cache"]
 owners = ["T20.1", "T20.2"]
 positive = "old and new tokens verify through the overlap with no config change; with the audit sink missing or unavailable, emergency disable and standby promotion still proceed, with an alert and a local append-only record"
-negative = "retired key after overlap, unknown kid; public key enrollment, activation or publication with no configured audit sink is refused"
+negative = "retired key after overlap, unknown kid; public key enrollment, activation or publication with no configured audit sink is refused, including a configured sink endpoint that fails startup validation"
 matrix_sha256 = "f6aee453acbc90c6c8e452946bcce0f5744ce8b4462732037da48d48f685441c"
 
 [[scenario.stage]]
