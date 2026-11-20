@@ -31,7 +31,13 @@
 # that a pull request that adds or renames a badge can pass; it is checked
 # strictly once the merge has published it. What the README embeds, a
 # README fetch answered with another error, and a badge served with a
-# non-SVG type fail in both modes.
+# non-SVG type fail in both modes. When the rendered README itself cannot
+# be fetched (transport error, 429 or 5xx after the retries), a pull
+# request falls back to README.md in the current directory, which must be
+# a checkout of README_REF: every https URL in it that ends in
+# coverage.svg or tests.svg must be one of the four badge URLs, each of
+# which must appear exactly once, and the files are then checked as in 2.
+# (The Camo check in 1 needs the rendered page, so it is not made then.)
 #
 #   GH_TOKEN=... scripts/ci/verify-badges-render.sh [--pull-request] OWNER/REPO BRANCH [README_REF]
 set -eu
@@ -103,20 +109,35 @@ readme_api="https://api.github.com/repos/$repo/readme?ref=$readme_ref"
 fetch "$tmp/readme.html" "$readme_api" \
     -H "Authorization: Bearer $GH_TOKEN" \
     -H "Accept: application/vnd.github.html+json"
-if [ "$transient" -eq 1 ]; then
-    transient_problem "could not fetch the rendered README at $readme_ref ($what); nothing was checked"
-    exit "$status"
-fi
-if [ "$code" != 200 ]; then
-    problem "could not fetch the rendered README at $readme_ref: $readme_api answered $what"
+if [ "$transient" -eq 1 ] && [ "$pull_request" -eq 0 ]; then
+    problem "could not fetch the rendered README at $readme_ref ($what); nothing was checked"
     exit 1
-fi
-urls=$(grep -o '<img[^>]*>' "$tmp/readme.html" | grep -E 'coverage\.svg|tests\.svg' \
-    | sed -E 's/^<img[^>]*[[:space:]]src="([^"]*)".*/\1/' || true)
-if [ -z "$urls" ]; then
-    echo "verify-badges-render: no badge <img> in the rendered README:" >&2
-    grep -o '<img[^>]*>' "$tmp/readme.html" >&2 || true
-    exit 1
+elif [ "$transient" -eq 1 ]; then
+    # The offline fallback (see the top): the badge URLs in README.md.
+    echo "::warning::verify-badges-render: could not fetch the rendered README at $readme_ref ($what); checking the badge URLs in the checked-out README.md instead"
+    readme=README.md
+    if [ ! -f README.md ]; then
+        problem "cannot read README.md in $(pwd) for the offline check"
+        exit 1
+    fi
+    urls=$(grep -oE 'https://[^]()<>"[:space:]]*(coverage|tests)\.svg' README.md || true)
+    if [ -z "$urls" ]; then
+        echo "verify-badges-render: no badge URL in README.md" >&2
+        exit 1
+    fi
+else
+    if [ "$code" != 200 ]; then
+        problem "could not fetch the rendered README at $readme_ref: $readme_api answered $what"
+        exit 1
+    fi
+    readme="rendered README"
+    urls=$(grep -o '<img[^>]*>' "$tmp/readme.html" | grep -E 'coverage\.svg|tests\.svg' \
+        | sed -E 's/^<img[^>]*[[:space:]]src="([^"]*)".*/\1/' || true)
+    if [ -z "$urls" ]; then
+        echo "verify-badges-render: no badge <img> in the rendered README:" >&2
+        grep -o '<img[^>]*>' "$tmp/readme.html" >&2 || true
+        exit 1
+    fi
 fi
 seen_rust_tests=0
 seen_rust_coverage=0
@@ -134,7 +155,7 @@ for url in $urls; do
         https://github.com/"$repo"/raw/badges/main/typescript-coverage.svg)
             seen_typescript_coverage=$((seen_typescript_coverage + 1)) ;;
         *)
-            problem "unexpected badge URL in the rendered README: $url"
+            problem "unexpected badge URL in the $readme: $url"
             continue ;;
     esac
     file=${url##*/badges/main/}
@@ -157,7 +178,7 @@ check_badge() {
     badge=$1
     n=$2
     if [ "$n" -eq 0 ]; then
-        problem "the rendered README does not embed badges/main/$badge.svg"
+        problem "the $readme does not embed badges/main/$badge.svg"
     elif [ "$n" -gt 1 ]; then
         problem "badges/main/$badge.svg is embedded more than once ($n)"
     fi

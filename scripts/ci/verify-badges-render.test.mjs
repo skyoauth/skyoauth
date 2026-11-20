@@ -31,9 +31,17 @@ function readme(badges = BADGES) {
   return `<div id="readme"><h1>skyoauth</h1>\n${imgs.join('\n')}\n</div>\n`;
 }
 
+// The checked-out README.md, as the repository's own embeds the badges.
+function markdown(urls = BADGES.map((b) => `https://github.com/${REPO}/raw/badges/main/${b}.svg`)) {
+  const lines = urls.map((u) => `[![badge](${u})](https://github.com/${REPO}/actions/workflows/ci.yml?query=branch%3Amain)`);
+  return `# skyoauth\n\n${lines.join('\n')}\n\nThe badges are SVG files on the badges branch.\n`;
+}
+
 // Runs the script against the given rules. `rules` maps a URL substring
-// to its responses; raw badge URLs not named answer 200 SVG.
-function verify({ pr, rules = {}, html = readme(), args = [REPO, 'main', SHA] }) {
+// to its responses; raw badge URLs not named answer 200 SVG. The script
+// runs in the case directory, whose README.md (none for `md: null`) is
+// what the offline fallback reads.
+function verify({ pr, rules = {}, html = readme(), md = markdown(), args = [REPO, 'main', SHA] }) {
   const dir = join(TOP, `case-${++cases}`);
   const bin = join(dir, 'bin');
   const tmp = join(dir, 'tmp');
@@ -42,11 +50,13 @@ function verify({ pr, rules = {}, html = readme(), args = [REPO, 'main', SHA] })
   copyFileSync(STUB, join(bin, 'curl'));
   chmodSync(join(bin, 'curl'), 0o755);
   writeFileSync(join(dir, 'readme.html'), html);
+  if (md !== null) writeFileSync(join(dir, 'README.md'), md);
   const all = { [README_URL]: '200:application/vnd.github.html+json:readme', ...rules };
   const lines = Object.entries(all).map(([sub, responses]) => `${sub} ${responses}`);
   lines.push('https://raw.githubusercontent.com/ 200:image/svg+xml');
   writeFileSync(join(dir, 'rules'), `${lines.join('\n')}\n`);
   const r = spawnSync('sh', [SCRIPT, ...(pr ? ['--pull-request'] : []), ...args], {
+    cwd: dir,
     encoding: 'utf8',
     timeout: 60_000,
     killSignal: 'SIGKILL',
@@ -103,18 +113,20 @@ describe('verify-badges-render.sh with a stub curl', () => {
         ['a timeout (curl exit 28)', 'x28', 4],
         ['a refused connection (curl exit 7)', 'x7', 1],
       ]) {
-        test(`README fetch that keeps failing with ${what}: ${pr ? 'warning' : 'failure'}`, () => {
+        test(`README fetch that keeps failing with ${what}: ${pr ? 'warning, then the checked-out README.md is checked' : 'failure'}`, () => {
           const r = verify({ pr, rules: { [README_URL]: responses } });
-          assert.equal(r.attempts.length, attempts, r.attempts.join('\n'));
-          assert.equal(r.calls.length, 1, 'no badge is fetched without the README');
+          assert.equal(r.attempts.filter((a) => a.startsWith(README_URL)).length, attempts, r.attempts.join('\n'));
           if (pr) {
             assert.equal(r.status, 0, r.stderr);
             assert.equal(warnings(r).length, 1);
-            assert.match(warnings(r)[0], /could not fetch the rendered README/);
+            assert.match(warnings(r)[0], /could not fetch the rendered README .*checking the badge URLs in the checked-out README\.md instead/);
+            assert.equal(r.calls.length, 5, 'the four badges from README.md are fetched');
+            for (const badge of BADGES) assert.match(r.stdout, new RegExp(`${raw(badge)} -> 200 image/svg\\+xml`));
           } else {
             assert.equal(r.status, 1);
             assert.deepEqual(warnings(r), []);
-            assert.match(r.stderr, /could not fetch the rendered README/);
+            assert.match(r.stderr, /could not fetch the rendered README .*nothing was checked/);
+            assert.equal(r.calls.length, 1, 'no badge is fetched without the README');
           }
           assert.deepEqual(r.leftovers, []);
         });
@@ -210,6 +222,67 @@ describe('verify-badges-render.sh with a stub curl', () => {
       });
     });
   }
+
+  // The offline fallback of a pull request whose rendered README cannot
+  // be fetched: the checked-out README.md must embed each badge URL once.
+  describe('pull request, rendered README unavailable: the checked-out README.md', () => {
+    const down = { [README_URL]: '503' };
+    const url = (b, ref = 'main') => `https://github.com/${REPO}/raw/badges/${ref}/${b}.svg`;
+
+    test('a README.md that lacks a badge: failure', () => {
+      const r = verify({ pr: true, rules: down, md: markdown(BADGES.filter((b) => b !== 'typescript-tests').map((b) => url(b))) });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /the README\.md does not embed badges\/main\/typescript-tests\.svg/);
+    });
+
+    test('a README.md that embeds a badge twice: failure', () => {
+      const r = verify({ pr: true, rules: down, md: markdown([...BADGES, 'rust-coverage'].map((b) => url(b))) });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /rust-coverage\.svg is embedded more than once \(2\)/);
+    });
+
+    test('a README.md badge URL that points elsewhere: failure', () => {
+      const urls = BADGES.map((b) => url(b));
+      urls[1] = url('rust-coverage', 'feature');
+      const r = verify({ pr: true, rules: down, md: markdown(urls) });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /unexpected badge URL in the README\.md: .*badges\/feature\/rust-coverage\.svg/);
+      assert.match(r.stderr, /does not embed badges\/main\/rust-coverage\.svg/);
+    });
+
+    test('a README.md without any badge URL: failure', () => {
+      const r = verify({ pr: true, rules: down, md: markdown([]) });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /no badge URL in README\.md/);
+      assert.equal(r.calls.length, 1);
+    });
+
+    test('no README.md in the current directory: failure', () => {
+      const r = verify({ pr: true, rules: down, md: null });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /cannot read README\.md/);
+      assert.equal(r.calls.length, 1);
+    });
+
+    test('the badge files are still checked: a non-SVG one fails', () => {
+      const r = verify({ pr: true, rules: { ...down, [raw('rust-tests')]: '200:text/plain' } });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /rust-tests\.svg is not served as SVG \(HTTP 200 text\/plain\)/);
+    });
+
+    test('the README.md is not read when the rendered README was fetched', () => {
+      const r = verify({ pr: true, md: markdown([]) });
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(warnings(r), []);
+    });
+
+    test('strict mode never falls back: a broken README.md is not reached', () => {
+      const r = verify({ pr: false, rules: down, md: markdown([]) });
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /nothing was checked/);
+      assert.doesNotMatch(r.stderr, /README\.md/);
+    });
+  });
 
   test('the README ref defaults to the branch and is passed to the API', () => {
     const withRef = verify({ pr: true });

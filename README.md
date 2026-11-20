@@ -187,7 +187,9 @@ run the same check against the badges already published for `main`. On a pull
 request, a fetch that still fails after curl's retries (a transport error, 429
 or 5xx) and a badge not yet published for `main` (404, as for a badge the pull
 request adds or renames) are warnings, not failures; what the README embeds is
-always checked. To protect `main`, require the `CI passed` check: it passes
+always checked: when the rendered README cannot be fetched, the check reads the
+badge URLs from the checked-out `README.md` instead and fails unless each of
+the four appears exactly once and no other badge URL does. To protect `main`, require the `CI passed` check: it passes
 when `Docs consistency` and `Conformance registry` passed and every other job
 passed or was skipped. Dependabot keeps actions, crates and npm packages up to
 date.
