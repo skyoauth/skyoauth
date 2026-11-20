@@ -1452,6 +1452,42 @@ describe('--gate-pr', () => {
     }
   });
 
+  // A second commit on main, with origin/main at it: the new merge-base.
+  const advanceMain = (root) => {
+    const mb = commit(root, 'main moves on');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    return mb;
+  };
+
+  // ls-tree -z separates the path with the first tab; a path may hold more.
+  test('a path with a tab under tests/conformance is copied from the merge-base whole', () => {
+    const { root } = mainRoot();
+    // Two stray fixture entries, one named with a tab after the other's name.
+    mkdirSync(join(root, FIXTURES));
+    writeFileSync(join(root, FIXTURES, 'zz'), 'x\n');
+    writeFileSync(join(root, FIXTURES, 'zz\tmore'), 'y\n');
+    const mb = advanceMain(root);
+    const plainErrors = check(root).errors.map(formatError);
+    assert.equal(plainErrors.length, 2, plainErrors.join('\n'));
+    gateCommit(root, '["M1a"]');
+    const res = checkGatePr(root);
+    assert.deepEqual(res.errors.map(formatError), plainErrors);
+    assert.deepEqual(res.notes, [NOTE_AT(mb)]);
+  });
+
+  // .gitmodules `ignore = all` hides a submodule (gitlink) change from
+  // diff-tree unless --ignore-submodules=none overrides it.
+  test('a gitlink change hidden by .gitmodules ignore = all', () => {
+    const { root } = mainRoot();
+    writeFileSync(join(root, '.gitmodules'), '[submodule "sub"]\n\tpath = sub\n\turl = ./nowhere\n\tignore = all\n');
+    mkdirSync(join(root, 'sub'));
+    git(root, 'update-index', '--add', '--cacheinfo', `160000,${'a'.repeat(40)},sub`);
+    advanceMain(root);
+    gateCommit(root, '["M1a"]', (r) => git(r, 'update-index', '--cacheinfo', `160000,${'b'.repeat(40)},sub`));
+    assert.deepEqual([git(root, 'rev-parse', 'HEAD^:sub'), git(root, 'rev-parse', 'HEAD:sub')], ['a'.repeat(40), 'b'.repeat(40)]);
+    expectOnly(checkGatePr(root), 'gate-pr', /^error \[gate-pr\] the gate PR changes sub; it may change only the gates_passed line of tests\/conformance\/scenarios\.toml$/);
+  });
+
   test('not a gate PR: gates_passed does not grow (unchanged, or a milestone dropped): nothing else is checked', () => {
     const { root, mb } = mainRoot((t) => setGates('["M0", "M1a"]')(allM1a(t)));
     writeFileSync(join(root, 'other.txt'), 'x');

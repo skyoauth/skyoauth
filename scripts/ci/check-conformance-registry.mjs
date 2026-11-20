@@ -677,12 +677,13 @@ export function checkGatePr(root) {
   if (mbr.status !== 0) throw new Error(`git merge-base: ${mbr.stderr}`);
   const mb = mbr.stdout.trim();
   out.mergeBase = mb;
-  const blob = (rev, rel) => {
-    const r = git(['cat-file', 'blob', `${rev}:${rel}`], 'buffer');
+  // The blob `object` (an id, or `<rev>:<path>`), or null if there is none.
+  const blob = (object) => {
+    const r = git(['cat-file', 'blob', object], 'buffer');
     return r.status === 0 ? r.stdout : null;
   };
-  const baseText = blob(mb, SCENARIOS)?.toString('utf8') ?? null;
-  const headText = blob(head, SCENARIOS)?.toString('utf8') ?? null;
+  const baseText = blob(`${mb}:${SCENARIOS}`)?.toString('utf8') ?? null;
+  const headText = blob(`${head}:${SCENARIOS}`)?.toString('utf8') ?? null;
   const before = gatesOf(baseText);
   const after = gatesOf(headText);
   out.added = [...new Set(after.filter((g) => !before.includes(g)))];
@@ -701,10 +702,11 @@ export function checkGatePr(root) {
   }
   // Its diff: the gates_passed line of scenarios.toml and nothing else. The
   // raw tree diff lists every path whose entry differs, content, mode or type
-  // (a rename or copy is a deletion and an addition, with --no-renames); for
+  // (a rename or copy is a deletion and an addition, with --no-renames; a
+  // submodule's gitlink even if .gitmodules says `ignore = all`); for
   // scenarios.toml, the text comparison below covers only the content, so its
   // mode (and with it its type) must not change either.
-  const raw = ok(['diff-tree', '-r', '-z', '--raw', '--no-renames', mb, head]).split('\0');
+  const raw = ok(['diff-tree', '-r', '-z', '--raw', '--no-renames', '--ignore-submodules=none', mb, head]).split('\0');
   for (let i = 0; i + 1 < raw.length; i += 2) {
     const [from, to] = raw[i].slice(1).split(' ');
     const p = raw[i + 1];
@@ -731,11 +733,15 @@ export function checkGatePr(root) {
   if (bi >= 0 && hi >= 0) {
     const dir = mkdtempSync(join(tmpdir(), 'gate-pr-'));
     try {
+      // `<mode> <type> <object>\t<path>`: the path is all after the first
+      // tab (it may hold more), and the contents are read by object id.
       for (const entry of ok(['ls-tree', '-r', '-z', mb, '--', ...GATE_PATHS]).split('\0').filter(Boolean)) {
-        const [meta, rel] = entry.split('\t');
-        if (meta.split(' ')[1] !== 'blob') continue;
+        const tab = entry.indexOf('\t');
+        const [, type, object] = entry.slice(0, tab).split(' ');
+        const rel = entry.slice(tab + 1);
+        if (type !== 'blob') continue;
         mkdirSync(dirname(join(dir, rel)), { recursive: true });
-        writeFileSync(join(dir, rel), blob(mb, rel));
+        writeFileSync(join(dir, rel), blob(object));
       }
       b[bi] = h[hi];
       writeFileSync(join(dir, SCENARIOS), b.join('\n'));
