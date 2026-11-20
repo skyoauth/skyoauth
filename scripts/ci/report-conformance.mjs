@@ -338,18 +338,23 @@ const NO_RUNNER = 'has no decided runner (layout §6 "Still open", item 5)';
 export const jobOf = (leg) => leg.split('/')[0];
 
 // Layout §3 "Which job produces a test": [runner, package, target, jobs];
-// null matches any package or target. PROVISIONAL in two ways (layout §6
-// "Still open"): skyoauth-service is absent because service/ tests are not
-// conformance evidence for now (item 3), and a test whose package and target
-// fix several jobs is expected from every one of them that its stage lists,
-// until a per-target job mapping exists (item 4).
+// null matches any package or target, and the first matching row wins.
+// skyoauth-operator has one job per test target (decided, layout §6): target
+// operator runs in operator, target recovery_offline in the recovery-offline
+// chain, and any other target of the package (its lib or bin tests too) is
+// produced by no job. PROVISIONAL in two ways (layout §6 "Still open"):
+// skyoauth-service is absent because service/ tests are not conformance
+// evidence for now (item 3), and a skyoauth-scenarios envoy_k3s or live test
+// is expected from every one of its several jobs that its stage lists, until
+// a per-target job mapping exists for them (item 4).
 export const TEST_JOBS = [
   ['nextest', 'skyoauth-scenarios', 'hermetic', ['scenarios-hermetic']],
   ['nextest', 'skyoauth-scenarios', 'pg', ['scenarios-pg']],
   ['nextest', 'skyoauth-scenarios', 'envoy_k3s', ['scenarios-envoy-k3s', 'scenarios-envoy-k3s-nightly', 'migration-rehearsal', 'deployed-topology-audit']],
   ['nextest', 'skyoauth-scenarios', 'live', ['live-wif-push', 'live-wif-negative']],
   ['nextest', 'skyoauth-client', null, ['clients-rust', 'clients-rust-native']],
-  ['nextest', 'skyoauth-operator', null, ['operator', 'recovery-offline']],
+  ['nextest', 'skyoauth-operator', 'operator', ['operator']],
+  ['nextest', 'skyoauth-operator', 'recovery_offline', ['recovery-offline']],
   ['vitest', null, null, ['typescript']],
   ['playwright', null, null, ['typescript-browser']],
 ];
