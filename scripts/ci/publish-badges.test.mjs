@@ -21,7 +21,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -614,8 +614,13 @@ describe('numeric settings and counts', () => {
 describe('large JUnit reports', () => {
   const LIMIT_MS = 30_000;
 
+  // Virtual memory for awk in the tests that limit it: far less than the
+  // 72 MiB line of BIG_REPORT.
+  const AWK_MEMORY_KIB = 45 * 1024;
+
   // The awk on PATH, and mawk, gawk and busybox awk wherever installed:
-  // one entry per distinct binary, each run as the only `awk` on PATH.
+  // one entry per distinct binary, each run as the only `awk` on PATH,
+  // as is (PATH) and limited to AWK_MEMORY_KIB (LIMITED_PATH, LIMITED_AWK).
   const AWKS = (() => {
     const dirs = (ENV.PATH ?? '').split(':').filter(Boolean);
     const which = (name) => {
@@ -636,11 +641,20 @@ describe('large JUnit reports', () => {
       const key = [realpathSync(path), ...argv].join(' ');
       if (found.has(key)) continue;
       const bin = join(TOP, `awk-${found.size}`);
+      const limited = join(TOP, `awk-${found.size}-limited`);
       mkdirSync(bin);
+      mkdirSync(limited);
       assert.ok(!path.includes("'"), path);
       writeFileSync(join(bin, 'awk'), `#!/bin/sh\nexec '${path}' ${argv.join(' ')} "$@"\n`);
+      writeFileSync(join(limited, 'awk'), `#!/bin/sh\nulimit -v ${AWK_MEMORY_KIB} || exit 125\nexec '${path}' ${argv.join(' ')} "$@"\n`);
       chmodSync(join(bin, 'awk'), 0o755);
-      found.set(key, { label: name === 'awk' ? `awk on PATH (${basename(realpathSync(path))})` : name, PATH: `${bin}:${ENV.PATH}` });
+      chmodSync(join(limited, 'awk'), 0o755);
+      found.set(key, {
+        label: name === 'awk' ? `awk on PATH (${basename(realpathSync(path))})` : name,
+        PATH: `${bin}:${ENV.PATH}`,
+        LIMITED_PATH: `${limited}:${ENV.PATH}`,
+        LIMITED_AWK: join(limited, 'awk'),
+      });
     }
     return [...found.values()];
   })();
@@ -677,15 +691,45 @@ describe('large JUnit reports', () => {
     'a large DOCTYPE before the root element': `<?xml version="1.0"?>\n<!DOCTYPE testsuites [\n${BODY.replace(/^.*?test_(\d+).*$/gm, '<!ENTITY e$1 "output line $1 of a failed run">')}]>\n<testsuites name="t" tests="12" failures="0" errors="0" skipped="0"><testsuite name="s"/></testsuites>\n`,
   };
 
+  // A compact report can hold the root element and a failed run's whole
+  // output on one line, which awk would read as one record. Written in
+  // 1 MiB pieces, once, for every test that reads it.
+  let bigReport;
+  function BIG_REPORT() {
+    if (!bigReport) {
+      bigReport = join(TOP, 'big-junit.xml');
+      const fd = openSync(bigReport, 'w');
+      writeSync(fd, '<?xml version="1.0" encoding="UTF-8"?><testsuites name="nextest-run" tests="12" failures="3" errors="0" skipped="1"><testsuite name="s"><testcase name="t"><failure>');
+      const piece = Buffer.alloc(1 << 20, 'output of a failed run ');
+      for (let i = 0; i < 72; i++) writeSync(fd, piece);
+      writeSync(fd, '</failure></testcase></testsuite></testsuites>\n');
+      closeSync(fd);
+    }
+    return bigReport;
+  }
+
   test('finds an awk to run', () => {
     assert.ok(AWKS.length > 0);
     assert.ok(Buffer.byteLength(REPORTS['a large report']) > 8_000_000);
   });
 
-  for (const { label, PATH } of AWKS) {
+  for (const awk of AWKS) {
+    const { label, PATH } = awk;
     test(`a large report with failures publishes a red badge in time (${label})`, async () => {
       const { remote, sha, work, file } = setup();
       const r = await publishWithin(work[0], ['main', sha, '--rust-junit', file('junit.xml', REPORTS['a large report'])], { PATH });
+      assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
+    });
+
+    test(`a 72 MiB report on one line publishes a red badge in time with awk limited to 45 MiB (${label})`, async () => {
+      const big = BIG_REPORT();
+      assert.ok(statSync(big).size > 72 * (1 << 20));
+      const r0 = spawnSync(awk.LIMITED_AWK, ['{ n += length($0) } END { print n }', big], { env: ENV, encoding: 'utf8' });
+      assert.ok(r0.status !== 0 && r0.status !== 125, `the limit holds: awk cannot read the whole line (status ${r0.status}, ${r0.stdout}${r0.stderr})`);
+      const { remote, sha, work } = setup();
+      const r = await publishWithin(work[0], ['main', sha, '--rust-junit', big], { PATH: awk.LIMITED_PATH });
       assert.equal(r.signal, null, `killed after ${LIMIT_MS} ms`);
       assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });

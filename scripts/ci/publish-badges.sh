@@ -278,9 +278,11 @@ gate() {
 # <testsuites> element, without leading zeros (which `$(( ))` reads as
 # octal), or nothing when it is absent. The element may span lines, and
 # its attributes may be single- or double-quoted with spaces around `=`.
-# Only the first 64 KiB of FILE are read (a failed run can leave a report
-# of many megabytes, and building it into one awk string is quadratic in
-# mawk and busybox awk), so the start tag must end within them.
+# Only the first 64 KiB of FILE are read, and they are cut off before awk
+# sees them (a failed run can leave a report of many megabytes, possibly
+# on one line, which awk would hold whole as a record, and joining many
+# lines into one awk string is quadratic in mawk and busybox awk), so the
+# start tag must end within them.
 # Fails when <testsuites> is not the first element, after nothing but
 # white space and an optional <?xml ...?> declaration (so a comment,
 # DOCTYPE or processing instruction before it fails: its text could
@@ -292,9 +294,8 @@ gate() {
 # trusted with.
 junit_attr() {
     rc=0
-    value=$(tr '\r\t' '  ' <"$1" | awk -v want="$2" -v sq="'" '
+    value=$(head -c 65536 <"$1" | tr '\r\t' '  ' | awk -v want="$2" -v sq="'" '
         { s = s $0 " " }
-        length(s) > 65536 { exit }
         END {
             s = substr(s, 1, 65536)
             sub(/^ *<\?xml ([^?]|\?[^>])*\?>/, "", s)
