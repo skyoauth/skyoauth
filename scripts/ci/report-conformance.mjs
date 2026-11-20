@@ -9,6 +9,8 @@
 //        [--require-milestone M] [--require-history]
 //        [--allow-commit-mismatch] [--json FILE] [--summary FILE]
 //
+// Each value option may be given once; a repeat is a usage error.
+//
 // Input
 //   --artifacts DIR   Downloaded artifacts of every run for the commit, one
 //                     directory per run named by its numeric run ID, one
@@ -35,11 +37,13 @@
 //                     (layout §3 "Waivers"); the caller fetches it, for
 //                     example with `git show origin/main:tests/conformance/waivers.toml`.
 //                     The waivers for --commit get the registry check's full
-//                     waiver rule, the others only its shape checks.
+//                     waiver rule, the others only its shape checks. A FILE
+//                     that is missing or not a regular file is a usage error.
 //   --root DIR        Checkout of the judged commit (default: this
 //                     repository). In a git checkout, HEAD must be --commit
 //                     (else exit 2, no report; --allow-commit-mismatch
-//                     prints the report as untrusted). Its registry is
+//                     prints the report as untrusted). GIT_DIR and the other
+//                     variables that point git elsewhere are ignored. Its registry is
 //                     checked first with check-conformance-registry.mjs; any
 //                     error stops the report.
 //   --today DATE      Judging date for waiver expiry (default: today, UTC);
@@ -78,7 +82,9 @@
 // Exit status (exitStatus below; tests/conformance/README.md "Output and
 // exit status" is the one place that documents it)
 //   2  usage, registry or waiver-file errors (no report), or input errors
-//      (the report is printed with trusted: false, but cannot be trusted);
+//      (the report is printed with trusted: false, but cannot be trusted;
+//      with --require-milestone, a --root that is not a git checkout is
+//      one, as the gate would judge a registry not bound to --commit);
 //   with --require-milestone M, otherwise:
 //   0  the gate of M is passed (every stage it covers is passed);
 //   1  it is not. Stages of other milestones and of conditional sub-IDs do
@@ -88,14 +94,13 @@
 //      included, has a failed (unwaived) pair;
 //   0  none has.
 
-import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict } from 'smol-toml';
 
-import { checkRegistry, checkWaivers, formatError, history, load, locate, Report, WAIVERS } from './check-conformance-registry.mjs';
+import { checkRegistry, checkWaivers, formatError, gitIn, history, load, locate, Report, WAIVERS } from './check-conformance-registry.mjs';
 import { LAYOUT, MILESTONES, parseEnvironments, SCENARIOS, SUBCASES } from './gen-conformance-registry.mjs';
 
 // ---------------------------------------------------------------------------
@@ -222,24 +227,48 @@ export const SKIPPED_ELEMENTS = new Set(['skipped', 'ignored', 'disabled']);
 // that starts writing a new verdict element cannot be read as a pass.
 const QUIET_ELEMENTS = new Set(['system-out', 'system-err', 'properties']);
 const STATUS_ATTR = { passed: 'passed', success: 'passed', run: 'passed', skipped: 'skipped', notrun: 'skipped', disabled: 'skipped', ignored: 'skipped', failed: 'failed', failure: 'failed', error: 'failed' };
+// Attributes that mark testcases not run, as some dialects write them in
+// place of (or next to) the elements. On a <testcase>: "true" or "1" makes it
+// skipped, "false" or "0" means nothing. On a <testsuite> or <testsuites>
+// they are counts (quick-junit, as nextest uses it, writes disabled="N";
+// vitest and Playwright write skipped="N"): their sum may not exceed the
+// skipped testcases under that element, or a skipped test would read as
+// passed; "true" makes every testcase under it skipped (nested suites
+// included, before their counts are checked; a failed one stays failed),
+// "false" means nothing. Any other value is an input error.
+const SKIP_ATTRS = ['skipped', 'disabled', 'ignored'];
+const skipFlag = (attrs, what) => {
+  let skipped = false;
+  for (const a of SKIP_ATTRS) {
+    const v = attrs[a];
+    if (v === undefined || v === 'false' || v === '0') continue;
+    if (v === 'true' || v === '1') skipped = true;
+    else throw new InputError(`${what}: ${a}="${v}" is not true, false, 1 or 0`);
+  }
+  return skipped;
+};
 // Elements are matched by local name, so a namespaced <j:failure> is a
 // failure too.
 const local = (n) => n.slice(n.lastIndexOf(':') + 1);
 
 // The testcases of a JUnit report: [{ classname, name, status }], status one
 // of passed, failed, skipped. Throws InputError for a malformed report, for
-// an element it does not know inside a <testsuite> or <testcase>, and for a
-// suite-level failure (a <failure>, <error> or retry marker directly in a
+// an element it does not know inside a <testsuite> or <testcase>, for a
+// skipped, disabled or ignored attribute it cannot account for (SKIP_ATTRS),
+// and for a suite-level failure (a <failure>, <error> or retry marker directly in a
 // <testsuite>, such as a setup crash): it cannot be pinned to a testcase, so
 // the report is not used and the result cannot be trusted.
 export function readJUnit(text) {
   const root = parseXml(text);
   if (local(root.name) !== 'testsuites' && local(root.name) !== 'testsuite') throw new InputError(`the root element is <${root.name}>, not <testsuites> or <testsuite>`);
   const cases = [];
-  const walk = (el, inSuite) => {
+  // `skip`: an enclosing suite is flagged skipped (SKIP_ATTRS = "true"), so
+  // every testcase under it is, a failed one excepted. A testcase's own skip
+  // attributes are still validated under it (skipFlag runs first).
+  const walk = (el, inSuite, skip) => {
     for (const c of el.children) {
       const n = local(c.name);
-      if (n === 'testsuite' || n === 'testsuites') walk(c, n === 'testsuite' || inSuite);
+      if (n === 'testsuite' || n === 'testsuites') suite(c, n === 'testsuite' || inSuite, skip);
       else if (n === 'testcase') {
         if (!inSuite) throw new InputError('a <testcase> outside any <testsuite>');
         const { name, classname } = c.attrs;
@@ -249,14 +278,34 @@ export function readJUnit(text) {
         const kids = c.children.map((k) => local(k.name));
         const odd = kids.find((k) => !FAILED_ELEMENTS.has(k) && !SKIPPED_ELEMENTS.has(k) && !QUIET_ELEMENTS.has(k));
         if (odd !== undefined) throw new InputError(`testcase ${name}: unknown element <${odd}>`);
-        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
+        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], skipFlag(c.attrs, `testcase ${name}`) || skip ? 'skipped' : 'passed', ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
         const status = verdicts.includes('failed') ? 'failed' : verdicts.includes('skipped') ? 'skipped' : 'passed';
         cases.push({ classname, name, status });
       } else if (FAILED_ELEMENTS.has(n)) throw new InputError(`a suite-level <${c.name}> in <${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>: it fails no particular testcase`);
       else if (!QUIET_ELEMENTS.has(n)) throw new InputError(`unknown element <${c.name}> in <${el.name}>`);
     }
   };
-  walk(root, local(root.name) === 'testsuite');
+  // A suite's own skip attributes (SKIP_ATTRS): a "true" flag is passed down
+  // before the walk, so it reaches the cases of nested suites before their
+  // counts are checked; the counts are checked against the testcases under
+  // the suite once they are read.
+  const suite = (el, inSuite, inherited) => {
+    const what = `<${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>`;
+    let count = 0;
+    let skip = inherited;
+    for (const a of SKIP_ATTRS) {
+      const v = el.attrs[a];
+      if (v === undefined || v === 'false') continue;
+      if (v === 'true') skip = true;
+      else if (/^(0|[1-9]\d{0,8})$/.test(v)) count += Number(v);
+      else throw new InputError(`${what}: ${a}="${v}" is not a count, true or false`);
+    }
+    const from = cases.length;
+    walk(el, inSuite, skip);
+    const shown = cases.slice(from).filter((t) => t.status === 'skipped').length;
+    if (count > shown) throw new InputError(`${what} counts ${count} skipped or disabled test(s), but only ${shown} of its testcases are marked skipped, so which are skipped cannot be told`);
+  };
+  suite(root, local(root.name) === 'testsuite', false);
   return cases;
 }
 
@@ -372,6 +421,7 @@ const LEG_FILES = ['leg', 'junit.xml'];
 export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
 // Artifacts of jobs that are not conformance legs (ci.yml): the only ones
 // that may lack a leg file. Any other artifact without one is an input error.
+// The self-test checks this list against the workflows' upload steps.
 export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/];
 
 // What a path is, without following a symbolic link: dir, file, symlink,
@@ -791,7 +841,7 @@ const USAGE =
 // HEAD of the git checkout whose top level is `root`; undefined when root is
 // not one (or git is missing), null when HEAD names no commit.
 export function checkoutHead(root) {
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  const git = gitIn(root);
   const top = git('rev-parse', '--show-toplevel');
   if (top.status !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(root)) return undefined;
   const head = git('rev-parse', '--verify', '--quiet', 'HEAD^{commit}');
@@ -812,8 +862,16 @@ export function exitStatus(res, requireMilestone) {
 
 export function run(argv, { log = console.log, logErr = console.error, now = new Date() } = {}) {
   const o = { root: resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'), docsOnly: false, requireHistory: false };
+  const given = new Set();
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // A value flag given twice is ambiguous (which --commit is judged?), so
+    // it is a usage error rather than last-one-wins.
+    if (VALUE_FLAGS.includes(a) && given.has(a)) {
+      logErr(`report-conformance: ${a} given more than once\n${USAGE}`);
+      return 2;
+    }
+    given.add(a);
     if (a === '--docs-only') o.docsOnly = true;
     else if (a === '--require-history') o.requireHistory = true;
     else if (a === '--allow-commit-mismatch') o.allowCommitMismatch = true;
@@ -842,7 +900,11 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   // to compare (a note); --require-history makes that an error below.
   const bound = { errors: [], notes: [] };
   const head = checkoutHead(root);
-  if (head === undefined) bound.notes.push('the registry is not bound to --commit: --root is not a git checkout');
+  // A gate verdict needs a bound root, so with --require-milestone an
+  // unbound one (not a git checkout here, a mismatch above) is an input
+  // error: exit 2, never a verdict of 0 or 1.
+  if (head === undefined && o.requireMilestone !== undefined) bound.errors.push('--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit\'s');
+  else if (head === undefined) bound.notes.push('the registry is not bound to --commit: --root is not a git checkout');
   else if (head !== o.commit) {
     const msg = `--root is a checkout of ${head ?? 'no commit'}, not of --commit ${o.commit}, so its registry is not the judged commit's`;
     if (!o.allowCommitMismatch) {
@@ -871,6 +933,9 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   let waivers = [];
   if (o.waivers !== undefined) {
     if (!existsSync(o.waivers)) return usage(`--waivers ${o.waivers}: no such file`);
+    // A directory (or a FIFO, a device) is a wrong argument, not an empty
+    // waiver list and not an internal error.
+    if (!statSync(o.waivers).isFile()) return usage(`--waivers ${o.waivers}: not a regular file (give the waivers.toml file, not its directory)`);
     const text = readFileSync(o.waivers, 'utf8');
     const rep = new Report();
     const doc = load(text, o.waivers, rep);

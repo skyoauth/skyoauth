@@ -18,9 +18,10 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
-import { checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
+import { checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
+import { GIT_LOCATION as DOCS_GIT_LOCATION } from './docs-check.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
+import { assertGitImmune, GIT_ENV, normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -1118,7 +1119,6 @@ function waiver(over = {}) {
     .join('\n')}\n`;
 }
 
-const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
 function git(root, ...args) {
   const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env: GIT_ENV });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
@@ -1218,6 +1218,28 @@ describe('rule waivers', () => {
       expectOk(check(root));
     });
   }
+
+  // A git hook or `git rebase --exec` exports GIT_DIR and its kin; git -C
+  // obeys them, so a plain directory would borrow another repository's
+  // history (and its origin/main) for the waiver rule.
+  test('an inherited GIT_DIR does not make a plain directory a checkout', () => {
+    assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES']);
+    assert.deepEqual(DOCS_GIT_LOCATION, GIT_LOCATION, 'docs-check.mjs keeps its own copy of the list');
+    const other = gitRoot();
+    const plainRoot = withWaiver(fixture({ [SCENARIOS]: implementedA24 }), waiver({ commit: `"${other.head}"` }));
+    const gitDir = join(other.root, '.git');
+    for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: plainRoot }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', plainRoot], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.equal(r.stderr, `${HISTORY_ERROR('the root is not a git checkout')}\ncheck-conformance-registry: 1 error(s)\n`);
+    }
+  });
+
+  // The git fixtures here with an absolute GIT_DIR exported (as in a git
+  // hook): they pass and leave that repository alone.
+  test('the git fixtures are immune to an inherited GIT_DIR', () => {
+    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make']);
+  });
 
   test('--require-history passes with the history and no waivers', () => {
     const { root } = gitRoot();
