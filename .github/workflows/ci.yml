@@ -665,6 +665,7 @@ jobs:
       (github.event_name == 'pull_request' ||
        (needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -715,6 +716,7 @@ jobs:
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [rust-coverage, service-nextest, typescript-coverage]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
     concurrency:

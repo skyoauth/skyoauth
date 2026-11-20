@@ -23,7 +23,10 @@
 # the badges published for main.
 #
 # Every fetch is retried by curl (--retry 3 --retry-delay 2: timeouts, 408,
-# 429 and 5xx) and limited to 20 seconds. By default (after a publication,
+# 429 and 5xx), each attempt is limited to 20 seconds, and no retry starts
+# more than 60 seconds after the first attempt (--retry-max-time 60: a
+# Retry-After that would wait past that ends the retries instead of
+# sleeping, which --max-time does not limit). By default (after a publication,
 # and on a docs-only push to main) every problem fails the check. With
 # --pull-request, a problem the pull request cannot have caused only warns
 # (a `::warning::` annotation, exit 0): a transport error, 429 or 5xx that
@@ -72,7 +75,7 @@ fetch() {
     fetch_url=$2
     shift 2
     rc=0
-    meta=$(curl -sS --retry 3 --retry-delay 2 --max-time 20 -o "$fetch_out" \
+    meta=$(curl -sS --retry 3 --retry-delay 2 --retry-max-time 60 --max-time 20 -o "$fetch_out" \
         -w '%{http_code} %{content_type}' "$@" "$fetch_url") || rc=$?
     code=${meta%% *}
     ctype=${meta#* }

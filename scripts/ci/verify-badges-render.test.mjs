@@ -100,10 +100,10 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.deepEqual(r.leftovers, []);
       });
 
-      test('passes every curl --retry 3 --retry-delay 2 --max-time 20', () => {
+      test('passes every curl --retry 3 --retry-delay 2 --retry-max-time 60 --max-time 20', () => {
         const r = verify({ pr });
         assert.equal(r.status, 0, r.stderr);
-        for (const call of r.calls) assert.match(call, /(^| )--retry 3 --retry-delay 2 --max-time 20( |$)/, call);
+        for (const call of r.calls) assert.match(call, /(^| )--retry 3 --retry-delay 2 --retry-max-time 60 --max-time 20( |$)/, call);
       });
 
       for (const [what, responses, attempts] of [
@@ -290,6 +290,19 @@ describe('verify-badges-render.sh with a stub curl', () => {
     const withoutRef = verify({ pr: false, args: [REPO, 'main'] });
     assert.equal(withoutRef.status, 0, withoutRef.stderr);
     assert.match(withoutRef.calls[0], new RegExp(`${README_URL}\\?ref=main`));
+  });
+
+  // A job that runs the script has a timeout, and one long enough for the
+  // script to finish on its own: at worst 5 fetches, each retried for up
+  // to 60 seconds with a last attempt of up to 20 (about 7 minutes).
+  test('the CI jobs that run it have a timeout above its worst case', () => {
+    const ci = readFileSync(join(dirname(SCRIPT), '..', '..', '.github', 'workflows', 'ci.yml'), 'utf8');
+    for (const job of ['verify-badges', 'publish-badges']) {
+      const block = ci.match(new RegExp(`^  ${job}:\\n((?:(?:    .*)?\\n)*)`, 'm'))?.[1] ?? '';
+      assert.match(block, /verify-badges-render\.sh/, `${job} runs the script`);
+      const minutes = Number(block.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+      assert.ok(minutes >= 8 && minutes <= 30, `${job}: timeout-minutes ${minutes}`);
+    }
   });
 
   test('an unknown option is a usage error', () => {
