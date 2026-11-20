@@ -120,9 +120,9 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/gen-conformance-registry.test.mjs
 
-      # The result reporter (layout §3 "Result join") is not run on real
-      # artifacts yet; its self-test runs here so it is tested on every
-      # change.
+      # The result reporter (layout §3 "Result join") runs on real artifacts
+      # only in `conformance-report`, which code changes alone reach; its
+      # self-test runs here so it is tested on every change.
       - name: Self-test the result reporter
         if: success() || failure()
         run: node --test scripts/ci/report-conformance.test.mjs
@@ -556,6 +556,78 @@ jobs:
           path: |
             target/nextest/ci/junit.xml
             target/nextest/ci/leg
+          if-no-files-found: warn
+
+  # Informational conformance report: runs scripts/ci/report-conformance.mjs
+  # on the leg artifacts of this run (docs/testing/conformance-layout.md §3
+  # "Leg artifacts"), appends its Markdown to the step summary and uploads
+  # its JSON. It judges this run only, not every run for the commit, and no
+  # milestone gate (no --require-milestone, no --require-history), so a
+  # stage that is not run or planned never fails it. Only a reporter error
+  # fails it: usage, registry or input errors, or a crash; a failed
+  # conformance test is a warning here, because it already fails its own
+  # leg job (scripts/ci/report-conformance-ci.sh). It is not in `ci-passed`
+  # and must not be made a required check.
+  #
+  # It runs after its leg jobs whatever their result, but not when
+  # `changes` skipped them. `needs` lists every job that uploads a leg
+  # artifact (`junit-<leg id>-attempt-N`), so all of them have finished
+  # before the download; the PR that adds a leg adds its job here (the
+  # reporter self-test checks it). The reporter binds the registry to the
+  # judged commit through the checkout's HEAD, so a pull request run checks
+  # out and judges the PR head, as `gh run view` names it in `headSha`
+  # (tests/conformance/README.md "The reporter").
+  conformance-report:
+    name: Conformance report (informational)
+    needs:
+      - changes
+      - scenarios-pg
+    if: always() && needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ env.COMMIT }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install reporter dependencies
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
+
+      # One directory per artifact under the run's directory, as the
+      # reporter reads them (a pattern download keeps them apart). Whether a
+      # re-run attempt sees the artifacts of earlier attempts here is not
+      # verified (layout §6 "Still open", item 6).
+      - name: Download the leg artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: junit-*-attempt-*
+          path: ${{ runner.temp }}/conformance-artifacts/${{ github.run_id }}
+
+      - name: Report
+        env:
+          ARTIFACTS: ${{ runner.temp }}/conformance-artifacts
+          REPORT_JSON: ${{ runner.temp }}/conformance-report.json
+        run: sh scripts/ci/report-conformance-ci.sh
+
+      # Not a leg artifact: NOT_CONFORMANCE in the reporter lists it.
+      - name: Upload the JSON report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-report-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/conformance-report.json
           if-no-files-found: warn
 
   typescript:
