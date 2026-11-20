@@ -1,0 +1,1 @@
+{"branch":"main","rust_coverage":{"status":"ok","lines_percent":97.7,"commit":"20e6bbb"},"rust_tests":{"status":"passed","passed":46,"failed":0,"commit":"20e6bbb"},"typescript_coverage":{"status":"ok","lines_percent":100.0,"commit":"20e6bbb"},"typescript_tests":{"status":"passed","passed":7,"failed":0,"commit":"20e6bbb"}}
