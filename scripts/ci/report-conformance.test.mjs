@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -276,7 +276,15 @@ describe('statuses', () => {
     assert.match(plainRun.err, /some implemented stage has a failed result/);
     // Only the conditional stage failed: still 1 without the flag.
     assert.equal(gateRun([pgTest('A33.90', 'neg')]).code, 1);
+    const clean0 = gateRun([], ['--require-milestone', 'M1b']);
+    assert.equal(clean0.code, 0);
+    assert.equal(clean0.err, '', 'nothing on stderr when the gate passed and nothing else failed');
+    assert.equal(gateRun([]).err, '');
     assert.equal(gateRun([]).code, 0);
+    // The gate failed and so did a stage outside it: both are said.
+    const both = gateRun([pgTest('A47', 'neg'), A24_NEG], ['--require-milestone', 'M1b']);
+    assert.equal(both.code, 1);
+    assert.match(both.err, /milestone M1b is failed, not passed\n.*note: implemented stages outside the M1b gate failed/);
     // The gate's own failure: 1, and no note about other stages.
     const own = gateRun([pgTest('A47', 'neg')], ['--require-milestone', 'M1b']);
     assert.equal(own.code, 1);
@@ -289,8 +297,10 @@ describe('statuses', () => {
 
   test('--require-milestone with input errors: exit 2 even when the gate passed, and the JSON says trusted: false', () => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
-    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }, { leg: null, name: 'mystery', junit: null }])]);
+    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, t === A24_NEG ? 'failed' : 'passed'])) }, { leg: null, name: 'mystery', junit: null }])]);
     assert.equal(r.code, 2);
+    assert.equal(stage(r.json, 'A24', 'M1a').status, 'failed');
+    assert.doesNotMatch(r.err, /outside the M1b gate/, 'an untrusted report gets no note about the gate');
     assert.equal(r.json.milestones.M1b.gate, 'passed');
     assert.equal(r.json.trusted, false);
     assert.equal(r.json.input_errors.length, 1);
@@ -868,6 +878,9 @@ describe('waivers', () => {
     const foreign = waiver(other, { test: '"nextest:skyoauth-scenarios/pg/x::a24_neg_renamed_later"', leg: '"scenarios-pg/arm64"' });
     const ok = report(dir, ['--require-history', '--waivers', waiverFile(`${foreign}\n${waiver(head)}`), '--artifacts', failedThenPassed(head)], { commit: head });
     assert.equal(ok.code, 0, ok.err);
+    assert.doesNotMatch(ok.out, /reachability/, 'no history note for the waivers of other commits');
+    const noHist = report(dir, ['--waivers', waiverFile(foreign), '--artifacts', failedThenPassed(head)], { commit: head });
+    assert.doesNotMatch(noHist.out, /reachability/);
     assert.deepEqual(ok.json.waivers.map((w) => [w.commit, w.applied, w.why ?? null]), [
       [other, false, 'for another commit'],
       [head, true, null],
@@ -1110,6 +1123,39 @@ describe('input errors', () => {
     assert.equal(r.json.trusted, false);
   });
 
+  test('run.json: null is not an object; exactly 64 KiB is read', () => {
+    const d = artifacts([{ run: 1, leg: PG, junit: allPass(A24) }, { run: 2, leg: PG, junit: allPass(A24) }]);
+    write(join(d, '1', 'run.json'), 'null');
+    const base = JSON.stringify({ attempt: 1, databaseId: 2, headSha: SHA, workflowName: '' });
+    write(join(d, '2', 'run.json'), JSON.stringify({ attempt: 1, databaseId: 2, headSha: SHA, workflowName: 'w'.repeat(64 * 1024 - base.length) }));
+    assert.equal(readFileSync(join(d, '2', 'run.json')).length, 64 * 1024);
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.deepEqual(r.json.input_errors, ["1/run.json: not a JSON object; the run's artifacts are not used"]);
+    assert.deepEqual(r.json.reports.map((x) => x.run_id), [2]);
+  });
+
+  test('an artifacts path that cannot be read is an input error, not an internal one', () => {
+    const f = join(tmp('report-file-'), 'file');
+    writeFileSync(f, '');
+    const notDir = report(root(withA24), ['--artifacts', join(f, 'x')]);
+    assert.equal(notDir.code, 2);
+    assert.deepEqual(notDir.json.input_errors, [`${join(f, 'x')}: cannot be read (ENOTDIR)`]);
+    const loop = join(tmp('report-loop-'), 'loop');
+    symlinkSync(loop, loop);
+    const looped = report(root(withA24), ['--artifacts', loop]);
+    assert.deepEqual(looped.json.input_errors, [`${loop}: cannot be read (ELOOP)`]);
+  });
+
+  test('a leg file of exactly 1024 bytes is read; 1025 is too many', () => {
+    const name = 'junit-scenarios-pg-x86_64-attempt-1';
+    const d = artifacts([{ run: 1, leg: PG, name, junit: allPass(A24) }, { run: 2, leg: PG, name, junit: allPass(A24) }]);
+    writeFileSync(join(d, '1', name, 'leg'), `${PG}${' '.repeat(1024 - PG.length)}`);
+    writeFileSync(join(d, '2', name, 'leg'), `${PG}${' '.repeat(1025 - PG.length)}`);
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.deepEqual(r.json.input_errors, [`2/${name}/leg: 1025 bytes, more than the 1024 it may hold; not read`]);
+    assert.deepEqual(r.json.reports.map((x) => x.run_id), [1]);
+  });
+
   test('a run directory with only run.json is a run without artifacts', () => {
     const d = tmp('report-art-');
     runJson(d, 5);
@@ -1303,7 +1349,7 @@ describe('XML and JUnit reader', () => {
   }
 
   for (const [text, re] of [
-    ['<report/>', /the root element is <report>, not <testsuites> or <testsuite>/],
+    ['<report/>', /^the root element is <report>, not <testsuites> or <testsuite>$/],
     ['<testsuites><testcase classname="c" name="n"/></testsuites>', /a <testcase> outside any <testsuite>/],
     ['<testsuite><testcase name="n"/></testsuite>', /without a name or classname attribute \(n\)/],
     ['<testsuite><testcase classname="c"/></testsuite>', /without a name or classname attribute$/],
@@ -1431,6 +1477,34 @@ describe('aggregation', () => {
     assert.equal(row.split(/(?<!\\)\|/).length, 5, row);
     assert.ok(row.startsWith('| A24 M1a: a\\|b &lt;i&gt; | not run | '), row);
     assert.doesNotMatch(row, /<b>|<i>/);
+  });
+
+  test('the documented limits (README "Output and exit status", "Input")', () => {
+    assert.equal(MAX_TEXT, 300);
+    assert.equal(MAX_LIST, 50);
+    assert.equal(MAX_DEPTH, 100);
+    assert.deepEqual(MAX_BYTES, { leg: 1024, 'junit.xml': 64 * 1024 * 1024 });
+  });
+
+  test('a list of exactly MAX_LIST items is shown whole; a stage with more details is cut', () => {
+    const res = judge({ scenarios: [], subcases: [], contracts: [], reports: [], commit: SHA, today: TODAY });
+    const many = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+    const md = renderMarkdown(res, { inputErrors: many(MAX_LIST, (i) => `e${i}`), ignored: many(MAX_LIST, (i) => `9/i${i}`) });
+    assert.doesNotMatch(md, /more/);
+    const tests = many(MAX_LIST + 3, (i) => `nextest:skyoauth-scenarios/pg/a25_pos_t${i}`);
+    const st = judge({ scenarios: [{ id: 'A24', stage: [{ milestone: 'M1a', scope: 'full row', legs: [PG], status: 'implemented', tests }] }], subcases: [], contracts: [], reports: [], commit: SHA, today: TODAY });
+    const row = renderMarkdown(st).split('\n').find((l) => l.startsWith('| A24'));
+    const shown = row.split(' | ')[2].split('<br>');
+    assert.equal(shown.length, MAX_LIST + 1);
+    assert.match(shown[0], /^nextest:skyoauth-scenarios\/pg\/a25\\_pos\\_t0 is not a pos\/neg scenario test of A24$/);
+    assert.match(shown[MAX_LIST], /^… and \d+ more \(the JSON lists all of them\)/);
+    // Exactly MAX_LIST details (MAX_LIST - 2 tests of another entry, plus no
+    // pos and no neg test for the job) are shown whole.
+    const exact = judge({ scenarios: [{ id: 'A24', stage: [{ milestone: 'M1a', scope: 'full row', legs: [PG], status: 'implemented', tests: tests.slice(0, MAX_LIST - 2) }] }], subcases: [], contracts: [], reports: [], commit: SHA, today: TODAY });
+    assert.equal(exact.stages[0].problems.length, MAX_LIST);
+    const exactRow = renderMarkdown(exact).split('\n').find((l) => l.startsWith('| A24'));
+    assert.equal(exactRow.split(' | ')[2].split('<br>').length, MAX_LIST);
+    assert.doesNotMatch(exactRow, /more \(the JSON/);
   });
 
   test('hostile artifacts: raw HTML in a leg file, entity text and a lone CR in testcase names, a 3 MB leg file', () => {
