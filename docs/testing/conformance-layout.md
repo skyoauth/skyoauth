@@ -226,7 +226,7 @@ layers = ["integration"]
 envs = ["hermetic", "pg", "native-3os"]
 harness = ["OP on 3 OSes", "Linux service", "SoftHSM2"]
 owners = ["T13.3", "T13.5", "T13.7", "T13.10"]
-positive = "remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6)"
+positive = "remote scoped write against the Linux service; offline recovery via the three-job chain on injected clocks, plus one same-job Linux run in real time (Q6); a challenge signed within its TTL accepted (hermetic)"
 negative = "key export into the pod, wrong-instance challenge, expired challenge at the TTL boundary (hermetic), unsupported adapter fails explicitly"
 matrix_sha256 = "078ca6a19a34b32f05d2982cb296c71cf5a182e64f2e6589767807fd36eaeec3"
 
