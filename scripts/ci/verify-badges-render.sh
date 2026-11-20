@@ -23,7 +23,10 @@
 # the badges published for main.
 #
 # Every fetch is retried by curl (--retry 3 --retry-delay 2: timeouts, 408,
-# 429 and 5xx) and limited to 20 seconds. By default (after a publication,
+# 429 and 5xx), each attempt is limited to 20 seconds, and no retry starts
+# more than 60 seconds after the first attempt (--retry-max-time 60: a
+# Retry-After that would wait past that ends the retries instead of
+# sleeping, which --max-time does not limit). By default (after a publication,
 # and on a docs-only push to main) every problem fails the check. With
 # --pull-request, a problem the pull request cannot have caused only warns
 # (a `::warning::` annotation, exit 0): a transport error, 429 or 5xx that
@@ -31,7 +34,19 @@
 # that a pull request that adds or renames a badge can pass; it is checked
 # strictly once the merge has published it. What the README embeds, a
 # README fetch answered with another error, and a badge served with a
-# non-SVG type fail in both modes.
+# non-SVG type fail in both modes. When the rendered README itself cannot
+# be fetched (transport error, 429 or 5xx after the retries), a pull
+# request passes with a warning only if it leaves the README byte for byte
+# as on the base branch: the current directory must be the checkout of the
+# merge commit README_REF (HEAD must be that commit) with its first
+# parent (fetch-depth 2), every README path in both commits must be a
+# regular file (no symbolic link, also not for .github/ or docs/), and
+# `git diff --quiet HEAD^1 HEAD` must find no change to any file GitHub
+# could render as the README (README* at the top level, in .github/ and
+# in docs/, in any case). The README is then the one already verified on
+# main, and the four badge files are checked as in 2. A pull request that
+# changes the README fails (re-run the job once the API answers again), as
+# does a missing parent commit or any git error. No Markdown is parsed.
 #
 #   GH_TOKEN=... scripts/ci/verify-badges-render.sh [--pull-request] OWNER/REPO BRANCH [README_REF]
 set -eu
@@ -66,7 +81,7 @@ fetch() {
     fetch_url=$2
     shift 2
     rc=0
-    meta=$(curl -sS --retry 3 --retry-delay 2 --max-time 20 -o "$fetch_out" \
+    meta=$(curl -sS --retry 3 --retry-delay 2 --retry-max-time 60 --max-time 20 -o "$fetch_out" \
         -w '%{http_code} %{content_type}' "$@" "$fetch_url") || rc=$?
     code=${meta%% *}
     ctype=${meta#* }
@@ -103,20 +118,72 @@ readme_api="https://api.github.com/repos/$repo/readme?ref=$readme_ref"
 fetch "$tmp/readme.html" "$readme_api" \
     -H "Authorization: Bearer $GH_TOKEN" \
     -H "Accept: application/vnd.github.html+json"
-if [ "$transient" -eq 1 ]; then
-    transient_problem "could not fetch the rendered README at $readme_ref ($what); nothing was checked"
-    exit "$status"
-fi
-if [ "$code" != 200 ]; then
-    problem "could not fetch the rendered README at $readme_ref: $readme_api answered $what"
+if [ "$transient" -eq 1 ] && [ "$pull_request" -eq 0 ]; then
+    problem "could not fetch the rendered README at $readme_ref ($what); nothing was checked"
     exit 1
-fi
-urls=$(grep -o '<img[^>]*>' "$tmp/readme.html" | grep -E 'coverage\.svg|tests\.svg' \
-    | sed -E 's/^<img[^>]*[[:space:]]src="([^"]*)".*/\1/' || true)
-if [ -z "$urls" ]; then
-    echo "verify-badges-render: no badge <img> in the rendered README:" >&2
-    grep -o '<img[^>]*>' "$tmp/readme.html" >&2 || true
-    exit 1
+elif [ "$transient" -eq 1 ]; then
+    # The fallback (see the top): pass only for an unchanged README.
+    unavailable="could not fetch the rendered README at $readme_ref ($what)"
+    if ! git rev-parse -q --verify 'HEAD^1^{commit}' >/dev/null 2>&1; then
+        problem "$unavailable, and cannot compare the README with the base branch: no parent commit of HEAD in $(pwd) (not a git checkout, or a shallow one; the job checks out with fetch-depth 2)"
+        exit 1
+    fi
+    head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=
+    ref=$(git rev-parse -q --verify "$readme_ref^{commit}" 2>/dev/null) || ref=
+    if [ -z "$ref" ] || [ "$head" != "$ref" ]; then
+        problem "$unavailable, and the current directory is not a checkout of $readme_ref (HEAD is ${head:-unknown}, $readme_ref is ${ref:-no commit here}), so its README cannot stand in for the one being checked"
+        exit 1
+    fi
+    # Only regular files: a symbolic link (or a submodule) at a README
+    # path, or in place of .github/ or docs/, can change what GitHub
+    # renders without any change to the README paths themselves. Read from
+    # the commits, not the working tree.
+    if ! trees=$(git ls-tree -r HEAD && git ls-tree -r 'HEAD^1'); then
+        problem "$unavailable, and git could not list the files of HEAD and HEAD^1"
+        exit 1
+    fi
+    odd=$(printf '%s\n' "$trees" | awk -F '\t' '{
+        split($1, f, " ")
+        p = tolower($2)
+        sub(/^"/, "", p)
+    }
+    (p ~ /^(\.github\/|docs\/)?readme/ || p == ".github" || p == "docs") && f[1] != "100644" && f[1] != "100755" {
+        print $2 " (mode " f[1] ")"
+    }' | sort -u)
+    if [ -n "$odd" ]; then
+        problem "$unavailable, and a README path is not a regular file in HEAD or HEAD^1, so an unchanged README proves nothing: $(printf '%s' "$odd" | tr '\n' ' ')"
+        exit 1
+    fi
+    rc=0
+    git diff --quiet 'HEAD^1' HEAD -- ':(icase)README*' ':(icase).github/README*' ':(icase)docs/README*' || rc=$?
+    case $rc in
+        0) ;;
+        1)
+            problem "$unavailable, and this pull request changes the README, which cannot be checked without it; re-run this job once the GitHub API answers again"
+            exit 1 ;;
+        *)
+            problem "$unavailable, and git could not compare the README with the base branch (git diff exit $rc)"
+            exit 1 ;;
+    esac
+    echo "::warning::verify-badges-render: $unavailable; the README is unchanged from the base branch, so only the published badge files are checked"
+    readme="unchanged README"
+    urls=
+    for file in rust-tests rust-coverage typescript-tests typescript-coverage; do
+        urls="$urls https://github.com/$repo/raw/badges/main/$file.svg"
+    done
+else
+    if [ "$code" != 200 ]; then
+        problem "could not fetch the rendered README at $readme_ref: $readme_api answered $what"
+        exit 1
+    fi
+    readme="rendered README"
+    urls=$(grep -o '<img[^>]*>' "$tmp/readme.html" | grep -E 'coverage\.svg|tests\.svg' \
+        | sed -E 's/^<img[^>]*[[:space:]]src="([^"]*)".*/\1/' || true)
+    if [ -z "$urls" ]; then
+        echo "verify-badges-render: no badge <img> in the rendered README:" >&2
+        grep -o '<img[^>]*>' "$tmp/readme.html" >&2 || true
+        exit 1
+    fi
 fi
 seen_rust_tests=0
 seen_rust_coverage=0
@@ -134,7 +201,7 @@ for url in $urls; do
         https://github.com/"$repo"/raw/badges/main/typescript-coverage.svg)
             seen_typescript_coverage=$((seen_typescript_coverage + 1)) ;;
         *)
-            problem "unexpected badge URL in the rendered README: $url"
+            problem "unexpected badge URL in the $readme: $url"
             continue ;;
     esac
     file=${url##*/badges/main/}
@@ -157,7 +224,7 @@ check_badge() {
     badge=$1
     n=$2
     if [ "$n" -eq 0 ]; then
-        problem "the rendered README does not embed badges/main/$badge.svg"
+        problem "the $readme does not embed badges/main/$badge.svg"
     elif [ "$n" -gt 1 ]; then
         problem "badges/main/$badge.svg is embedded more than once ($n)"
     fi
