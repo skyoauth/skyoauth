@@ -96,7 +96,7 @@ impl DatabaseConfig {
         {
             return Err(out_of_range(ACQUIRE_TIMEOUT_VAR, ACQUIRE_TIMEOUT_SECS));
         }
-        if is_remote(&connect) && !matches!(connect.get_ssl_mode(), PgSslMode::VerifyFull) {
+        if is_weaker_than_verify_full_for_remote(&connect) {
             tracing::warn!(
                 host = connect.get_host(),
                 ssl_mode = ?connect.get_ssl_mode(),
@@ -204,6 +204,12 @@ fn is_remote(connect: &PgConnectOptions) -> bool {
         return false;
     }
     !host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Whether the connection leaves the machine with a mode weaker than
+/// `verify-full`, which is what [`DatabaseConfig::new`] logs a WARN for.
+fn is_weaker_than_verify_full_for_remote(connect: &PgConnectOptions) -> bool {
+    is_remote(connect) && !matches!(connect.get_ssl_mode(), PgSslMode::VerifyFull)
 }
 
 /// The SSL mode to use. An explicit URL value wins. Otherwise `parsed`, which
@@ -401,50 +407,25 @@ mod tests {
         }
     }
 
-    /// Runs `f` with WARN-and-above logs captured in memory.
-    fn warnings(f: impl FnOnce()) -> String {
-        #[derive(Clone, Default)]
-        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Sink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
-            type Writer = Self;
-            fn make_writer(&'a self) -> Self {
-                self.clone()
-            }
-        }
-        let sink = Sink::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .with_writer(sink.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, f);
-        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+    // The WARN itself is checked on the built binary in
+    // `service/tests/tls_entry.rs`. A unit test cannot capture it reliably:
+    // tracing caches each callsite's interest process-wide, so a scoped
+    // subscriber races with other tests running in parallel threads.
+    fn warns(url: &str) -> bool {
+        let config = config(&[(DATABASE_URL_VAR, url)]).unwrap();
+        is_weaker_than_verify_full_for_remote(config.connect_options())
     }
 
     #[test]
-    fn a_weak_explicit_mode_for_a_remote_host_logs_a_warning() {
+    fn a_weak_explicit_mode_for_a_remote_host_is_flagged_for_a_warning() {
         for mode in ["disable", "allow", "prefer", "require", "verify-ca"] {
             let url = format!("postgres://u:{SECRET}@db.example/skyoauth?sslmode={mode}");
-            let logs = warnings(|| {
-                config(&[(DATABASE_URL_VAR, &url)]).unwrap();
-            });
-            assert!(logs.contains("WARN"), "{mode}: {logs}");
-            assert!(logs.contains("db.example"), "{mode}: {logs}");
-            assert!(!logs.contains(SECRET), "{mode}: {logs}");
+            assert!(warns(&url), "{mode}");
         }
     }
 
     #[test]
-    fn strict_or_local_configurations_log_no_warning() {
+    fn strict_or_local_configurations_are_not_flagged() {
         for url in [
             "postgres://u@db.example/skyoauth",
             "postgres://u@db.example/skyoauth?sslmode=verify-full",
@@ -452,10 +433,7 @@ mod tests {
             "postgres://u@localhost/skyoauth",
             "postgres:///skyoauth?host=/var/run/postgresql&sslmode=disable",
         ] {
-            let logs = warnings(|| {
-                config(&[(DATABASE_URL_VAR, url)]).unwrap();
-            });
-            assert!(logs.is_empty(), "{url}: {logs}");
+            assert!(!warns(url), "{url}");
         }
     }
 
