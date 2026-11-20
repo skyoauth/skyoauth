@@ -237,6 +237,8 @@ This table is the one definition of the exit status; the script header and layou
 | 1 | With `--require-milestone M`: the gate of M is not passed (some stage it covers is failed, not run or planned; M0 always). Without it: some implemented stage, of any milestone and conditional sub-IDs included, has a failed (unwaived) pair. |
 | 0 | With `--require-milestone M`: the gate of M passed. Failed stages of other milestones and of conditional sub-IDs do not change this; they stay in the report, and stderr says so. Without it: no implemented stage has a failed pair; not run and planned stages do not fail the run. |
 
+The status without `--require-milestone` is informational: it says whether any conformance test failed, not whether a gate passed. A consumer that decides on a gate must pass `--require-milestone`.
+
 Only **passed** counts; `CI passed` is never read and is not a conformance signal (layout §3).
 
 ## Not here yet
