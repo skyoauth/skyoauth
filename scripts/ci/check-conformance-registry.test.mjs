@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -1413,6 +1413,48 @@ describe('--gate-pr', () => {
       `error [gate-pr] the gate PR changes ${TASKS}; it may change only the gates_passed line of ${SCENARIOS}`,
       `error [gate-pr] the gate PR changes notes.txt; it may change only the gates_passed line of ${SCENARIOS}`,
     ]);
+  });
+
+  // A mode or type change of scenarios.toml leaves its text, and so its
+  // gates_passed line, as a gate PR may change it: the tree entry must not move.
+  const MODE = (from, to) => `error [gate-pr] the gate PR changes the mode of ${SCENARIOS} from ${from} to ${to}; a gate PR changes only its gates_passed line`;
+
+  test('an exec-bit flip on scenarios.toml', () => {
+    const { root } = mainRoot((t) => t);
+    gateCommit(root, '["M0"]', (r) => chmodSync(join(r, SCENARIOS), 0o755));
+    assert.equal(git(root, 'ls-tree', 'HEAD', '--', SCENARIOS).split(' ')[0], '100755');
+    assert.deepEqual(checkGatePr(root).errors.map(formatError), [MODE('100644', '100755')]);
+  });
+
+  test('scenarios.toml turned into a symbolic link whose target is the gated registry text', () => {
+    const { root } = mainRoot((t) => t);
+    // Plumbing: a symlink entry whose blob (its target) is the registry with
+    // M0 gated, so the text of the entry differs only in gates_passed.
+    const blob = git(root, 'rev-parse', `HEAD:${SCENARIOS}`);
+    const text = setGates('["M0"]')(read(root, SCENARIOS));
+    const file = join(root, 'gated.toml');
+    writeFileSync(file, text);
+    const sha = git(root, 'hash-object', '-w', file);
+    rmSync(file);
+    assert.notEqual(sha, blob);
+    git(root, 'update-index', '--cacheinfo', `120000,${sha},${SCENARIOS}`);
+    git(root, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'gate');
+    assert.equal(git(root, 'ls-tree', 'HEAD', '--', SCENARIOS).split(' ')[0], '120000');
+    const res = checkGatePr(root);
+    assert.deepEqual(res.added, ['M0']);
+    assert.deepEqual(res.errors.map(formatError), [MODE('100644', '120000')]);
+  });
+
+  test('a rename, copy, deletion or mode change of another file', () => {
+    const { root } = mainRoot();
+    gateCommit(root, '["M1a"]', (r) => {
+      renameSync(join(r, TASKS), join(r, 'docs/tasks-renamed.md'));
+      copyFileSync(join(r, DESIGN), join(r, 'docs/design-copy.md'));
+      rmSync(join(r, SUBCASES));
+      chmodSync(join(r, LAYOUT), 0o755);
+    });
+    const changed = (p) => `error [gate-pr] the gate PR changes ${p}; it may change only the gates_passed line of ${SCENARIOS}`;
+    assert.deepEqual(checkGatePr(root).errors.map(formatError), ['docs/design-copy.md', TASKS, 'docs/tasks-renamed.md', LAYOUT, SUBCASES].map(changed));
   });
 
   test('the PR implements a stage itself: the registry is read at the merge-base, where that stage is planned', () => {

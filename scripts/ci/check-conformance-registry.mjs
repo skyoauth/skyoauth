@@ -44,7 +44,8 @@
 //             fields; commit is a 40-hex SHA on origin/main; test is registered
 //             and leg is one of its stages' legs; expires is a TOML date.
 //   gate-pr   (--gate-pr only) The gate PR is one commit on its merge-base
-//             with origin/main and changes only the gates_passed line.
+//             with origin/main and changes only the gates_passed line (no
+//             other path, and not the mode or type of scenarios.toml).
 //
 // The commit check needs the full history and origin/main. Without them it is
 // skipped with a note, unless --require-history is given (CI): that probes
@@ -678,9 +679,17 @@ export function checkGatePr(root) {
   if (parents.length !== 1 || parents[0] !== mb) {
     err(`HEAD ${head} is not a single commit on top of the merge-base ${mb} with origin/main (its parents: ${parents.join(', ')}); a gate PR is one commit on the main commit it certifies`);
   }
-  // Its diff: the gates_passed line of scenarios.toml and nothing else.
-  for (const p of ok(['diff', '--name-only', '-z', '--no-renames', mb, head]).split('\0').filter(Boolean)) {
+  // Its diff: the gates_passed line of scenarios.toml and nothing else. The
+  // raw tree diff lists every path whose entry differs, content, mode or type
+  // (a rename or copy is a deletion and an addition, with --no-renames); for
+  // scenarios.toml, the text comparison below covers only the content, so its
+  // mode (and with it its type) must not change either.
+  const raw = ok(['diff-tree', '-r', '-z', '--raw', '--no-renames', mb, head]).split('\0');
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    const [from, to] = raw[i].slice(1).split(' ');
+    const p = raw[i + 1];
     if (p !== SCENARIOS) err(`the gate PR changes ${p}; it may change only the gates_passed line of ${SCENARIOS}`);
+    else if (from !== to) err(`the gate PR changes the mode of ${SCENARIOS} from ${from} to ${to}; a gate PR changes only its gates_passed line`);
   }
   const lines = (text) => (text ?? '').split('\n');
   const at = (ls) => ls.findIndex((l) => GATES_LINE.test(l));
