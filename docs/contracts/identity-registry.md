@@ -6,9 +6,11 @@
   C09), §3.1, §4, §4.1, §5.1.1, §5.2, §5.2.1, §5.2.2, §5.3, §5.6, §5.7, §6,
   §6.1, §6.1.1, §7.1, §7.2, §7.4; [tasks](../skyoauth-tasks.md) §2 "Endpoint
   matrix", §2 "Exchange selection and scope", §3 (logical model,
-  "Ownership", "Policy revisions", "IDs/names"), T12.8–T12.9, T14.1–T14.7,
-  §8 (A13, A29, A30, A43, A44, A45, A49), §11 (ADR-001, ADR-014, ADR-016,
-  ADR-018, ADR-019, ADR-022).
+  "Ownership", "Policy revisions", "IDs/names", "Source kinds", "Egress and
+  secret namespaces", "Instance security policy"), T12.8–T12.9, T14.1–T14.7,
+  §8 (A13, A29, A30, A43, A44, A45, A49), §11 (ADR-001, ADR-005, ADR-008,
+  ADR-014, ADR-016, ADR-018, ADR-019, ADR-022);
+  [threat model](../threat-model.md) OQ-TM-7, OQ-TM-12, OQ-TM-13.
 - **Related contracts:** [token-profiles.md](token-profiles.md),
   [public-api.md](public-api.md).
 
@@ -24,12 +26,12 @@ RFC 8174) when they appear in capitals. Requirement IDs use `IR-nnn`.
 
 ## 1. Authority split
 
-| Authority                   | Owns                                                                                                                                                                                   | Source                |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
-| Instance (`security_admin`) | Issuer and signing keys, tenants, operators and roles, `ResourceServer` audiences, `AudienceTenantAssignment`, `ResourceServerChecker`, `ResourceAction`, application-origin ownership | design §1, §7.1, §7.2 |
-| Tenant (scoped roles)       | Trust sources, keysets, bindings, workload and service principals, grants, OAuth clients, origin and route versions, `HumanAccessPolicy`, human providers and links                    | design §7.1, §7.2     |
-| Replaceable human IdP       | Upstream human authentication only; none of the above                                                                                                                                  | design §1, §2 C08     |
-| Backend (resource server)   | Canonical resource ownership and resource RBAC                                                                                                                                         | design §1, §3.1, §6   |
+| Authority                   | Owns                                                                                                                                                                                                                                                                                                                       | Source                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Instance (`security_admin`) | Issuer and signing keys, tenants, operators and roles, `ResourceServer` audiences, `AudienceTenantAssignment`, `ResourceServerChecker`, `ResourceAction`, application-origin ownership, the egress-destination allowlist (`EgressAllowlistEntry`), the instance security policy (`InstanceSecurityPolicy`; IR-052, IR-053) | design §1, §7.1, §7.2; tasks §3 |
+| Tenant (scoped roles)       | Trust sources, keysets, bindings, workload and service principals, grants, OAuth clients, origin and route versions, `HumanAccessPolicy`, human providers and links                                                                                                                                                        | design §7.1, §7.2               |
+| Replaceable human IdP       | Upstream human authentication only; none of the above                                                                                                                                                                                                                                                                      | design §1, §2 C08               |
+| Backend (resource server)   | Canonical resource ownership and resource RBAC                                                                                                                                                                                                                                                                             | design §1, §3.1, §6             |
 
 - **IR-001** Issuer, signing keys, tenants, audience authority, clients and
   origins, principals, trust and policy, and operator authority MUST NOT be
@@ -106,6 +108,14 @@ Prefixes seen in the design's examples (illustrative only; see IR-024):
   origin; the tenant of a native request MUST come from the registered
   `client_id`; the tenant of a WIF request MUST come from the selected source
   and grant, which MUST belong to the same tenant. (design §4, §5.2, §5.7)
+- **IR-034** `Tenant.secret_namespace` MUST be unique, non-null, immutable and
+  a server-generated opaque value; no operator chooses or changes it.
+  `TrustSource.ca_bundle_ref`, `TrustSource.reviewer_credential_ref` and the
+  human provider `credential_ref` MUST resolve only within the owning tenant's
+  `secret_namespace`, so a reference cannot name a secret provisioned for
+  another tenant. The audit sink configuration is instance deployment
+  configuration, not a tenant secret namespace (IR-053). (design §5.4; tasks
+  §3 "Egress and secret namespaces", T11.8, T23.2; lead decision, OQ-TM-13)
 
 ## 5. Principals
 
@@ -149,17 +159,53 @@ credentials never do. That rule is
 [public-api.md API-002](public-api.md#1-listener-classes), which is canonical;
 **IR-050** is withdrawn as a duplicate of it.
 
-| Role             | Scope    | Explicit rights (summary)                                                                                                                                                                                                               | Source      |
-| ---------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `security_admin` | Instance | Tenants; operators and roles; resource servers, assignments, checkers, actions; origin ownership; signer and recovery policy; capacity ceiling; controller and provisioner identities; protection-scope registry; route-bundle approval | design §7.2 |
-| `trust_admin`    | Tenant   | Workload and service principals; sources, keysets, bindings, grants within instance audience ceilings                                                                                                                                   | design §7.2 |
-| `client_admin`   | Tenant   | OAuth clients, origin and route versions, route bundles and preparation, `HumanAccessPolicy`, origin capacity                                                                                                                           | design §7.2 |
-| `provider_admin` | Tenant   | Inactive providers, enrollment policy and hold, verified links, credential-only rotation, switch and rollback plans                                                                                                                     | design §7.2 |
-| `auditor`        | Tenant   | Redacted configuration and audit reads                                                                                                                                                                                                  | design §7.2 |
+| Role             | Scope    | Explicit rights (summary)                                                                                                                                                                                                                                                                                                                                                                                                                | Source      |
+| ---------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `security_admin` | Instance | Tenants; operators and roles; resource servers, assignments, checkers, actions; origin ownership; signer and recovery policy; egress-destination allowlist; instance security policy (`widening_second_approver` online; `single_actor_mode` and the audit sink configuration are deployment configuration, read-only online); capacity ceiling; controller and provisioner identities; protection-scope registry; route-bundle approval | design §7.2 |
+| `trust_admin`    | Tenant   | Workload and service principals; sources, keysets, bindings, grants within instance audience ceilings                                                                                                                                                                                                                                                                                                                                    | design §7.2 |
+| `client_admin`   | Tenant   | OAuth clients, origin and route versions, route bundles and preparation, `HumanAccessPolicy`, origin capacity                                                                                                                                                                                                                                                                                                                            | design §7.2 |
+| `provider_admin` | Tenant   | Inactive providers, enrollment policy and hold, verified links, credential-only rotation, switch and rollback plans                                                                                                                                                                                                                                                                                                                      | design §7.2 |
+| `auditor`        | Tenant   | Redacted configuration and audit reads                                                                                                                                                                                                                                                                                                                                                                                                   | design §7.2 |
 
 - **IR-051** Withdrawn as a duplicate. Role non-inheritance follows
   [public-api.md API-120](public-api.md#72-approval-boundaries), which is
   canonical.
+
+The instance security policy is one `InstanceSecurityPolicy` row per instance
+(`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
+`audit_sink_validated_at`, `revision`). (tasks §3)
+
+- **IR-052** `widening_second_approver` is off by default. Turning it on or
+  off is the only online write to `InstanceSecurityPolicy`: an audited,
+  revision-checked write by instance `security_admin` that MUST have a
+  distinct second `security_admin` approver (IR-054), or one actor when
+  `single_actor_mode` is on. (design §7.2; tasks §3 "Instance security
+  policy"; ADR-008 item 12; lead decision, OQ-ADR008-3; public-api API-156)
+- **IR-053** `single_actor_mode` (default false) and the audit sink
+  configuration are instance deployment configuration, read-only online; an
+  online operator write MUST NOT change them. `single_actor_mode` is set at
+  install or by the local signed recovery transaction; the row mirrors it, and
+  a change emits an audit event. The sink endpoint, protocol and TLS trust or credential
+  reference are not stored in the database: the row holds only
+  `audit_sink_config_digest` and `audit_sink_validated_at`, and observed sink
+  health is a metric and health signal, not a revisioned row. A sink
+  configuration change takes effect only on restart and first emits a sink
+  changed event to the old sink, plus an audit event. (design §7, §7.2; tasks
+  §3 "Instance security policy", Gate M1a; ADR-002 item 4; lead decision,
+  OQ-TM-7, OQ-TM-12, OQ-ADR008-3)
+- **IR-054** An approval is a second `AdministrativeOperation` of kind
+  `approve` whose `approves_operation_id` names the approved operation and
+  whose `actor_id` differs from that operation's `actor_id`. For widening
+  writes and security-domain toggles, including IR-052, the approver MUST hold
+  `security_admin`. (tasks §3 "Instance security policy"; ADR-008 item 12;
+  lead decision, OQ-ADR008-3)
+- **IR-055** Audit events form one hash chain per instance.
+  `AuditEvent.sequence` is assigned in the same transaction as the audited
+  write and strictly increases; `prev_hash` links each event to the previous
+  one; the chain head lives in the database, whose audit stays authoritative.
+  The external sink receives the chain as an append-only JSONL stream over
+  syslog-over-TLS or OTLP logs. (design §7; tasks §3 "Instance security
+  policy", Gate M1a; lead decision, OQ-TM-12)
 
 ## 6. Scopes
 
@@ -360,16 +406,27 @@ For every protected request the backend MUST perform these steps
 
 Other allowlists in the registry, each with the rule its source states:
 
-| Allowlist                                       | Owner                                   | Rule                                                                                                                                                                                                                        | Source                                                   |
-| ----------------------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `ServiceGrant.allowed_binding_ids`              | Tenant `trust_admin`                    | Nonempty; only these bindings of the grant actor are eligible; cross-actor references rejected                                                                                                                              | design §5.7; tasks §2 "Exchange selection and scope"     |
-| `ApplicationOriginVersion.allowed_return_paths` | Tenant `client_admin`                   | Normalized same-origin relative paths only                                                                                                                                                                                  | design §4                                                |
-| `ApplicationOriginVersion.resource_server_ids`  | Tenant `client_admin` within assignment | Approved API audiences for the origin                                                                                                                                                                                       | design §4; tasks §3                                      |
-| `ApplicationRouteVersion.methods`               | Tenant `client_admin`                   | Nonempty method allowlist; unknown method denies                                                                                                                                                                            | design §4.1                                              |
-| `OAuthClient.redirect_rules`                    | Tenant `client_admin`                   | IP-loopback redirect rules: each fixes scheme `http`, the IP literal (`127.0.0.1` and/or `[::1]`) and the path; the port varies per request and is bound exactly per transaction; `localhost` rejected (public-api API-031) | design §5.2, §10.3; tasks T40.1; lead decision (OQ-TM-5) |
-| `TrustSource.audiences`, `algorithms`           | Tenant `trust_admin`                    | Exact proof audiences and algorithm allowlist                                                                                                                                                                               | design §5.4                                              |
-| `ResourceServerChecker.allowed_tenant_ids`      | Instance `security_admin`               | Explicit tenant set                                                                                                                                                                                                         | design §6.1                                              |
-| `PrincipalBinding` match predicates             | Tenant `trust_admin`                    | ANDed exact strings; a configured claim absent from evidence is a non-match; omitted optional predicates are unconstrained; required production predicates cannot be omitted                                                | design §5.3                                              |
+| Allowlist                                       | Owner                                                           | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Source                                                                                                    |
+| ----------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `ServiceGrant.allowed_binding_ids`              | Tenant `trust_admin`                                            | Nonempty; only these bindings of the grant actor are eligible; cross-actor references rejected                                                                                                                                                                                                                                                                                                                                                        | design §5.7; tasks §2 "Exchange selection and scope"                                                      |
+| `ApplicationOriginVersion.allowed_return_paths` | Tenant `client_admin`                                           | Normalized same-origin relative paths only                                                                                                                                                                                                                                                                                                                                                                                                            | design §4                                                                                                 |
+| `ApplicationOriginVersion.resource_server_ids`  | Tenant `client_admin` within assignment                         | Approved API audiences for the origin                                                                                                                                                                                                                                                                                                                                                                                                                 | design §4; tasks §3                                                                                       |
+| `ApplicationRouteVersion.methods`               | Tenant `client_admin`                                           | Nonempty method allowlist; unknown method denies                                                                                                                                                                                                                                                                                                                                                                                                      | design §4.1                                                                                               |
+| `OAuthClient.redirect_rules`                    | Tenant `client_admin`                                           | IP-loopback redirect rules: each fixes scheme `http`, the IP literal (`127.0.0.1` and/or `[::1]`) and the path; the port varies per request and is bound exactly per transaction; `localhost` rejected (public-api API-031)                                                                                                                                                                                                                           | design §5.2, §10.3; tasks T40.1; lead decision (OQ-TM-5)                                                  |
+| `TrustSource.audiences`, `algorithms`           | Tenant `trust_admin`                                            | Exact proof audiences and algorithm allowlist                                                                                                                                                                                                                                                                                                                                                                                                         | design §5.4                                                                                               |
+| `EgressAllowlistEntry`                          | Instance `security_admin`; tenant operators only choose from it | Exact discovery, JWKS and TokenReview destinations. `purpose` is `oidc_discovery`, `jwks` or `token_review`; `exact_destination` is an exact URL (scheme, host, port and path); (`purpose`, `exact_destination`) is unique. A `TrustSource` matches an entry by value at write time, and a destination with no matching entry is rejected (inferred). Disabling an entry fails closed for new fetches and marks dependent sources degraded (OQ-IR-12) | design §5.4, §7.2; tasks §3 "Egress and secret namespaces", T11.2, T11.8, T23.2; lead decision (OQ-TM-13) |
+| `ResourceServerChecker.allowed_tenant_ids`      | Instance `security_admin`                                       | Explicit tenant set                                                                                                                                                                                                                                                                                                                                                                                                                                   | design §6.1                                                                                               |
+| `PrincipalBinding` match predicates             | Tenant `trust_admin`                                            | ANDed exact strings; a configured claim absent from evidence is a non-match; omitted optional predicates are unconstrained; required production predicates cannot be omitted                                                                                                                                                                                                                                                                          | design §5.3                                                                                               |
+
+- **IR-151** `TrustSource.kind` is `oidc_discovery`, `uploaded_jwks` or
+  `kubernetes_token_review`; there is no fourth kind. Kubernetes local JWT
+  validation is an `uploaded_jwks` or `oidc_discovery` source with
+  `assertion_profile` `projected_service_account` and
+  `stale_revocation_acknowledged` set. `stale_revocation_acknowledged` MUST be
+  set for `projected_service_account` on `uploaded_jwks` or `oidc_discovery`
+  and MUST be rejected on every other source; `kubernetes_token_review`
+  performs a live review and does not take it. (tasks §3 "Source kinds";
+  ADR-005; lead decision, OQ-ADR005-1)
 
 ## 11. Claim and parameter namespace
 
@@ -494,3 +551,14 @@ follow-up. All other items are not resolved by this contract.
   Lead lean (not decided): keep duplicate scope tokens tolerated outside
   comparison v1 unless a source says otherwise. Set semantics everywhere is
   not adopted. (triage: spec-amendments PR)
+
+- **OQ-IR-12 — Degraded trust sources after an egress entry is disabled.**
+  Tasks §3 says disabling an `EgressAllowlistEntry` "marks dependent sources
+  degraded", but `TrustSource.status` has no listed `degraded` value. Not
+  stated: whether degraded is a status value, a derived health signal or an
+  audit-only mark; whether re-enabling the entry clears it; whether an
+  `oidc_discovery` source whose discovered `jwks_uri` has no enabled `jwks`
+  entry is rejected at write or degraded at fetch; and whether adding an
+  entry counts as a widening write under `widening_second_approver`. That a
+  destination with no matching entry is rejected at write (§10) is this
+  contract's reading of "matches an entry by value at write time".
