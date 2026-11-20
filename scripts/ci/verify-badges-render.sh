@@ -37,16 +37,17 @@
 # non-SVG type fail in both modes. When the rendered README itself cannot
 # be fetched (transport error, 429 or 5xx after the retries), a pull
 # request passes with a warning only if it leaves the README byte for byte
-# as on the base branch: the current directory must be the checkout of the
-# merge commit README_REF (HEAD must be that commit) with its first
-# parent (fetch-depth 2), every README path in both commits must be a
-# regular file (no symbolic link, also not for .github/ or docs/), and
-# `git diff --quiet HEAD^1 HEAD` must find no change to any file GitHub
-# could render as the README (README* at the top level, in .github/ and
-# in docs/, in any case). The README is then the one already verified on
-# main, and the four badge files are checked as in 2. A pull request that
-# changes the README fails (re-run the job once the API answers again), as
-# does a missing parent commit or any git error. No Markdown is parsed.
+# as on the base branch: the current directory must be in the checkout of
+# the merge commit README_REF (HEAD must be that commit, with exactly two
+# parents, both fetched: fetch-depth 2), every README path in HEAD and
+# HEAD^1 must be a regular file (no symbolic link, also not for .github/
+# or docs/), and `git diff --quiet HEAD^1 HEAD` must find no change to any
+# file GitHub could render as the README (README* at the top level, in
+# .github/ and in docs/, in any case). The README is then the one already
+# verified on main, and the four badge files are checked as in 2. A pull
+# request that changes the README fails (re-run the job once the API
+# answers again), as does a missing parent commit or any git error. No
+# Markdown is parsed.
 #
 #   GH_TOKEN=... scripts/ci/verify-badges-render.sh [--pull-request] OWNER/REPO BRANCH [README_REF]
 set -eu
@@ -128,6 +129,13 @@ elif [ "$transient" -eq 1 ]; then
         problem "$unavailable, and cannot compare the README with the base branch: no parent commit of HEAD in $(pwd) (not a git checkout, or a shallow one; the job checks out with fetch-depth 2)"
         exit 1
     fi
+    # HEAD^1 is the base tip only in a pull request's merge commit, which
+    # has exactly two parents (the base tip and the pull request's head).
+    parents=$(git show -s --format=%P HEAD 2>/dev/null | awk '{ print NF }')
+    if [ "$parents" != 2 ] || ! git rev-parse -q --verify 'HEAD^2^{commit}' >/dev/null 2>&1; then
+        problem "$unavailable, and HEAD is not a merge commit with two parents (${parents:-unknown} parents), so HEAD^1 is not known to be the base tip"
+        exit 1
+    fi
     head=$(git rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=
     ref=$(git rev-parse -q --verify "$readme_ref^{commit}" 2>/dev/null) || ref=
     if [ -z "$ref" ] || [ "$head" != "$ref" ]; then
@@ -138,7 +146,7 @@ elif [ "$transient" -eq 1 ]; then
     # path, or in place of .github/ or docs/, can change what GitHub
     # renders without any change to the README paths themselves. Read from
     # the commits, not the working tree.
-    if ! trees=$(git ls-tree -r HEAD && git ls-tree -r 'HEAD^1'); then
+    if ! trees=$(git ls-tree -r --full-tree HEAD && git ls-tree -r --full-tree 'HEAD^1'); then
         problem "$unavailable, and git could not list the files of HEAD and HEAD^1"
         exit 1
     fi
@@ -154,8 +162,11 @@ elif [ "$transient" -eq 1 ]; then
         problem "$unavailable, and a README path is not a regular file in HEAD or HEAD^1, so an unchanged README proves nothing: $(printf '%s' "$odd" | tr '\n' ' ')"
         exit 1
     fi
+    # Either would make git read the pathspecs below as literal names that
+    # match no file, so that a changed README compares as unchanged.
+    unset GIT_LITERAL_PATHSPECS GIT_NOGLOB_PATHSPECS
     rc=0
-    git diff --quiet 'HEAD^1' HEAD -- ':(icase)README*' ':(icase).github/README*' ':(icase)docs/README*' || rc=$?
+    git diff --quiet 'HEAD^1' HEAD -- ':(top,icase)README*' ':(top,icase).github/README*' ':(top,icase)docs/README*' || rc=$?
     case $rc in
         0) ;;
         1)
@@ -207,7 +218,11 @@ for url in $urls; do
     file=${url##*/badges/main/}
     raw="https://raw.githubusercontent.com/$repo/badges/$branch/$file"
     fetch "$tmp/badge" "$raw" -L -H "Authorization: token $GH_TOKEN"
-    echo "README embeds $url"
+    if [ "$readme" = "rendered README" ]; then
+        echo "README embeds $url"
+    else
+        echo "badge file $file (not read from the README, which is unchanged from the base branch)"
+    fi
     echo "  published file $raw -> ${code:-000} ${ctype:-?}"
     if [ "$transient" -eq 1 ]; then
         transient_problem "could not fetch $raw ($what)"
