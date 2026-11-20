@@ -21,9 +21,11 @@
 //! a transaction-pooling proxy such as PgBouncer in transaction mode, and
 //! waiting for it has no timeout; a lock timeout is a follow-up.
 //!
-//! TLS to the database follows the URL's `sslmode` (sqlx's default is
-//! `prefer`); enforcing TLS is a follow-up. [`DatabaseConfig`]'s `Debug`
-//! omits the password, and the connection-failure tests in
+//! TLS to the database is strict by default: without `sslmode` in the URL, a
+//! remote host gets `verify-full` and a loopback or Unix-socket host gets
+//! `prefer`, whatever `PGSSLMODE` says (see [`DatabaseConfig`]). An explicit
+//! weaker mode for a remote host is accepted with a WARN log. [`DatabaseConfig`]'s
+//! `Debug` shows the SSL mode and omits the password, and the connection-failure tests in
 //! `service/tests/redaction.rs` check that errors and trace-level logs do not
 //! contain it.
 
