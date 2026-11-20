@@ -92,7 +92,7 @@ const MAIN = 'refs/remotes/origin/main';
 // ---------------------------------------------------------------------------
 // Diagnostics
 
-class Report {
+export class Report {
   constructor() {
     this.errors = [];
     this.notes = [];
@@ -126,7 +126,7 @@ export function plain(v) {
 
 // Parses a registry file with smol-toml and with the generator's reader.
 // Returns the smol-toml data, or null after reporting an error.
-function load(text, rel, report) {
+export function load(text, rel, report) {
   let data;
   try {
     data = parseStrict(text);
@@ -340,7 +340,7 @@ export function history(root) {
   };
 }
 
-function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
+export function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
   const bad = (i, msg) => report.error(WAIVERS, at.get(`waiver/${i}`), 'waivers', msg);
   unknownKeys(doc, ['waiver'], (msg) => report.error(WAIVERS, null, 'fields', msg));
   const waivers = doc.waiver ?? [];

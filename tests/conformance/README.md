@@ -1,6 +1,6 @@
 # Conformance registry
 
-This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**. There are no runtime tests, fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job).
+This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**. There are no runtime tests, fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job). [`report-conformance.mjs`](#the-reporter) joins the registry with the JUnit results of one commit.
 
 | File | What it holds |
 | --- | --- |
@@ -10,7 +10,8 @@ This directory holds the conformance scenario registry of [the conformance layou
 | `fixtures/`, `schema/` | Absent today. Layout §1.3. |
 | [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Rewrites the derived fields of both files and renders the layout §2 table from them; `--check` verifies. Node 20 or later, no dependencies. |
 | [`scripts/ci/check-conformance-registry.mjs`](../../scripts/ci/check-conformance-registry.mjs) | The static registry check (layout §3). Needs `smol-toml` from [`scripts/ci/package.json`](../../scripts/ci/package.json). |
-| `scripts/ci/*.test.mjs` | Self-tests of both scripts (`node:test`). |
+| [`scripts/ci/report-conformance.mjs`](../../scripts/ci/report-conformance.mjs) | The result reporter (layout §3 "Result join", [below](#the-reporter)). Uses the registry check and `smol-toml`. |
+| `scripts/ci/*.test.mjs` | Self-tests of the three scripts (`node:test`). |
 
 ## Generate and check
 
@@ -22,9 +23,10 @@ node --test scripts/ci/gen-conformance-registry.test.mjs
 (cd scripts/ci && npm ci --ignore-scripts)              # once: installs the pinned smol-toml
 node scripts/ci/check-conformance-registry.mjs          # add --require-history to fail without git history
 node --test scripts/ci/check-conformance-registry.test.mjs
+node --test scripts/ci/report-conformance.test.mjs
 ```
 
-CI runs all four commands in the `conformance-registry` job, which `CI passed` requires to pass (a skip does not count). The job checks out the full history, because the waiver rule needs `origin/main`.
+CI runs the checks and the three self-tests above in the `conformance-registry` job, which `CI passed` requires to pass (a skip does not count). The job checks out the full history, because the waiver rule needs `origin/main`.
 
 ## Source of truth
 
@@ -162,7 +164,69 @@ The default legs are used only when a stage has none committed. For each env of 
 | native-3os | `clients-rust-native` (ubuntu, macos, windows) from M4 | Rows whose harness has `OP`: `operator` from M1a. A64: `operator` and `recovery-offline` (§5 Q6). |
 | live | `live-wif-push` from M2 | A02: `live-wif-negative`. |
 
+## The reporter
+
+`node scripts/ci/report-conformance.mjs` implements the layout §3 result join for **one commit**. It first runs the registry check on `--root` (default: this checkout, which should be the judged commit) and stops with exit 2 on any error. It runs no git command itself; only the registry check's waiver rule does (`origin/main` reachability).
+
+### Input
+
+```text
+<artifacts>/<run_id>/<artifact name ending in attempt-N>/junit.xml
+<artifacts>/<run_id>/<artifact name ending in attempt-N>/leg
+```
+
+One directory per workflow run of the commit (CI, live, nightly, release), named by its numeric run ID, holding that run's artifacts as `gh run download` writes them. The run attempt comes from the artifact name suffix `attempt-N` (`junit-scenarios-pg-x86_64-attempt-2`); the leg comes from the `leg` file, which must hold a layout §1.1 leg string. An artifact without a `leg` file, such as `service-nextest-junit-N` or a coverage report, is not a conformance leg and is ignored with a note. A leg artifact without `junit.xml` (a job that stopped before its tests) gives that leg no result for that attempt.
+
+```sh
+sha=<40-hex commit>
+mkdir artifacts
+for id in $(gh run list --commit "$sha" --limit 100 --json databaseId --jq '.[].databaseId'); do
+  gh run download "$id" --dir "artifacts/$id" || true   # a run without artifacts fails here
+done
+git show origin/main:tests/conformance/waivers.toml > waivers.toml 2>/dev/null || rm -f waivers.toml
+node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts \
+  $( [ -f waivers.toml ] && echo --waivers waivers.toml ) \
+  --json conformance.json --summary "$GITHUB_STEP_SUMMARY"
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--commit SHA` | Required. The judged commit; waivers match it. |
+| `--artifacts DIR` | The layout above. Omitted: no results, so every implemented stage is not run. |
+| `--waivers FILE` | `waivers.toml` from the tip of `main` (layout §3: the waived commit's own tree cannot hold its waiver). Validated by the registry check's waiver rule; an error stops the report (exit 2). |
+| `--today YYYY-MM-DD` | Judging date for waiver expiry; default today (UTC). A waiver is valid through its `expires` date. |
+| `--docs-only` | The docs-only classifier skipped the build jobs: the summary starts with `runtime conformance: not run (docs-only change)`. |
+| `--require-milestone M` | Exit 1 unless every required stage of milestone M is passed. |
+| `--require-history` | Passed to the registry check: no history is an error. |
+| `--json FILE`, `--summary FILE` | Write the JSON result; append the Markdown summary (stdout always gets it). |
+
+### Rules
+
+- **Test IDs.** A JUnit testcase maps to a registry test ID by the runner of its leg's job (`typescript`: vitest, `typescript-browser`: Playwright, every other job: cargo-nextest): nextest classname `<package>::<binary>` and name `<path>` give `nextest:<package>/<binary>/<path>` (a lib unit test, classname `<package>`, gives `nextest:<package>/<path>`); vitest and Playwright give `vitest:<file>/<name>` and `playwright:<file>/<name>`, where the file ends in `.test.*` or `.spec.*`.
+- **Scenario names** (layout §3): Rust `a<NN>_<pos|neg>_…` or `a<NN>_<SS>_<pos|neg>_…` on the last `::` segment; vitest `A40 pos: …` or `A58.07 neg: …` after the start or a ` > `; Playwright the same on the own title (the last ` › ` segment). The name gives the entry (`A24`, `A58.07`) and the polarity.
+- **Jobs of a test** (layout §3 "Which job produces a test", `TEST_JOBS` in the script): `skyoauth-scenarios` targets `hermetic`, `pg`, `envoy_k3s`, `live`; `skyoauth-client`; `skyoauth-operator`; vitest; Playwright. `skyoauth-service` has no job: it is not registrable. A test whose package fixes several jobs is expected from each of them that its stage lists.
+- **Testcase status.** `<failure>`, `<error>` or a retry marker (`<flakyFailure>`, `<flakyError>`, `<rerunFailure>`, `<rerunError>`) is failed: retries are 0, so a pass after a retry is a failure. `<skipped>` is not run. A testcase listed twice in one report keeps its worst status.
+- **Pairs.** For each implemented stage, every (test, leg) whose leg's job produces the test. Any unwaived failed attempt, in any run, makes the pair failed for good; otherwise a passing attempt makes it passed; otherwise it is not run (missing or skipped case, leg without a report).
+- **Stages.** Worst pair, failed > not run > passed. A stage that lists a test that is not a pos/neg test of its own entry, a test that no job of its legs produces, or a job with no pos or no neg test, is not run (or failed, if a pair failed). A planned stage is planned whatever results exist; results for its tests are listed as not counted.
+- **Aggregates.** A scenario at milestone M takes the worst of its stages up to M and those of its required sub-IDs; a contract is passed only when every covered scenario is. Aggregates rank failed > planned > not run > passed. A milestone's gate is passed only when every required stage of that milestone is; conditional sub-IDs are reported but gate nothing.
+- **Waivers.** A waiver discards one failed attempt only when commit, test, leg, `run_id` and `run_attempt` all match and it has not expired; the pair still needs a passing attempt. A waiver never applies to a not-run pair or a planned stage. Every waiver for the commit is listed as applied (next to the pair it affected) or not applied, with the reason.
+- **Results not counted.** Testcases with a scenario-like name that no implemented stage lists are listed: tests of planned stages, well-formed names not in any stage's `tests`, and unknown names (malformed, or no such entry). Other testcases are ignored.
+
+### Output and exit status
+
+The Markdown summary has a per-milestone table (stages passed, failed, not run, planned, and the gate), each implemented stage with its non-passed pairs and applied waivers, the waivers for the commit, the results not counted, and notes. The JSON (`format: 1`) holds the same data: `milestones`, `stages` (with `pairs` and their per-attempt statuses), `scenarios` (`status` and `by_milestone`), `contracts`, `waivers`, `uncounted`, `input_errors`, `notes`.
+
+| Exit | When |
+| --- | --- |
+| 0 | Report produced, no implemented stage has a failed pair, and the `--require-milestone` gate (if given) passed. Not run and planned stages do not fail the run. |
+| 1 | Some implemented stage (conditional sub-IDs included) has a failed pair, or `--require-milestone` is not met. |
+| 2 | Usage error, registry error or waiver-file error (no report); or input errors: malformed JUnit (its results are not used), duplicate artifacts for one (run, attempt, leg) (both copies are joined, so a failure in either counts), an unknown leg string, an artifact name without `attempt-N`, a stray entry in the artifacts directory. The report is still printed with the errors at the top, but cannot be trusted. |
+
+Only **passed** counts; `CI passed` is never read and is not a conformance signal (layout §3).
+
 ## Not here yet
 
-- Runtime tests, fixtures, fixture schemas, `waivers.toml`, the resolution part of `check-conformance-registry` and the reporter.
+- Runtime tests, fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry`.
+- A workflow job that downloads the artifacts of a commit, runs the reporter and posts or uploads its result; the gate check that reads the reporter result for a gate PR's base commit (layout §3 "Gates"); the release check.
+- The reporter's fixture count check of layout §1.3 (per consumer and kind, executed JUnit cases equal fixtures on disk). Each fixture case is listed as its own registered test, so a missing case already makes its pair not run.
 - **PENDING FOLLOW-UP: CODEOWNERS.** Layout §3 "Who approves" plans a `.github/CODEOWNERS` file that names the lead as owner of `tests/conformance/waivers.toml`, `tests/conformance/scenarios.toml`, `tests/conformance/subcases.toml` and the release manifest, together with "Require review from Code Owners" in the branch protection of `main`. It is not added here: it needs the lead's real GitHub handle and the maintainers' decision on the branch-protection setting (layout §6). Until then, no check enforces who approved a registry or waiver change.
