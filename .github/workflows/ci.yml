@@ -416,6 +416,11 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    # The name of the leg artifact this job uploaded, from the attempt it
+    # ran in, or empty when the upload produced none: conformance-report
+    # downloads it by this name (layout §3 "Leg artifacts").
+    outputs:
+      junit-artifact: ${{ steps.junit.outputs.artifact-id && format('junit-scenarios-pg-x86_64-attempt-{0}', github.run_attempt) || '' }}
     env:
       SKYOAUTH_CONFORMANCE_LEG: scenarios-pg/x86_64
       SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
@@ -549,6 +554,7 @@ jobs:
           printf '%s\n' "$SKYOAUTH_CONFORMANCE_LEG" > target/nextest/ci/leg
 
       - name: Upload JUnit report
+        id: junit
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -579,7 +585,8 @@ jobs:
   # report and no "not run" summary. `needs` lists every job of this
   # workflow that uploads a leg artifact (`junit-<leg id>-attempt-N`), so all
   # of them have finished before the download; the PR that adds a leg job to
-  # ci.yml adds it here (the reporter self-test checks it). A leg of another
+  # ci.yml adds it here, with its `junit-artifact` output, a download step
+  # and a DOWNLOADS line (the reporter self-test checks all four). A leg of another
   # workflow (the schedule-only live-wif-negative and nightly legs) runs in
   # another run and cannot be needed here. The reporter binds the registry to the
   # judged commit through the checkout's HEAD, so a pull request run checks
@@ -613,18 +620,29 @@ jobs:
         working-directory: scripts/ci
         run: npm ci --ignore-scripts
 
-      # One directory per artifact under the run's directory, as the
-      # reporter reads them (a pattern download keeps them apart). Whether a
-      # re-run attempt sees the artifacts of earlier attempts here is not
-      # verified (layout §6 "Still open", item 6).
-      - name: Download the leg artifacts
+      # One download per leg job, by the name that job gave in its
+      # `junit-artifact` output: never a pattern (one match extracts flat,
+      # several extract into one directory each) and never a name built
+      # here (a re-run of this job alone has another run_attempt). A
+      # download by name extracts the artifact's files directly into
+      # `path`; report-conformance-ci.sh checks them and moves them to
+      # ARTIFACTS/<run_id>/<name>/. A leg job that uploaded nothing has an
+      # empty output: no download, and its legs are not run. A failed
+      # download fails the job before the report step, which has no `if:`.
+      # Whether an artifact of an earlier attempt can be downloaded in a
+      # re-run is not verified (layout §6 "Still open", item 6).
+      - name: Download the scenarios-pg leg artifact
+        if: needs.scenarios-pg.outputs.junit-artifact != ''
         uses: actions/download-artifact@v8
         with:
-          pattern: junit-*-attempt-*
-          path: ${{ runner.temp }}/conformance-artifacts/${{ github.run_id }}
+          name: ${{ needs.scenarios-pg.outputs.junit-artifact }}
+          path: ${{ runner.temp }}/conformance-download/scenarios-pg
 
       - name: Report
         env:
+          DOWNLOAD_DIR: ${{ runner.temp }}/conformance-download
+          DOWNLOADS: |
+            scenarios-pg=${{ needs.scenarios-pg.outputs.junit-artifact }}
           ARTIFACTS: ${{ runner.temp }}/conformance-artifacts
           REPORT_JSON: ${{ runner.temp }}/conformance-report.json
         run: sh scripts/ci/report-conformance-ci.sh
