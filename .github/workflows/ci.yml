@@ -312,7 +312,7 @@ jobs:
           echo "The role can create, connect to and drop a database ($db)"
 
       - name: Run tests
-        run: cargo nextest run --locked --workspace --all-features --profile ci
+        run: cargo nextest run --locked --workspace --all-features --profile ci --run-ignored all
 
       - name: Upload JUnit report
         if: always()

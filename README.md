@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 
-| Path                 | Description                                     |
-| -------------------- | ----------------------------------------------- |
-| `service/`           | Rust service (`skyoauth-service`, axum + tokio) |
-| `clients/typescript` | TypeScript client library (`@skyoauth/client`)  |
+| Path                  | Description                                          |
+| --------------------- | ---------------------------------------------------- |
+| `service/`            | Rust service (`skyoauth-service`, axum + tokio)      |
+| `service/migrations/` | Forward-only PostgreSQL migrations (sqlx, embedded)  |
+| `clients/typescript`  | TypeScript client library (`@skyoauth/client`)       |
 
 ## Service
 
@@ -20,6 +21,44 @@ cargo run -p skyoauth-service   # listens on $SKYOAUTH_ADDR (default 127.0.0.1:8
 `cargo coverage` is an alias (in `.cargo/config.toml`) for `cargo llvm-cov`
 that fails if line coverage is below 85%. It needs `cargo install
 cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
+
+### Database migrations
+
+The server does not need a database yet and never migrates on start.
+Migrations are an explicit deploy step:
+
+```bash
+SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
+  cargo run -p skyoauth-service -- migrate
+```
+
+| Variable                                 | Meaning                                        |
+| ---------------------------------------- | ---------------------------------------------- |
+| `SKYOAUTH_DATABASE_URL`                  | `postgres://` or `postgresql://` URL, required |
+| `SKYOAUTH_DATABASE_MAX_CONNECTIONS`      | Pool size, 1 to 100, default 10                |
+| `SKYOAUTH_DATABASE_ACQUIRE_TIMEOUT_SECS` | Connection wait, 1 to 300 seconds, default 10  |
+
+- The migration role must own the database, or at least have `CREATE` on
+  the `public` schema.
+- Runners serialize on a session-level advisory lock, so `migrate` needs a
+  direct connection, not a transaction-pooling proxy such as PgBouncer in
+  transaction mode. Waiting for the lock has no timeout yet (follow-up).
+- TLS follows the URL's `sslmode` (sqlx's default is `prefer`); enforcing
+  TLS is a follow-up recorded under T10.1 in `docs/skyoauth-tasks.md`.
+- Conventions for writing migrations, and the limits of the append-only
+  triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
+
+Tests that need PostgreSQL are `#[ignore]`d. To run them, point
+`SKYOAUTH_IT_DATABASE_URL` at a server whose role may create databases (each
+test creates and drops its own) and include ignored tests:
+
+```bash
+export SKYOAUTH_IT_DATABASE_URL=postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+cargo nextest run --workspace --all-features --run-ignored all
+# or: cargo test --workspace --all-features -- --include-ignored
+```
+
+The replica-role append-only test needs a superuser role.
 
 ## TypeScript client
 
@@ -56,12 +95,13 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   exists, the job passes with a warning annotation: no scenario ran, which
   is not a conformance pass.
 - Service tests (nextest): `cargo nextest run --workspace --all-features
-  --profile ci` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
+  --profile ci --run-ignored all` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
   DB-backed tests reach a PostgreSQL 17 service container, with the same
-  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`.
+  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`. They
+  are `#[ignore]`d, so jobs without a database report them as ignored.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as

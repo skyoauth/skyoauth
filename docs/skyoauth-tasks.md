@@ -32,6 +32,7 @@ service/              Existing skyoauth-service (Axum/Tokio)
   src/core/           Proposed tenant/principal/profile/decision types
   src/config/         Validated configuration and reloads
   src/persistence/    PostgreSQL repositories, revisions and transactions
+  migrations/         Forward-only versioned SQL migrations (`skyoauth-service migrate`)
   src/admin/          Independent operator roles, bootstrap and recovery
   src/registry/       Resource servers, audiences/actions, clients and origins
   src/route_control/  M3 separately deployed route-control subcommand and observers
@@ -466,7 +467,7 @@ Only confirmed old-UID absence permits retired and exception removal; transport 
 
 ### T10 — Schema and migration safety
 
-- [ ] **T10.1** Implement staged migrations/indexes from the approved logical schema: workload M1a, human M1b before handlers. Generated IDs, typed unions, tenant references, soft disable/immutable revisions; no provider cascade into WIF/audience/client/operator authority. Origin/route/bundle versions are append-only; runtime observations and capacity policies have separate storage/revision rules.
+- [ ] **T10.1** Implement staged migrations/indexes from the approved logical schema: workload M1a, human M1b before handlers. Generated IDs, typed unions, tenant references, soft disable/immutable revisions; no provider cascade into WIF/audience/client/operator authority. Origin/route/bundle versions are append-only; runtime observations and capacity policies have separate storage/revision rules. Before any schema or domain data lands, a follow-up PR makes database TLS strict: when the URL has no `sslmode` and the host is neither loopback nor a Unix socket, default to `verify-full` (regardless of `PGSSLMODE`); accept an explicit weaker value only with a WARN log; ignore or document ambient `PG*` variables; show the SSL mode in the configuration `Debug` output; and require `sslrootcert` for a private CA.
 - [ ] **T10.2** Implement server-generated opaque create IDs/client_id and tenant-local name uniqueness; create responses return IDs/revisions, and exports retain them. No user-chosen global ID on normal create.
 - [ ] **T10.3** Hash browser-flow/session/code/refresh secrets; protect CSRF/PKCE and normalize expiry/revocation. Do not store raw replay assertions or expose cookie hashes as backend session references. The opted-in <=30s encrypted refresh-retry envelope is the explicit design §5.2.2 exception, never plaintext.
 - [ ] **T10.4** Complete immutable typed policy dependencies, pinned active versions and atomic audit/optimistic concurrency. Staged config, sample refresh and capacity-only changes cannot supersede live authorization; committed security disable/activation can. No mutable reinterpretation of issued credentials.
