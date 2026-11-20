@@ -43,6 +43,41 @@ not a migration.
   PostgreSQL error uses, so callers can tell it apart from constraint
   errors such as `23001` (`restrict_violation`).
 
+## What 0002 adds
+
+`0002_foundation.sql` is the first slice of the M1a domain schema (T10.1):
+`tenant`, `principal`, `instance_security_policy`, `egress_allowlist_entry`,
+`audit_event` and `audit_chain_head`. Comments marked `(inferred)` are
+choices the specifications do not dictate. Besides the append-only guard it
+adds two shared guard functions, both failing with `SK001`:
+`skyoauth_reject_immutable_change(column, ...)` rejects an `UPDATE` that
+changes a named column, and `skyoauth_check_revision()` requires revision 1
+on insert and exactly +1 on every update. Policy and egress rows are never
+deleted. The audit chain is enforced in order: an event must extend the
+chain head (`sequence` = head + 1, `prev_hash` = head hash; the first event
+has a `NULL` `prev_hash`), the head may only advance by one to an existing
+event, and a deferred check fails the commit if the head has not reached
+every event the transaction inserted.
+
+The database does not enforce these rules; the service must:
+
+- generate every ID and `Tenant.secret_namespace` (T10.2), and resolve
+  secret references only within the owning tenant's namespace (IR-034);
+- insert the single `instance_security_policy` row at bootstrap (the schema
+  allows at most one, not exactly one);
+- keep `single_actor_mode` and the audit sink fields read-only online, so
+  only the startup mirror of deployment configuration writes them (IR-053),
+  and keep `audit_sink_validated_at` matching the current digest;
+- require the second approver for the `widening_second_approver` toggle and
+  for adding or re-enabling egress entries (IR-052, IR-054);
+- check the expected revision of every write (compare and set);
+- disable tenants and principals through `status` instead of deleting them
+  (only foreign keys hold back a delete);
+- validate `exact_destination` as an exact URL (IR-152);
+- compute event and head hashes (the database only stores them), and lock
+  the chain head (`SELECT … FOR UPDATE`) before assigning a sequence, so
+  concurrent writers queue instead of failing.
+
 ## Limits
 
 - The append-only triggers are a tripwire against application DML, not a

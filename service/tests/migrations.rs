@@ -10,84 +10,12 @@
 //! No test name here may match the scenario pattern
 //! `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, so `scenarios-pg` never selects them.
 
-use std::{
-    str::FromStr,
-    sync::atomic::{AtomicU32, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+mod common;
 
-use skyoauth_service::persistence::{self, DatabaseConfig, MIGRATOR, MigrateError, PgPool};
-use sqlx::{AssertSqlSafe, Connection, PgConnection, postgres::PgConnectOptions};
+use std::time::Duration;
 
-const IT_DATABASE_URL_VAR: &str = "SKYOAUTH_IT_DATABASE_URL";
-
-struct TestDb {
-    admin_url: String,
-    name: String,
-    config: DatabaseConfig,
-}
-
-impl TestDb {
-    /// Creates a fresh, empty database.
-    ///
-    /// # Panics
-    ///
-    /// When `SKYOAUTH_IT_DATABASE_URL` is unset or empty.
-    async fn create() -> Self {
-        let admin_url = std::env::var(IT_DATABASE_URL_VAR)
-            .ok()
-            .filter(|url| !url.is_empty())
-            .unwrap_or_else(|| {
-                panic!(
-                    "{IT_DATABASE_URL_VAR} must be set to run this database test \
-                     (a postgres:// URL for a role that may create databases)"
-                )
-            });
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
-        let name = format!(
-            "skyoauth_test_{}_{}_{nanos}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let mut admin = PgConnection::connect(&admin_url).await.unwrap();
-        // The name is generated above from digits and underscores only.
-        sqlx::raw_sql(AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&mut admin)
-            .await
-            .unwrap();
-        let connect = PgConnectOptions::from_str(&admin_url)
-            .unwrap()
-            .database(&name);
-        let config = DatabaseConfig::new(connect, 4, Duration::from_secs(10)).unwrap();
-        Self {
-            admin_url,
-            name,
-            config,
-        }
-    }
-
-    async fn pool(&self) -> PgPool {
-        persistence::connect(&self.config).await.unwrap()
-    }
-
-    async fn drop(self, pools: impl IntoIterator<Item = PgPool>) {
-        for pool in pools {
-            pool.close().await;
-        }
-        let mut admin = PgConnection::connect(&self.admin_url).await.unwrap();
-        sqlx::raw_sql(AssertSqlSafe(format!(
-            "DROP DATABASE {} WITH (FORCE)",
-            self.name
-        )))
-        .execute(&mut admin)
-        .await
-        .unwrap();
-    }
-}
+use common::TestDb;
+use skyoauth_service::persistence::{self, MIGRATOR, MigrateError, PgPool};
 
 async fn applied(pool: &PgPool) -> Vec<(i64, bool, String)> {
     sqlx::query_as(
