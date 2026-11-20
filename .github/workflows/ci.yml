@@ -539,7 +539,9 @@ jobs:
           echo "$msg" >> "$GITHUB_STEP_SUMMARY"
 
       # The artifact carries the leg string in `leg` next to the JUnit file,
-      # and its name carries the attempt (§3: every attempt is kept).
+      # and its name carries the attempt (§3: every attempt is kept). An
+      # artifact without a `leg` file needs an entry in NOT_CONFORMANCE in
+      # scripts/ci/report-conformance.mjs, or its self-test fails.
       - name: Record the leg
         if: always()
         run: |

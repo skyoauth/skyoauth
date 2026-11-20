@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -1225,6 +1225,45 @@ describe('input errors', () => {
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
     assert.deepEqual(r.json.ignored_artifacts, ['100/rust-coverage', '100/service-nextest-junit-1', '100/service-nextest-junit-12', '100/typescript-coverage']);
     assert.match(r.out, /note: 4 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/rust-coverage`/);
+  });
+
+  test('every artifact the workflows upload is a leg artifact or a known non-conformance artifact', () => {
+    // Fails when a workflow gains an artifact without a `leg` file: add it to
+    // NOT_CONFORMANCE (or upload a leg file with it), or the reporter calls
+    // it an input error. A NOT_CONFORMANCE entry no workflow uploads fails too.
+    const uploads = [];
+    for (const wf of readdirSync(join(REPO, '.github', 'workflows')).filter((f) => /\.ya?ml$/.test(f)).sort()) {
+      const lines = repoText(join('.github', 'workflows', wf)).split('\n');
+      lines.forEach((l, i) => {
+        if (!/^\s*(- )?uses: actions\/upload-artifact@/.test(l)) return;
+        // The step's `with:` block: the lines after `uses:` indented deeper
+        // than the step's keys.
+        const indent = l.search(/\S/) + (l.trimStart().startsWith('- ') ? 2 : 0);
+        const block = [];
+        for (let j = i + 1; j < lines.length && (lines[j].trim() === '' || lines[j].search(/\S/) >= indent); j++) {
+          if (lines[j].search(/\S/) === indent && !/^\s*with:/.test(lines[j])) break;
+          block.push(lines[j]);
+        }
+        const name = block.map((b) => b.match(/^\s*name:\s*(.+?)\s*$/)).find(Boolean)?.[1];
+        // `path:` is one path, or a `|` block of one per line.
+        const paths = [];
+        const p = block.findIndex((b) => /^\s*path:/.test(b));
+        if (p >= 0) {
+          paths.push(block[p].replace(/^\s*path:\s*\|?\s*/, ''));
+          for (let k = p + 1; k < block.length && block[k].search(/\S/) > block[p].search(/\S/); k++) paths.push(block[k].trim());
+        }
+        uploads.push({ at: `${wf}:${i + 1}`, name, paths });
+      });
+    }
+    assert.ok(uploads.length > 0, 'no upload-artifact steps found');
+    const asNamed = (name) => name.replace(/\$\{\{\s*github\.run_attempt\s*\}\}/g, '1');
+    const bad = uploads.filter(({ name, paths }) => {
+      assert.ok(name, 'an upload step without a name');
+      const leg = paths.some((x) => /(^|\/)leg$/.test(x));
+      return leg ? !/-attempt-\$\{\{\s*github\.run_attempt\s*\}\}$/.test(name) : !NOT_CONFORMANCE.some((re) => re.test(asNamed(name)));
+    });
+    assert.deepEqual(bad, [], 'leg artifacts must end in attempt-${{ github.run_attempt }}; others need a NOT_CONFORMANCE entry');
+    assert.deepEqual(NOT_CONFORMANCE.filter((re) => !uploads.some(({ name }) => re.test(asNamed(name)))).map(String), [], 'NOT_CONFORMANCE entries no workflow uploads');
   });
 
   test('a failed attempt whose artifact lost its leg file does not vanish: input error, exit 2', () => {

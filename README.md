@@ -170,7 +170,10 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   failed, not run and planned results (no job runs the reporter itself
   yet). Its one dependency, `smol-toml`, is pinned in
   `scripts/ci/package.json` and installed with `npm ci --ignore-scripts`.
-  See `tests/conformance/README.md`.
+  A new artifact in `ci.yml` without a `leg` file needs an entry in the
+  reporter's `NOT_CONFORMANCE` list, and a new layout job needs a
+  `JOB_RUNNER` decision, or its self-test fails. See
+  `tests/conformance/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. On pushes to `main`, CI generates separate Rust and TypeScript tests and

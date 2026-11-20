@@ -376,6 +376,7 @@ const LEG_FILES = ['leg', 'junit.xml'];
 export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
 // Artifacts of jobs that are not conformance legs (ci.yml): the only ones
 // that may lack a leg file. Any other artifact without one is an input error.
+// The self-test checks this list against the workflows' upload steps.
 export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/];
 
 // What a path is, without following a symbolic link: dir, file, symlink,
