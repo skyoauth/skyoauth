@@ -91,11 +91,17 @@ export function assertGitImmune(file, patterns) {
     const before = snapshot(scratch);
     const env = { ...process.env, GIT_DIR: join(scratch, '.git') };
     delete env.NODE_TEST_CONTEXT; // set for files run by `node --test`; the child reports on its own
-    const p = spawnSync(process.execPath, ['--test', ...patterns.map((t) => `--test-name-pattern=${t}`), file], { encoding: 'utf8', env, timeout: 300_000 });
+    // The child's summary is read from TAP, forced here: the default reporter
+    // differs between Node versions (Node 24 writes spec even to a pipe), and
+    // a reporter in NODE_OPTIONS would be added to this one (and fail without
+    // a destination of its own), so it is removed.
+    if (env.NODE_OPTIONS !== undefined) env.NODE_OPTIONS = env.NODE_OPTIONS.replace(/(^|\s)--test-reporter(?:-destination)?(?:=\S*|\s+\S+)/g, '$1');
+    const p = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout', ...patterns.map((t) => `--test-name-pattern=${t}`), file], { encoding: 'utf8', env, timeout: 300_000 });
     assert.deepEqual(snapshot(scratch), before, 'the repository GIT_DIR names is untouched');
     assert.equal(p.status, 0, p.stdout + p.stderr);
-    assert.match(p.stdout, new RegExp(`^# pass ${patterns.length}$`, 'm'), 'each pattern names one test');
-    assert.match(p.stdout, /^# fail 0$/m);
+    for (const [key, n] of [['tests', patterns.length], ['pass', patterns.length], ['fail', 0]]) {
+      assert.match(p.stdout, new RegExp(`^# ${key} ${n}$`, 'm'), `# ${key} ${n}: each pattern names one test, and it passed\n${p.stdout}`);
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
