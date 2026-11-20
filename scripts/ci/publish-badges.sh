@@ -39,12 +39,17 @@
 # 84.9 %, 85 as 85.0 %, 100 as 100.0 %. A percentage outside 0..100 is an
 # error.
 #
-# A report that cannot be used (a missing or malformed figure, a percentage
-# outside 0..100, a count that is not a whole number of at most 9 digits, or
-# counts that add up to fewer than none passed) never yields a badge: when
-# its tests job is marked as failed, the tests badge is a red `failing` one;
-# otherwise that badge is left as it was, the other badges are published,
-# and the script then exits 1 (at once when there is no other badge).
+# A report that cannot be used (a missing file, a missing or malformed
+# figure, a percentage outside 0..100, a count that is not a whole number
+# of at most 9 digits, or counts that add up to fewer than none passed)
+# never yields a badge. When its tests job is marked as failed
+# (--rust-tests-failed, --ts-tests-failed), the tests badge is a red
+# `failing` one, as without a report. Otherwise that badge is left as it
+# was, the other badges are published, and the script then exits 1 (at
+# once, publishing nothing, when no other badge is known). A run found
+# superseded (see below) exits 0 without publishing all the same: the
+# first check comes before any report is read, and the one before each
+# push exits 0 even when a report was unusable.
 #
 # Only the badges whose inputs are passed are regenerated; any other files
 # already on the badges branch under `<branch>/` are preserved, and each

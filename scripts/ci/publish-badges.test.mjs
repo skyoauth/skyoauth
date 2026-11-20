@@ -392,6 +392,15 @@ describe('numeric settings and counts', () => {
     return ctx;
   };
 
+  test('a superseded run exits 0 without publishing, even with an unusable report', () => {
+    const { remote, sha, work, file } = superseded();
+    const r = publish(work[0], ['main', sha, '--ts-results', file('bad.json', '{"success":true,"numPassedTests":-1,"numFailedTests":0}')]);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /superseded, not publishing/);
+    assert.doesNotMatch(r.stderr, /cannot read/);
+    assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+  });
+
   test('a valid setting on a superseded commit publishes nothing', () => {
     const { sha, work, file } = superseded();
     const r = publish(work[0], args(sha, file), { BADGES_ATTEMPTS: '5' });
