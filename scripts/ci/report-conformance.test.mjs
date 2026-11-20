@@ -1668,6 +1668,15 @@ const needsOf = (body) => {
   const block = /^ {4}needs:\n((?: {6}- .*\n)+)/m.exec(body);
   return block ? block[1].split('\n').filter(Boolean).map((l) => l.replace(/^ {6}- /, '').trim()) : [];
 };
+// A job's `if:` as one expression: a plain value, or a folded (`>-`) block
+// joined with single spaces as YAML folds it, with a surrounding `${{ }}`
+// removed.
+const jobIf = (body) => {
+  const m = /^ {4}if: *(.*)\n((?: {6}.*\n)*)/m.exec(body);
+  if (!m) return null;
+  const expr = m[1] === '>-' ? m[2].split('\n').map((l) => l.trim()).filter(Boolean).join(' ') : m[1].trim();
+  return /^\$\{\{\s*(.*?)\s*\}\}$/.exec(expr)?.[1] ?? expr;
+};
 // The steps of a job body, each as its text from `- ` to the next step.
 const stepsOf = (body) => body.split(/^(?= {6}- )/m).filter((s) => s.startsWith('      - '));
 const stepNamed = (body, re) => stepsOf(body).filter((s) => re.test(s));
@@ -1680,20 +1689,23 @@ const inAttempt = (name, n = 1) => name.replace(/\$\{\{\s*github\.run_attempt\s*
 const globRe = (glob) => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')}$`);
 // The leg id of a leg string (layout §3 "Leg artifacts").
 const legId = (leg) => leg.replaceAll('/', '-');
-// The leg artifacts of a workflow, per job: [{ job, at, name, paths, leg }].
-const legUploads = (text) =>
+// The leg artifacts of workflow file `wf`, per job: [{ wf, job, at, name,
+// paths, leg }].
+const legUploads = (text, wf = 'ci.yml') =>
   [...workflowJobs(text)].flatMap(([job, body]) =>
-    workflowUploads([[`ci.yml#${job}`, body]])
+    workflowUploads([[`${wf}#${job}`, body]])
       .filter(({ paths }) => paths.some((x) => /(^|\/)leg$/.test(x)))
-      .map((u) => ({ job, ...u, leg: /^ {6}SKYOAUTH_CONFORMANCE_LEG: *(\S+)$/m.exec(body)?.[1] ?? null })),
+      .map((u) => ({ wf, job, ...u, body, leg: /^ {6}SKYOAUTH_CONFORMANCE_LEG: *(\S+)$/m.exec(body)?.[1] ?? null })),
   );
 
 describe('the conformance-report CI job', () => {
   const catalogue = parseEnvironments(repoText(LAYOUT), []).catalogue;
 
-  test('leg artifacts follow the layout §3 naming contract, and the layout lists the legs that upload', () => {
-    const uploads = legUploads(ciText());
-    assert.ok(uploads.length > 0, 'no leg artifact in ci.yml');
+  test('leg artifacts follow the layout §3 naming contract in every workflow, and the layout lists the legs that upload', () => {
+    // Every workflow file: a leg of a schedule-only workflow follows the same
+    // contract, although conformance-report cannot need its job.
+    const uploads = repoWorkflows().flatMap(([wf, text]) => legUploads(text, wf));
+    assert.ok(uploads.some((u) => u.wf === 'ci.yml'), 'no leg artifact in ci.yml');
     for (const u of uploads) {
       // A matrix leg would come from an expression; extend this test then.
       assert.ok(u.leg, `${u.at}: job ${u.job} uploads a leg artifact but sets no literal SKYOAUTH_CONFORMANCE_LEG`);
@@ -1705,7 +1717,7 @@ describe('the conformance-report CI job', () => {
       const dirs = new Set(paths.map((x) => dirname(x)));
       assert.deepEqual(paths.map((x) => x.slice(x.lastIndexOf('/') + 1)).sort(), ['junit.xml', 'leg'], `${u.at}: a leg artifact uploads exactly junit.xml and leg`);
       assert.equal(dirs.size, 1, `${u.at}: junit.xml and leg come from one directory, so both land at the top of the artifact`);
-      const step = stepNamed(workflowJobs(ciText()).get(u.job), /uses: actions\/upload-artifact@/)[0];
+      const step = stepNamed(u.body, /uses: actions\/upload-artifact@/)[0];
       assert.match(step, /^ {8}if: always\(\)$/m, `${u.at}: the upload runs whatever the tests did`);
     }
     // Leg ids are distinct across the whole §1.1 column, so no two legs can
@@ -1751,12 +1763,16 @@ describe('the conformance-report CI job', () => {
     assert.equal(path, `${artifacts}/\${{ github.run_id }}`, 'the artifacts land in ARTIFACTS/<run_id>/<artifact name>/');
   });
 
-  test('it is informational: always after its legs unless classified docs-only, not required, read-only, no secrets, no gate flags', () => {
+  test('it is informational: after its legs unless the run is cancelled or classified docs-only, not required, read-only, no secrets, no gate flags', () => {
     const jobs = workflowJobs(ciText());
     const body = jobs.get(REPORT_JOB);
-    const cond = /^ {4}if: *(.+)$/m.exec(body)?.[1] ?? '';
-    assert.match(cond, /^always\(\) && /, 'runs whatever its legs did');
-    assert.match(cond, /needs\.changes\.outputs\.code == 'true'/, 'skipped with the jobs that a docs-only classification skips');
+    // Runs whatever its legs did, except in a cancelled run, and is skipped
+    // with the jobs that a docs-only classification skips.
+    const cond = jobIf(body);
+    assert.match(cond, /^!cancelled\(\) && /, 'the condition starts with !cancelled(), so a cancelled run gets no report');
+    assert.doesNotMatch(/^ {4}if:.*\n(?: {6}.*\n)*/m.exec(body)[0], /always\(\)/, 'always() would also run it in a cancelled run');
+    assert.equal(cond, "!cancelled() && needs.changes.outputs.code == 'true'");
+    assert.match(body, /^ {4}if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.code == 'true' \}\}$/m, 'one line, inside ${{ }}');
     assert.ok(!needsOf(jobs.get('ci-passed')).includes(REPORT_JOB), 'ci-passed must not need it: it is not a required check');
     assert.match(body, /^ {4}permissions:\n {6}contents: read\n(?! {6})/m, 'permissions: contents: read only');
     for (const bad of [/secrets\./, /github\.token/, /GH_TOKEN/, /id-token/, /continue-on-error/, /--require-milestone/, /--require-history/, /--allow-commit-mismatch/, /--docs-only/]) {
@@ -1801,6 +1817,7 @@ describe('the conformance-report CI job', () => {
       GITHUB_RUN_ATTEMPT: '1',
       GITHUB_WORKFLOW: 'CI',
       GITHUB_EVENT_NAME: 'push',
+      GITHUB_REF_NAME: 'main',
       GITHUB_STEP_SUMMARY: join(out, 'summary.md'),
       ...env,
     };
@@ -1824,14 +1841,21 @@ describe('the conformance-report CI job', () => {
       // The reporter gets the commit, the artifacts, the JSON and the step
       // summary, and nothing that would make it a gate.
       assert.deepEqual(r.args, [join(dirname(SCRIPT), 'report-conformance.mjs'), '--commit', SHA, '--artifacts', r.env.ARTIFACTS, '--json', r.env.REPORT_JSON, '--summary', r.env.GITHUB_STEP_SUMMARY]);
-      assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI' });
-      assert.match(r.summary, /^> \*\*Informational\.\*\* This conformance report covers only the leg artifacts of this workflow run \(run 100, attempts 1 to 1\)/);
+      assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'push', headBranch: 'main' });
+      assert.match(r.summary, /^> \*\*Informational\.\*\* This conformance report covers only the leg artifacts this job downloaded from this workflow run \(run 100, report attempt 1\), [^\n]* Whether a re-run attempt also sees the artifacts of earlier attempts is not verified\./);
+      assert.doesNotMatch(r.summary, /attempts 1 to/);
       assert.doesNotMatch(r.summary, /PR head/);
     }
-    const pr = stubbed(0, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_RUN_ID: '98765432101', GITHUB_RUN_ATTEMPT: '3', GITHUB_WORKFLOW: 'CI "x"' });
+    // In a pull_request run GITHUB_REF_NAME is the merge ref; headBranch is
+    // the PR's head branch, as gh run view gives it.
+    const pr = stubbed(0, { GITHUB_EVENT_NAME: 'pull_request', GITHUB_HEAD_REF: 'claude/x "y"', GITHUB_REF_NAME: '52/merge', GITHUB_RUN_ID: '98765432101', GITHUB_RUN_ATTEMPT: '3', GITHUB_WORKFLOW: 'CI "x"' });
     assert.equal(pr.status, 0);
     assert.match(pr.summary, /^> In a pull request run the judged commit is the PR head, while the leg jobs tested its merge with the base branch\.$/m);
-    assert.deepEqual(JSON.parse(pr.runJson), { databaseId: 98765432101, headSha: SHA, attempt: 3, workflowName: 'CI "x"' });
+    assert.deepEqual(JSON.parse(pr.runJson), { databaseId: 98765432101, headSha: SHA, attempt: 3, workflowName: 'CI "x"', event: 'pull_request', headBranch: 'claude/x "y"' });
+    // An empty GITHUB_HEAD_REF (any other event) falls back to the ref name.
+    const dispatch = stubbed(0, { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_HEAD_REF: '' });
+    assert.equal(dispatch.status, 0);
+    assert.deepEqual(JSON.parse(dispatch.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'workflow_dispatch', headBranch: 'main' });
   });
 
   test('a missing or malformed variable, or an existing run.json, is a usage error before the reporter runs', () => {
@@ -1848,6 +1872,11 @@ describe('the conformance-report CI job', () => {
       [{ GITHUB_RUN_ATTEMPT: '' }, /GITHUB_RUN_ATTEMPT must be a positive integer, not ''/],
       [{ GITHUB_RUN_ATTEMPT: '01' }, /GITHUB_RUN_ATTEMPT must be a positive integer/],
       [{ GITHUB_WORKFLOW: undefined }, /GITHUB_WORKFLOW is not set/],
+      [{ GITHUB_EVENT_NAME: undefined }, /GITHUB_EVENT_NAME must be an event name \(a-z and _\), not ''/],
+      [{ GITHUB_EVENT_NAME: 'Push' }, /GITHUB_EVENT_NAME must be an event name/],
+      [{ GITHUB_EVENT_NAME: 'push x' }, /GITHUB_EVENT_NAME must be an event name/],
+      [{ GITHUB_REF_NAME: undefined }, /GITHUB_HEAD_REF and GITHUB_REF_NAME are both unset or empty/],
+      [{ GITHUB_REF_NAME: '', GITHUB_HEAD_REF: '' }, /GITHUB_HEAD_REF and GITHUB_REF_NAME are both unset or empty/],
     ]) {
       const r = stubbed(0, env);
       assert.equal(r.status, 2, JSON.stringify(env));
@@ -1907,7 +1936,9 @@ describe('the conformance-report CI job', () => {
     const r = job(co, [{ leg: PG, junit: nextestJUnit([]) }]);
     assert.equal(r.status, 0, r.out + r.err);
     assert.doesNotMatch(r.out, /^::(warning|error)/m);
-    assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: co.head, attempt: 1, workflowName: 'CI' });
+    // The reporter checks four of run.json's fields and ignores event and
+    // headBranch.
+    assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: co.head, attempt: 1, workflowName: 'CI', event: 'push', headBranch: 'main' });
     assert.equal(r.json.trusted, true);
     assert.deepEqual(r.json.input_errors, []);
     assert.deepEqual(r.json.reports, [{ run_id: 100, run_attempt: 1, workflow: 'CI', leg: PG, artifact: `100/${PG_ARTIFACT}`, cases: 0 }]);

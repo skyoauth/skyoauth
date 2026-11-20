@@ -567,13 +567,21 @@ jobs:
   # fails it: usage, registry or input errors, or a crash; a failed
   # conformance test is a warning here, because it already fails its own
   # leg job (scripts/ci/report-conformance-ci.sh). It is not in `ci-passed`
-  # and must not be made a required check.
+  # and must not be made a required check. A reporter error still fails the
+  # workflow run: on main that turns the README's CI badge red, while
+  # `CI passed` stays green.
   #
-  # It runs after its leg jobs whatever their result, but not when
-  # `changes` skipped them. `needs` lists every job that uploads a leg
-  # artifact (`junit-<leg id>-attempt-N`), so all of them have finished
-  # before the download; the PR that adds a leg adds its job here (the
-  # reporter self-test checks it). The reporter binds the registry to the
+  # It runs after its leg jobs whatever their result unless the run was
+  # cancelled (`!cancelled()`, as in publish-badges): a failed or timed-out
+  # leg still gets a report, a cancelled run (such as a pull request run
+  # superseded by cancel-in-progress) does not. It does not run when
+  # `changes` skipped the code jobs: a docs-only change gets no conformance
+  # report and no "not run" summary. `needs` lists every job of this
+  # workflow that uploads a leg artifact (`junit-<leg id>-attempt-N`), so all
+  # of them have finished before the download; the PR that adds a leg job to
+  # ci.yml adds it here (the reporter self-test checks it). A leg of another
+  # workflow (the schedule-only live-wif-negative and nightly legs) runs in
+  # another run and cannot be needed here. The reporter binds the registry to the
   # judged commit through the checkout's HEAD, so a pull request run checks
   # out and judges the PR head, as `gh run view` names it in `headSha`
   # (tests/conformance/README.md "The reporter").
@@ -582,7 +590,7 @@ jobs:
     needs:
       - changes
       - scenarios-pg
-    if: always() && needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
