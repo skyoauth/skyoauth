@@ -14,14 +14,17 @@ import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  checkNamedSubcases,
   DESIGN,
   generate,
   LAYOUT,
   LINE,
   LocalDate,
+  MILESTONES,
   parseConditional,
   parseToml,
   renderLayoutRow,
+  renderTable,
   rowConditionals,
   stageStamp,
   run,
@@ -31,6 +34,7 @@ import {
   SUBCASES,
   TASKS,
 } from './gen-conformance-registry.mjs';
+import { normaliseRegistry } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'gen-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -46,7 +50,7 @@ function fixture(edit = (_rel, text) => text) {
   const root = mkdtempSync(join(tmpdir(), 'gen-registry-'));
   roots.push(root);
   for (const rel of FILES) {
-    const text = edit(rel, readFileSync(join(REPO, rel), 'utf8'));
+    const text = edit(rel, registry(rel));
     if (text === null) continue;
     mkdirSync(dirname(join(root, rel)), { recursive: true });
     writeFileSync(join(root, rel), text);
@@ -55,6 +59,9 @@ function fixture(edit = (_rel, text) => text) {
 }
 
 const read = (root, rel) => readFileSync(join(root, rel), 'utf8');
+// A repository file as fixtures start from it: the registry files with every
+// stage planned and no gate passed (registry-fixtures.mjs), the specs as they are.
+const registry = (rel) => (rel === SCENARIOS || rel === SUBCASES ? normaliseRegistry(read(REPO, rel)) : read(REPO, rel));
 
 // Runs the CLI and returns { status, stderr, stdout }.
 function cli(...args) {
@@ -87,7 +94,7 @@ describe('committed registry', () => {
     const kinds = doc.scenario.map((e) => e.kind);
     assert.equal(kinds.filter((k) => k === 'scenario').length, 64);
     assert.equal(kinds.filter((k) => k === 'contract').length, 10);
-    assert.deepEqual(doc.gates_passed, []);
+    assert.ok(doc.gates_passed.every((g) => MILESTONES.includes(g)));
     const subs = parseToml(read(REPO, SUBCASES)).subcase.map((s) => s.id);
     assert.deepEqual(subs, ['A18.90', 'A27.90', 'A33.90', 'A58.90']);
   });
@@ -104,8 +111,8 @@ describe('committed registry', () => {
     const root = fixture();
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
     const once = [read(root, SCENARIOS), read(root, SUBCASES)];
-    assert.equal(once[0], read(REPO, SCENARIOS));
-    assert.equal(once[1], read(REPO, SUBCASES));
+    assert.equal(once[0], registry(SCENARIOS));
+    assert.equal(once[1], registry(SUBCASES));
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
     assert.deepEqual([read(root, SCENARIOS), read(root, SUBCASES)], once);
   });
@@ -205,7 +212,7 @@ describe('drift is detected', () => {
     assert.match(cli('--root', root, '--check').stderr, /§2 row A26 differs from the table rendered from the registry/);
     assert.equal(cli('--root', root).status, 0);
     assert.equal(specLine(read(root, LAYOUT), 'A26'), specLine(read(REPO, LAYOUT), 'A26').replace('| PG, UC |', '| PG, UC, FX |'));
-    assert.equal(read(root, SCENARIOS), read(REPO, SCENARIOS).replace('harness = ["PG", "UC"]\nowners = ["T12.8", "T21.5"]', 'harness = ["PG", "UC", "FX"]\nowners = ["T12.8", "T21.5"]'));
+    assert.equal(read(root, SCENARIOS), registry(SCENARIOS).replace('harness = ["PG", "UC"]\nowners = ["T12.8", "T21.5"]', 'harness = ["PG", "UC", "FX"]\nowners = ["T12.8", "T21.5"]'));
     assert.equal(cli('--root', root, '--check').status, 0);
   });
 
@@ -709,6 +716,35 @@ describe('hand-authored input is validated', () => {
     });
   }
 
+  // Values of the wrong shape where an array of tables is expected used to
+  // crash the duplicate check with a TypeError (exit 2).
+  for (const [name, rel, edit, re] of [
+    ['scenario = 1 in scenarios.toml', SCENARIOS, () => 'gates_passed = []\nscenario = 1\n', /^error: tests\/conformance\/scenarios\.toml: scenario must be an array of tables \(\[\[scenario\]\]\)$/m],
+    ['subcase = 1 in subcases.toml', SUBCASES, () => 'subcase = 1\n', /^error: tests\/conformance\/subcases\.toml: subcase must be an array of tables \(\[\[subcase\]\]\)$/m],
+    ['subcase = 1 in scenarios.toml', SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', 'gates_passed = []\nsubcase = 1'), /^error: tests\/conformance\/scenarios\.toml: unknown top-level key subcase$/m],
+    ['scenario = 1 in subcases.toml', SUBCASES, (t) => 'scenario = 1\n' + t, /^error: tests\/conformance\/subcases\.toml: unknown top-level key scenario$/m],
+    ['[[constructor]] in scenarios.toml', SCENARIOS, (t) => t + '\n[[constructor]]\nx = 1\n', /^error: tests\/conformance\/scenarios\.toml: unknown top-level key constructor$/m],
+  ]) {
+    test(`${name} is a validation error, not a crash`, () => {
+      const root = fixture((r, t) => (r === rel ? edit(t) : t));
+      failsBothModes(root, re);
+      assert.doesNotMatch(cli('--root', root).stderr, /TypeError|at .*\.mjs:\d+/);
+    });
+  }
+
+  test('stage = 1 in a contract entry is drift, not a crash', () => {
+    // A contract has no stages, so the write mode regenerates the entry
+    // without it; --check reports it.
+    const root = fixture((r, t) => (r === SCENARIOS ? replaceOnce(t, 'id = "C07"\n', 'id = "C07"\nstage = 1\n') : t));
+    const check = cli('--root', root, '--check');
+    assert.equal(check.status, 1, check.stderr);
+    assert.match(check.stderr, /^error: tests\/conformance\/scenarios\.toml: C07: stage differs from the specs$/m);
+    assert.doesNotMatch(check.stderr, /TypeError|at .*\.mjs:\d+/);
+    const write = cli('--root', root);
+    assert.equal(write.status, 0, write.stderr);
+    assert.equal(read(root, SCENARIOS), registry(SCENARIOS));
+  });
+
   test('valid \\u and \\U escapes still parse', () => {
     assert.deepEqual(parseToml('a = "\\u00e9\\U0001F600"'), { a: 'é😀' });
   });
@@ -749,6 +785,34 @@ describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
     failsBothModes(root, /A27\.90: table_text names T40\.7, but the first owner is T40\.6/);
   });
 
+  test('a sub-ID named in another row, for another feature and task', () => {
+    // The checker runs checkNamedSubcases() on the committed table (the
+    // generator only on the table it renders). Row A33 names A27.90 (back-channel
+    // logout, T30.6): its parent, feature and first owner each disagree.
+    const layout = replaceOnce(read(REPO, LAYOUT), 'Conditional sub-ID A33.90 (back-channel logout, T30.6)', 'Conditional sub-ID A27.90 (back-channel logout, T30.6)');
+    const named = ['A18', 'A27', 'A33', 'A58'].flatMap((id) => rowConditionals(specLine(layout, id), id));
+    const errors = [];
+    checkNamedSubcases(named, parseToml(registry(SUBCASES)).subcase, errors);
+    assert.deepEqual(errors, [
+      `${SUBCASES}: A27.90: parent is A27, but the layout doc names it under A33`,
+      `${SUBCASES}: A27.90: conditional_on is device-flow, but the layout doc names back-channel-logout`,
+      `${SUBCASES}: A27.90: first owner is T40.6, but the layout doc names T30.6`,
+      `${SUBCASES}: A33.90 is a conditional sub-ID not named in ${LAYOUT} §2`,
+    ]);
+  });
+
+  test('a row renders its conditional sub-ID sentences in ID order, whatever the input order', () => {
+    const { entries, codes } = generate(REPO);
+    const a2790 = entries.subcases.find((s) => s.id === 'A27.90');
+    const a2791 = { ...a2790, id: 'A27.91', table_text: 'Conditional sub-ID A27.91 (device flow, T40.6): second' };
+    const a2792 = { ...a2790, id: 'A27.92', table_text: 'Conditional sub-ID A27.92 (device flow, T40.6): third' };
+    const want = renderLayoutRow(entries.scenarios.find((e) => e.id === 'A27'), codes, [a2790, a2791, a2792].map((s) => s.table_text));
+    for (const order of [[a2792, a2791, a2790], [a2791, a2790, a2792], [a2790, a2792, a2791]]) {
+      const rows = renderTable(entries.scenarios, [...entries.subcases.filter((s) => s.parent !== 'A27'), ...order], codes);
+      assert.equal(rows.find((r) => r.startsWith('| A27 |')), want);
+    }
+  });
+
   test('a table_text whose feature does not match conditional_on', () => {
     const root = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'Conditional sub-ID A33.90 (back-channel logout,', 'Conditional sub-ID A33.90 (device flow,') : t));
     failsBothModes(root, /A33\.90: table_text names device-flow, but conditional_on is back-channel-logout/);
@@ -772,7 +836,7 @@ describe('hand-authored fields are kept', () => {
   test('legs, status, tests, the stamp and gates_passed survive regeneration', () => {
     const root = fixture((rel, t) => (rel === SCENARIOS ? implementedA24(replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M0", "M1a"]')) : t));
     const before = read(root, SCENARIOS);
-    assert.notEqual(before, read(REPO, SCENARIOS));
+    assert.notEqual(before, registry(SCENARIOS));
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
     assert.equal(read(root, SCENARIOS), before);
     assert.equal(cli('--root', root, '--check').status, 0);
@@ -788,7 +852,7 @@ describe('hand-authored fields are kept', () => {
     const root = fixture((rel, t) => (rel === SCENARIOS ? drop(drop(drop(drop(drop(t, 'A14', 0), 'A62', 1), 'A24', 0), 'A01', 0), 'A02', 1) : t));
     assert.equal(run(['--root', root], () => {}, () => {}), 0);
     // The committed legs of these stages are the defaults.
-    assert.equal(read(root, SCENARIOS), read(REPO, SCENARIOS));
+    assert.equal(read(root, SCENARIOS), registry(SCENARIOS));
   });
 
   test('a stage that moves milestone keeps its tests', () => {

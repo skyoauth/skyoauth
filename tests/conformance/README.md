@@ -90,7 +90,7 @@ for example `printf '%s\n%s\n%s\n%s' A24 M1a 'consume primitive' "$matrix_sha256
 
 Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, inside the annex range that the parent's `note` declares; today only A58 declares one (`A58.01–A58.89`), and a declared range must itself lie within .01–.89. The T32.3 owner drafts A58's required sub-IDs; none exist yet.
 
-`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
+`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner, and that owner must be the feature's own task (layout §2: `device-flow` T40.6, `back-channel-logout` T30.6, `forwardauth` T32.9), since `conditional_on` keeps the sub-ID out of the gates. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
 
 ## The registry check
 

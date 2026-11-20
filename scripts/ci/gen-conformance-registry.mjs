@@ -72,10 +72,17 @@ export const SUBCASES = 'tests/conformance/subcases.toml';
 
 export const MILESTONES = ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5'];
 
-export const LAYERS = { C: 'conformance', S: 'security', I: 'integration', P: 'package' };
+// Lookup tables without a prototype, so that a key read from a spec or the
+// registry (`toString`, `constructor`, `__proto__`) finds nothing it did not list.
+const lookup = (entries) => Object.freeze(Object.assign(Object.create(null), entries));
+
+export const LAYERS = lookup({ C: 'conformance', S: 'security', I: 'integration', P: 'package' });
 // Feature label in a §2 "Conditional sub-ID (<label>, Txx.y)" sentence ->
 // conditional_on value.
-export const FEATURES = { 'device flow': 'device-flow', 'back-channel logout': 'back-channel-logout', ForwardAuth: 'forwardauth' };
+export const FEATURES = lookup({ 'device flow': 'device-flow', 'back-channel logout': 'back-channel-logout', ForwardAuth: 'forwardauth' });
+// The optional task behind each conditional feature, as the layout §2 rows name
+// it (and §5 decision 6 for ForwardAuth).
+export const FEATURE_TASK = lookup({ 'device-flow': 'T40.6', 'back-channel-logout': 'T30.6', forwardauth: 'T32.9' });
 export const STATUSES = ['planned', 'implemented'];
 // A single-stage row shows only its milestone in the table; its stage scope
 // is this fixed text (as in the layout §3 A64 example).
@@ -85,7 +92,7 @@ const AUDIT = 'deployed-topology audit';
 // First milestone in which each CI job exists (layout §1.1 and the §4 table;
 // `typescript` exists already). The jobs and legs themselves come from the
 // §1.1 "Leg strings" column; every job there must have an entry here.
-export const JOB_FROM = {
+export const JOB_FROM = lookup({
   'scenarios-hermetic': 'M1a',
   'clients-rust': 'M2',
   typescript: 'M0',
@@ -101,7 +108,7 @@ export const JOB_FROM = {
   'clients-rust-native': 'M4',
   'live-wif-push': 'M2',
   'live-wif-negative': 'M2',
-};
+});
 
 const mIndex = (m) => MILESTONES.indexOf(m);
 
@@ -152,6 +159,10 @@ export function defaultLegs(entry, stage, catalogue) {
 // Markdown
 
 export const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
+
+// A value in a diagnostic or a stamp: a string as it is, anything else as JSON.
+// Interpolating it directly throws for smol-toml's prototype-less tables.
+export const show = (v) => (typeof v === 'string' ? v : (JSON.stringify(v) ?? String(v)));
 
 export class SpecError extends Error {}
 
@@ -216,7 +227,7 @@ export function parseEnvironments(layout, errors) {
   const lines = section(layout, LAYOUT, '1.');
   const start = lines.findIndex((l) => l.line.startsWith('### 1.1 '));
   if (start < 0) throw new SpecError(`${LAYOUT}: subsection "### 1.1" not found`);
-  const codes = {};
+  const codes = Object.create(null);
   const catalogue = new Map();
   let col = -1;
   for (const { line, n } of lines.slice(start + 1)) {
@@ -262,6 +273,7 @@ export const isConditionalNumber = (id) => Number(id.slice(4)) >= 90;
 // The annex range for required sub-IDs that a scenario's note declares, such
 // as "A58.01–A58.89" (en dash): { from, to, text }, or null.
 export function annexRange(id, note) {
+  if (typeof id !== 'string' || (note !== undefined && typeof note !== 'string')) return null;
   const r = new RegExp(`\\b${id}\\.(\\d\\d)–${id}\\.(\\d\\d)\\b`).exec(note ?? '');
   return r ? { from: Number(r[1]), to: Number(r[2]), text: r[0] } : null;
 }
@@ -293,7 +305,7 @@ export function rowConditionals(line, id) {
 export function renderLayoutRow(e, codes, sentences = []) {
   const code = (v) => Object.keys(codes).find((k) => codes[k] === v) ?? `?${v}`;
   const st = e.stages ?? e.stage;
-  const stages = st.length === 1 && st[0].scope === FULL_ROW ? st[0].milestone : st.map((s) => `${s.milestone}: ${s.scope}`).join(' · ');
+  const stages = st.length === 1 && st[0].scope === FULL_ROW ? show(st[0].milestone) : st.map((s) => `${show(s.milestone)}: ${show(s.scope)}`).join(' · ');
   const pm = `${e.note ? `${e.note} ` : ''}${POS}${e.positive}${NEG}${e.negative}${sentences.map((s) => `. ${s}`).join('')}`;
   const cells = [e.id, e.layers.map((l) => Object.keys(LAYERS).find((k) => LAYERS[k] === l)).join('+'), e.envs.map(code).join(', '), e.harness.join(', '), stages, e.owners.join(', '), pm];
   return `| ${cells.join(' | ')} |`;
@@ -305,7 +317,8 @@ export const TABLE_HEADER = ['| ID | Layer | Env | Harness | Stages | Owners | +
 // scenario entries in order, each row ending with the table_text of its
 // conditional sub-IDs in ID order.
 export function renderTable(scenarios, subcases, codes) {
-  const sorted = [...subcases].sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const id = (s) => show(s.id);
+  const sorted = [...subcases].sort((x, y) => (id(x) < id(y) ? -1 : id(x) > id(y) ? 1 : 0));
   const rows = scenarios.map((e) =>
     renderLayoutRow(
       e,
@@ -356,7 +369,7 @@ export function findCounts(layout) {
 
 // The stamp an implemented stage carries in implemented_sha256: SHA-256 of
 // id, milestone, scope and the entry's matrix_sha256, joined by "\n".
-export const stageStamp = (id, milestone, scope, matrix) => sha256([id, milestone, scope, matrix].join('\n'));
+export const stageStamp = (id, milestone, scope, matrix) => sha256([id, milestone, scope, matrix].map(show).join('\n'));
 
 // Task IDs defined as "- [ ] **T12.3** ..." bullets, with their lines.
 export function taskLines(text) {
@@ -635,6 +648,16 @@ function readMaybe(root, rel) {
   return existsSync(p) ? readFileSync(p, 'utf8') : null;
 }
 
+// Top-level keys of a committed file: only `keys`, and the table among them
+// (the last) an array of tables when present.
+function shapeErrors(doc, file, keys) {
+  const errors = [];
+  for (const k of Object.keys(doc)) if (!keys.includes(k)) errors.push(`${file}: unknown top-level key ${k}`);
+  const table = keys[keys.length - 1];
+  if (doc[table] !== undefined && !Array.isArray(doc[table])) errors.push(`${file}: ${table} must be an array of tables ([[${table}]])`);
+  return errors;
+}
+
 // Duplicate IDs and duplicate (id, milestone) stages in a committed file,
 // reported before anything is keyed by them.
 function duplicateErrors(doc, file, table) {
@@ -644,7 +667,7 @@ function duplicateErrors(doc, file, table) {
     if (ids.has(e.id)) errors.push(`${file}:${e[LINE]}: duplicate ${table} ${e.id} (first at line ${ids.get(e.id)})`);
     else ids.set(e.id, e[LINE]);
     const ms = new Map();
-    for (const s of e.stage ?? []) {
+    for (const s of Array.isArray(e.stage) ? e.stage : []) {
       if (ms.has(s.milestone)) errors.push(`${file}:${s[LINE]}: duplicate stage ${e.id} ${s.milestone} (first at line ${ms.get(s.milestone)})`);
       else ms.set(s.milestone, s[LINE]);
     }
@@ -752,18 +775,18 @@ export function checkNamedSubcases(named, subs, errors) {
       continue;
     }
     matched.add(s);
-    if (s.parent !== n.parent) errors.push(`${SUBCASES}: ${s.id}: parent is ${s.parent}, but the layout doc names it under ${n.parent}`);
-    if (s.conditional_on !== n.feature) errors.push(`${SUBCASES}: ${s.id}: conditional_on is ${s.conditional_on}, but the layout doc names ${n.feature}`);
-    if (s.owners?.[0] !== n.task) errors.push(`${SUBCASES}: ${s.id}: first owner is ${s.owners?.[0]}, but the layout doc names ${n.task}`);
+    if (s.parent !== n.parent) errors.push(`${SUBCASES}: ${s.id}: parent is ${show(s.parent)}, but the layout doc names it under ${n.parent}`);
+    if (s.conditional_on !== n.feature) errors.push(`${SUBCASES}: ${s.id}: conditional_on is ${show(s.conditional_on)}, but the layout doc names ${n.feature}`);
+    if (s.owners?.[0] !== n.task) errors.push(`${SUBCASES}: ${s.id}: first owner is ${show(s.owners?.[0])}, but the layout doc names ${n.task}`);
   }
   for (const n of named.filter((x) => !x.id)) {
     const c = subs.filter((s) => !matched.has(s) && !explicit.has(s.id) && s.parent === n.parent && s.conditional_on === n.feature && s.owners?.[0] === n.task);
     if (c.length === 1) matched.add(c[0]);
     else if (!c.length) errors.push(`${desc(n)} but missing from ${SUBCASES}`);
-    else errors.push(`${desc(n)} without an ID, but ${c.map((s) => s.id).join(' and ')} all match it`);
+    else errors.push(`${desc(n)} without an ID, but ${c.map((s) => show(s.id)).join(' and ')} all match it`);
   }
   for (const s of subs) {
-    if (!matched.has(s) && s.conditional_on !== undefined) errors.push(`${SUBCASES}: ${s.id} is a conditional sub-ID not named in ${LAYOUT} §2`);
+    if (!matched.has(s) && s.conditional_on !== undefined) errors.push(`${SUBCASES}: ${show(s.id)} is a conditional sub-ID not named in ${LAYOUT} §2`);
   }
 }
 
@@ -789,6 +812,11 @@ export function generate(root) {
     const old = parseToml(oldScenarios, SCENARIOS);
     const subText = readMaybe(root, SUBCASES);
     const subDoc = subText === null ? {} : parseToml(subText, SUBCASES);
+    const shape = [...shapeErrors(old, SCENARIOS, ['gates_passed', 'scenario']), ...shapeErrors(subDoc, SUBCASES, ['subcase'])];
+    if (shape.length) {
+      errors.push(...shape);
+      return fail({ catalogue });
+    }
     const dups = [...duplicateErrors(old, SCENARIOS, 'scenario'), ...duplicateErrors(subDoc, SUBCASES, 'subcase')];
     if (dups.length) {
       errors.push(...dups);

@@ -19,7 +19,8 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
 import { checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
-import { DESIGN, LAYOUT, LocalDate, parseToml, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
+import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
+import { normaliseRegistry } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -30,7 +31,10 @@ after(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
 
-const repoText = (rel) => readFileSync(join(REPO, rel), 'utf8');
+const rawRepoText = (rel) => readFileSync(join(REPO, rel), 'utf8');
+// Fixtures start from the registry with every stage planned and no gate
+// passed (registry-fixtures.mjs), however far the real registry has got.
+const repoText = (rel) => (rel === SCENARIOS || rel === SUBCASES ? normaliseRegistry(rawRepoText(rel)) : rawRepoText(rel));
 
 // A temporary root holding copies of FILES. `edits` maps a file to a function
 // of its text (null drops the file); `extra` maps more files to their text.
@@ -231,11 +235,14 @@ describe('cli', () => {
 
   test('exit 1 with file:line errors and a count', () => {
     const root = fixture({ [SCENARIOS]: sc('A24', `matrix_sha256 = "${A24_HASH}"`, `matrix_sha256 = "${'0'.repeat(64)}"`) });
-    const r = cli('--root', root);
+    // --require-history on a root that is not a git checkout: the history
+    // error does not hide the registry errors.
+    const r = cli('--root', root, '--require-history');
     assert.equal(r.status, 1);
     const line = entryLine(read(root, SCENARIOS), 'scenario', 'A24');
     assert.match(r.stderr, new RegExp(`^tests/conformance/scenarios\\.toml:${line}: error \\[hash\\] A24: matrix_sha256 is 0{64}, but docs/skyoauth-tasks\\.md:\\d+ hashes to ${A24_HASH}`, 'm'));
-    assert.match(r.stderr, /^check-conformance-registry: 1 error\(s\)$/m);
+    assert.ok(r.stderr.startsWith(`${HISTORY_ERROR('the root is not a git checkout')}\n`), r.stderr);
+    assert.match(r.stderr, /^check-conformance-registry: 2 error\(s\)$/m);
     assert.equal(r.stdout, '');
   });
 
@@ -725,9 +732,10 @@ describe('rule legs', () => {
 
 describe('rule gates', () => {
   const gate = (v) => (t) => replaceOnce(t, 'gates_passed = []', `gates_passed = ${v}`);
-  const m1aStages = (t) => (t.match(/^\[\[scenario\.stage\]\]\nmilestone = "M1a"$/gm) ?? []).length;
+  const stagesAt = (t, m) => (t.match(new RegExp(`^\\[\\[scenario\\.stage\\]\\]\\nmilestone = "${m}"$`, 'gm')) ?? []).length;
+  const m1aStages = (t) => stagesAt(t, 'M1a');
 
-  test('an empty gates_passed (the repository) and a gate without stages pass', () => {
+  test('an empty gates_passed (the normalised fixtures) and a gate without stages pass', () => {
     assert.equal(m1aStages(repoText(SCENARIOS)) > 1, true);
     assert.deepEqual(parseStrict(repoText(SCENARIOS)).gates_passed, []);
     expectOk(check(fixture({ [SCENARIOS]: gate('["M0"]') })));
@@ -761,6 +769,47 @@ describe('rule gates', () => {
     // A scenario stage at that gate still counts.
     const res = check(fixture({ [SCENARIOS]: (t) => implementAll(gate('["M4"]')(t), 'scenario', 'M4', 'A27') }));
     expectOnly(res, 'gates', /scenarios\.toml:\d+: error \[gates\] A27 M4: gates_passed lists M4, but this stage is planned, not implemented$/);
+  });
+
+  test('a failing gate that is not the last one in gates_passed', () => {
+    const res = failing(SCENARIOS, (t) => implementAll(gate('["M1b", "M1a"]')(t), 'scenario', 'M1a'));
+    assert.equal(res.errors.length, stagesAt(repoText(SCENARIOS), 'M1b'), dump(res));
+    assert.ok(res.errors.every((e) => e.rule === 'gates' && / M1b: gates_passed lists M1b, but this stage is planned, not implemented$/.test(e.msg)), dump(res));
+  });
+
+  test('an M2 gate reports each planned M2 stage and no other', () => {
+    const res = failing(SCENARIOS, gate('["M2"]'));
+    const n = stagesAt(repoText(SCENARIOS), 'M2');
+    assert.ok(n > m1aStages(repoText(SCENARIOS)), `${n} M2 stages`);
+    assert.equal(res.errors.length, n, dump(res));
+    assert.ok(res.errors.every((e) => e.rule === 'gates' && /^A\d\d M2: gates_passed lists M2, but this stage is planned, not implemented$/.test(e.msg)), dump(res));
+    expectError(res, 'gates', /scenarios\.toml:\d+: error \[gates\] A01 M2: /);
+  });
+
+  test('a scenario with a stray conditional_on key is still gated', () => {
+    const t = sc('A24', 'kind = "scenario"\n', 'kind = "scenario"\nconditional_on = "forwardauth"\n')(implementAll(gate('["M1a"]')(repoText(SCENARIOS)), 'scenario', 'M1a', 'A24'));
+    const res = failing(SCENARIOS, () => t);
+    expectError(res, 'fields', /A24: unknown field conditional_on$/);
+    expectError(res, 'gates', /A24 M1a: gates_passed lists M1a, but this stage is planned, not implemented$/);
+    assert.equal(res.errors.length, 2, dump(res));
+  });
+
+  test('the fixtures do not depend on implemented stages or passed gates in the real registry', () => {
+    // A first real stage PR (A02 M1a implemented, as the generator writes it)
+    // and a gate-only PR (gates_passed = ["M0"]) are valid registries...
+    const real = rawRepoText(SCENARIOS);
+    // A02's M1a stage implemented with its stamp and a test; every other stage as committed.
+    const a02 = replaceOnce(real, entryBlock(real, 'scenario', 'A02'), entryBlock(implementAll(normaliseRegistry(real), 'scenario', 'M1a'), 'scenario', 'A02'));
+    const variants = { 'A02 M1a implemented': a02, 'gates_passed = ["M0"]': real.replace(/^gates_passed = \[.*\]$/m, 'gates_passed = ["M0"]') };
+    for (const [name, text] of Object.entries(variants)) {
+      const root = fixture({}, { [SCENARIOS]: text });
+      assert.equal(generateRun(['--root', root], () => {}, () => {}), 0, name);
+      const committed = read(root, SCENARIOS);
+      expectOk(check(root));
+      // ...and every fixture built from them is the one built from the real registry.
+      assert.equal(normaliseRegistry(committed), repoText(SCENARIOS), name);
+    }
+    assert.equal(normaliseRegistry(rawRepoText(SUBCASES)), repoText(SUBCASES));
   });
 
   test('a subcase stage counts too', () => {
@@ -1204,6 +1253,67 @@ describe('rule waivers', () => {
 
 // Every ```toml block of the layout doc, dedented.
 const layoutExamples = () => [...repoText(LAYOUT).matchAll(/^( *)```toml\n([^]*?)\n\1```$/gm)].map((m) => m[2].replace(new RegExp(`^${m[1]}`, 'gm'), ''));
+
+describe('values of the wrong type', () => {
+  // smol-toml returns prototype-less tables: a template literal cannot
+  // stringify them, so each of these used to crash the check (exit 2).
+  const gateM1a = (t) => replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M1a"]');
+  const cases = [
+    ['stage status (gated)', SCENARIOS, (t) => gateM1a(st('A24', 'M1a', 'status = "planned"', 'status = {}')(t)), 'gates', /A24 M1a: gates_passed lists M1a, but this stage is \{\}, not implemented$/],
+    ['stage milestone', SCENARIOS, st('A24', 'M1a', 'milestone = "M1a"', 'milestone = {}'), 'stages', /A24 \{\}: unknown milestone/],
+    ['stage implemented_sha256', SCENARIOS, st('A24', 'M1a', 'status = "planned"\ntests = []', 'status = "implemented"\nimplemented_sha256 = {}\ntests = ["x"]'), 'stages', /A24 M1a: implemented_sha256 is \{\}, but the stage's/],
+    ['stage scope', SCENARIOS, st('A24', 'M1a', 'scope = "consume primitive"', 'scope = { a = 1 }'), 'stages', /A24 M1a: scope must be non-empty table text$/],
+    ['stage legs element', SCENARIOS, st('A24', 'M1a', 'legs = ["scenarios-pg/x86_64"]', 'legs = [{}]'), 'stages', /A24 M1a: legs must be a non-empty list of leg strings$/],
+    ['scenario matrix_sha256', SCENARIOS, sc('A24', `matrix_sha256 = "${A24_HASH}"`, 'matrix_sha256 = {}'), 'hash', /A24: matrix_sha256 is \{\}, but docs\/skyoauth-tasks\.md:/],
+    ['subcase id', SUBCASES, su('A33.90', 'id = "A33.90"', 'id = {}'), 'ids', /subcases\.toml: error \[ids\] \{\}: a sub-ID looks like A58\.07$/],
+    ['subcase parent', SUBCASES, su('A33.90', 'parent = "A33"', 'parent = { a = 1 }'), 'subcases', /A33\.90: parent must be the registered scenario A33$/],
+    ['subcase conditional_on', SUBCASES, su('A33.90', 'conditional_on = "back-channel-logout"', 'conditional_on = {}'), 'subcases', /A33\.90: conditional_on must be one of /],
+    ['subcase first owner', SUBCASES, su('A33.90', 'owners = ["T30.6"]', 'owners = [{}]'), 'hash', /A33\.90: the first owner must be a task/],
+    ['subcase matrix_sha256', SUBCASES, (t) => t.replace(/(id = "A33\.90"[^]*?)matrix_sha256 = "[0-9a-f]+"/, '$1matrix_sha256 = {}'), 'hash', /A33\.90: matrix_sha256 is \{\}, but the docs\/skyoauth-tasks\.md line of T30\.6/],
+  ];
+  for (const [name, rel, edit, rule, re] of cases) {
+    test(`an inline table as ${name} is a diagnostic, not a crash`, () => {
+      expectError(failing(rel, edit), rule, re);
+    });
+  }
+
+  test('the CLI exits 1 for one', () => {
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', fixture({ [SCENARIOS]: st('A24', 'M1a', 'milestone = "M1a"', 'milestone = {}') })], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /error \[stages\] A24 \{\}: unknown milestone/);
+    assert.doesNotMatch(r.stderr, /internal error/);
+  });
+});
+
+describe('names of Object.prototype members in the specs', () => {
+  test('a feature label such as toString is not a feature', () => {
+    for (const label of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      assert.equal(parseConditional(`Conditional sub-ID A58.90 (${label}, T32.9): x`).feature, null, label);
+      assert.equal(FEATURES[label], undefined, label);
+    }
+    const res = failing(SUBCASES, su('A58.90', '(ForwardAuth, T32.9)', '(toString, T32.9)'));
+    expectError(res, 'subcases', /A58\.90: table_text names feature toString, but conditional_on is forwardauth$/);
+  });
+
+  test('a job named constructor has no first milestone', () => {
+    assert.equal(JOB_FROM.constructor, undefined);
+    assert.equal(JOB_FROM.toString, undefined);
+    const res = failing(LAYOUT, (t) => replaceOnce(t, '`typescript/node24`, ', '`typescript/node24`, `constructor`, '));
+    expectError(res, 'legs', /job constructor of the layout §1\.1 Leg strings column has no known first milestone \(add it to JOB_FROM\)$/);
+  });
+});
+
+describe('conditional features belong to their tasks', () => {
+  test('a conditional sub-ID owned by another task is reported', () => {
+    const res = failing(SUBCASES, su('A33.90', 'owners = ["T30.6"]', 'owners = ["T31.2", "T30.6"]'));
+    expectError(res, 'subcases', /A33\.90: conditional_on back-channel-logout is the feature of task T30\.6, but the first owner is T31\.2$/);
+  });
+
+  test('the committed conditional sub-IDs are owned by their feature tasks', () => {
+    const owners = Object.fromEntries(parseStrict(repoText(SUBCASES)).subcase.filter((s) => s.conditional_on).map((s) => [s.id, `${s.conditional_on} ${s.owners[0]}`]));
+    assert.deepEqual(owners, { 'A18.90': 'forwardauth T32.9', 'A27.90': 'device-flow T40.6', 'A33.90': 'back-channel-logout T30.6', 'A58.90': 'forwardauth T32.9' });
+  });
+});
 
 describe('smol-toml and the generator reader', () => {
   test('return the same data for the committed registry files', () => {
