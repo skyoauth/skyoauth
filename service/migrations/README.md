@@ -109,17 +109,23 @@ egress rows are never deleted.
   previous revision; tenants and principals carry none yet), as are
   `prev_hash` for the first event and `tenant_id` for instance-scope events.
   There is no sentinel: revisions start at 1 and 0 is rejected. The event
-  hash encoding, not yet specified, must encode an absent value differently
-  from every present one (for example JSON `null` against a number), so
-  that adding or dropping a value changes the hash.
+  hash encoding (identity-registry IR-056; see Follow-ups) must encode an absent
+  value differently from every present one (for example JSON `null` against
+  a number), so that adding or dropping a value changes the hash.
 - **Instance-scope events** (lead decision): the startup event that records
   the `single_actor_mode` mirror (IR-053) and the sink-change event have
   `tenant_id` `NULL`, the policy row's `instance_id` as `object_id`, and the
   row's real revisions before and after the write in `previous_revision`
-  and `new_revision`. The source and format of `instance_id`, the reserved
-  actor for events the service writes on its own, and the `action` names
-  (which must name the entity, since `object_id` alone does not) are open:
-  identity-registry OQ-IR-14.
+  and `new_revision`. `instance_id` is a lowercase hyphenated UUIDv7,
+  generated once at first bootstrap and immutable (IR-057). Events the
+  service writes on its own record the reserved actor
+  `{"type": "system", "id": "system"}`, never a principal or an operator
+  identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
+  (identity-registry IR-059). The decision fixes only that syntax: IR-059
+  lists examples, and the action names, including those of these two
+  events, are open until the audit writer (OQ-IR-15). These are lead
+  decisions (2026-11-20, OQ-IR-14), provisional until the audit writer
+  ships.
 
 The database does not enforce these rules; the service must:
 
@@ -151,6 +157,187 @@ since advanced waits for that transaction and then fails with `SK001` under
 `READ COMMITTED` (the default), or with `40001` under `REPEATABLE READ` or
 `SERIALIZABLE`. The database does not retry; a writer that locked the head
 first gets the committed head and succeeds.
+
+## What 0003 adds
+
+`0003_resource_servers.sql` is the second slice of the M1a domain schema
+(T10.1): the instance audience registry of identity-registry §7 and ADR-018,
+as `resource_server`, `audience_tenant_assignment`,
+`resource_server_checker` with its tenant rows in
+`resource_server_checker_tenant`, and `resource_action`. It adds no
+function: every table reuses `skyoauth_reject_immutable_change(…)` from
+`0002`, and every table except `resource_server_checker_tenant`, which has
+no revision, also `skyoauth_check_revision()`; all their triggers are
+`ENABLE ALWAYS`. `status` is `enabled` or `disabled` (inferred; the sources
+speak of disabling and re-enabling, and of an "active" assignment, read as
+`enabled`). Every column is `NOT NULL`.
+
+- **Keys.** `resource_server.audience` is globally unique and exact
+  (IR-070) and compared byte-wise. `(resource_server_id, action_name)` is
+  unique (inferred: the service looks up "the" persisted action of a
+  resource server, API-072). One assignment per resource server and tenant
+  (inferred from ADR-018 item 6 and the single assignment ceiling of
+  IR-062). `public_mtls_identity` is unique across all checkers, disabled
+  ones included, so an identity is bound to one resource server (IR-090;
+  including disabled rows is inferred).
+- **Free-text keys** are bounded and cleaned as `exact_destination` is in
+  `0002` (lead decision, 2026-11-20): `audience`, `action_name` and
+  `public_mtls_identity` are non-empty and at most 2048 bytes, so an
+  over-long value fails with `23514` instead of the btree error `54000`;
+  `audience` and `action_name` also reject whitespace and control characters
+  (`[[:space:][:cntrl:]]`, as for egress destinations). `public_mtls_identity`
+  may contain spaces, since its form is not specified and may be a subject
+  DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
+  (NFC or NFD) of these values is a service rule: the database compares
+  bytes, so two spellings of one name are two keys.
+- **ID column bounds.** Every ID column of `0003`, own IDs and reference
+  columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
+  are bounded by lead decision (2026-11-20), `tenant.id` with
+  `tenant_id_octet_length_check`, a forward-only constraint on the frozen
+  `0002` table; every other ID column (`id` of the assignment, checker and
+  action) and every reference column is bounded the same way (inferred).
+  Without its bound, an over-long ID would fail with the btree error `54000`
+  on its key's index. The reference columns need their own bound too: a
+  `CHECK` runs before the row enters any index, but the foreign key check
+  runs after it, so an over-long reference naming a missing row would
+  otherwise fail with `54000` as well. With the bounds, an over-long
+  ID value fails with `23514` even when it names a missing row, and every
+  composite key stays below the btree limit of about 2700 bytes even for
+  values that do not compress: `(resource_server_id, action_name)` at most
+  255 plus 2048 bytes, the checker's `(id, resource_server_id)`, the child
+  primary key `(checker_id, tenant_id)` and the assignment's
+  `(tenant_id, resource_server_id)` at most 255 plus 255.
+  `0003` also bounds the unique `tenant.secret_namespace` to 255 bytes with
+  `tenant_secret_namespace_octet_length_check` (lead decision, 2026-11-20;
+  length only, no character rule). Every primary key, unique and foreign key
+  column of the five tables and of `tenant` therefore has a named
+  `octet_length` bound: 255 bytes for IDs, references and the namespace, 2048
+  for the free-text keys.
+- **Immutable selectors** (`SK001`): the IDs (tasks §3 "IDs/names"), and
+  (inferred) the audience, each row's `resource_server_id`, an assignment's
+  `tenant_id` and an action's `action_name`; every column of a checker
+  tenant row (lead decision, 2026-11-20). A checker's identity may be
+  rotated (inferred).
+- **Checker tenants** (lead decision, 2026-11-20): the model and API field
+  `ResourceServerChecker.allowed_tenant_ids` is derived from the rows of
+  `resource_server_checker_tenant` (`checker_id`, `resource_server_id`,
+  `tenant_id`), primary key `(checker_id, tenant_id)`. Composite foreign keys
+  to the checker's `(id, resource_server_id)` and to the assignment's
+  `(tenant_id, resource_server_id)` hold the existence half of OQ-ADR018-1:
+  a checker can only list a tenant that has an assignment to its own
+  resource server (`23503` otherwise), whatever that assignment's status.
+  The set is edited by inserting and deleting rows; the rows have no status
+  or revision of their own (inferred: the set is part of the revisioned
+  checker).
+- **References.** Assignments, checkers and actions reference their
+  resource server, and assignments their tenant, with no action on delete or
+  update and not deferrable. Each foreign key is named, so the service can
+  map a `23503` by its constraint name:
+
+  | Constraint                                           | Columns                                            |
+  | ---------------------------------------------------- | -------------------------------------------------- |
+  | `audience_tenant_assignment_resource_server_id_fkey` | `resource_server_id` → `resource_server`           |
+  | `audience_tenant_assignment_tenant_id_fkey`          | `tenant_id` → `tenant`                             |
+  | `resource_server_checker_resource_server_id_fkey`    | `resource_server_id` → `resource_server`           |
+  | `resource_server_checker_tenant_checker_fkey`        | `(checker_id, resource_server_id)` → the checker   |
+  | `resource_server_checker_tenant_assignment_fkey`     | `(tenant_id, resource_server_id)` → the assignment |
+  | `resource_action_resource_server_id_fkey`            | `resource_server_id` → `resource_server`           |
+
+  The unique
+  `(tenant_id, resource_server_id)` of the assignment is the target for
+  composite foreign keys from later tenant-owned records that name an
+  audience (grants, services, clients, origins, human policies; IR-080), so
+  they cannot name an audience assigned only to another tenant.
+
+- **Named checks.** The bounds and character rules are named too, so the
+  service can map a `23514` by its constraint name. Two names abbreviate
+  `resource_server_id` to `server_id`, because the full name would exceed
+  the 63-byte identifier limit:
+
+  | Constraint                                                        | Rule                                        |
+  | ----------------------------------------------------------------- | ------------------------------------------- |
+  | `tenant_id_octet_length_check`                                    | `tenant.id` at most 255 bytes               |
+  | `tenant_secret_namespace_octet_length_check`                      | `tenant.secret_namespace` at most 255 bytes |
+  | `resource_server_id_octet_length_check`                           | `id` at most 255 bytes                      |
+  | `resource_server_audience_no_space_check`                         | `audience` has no whitespace or controls    |
+  | `resource_server_audience_octet_length_check`                     | `audience` at most 2048 bytes               |
+  | `audience_tenant_assignment_id_octet_length_check`                | `id` at most 255 bytes                      |
+  | `audience_tenant_assignment_server_id_octet_length_check`         | `resource_server_id` at most 255 bytes      |
+  | `audience_tenant_assignment_tenant_id_octet_length_check`         | `tenant_id` at most 255 bytes               |
+  | `resource_server_checker_id_octet_length_check`                   | `id` at most 255 bytes                      |
+  | `resource_server_checker_resource_server_id_octet_length_check`   | `resource_server_id` at most 255 bytes      |
+  | `resource_server_checker_public_mtls_identity_octet_length_check` | `public_mtls_identity` at most 2048 bytes   |
+  | `resource_server_checker_tenant_checker_id_octet_length_check`    | `checker_id` at most 255 bytes              |
+  | `resource_server_checker_tenant_server_id_octet_length_check`     | `resource_server_id` at most 255 bytes      |
+  | `resource_server_checker_tenant_tenant_id_octet_length_check`     | `tenant_id` at most 255 bytes               |
+  | `resource_action_id_octet_length_check`                           | `id` at most 255 bytes                      |
+  | `resource_action_resource_server_id_octet_length_check`           | `resource_server_id` at most 255 bytes      |
+  | `resource_action_action_name_no_space_check`                      | `action_name` has no whitespace or controls |
+  | `resource_action_action_name_octet_length_check`                  | `action_name` at most 2048 bytes            |
+
+  The other checks on the five tables keep the names PostgreSQL generates
+  (the list domains carry their own checks, which are not table
+  constraints):
+  - `resource_server`: `resource_server_id_check`,
+    `resource_server_audience_check`, `resource_server_name_check`,
+    `resource_server_constraint_versions_check`,
+    `resource_server_status_check`, `resource_server_revision_check`;
+  - `audience_tenant_assignment`: `audience_tenant_assignment_id_check`,
+    `audience_tenant_assignment_constraint_versions_check`,
+    `audience_tenant_assignment_status_check`,
+    `audience_tenant_assignment_revision_check`;
+  - `resource_server_checker`: `resource_server_checker_id_check`,
+    `resource_server_checker_public_mtls_identity_check`,
+    `resource_server_checker_status_check`,
+    `resource_server_checker_revision_check`;
+  - `resource_action`: `resource_action_id_check`,
+    `resource_action_action_name_check`, `resource_action_status_check`,
+    `resource_action_revision_check`;
+  - `resource_server_checker_tenant`: none.
+
+- **Lists** are `jsonb` arrays checked through three domains, so each rule
+  is written once (a domain `CHECK` is stored as an expression tree and
+  resolves no names at run time): `skyoauth_scope_list` holds RFC 6749
+  scope tokens (IR-066), `skyoauth_profile_list` `wif`, `human_cli` and
+  `human_session` (token-profiles §3), and `skyoauth_string_list` non-empty
+  strings (`required_resource_dimensions`; inferred). The scope domain
+  checks the IR-066 grammar, not only non-empty strings (lead decision,
+  2026-11-20).
+  `constraint_versions` only has to be an array: the type of a version and
+  its relation to the constraints `version` member are open (OQ-TP-7). Empty
+  arrays and duplicate elements are accepted (inferred: no source forbids
+  them). An empty requirement (`required_scopes`,
+  `required_resource_dimensions`) requires nothing; an empty ceiling
+  (`scopes`, `allowed_profiles`, `allowed_scopes`, `accepted_profiles`)
+  allows nothing, so it fails closed.
+- **M1a fields only.** `resource_action` has no stream fields
+  (`stream_capable`, `max_stream_duration_seconds`, `stream_class`,
+  `max_session_lease_seconds`); T14.4 adds them in M1b.
+  `live_check_required` has no default (inferred): the service states it.
+
+The database does not enforce these rules; the service must:
+
+- validate the audience syntax (OQ-IR-9), normalize the Unicode form of
+  audiences and action names, canonicalize `public_mtls_identity` before it
+  is stored, and parse, pin and match the checker's mTLS certificate;
+- check scope vocabulary: that assignment and action scopes lie within the
+  resource server's scopes, and that profiles and constraint versions do
+  too, where a source requires it (IR-062, IR-110, IR-141);
+- give `constraint_versions` its meaning and check that each listed
+  version exists;
+- leave out of a checker's effective tenant set every tenant whose
+  assignment is disabled, without editing its rows, so that re-enabling the
+  assignment restores it (the other half of OQ-ADR018-1), and advance the
+  checker's revision when its tenant rows change;
+- refuse references outside an enabled same-tenant assignment at write and
+  at issuance (IR-080, IR-081); a composite key proves only that the
+  assignment exists;
+- let only instance `security_admin` write these tables (API-147); who may
+  assign an audience is authorization, not schema;
+- reject out-of-range or contradictory action rules (IR-103);
+- disable instead of deleting (only foreign keys hold back a delete), check
+  the expected revision of every write and write the audit event in the same
+  transaction.
 
 ## Limits
 
@@ -211,16 +398,81 @@ first gets the committed head and succeeds.
 
 ## Follow-ups
 
+Open for all registry tables:
+
+- Delete and truncate guards. One follow-up migration adds them for every
+  instance- and tenant-level registry table, decided together, not table by
+  table (lead decision, 2026-11-20). It is a prerequisite before any code
+  snapshots an `(id, revision)` pair (tasks §3 "Policy revisions") or relies
+  on revisions only increasing: a row deleted and recreated with the same ID
+  starts again at revision 1, so an old snapshot could match the new row.
+  Today only foreign keys hold back a delete, so these rows can be deleted:
+  `tenant` and `principal` rows nothing references (and
+  `TRUNCATE principal`), every `resource_action` row (nothing references
+  one), checkers with no tenant rows, assignments no checker tenant row
+  references, and resource servers with no assignment, checker or action.
+  `TRUNCATE resource_server CASCADE` empties all five `0003` tables: a
+  `TRUNCATE` that includes the referencing tables is never held back by
+  foreign keys. `resource_server_checker_tenant` is different: deleting a
+  row is how a checker's tenant set shrinks, so its rows stay deletable and
+  only the checker's revision records the change. ADR-008 item 3 already
+  decides that "removal of anything referenced or enabled is soft disable
+  only" (OQ-ADR008-2). What stays open is only the hard delete of disabled,
+  unreferenced rows: ADR-008 allows it for a binding, by an audited admin
+  write, when no grant, approval or audit-required record references it,
+  and for a disabled, unreferenced grant; for the other tables it is open,
+  and the admin endpoints of `0003` have no `DELETE` (public-api §7).
+
 Not done in `0002`:
 
-- Delete guards for `tenant` and `principal`, including
-  `TRUNCATE principal`, which nothing references yet. ADR-008 item 3 settles hard
-  delete for bindings and grants only; for tenants and principals it is
-  open, and today only foreign keys hold back a delete.
 - An `audit_event` detail column, for example the affected source IDs that
   the audit event of an egress entry write lists (IR-152, OQ-IR-12).
 - A `revision` on `tenant` and `principal`: updates require
   ID, tenant and revision (tasks §3 "IDs/names").
-- Who computes the audit event hash, with which algorithm and over which
-  input (including the encoding of absent values above). This needs a spec
-  decision before the first code that writes events.
+- The audit writer. The service computes the event hash (lead decision,
+  2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
+  writer ships). The hash is SHA-256 over the concatenation of:
+  1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
+  2. `prev_hash` as 32 raw bytes, or zero bytes for the first event, whose
+     `prev_hash` column is `NULL`;
+  3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
+     `hash` and `prev_hash` fields.
+
+  `prev_hash` and `head_hash` store the raw 32-byte digest as `bytea`;
+  lowercase hex is only the JSONL and API output form. `audit_event` has no
+  column for an event's own hash, so verification recomputes it and compares
+  it with the next event's `prev_hash` or the head's `head_hash`. Still open
+  before the writer ships (identity-registry OQ-IR-15): the text
+  serialization of an object `actor`, the envelope's member names, the
+  timestamp format, the encoding of absent values, and the action names
+  (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
+  startup-mirror and sink-change events.
+  Tests assert chain linkage and verification outcomes, never hash values.
+- Errata for comments and checks in `0002`, which is frozen (its checksum
+  covers comments), so they are corrected here and not in the file:
+  - Lines 116–118, on `instance_security_policy.instance_id`: "No format or
+    source is given for the instance ID" is superseded by identity-registry
+    IR-057: a lowercase hyphenated UUIDv7, generated once at first
+    bootstrap. The column still checks only `instance_id <> ''`; the
+    database does not enforce the format, and the immutability trigger
+    keeps it unchanged.
+  - Lines 244–246, on the chain genesis: "the genesis representation is not
+    specified" is superseded for the first event by IR-056, under which its
+    stored `prev_hash` is `NULL` and enters the hash as zero bytes. The
+    empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
+  - Line 259, on `audit_event.tenant_id`: OQ-IR-14 is decided; the
+    instance-scope event rules are IR-057 to IR-059 and "Instance-scope
+    events" above.
+  - `audit_chain_head.head_hash` and `audit_event.prev_hash` check
+    `octet_length(…) > 0`, but IR-056 makes every hash a raw 32-byte
+    SHA-256 digest. The database accepts any non-empty value; checking
+    `= 32` needs a later migration.
+
+Not done in `0003`:
+
+- The M1b stream fields of `resource_action`, with the lease range of
+  IR-101 (default 15, at most 300) and `stream_class` once OQ-IR-8 defines
+  its values (T14.4; kept out of `0003` by lead decision, 2026-11-20).
+- Rejecting duplicate list elements, if a source makes these lists sets.
+- Whether IR-021 (names unique within entity type and tenant) applies to
+  instance-owned names such as `resource_server.name`.
