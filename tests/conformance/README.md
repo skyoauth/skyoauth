@@ -155,7 +155,7 @@ node scripts/ci/report-conformance.mjs --root "$RUNNER_TEMP/merge-base" --commit
   --require-milestone "$m" --require-history --artifacts artifacts "$@"   # "$@": --waivers, as in the reporter script below
 ```
 
-A post-merge or live leg of the merge-base without a result is not run, so that run exits 1 until the leg has completed and passed. The gate job is not in `ci.yml` yet (layout §6 "Still open", item 7).
+A post-merge or live leg of the merge-base without a result is not run, so that run exits 1 until the leg has completed and passed. The gate job is not in `ci.yml` yet; its checkout, live runs on a commit that is not the tip, and re-triggering are open questions 7a–7d of layout §6 "Still open", item 7. The default until the lead decides them: a gate PR is based on a pushed tip of `main` (only such a commit gets a `live-wif-push` run), and the job checks out `pull_request.head.sha` with `fetch-depth: 0`, since the default merge ref's commit has two parents and `--gate-pr` would refuse it.
 
 ## Legs
 
