@@ -49,8 +49,8 @@ human-provider migration without reset (design §2 C05).
      `reviewer_credential_ref`) resolve only within a per-tenant provisioned
      secret namespace, and discovery, JWKS and TokenReview egress
      destinations come from an allowlist approved by instance
-     `security_admin`; tenant operators only choose from it (OQ-TM-13; before
-     M1a, T11.8).
+     `security_admin`; tenant operators only choose from it (OQ-TM-13; T11.2,
+     T11.8, T23.2 and the tasks §3 schema).
    - Kubernetes local JWT validation (item 7) is not a fourth kind
      (OQ-ADR005-1).
 2. **Fixed source selector.** The required generated `skyoauth_trust_source`
@@ -142,7 +142,9 @@ Existing contract questions that touch this ADR:
 - **OQ-TM-13** ([threat model](../threat-model.md) §6) — external secret
   references and egress approval. Decided (lead decision, 2026-11-19):
   per-tenant secret namespaces and a `security_admin`-approved egress
-  allowlist (item 1); the amendment lands before M1a (T11.8).
+  allowlist (item 1). The amendment has landed with the M1a spec amendments:
+  T11.2, T11.8, T23.2 and the tasks §3 `EgressAllowlistEntry` and
+  `Tenant.secret_namespace`.
 
 New questions raised by this ADR:
 
@@ -150,7 +152,8 @@ New questions raised by this ADR:
   (lead decision, 2026-11-19): no fourth kind. Local validation uses an
   `uploaded_jwks` or `oidc_discovery` source with the
   `projected_service_account` assertion profile plus an explicit
-  stale-revocation acknowledgment; fixed before the M1a schema. Original
+  stale-revocation acknowledgment. The tasks §3 schema (`TrustSource`
+  `stale_revocation_acknowledged`) and T11.1 record it. Original
   question: the baseline names three source kinds, and design §5.4 calls
   Kubernetes local JWT validation "a separately enrolled mode". Whether that
   mode is an `oidc_discovery` or `uploaded_jwks` source with a

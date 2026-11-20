@@ -297,7 +297,7 @@ An `implemented` stage lists at least one test and carries `implemented_sha256`:
 | `clients/typescript/test/browser/` | `typescript-browser` (Chromium, Firefox, WebKit) | browser |
 | `service/tests`, `service/src` | `service-nextest` runs them under cargo-nextest with a JUnit report, but section 1.1 has no leg string for it | none: not registrable until section 1.1 gives that job a leg |
 
-Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, which depends on `skyoauth-service`. A `service/` test can be registered only after a nextest job for that package is added; the same rule then applies to it. Every job above that produces registered tests runs cargo-nextest, vitest or Playwright with a JUnit reporter.
+Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, which depends on `skyoauth-service`. A `service/` test can be registered only after a nextest job for that package is added; the same rule then applies to it. Every job above that produces registered tests runs cargo-nextest, vitest or Playwright with a JUnit reporter. DB-backed `service/` tests run in `service-nextest`, which reaches the same pinned PostgreSQL service container as `scenarios-pg` through `SKYOAUTH_IT_DATABASE_URL`; scenario tests run in `scenarios-pg`.
 
 **Check: `check-conformance-registry`** (`scripts/ci/check-conformance-registry.mjs`; its static part runs in the `conformance-registry` CI job).
 
@@ -375,7 +375,7 @@ A tag push does carry `event_name: push`, but its `ref` is `refs/tags/…`; the 
 
 Coverage: the existing gates (Rust 85 % lines; TypeScript 85 % lines/functions/branches/statements) stay on unit tests. Scenario and integration coverage is uploaded and reported but not gated (Q9).
 
-**PostgreSQL image pin.** The `scenarios-pg` service container is pinned as `postgres:<17.x tag>@sha256:<digest>` in `ci.yml`. Dependabot is not configured to update this pin (`.github/dependabot.yml` covers GitHub Actions, Cargo and npm; its `docker` ecosystem is not documented here as reading workflow `services:` images), so it is bumped by hand: a maintainer opens a PR with each PostgreSQL 17 minor release (and at least quarterly), taking the multi-arch index digest of the new tag from Docker Hub and changing tag and digest together. The job's check step verifies both: the server must report major version 17, and its `server_version` must equal the image tag. Moving to a new major version is a design decision, not a bump.
+**PostgreSQL image pin.** The `scenarios-pg` and `service-nextest` service containers are pinned as `postgres:<17.x tag>@sha256:<digest>` in `ci.yml`, with the same pin in both jobs. Dependabot is not configured to update this pin (`.github/dependabot.yml` covers GitHub Actions, Cargo and npm; its `docker` ecosystem is not documented here as reading workflow `services:` images), so it is bumped by hand: a maintainer opens a PR with each PostgreSQL 17 minor release (and at least quarterly), taking the multi-arch index digest of the new tag from Docker Hub and changing tag and digest together in both jobs. Each job's check step verifies this: every `postgres` service pin in `ci.yml` must be the same `postgres:<tag>@sha256:<digest>` string, the server must report major version 17, its `server_version` must equal the image tag, and the role must be able to create and drop a database. Moving to a new major version is a design decision, not a bump.
 
 ## 5. Decisions
 
