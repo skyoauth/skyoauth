@@ -120,6 +120,13 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/gen-conformance-registry.test.mjs
 
+      # The result reporter (layout §3 "Result join") is not run on real
+      # artifacts yet; its self-test runs here so it is tested on every
+      # change.
+      - name: Self-test the result reporter
+        if: success() || failure()
+        run: node --test scripts/ci/report-conformance.test.mjs
+
       # publish-badges.sh against local bare repositories (no network, no
       # git configuration of the runner), with one round of the concurrent
       # publishers' stress test; verify-badges-render.sh against a stub curl
