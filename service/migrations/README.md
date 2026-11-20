@@ -184,6 +184,18 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
   (NFC or NFD) of these values is a service rule: the database compares
   bytes, so two spellings of one name are two keys.
+- **ID bounds in composite keys.** `resource_server.id` is at most 255
+  bytes, and `0003` also bounds `tenant.id` to 255 bytes with
+  `tenant_id_octet_length_check`, a forward-only constraint on the frozen
+  `0002` table (both lead decision, 2026-11-20); `resource_server_checker.id`
+  is bounded the same way (inferred: it is in two composite keys). Every
+  composite key in `0003` is therefore bounded on both sides and stays below
+  the btree limit of about 2700 bytes even for values that do not compress,
+  so an over-long value fails with `23514`, not `54000`:
+  `(resource_server_id, action_name)` at most 255 plus 2048 bytes, the
+  checker's `(id, resource_server_id)` and the child primary key
+  `(checker_id, tenant_id)` at most 255 plus 255, and the assignment's
+  `(tenant_id, resource_server_id)` at most 255 plus 255.
 - **Immutable selectors** (`SK001`): the IDs (tasks §3 "IDs/names"), and
   (inferred) the audience, each row's `resource_server_id`, an assignment's
   `tenant_id` and an action's `action_name`; every column of a checker

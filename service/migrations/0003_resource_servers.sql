@@ -49,13 +49,24 @@ CREATE DOMAIN skyoauth_string_list AS jsonb
 -- index, and, where the value is a name, no whitespace or control character
 -- ([:space:] is ASCII whitespace under "C"; [:cntrl:] is U+0000-U+001F and
 -- U+007F-U+009F in every collation). Other syntax and Unicode normalization
--- stay with the service.
+-- stay with the service. An ID that is part of a composite unique key is at
+-- most 255 bytes, so the key stays below the btree limit of about 2700 bytes
+-- even when the values do not compress: resource_server.id and tenant.id
+-- (lead decision, 2026-11-20) and resource_server_checker.id (inferred: it is
+-- in two composite keys).
+
+-- A forward-only bound on a 0002 table (lead decision, 2026-11-20): 0002 is
+-- frozen, so 0003 adds it. It is validated against existing rows (no NOT
+-- VALID).
+ALTER TABLE tenant ADD CONSTRAINT tenant_id_octet_length_check
+    CHECK (octet_length(id) <= 255);
 
 -- ResourceServer (IR-070, IR-071). The audience is globally unique and exact
 -- (IR-070); that it never changes is (inferred). Its syntax and comparison
 -- rules are open (OQ-IR-9), so the database compares it byte-wise.
 CREATE TABLE resource_server (
-    id                   text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
+    id                   text COLLATE "C" PRIMARY KEY CHECK (id <> '')
+        CHECK (octet_length(id) <= 255),
     audience             text COLLATE "C" NOT NULL UNIQUE CHECK (audience <> '')
         CHECK (audience !~ '[[:space:][:cntrl:]]')
         CHECK (octet_length(audience) <= 2048),
@@ -101,7 +112,9 @@ CREATE TABLE audience_tenant_assignment (
 -- for another audience (IR-090; including disabled rows is inferred). Its
 -- allowed_tenant_ids are the rows of resource_server_checker_tenant.
 CREATE TABLE resource_server_checker (
-    id                    text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
+    -- At most 255 bytes (inferred): see the comment on the ID bound above.
+    id                    text COLLATE "C" PRIMARY KEY CHECK (id <> '')
+        CHECK (octet_length(id) <= 255),
     resource_server_id    text COLLATE "C" NOT NULL
         CONSTRAINT resource_server_checker_resource_server_id_fkey
         REFERENCES resource_server (id),

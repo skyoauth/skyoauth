@@ -210,6 +210,82 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
     .map(|name| (name.into(), "aa".into(), "falsefalse".into()))
     .into();
     assert_eq!(foreign_keys, expected);
+
+    // 0003 bounds the IDs in its composite keys, including the 0002 tenant.
+    let id_bounds: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conrelid::regclass::text, pg_get_constraintdef(oid) FROM pg_constraint
+         WHERE contype = 'c' AND conrelid = ANY($1::text[]::regclass[])
+           AND pg_get_constraintdef(oid) LIKE '%octet_length(id)%'
+         ORDER BY 1",
+    )
+    .bind(["tenant", "resource_server", "resource_server_checker"])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let bound = "CHECK ((octet_length(id) <= 255))";
+    assert_eq!(
+        id_bounds,
+        [
+            ("resource_server".into(), bound.into()),
+            ("resource_server_checker".into(), bound.into()),
+            ("tenant".into(), bound.into()),
+        ]
+    );
+    db.drop([pool]).await;
+}
+
+/// IDs in composite keys are at most 255 bytes, so every composite index
+/// stays below the btree limit even for values that do not compress
+/// (md5 hex), and an over-long ID is a check violation, not 54000.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn ids_in_composite_keys_are_bounded() {
+    let (db, pool) = seeded().await;
+    rejects(&pool, "
+        23514 INSERT INTO tenant VALUES (repeat('t', 256), 'c', 'ns_c', 'enabled')
+        23514 INSERT INTO tenant VALUES (repeat('é', 128), 'c', 'ns_c', 'enabled')
+        23514 INSERT INTO resource_server VALUES (repeat('r', 256), 'x-api', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES (repeat('é', 128), 'x-api', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server_checker VALUES (repeat('c', 256), 'rs_1', 'sha256:bb', 'enabled')
+        23514 INSERT INTO resource_server_checker VALUES (repeat('é', 128), 'rs_1', 'sha256:bb', 'enabled')
+    ").await;
+    let err = sqlx::raw_sql("INSERT INTO tenant VALUES (repeat('t', 256), 'c', 'ns_c', 'enabled')")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.constraint()),
+        Some("tenant_id_octet_length_check"),
+        "{err}"
+    );
+    // 255-byte IDs with 2048-byte incompressible names in every composite key.
+    run(
+        &pool,
+        "CREATE TEMP TABLE incompressible AS
+             SELECT string_agg(md5(i::text), '' ORDER BY i) AS v FROM generate_series(1, 64) i;
+         INSERT INTO tenant VALUES (repeat('t', 255), 'c', 'ns_c', 'enabled');
+         INSERT INTO resource_server VALUES
+             (repeat('r', 255), 'x-api', 'X', '[]', '[]', '[]', 'enabled');
+         INSERT INTO audience_tenant_assignment VALUES
+             ('ata_2', repeat('r', 255), repeat('t', 255), '[]', '[]', '[]', 'enabled');
+         INSERT INTO resource_server_checker
+             SELECT repeat('c', 255), repeat('r', 255), v, 'enabled' FROM incompressible;
+         INSERT INTO resource_server_checker_tenant
+             VALUES (repeat('c', 255), repeat('r', 255), repeat('t', 255));
+         INSERT INTO resource_action
+             SELECT 'act_2', repeat('r', 255), v, '[]', '[]', '[]', false, 'enabled'
+             FROM incompressible",
+    )
+    .await;
+    let lengths: (i32, i32) = sqlx::query_as(
+        "SELECT (SELECT octet_length(action_name) FROM resource_action WHERE id = 'act_2'),
+                (SELECT octet_length(public_mtls_identity) FROM resource_server_checker
+                 WHERE id = repeat('c', 255))",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lengths, (2048, 2048));
     db.drop([pool]).await;
 }
 
