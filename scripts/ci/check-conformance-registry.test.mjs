@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
-import { checkRegistry, FIXTURES, formatError, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
+import { checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, plain, run, SCHEMAS, WAIVERS } from './check-conformance-registry.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
@@ -1218,6 +1218,21 @@ describe('rule waivers', () => {
       expectOk(check(root));
     });
   }
+
+  // A git hook or `git rebase --exec` exports GIT_DIR and its kin; git -C
+  // obeys them, so a plain directory would borrow another repository's
+  // history (and its origin/main) for the waiver rule.
+  test('an inherited GIT_DIR does not make a plain directory a checkout', () => {
+    assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES']);
+    const other = gitRoot();
+    const plainRoot = withWaiver(fixture({ [SCENARIOS]: implementedA24 }), waiver({ commit: `"${other.head}"` }));
+    const gitDir = join(other.root, '.git');
+    for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: plainRoot }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', plainRoot], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.equal(r.stderr, `${HISTORY_ERROR('the root is not a git checkout')}\ncheck-conformance-registry: 1 error(s)\n`);
+    }
+  });
 
   test('--require-history passes with the history and no waivers', () => {
     const { root } = gitRoot();

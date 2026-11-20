@@ -42,7 +42,8 @@
 //   --root DIR        Checkout of the judged commit (default: this
 //                     repository). In a git checkout, HEAD must be --commit
 //                     (else exit 2, no report; --allow-commit-mismatch
-//                     prints the report as untrusted). Its registry is
+//                     prints the report as untrusted). GIT_DIR and the other
+//                     variables that point git elsewhere are ignored. Its registry is
 //                     checked first with check-conformance-registry.mjs; any
 //                     error stops the report.
 //   --today DATE      Judging date for waiver expiry (default: today, UTC);
@@ -93,14 +94,13 @@
 //      included, has a failed (unwaived) pair;
 //   0  none has.
 
-import { spawnSync } from 'node:child_process';
 import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict } from 'smol-toml';
 
-import { checkRegistry, checkWaivers, formatError, history, load, locate, Report, WAIVERS } from './check-conformance-registry.mjs';
+import { checkRegistry, checkWaivers, formatError, gitIn, history, load, locate, Report, WAIVERS } from './check-conformance-registry.mjs';
 import { LAYOUT, MILESTONES, parseEnvironments, SCENARIOS, SUBCASES } from './gen-conformance-registry.mjs';
 
 // ---------------------------------------------------------------------------
@@ -840,7 +840,7 @@ const USAGE =
 // HEAD of the git checkout whose top level is `root`; undefined when root is
 // not one (or git is missing), null when HEAD names no commit.
 export function checkoutHead(root) {
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  const git = gitIn(root);
   const top = git('rev-parse', '--show-toplevel');
   if (top.status !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(root)) return undefined;
   const head = git('rev-parse', '--verify', '--quiet', 'HEAD^{commit}');

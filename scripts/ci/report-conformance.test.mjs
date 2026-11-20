@@ -984,6 +984,25 @@ describe('waivers', () => {
     assert.match(none.err, /--root is a checkout of no commit, not of --commit/);
   });
 
+  // A git hook or `git rebase --exec` exports GIT_DIR and its kin; git -C
+  // obeys them, so a plain directory would pass as a checkout of another
+  // repository's HEAD and get a gate verdict.
+  test('an inherited GIT_DIR does not bind a plain directory to --commit', () => {
+    const other = root(withA24);
+    const head = commitRoot(other);
+    const plainRoot = root(withA24);
+    const gitDir = join(other, '.git');
+    const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
+    for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: plainRoot }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
+      const j = join(tmp('report-out-'), 'r.json');
+      const p = spawnSync(process.execPath, [SCRIPT, '--root', plainRoot, '--commit', head, '--today', TODAY, '--require-milestone', 'M1a', '--json', j], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(p.status, 2, `${Object.keys(env)}: ${p.stderr}`);
+      const json = JSON.parse(readFileSync(j, 'utf8'));
+      assert.equal(json.trusted, false);
+      assert.deepEqual(json.input_errors, [UNBOUND]);
+    }
+  });
+
   test('without history a waiver commit is not checked (note), unless --require-history', () => {
     const dir = root(withA24);
     const soft = report(dir, ['--waivers', waiverFile(waiver(SHA)), '--artifacts', failedThenPassed()]);
