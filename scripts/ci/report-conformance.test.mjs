@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { InputError, judge, parseXml, readJUnit, renderMarkdown, run, testId, testInfo, worst } from './report-conformance.mjs';
+import { InputError, judge, MAX_DEPTH, parseXml, readJUnit, renderMarkdown, run, testId, testInfo, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -812,6 +812,59 @@ describe('input errors', () => {
     assert.deepEqual(r.json.ignored_artifacts, []);
     assert.deepEqual(r.json.reports.map((x) => [x.run_id, x.run_attempt, x.leg]), [[9, 9, PG]]);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
+  });
+
+  test('a directory or symbolic link where a file belongs, or a symbolic link anywhere, is an input error with a report, not an internal error', () => {
+    const name = 'junit-scenarios-pg-x86_64-attempt-1';
+    const d = artifacts([
+      { run: 1, leg: null, name, junit: allPass(A24) },
+      { run: 2, leg: PG, name, junit: null },
+      { run: 3, leg: null, name, junit: allPass(A24) },
+      { run: 4, leg: PG, name, junit: null },
+      { run: 5, leg: PG, name, junit: null },
+      { run: 6, leg: PG, name: 'real-attempt-1', junit: allPass(A24) },
+      { run: 8, leg: PG, name, junit: allPass(A24) },
+    ]);
+    mkdirSync(join(d, '1', name, 'leg'));
+    mkdirSync(join(d, '2', name, 'junit.xml'));
+    symlinkSync(join(d, 'nowhere'), join(d, '3', name, 'leg'));
+    symlinkSync(join(d, '6', 'real-attempt-1', 'junit.xml'), join(d, '4', name, 'junit.xml'));
+    symlinkSync(join(d, '6', 'real-attempt-1'), join(d, '5', 'linked-attempt-1'));
+    symlinkSync(join(d, '6'), join(d, '7'));
+    symlinkSync(join(d, 'nowhere'), join(d, '8', name, 'ci'));
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 2);
+    const LINK = 'a symbolic link; the artifacts tree holds plain files and directories only';
+    assert.deepEqual(r.json.input_errors, [
+      `1/${name}/leg: a directory, not a regular file`,
+      `2/${name}/junit.xml: a directory, not a regular file`,
+      `3/${name}: leg: ${LINK}`,
+      `4/${name}: junit.xml: ${LINK}`,
+      `5/linked-attempt-1: ${LINK}`,
+      '7: every entry of the artifacts directory is a directory named by a workflow run ID',
+      `8/${name}: ci: ${LINK}`,
+    ]);
+    assert.match(r.out, /\*\*Input errors: this report cannot be trusted \(7\)\.\*\*/);
+    assert.deepEqual(r.json.reports.map((x) => x.artifact), ['5/junit-scenarios-pg-x86_64-attempt-1', '6/real-attempt-1']);
+  });
+
+  test('a FIFO where the leg file belongs is an input error', { skip: process.platform === 'win32' }, () => {
+    const name = 'junit-scenarios-pg-x86_64-attempt-1';
+    const d = artifacts([{ leg: null, name, junit: allPass(A24) }]);
+    const mk = spawnSync('mkfifo', [join(d, '100', name, 'leg')]);
+    assert.equal(mk.status, 0, String(mk.stderr));
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 2);
+    assert.deepEqual(r.json.input_errors, [`100/${name}/leg: a special file, not a regular file`]);
+  });
+
+  test('deeply nested XML is an input error, not a stack overflow', () => {
+    const deep = (n) => `${'<testsuites>'.repeat(n)}${'</testsuites>'.repeat(n)}`;
+    assert.deepEqual(readJUnit(deep(MAX_DEPTH)), []);
+    assert.throws(() => readJUnit(deep(MAX_DEPTH + 1)), (ex) => ex instanceof InputError && /elements nested more than 100 deep/.test(ex.message));
+    const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: deep(100000) }])]);
+    assert.equal(r.code, 2);
+    assert.match(r.json.input_errors[0], /junit\.xml: malformed JUnit: line 1: elements nested more than 100 deep; its results are not used$/);
   });
 
   test('a missing artifacts directory is an input error', () => {

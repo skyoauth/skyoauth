@@ -76,7 +76,7 @@
 //      artifact name). The report is still printed for input errors, but
 //      it cannot be trusted.
 
-import { appendFileSync, existsSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -93,6 +93,9 @@ export class InputError extends Error {}
 const ENTITIES = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
 const NAME = /[A-Za-z_:][-A-Za-z0-9_:.]*/y;
 const SPACE = /[ \t\r\n]/;
+// JUnit nests a few levels deep; the limit keeps a hostile file from
+// exhausting the stack of the readers that walk the tree.
+export const MAX_DEPTH = 100;
 
 // Parses well-formed XML into { name, attrs, children } elements and returns
 // the root element. Text is checked but not kept. DOCTYPE is rejected. A
@@ -182,6 +185,7 @@ export function parseXml(text) {
       if (stack.length === 1 && doc.children.length) fail('more than one root element');
       stack[stack.length - 1].children.push(el);
       if (!empty) stack.push(el);
+      if (stack.length - 1 > MAX_DEPTH) fail(`elements nested more than ${MAX_DEPTH} deep`);
       i = j;
     }
   }
@@ -331,82 +335,121 @@ const LEG_FILES = ['leg', 'junit.xml'];
 // that may lack a leg file. Any other artifact without one is an input error.
 export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/];
 
+// What a path is, without following a symbolic link: dir, file, symlink,
+// other or missing. Other file system errors are thrown.
+function kindOf(p) {
+  try {
+    const st = lstatSync(p);
+    return st.isSymbolicLink() ? 'symlink' : st.isDirectory() ? 'dir' : st.isFile() ? 'file' : 'other';
+  } catch (ex) {
+    if (ex.code === 'ENOENT') return 'missing';
+    throw ex;
+  }
+}
+const KIND = { symlink: 'a symbolic link', dir: 'a directory', other: 'a special file', missing: 'missing' };
+
+// Reads one artifact directory. Returns { error }, { ignored: true }, or
+// { report, note }; file system errors are thrown.
+function readArtifact(dir, run, artifact, catalogue) {
+  const rel = `${run}/${artifact}`;
+  const path = join(dir, run, artifact);
+  const k = kindOf(path);
+  if (k !== 'dir') return { error: k === 'symlink' ? `${rel}: a symbolic link; the artifacts tree holds plain files and directories only` : `${rel}: a run directory holds only artifact directories` };
+  const entries = readdirSync(path).sort();
+  const kinds = new Map(entries.map((x) => [x, kindOf(join(path, x))]));
+  const links = entries.filter((x) => kinds.get(x) === 'symlink');
+  if (links.length) return { error: `${rel}: ${links.join(', ')}: a symbolic link; the artifacts tree holds plain files and directories only` };
+  // A leg or junit.xml one level down (an upload whose paths had another
+  // common ancestor) would otherwise go unread.
+  const nested = entries.filter((x) => kinds.get(x) === 'dir' && LEG_FILES.some((f) => kindOf(join(path, x, f)) !== 'missing'));
+  if (nested.length) return { error: `${rel}: ${nested.map((x) => `${x}/`).join(', ')} holds a leg or junit.xml file; they belong at the top of the artifact` };
+  if (!entries.includes('leg')) {
+    // Only the known artifacts of other jobs may lack a leg file; any other
+    // one (a leg artifact that lost its leg file, say) could hide a failed
+    // attempt.
+    if (NOT_CONFORMANCE.some((re) => re.test(artifact))) return { ignored: true };
+    return { error: `${rel}: no leg file, and not a known artifact of a non-conformance job (${NOT_CONFORMANCE.map((re) => re.source).join(', ')}); its results cannot be placed` };
+  }
+  const extra = entries.filter((x) => !LEG_FILES.includes(x));
+  if (extra.length) return { error: `${rel}: a leg artifact holds only leg and junit.xml, not ${extra.join(', ')}` };
+  for (const f of LEG_FILES) if (kinds.has(f) && kinds.get(f) !== 'file') return { error: `${rel}/${f}: ${KIND[kinds.get(f)]}, not a regular file` };
+  const leg = readFileSync(join(path, 'leg'), 'utf8').trim();
+  const attempt = /(?:^|-)attempt-([1-9]\d*)$/.exec(artifact);
+  if (!catalogue.has(leg)) return { error: `${rel}: leg file names ${JSON.stringify(leg)}, which is not a layout §1.1 leg string` };
+  if (!attempt) return { error: `${rel}: the artifact name does not end in attempt-N, so its run attempt is unknown` };
+  const report = { run_id: Number(run), run_attempt: Number(attempt[1]), leg, artifact: rel, cases: new Map() };
+  if (!kinds.has('junit.xml')) return { report, note: `${rel}: no junit.xml; leg ${leg} has no result from run ${run} attempt ${report.run_attempt}` };
+  let cases;
+  try {
+    cases = readJUnit(readFileSync(join(path, 'junit.xml'), 'utf8'));
+  } catch (ex) {
+    if (!(ex instanceof InputError)) throw ex;
+    return { error: `${rel}/junit.xml: malformed JUnit: ${ex.message}; its results are not used` };
+  }
+  const runner = runnerOf(catalogue.get(leg).job);
+  for (const c of cases) {
+    const id = testId(runner, c.classname, c.name);
+    const prev = report.cases.get(id);
+    if (!prev || RANK[c.status] > RANK[prev]) report.cases.set(id, c.status);
+  }
+  return { report };
+}
+
 // Reads DIR/<run_id>/<artifact>/{junit.xml,leg}. Returns { reports, ignored,
 // notes, errors }; a report is { run_id, run_attempt, leg, artifact, cases:
-// Map(test ID -> passed | failed | skipped) }.
+// Map(test ID -> passed | failed | skipped) }. Nothing in the tree is
+// trusted: a symbolic link, a directory where a file belongs or a file
+// system error is an input error, never an internal one.
 export function readArtifacts(dir, catalogue) {
   const out = { reports: [], ignored: [], notes: [], errors: [] };
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) {
+  const fsError = (where, ex) => {
+    if (typeof ex?.code !== 'string') throw ex;
+    out.errors.push(`${where}: cannot be read (${ex.code})`);
+  };
+  let runs;
+  try {
+    runs = statSync(dir).isDirectory() ? readdirSync(dir).sort() : null;
+  } catch (ex) {
+    if (ex?.code !== 'ENOENT') {
+      fsError(dir, ex);
+      return out;
+    }
+  }
+  if (!runs) {
     out.errors.push(`${dir}: the artifacts directory does not exist`);
     return out;
   }
   const seen = new Map();
-  for (const run of readdirSync(dir).sort()) {
-    if (!/^[1-9]\d*$/.test(run) || !statSync(join(dir, run)).isDirectory()) {
-      out.errors.push(`${run}: every entry of the artifacts directory is a directory named by a workflow run ID`);
+  for (const run of runs) {
+    let artifacts;
+    try {
+      if (!/^[1-9]\d*$/.test(run) || kindOf(join(dir, run)) !== 'dir') {
+        out.errors.push(`${run}: every entry of the artifacts directory is a directory named by a workflow run ID`);
+        continue;
+      }
+      artifacts = readdirSync(join(dir, run)).sort();
+    } catch (ex) {
+      fsError(run, ex);
       continue;
     }
-    for (const artifact of readdirSync(join(dir, run)).sort()) {
+    for (const artifact of artifacts) {
       const rel = `${run}/${artifact}`;
-      const path = join(dir, run, artifact);
-      if (!statSync(path).isDirectory()) {
-        out.errors.push(`${rel}: a run directory holds only artifact directories`);
+      let a;
+      try {
+        a = readArtifact(dir, run, artifact, catalogue);
+      } catch (ex) {
+        fsError(rel, ex);
         continue;
       }
-      const entries = readdirSync(path).sort();
-      // A leg or junit.xml one level down (an upload whose paths had another
-      // common ancestor) would otherwise go unread.
-      const nested = entries.filter((x) => statSync(join(path, x)).isDirectory() && LEG_FILES.some((f) => existsSync(join(path, x, f))));
-      if (nested.length) {
-        out.errors.push(`${rel}: ${nested.map((x) => `${x}/`).join(', ')} holds a leg or junit.xml file; they belong at the top of the artifact`);
-        continue;
-      }
-      if (!entries.includes('leg')) {
-        // Only the known artifacts of other jobs may lack a leg file; any
-        // other one (a leg artifact that lost its leg file, say) could hide
-        // a failed attempt.
-        if (NOT_CONFORMANCE.some((re) => re.test(artifact))) out.ignored.push(rel);
-        else out.errors.push(`${rel}: no leg file, and not a known artifact of a non-conformance job (${NOT_CONFORMANCE.map((re) => re.source).join(', ')}); its results cannot be placed`);
-        continue;
-      }
-      const extra = entries.filter((x) => !LEG_FILES.includes(x));
-      if (extra.length) {
-        out.errors.push(`${rel}: a leg artifact holds only leg and junit.xml, not ${extra.join(', ')}`);
-        continue;
-      }
-      const leg = readFileSync(join(path, 'leg'), 'utf8').trim();
-      const attempt = /(?:^|-)attempt-([1-9]\d*)$/.exec(artifact);
-      if (!catalogue.has(leg)) {
-        out.errors.push(`${rel}: leg file names ${JSON.stringify(leg)}, which is not a layout §1.1 leg string`);
-        continue;
-      }
-      if (!attempt) {
-        out.errors.push(`${rel}: the artifact name does not end in attempt-N, so its run attempt is unknown`);
-        continue;
-      }
-      const r = { run_id: Number(run), run_attempt: Number(attempt[1]), leg, artifact: rel, cases: new Map() };
-      const key = `${r.run_id}/${r.run_attempt}/${leg}`;
-      const junit = join(path, 'junit.xml');
-      if (!existsSync(junit)) out.notes.push(`${rel}: no junit.xml; leg ${leg} has no result from run ${run} attempt ${r.run_attempt}`);
-      else {
-        let cases;
-        try {
-          cases = readJUnit(readFileSync(junit, 'utf8'));
-        } catch (ex) {
-          if (!(ex instanceof InputError)) throw ex;
-          out.errors.push(`${rel}/junit.xml: malformed JUnit: ${ex.message}; its results are not used`);
-          continue;
-        }
-        const runner = runnerOf(catalogue.get(leg).job);
-        for (const c of cases) {
-          const id = testId(runner, c.classname, c.name);
-          const prev = r.cases.get(id);
-          if (!prev || RANK[c.status] > RANK[prev]) r.cases.set(id, c.status);
-        }
-      }
+      if (a.error) out.errors.push(a.error);
+      if (a.ignored) out.ignored.push(rel);
+      if (a.note) out.notes.push(a.note);
+      if (!a.report) continue;
+      const r = a.report;
+      const key = `${r.run_id}/${r.run_attempt}/${r.leg}`;
       if (seen.has(key)) {
         // Both copies stay in the join, so a failure in either one counts.
-        out.errors.push(`${rel}: duplicate artifact for leg ${leg}, run ${run} attempt ${r.run_attempt} (also ${seen.get(key)})`);
+        out.errors.push(`${rel}: duplicate artifact for leg ${r.leg}, run ${run} attempt ${r.run_attempt} (also ${seen.get(key)})`);
       } else seen.set(key, rel);
       out.reports.push(r);
     }
