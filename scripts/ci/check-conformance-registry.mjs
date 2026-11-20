@@ -24,8 +24,10 @@
 //   legs      Every leg is a §1.1 leg string, its env is one of the entry's
 //             envs, its job exists at the stage's milestone (JOB_FROM), and
 //             every env has a leg in some stage.
-//   gates     Every stage of a milestone in gates_passed is implemented
-//             (layout §3 Gates; the reporter part of that rule is not here).
+//   gates     Every scenario or required-subcase stage of a milestone in
+//             gates_passed is implemented (layout §3 Gates; the reporter part
+//             of that rule is not here). Conditional subcases are skipped
+//             until a release manifest selects their feature.
 //   table     The layout §2 table and its counts sentences equal the ones
 //             rendered from the registry (gen-conformance-registry.mjs renders
 //             both; this check imports that code).
@@ -495,8 +497,12 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
     const stageErr = (rule) => (m, msg) => report.error(file, where.get(`${e.id}/${m}`) ?? where.get(e.id), rule, msg);
     checkStages(e, stageErr('stages'));
     checkLegs(e, catalogue, stageErr('legs'), (msg) => report.error(file, where.get(e.id), 'legs', msg));
+    // Layout §3 Release: a conditional sub-ID is required only when the release
+    // manifest lists its feature as shipped. No manifest exists yet, so its
+    // stages join the gate once one selects their feature.
+    const gated = e.conditional_on === undefined;
     for (const s of e.stage) {
-      if (gates.includes(s.milestone) && s.status !== 'implemented') stageErr('gates')(s.milestone, `${e.id} ${s.milestone}: gates_passed lists ${s.milestone}, but this stage is ${s.status}, not implemented`);
+      if (gated && gates.includes(s.milestone) && s.status !== 'implemented') stageErr('gates')(s.milestone, `${e.id} ${s.milestone}: gates_passed lists ${s.milestone}, but this stage is ${s.status}, not implemented`);
       for (const t of Array.isArray(s.tests) ? s.tests : []) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: Array.isArray(s.legs) ? s.legs : [] }]);
     }
   };

@@ -750,6 +750,19 @@ describe('rule gates', () => {
     expectError(res, 'gates', /scenarios\.toml:\d+: error \[gates\] A64 M1a: /);
   });
 
+  test('planned stages of conditional subcases do not block a gate (no release manifest yet)', () => {
+    // The four conditional sub-IDs: three planned M3 stages, one planned M4 stage.
+    const conditional = parseStrict(repoText(SUBCASES)).subcase.filter((s) => s.conditional_on !== undefined);
+    const planned = (m) => conditional.filter((s) => s.stage.some((x) => x.milestone === m && x.status === 'planned')).map((s) => s.id);
+    assert.deepEqual([planned('M3').length, planned('M4').length, conditional.length], [3, 1, 4]);
+    for (const m of ['M3', 'M4']) {
+      expectOk(check(fixture({ [SCENARIOS]: (t) => implementAll(gate(`["${m}"]`)(t), 'scenario', m) })));
+    }
+    // A scenario stage at that gate still counts.
+    const res = check(fixture({ [SCENARIOS]: (t) => implementAll(gate('["M4"]')(t), 'scenario', 'M4', 'A27') }));
+    expectOnly(res, 'gates', /scenarios\.toml:\d+: error \[gates\] A27 M4: gates_passed lists M4, but this stage is planned, not implemented$/);
+  });
+
   test('a subcase stage counts too', () => {
     const res = check(fixture({ [SCENARIOS]: (t) => implementAll(gate('["M1b"]')(t), 'scenario', 'M1b'), [SUBCASES]: withSub('A58.07') }));
     expectOnly(res, 'gates', new RegExp(`^tests/conformance/subcases\\.toml:\\d+: error \\[gates\\] A58\\.07 M1b: gates_passed lists M1b, but this stage is planned, not implemented$`));

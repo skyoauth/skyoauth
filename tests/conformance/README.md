@@ -106,7 +106,7 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `owners` | Every owner is a task in tasks.md. |
 | `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
 | `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, its job exists at the stage's milestone, no leg repeats in a stage, and every env has a leg. |
-| `gates` | Every stage, scenario or subcase, of a milestone in `gates_passed` is `implemented`. The reporter half of layout §3 **Gates** (every such stage **passed** on `main`) is not part of the static check. |
+| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The reporter half of layout §3 **Gates** (every such stage **passed** on `main`) is not part of the static check. |
 | `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
 | `subcases` | The sub-ID rules above. |
 | `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
