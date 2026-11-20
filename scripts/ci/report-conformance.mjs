@@ -226,14 +226,34 @@ export const SKIPPED_ELEMENTS = new Set(['skipped', 'ignored', 'disabled']);
 // that starts writing a new verdict element cannot be read as a pass.
 const QUIET_ELEMENTS = new Set(['system-out', 'system-err', 'properties']);
 const STATUS_ATTR = { passed: 'passed', success: 'passed', run: 'passed', skipped: 'skipped', notrun: 'skipped', disabled: 'skipped', ignored: 'skipped', failed: 'failed', failure: 'failed', error: 'failed' };
+// Attributes that mark testcases not run, as some dialects write them in
+// place of (or next to) the elements. On a <testcase>: "true" or "1" makes it
+// skipped, "false" or "0" means nothing. On a <testsuite> or <testsuites>
+// they are counts (quick-junit, as nextest uses it, writes disabled="N";
+// vitest and Playwright write skipped="N"): their sum may not exceed the
+// skipped testcases under that element, or a skipped test would read as
+// passed; "true" makes every testcase under it skipped, "false" means
+// nothing. Any other value is an input error.
+const SKIP_ATTRS = ['skipped', 'disabled', 'ignored'];
+const skipFlag = (attrs, what) => {
+  let skipped = false;
+  for (const a of SKIP_ATTRS) {
+    const v = attrs[a];
+    if (v === undefined || v === 'false' || v === '0') continue;
+    if (v === 'true' || v === '1') skipped = true;
+    else throw new InputError(`${what}: ${a}="${v}" is not true, false, 1 or 0`);
+  }
+  return skipped;
+};
 // Elements are matched by local name, so a namespaced <j:failure> is a
 // failure too.
 const local = (n) => n.slice(n.lastIndexOf(':') + 1);
 
 // The testcases of a JUnit report: [{ classname, name, status }], status one
 // of passed, failed, skipped. Throws InputError for a malformed report, for
-// an element it does not know inside a <testsuite> or <testcase>, and for a
-// suite-level failure (a <failure>, <error> or retry marker directly in a
+// an element it does not know inside a <testsuite> or <testcase>, for a
+// skipped, disabled or ignored attribute it cannot account for (SKIP_ATTRS),
+// and for a suite-level failure (a <failure>, <error> or retry marker directly in a
 // <testsuite>, such as a setup crash): it cannot be pinned to a testcase, so
 // the report is not used and the result cannot be trusted.
 export function readJUnit(text) {
@@ -243,7 +263,7 @@ export function readJUnit(text) {
   const walk = (el, inSuite) => {
     for (const c of el.children) {
       const n = local(c.name);
-      if (n === 'testsuite' || n === 'testsuites') walk(c, n === 'testsuite' || inSuite);
+      if (n === 'testsuite' || n === 'testsuites') suite(c, n === 'testsuite' || inSuite);
       else if (n === 'testcase') {
         if (!inSuite) throw new InputError('a <testcase> outside any <testsuite>');
         const { name, classname } = c.attrs;
@@ -253,14 +273,32 @@ export function readJUnit(text) {
         const kids = c.children.map((k) => local(k.name));
         const odd = kids.find((k) => !FAILED_ELEMENTS.has(k) && !SKIPPED_ELEMENTS.has(k) && !QUIET_ELEMENTS.has(k));
         if (odd !== undefined) throw new InputError(`testcase ${name}: unknown element <${odd}>`);
-        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
+        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], skipFlag(c.attrs, `testcase ${name}`) ? 'skipped' : 'passed', ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
         const status = verdicts.includes('failed') ? 'failed' : verdicts.includes('skipped') ? 'skipped' : 'passed';
         cases.push({ classname, name, status });
       } else if (FAILED_ELEMENTS.has(n)) throw new InputError(`a suite-level <${c.name}> in <${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>: it fails no particular testcase`);
       else if (!QUIET_ELEMENTS.has(n)) throw new InputError(`unknown element <${c.name}> in <${el.name}>`);
     }
   };
-  walk(root, local(root.name) === 'testsuite');
+  // A suite's own skip attributes (SKIP_ATTRS), checked against the
+  // testcases under it once they are read.
+  const suite = (el, inSuite) => {
+    const from = cases.length;
+    walk(el, inSuite);
+    const what = `<${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>`;
+    const under = cases.slice(from);
+    let count = 0;
+    for (const a of SKIP_ATTRS) {
+      const v = el.attrs[a];
+      if (v === undefined || v === 'false') continue;
+      if (v === 'true') for (const t of under) t.status = t.status === 'failed' ? 'failed' : 'skipped';
+      else if (/^(0|[1-9]\d{0,8})$/.test(v)) count += Number(v);
+      else throw new InputError(`${what}: ${a}="${v}" is not a count, true or false`);
+    }
+    const shown = under.filter((t) => t.status === 'skipped').length;
+    if (count > shown) throw new InputError(`${what} counts ${count} skipped or disabled test(s), but only ${shown} of its testcases are marked skipped, so which are skipped cannot be told`);
+  };
+  suite(root, local(root.name) === 'testsuite');
   return cases;
 }
 

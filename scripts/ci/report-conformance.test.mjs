@@ -1373,6 +1373,71 @@ describe('XML and JUnit reader', () => {
     assert.deepEqual(readJUnit('<j:testsuite xmlns:j="u"><j:testcase classname="c" name="n"><j:failure/></j:testcase></j:testsuite>'), [{ classname: 'c', name: 'n', status: 'failed' }]);
   });
 
+  test('skipped, disabled and ignored attributes: a testcase flag or a suite count is not a pass', () => {
+    const tc = (attrs, body = '') => `<testcase classname="c" name="n"${attrs}>${body}</testcase>`;
+    const one = (attrs, body) => readJUnit(`<testsuite name="s">${tc(attrs, body)}</testsuite>`)[0].status;
+    // On a testcase: a flag. status="skipped" was already a skip.
+    for (const [attrs, want] of [
+      [' status="skipped"', 'skipped'],
+      [' skipped="true"', 'skipped'],
+      [' skipped="1"', 'skipped'],
+      [' disabled="true"', 'skipped'],
+      [' disabled="1"', 'skipped'],
+      [' ignored="true"', 'skipped'],
+      [' skipped="false"', 'passed'],
+      [' disabled="0"', 'passed'],
+      [' skipped="false" disabled="1"', 'skipped'],
+      [' disabled="true" status="failed"', 'failed'],
+    ]) {
+      assert.equal(one(attrs), want, attrs);
+    }
+    assert.equal(one(' disabled="true"', '<failure/>'), 'failed');
+    // On a suite: a count, which the skipped testcases under it must cover.
+    const cases = (x) => readJUnit(x).map((c) => c.status);
+    const pair = `${tc('')}<testcase classname="c" name="m"><skipped/></testcase>`;
+    assert.deepEqual(cases(`<testsuites skipped="1"><testsuite skipped="1" tests="2">${pair}</testsuite></testsuites>`), ['passed', 'skipped']);
+    assert.deepEqual(cases(`<testsuites><testsuite disabled="0">${tc('')}</testsuite></testsuites>`), ['passed']);
+    assert.deepEqual(cases(`<testsuites><testsuite disabled="1">${tc(' disabled="true"')}</testsuite></testsuites>`), ['skipped']);
+    assert.deepEqual(cases(`<testsuites disabled="2"><testsuite>${pair}</testsuite><testsuite>${tc(' skipped="1"')}</testsuite></testsuites>`), ['passed', 'skipped', 'skipped']);
+    assert.deepEqual(cases(`<testsuites><testsuite skipped="true">${pair}<testcase classname="c" name="f"><failure/></testcase></testsuite></testsuites>`), ['skipped', 'skipped', 'failed']);
+    assert.deepEqual(cases(`<testsuites skipped="false"><testsuite>${tc('')}</testsuite></testsuites>`), ['passed']);
+    for (const [x, re] of [
+      [`<testsuite name="s">${tc(' skipped="yes"')}</testsuite>`, /^testcase n: skipped="yes" is not true, false, 1 or 0$/],
+      [`<testsuite name="s">${tc(' disabled="2"')}</testsuite>`, /^testcase n: disabled="2" is not true, false, 1 or 0$/],
+      [`<testsuite name="s">${tc(' ignored=""')}</testsuite>`, /^testcase n: ignored="" is not true, false, 1 or 0$/],
+      [`<testsuite name="s">${tc(' skipped="True"')}</testsuite>`, /^testcase n: skipped="True" is not/],
+      // A count with no skipped testcase to match: one of them is skipped,
+      // but would read as passed.
+      [`<testsuite name="s" skipped="1">${tc('')}</testsuite>`, /^<testsuite name="s"> counts 1 skipped or disabled test\(s\), but only 0 of its testcases are marked skipped, so which are skipped cannot be told$/],
+      [`<testsuites disabled="2"><testsuite name="s">${pair}</testsuite></testsuites>`, /^<testsuites> counts 2 skipped or disabled test\(s\), but only 1 of its/],
+      [`<testsuite name="s" skipped="1" disabled="1">${pair}</testsuite>`, /^<testsuite name="s"> counts 2 skipped/],
+      [`<testsuite name="s" skipped="1"/>`, /^<testsuite name="s"> counts 1 skipped/],
+      [`<testsuite name="s" disabled="-1">${tc('')}</testsuite>`, /^<testsuite name="s">: disabled="-1" is not a count, true or false$/],
+      [`<testsuite name="s" skipped="01">${tc('')}</testsuite>`, /^<testsuite name="s">: skipped="01" is not a count/],
+      [`<testsuite name="s" skipped="">${tc('')}</testsuite>`, /^<testsuite name="s">: skipped="" is not a count/],
+      [`<testsuite name="s" ignored="1e3">${tc('')}</testsuite>`, /^<testsuite name="s">: ignored="1e3" is not a count/],
+    ]) {
+      assert.throws(() => readJUnit(x), (ex) => ex instanceof InputError && re.test(ex.message), x);
+    }
+  });
+
+  test('end to end: a testcase marked disabled is not run, and an unaccounted suite count is an input error', () => {
+    const marked = allPass(A24).replace(/(<testcase name="[^"]*a24_neg_replay")/, '$1 disabled="true"');
+    assert.notEqual(marked, allPass(A24));
+    const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: marked }])]);
+    assert.equal(r.code, 0, r.err);
+    const st = stage(r.json, 'A24', 'M1a');
+    assert.equal(st.status, 'not run');
+    assert.deepEqual(st.pairs.map((p) => p.status), ['passed', 'not run']);
+    const counted = allPass(A24).replace('<testsuite name="skyoauth-scenarios::pg" tests="2">', '<testsuite name="skyoauth-scenarios::pg" tests="2" disabled="1">');
+    assert.notEqual(counted, allPass(A24));
+    const c = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: counted }])]);
+    assert.equal(c.code, 2);
+    assert.equal(c.json.trusted, false);
+    assert.match(c.json.input_errors[0], /<testsuite name="skyoauth-scenarios::pg"> counts 1 skipped or disabled test\(s\), but only 0 of its testcases are marked skipped/);
+    assert.equal(stage(c.json, 'A24', 'M1a').status, 'not run');
+  });
+
   test('a suite-level error is an input error and the report is not used', () => {
     const x = allPass(A24).replace('<testsuite name="skyoauth-scenarios::pg" tests="2">', '<testsuite name="skyoauth-scenarios::pg" tests="2"><error message="binary crashed"/>');
     assert.notEqual(x, allPass(A24));
