@@ -883,7 +883,7 @@ envs = ["hermetic", "pg"]
 harness = ["UC", "PG", "metadata fixture"]
 owners = ["T10.11", "T12.5", "T20.1"]
 positive = "disabled record stored"
-negative = "a disable/re-enable cycle cannot revive old evidence: re-enabling a disabled record does not resurrect its prior revision or evidence (M1a, tasks §3); device or impersonation not advertised, issuance rejected, capability gain does not activate"
+negative = "a disable/re-enable cycle cannot revive old evidence: re-enabling a disabled record does not resurrect its prior revision or evidence (M1a, tasks §3); device or impersonation not advertised, issuance rejected, capability gain does not activate (M2)"
 matrix_sha256 = "58b5705933e5a591405976faa07ecbef2527b2a217f11ca6bdbb296a533d7d0a"
 
 [[scenario.stage]]
