@@ -1432,6 +1432,32 @@ describe('XML and JUnit reader', () => {
     }
   });
 
+  // A suite flagged skipped="true" (disabled, ignored) marks the cases under
+  // it before the counts of the suites inside it are checked.
+  const tcx = (name, body = '') => `<testcase classname="c" name="${name}">${body}</testcase>`;
+  const statuses = (x) => readJUnit(x).map((c) => [c.name, c.status]);
+  const unaccounted = (x, re) => assert.throws(() => readJUnit(x), (ex) => ex instanceof InputError && re.test(ex.message), x);
+
+  test('inherited skip flag: an enclosing "true" accounts for an inner count', () => {
+    assert.deepEqual(statuses(`<testsuites disabled="true"><testsuite skipped="1">${tcx('n')}</testsuite></testsuites>`), [['n', 'skipped']]);
+  });
+
+  test('inherited skip flag: through two levels, with counts at each level below it', () => {
+    assert.deepEqual(statuses(`<testsuites skipped="true"><testsuites disabled="2"><testsuite skipped="1">${tcx('a')}</testsuite><testsuite>${tcx('b')}</testsuite></testsuites></testsuites>`), [['a', 'skipped'], ['b', 'skipped']]);
+    assert.deepEqual(statuses(`<testsuites ignored="true"><testsuites><testsuite>${tcx('a')}${tcx('b', '<skipped/>')}</testsuite></testsuites></testsuites>`), [['a', 'skipped'], ['b', 'skipped']]);
+  });
+
+  test('inherited skip flag: a failed case stays failed and does not account for a count', () => {
+    assert.deepEqual(statuses(`<testsuites disabled="true"><testsuites><testsuite>${tcx('f', '<failure/>')}${tcx('e', '<error/>')}${tcx('r', '<flakyFailure/>')}${tcx('p')}</testsuite></testsuites></testsuites>`), [['f', 'failed'], ['e', 'failed'], ['r', 'failed'], ['p', 'skipped']]);
+    unaccounted(`<testsuites disabled="true"><testsuite name="s" skipped="1">${tcx('f', '<failure/>')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 1 skipped or disabled test\(s\), but only 0 of its testcases are marked skipped/);
+  });
+
+  test('inherited skip flag: a count with no flag above it, or a flag only on a sibling or "false", is still unaccounted', () => {
+    unaccounted(`<testsuites><testsuite disabled="true">${tcx('a')}</testsuite><testsuite name="t" skipped="1">${tcx('b')}</testsuite></testsuites>`, /^<testsuite name="t"> counts 1 skipped or disabled test\(s\), but only 0 of/);
+    unaccounted(`<testsuites disabled="false"><testsuite name="s" skipped="1">${tcx('n')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 1 skipped/);
+    unaccounted(`<testsuites skipped="true"><testsuite name="s" skipped="2">${tcx('n')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 2 skipped or disabled test\(s\), but only 1 of/);
+  });
+
   test('end to end: a testcase marked disabled is not run, and an unaccounted suite count is an input error', () => {
     const marked = allPass(A24).replace(/(<testcase name="[^"]*a24_neg_replay")/, '$1 disabled="true"');
     assert.notEqual(marked, allPass(A24));

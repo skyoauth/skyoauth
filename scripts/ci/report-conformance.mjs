@@ -233,8 +233,9 @@ const STATUS_ATTR = { passed: 'passed', success: 'passed', run: 'passed', skippe
 // they are counts (quick-junit, as nextest uses it, writes disabled="N";
 // vitest and Playwright write skipped="N"): their sum may not exceed the
 // skipped testcases under that element, or a skipped test would read as
-// passed; "true" makes every testcase under it skipped, "false" means
-// nothing. Any other value is an input error.
+// passed; "true" makes every testcase under it skipped (nested suites
+// included, before their counts are checked; a failed one stays failed),
+// "false" means nothing. Any other value is an input error.
 const SKIP_ATTRS = ['skipped', 'disabled', 'ignored'];
 const skipFlag = (attrs, what) => {
   let skipped = false;
@@ -261,10 +262,12 @@ export function readJUnit(text) {
   const root = parseXml(text);
   if (local(root.name) !== 'testsuites' && local(root.name) !== 'testsuite') throw new InputError(`the root element is <${root.name}>, not <testsuites> or <testsuite>`);
   const cases = [];
-  const walk = (el, inSuite) => {
+  // `skip`: an enclosing suite is flagged skipped (SKIP_ATTRS = "true"), so
+  // every testcase under it is, a failed one excepted.
+  const walk = (el, inSuite, skip) => {
     for (const c of el.children) {
       const n = local(c.name);
-      if (n === 'testsuite' || n === 'testsuites') suite(c, n === 'testsuite' || inSuite);
+      if (n === 'testsuite' || n === 'testsuites') suite(c, n === 'testsuite' || inSuite, skip);
       else if (n === 'testcase') {
         if (!inSuite) throw new InputError('a <testcase> outside any <testsuite>');
         const { name, classname } = c.attrs;
@@ -274,32 +277,34 @@ export function readJUnit(text) {
         const kids = c.children.map((k) => local(k.name));
         const odd = kids.find((k) => !FAILED_ELEMENTS.has(k) && !SKIPPED_ELEMENTS.has(k) && !QUIET_ELEMENTS.has(k));
         if (odd !== undefined) throw new InputError(`testcase ${name}: unknown element <${odd}>`);
-        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], skipFlag(c.attrs, `testcase ${name}`) ? 'skipped' : 'passed', ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
+        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], skip || skipFlag(c.attrs, `testcase ${name}`) ? 'skipped' : 'passed', ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
         const status = verdicts.includes('failed') ? 'failed' : verdicts.includes('skipped') ? 'skipped' : 'passed';
         cases.push({ classname, name, status });
       } else if (FAILED_ELEMENTS.has(n)) throw new InputError(`a suite-level <${c.name}> in <${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>: it fails no particular testcase`);
       else if (!QUIET_ELEMENTS.has(n)) throw new InputError(`unknown element <${c.name}> in <${el.name}>`);
     }
   };
-  // A suite's own skip attributes (SKIP_ATTRS), checked against the
-  // testcases under it once they are read.
-  const suite = (el, inSuite) => {
-    const from = cases.length;
-    walk(el, inSuite);
+  // A suite's own skip attributes (SKIP_ATTRS): a "true" flag is passed down
+  // before the walk, so it reaches the cases of nested suites before their
+  // counts are checked; the counts are checked against the testcases under
+  // the suite once they are read.
+  const suite = (el, inSuite, inherited) => {
     const what = `<${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>`;
-    const under = cases.slice(from);
     let count = 0;
+    let skip = inherited;
     for (const a of SKIP_ATTRS) {
       const v = el.attrs[a];
       if (v === undefined || v === 'false') continue;
-      if (v === 'true') for (const t of under) t.status = t.status === 'failed' ? 'failed' : 'skipped';
+      if (v === 'true') skip = true;
       else if (/^(0|[1-9]\d{0,8})$/.test(v)) count += Number(v);
       else throw new InputError(`${what}: ${a}="${v}" is not a count, true or false`);
     }
-    const shown = under.filter((t) => t.status === 'skipped').length;
+    const from = cases.length;
+    walk(el, inSuite, skip);
+    const shown = cases.slice(from).filter((t) => t.status === 'skipped').length;
     if (count > shown) throw new InputError(`${what} counts ${count} skipped or disabled test(s), but only ${shown} of its testcases are marked skipped, so which are skipped cannot be told`);
   };
-  suite(root, local(root.name) === 'testsuite');
+  suite(root, local(root.name) === 'testsuite', false);
   return cases;
 }
 
