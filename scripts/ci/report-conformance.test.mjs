@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { normaliseRegistry } from './registry-fixtures.mjs';
+import { assertGitImmune, GIT_ENV, normaliseRegistry } from './registry-fixtures.mjs';
 import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
@@ -195,7 +195,6 @@ function report(rootDir, args = [], { commit = SHA } = {}) {
 }
 // The Markdown with text() escapes undone, for matching prose.
 const plain = (md) => md.replace(/\\([\\`*_[\]~|])/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
 const git = (dir, ...args) => {
   const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
@@ -1003,6 +1002,13 @@ describe('waivers', () => {
     }
   });
 
+  // The git fixtures above, and the run on the repository below, with an
+  // absolute GIT_DIR exported (as in a git hook): they pass and leave that
+  // repository alone.
+  test('the git fixtures are immune to an inherited GIT_DIR', () => {
+    assertGitImmune(fileURLToPath(import.meta.url), ['^in a git checkout, --root must be', '^an inherited GIT_DIR does not bind', '^the script runs on the repository']);
+  });
+
   test('without history a waiver commit is not checked (note), unless --require-history', () => {
     const dir = root(withA24);
     const soft = report(dir, ['--waivers', waiverFile(waiver(SHA)), '--artifacts', failedThenPassed()]);
@@ -1792,7 +1798,7 @@ describe('cli', () => {
   // so this case checks only that the report is produced and well-formed.
   test('the script runs on the repository: exit 0 and a milestone table', () => {
     // In a git checkout the judged commit must be HEAD.
-    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: GIT_ENV });
     const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8' });
     assert.equal(p.status, 0, p.stderr);
     for (const m of ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5']) {

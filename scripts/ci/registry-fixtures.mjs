@@ -1,10 +1,22 @@
-// Test helper for the registry self-tests (check-conformance-registry.test.mjs
-// and gen-conformance-registry.test.mjs); not used by CI scripts themselves.
+// Test helpers for the self-tests; not used by CI scripts themselves.
 //
-// Fixtures start from the committed scenarios.toml and subcases.toml with every
-// stage reset to `planned` (no stamp, `tests = []`) and `gates_passed = []`,
-// so that implementing a real stage or passing a gate does not change what the
-// tests see. Stage legs, scopes and milestones are kept as committed.
+// Registry fixtures (check-conformance-registry.test.mjs and
+// gen-conformance-registry.test.mjs): they start from the committed
+// scenarios.toml and subcases.toml with every stage reset to `planned` (no
+// stamp, `tests = []`) and `gates_passed = []`, so that implementing a real
+// stage or passing a gate does not change what the tests see. Stage legs,
+// scopes and milestones are kept as committed.
+//
+// Git fixtures (every self-test that runs git itself): GIT_ENV and
+// assertGitImmune() below. This module needs nothing but Node, so the
+// docs-check job can use it without `npm ci`.
+
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // A stage's status, optional stamp and tests, as the generator writes them
 // (tests inline or one string per line).
@@ -37,4 +49,54 @@ export function valueSwaps(text, table, id, value, extra = {}) {
     if (m[1] === 'id') for (const k of extra.entry ?? []) out.push([`${id} +${k}`, at(m.index + m[0].length, 0, `\n${k} = ${value}`)]);
   }
   return out;
+}
+
+// The environment of a self-test's own git runs: no inherited GIT_*
+// variable, so none of those that point git at another repository (GIT_DIR,
+// GIT_WORK_TREE, GIT_INDEX_FILE, ..., which a git hook or `git rebase
+// --exec` exports, would make the fixtures be committed into that
+// repository), no global or system configuration, and a fixed identity.
+export const GIT_ENV = {
+  ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_AUTHOR_NAME: 't',
+  GIT_AUTHOR_EMAIL: 't@example.invalid',
+  GIT_COMMITTER_NAME: 't',
+  GIT_COMMITTER_EMAIL: 't@example.invalid',
+};
+
+// Every file under `dir` with the SHA-256 of its contents.
+function snapshot(dir, rel = '', out = {}) {
+  for (const e of readdirSync(join(dir, rel), { withFileTypes: true })) {
+    const p = join(rel, e.name);
+    if (e.isDirectory()) snapshot(dir, p, out);
+    else out[p] = e.isFile() ? createHash('sha256').update(readFileSync(join(dir, p))).digest('hex') : 'other';
+  }
+  return out;
+}
+
+// Runs the tests of the self-test `file` named by `patterns`
+// (--test-name-pattern, one test each) in a child `node --test` that
+// inherits an absolute GIT_DIR of a scratch repository, and asserts that the
+// scratch repository is unchanged, file for file, and that they all ran and
+// passed.
+export function assertGitImmune(file, patterns) {
+  const scratch = mkdtempSync(join(tmpdir(), 'git-immune-'));
+  try {
+    for (const args of [['init', '-q', '-b', 'main'], ['-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'scratch']]) {
+      const r = spawnSync('git', ['-C', scratch, ...args], { encoding: 'utf8', env: GIT_ENV });
+      assert.equal(r.status, 0, r.stderr);
+    }
+    const before = snapshot(scratch);
+    const env = { ...process.env, GIT_DIR: join(scratch, '.git') };
+    delete env.NODE_TEST_CONTEXT; // set for files run by `node --test`; the child reports on its own
+    const p = spawnSync(process.execPath, ['--test', ...patterns.map((t) => `--test-name-pattern=${t}`), file], { encoding: 'utf8', env, timeout: 300_000 });
+    assert.deepEqual(snapshot(scratch), before, 'the repository GIT_DIR names is untouched');
+    assert.equal(p.status, 0, p.stdout + p.stderr);
+    assert.match(p.stdout, new RegExp(`^# pass ${patterns.length}$`, 'm'), 'each pattern names one test');
+    assert.match(p.stdout, /^# fail 0$/m);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }

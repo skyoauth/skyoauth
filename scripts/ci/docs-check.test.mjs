@@ -14,6 +14,7 @@ import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { checkDocs, findCycle, findRefs, formatAnnotation, GIT_LOCATION, githubSlug, MermaidError, parseFlowchart, scanFences } from './docs-check.mjs';
+import { assertGitImmune, GIT_ENV } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'docs-check.mjs');
 
@@ -705,18 +706,18 @@ describe('links and anchors', () => {
   });
   test('link to a file outside docs that is not tracked', () => {
     const root = fixture();
-    execFileSync('git', ['init', '-q', root], { stdio: 'ignore' });
+    execFileSync('git', ['init', '-q', root], { stdio: 'ignore', env: GIT_ENV });
     writeFileSync(join(root, 'README.md'), '# r\n');
     writeFileSync(join(root, 'docs', 'untracked.md'), '# u\n\nT99.1 [x](nowhere.md)\n');
     const design = edit(DESIGN, '[the tasks](skyoauth-tasks.md)', '[readme](../README.md)');
     writeFileSync(join(root, 'docs', 'skyoauth-design.md'), design);
-    execFileSync('git', ['-C', root, 'add', 'docs/skyoauth-design.md', 'docs/skyoauth-tasks.md']);
+    execFileSync('git', ['-C', root, 'add', 'docs/skyoauth-design.md', 'docs/skyoauth-tasks.md'], { env: GIT_ENV });
     const r = checkDocs({ root });
     // README.md exists but is untracked; docs/untracked.md is not scanned.
     assert.deepEqual(r.stats.files, ['docs/skyoauth-design.md', 'docs/skyoauth-tasks.md']);
     expectError(r, { file: D, line: 3, check: 'link', match: /'\.\.\/README\.md' does not exist as a git-tracked file/ });
     assert.equal(r.errors.length, 1);
-    execFileSync('git', ['-C', root, 'add', 'README.md']);
+    execFileSync('git', ['-C', root, 'add', 'README.md'], { env: GIT_ENV });
     assert.deepEqual(checkDocs({ root }).errors, []);
   });
   // A git hook or `git rebase --exec` exports GIT_DIR and its kin; git -C
@@ -725,17 +726,22 @@ describe('links and anchors', () => {
   test('an inherited GIT_DIR does not replace the tracked files of --root', () => {
     assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES']);
     const other = fixture();
-    execFileSync('git', ['init', '-q', other], { stdio: 'ignore' });
-    execFileSync('git', ['-C', other, 'add', 'docs']);
+    execFileSync('git', ['init', '-q', other], { stdio: 'ignore', env: GIT_ENV });
+    execFileSync('git', ['-C', other, 'add', 'docs'], { env: GIT_ENV });
     const root = fixture({ 'docs/notes.md': '# Notes\n\n[x](nowhere.md)\n' });
-    execFileSync('git', ['init', '-q', root], { stdio: 'ignore' });
-    execFileSync('git', ['-C', root, 'add', 'docs']);
+    execFileSync('git', ['init', '-q', root], { stdio: 'ignore', env: GIT_ENV });
+    execFileSync('git', ['-C', root, 'add', 'docs'], { env: GIT_ENV });
     const gitDir = join(other, '.git');
     for (const env of [{}, { GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: root }, { GIT_INDEX_FILE: join(gitDir, 'index') }]) {
       const p = cli(['--root', root], { env });
       assert.equal(p.status, 1, `${Object.keys(env)}: ${p.stdout}${p.stderr}`);
       assert.match(p.stdout + p.stderr, /docs\/notes\.md:3: .*'nowhere\.md' does not exist as a git-tracked file/);
     }
+  });
+  // The git fixtures here with an absolute GIT_DIR exported (as in a git
+  // hook): they pass and leave that repository alone.
+  test('the git fixtures are immune to an inherited GIT_DIR', () => {
+    assertGitImmune(fileURLToPath(import.meta.url), ['^link to a file outside docs that is not tracked$', '^an inherited GIT_DIR does not replace']);
   });
   test('reference links need a definition', () => {
     const design = edit(DESIGN, 'Back to [the summary](#1-summary).', 'See [the tasks][tasks], [Tasks][] and [the plan][plan].\n\n[tasks]: skyoauth-tasks.md#task-dag');
