@@ -20,7 +20,7 @@
 #                           `failure` or `cancelled`), required with
 #                           --rust-coverage. Anything but `success` means the
 #                           coverage gate did not pass: the badge is red
-#                           whatever the percentage (84.96 % shows as 85.0 %)
+#                           whatever the percentage
 #   --rust-coverage-failed  publish a red `failing` rust coverage badge
 #   --rust-junit            `cargo nextest` JUnit report (passed or failed tests)
 #   --rust-tests-failed     mark the rust tests job as failed (uses the JUnit
@@ -33,6 +33,11 @@
 #   --ts-results            Vitest `--reporter=json` test report
 #   --ts-tests-failed       mark the typescript tests job as failed (uses the
 #                           JSON failure count when present, else red `failing`)
+#
+# Coverage percentages are shown truncated to one decimal, never rounded,
+# so a figure below a threshold never reads as reaching it: 84.96 shows as
+# 84.9 %, 85 as 85.0 %, 100 as 100.0 %. A percentage outside 0..100 is an
+# error.
 #
 # Only the badges whose inputs are passed are regenerated; any other files
 # already on the badges branch under `<branch>/` are preserved, and each
@@ -196,6 +201,51 @@ coverage_color() {
     fi
 }
 
+# `percent_1dp NUMBER`: NUMBER, a JSON number as jq prints it, truncated to
+# one decimal. jq (1.7 or later) prints a number it read unchanged, so this
+# works on the report's own decimal literal, and does so by string
+# arithmetic only: no float conversion can round 84.99999 or 84.9 up or
+# down. Exponent forms (`1E+2`, `5E-324`) are accepted. Fails unless
+# 0 <= NUMBER <= 100.
+percent_1dp() {
+    PERCENT=$1 awk 'BEGIN {
+        s = ENVIRON["PERCENT"]
+        if (s !~ /^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) exit 1
+        m = s
+        e = 0
+        if (match(s, /[eE]/)) {
+            m = substr(s, 1, RSTART - 1)
+            x = substr(s, RSTART + 1)
+        }
+        if (m ~ /^[0.]+$/) { print "0.0"; exit 0 }
+        if (x != "") {
+            negative = (x ~ /^-/)
+            sub(/^[-+]/, "", x)
+            sub(/^0+/, "", x)
+            # An exponent this long is far below 0.1 or far above 100.
+            if (length(x) > 9) { if (negative) { print "0.0"; exit 0 } exit 1 }
+            e = (x == "" ? 0 : x + 0)
+            if (negative) e = -e
+        }
+        # The digits of the mantissa, and where the decimal point falls
+        # among them once the exponent is applied.
+        dot = index(m, ".")
+        if (dot) { d = substr(m, 1, dot - 1) substr(m, dot + 1); p = dot - 1 + e }
+        else { d = m; p = length(m) + e }
+        while (substr(d, 1, 1) == "0") { d = substr(d, 2); p-- }
+        # Now d starts with a non-zero digit, so the value has p integer
+        # digits; more than 3 is above 100.
+        if (p > 3) exit 1
+        if (p < 0) { print "0.0"; exit 0 }
+        if (p == 0) { print "0." substr(d, 1, 1); exit 0 }
+        while (length(d) <= p) d = d "0"
+        whole = substr(d, 1, p)
+        rest = substr(d, p + 1)
+        if (whole + 0 > 100 || (whole + 0 == 100 && rest ~ /[1-9]/)) exit 1
+        print whole "." substr(rest, 1, 1)
+    }'
+}
+
 # `gate RESULT`: the coverage gate outcome recorded in summary.json.
 gate() {
     if [ "$1" = success ]; then printf '%s' passed; else printf '%s' failed; fi
@@ -216,7 +266,11 @@ if [ -n "$rust_coverage" ]; then
         echo "publish-badges: cannot read line coverage percentage from $rust_coverage" >&2
         exit 1
     fi
-    rust_percent=$(jq '.data[0].totals.lines.percent' "$rust_coverage" | awk '{printf "%.1f", $1}')
+    rust_raw=$(jq -r '.data[0].totals.lines.percent' "$rust_coverage")
+    if ! rust_percent=$(percent_1dp "$rust_raw"); then
+        echo "publish-badges: line coverage percentage '$rust_raw' in $rust_coverage is not a number from 0 to 100" >&2
+        exit 1
+    fi
     rust_cov_value="${rust_percent}%"
     rust_cov_color=$(coverage_color "$rust_percent" "$rust_coverage_result")
     rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg g "$(gate "$rust_coverage_result")" --arg c "$sha" \
@@ -294,7 +348,11 @@ if [ -n "$ts_coverage" ]; then
         echo "publish-badges: cannot read line coverage percentage from $ts_coverage" >&2
         exit 1
     fi
-    ts_percent=$(jq '.total.lines.pct' "$ts_coverage" | awk '{printf "%.1f", $1}')
+    ts_raw=$(jq -r '.total.lines.pct' "$ts_coverage")
+    if ! ts_percent=$(percent_1dp "$ts_raw"); then
+        echo "publish-badges: line coverage percentage '$ts_raw' in $ts_coverage is not a number from 0 to 100" >&2
+        exit 1
+    fi
     ts_cov_value="${ts_percent}%"
     ts_cov_color=$(coverage_color "$ts_percent" "$ts_coverage_result")
     ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg g "$(gate "$ts_coverage_result")" --arg c "$sha" \

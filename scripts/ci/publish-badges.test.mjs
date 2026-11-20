@@ -119,7 +119,7 @@ function setup({ branches = [], clones = 1 } = {}) {
   }
   const file = (name, value) => {
     const path = join(root, name);
-    writeFileSync(path, JSON.stringify(value));
+    writeFileSync(path, typeof value === 'string' ? value : JSON.stringify(value));
     return path;
   };
   return { root, remote, sha, work, file };
@@ -127,6 +127,10 @@ function setup({ branches = [], clones = 1 } = {}) {
 
 const rustReport = (percent) => ({ data: [{ totals: { lines: { percent } } }] });
 const tsSummary = (lines) => ({ total: { lines: { pct: lines }, branches: { pct: 70 }, functions: { pct: 80 }, statements: { pct: lines } } });
+// The same reports with the percentage written as a literal JSON number,
+// exactly as given (exponent forms, more digits than a double keeps).
+const rustReportText = (literal) => `{"data":[{"totals":{"lines":{"percent":${literal}}}}]}`;
+const tsSummaryText = (literal) => `{"total":{"lines":{"pct":${literal}},"branches":{"pct":70},"functions":{"pct":80},"statements":{"pct":${literal}}}}`;
 
 function publish(cwd, args, env = {}) {
   return spawnSync('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env }, encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
@@ -162,7 +166,7 @@ function badge(remote, path) {
 const summary = (remote, branch) => JSON.parse(git(remote, 'show', `badges:${branch}/summary.json`));
 
 describe('coverage badge colour follows the gate', () => {
-  test('a failed gate is red even when the rounded figure reaches the threshold', () => {
+  test('a failed gate is red whatever the figure', () => {
     const { remote, sha, work, file } = setup();
     const r = publish(work[0], [
       'main', sha,
@@ -170,7 +174,7 @@ describe('coverage badge colour follows the gate', () => {
       '--ts-coverage', file('ts.json', tsSummary(100)), '--ts-coverage-result', 'failure',
     ]);
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(badge(remote, 'main/rust-coverage.svg'), { color: RED, title: 'rust coverage: 85.0%' });
+    assert.deepEqual(badge(remote, 'main/rust-coverage.svg'), { color: RED, title: 'rust coverage: 84.9%' });
     assert.deepEqual(badge(remote, 'main/typescript-coverage.svg'), { color: RED, title: 'typescript coverage: 100.0%' });
     const s = summary(remote, 'main');
     assert.equal(s.rust_coverage.gate, 'failed');
@@ -209,6 +213,57 @@ describe('coverage badge colour follows the gate', () => {
       const r = publish(work[0], ['main', sha, ...args.map((a) => (a === 'R' ? path : a))]);
       assert.equal(r.status, 2);
       assert.match(r.stderr, message);
+    });
+  }
+});
+
+describe('coverage percentage is truncated to one decimal, never rounded', () => {
+  // [literal in the report, badge text]
+  const CASES = [
+    ['84.96', '84.9'],
+    ['84.99999', '84.9'],
+    ['84.99999999999999', '84.9'], // the largest double below 85 prints like this
+    ['85', '85.0'],
+    ['85.04', '85.0'],
+    ['84.9', '84.9'], // a double slightly below 84.9; the literal is what counts
+    ['99.99', '99.9'],
+    ['100', '100.0'],
+    ['0', '0.0'],
+    ['0.05', '0.0'],
+    ['97.80487804878049', '97.8'],
+    ['8.496e1', '84.9'],
+    ['1E+2', '100.0'],
+    ['5e-324', '0.0'],
+  ];
+  for (const [literal, shown] of CASES) {
+    test(`${literal} shows as ${shown}%`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], [
+        'main', sha,
+        '--rust-coverage', file('rust.json', rustReportText(literal)), '--rust-coverage-result', 'success',
+        '--ts-coverage', file('ts.json', tsSummaryText(literal)), '--ts-coverage-result', 'success',
+      ]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(badge(remote, 'main/rust-coverage.svg').title, `rust coverage: ${shown}%`);
+      assert.equal(badge(remote, 'main/typescript-coverage.svg').title, `typescript coverage: ${shown}%`);
+      assert.equal(summary(remote, 'main').rust_coverage.lines_percent, Number(shown));
+    });
+  }
+
+  test('the colour band follows the truncated figure', () => {
+    const { remote, sha, work, file } = setup();
+    const r = publish(work[0], ['main', sha, '--rust-coverage', file('rust.json', rustReportText('89.96')), '--rust-coverage-result', 'success']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(badge(remote, 'main/rust-coverage.svg'), { color: GREEN, title: 'rust coverage: 89.9%' });
+  });
+
+  for (const literal of ['100.5', '100.01', '1E+3', '1.7976931348623157e308', '-1']) {
+    test(`rejects ${literal}, which is not a percentage`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], ['main', sha, '--rust-coverage', file('rust.json', rustReportText(literal)), '--rust-coverage-result', 'success']);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /is not a number from 0 to 100/);
+      assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
     });
   }
 });
