@@ -154,14 +154,21 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   warning annotations that do not fail the job (locally the latter is an
   info note); ADRs never referenced by ID are one info summary line, listed
   with `--verbose`.
-- Conformance registry also runs on every change, and `CI passed` requires
-  it to pass: `node scripts/ci/check-conformance-registry.mjs` checks
+- Conformance registry also runs on every change, and `CI passed` requires it
+  to pass: `node scripts/ci/check-conformance-registry.mjs` checks
   `tests/conformance/` (scenario and contract IDs and hashes against the
   specs, stages, legs, sub-IDs, fixtures and waivers), and confirms that the
   layout §2 scenario table equals the one rendered from
   `tests/conformance/scenarios.toml`, which is its source. The job also runs
-  `node scripts/ci/gen-conformance-registry.mjs --check` and both
-  self-tests. Its one dependency, `smol-toml`, is pinned in
+  `node scripts/ci/gen-conformance-registry.mjs --check`, both
+  self-tests, the self-tests of the badge scripts (`node --test
+  scripts/ci/publish-badges.test.mjs
+  scripts/ci/verify-badges-render.test.mjs`, without network access), and the
+  self-test of the result reporter
+  `scripts/ci/report-conformance.mjs`, which joins the registry with the
+  JUnit artifacts of one commit into per-stage and per-milestone passed,
+  failed, not run and planned results (no job runs the reporter itself
+  yet). Its one dependency, `smol-toml`, is pinned in
   `scripts/ci/package.json` and installed with `npm ci --ignore-scripts`.
   See `tests/conformance/README.md`.
 
@@ -169,18 +176,26 @@ Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. On pushes to `main`, CI generates separate Rust and TypeScript tests and
 line-coverage badges as SVG files on the `badges` branch
 (`scripts/ci/publish-badges.sh`, rendered by `scripts/ci/badge.sh`), so they
-need no external service and render in a private repository too. Rust test
+need no external service and render in a private repository too (only
+`skyoauth/skyoauth` publishes and checks them; a fork does neither). Rust test
 counts come from `service-nextest` (all workspace tests, including PostgreSQL
 tests) and Rust line coverage comes from `rust-coverage` (which excludes the
 PostgreSQL-backed tests); TypeScript test counts and line coverage come from
 `typescript-coverage`. When a suite fails on `main`, CI publishes red failure
-badges (`N failed` or `failing`) rather than leaving stale passing figures. The
-publishing job checks that GitHub serves them as images from the rendered
-README (`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`,
-which publishes nothing, runs the same check. To protect `main`, require the
-`CI passed` check: it passes when `Docs consistency` and `Conformance registry`
-passed and every other job passed or was skipped. Dependabot keeps actions,
-crates and npm packages up to date.
+badges (`N failed` or `failing`) rather than leaving stale passing figures,
+and a coverage badge is red whenever its gate failed, whatever percentage it
+shows. Coverage percentages are truncated to one decimal, never rounded up
+(84.96 % shows as 84.9 %). The publishing job checks that GitHub serves them
+as images from the rendered README (`scripts/ci/verify-badges-render.sh`);
+every pull request, and a docs-only push to `main`, which publishes nothing,
+run the same check against the badges already published for `main`. On a pull
+request, a fetch that still fails after curl's retries (a transport error, 429
+or 5xx) and a badge not yet published for `main` (404, as for a badge the pull
+request adds or renames) are warnings, not failures; what the README embeds is
+always checked. To protect `main`, require the `CI passed` check: it passes
+when `Docs consistency` and `Conformance registry` passed and every other job
+passed or was skipped. Dependabot keeps actions, crates and npm packages up to
+date.
 
 ## License
 

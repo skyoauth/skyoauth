@@ -14,6 +14,7 @@ import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  annexRange,
   checkNamedSubcases,
   DESIGN,
   generate,
@@ -34,7 +35,7 @@ import {
   SUBCASES,
   TASKS,
 } from './gen-conformance-registry.mjs';
-import { normaliseRegistry } from './registry-fixtures.mjs';
+import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'gen-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -541,6 +542,34 @@ describe('subcases are consistent with their §2 sentences', () => {
     failsBothModes(root, /A33\.90: table_text names T30\.6, but the first owner is T31\.2/);
   });
 
+  test("a conditional sub-ID is first owned by its feature's task, even when table_text agrees", () => {
+    for (const [id, feature, task, other] of [
+      ['A27.90', 'device-flow', 'T40.6', 'T40.5'],
+      ['A33.90', 'back-channel-logout', 'T30.6', 'T31.2'],
+      ['A58.90', 'forwardauth', 'T32.9', 'T32.3'],
+    ]) {
+      const root = fixture((rel, t) => {
+        if (rel !== SUBCASES) return t;
+        const b = entryBlock(t, 'subcase', id);
+        return replaceOnce(t, b, replaceOnce(replaceOnce(b, `owners = ["${task}"]`, `owners = ["${other}"]`), `, ${task}): `, `, ${other}): `));
+      });
+      const esc = (s) => s.replaceAll('.', '\\.');
+      failsBothModes(root, new RegExp(`subcases\\.toml:\\d+: ${esc(id)}: conditional_on ${feature} is the feature of task ${esc(task)}, but the first owner is ${esc(other)}$`, 'm'));
+    }
+  });
+
+  test('two owners: the rule is about the first owner, so the feature task second does not make a sub-ID conditional', () => {
+    // table_text still names T30.6, the feature's task: only the order is wrong.
+    const second = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'owners = ["T30.6"]', 'owners = ["T31.2", "T30.6"]') : t));
+    failsBothModes(second, /^error: tests\/conformance\/subcases\.toml:\d+: A33\.90: conditional_on back-channel-logout is the feature of task T30\.6, but the first owner is T31\.2$/m);
+    // The feature task first and another owner second is accepted.
+    const first = fixture((rel, t) => (rel === SUBCASES ? replaceOnce(t, 'owners = ["T30.6"]', 'owners = ["T30.6", "T31.2"]') : t));
+    const r = cli('--root', first, '--check');
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(cli('--root', first).status, 0);
+    assert.equal(read(first, SUBCASES), replaceOnce(registry(SUBCASES), 'owners = ["T30.6"]', 'owners = ["T30.6", "T31.2"]'));
+  });
+
   test('a new conditional sub-ID is rendered into its parent row', () => {
     const root = fixture((rel, t) => {
       if (rel !== SUBCASES) return t;
@@ -616,6 +645,17 @@ describe('required and conditional sub-ID numbering', () => {
     );
     failsBothModes(root, /A58\.02: table_text is only for a conditional sub-ID/);
   });
+
+  test('annexRange: only a scenario ID declares a range, and no ID is built into a regex', () => {
+    assert.deepEqual(annexRange('A58', 'x A58.01–A58.89 y'), { from: 1, to: 89, text: 'A58.01–A58.89' });
+    assert.equal(annexRange('A58', undefined), null);
+    assert.equal(annexRange('A58', 1), null);
+    assert.equal(annexRange(58, 'A58.01–A58.89'), null);
+    // Regex metacharacters: "(" used to throw a SyntaxError, "." to match any digit.
+    for (const id of ['A5(', 'A5(.05', 'A58.0(', 'A.8', 'A5.', '.*', 'A58.90', 'A58 ', 'xA58', 'A588', '(A58']) {
+      assert.equal(annexRange(id, 'A58.01–A58.89 A5(.01–A5(.89 A.8.01–A.8.89'), null, id);
+    }
+  });
 });
 
 // Replaces `from` with `to` inside the first stage of entry `id`.
@@ -634,6 +674,14 @@ function editStageAt(text, id, m, from, to) {
   const next = block.indexOf('[[scenario.stage]]', at + 1);
   const end = next < 0 ? block.length : next;
   return replaceOnce(text, block, block.slice(0, at) + replaceOnce(block.slice(at, end), from, to) + block.slice(end));
+}
+// Repeats the first stage of scenario `id` right after it.
+function dupFirstStage(text, id) {
+  const block = entryBlock(text, 'scenario', id);
+  const at = block.indexOf('[[scenario.stage]]');
+  const next = block.indexOf('[[scenario.stage]]', at + 1);
+  const stage = block.slice(at, next < 0 ? block.length : next);
+  return replaceOnce(text, block, block.slice(0, at) + stage + block.slice(at));
 }
 const stageLine = (text, table, id) => lineOf(text, `[[${table}]]\nid = "${id}"`) + entryBlock(text, table, id).slice(0, entryBlock(text, table, id).indexOf(`[[${table}.stage]]`)).split('\n').length - 1;
 const entryLine = (text, table, id) => lineOf(text, `[[${table}]]\nid = "${id}"`);
@@ -747,6 +795,25 @@ describe('hand-authored input is validated', () => {
 
   test('valid \\u and \\U escapes still parse', () => {
     assert.deepEqual(parseToml('a = "\\u00e9\\U0001F600"'), { a: 'é😀' });
+  });
+
+  // Each level of nesting is one recursive call of the reader: 10000 levels
+  // used to overflow the stack (RangeError, exit 2).
+  test('arrays and inline tables nested deeper than 64 levels are a clean error, not a stack overflow', () => {
+    const deep = (n, k = 0) => `x = ${'['.repeat(n - k)}${'{ a = '.repeat(k)}1${' }'.repeat(k)}${']'.repeat(n - k)}`;
+    const tooDeep = (ex) => ex instanceof SpecError && ex.message === 'x:2: arrays and inline tables nest deeper than 64 levels';
+    // n levels: n - k arrays around k inline tables around the integer 1.
+    for (const k of [0, 1, 32, 64]) {
+      let v = parseToml(deep(64, k)).x;
+      for (let level = 0; level < 64; level++) v = Array.isArray(v) ? v[0] : v.a;
+      assert.equal(v, 1, `64 levels, ${k} inline tables`);
+      for (const n of [65, 10000]) assert.throws(() => parseToml(`# c\n${deep(n, k)}\n`, 'x'), tooDeep, `${n} levels, ${k} inline tables`);
+    }
+    // Closed levels do not count: 1000 arrays of depth 64 side by side parse.
+    assert.equal(parseToml(`x = [${Array(1000).fill(`${'['.repeat(63)}${']'.repeat(63)}`).join(', ')}]`).x.length, 1000);
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'gates_passed = []', `gates_passed = []\nx = ${'['.repeat(10000)}${']'.repeat(10000)}`) : t));
+    failsBothModes(root, new RegExp(`^error: tests/conformance/scenarios\\.toml:${lineOf(read(root, SCENARIOS), 'x = [[')}: arrays and inline tables nest deeper than 64 levels$`, 'm'));
+    assert.doesNotMatch(cli('--root', root).stderr, /internal error|RangeError/);
   });
 });
 
@@ -1053,6 +1120,60 @@ describe('TOML', () => {
       });
       assert.equal(r.status, 0, r.stderr);
       assert.deepEqual(JSON.parse(r.stdout), parseToml(read(REPO, rel)));
+    }
+  });
+});
+
+describe('a value with an own toString key is a diagnostic, not a crash', () => {
+  // The subset reader returns ordinary objects, and a template literal calls an
+  // own toString key of one; a value that is not a function used to throw
+  // "Cannot convert object to primitive value" (exit 2) wherever the generator
+  // put an unvalidated value into a message. Each key of a scenario with two
+  // stages, a contract and a conditional subcase gets each value in turn.
+  const VALUES = ['{ toString = 1 }', '{ toString = "x", valueOf = 1 }', '[{ toString = 1 }]'];
+  const swaps = (value) => [
+    ['gates_passed', SCENARIOS, replaceOnce(registry(SCENARIOS), 'gates_passed = []', `gates_passed = ${value}`)],
+    ...valueSwaps(registry(SCENARIOS), 'scenario', 'A24', value, { entry: ['note'], stage: ['implemented_sha256'] }).map(([l, t]) => [l, SCENARIOS, t]),
+    ...valueSwaps(registry(SCENARIOS), 'scenario', 'C07', value).map(([l, t]) => [l, SCENARIOS, t]),
+    ...valueSwaps(registry(SUBCASES), 'subcase', 'A33.90', value, { stage: ['implemented_sha256'] }).map(([l, t]) => [l, SUBCASES, t]),
+  ];
+  // run() in-process: an internal error throws out of it.
+  const runIn = (root, ...args) => {
+    const out = [];
+    const code = run(['--root', root, ...args], (m) => out.push(m), (m) => out.push(m));
+    return { code, out: out.join('\n') };
+  };
+  for (const value of VALUES) {
+    test(`every key of A24, C07 and A33.90 as ${value}`, () => {
+      const cases = swaps(value);
+      assert.ok(cases.length >= 40, String(cases.length));
+      for (const [label, rel, text] of cases) {
+        const root = fixture((r, t) => (r === rel ? text : t));
+        const c = runIn(root, '--check');
+        assert.equal(c.code, 1, `${label}: --check\n${c.out}`);
+        assert.doesNotMatch(c.out, /\[object /, label);
+        const w = runIn(root);
+        assert.ok(w.code === 0 || w.code === 1, `${label}: write mode exited ${w.code}\n${w.out}`);
+      }
+    });
+  }
+
+  test('the CLI exits 1, and names the value as JSON', () => {
+    for (const [edit, re] of [
+      [(rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'milestone = "M1a"', 'milestone = { toString = 1 }') : t), /A24 \{"toString":1\}: milestone must be one of /],
+      [(rel, t) => (rel === SUBCASES ? replaceOnce(t, 'id = "A33.90"', 'id = { toString = 1 }') : t), /subcases\.toml:\d+: \{"toString":1\}: id must look like A58\.07$/m],
+      [(rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'id = "C07"', 'id = { toString = 1 }') : t), /scenarios\.toml: C07 is missing\n.*scenarios\.toml: \{"toString":1\} is not in the specs$/m],
+      // Two keys at once, which the fuzz above does not reach.
+      [(rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'id = "A24"\nkind = "scenario"', 'id = { toString = 1 }\nkind = "x"') : t), /scenarios\.toml:\d+: \{"toString":1\}: kind must be scenario or contract$/m],
+      [(rel, t) => (rel === SCENARIOS ? replaceOnce(t, `matrix_sha256 = "${A24_HASH}"`, 'matrix_sha256 = { toString = 1 }') : t), /A24: matrix_sha256 is \{"toString":1\}, but its spec line hashes to /],
+      // duplicateErrors() runs before any ID is checked: an unchecked ID and a
+      // repeated stage milestone.
+      [(rel, t) => (rel === SCENARIOS ? dupFirstStage(t, 'A24').replace('id = "A24"\n', 'id = { toString = 1 }\n') : t), /scenarios\.toml:\d+: duplicate stage \{"toString":1\} M1a \(first at line \d+\)$/m],
+    ]) {
+      const r = cli('--root', fixture(edit), '--check');
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, re);
+      assert.doesNotMatch(r.stderr, /internal error/);
     }
   });
 });

@@ -44,8 +44,9 @@
 //     fails and writes nothing until a reviewer resets the stage to planned
 //     or re-stamps it. Stages are never re-keyed, so a moved stage keeps its
 //     tests;
-//   - conditional sub-IDs are numbered .90-.99 and are the ones the rendered
-//     §2 table names; required sub-IDs lie in the annex range that the
+//   - conditional sub-IDs are numbered .90-.99, are the ones the rendered
+//     §2 table names, and are first owned by their feature's task
+//     (FEATURE_TASK); required sub-IDs lie in the annex range that the
 //     parent's note declares (e.g. "A58.01–A58.89");
 //   - neither file repeats an ID or a (id, milestone) stage.
 //
@@ -271,9 +272,11 @@ const COND_RE = /^Conditional sub-ID(?: (A\d\d\.\d\d))? \(([^,()]+), (T\d\d\.\d+
 export const isConditionalNumber = (id) => Number(id.slice(4)) >= 90;
 
 // The annex range for required sub-IDs that a scenario's note declares, such
-// as "A58.01–A58.89" (en dash): { from, to, text }, or null.
+// as "A58.01–A58.89" (en dash): { from, to, text }, or null. Only a scenario
+// ID such as A58 has one; any other ID (a sub-ID, or a malformed one that may
+// hold regex metacharacters) has none, and is never built into the regex.
 export function annexRange(id, note) {
-  if (typeof id !== 'string' || (note !== undefined && typeof note !== 'string')) return null;
+  if (typeof id !== 'string' || !/^A\d\d$/.test(id) || (note !== undefined && typeof note !== 'string')) return null;
   const r = new RegExp(`\\b${id}\\.(\\d\\d)–${id}\\.(\\d\\d)\\b`).exec(note ?? '');
   return r ? { from: Number(r[1]), to: Number(r[2]), text: r[0] } : null;
 }
@@ -414,13 +417,22 @@ export function validDate(y, m, d) {
   return d <= (m === 2 && isLeap(y) ? 29 : DAYS[m - 1]);
 }
 
+// Arrays and inline tables nest at most this deep. value() recurses once per
+// level, so a deeper value would overflow the stack (exit 2) instead of being
+// an error; the registry files nest two levels at most.
+export const MAX_NESTING = 64;
+
 export function parseToml(text, file = 'toml') {
   let i = 0;
   let line = 1;
+  let depth = 0;
   const root = {};
   let cur = root;
   const err = (msg) => {
     throw new SpecError(`${file}:${line}: ${msg}`);
+  };
+  const nest = () => {
+    if (++depth > MAX_NESTING) err(`arrays and inline tables nest deeper than ${MAX_NESTING} levels`);
   };
   // The arrays that [[headers]] create; every other value is final.
   const headerArrays = new WeakSet();
@@ -474,12 +486,14 @@ export function parseToml(text, file = 'toml') {
       }
     }
     if (c === '[') {
+      nest();
       i++;
       const arr = [];
       for (;;) {
         ws(true);
         if (text[i] === ']') {
           i++;
+          depth--;
           return arr;
         }
         arr.push(value());
@@ -489,11 +503,13 @@ export function parseToml(text, file = 'toml') {
       }
     }
     if (c === '{') {
+      nest();
       i++;
       const obj = {};
       ws(false);
       if (text[i] === '}') {
         i++;
+        depth--;
         return obj;
       }
       for (;;) {
@@ -508,6 +524,7 @@ export function parseToml(text, file = 'toml') {
         if (text[i] === ',') i++;
         else if (text[i] === '}') {
           i++;
+          depth--;
           return obj;
         } else err('expected "," or "}"');
       }
@@ -664,11 +681,11 @@ function duplicateErrors(doc, file, table) {
   const errors = [];
   const ids = new Map();
   for (const e of doc[table] ?? []) {
-    if (ids.has(e.id)) errors.push(`${file}:${e[LINE]}: duplicate ${table} ${e.id} (first at line ${ids.get(e.id)})`);
+    if (ids.has(e.id)) errors.push(`${file}:${e[LINE]}: duplicate ${table} ${show(e.id)} (first at line ${ids.get(e.id)})`);
     else ids.set(e.id, e[LINE]);
     const ms = new Map();
     for (const s of Array.isArray(e.stage) ? e.stage : []) {
-      if (ms.has(s.milestone)) errors.push(`${file}:${s[LINE]}: duplicate stage ${e.id} ${s.milestone} (first at line ${ms.get(s.milestone)})`);
+      if (ms.has(s.milestone)) errors.push(`${file}:${s[LINE]}: duplicate stage ${show(e.id)} ${show(s.milestone)} (first at line ${ms.get(s.milestone)})`);
       else ms.set(s.milestone, s[LINE]);
     }
   }
@@ -859,9 +876,9 @@ export function generate(root) {
     const registered = new Map();
     for (const e of old.scenario ?? []) {
       if (e.kind === 'scenario') registered.set(e.id, e);
-      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e[LINE]}: ${e.id}: kind must be scenario or contract`);
+      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e[LINE]}: ${show(e.id)}: kind must be scenario or contract`);
     }
-    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e[LINE]}: scenario ${id} is not a row of ${TASKS} §8`);
+    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e[LINE]}: scenario ${show(id)} is not a row of ${TASKS} §8`);
     const scenarios = [];
     for (const r of a.rows) {
       const s = registered.get(r.id);
@@ -872,7 +889,7 @@ export function generate(root) {
       const where = `${SCENARIOS}:${s[LINE]}: ${r.id}`;
       if (!validScenario(s, where, codes, tasksById, errors)) continue;
       const e = { id: r.id, layers: s.layers, envs: s.envs, harness: s.harness, owners: s.owners, note: s.note, positive: s.positive, negative: s.negative, matrix_sha256: sha256(r.line) };
-      const at = (st) => `${SCENARIOS}:${st[LINE]}: ${r.id} ${st.milestone}`;
+      const at = (st) => `${SCENARIOS}:${st[LINE]}: ${r.id} ${show(st.milestone)}`;
       const before = errors.length;
       e.stages = s.stage.map((st) => {
         const full = { ...st, legs: st.legs ?? defaultLegs(e, st, catalogue), status: st.status ?? 'planned', tests: st.tests ?? [] };
@@ -893,7 +910,7 @@ export function generate(root) {
     const byId = new Map([...registered].filter(([id]) => aIds.includes(id)));
     const subBlocks = [];
     for (const s of subs) {
-      const where = `${SUBCASES}:${s[LINE]}: ${s.id}`;
+      const where = `${SUBCASES}:${s[LINE]}: ${show(s.id)}`;
       const before = errors.length;
       if (typeof s.id !== 'string' || !/^A\d\d\.\d\d$/.test(s.id)) errors.push(`${where}: id must look like A58.07`);
       else if (s.parent !== s.id.slice(0, 3) || !byId.has(s.parent)) errors.push(`${where}: parent must be the registered scenario ${s.id.slice(0, 3)}`);
@@ -905,7 +922,7 @@ export function generate(root) {
       if (errors.length > before) continue;
       for (const x of s.layers) if (!Object.values(LAYERS).includes(x)) errors.push(`${where}: unknown layer "${x}"`);
       for (const x of s.envs) if (!Object.values(codes).includes(x)) errors.push(`${where}: unknown env "${x}"`);
-      const stageAt = (st) => `${SUBCASES}:${st[LINE]}: ${s.id} ${st.milestone}`;
+      const stageAt = (st) => `${SUBCASES}:${st[LINE]}: ${s.id} ${show(st.milestone)}`;
       for (const st of s.stage) {
         stageErrors(st, stageAt(st), errors);
         if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${stageAt(st)}: implemented_sha256 must be a string`);
@@ -925,6 +942,9 @@ export function generate(root) {
       } else if (!Object.values(FEATURES).includes(s.conditional_on)) {
         errors.push(`${where}: conditional_on must be one of ${Object.values(FEATURES).join(', ')}`);
       } else {
+        // Only the feature's own task can declare a sub-ID conditional (and so
+        // keep it out of the gates).
+        if (s.owners[0] !== FEATURE_TASK[s.conditional_on]) errors.push(`${where}: conditional_on ${s.conditional_on} is the feature of task ${FEATURE_TASK[s.conditional_on]}, but the first owner is ${s.owners[0]}`);
         const t = typeof s.table_text === 'string' ? parseConditional(s.table_text) : null;
         if (!t) errors.push(`${where}: table_text must be a "Conditional sub-ID ${s.id} (<feature>, Txx.y): ..." sentence`);
         else {
@@ -1005,14 +1025,14 @@ export function describeDiff(path, committed, regenerated) {
   for (const table of ['scenario', 'subcase']) {
     const o = new Map((oldDoc[table] ?? []).map((e) => [e.id, e]));
     const n = new Map((newDoc[table] ?? []).map((e) => [e.id, e]));
-    for (const id of n.keys()) if (!o.has(id)) out.push(`${path}: ${id} is missing`);
-    for (const id of o.keys()) if (!n.has(id)) out.push(`${path}: ${id} is not in the specs`);
+    for (const id of n.keys()) if (!o.has(id)) out.push(`${path}: ${show(id)} is missing`);
+    for (const id of o.keys()) if (!n.has(id)) out.push(`${path}: ${show(id)} is not in the specs`);
     for (const [id, ne] of n) {
       const oe = o.get(id);
       if (!oe) continue;
       for (const k of new Set([...Object.keys(oe), ...Object.keys(ne)])) {
         if (same(oe[k], ne[k])) continue;
-        if (k === 'matrix_sha256') out.push(`${path}: ${id}: matrix_sha256 is ${oe[k]}, but its spec line hashes to ${ne[k]} (spec row changed; review the entry)`);
+        if (k === 'matrix_sha256') out.push(`${path}: ${id}: matrix_sha256 is ${show(oe[k])}, but its spec line hashes to ${ne[k]} (spec row changed; review the entry)`);
         else out.push(`${path}: ${id}: ${k} differs from the specs`);
       }
     }
