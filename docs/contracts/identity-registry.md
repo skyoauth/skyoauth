@@ -179,14 +179,15 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   trust-source, keyset, binding or grant write that the server detects as
   widening, and adding or re-enabling an `EgressAllowlistEntry` (IR-152),
   MUST NOT take effect until an `approve` operation (IR-054) by a distinct
-  `security_admin` applies it. When it is off, the widening flag, the expected
+  `security_admin` applies it, or one actor when `single_actor_mode` is on.
+  When it is off, the widening flag, the expected
   revision and the atomic audit record suffice. Turning the setting on or off
   is the only online write to `InstanceSecurityPolicy`: an audited,
   revision-checked write by instance `security_admin` that MUST have a
   distinct second `security_admin` approver (IR-054), or one actor when
   `single_actor_mode` is on. (design §7.2; tasks §3 "Instance security
   policy"; ADR-008 item 12; lead decision, OQ-ADR008-3; Decided (lead
-  decision, 2026-11-20); public-api API-156)
+  decision, 2026-11-20), OQ-IR-12; public-api API-156)
 - **IR-053** `single_actor_mode` (default false) is the explicit audited
   instance policy that lets one actor act where a distinct second approver is
   otherwise required: public-api API-142, API-148, API-155 and API-156,
@@ -228,7 +229,8 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   gateway-containment GW-130 and GW-131, where one person MAY hold both the
   preparer and approver roles by explicit assignment, and the second
   approvers of public-api API-148 and API-155 (`security_admin` or another
-  `provider_admin`) keep their own rules. (design §4.2; tasks §3 "Instance
+  `provider_admin`) keep their own rules (their wire form is public-api
+  OQ-API-15). (design §4.2; tasks §3 "Instance
   security policy"; ADR-008 item 12; lead decision, OQ-ADR008-3)
 - **IR-055** Audit events form one hash chain per instance.
   `AuditEvent.sequence` is assigned in the same transaction as the audited
@@ -437,17 +439,17 @@ For every protected request the backend MUST perform these steps
 
 Other allowlists in the registry, each with the rule its source states:
 
-| Allowlist                                       | Owner                                                           | Rule                                                                                                                                                                                                                                                                | Source                                                                                                              |
-| ----------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `ServiceGrant.allowed_binding_ids`              | Tenant `trust_admin`                                            | Nonempty; only these bindings of the grant actor are eligible; cross-actor references rejected                                                                                                                                                                      | design §5.7; tasks §2 "Exchange selection and scope"                                                                |
-| `ApplicationOriginVersion.allowed_return_paths` | Tenant `client_admin`                                           | Normalized same-origin relative paths only                                                                                                                                                                                                                          | design §4                                                                                                           |
-| `ApplicationOriginVersion.resource_server_ids`  | Tenant `client_admin` within assignment                         | Approved API audiences for the origin                                                                                                                                                                                                                               | design §4; tasks §3                                                                                                 |
-| `ApplicationRouteVersion.methods`               | Tenant `client_admin`                                           | Nonempty method allowlist; unknown method denies                                                                                                                                                                                                                    | design §4.1                                                                                                         |
-| `OAuthClient.redirect_rules`                    | Tenant `client_admin`                                           | IP-loopback redirect rules: each fixes scheme `http`, the IP literal (`127.0.0.1` and/or `[::1]`) and the path; the port varies per request and is bound exactly per transaction; `localhost` rejected (public-api API-031)                                         | design §5.2, §10.3; tasks T40.1; lead decision (OQ-TM-5)                                                            |
-| `TrustSource.audiences`, `algorithms`           | Tenant `trust_admin`                                            | Exact proof audiences and algorithm allowlist                                                                                                                                                                                                                       | design §5.4                                                                                                         |
-| `EgressAllowlistEntry`                          | Instance `security_admin`; tenant operators only choose from it | Exact discovery, JWKS and TokenReview destinations, unique per purpose and immutable; matched by value at write for `discovery_url` and `token_review_endpoint`, at fetch for a discovered `jwks_uri`; disable fails closed and degrades dependent sources (IR-152) | design §5.4, §7.2; tasks §3 "Egress and secret namespaces", T11.2, T11.8, T23.2; lead decision (OQ-TM-13, OQ-IR-12) |
-| `ResourceServerChecker.allowed_tenant_ids`      | Instance `security_admin`                                       | Explicit tenant set                                                                                                                                                                                                                                                 | design §6.1                                                                                                         |
-| `PrincipalBinding` match predicates             | Tenant `trust_admin`                                            | ANDed exact strings; a configured claim absent from evidence is a non-match; omitted optional predicates are unconstrained; required production predicates cannot be omitted                                                                                        | design §5.3                                                                                                         |
+| Allowlist                                       | Owner                                                           | Rule                                                                                                                                                                                                                                                                          | Source                                                                                                              |
+| ----------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `ServiceGrant.allowed_binding_ids`              | Tenant `trust_admin`                                            | Nonempty; only these bindings of the grant actor are eligible; cross-actor references rejected                                                                                                                                                                                | design §5.7; tasks §2 "Exchange selection and scope"                                                                |
+| `ApplicationOriginVersion.allowed_return_paths` | Tenant `client_admin`                                           | Normalized same-origin relative paths only                                                                                                                                                                                                                                    | design §4                                                                                                           |
+| `ApplicationOriginVersion.resource_server_ids`  | Tenant `client_admin` within assignment                         | Approved API audiences for the origin                                                                                                                                                                                                                                         | design §4; tasks §3                                                                                                 |
+| `ApplicationRouteVersion.methods`               | Tenant `client_admin`                                           | Nonempty method allowlist; unknown method denies                                                                                                                                                                                                                              | design §4.1                                                                                                         |
+| `OAuthClient.redirect_rules`                    | Tenant `client_admin`                                           | IP-loopback redirect rules: each fixes scheme `http`, the IP literal (`127.0.0.1` and/or `[::1]`) and the path; the port varies per request and is bound exactly per transaction; `localhost` rejected (public-api API-031)                                                   | design §5.2, §10.3; tasks T40.1; lead decision (OQ-TM-5)                                                            |
+| `TrustSource.audiences`, `algorithms`           | Tenant `trust_admin`                                            | Exact proof audiences and algorithm allowlist                                                                                                                                                                                                                                 | design §5.4                                                                                                         |
+| `EgressAllowlistEntry`                          | Instance `security_admin`; tenant operators only choose from it | Exact discovery, JWKS and TokenReview destinations, unique per purpose and immutable; matched by value on create or change of `discovery_url` and `token_review_endpoint`, at fetch for a discovered `jwks_uri`; disable fails closed and degrades dependent sources (IR-152) | design §5.4, §7.2; tasks §3 "Egress and secret namespaces", T11.2, T11.8, T23.2; lead decision (OQ-TM-13, OQ-IR-12) |
+| `ResourceServerChecker.allowed_tenant_ids`      | Instance `security_admin`                                       | Explicit tenant set                                                                                                                                                                                                                                                           | design §6.1                                                                                                         |
+| `PrincipalBinding` match predicates             | Tenant `trust_admin`                                            | ANDed exact strings; a configured claim absent from evidence is a non-match; omitted optional predicates are unconstrained; required production predicates cannot be omitted                                                                                                  | design §5.3                                                                                                         |
 
 - **IR-151** `TrustSource.kind` is `oidc_discovery`, `uploaded_jwks` or
   `kubernetes_token_review`; there is no fourth kind. Kubernetes local JWT
@@ -465,11 +467,15 @@ Other allowlists in the registry, each with the rule its source states:
   `token_review`; `exact_destination` is an exact URL (scheme, host, port and
   path); (`purpose`, `exact_destination`) MUST be unique, and both are
   immutable: a PATCH changes only `status`, and entries are not deleted.
-  - At write time a `TrustSource.discovery_url` MUST exactly match an enabled
-    `oidc_discovery` entry and a `token_review_endpoint` an enabled
-    `token_review` entry, or the write is rejected. Write-time matching covers
-    only these two fields; a dry run MAY offer a network check, which is not
-    part of the write path.
+  - On create, and on a write that changes `TrustSource.discovery_url` or
+    `token_review_endpoint`, the new `discovery_url` MUST exactly match an
+    enabled `oidc_discovery` entry and the new `token_review_endpoint` an
+    enabled `token_review` entry, or the write is rejected. A disable, or a
+    write that leaves both fields unchanged, MUST NOT be rejected for a
+    missing or disabled entry, so a whole-plan import that carries a degraded
+    source is not rejected for it (ADR-008 items 10 and 11). Write-time
+    matching covers only these two fields; a dry run MAY offer a network
+    check, which is not part of the write path.
   - A discovered `jwks_uri` is enforced at fetch and never followed unless it
     exactly matches an enabled `jwks` entry; otherwise no JWKS fetch is made,
     the source is degraded and an alert is raised.
@@ -624,8 +630,8 @@ follow-up. All other items are not resolved by this contract.
   source is degraded and an alert is raised. Write-time matching covers only
   `discovery_url` and `token_review_endpoint`; a dry run may offer the network
   check, outside the write path. Adding or re-enabling an entry is
-  widening-class, disabling is not, and the class applies only when
-  `widening_second_approver` is on (IR-052, IR-152; ADR-008 item 12).
+  widening-class, disabling is not, and the second-approver requirement
+  applies only when `widening_second_approver` is on (IR-052, IR-152; ADR-008 item 12).
   Original question: tasks §3 says disabling an `EgressAllowlistEntry` "marks
   dependent sources degraded", but `TrustSource.status` has no `degraded`
   value; whether degraded is a status value, a derived health signal or an
@@ -633,7 +639,7 @@ follow-up. All other items are not resolved by this contract.
   `jwks_uri` with no enabled `jwks` entry is rejected at write or degraded at
   fetch, and whether adding an entry is a widening write were not stated.
 - **OQ-IR-13 — How `single_actor_mode` changes after install.** Tasks §3 and
-  ADR-008 item 12 say `single_actor_mode` is set at install or by "the local
+  ADR-008 item 12, as merged in #22, said `single_actor_mode` is set at install or by "the local
   signed recovery transaction", but public-api API-152, design §7.2 and T13.5
   limit break-glass transactions to operator restoration and the provider
   switch or rollback. Not stated: whether setting `single_actor_mode` is a
