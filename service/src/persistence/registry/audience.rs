@@ -1,13 +1,14 @@
 //! Resource servers, audience tenant assignments, checkers with their
 //! tenant rows, and resource actions (`0003`).
 
-use sqlx::{PgExecutor, Row, types::Json};
+use sqlx::{PgExecutor, types::Json};
 
 use super::{
     AudienceTenantAssignment, AudienceTenantAssignmentChanges, NewAudienceTenantAssignment,
     NewResourceAction, NewResourceServer, NewResourceServerChecker, Page, RegistryError,
     ResourceAction, ResourceActionChanges, ResourceServer, ResourceServerChanges,
-    ResourceServerChecker, ResourceServerCheckerChanges, compare_and_set, list_page, updated,
+    ResourceServerChecker, ResourceServerCheckerChanges, compare_and_set, list_change, list_page,
+    updated,
 };
 
 macro_rules! resource_server_columns {
@@ -300,7 +301,7 @@ pub async fn add_resource_server_checker_tenant<'e>(
     .bind(tenant_id)
     .fetch_one(executor)
     .await?;
-    checker_set_change(&row, expected_revision)
+    list_change(&row, expected_revision)
 }
 
 /// Removes `tenant_id` from the tenant set of the checker at
@@ -337,23 +338,7 @@ pub async fn remove_resource_server_checker_tenant<'e>(
     .bind(tenant_id)
     .fetch_one(executor)
     .await?;
-    checker_set_change(&row, expected_revision)
-}
-
-/// The outcome of a checker tenant-set change: the new revision, or why
-/// nothing changed. `current_revision` and `listed` are read from the
-/// statement's snapshot, so when both say the change should have applied,
-/// a concurrent write moved the revision first.
-fn checker_set_change(row: &sqlx::postgres::PgRow, expected: i64) -> Result<i64, RegistryError> {
-    if let Some(revision) = row.try_get("revision")? {
-        return Ok(revision);
-    }
-    match row.try_get::<Option<i64>, _>("current_revision")? {
-        None => Err(RegistryError::NotFound),
-        Some(current) if current != expected => Err(RegistryError::StaleRevision),
-        Some(_) if !row.try_get::<bool, _>("listed")? => Err(RegistryError::NotFound),
-        Some(_) => Err(RegistryError::StaleRevision),
-    }
+    list_change(&row, expected_revision)
 }
 
 /// Creates an action rule at revision 1.

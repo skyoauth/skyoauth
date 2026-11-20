@@ -827,3 +827,32 @@ value:
 The registry does not authorize writes (API-147; T14.1, T14.2), write
 audit events (T13.x), check the rules listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
+
+### The `0004` tables
+
+The same module covers the nine `0004` tables, with the same conventions:
+create, get, list and revision-checked update for `trust_keyset`,
+`trust_source`, `principal_binding`, `service_identity` and
+`service_grant`; create, get and a per-keyset list for
+`trust_keyset_version`, which has no revision, so its `status` has no
+update yet (inferred, as for `tenant`). Every one is tenant-owned: reads,
+updates and list-set changes take the tenant and ID, so another tenant's ID
+is `NotFound`, and lists hold one tenant's rows. A trust source is stored
+flat, and the database's `trust_source_*_kind_check`s decide which fields a
+kind takes. Timestamps are written as whole microseconds, truncated toward
+the past (inferred).
+
+The list tables change one row at a time, each a compare-and-set on the
+owner's revision, as checker tenants do: a service identity's audiences, a
+grant's bindings and a grant's audiences. A service identity and a grant
+are created with their initial sets in one statement. That keeps the
+deferred binding-set check (`service_grant_binding_keeps_one`) whole: a
+grant created with a binding passes on any executor; a grant created
+without one, or the removal of its last binding, fails with `Guard` at once
+on a pool, and at the caller's commit inside a transaction unless a binding
+is added first (`RegistryError::from` maps the commit's error). Of two
+removals from one grant revision, the later is `StaleRevision` under
+`READ COMMITTED`; under `REPEATABLE READ` and `SERIALIZABLE` PostgreSQL
+fails it with `40001`, which maps to `Other` (inferred: no typed retry
+error yet). The `0004` constraint names are in `KNOWN_CONSTRAINTS`, and
+`service/tests/registry_trust.rs` tests the surface.

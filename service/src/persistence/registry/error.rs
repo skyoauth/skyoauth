@@ -17,8 +17,9 @@ const NOT_NULL_VIOLATION: &str = "23502";
 const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
-/// `principal` and the five `0003` tables) and of the three list domains,
-/// as migrations `0002` to `0004` name them, sorted. A unique, foreign key
+/// `principal`, the five `0003` tables and the nine `0004` tables) and of
+/// the three list domains, as migrations `0002` to `0004` name them, sorted
+/// byte-wise. A unique, foreign key
 /// or check violation maps to a typed variant only for a name listed here.
 /// The database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -34,6 +35,26 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_tenant_id_fkey",
     "audience_tenant_assignment_tenant_id_octet_length_check",
     "audience_tenant_assignment_tenant_id_resource_server_id_key",
+    "principal_binding_claim_match_policy_check",
+    "principal_binding_id_check",
+    "principal_binding_id_octet_length_check",
+    "principal_binding_name_check",
+    "principal_binding_name_no_space_check",
+    "principal_binding_name_octet_length_check",
+    "principal_binding_pkey",
+    "principal_binding_profile_check",
+    "principal_binding_revision_check",
+    "principal_binding_status_check",
+    "principal_binding_tenant_id_fkey",
+    "principal_binding_tenant_id_id_key",
+    "principal_binding_tenant_id_id_workload_principal_id_key",
+    "principal_binding_tenant_id_name_key",
+    "principal_binding_tenant_id_octet_length_check",
+    "principal_binding_trust_source_id_fkey",
+    "principal_binding_trust_source_id_octet_length_check",
+    "principal_binding_workload_principal_id_fkey",
+    "principal_binding_workload_principal_id_octet_length_check",
+    "principal_binding_workload_principal_kind_check",
     "principal_id_check",
     "principal_id_octet_length_check",
     "principal_kind_check",
@@ -83,6 +104,66 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "resource_server_pkey",
     "resource_server_revision_check",
     "resource_server_status_check",
+    "service_grant_activation_mode_check",
+    "service_grant_activation_state_check",
+    "service_grant_actor_principal_id_fkey",
+    "service_grant_actor_principal_id_octet_length_check",
+    "service_grant_actor_principal_kind_check",
+    "service_grant_binding_actor_principal_id_octet_length_check",
+    "service_grant_binding_binding_id_fkey",
+    "service_grant_binding_binding_id_octet_length_check",
+    "service_grant_binding_grant_id_fkey",
+    "service_grant_binding_grant_id_octet_length_check",
+    "service_grant_binding_pkey",
+    "service_grant_binding_tenant_id_octet_length_check",
+    "service_grant_default_scopes_check",
+    "service_grant_id_check",
+    "service_grant_id_octet_length_check",
+    "service_grant_impersonation_disabled_check",
+    "service_grant_max_ttl_check",
+    "service_grant_mode_check",
+    "service_grant_name_check",
+    "service_grant_name_no_space_check",
+    "service_grant_name_octet_length_check",
+    "service_grant_pkey",
+    "service_grant_resource_constraints_check",
+    "service_grant_resource_server_assignment_fkey",
+    "service_grant_resource_server_grant_id_fkey",
+    "service_grant_resource_server_grant_id_octet_length_check",
+    "service_grant_resource_server_pkey",
+    "service_grant_resource_server_server_id_octet_length_check",
+    "service_grant_resource_server_tenant_id_octet_length_check",
+    "service_grant_revision_check",
+    "service_grant_status_check",
+    "service_grant_target_mode_check",
+    "service_grant_target_service_id_fkey",
+    "service_grant_target_service_id_octet_length_check",
+    "service_grant_tenant_id_fkey",
+    "service_grant_tenant_id_id_actor_principal_id_key",
+    "service_grant_tenant_id_id_key",
+    "service_grant_tenant_id_name_key",
+    "service_grant_tenant_id_octet_length_check",
+    "service_identity_id_check",
+    "service_identity_id_fkey",
+    "service_identity_id_octet_length_check",
+    "service_identity_max_resource_constraints_check",
+    "service_identity_name_check",
+    "service_identity_name_no_space_check",
+    "service_identity_name_octet_length_check",
+    "service_identity_pkey",
+    "service_identity_principal_kind_check",
+    "service_identity_resource_server_assignment_fkey",
+    "service_identity_resource_server_pkey",
+    "service_identity_resource_server_server_id_octet_length_check",
+    "service_identity_resource_server_service_id_fkey",
+    "service_identity_resource_server_service_id_octet_length_check",
+    "service_identity_resource_server_tenant_id_octet_length_check",
+    "service_identity_revision_check",
+    "service_identity_status_check",
+    "service_identity_tenant_id_fkey",
+    "service_identity_tenant_id_id_key",
+    "service_identity_tenant_id_name_key",
+    "service_identity_tenant_id_octet_length_check",
     "skyoauth_profile_list_check",
     "skyoauth_scope_list_check",
     "skyoauth_string_list_check",
@@ -94,6 +175,83 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "tenant_secret_namespace_key",
     "tenant_secret_namespace_octet_length_check",
     "tenant_status_check",
+    "trust_keyset_id_check",
+    "trust_keyset_id_octet_length_check",
+    "trust_keyset_name_check",
+    "trust_keyset_name_no_space_check",
+    "trust_keyset_name_octet_length_check",
+    "trust_keyset_pkey",
+    "trust_keyset_revision_check",
+    "trust_keyset_status_check",
+    "trust_keyset_tenant_id_fkey",
+    "trust_keyset_tenant_id_id_key",
+    "trust_keyset_tenant_id_name_key",
+    "trust_keyset_tenant_id_octet_length_check",
+    "trust_keyset_version_fingerprint_check",
+    "trust_keyset_version_fingerprint_no_space_check",
+    "trust_keyset_version_fingerprint_octet_length_check",
+    "trust_keyset_version_id_check",
+    "trust_keyset_version_id_octet_length_check",
+    "trust_keyset_version_keyset_id_fkey",
+    "trust_keyset_version_keyset_id_octet_length_check",
+    "trust_keyset_version_pkey",
+    "trust_keyset_version_provenance_check",
+    "trust_keyset_version_public_jwks_check",
+    "trust_keyset_version_status_check",
+    "trust_keyset_version_tenant_id_fkey",
+    "trust_keyset_version_tenant_id_id_key",
+    "trust_keyset_version_tenant_id_octet_length_check",
+    "trust_keyset_version_validity_check",
+    "trust_source_algorithms_check",
+    "trust_source_algorithms_kind_check",
+    "trust_source_assertion_profile_check",
+    "trust_source_audiences_check",
+    "trust_source_ca_bundle_ref_check",
+    "trust_source_ca_bundle_ref_no_space_check",
+    "trust_source_ca_bundle_ref_octet_length_check",
+    "trust_source_ca_fingerprint_check",
+    "trust_source_ca_fingerprint_no_space_check",
+    "trust_source_ca_fingerprint_octet_length_check",
+    "trust_source_cluster_id_check",
+    "trust_source_cluster_id_key",
+    "trust_source_cluster_id_octet_length_check",
+    "trust_source_discovery_url_check",
+    "trust_source_discovery_url_kind_check",
+    "trust_source_discovery_url_no_space_check",
+    "trust_source_discovery_url_octet_length_check",
+    "trust_source_exact_issuer_check",
+    "trust_source_exact_issuer_no_space_check",
+    "trust_source_exact_issuer_octet_length_check",
+    "trust_source_id_check",
+    "trust_source_id_octet_length_check",
+    "trust_source_jwks_keyset_id_fkey",
+    "trust_source_jwks_keyset_id_kind_check",
+    "trust_source_jwks_keyset_id_octet_length_check",
+    "trust_source_kind_check",
+    "trust_source_name_check",
+    "trust_source_name_no_space_check",
+    "trust_source_name_octet_length_check",
+    "trust_source_pkey",
+    "trust_source_proof_bounds_check",
+    "trust_source_replay_mode_check",
+    "trust_source_review_timeout_ms_check",
+    "trust_source_reviewer_credential_ref_check",
+    "trust_source_reviewer_credential_ref_no_space_check",
+    "trust_source_reviewer_credential_ref_octet_length_check",
+    "trust_source_revision_check",
+    "trust_source_single_use_replay_check",
+    "trust_source_stale_revocation_acknowledged_check",
+    "trust_source_stale_revocation_kind_check",
+    "trust_source_status_check",
+    "trust_source_tenant_id_fkey",
+    "trust_source_tenant_id_id_key",
+    "trust_source_tenant_id_name_key",
+    "trust_source_tenant_id_octet_length_check",
+    "trust_source_token_review_endpoint_check",
+    "trust_source_token_review_endpoint_no_space_check",
+    "trust_source_token_review_endpoint_octet_length_check",
+    "trust_source_token_review_fields_kind_check",
+    "trust_source_token_review_profile_check",
 ];
 
 /// The error of a registry function.
@@ -396,6 +554,70 @@ mod tests {
                 other => panic!("{other:?}"),
             }
             assert_redacted(&error);
+        }
+    }
+
+    #[test]
+    fn trust_binding_and_grant_constraints_map_by_name() {
+        for name in [
+            "trust_source_cluster_id_key",
+            "service_grant_binding_pkey",
+            "principal_binding_tenant_id_name_key",
+        ] {
+            let error = map(Some("23505"), Some(name));
+            assert!(
+                matches!(error, RegistryError::AlreadyExists { constraint } if constraint == name),
+                "{error:?}"
+            );
+            assert_redacted(&error);
+        }
+        for (code, kind, name) in [
+            (
+                "23503",
+                InvariantKind::ForeignKey,
+                "service_grant_binding_binding_id_fkey",
+            ),
+            (
+                "23503",
+                InvariantKind::ForeignKey,
+                "service_identity_resource_server_assignment_fkey",
+            ),
+            (
+                "23514",
+                InvariantKind::Check,
+                "trust_source_token_review_fields_kind_check",
+            ),
+            (
+                "23514",
+                InvariantKind::Check,
+                "service_grant_resource_server_server_id_octet_length_check",
+            ),
+            (
+                "23514",
+                InvariantKind::Check,
+                "trust_keyset_version_validity_check",
+            ),
+        ] {
+            let error = map(Some(code), Some(name));
+            match &error {
+                RegistryError::Invariant {
+                    kind: actual,
+                    constraint: Some(constraint),
+                } => assert_eq!((*actual, *constraint), (kind, name)),
+                other => panic!("{other:?}"),
+            }
+            assert_redacted(&error);
+        }
+        // The deferred binding-set check at commit is a guard like any other.
+        assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+        // A serialization failure or deadlock is not typed (inferred).
+        for code in ["40001", "40P01"] {
+            let error = map(Some(code), None);
+            assert!(matches!(error, RegistryError::Other(_)), "{error:?}");
+            assert_eq!(
+                error.to_string(),
+                format!("registry database error (SQLSTATE {code})")
+            );
         }
     }
 

@@ -195,7 +195,10 @@ async fn registry_constraint_names_match_the_catalog() {
          WHERE (contype IN ('c', 'f', 'p', 'u') AND conrelid = ANY(ARRAY[
                    'tenant', 'principal', 'resource_server', 'audience_tenant_assignment',
                    'resource_server_checker', 'resource_server_checker_tenant',
-                   'resource_action']::regclass[]))
+                   'resource_action', 'trust_keyset', 'trust_keyset_version', 'trust_source',
+                   'principal_binding', 'service_identity', 'service_identity_resource_server',
+                   'service_grant', 'service_grant_binding',
+                   'service_grant_resource_server']::regclass[]))
             OR contypid = ANY(ARRAY[
                    'skyoauth_scope_list', 'skyoauth_profile_list',
                    'skyoauth_string_list']::regtype[])
