@@ -434,7 +434,7 @@ Answered by the lead in the second review round:
 
 Decided by the lead in the M1a stage-scope review (2026-11-20):
 
-1. **Per-target job mapping for `operator/tests`:** the `skyoauth-operator` package has two test targets, one per job. Target `operator` runs in `operator` (ubuntu, macos, windows), and target `recovery_offline` runs in the `recovery-offline` three-job chain (section 3 "Which job produces a test"). A test therefore belongs to one of the two jobs, and a stage that lists both jobs (A64) needs a `pos` and a `neg` test from each target. The reporter still maps the whole package to both jobs (`TEST_JOBS` in `scripts/ci/report-conformance.mjs`) until it is updated.
+1. **Per-target job mapping for `operator/tests`:** the `skyoauth-operator` package has two test targets, one per job. Target `operator` runs in `operator` (ubuntu, macos, windows), and target `recovery_offline` runs in the `recovery-offline` three-job chain (section 3 "Which job produces a test"). A test therefore belongs to one of the two jobs, and a stage that lists both jobs (A64) needs a `pos` and a `neg` test from each target. The reporter implements this mapping (`TEST_JOBS` in `scripts/ci/report-conformance.mjs`); a test of any other target of the package is produced by no job.
 
 Still open:
 
