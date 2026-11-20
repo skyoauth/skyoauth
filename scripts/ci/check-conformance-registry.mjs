@@ -634,8 +634,11 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
 // What the registry check reads, copied from the merge-base: the three specs
 // and tests/conformance (registry, waivers, fixtures, schemas).
 const GATE_PATHS = [TASKS, DESIGN, LAYOUT, 'tests/conformance'];
-// The generator writes gates_passed on one line (at most 7 short milestones).
-const GATES_LINE = /^gates_passed = \[.*\]$/;
+// The generator writes gates_passed on one line (at most 7 short milestones),
+// as `gates_passed = [` and `]` around quoted strings separated by ", ". Only
+// a line of exactly that form is the gates_passed line: any other form of it
+// (several lines, a comment after it, other spacing) is a change outside it.
+const GATES_LINE = /^gates_passed = \[(?:"[^"\\]*"(?:, "[^"\\]*")*)?\]$/;
 
 // The milestone strings of gates_passed in a scenarios.toml text, or [] when
 // the text has no such list (the registry check reports what is wrong).

@@ -1488,6 +1488,32 @@ describe('--gate-pr', () => {
     expectOnly(checkGatePr(root), 'gate-pr', /^error \[gate-pr\] the gate PR changes sub; it may change only the gates_passed line of tests\/conformance\/scenarios\.toml$/);
   });
 
+  // The gates_passed line is the one line the generator writes (GATES_LINE):
+  // `gates_passed = [` and `]` around quoted milestones separated by ", ".
+  // Any other form of it at HEAD, even one that parses to the same list, is a
+  // change outside that line.
+  test('gates_passed at HEAD not on one line as the generator writes it', () => {
+    for (const line of ['gates_passed = [\n  "M1a",\n]', 'gates_passed = ["M1a"] # gated', 'gates_passed = [ "M1a" ]', 'gates_passed=["M1a"]', 'gates_passed = ["M1a",]', 'gates_passed = ["M0","M1a"]']) {
+      const { root, mb } = mainRoot();
+      const n = read(root, SCENARIOS).split('\n').indexOf('gates_passed = []') + 1;
+      assert.ok(n > 0);
+      edit(root, SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', line));
+      commit(root, 'gate');
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.ok(res.added.includes('M1a'), `${line}: a gate PR`);
+      expectOnly(res, 'gate-pr', new RegExp(`^tests/conformance/scenarios\\.toml:${n}: error \\[gate-pr\\] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line$`));
+    }
+  });
+
+  test('a comment that quotes a gates_passed line is not the gates_passed line', () => {
+    const { root, mb } = mainRoot((t) => replaceOnce(allM1a(t), 'gates_passed = []', '# was: gates_passed = []\ngates_passed = []'));
+    gateCommit(root, '["M1a"]');
+    const res = checkGatePr(root);
+    expectOk(res);
+    assert.deepEqual(res.notes, [NOTE_AT(mb)]);
+  });
+
   test('not a gate PR: gates_passed does not grow (unchanged, or a milestone dropped): nothing else is checked', () => {
     const { root, mb } = mainRoot((t) => setGates('["M0", "M1a"]')(allM1a(t)));
     writeFileSync(join(root, 'other.txt'), 'x');
