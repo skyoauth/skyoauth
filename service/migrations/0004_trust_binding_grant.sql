@@ -5,8 +5,9 @@
 -- ADR-022). All of them are tenant-owned (design section 7.1), and every
 -- reference between them is a composite (tenant_id, ...) foreign key to a
 -- unique key that starts with (tenant_id, id), so no cross-tenant reference
--- can exist (IR-031; tasks section 3 "Ownership"). The conventions of 0002 and 0003 apply:
--- README.md in this directory has them and the rules left to the service.
+-- can exist (IR-031; tasks section 3 "Ownership"). The conventions of 0002
+-- and 0003 apply: README.md in this directory has them and the rules left
+-- to the service.
 -- "(inferred)" marks a choice the specifications do not dictate.
 --
 -- Every column is NOT NULL unless the logical model marks the field
@@ -18,8 +19,9 @@
 -- truncate guards come with the one follow-up migration for all registry
 -- tables (README.md "Follow-ups"); until then only foreign keys and the
 -- deferred service_grant_binding_keeps_one check, which rejects deleting a
--- grant's last binding, hold back a DELETE, and nothing holds back a
--- TRUNCATE.
+-- grant's last binding, hold back a DELETE, and no trigger holds back a
+-- TRUNCATE (foreign keys refuse only one that leaves out the referencing
+-- tables; TRUNCATE ... CASCADE includes them).
 --
 -- Bounds, as in 0003 (lead decision, 2026-11-20): every ID column, own ID or
 -- reference, is at most 255 bytes, and every unique free-text key at most
@@ -49,8 +51,8 @@
 -- service principal (tasks section 3 "Ownership"). The constant column and
 -- its default are the mechanism (inferred). 0002 is frozen, so 0004 bounds
 -- the key columns of principal forward-only, as 0003 bounds tenant (lead
--- decision, consistent with tenant IDs in 0003), validated against existing
--- rows: README.md has the upgrade precondition.
+-- decision, 2026-11-20, consistent with tenant IDs in 0003), validated
+-- against existing rows: README.md has the upgrade precondition.
 ALTER TABLE principal ADD CONSTRAINT principal_id_octet_length_check
     CHECK (octet_length(id) <= 255);
 ALTER TABLE principal ADD CONSTRAINT principal_tenant_id_octet_length_check
@@ -603,10 +605,11 @@ ALTER TABLE service_grant ENABLE ALWAYS TRIGGER service_grant_revision;
 -- it also locks the grant's remaining binding rows (FOR KEY SHARE, so the
 -- caller needs UPDATE on service_grant_binding too): such a row fails the
 -- later transaction with 40001, or 40P01 when both wait for each other.
--- Under READ COMMITTED that lock is skipped, as two removers would then
+-- Under READ COMMITTED, and READ UNCOMMITTED, which PostgreSQL runs as
+-- READ COMMITTED, that lock is skipped, as two removers would then
 -- deadlock (40P01) instead of the later one failing with SK001. The
--- function reads tables, so it is created as the 0002 chain
--- functions are: schema resolved by current_schema(), pinned search_path,
+-- function reads tables, so it is created as the 0002 chain functions
+-- are: schema resolved by current_schema(), pinned search_path,
 -- tables named with the schema, body passed as a quoted literal (%L).
 DO $migration$
 DECLARE
@@ -635,7 +638,8 @@ BEGIN
         -- The grant was deleted in this transaction too.
         RETURN NULL;
     END IF;
-    IF current_setting('transaction_isolation') <> 'read committed' THEN
+    IF current_setting('transaction_isolation')
+        IN ('repeatable read', 'serializable') THEN
         PERFORM FROM @schema@.service_grant_binding b WHERE b.grant_id = grant_key
             FOR KEY SHARE;
     END IF;
