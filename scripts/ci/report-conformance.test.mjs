@@ -140,6 +140,9 @@ function junit(cases) {
     skipped: '<skipped/>',
     flaky: '<flakyFailure message="first try failed" type="test failure"><system-out>x</system-out></flakyFailure>',
     rerun: '<failure message="f"/><rerunFailure message="f"/>',
+    // A pass after a retry that errored: only the marker says so.
+    flakyError: '<flakyError message="first try crashed"/>',
+    rerunError: '<rerunError message="crashed"/>',
   };
   const suites = new Map();
   for (const [t, s] of cases) suites.set(t.classname, [...(suites.get(t.classname) ?? []), [t, s]]);
@@ -295,6 +298,15 @@ describe('statuses', () => {
     assert.doesNotMatch(r.err, /milestone M1b/);
   });
 
+  test('--require-milestone M: a gate with a not run stage is not passed (exit 1)', () => {
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')].filter((t) => t.id !== pgTest('A47', 'neg').id);
+    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }])]);
+    assert.equal(r.code, 1);
+    assert.equal(stage(r.json, 'A47', 'M1b').status, 'not run');
+    assert.equal(r.json.milestones.M1b.gate, 'not run');
+    assert.match(r.err, /milestone M1b is not run, not passed/);
+  });
+
   test('exitStatus', () => {
     const ms = (gate) => Object.fromEntries(['M0', 'M1a'].map((m) => [m, { gate: m === 'M1a' ? gate : 'no stages' }]));
     const res = (o) => ({ input_errors: [], failed: false, milestones: ms('passed'), ...o });
@@ -340,7 +352,7 @@ describe('statuses', () => {
     ]);
   });
 
-  for (const s of ['flaky', 'rerun', 'error']) {
+  for (const s of ['flaky', 'rerun', 'error', 'flakyError', 'rerunError']) {
     test(`a testcase with ${s === 'error' ? 'an <error>' : `${s} retry markers`} is failed`, () => {
       const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: junit([[A24_POS, s], [A24_NEG, 'passed']]) }])]);
       assert.equal(r.code, 1);
@@ -433,6 +445,20 @@ describe('legs', () => {
       assert.ok(st.problems.some((p) => re.test(p)), `${re} not in ${st.problems}`);
       assert.match(plain(r.out), re);
     }
+  });
+
+  test('each job of a stage needs its own pos and neg test: a neg test of another job does not count', () => {
+    // scenarios-pg has only a pos test; the hermetic and operator jobs have
+    // both, so neg tests exist in the stage, just not from scenarios-pg.
+    const tests = [H_POS, H_NEG, PG_POS, OP_POS, OP_NEG];
+    const r = report(root({ [SCENARIOS]: implement('scenario', 'A64', 'M1a', ids(tests)) }), [
+      '--artifacts',
+      artifacts(['scenarios-hermetic/x86_64', 'scenarios-hermetic/aarch64', PG, 'operator/ubuntu', 'operator/macos', 'operator/windows', 'recovery-offline/ubuntu', 'recovery-offline/macos', 'recovery-offline/windows'].map((leg) => ({ leg, junit: allPass(tests) }))),
+    ]);
+    const st = stage(r.json, 'A64', 'M1a');
+    assert.deepEqual(st.problems, ['job scenarios-pg produces no neg test of this stage']);
+    assert.equal(st.status, 'not run');
+    assert.ok(st.pairs.every((p) => p.status === 'passed'));
   });
 
   test('a problem stage with a failed pair is failed', () => {
@@ -627,6 +653,13 @@ describe('test names', () => {
     assert.doesNotMatch(r.out, /helper_fn/);
   });
 
+  test('a backtick in a test name cannot end its code span', () => {
+    const t = rust('skyoauth-scenarios', 'pg', 'x::a24_pos_`<b>bold`');
+    const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: junit([[t, 'passed'], ...A24.map((x) => [x, 'passed'])]) }])]);
+    assert.match(r.out, /^- unknown scenario test \(not a well-formed pos\/neg scenario name\): `nextest:skyoauth-scenarios\/pg\/x::a24_pos_'<b>bold'` on /m);
+    assert.equal(r.json.uncounted.unknown[0].test, t.id);
+  });
+
   test('testId maps nextest, vitest and Playwright testcases to registry IDs', () => {
     assert.equal(testId('nextest', 'skyoauth-scenarios::pg', 'security::a24::a24_neg_x'), 'nextest:skyoauth-scenarios/pg/security::a24::a24_neg_x');
     assert.equal(testId('nextest', 'skyoauth-service', 'tests::a01_pos_x'), 'nextest:skyoauth-service/tests::a01_pos_x');
@@ -759,6 +792,26 @@ describe('waivers', () => {
     assert.equal(r.code, 1);
     assert.equal(pair(r.json, 'A24', 'M1a', A24_NEG, PG).status, 'failed');
     assert.match(r.out, /a24_neg_replay` on `scenarios-pg\/x86_64`: failed \(failed in run 100 attempt 2\); waiver applied to run 100 attempt 1: /);
+  });
+
+  test('a waiver for the same test, run and attempt on another leg does not apply', () => {
+    const P = H_POS.id;
+    const N = H_NEG.id;
+    const X86 = 'scenarios-hermetic/x86_64';
+    const ARM = 'scenarios-hermetic/aarch64';
+    const fail = (leg, attempt, n) => ({ run_id: 5, run_attempt: attempt, leg, cases: new Map([[P, 'passed'], [N, n]]) });
+    const res = judge({
+      scenarios: [{ id: 'A64', stage: [{ milestone: 'M1a', scope: 'full row', legs: [X86, ARM], status: 'implemented', tests: [P, N] }] }],
+      subcases: [],
+      contracts: [],
+      commit: SHA,
+      today: TODAY,
+      waivers: [{ commit: SHA, test: N, leg: ARM, run_id: 5, run_attempt: 1, reason: 'r', expires: '2026-12-31' }],
+      reports: [fail(X86, 1, 'failed'), fail(X86, 2, 'passed'), fail(ARM, 1, 'passed')],
+    });
+    assert.equal(res.stages[0].pairs.find((p) => p.test === N && p.leg === X86).status, 'failed');
+    assert.equal(res.waivers[0].applied, false);
+    assert.match(res.waivers[0].why, /matches no failed attempt/);
   });
 
   test('an expired and a valid waiver for the same attempt: the valid one applies', () => {
