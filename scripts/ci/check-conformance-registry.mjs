@@ -376,19 +376,24 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // which --no-replace-objects does not turn off. Replace refs
 // (refs/replace/*, in the repository itself) would swap one object for
 // another in the same way, so every git run here also passes
-// --no-replace-objects.
+// --no-replace-objects. A commit-graph file (.git/objects/info/commit-graph
+// or commit-graphs/, in the repository itself) gives a commit the parents it
+// lists wherever git walks to it, whatever the commit object says, and
+// neither of those turns it off, so every git run here also passes
+// -c core.commitGraph=false (which wins over the repository's configuration
+// and an inherited GIT_CONFIG_COUNT or GIT_CONFIG_PARAMETERS).
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
 // The graft file git is pointed at: a path that does not exist, so git reads
 // no grafts (an existing empty file such as /dev/null would do as well, but
 // git then warns that grafts are deprecated on every run).
 export const NO_GRAFTS = '/nonexistent/skyoauth-no-grafts';
 
-// `git --no-replace-objects -C root ...args`, run without GIT_LOCATION and
-// with GIT_GRAFT_FILE=NO_GRAFTS; `options` (encoding, maxBuffer) are passed
-// to spawnSync.
+// `git --no-replace-objects -c core.commitGraph=false -C root ...args`, run
+// without GIT_LOCATION and with GIT_GRAFT_FILE=NO_GRAFTS; `options`
+// (encoding, maxBuffer) are passed to spawnSync.
 export function gitIn(root, options = {}) {
   const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k))), GIT_GRAFT_FILE: NO_GRAFTS };
-  return (...args) => spawnSync('git', ['--no-replace-objects', '-C', root, ...args], { encoding: 'utf8', ...options, env });
+  return (...args) => spawnSync('git', ['--no-replace-objects', '-c', 'core.commitGraph=false', '-C', root, ...args], { encoding: 'utf8', ...options, env });
 }
 
 // Whether origin/main's full history is available in `root`: { onMain(sha) }

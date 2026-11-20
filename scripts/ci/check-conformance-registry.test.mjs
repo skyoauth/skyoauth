@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1125,6 +1126,32 @@ function git(root, ...args) {
   return r.stdout.trim();
 }
 
+// Writes the commit-graph file of `root` for `commits` and rewrites it to
+// give `child` the first parent `parent`, with the checksum at its end made
+// right again: a file the repository itself can hold. git reads a commit's
+// parents from it in place of the commit object, and --no-replace-objects
+// and GIT_GRAFT_FILE do not turn it off; asserted here with a git run as
+// gitIn ran it before core.commitGraph=false.
+function forgeCommitGraph(root, commits, child, parent) {
+  const w = spawnSync('git', ['-C', root, 'commit-graph', 'write', '--stdin-commits'], { input: `${commits.join('\n')}\n`, encoding: 'utf8', env: GIT_ENV });
+  assert.equal(w.status, 0, w.stderr);
+  const path = join(root, '.git', 'objects', 'info', 'commit-graph');
+  const b = readFileSync(path);
+  assert.deepEqual([b.toString('latin1', 0, 4), b[4], b[5]], ['CGPH', 1, 1], 'a version 1 SHA-1 commit-graph');
+  const chunks = new Map();
+  for (let i = 0; i < b[6]; i++) chunks.set(b.toString('latin1', 8 + 12 * i, 12 + 12 * i), Number(b.readBigUInt64BE(12 + 12 * i)));
+  const count = b.readUInt32BE(chunks.get('OIDF') + 255 * 4);
+  const oids = Array.from({ length: count }, (_, i) => b.toString('hex', chunks.get('OIDL') + 20 * i, chunks.get('OIDL') + 20 * i + 20));
+  assert.ok(oids.includes(child) && oids.includes(parent), 'both commits are in the graph');
+  // A commit's entry in CDAT: its tree, then the indexes of its first two parents.
+  b.writeUInt32BE(oids.indexOf(parent), chunks.get('CDAT') + 36 * oids.indexOf(child) + 20);
+  createHash('sha1').update(b.subarray(0, -20)).digest().copy(b, b.length - 20);
+  rmSync(path);
+  writeFileSync(path, b);
+  const r = spawnSync('git', ['--no-replace-objects', '-C', root, 'rev-list', '--parents', '-n', '1', child], { encoding: 'utf8', env: { ...GIT_ENV, GIT_GRAFT_FILE: NO_GRAFTS } });
+  assert.equal(r.stdout.trim(), `${child} ${parent}`, 'git --no-replace-objects without grafts reads the forged parent');
+}
+
 // A git root with the registry (A24 M1a implemented) committed on main; with
 // `originMain`, refs/remotes/origin/main points at that commit.
 function gitRoot({ originMain = true } = {}) {
@@ -1203,6 +1230,36 @@ describe('rule waivers', () => {
     }
     // Nor does an inherited GIT_GRAFT_FILE that names a grafts file.
     for (const env of [{}, { GIT_GRAFT_FILE: join(root, '.git', 'other-grafts') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.match(r.stderr, new RegExp(`commit ${side} is not on main`), Object.keys(env).join(', '));
+    }
+  });
+
+  // A commit-graph file (.git/objects/info/commit-graph, in the repository
+  // itself) gives a commit the parents it lists wherever git walks history,
+  // and neither --no-replace-objects nor GIT_GRAFT_FILE turns it off; gitIn
+  // runs git with core.commitGraph=false, so git reads the commit objects.
+  test('a commit-graph that puts a side commit into the history of origin/main does not put it on main', () => {
+    const { root, head } = gitRoot();
+    // Committed before head, so that the generation numbers in the graph do
+    // not stop git from walking from head to it.
+    const s = spawnSync('git', ['-C', root, 'commit-tree', 'HEAD^{tree}', '-m', 'side'], { encoding: 'utf8', env: { ...GIT_ENV, GIT_COMMITTER_DATE: '@1000000000 +0000' } });
+    assert.equal(s.status, 0, s.stderr);
+    const side = s.stdout.trim();
+    // origin/main one commit on, and its parent given side as its parent:
+    // git reads the commit it is given from the object itself, and the
+    // commits it walks to from the graph.
+    git(root, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'second');
+    git(root, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+    forgeCommitGraph(root, [git(root, 'rev-parse', 'HEAD'), side], head, side);
+    assert.equal(spawnSync('git', ['--no-replace-objects', '-C', root, 'merge-base', '--is-ancestor', side, 'refs/remotes/origin/main'], { env: { ...GIT_ENV, GIT_GRAFT_FILE: NO_GRAFTS } }).status, 0, 'git without grafts or replace objects sees side on main');
+    withWaiver(root, waiver({ commit: `"${side}"` }));
+    for (const requireHistory of [false, true]) {
+      expectOnly(check(root, { requireHistory }), 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
+    }
+    // Nor does an inherited configuration that turns the commit-graph on.
+    for (const env of [{}, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }, { GIT_CONFIG_PARAMETERS: "'core.commitgraph'='true'" }]) {
       const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
       assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
       assert.match(r.stderr, new RegExp(`commit ${side} is not on main`), Object.keys(env).join(', '));
@@ -1694,6 +1751,25 @@ describe('--gate-pr', () => {
     expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
     // Nor does an inherited GIT_GRAFT_FILE that names a grafts file.
     for (const env of [{}, { GIT_GRAFT_FILE: join(root, '.git', 'other-grafts') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.equal(r.stderr, `${ONE_COMMIT(head, mb, first)}\ncheck-conformance-registry --gate-pr: 1 error(s)\n`, Object.keys(env).join(', '));
+    }
+  });
+
+  // A commit-graph file (.git/objects/info/commit-graph) gives the gate
+  // commit the parents it lists, and neither --no-replace-objects nor
+  // GIT_GRAFT_FILE turns it off; gitIn runs git with core.commitGraph=false.
+  test('a commit-graph that gives the gate commit the merge-base as its parent does not hide a second commit', () => {
+    const { root, mb } = mainRoot();
+    const first = commit(root, 'first');
+    const head = gateCommit(root, '["M1a"]');
+    forgeCommitGraph(root, [mb, first, head], head, mb);
+    const res = checkGatePr(root);
+    assert.equal(res.mergeBase, mb);
+    expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+    // Nor does an inherited configuration that turns the commit-graph on.
+    for (const env of [{}, { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }, { GIT_CONFIG_PARAMETERS: "'core.commitgraph'='true'" }]) {
       const r = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
       assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
       assert.equal(r.stderr, `${ONE_COMMIT(head, mb, first)}\ncheck-conformance-registry --gate-pr: 1 error(s)\n`, Object.keys(env).join(', '));
