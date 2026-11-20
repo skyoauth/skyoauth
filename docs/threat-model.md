@@ -1461,10 +1461,15 @@ the contract amendments; what is still open is named in the entry:
   recovery key through the local recovery verifier while the IdP is
   unavailable needs the second approver or takes an audited single-actor
   exception; the lead decides before M1b. Spec follow-up against design §7.2
-  and §7.3, T13.5, T13.9 and OQ-TM-7.
+  and §7.3, T13.5, T13.9 and OQ-TM-7. Contracts: `single_actor_mode` is the
+  explicit audited instance policy (identity-registry IR-053); the optional
+  widening approver and second-approver approvals are identity-registry
+  IR-052 and IR-054 (with OQ-ADR008-3).
 - **OQ-TM-8:** design §7.2; T13.5; API-152 and T13.4 (scope of the recovery
   transaction: replacement `security_admin` credential, operator-credential
-  revocation, replacement recovery public key).
+  revocation, replacement recovery public key). Still open: whether setting
+  `single_actor_mode` is a further recovery transaction kind that also
+  replaces the recovery key (identity-registry OQ-IR-13).
 - **OQ-TM-9:** design §7.2 (recovery socket owned by the service UID, mode
   0600; `pods/exec` on the SkyOAuth namespace restricted to trusted
   infrastructure administrators); T13.4; T50.1.
@@ -1472,14 +1477,16 @@ the contract amendments; what is still open is named in the entry:
   access-token key administration endpoint (OQ-API-3), now API-153 with
   API-042 and API-043 for the JWKS bounds.
 - **OQ-TM-12:** design §7 and §7.2; ADR-002 item 4; tasks Gate M1a and §3
-  (`InstanceSecurityPolicy`, `AuditEvent`); T13.3, T20.2, T50.6. Contracts:
-  identity-registry IR-052 to IR-055, public-api API-153 and API-156.
+  (`InstanceSecurityPolicy`, `AuditEvent`); T13.3, T20.2, T50.6. Contracts
+  (read-only sink fields, the key gate and the hash chain): identity-registry
+  IR-053 and IR-055, public-api API-153 and API-156.
 - **OQ-TM-13:** design §5.4 and §7.2 (per-tenant secret namespace for
   `ca_bundle_ref`, `reviewer_credential_ref` and provider `credential_ref`;
   `security_admin`-approved egress allowlist); T11.2, T11.8, T23.2; the tasks
   §3 schema (`EgressAllowlistEntry`, `Tenant.secret_namespace`); before M1a.
-  Contracts: identity-registry IR-034 and the §10 `EgressAllowlistEntry` row;
-  the public-api egress allowlist endpoint (path open, OQ-API-13).
+  Contracts: identity-registry IR-034 and IR-152 (degraded sources, `jwks_uri`
+  at fetch and widening class: OQ-IR-12, decided); the public-api egress
+  allowlist endpoints (OQ-API-13, decided).
 - **OQ-TM-14:** design §5.1.1 and §7.3; tasks §3 (`TenantLoginState`); the
   public-API operator endpoint matrix (OQ-API-2), now API-154; the lifetimes
   contract §4

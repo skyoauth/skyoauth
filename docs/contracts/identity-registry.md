@@ -175,24 +175,35 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
 (`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
 `audit_sink_validated_at`, `revision`). (tasks §3)
 
-- **IR-052** `widening_second_approver` is off by default. Turning it on or
-  off is the only online write to `InstanceSecurityPolicy`: an audited,
+- **IR-052** `widening_second_approver` is off by default. When it is on, a
+  trust-source, keyset, binding or grant write that the server detects as
+  widening, and adding or re-enabling an `EgressAllowlistEntry` (IR-152),
+  MUST NOT take effect until an `approve` operation (IR-054) by a distinct
+  `security_admin` applies it. When it is off, the widening flag, the expected
+  revision and the atomic audit record suffice. Turning the setting on or off
+  is the only online write to `InstanceSecurityPolicy`: an audited,
   revision-checked write by instance `security_admin` that MUST have a
   distinct second `security_admin` approver (IR-054), or one actor when
   `single_actor_mode` is on. (design §7.2; tasks §3 "Instance security
-  policy"; ADR-008 item 12; lead decision, OQ-ADR008-3; public-api API-156)
-- **IR-053** `single_actor_mode` (default false) and the audit sink
-  configuration are instance deployment configuration, read-only online; an
-  online operator write MUST NOT change them. `single_actor_mode` is set at
-  install or by the local signed recovery transaction; the row mirrors it, and
-  a change emits an audit event. The sink endpoint, protocol and TLS trust or
+  policy"; ADR-008 item 12; lead decision, OQ-ADR008-3; Decided (lead
+  decision, 2026-11-20); public-api API-156)
+- **IR-053** `single_actor_mode` (default false) is the explicit audited
+  instance policy that lets one actor act where a distinct second approver is
+  otherwise required: public-api API-142, API-148, API-155 and API-156,
+  gateway-containment GW-116 and IR-052. It and the audit sink configuration
+  are instance deployment configuration, read-only online; an online operator
+  write MUST NOT change them. `single_actor_mode` is set at install, and the
+  row mirrors it. Interim reading (lead, 2026-11-20), pending OQ-IR-13: a
+  change is deployment configuration, applied at restart and recorded in an
+  audit event at startup; whether the local signed recovery transaction can
+  also set it is OQ-IR-13. The sink endpoint, protocol and TLS trust or
   credential reference are not stored in the database: the row holds only
   `audit_sink_config_digest` and `audit_sink_validated_at`, and observed sink
   health is a metric and health signal, not a revisioned row. A sink
   configuration change takes effect only on restart and first emits a sink
-  changed event to the old sink, plus an audit event. A sink is configured
-  only when its endpoint is set and the current configuration passed
-  validation at startup: `audit_sink_validated_at` MUST correspond to the
+  changed event to the old sink, plus an audit event. "Configured" means set
+  and validated at startup: the endpoint is set and the current configuration
+  passed validation, and `audit_sink_validated_at` MUST correspond to the
   current `audit_sink_config_digest`, so an endpoint that is present but
   failed validation, or a changed configuration not yet validated, is not
   configured (the digest correspondence is inferred from "validated at
@@ -200,22 +211,25 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   activation and publication MUST be refused while no sink is configured;
   emergency disable and standby promotion MUST NOT be refused for a missing,
   unvalidated or unavailable sink, which raises an alert and a local
-  append-only record (public-api API-153). (design §7, §7.2; tasks §3
-  "Instance security policy", Gate M1a; ADR-002 item 4; lead decision,
-  OQ-TM-7, OQ-TM-12, OQ-ADR008-3)
-- **IR-054** This rule covers the operations that need a distinct second
-  `security_admin` approver: the IR-052 toggle, widening writes while
-  `widening_second_approver` is on (ADR-008 item 12) and other
-  security-domain toggles. For them an approval is a second
+  append-only record. If the sink configuration is removed while keys are
+  published, the instance starts degraded with an alert, and disable still
+  works (public-api API-153). (design §7, §7.2; tasks §3 "Instance security
+  policy", Gate M1a; ADR-002 item 4; lead decision, OQ-TM-7, OQ-TM-12,
+  OQ-ADR008-3)
+- **IR-054** A second-approver approval covers the operations that need a
+  distinct second `security_admin` approver: the IR-052 toggle, widening
+  writes while `widening_second_approver` is on (IR-052, IR-152; ADR-008 item 12) and other security-domain toggles. It is a second
   `AdministrativeOperation` of kind `approve` whose `approves_operation_id`
-  names the approved operation and whose `actor_id` differs from that
-  operation's `actor_id`, and the approver MUST hold `security_admin`. It does
-  not change other approval boundaries: a route-bundle approval follows
+  names the pending operation and whose `actor_id` differs from that
+  operation's `actor_id`, and the approver MUST hold `security_admin`; it is
+  submitted through the public-api `/approve` operation endpoints (lead
+  decision, OQ-API-13). It does not change other approval boundaries: a
+  route-bundle approval is a `kind=route_bundle_approval` operation under
   gateway-containment GW-130 and GW-131, where one person MAY hold both the
   preparer and approver roles by explicit assignment, and the second
   approvers of public-api API-148 and API-155 (`security_admin` or another
-  `provider_admin`) keep their own rules. (tasks §3 "Instance security
-  policy"; ADR-008 item 12; lead decision, OQ-ADR008-3)
+  `provider_admin`) keep their own rules. (design §4.2; tasks §3 "Instance
+  security policy"; ADR-008 item 12; lead decision, OQ-ADR008-3)
 - **IR-055** Audit events form one hash chain per instance.
   `AuditEvent.sequence` is assigned in the same transaction as the audited
   write and strictly increases; `prev_hash` links each event to the previous
@@ -423,17 +437,17 @@ For every protected request the backend MUST perform these steps
 
 Other allowlists in the registry, each with the rule its source states:
 
-| Allowlist                                       | Owner                                                           | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Source                                                                                                    |
-| ----------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `ServiceGrant.allowed_binding_ids`              | Tenant `trust_admin`                                            | Nonempty; only these bindings of the grant actor are eligible; cross-actor references rejected                                                                                                                                                                                                                                                                                                                                                        | design §5.7; tasks §2 "Exchange selection and scope"                                                      |
-| `ApplicationOriginVersion.allowed_return_paths` | Tenant `client_admin`                                           | Normalized same-origin relative paths only                                                                                                                                                                                                                                                                                                                                                                                                            | design §4                                                                                                 |
-| `ApplicationOriginVersion.resource_server_ids`  | Tenant `client_admin` within assignment                         | Approved API audiences for the origin                                                                                                                                                                                                                                                                                                                                                                                                                 | design §4; tasks §3                                                                                       |
-| `ApplicationRouteVersion.methods`               | Tenant `client_admin`                                           | Nonempty method allowlist; unknown method denies                                                                                                                                                                                                                                                                                                                                                                                                      | design §4.1                                                                                               |
-| `OAuthClient.redirect_rules`                    | Tenant `client_admin`                                           | IP-loopback redirect rules: each fixes scheme `http`, the IP literal (`127.0.0.1` and/or `[::1]`) and the path; the port varies per request and is bound exactly per transaction; `localhost` rejected (public-api API-031)                                                                                                                                                                                                                           | design §5.2, §10.3; tasks T40.1; lead decision (OQ-TM-5)                                                  |
-| `TrustSource.audiences`, `algorithms`           | Tenant `trust_admin`                                            | Exact proof audiences and algorithm allowlist                                                                                                                                                                                                                                                                                                                                                                                                         | design §5.4                                                                                               |
-| `EgressAllowlistEntry`                          | Instance `security_admin`; tenant operators only choose from it | Exact discovery, JWKS and TokenReview destinations. `purpose` is `oidc_discovery`, `jwks` or `token_review`; `exact_destination` is an exact URL (scheme, host, port and path); (`purpose`, `exact_destination`) is unique. A `TrustSource` matches an entry by value at write time, and a destination with no matching entry is rejected (inferred). Disabling an entry fails closed for new fetches and marks dependent sources degraded (OQ-IR-12) | design §5.4, §7.2; tasks §3 "Egress and secret namespaces", T11.2, T11.8, T23.2; lead decision (OQ-TM-13) |
-| `ResourceServerChecker.allowed_tenant_ids`      | Instance `security_admin`                                       | Explicit tenant set                                                                                                                                                                                                                                                                                                                                                                                                                                   | design §6.1                                                                                               |
-| `PrincipalBinding` match predicates             | Tenant `trust_admin`                                            | ANDed exact strings; a configured claim absent from evidence is a non-match; omitted optional predicates are unconstrained; required production predicates cannot be omitted                                                                                                                                                                                                                                                                          | design §5.3                                                                                               |
+| Allowlist                                       | Owner                                                           | Rule                                                                                                                                                                                                                                                                | Source                                                                                                              |
+| ----------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `ServiceGrant.allowed_binding_ids`              | Tenant `trust_admin`                                            | Nonempty; only these bindings of the grant actor are eligible; cross-actor references rejected                                                                                                                                                                      | design §5.7; tasks §2 "Exchange selection and scope"                                                                |
+| `ApplicationOriginVersion.allowed_return_paths` | Tenant `client_admin`                                           | Normalized same-origin relative paths only                                                                                                                                                                                                                          | design §4                                                                                                           |
+| `ApplicationOriginVersion.resource_server_ids`  | Tenant `client_admin` within assignment                         | Approved API audiences for the origin                                                                                                                                                                                                                               | design §4; tasks §3                                                                                                 |
+| `ApplicationRouteVersion.methods`               | Tenant `client_admin`                                           | Nonempty method allowlist; unknown method denies                                                                                                                                                                                                                    | design §4.1                                                                                                         |
+| `OAuthClient.redirect_rules`                    | Tenant `client_admin`                                           | IP-loopback redirect rules: each fixes scheme `http`, the IP literal (`127.0.0.1` and/or `[::1]`) and the path; the port varies per request and is bound exactly per transaction; `localhost` rejected (public-api API-031)                                         | design §5.2, §10.3; tasks T40.1; lead decision (OQ-TM-5)                                                            |
+| `TrustSource.audiences`, `algorithms`           | Tenant `trust_admin`                                            | Exact proof audiences and algorithm allowlist                                                                                                                                                                                                                       | design §5.4                                                                                                         |
+| `EgressAllowlistEntry`                          | Instance `security_admin`; tenant operators only choose from it | Exact discovery, JWKS and TokenReview destinations, unique per purpose and immutable; matched by value at write for `discovery_url` and `token_review_endpoint`, at fetch for a discovered `jwks_uri`; disable fails closed and degrades dependent sources (IR-152) | design §5.4, §7.2; tasks §3 "Egress and secret namespaces", T11.2, T11.8, T23.2; lead decision (OQ-TM-13, OQ-IR-12) |
+| `ResourceServerChecker.allowed_tenant_ids`      | Instance `security_admin`                                       | Explicit tenant set                                                                                                                                                                                                                                                 | design §6.1                                                                                                         |
+| `PrincipalBinding` match predicates             | Tenant `trust_admin`                                            | ANDed exact strings; a configured claim absent from evidence is a non-match; omitted optional predicates are unconstrained; required production predicates cannot be omitted                                                                                        | design §5.3                                                                                                         |
 
 - **IR-151** `TrustSource.kind` is `oidc_discovery`, `uploaded_jwks` or
   `kubernetes_token_review`; there is no fourth kind. Kubernetes local JWT
@@ -444,6 +458,36 @@ Other allowlists in the registry, each with the rule its source states:
   and MUST be rejected on every other source; `kubernetes_token_review`
   performs a live review and does not take it. (tasks §3 "Source kinds";
   ADR-005; lead decision, OQ-ADR005-1)
+- **IR-152** `EgressAllowlistEntry` records are instance-global and owned by
+  instance `security_admin`; tenant operators only choose from them and read
+  them through a read-only tenant view that lists every entry, an accepted
+  v0.1 property (public-api §7.1). `purpose` is `oidc_discovery`, `jwks` or
+  `token_review`; `exact_destination` is an exact URL (scheme, host, port and
+  path); (`purpose`, `exact_destination`) MUST be unique, and both are
+  immutable: a PATCH changes only `status`, and entries are not deleted.
+  - At write time a `TrustSource.discovery_url` MUST exactly match an enabled
+    `oidc_discovery` entry and a `token_review_endpoint` an enabled
+    `token_review` entry, or the write is rejected. Write-time matching covers
+    only these two fields; a dry run MAY offer a network check, which is not
+    part of the write path.
+  - A discovered `jwks_uri` is enforced at fetch and never followed unless it
+    exactly matches an enabled `jwks` entry; otherwise no JWKS fetch is made,
+    the source is degraded and an alert is raised.
+  - Disabling an entry fails closed for new fetches: no new discovery or JWKS
+    fetch through it, and a TokenReview call through it is denied with no
+    fallback. Cached JWKS stay usable until their bounded expiry. Dependent
+    sources are degraded.
+  - Degraded is a derived health signal, not a stored `TrustSource.status`
+    value: source reads show it with a reason, it is a metric with an alert,
+    and the audit event of the entry write lists the affected source IDs.
+    Re-enabling the entry clears it, since nothing is stored.
+  - Adding or re-enabling an entry is widening-class and needs an IR-054
+    approval when `widening_second_approver` is on; disabling is not
+    widening.
+
+  (design §5.4, §7.2; tasks §3 "Egress and secret namespaces", T11.2, T11.8,
+  T23.2; ADR-008 item 12; lead decision, OQ-TM-13; Decided (lead decision,
+  2026-11-20), OQ-IR-12)
 
 ## 11. Claim and parameter namespace
 
@@ -570,12 +614,31 @@ follow-up. All other items are not resolved by this contract.
   not adopted. (triage: spec-amendments PR)
 
 - **OQ-IR-12 — Degraded trust sources after an egress entry is disabled.**
-  Tasks §3 says disabling an `EgressAllowlistEntry` "marks dependent sources
-  degraded", but `TrustSource.status` has no listed `degraded` value. Not
-  stated: whether degraded is a status value, a derived health signal or an
-  audit-only mark; whether re-enabling the entry clears it; whether an
-  `oidc_discovery` source whose discovered `jwks_uri` has no enabled `jwks`
-  entry is rejected at write or degraded at fetch; and whether adding an
-  entry counts as a widening write under `widening_second_approver`. That a
-  destination with no matching entry is rejected at write (§10) is this
-  contract's reading of "matches an entry by value at write time".
+  **Decided** (lead decision, 2026-11-20): degraded is a derived health
+  signal, not a stored `TrustSource.status` value: shown with a reason on
+  source reads, a metric with an alert, and the affected source IDs listed in
+  the audit event of the entry write; cached JWKS stay usable until their
+  bounded expiry. Re-enabling the entry clears it, since nothing is stored. A
+  discovered `jwks_uri` is enforced at fetch and never followed: it must
+  exactly match an enabled `jwks` entry, otherwise no JWKS fetch is made, the
+  source is degraded and an alert is raised. Write-time matching covers only
+  `discovery_url` and `token_review_endpoint`; a dry run may offer the network
+  check, outside the write path. Adding or re-enabling an entry is
+  widening-class, disabling is not, and the class applies only when
+  `widening_second_approver` is on (IR-052, IR-152; ADR-008 item 12).
+  Original question: tasks §3 says disabling an `EgressAllowlistEntry` "marks
+  dependent sources degraded", but `TrustSource.status` has no `degraded`
+  value; whether degraded is a status value, a derived health signal or an
+  audit-only mark, whether re-enabling clears it, whether a discovered
+  `jwks_uri` with no enabled `jwks` entry is rejected at write or degraded at
+  fetch, and whether adding an entry is a widening write were not stated.
+- **OQ-IR-13 — How `single_actor_mode` changes after install.** Tasks §3 and
+  ADR-008 item 12 say `single_actor_mode` is set at install or by "the local
+  signed recovery transaction", but public-api API-152, design §7.2 and T13.5
+  limit break-glass transactions to operator restoration and the provider
+  switch or rollback. Not stated: whether setting `single_actor_mode` is a
+  third break-glass kind; whether that transaction also enrolls a replacement
+  recovery key and retires the used one (OQ-TM-8); and whether a
+  deployment-configuration change applied at restart alone can flip the
+  value. Interim reading (lead, 2026-11-20): deployment configuration,
+  applied at restart and audited at startup (IR-053).

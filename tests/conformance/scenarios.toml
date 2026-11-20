@@ -105,14 +105,14 @@ kind = "scenario"
 layers = ["security"]
 envs = ["hermetic", "pg"]
 harness = ["UC", "FX"]
-owners = ["T11.3", "T11.5", "T24.3", "T52.1"]
+owners = ["T11.2", "T11.3", "T11.5", "T11.8", "T24.3", "T52.1"]
 positive = "public-only JWK"
-negative = "private members, jku, x5u, embedded jwk, unsafe key URL, a discovery, JWKS or TokenReview destination with no matching egress allowlist entry, a new fetch through a disabled entry; M2 adds disallowed issuer/alg, conflicting kid, cross-tenant keyset"
+negative = "private members, jku, x5u, embedded jwk, unsafe key URL; a `discovery_url` or `token_review_endpoint` with no enabled matching egress allowlist entry rejected at write, a discovered `jwks_uri` with no enabled `jwks` entry not fetched, no new discovery or JWKS fetch through a disabled entry (IR-152); M2 adds disallowed issuer/alg, conflicting kid, cross-tenant keyset"
 matrix_sha256 = "38d5da59b73f237d10ec57d4518aa8ab0522c6bbf67c5abb4affab307d9e1dc8"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "upload and token-header rejection"
+scope = "upload, token-header and egress-allowlist rejection"
 legs = ["scenarios-hermetic/x86_64", "scenarios-hermetic/aarch64", "scenarios-pg/x86_64"]
 status = "planned"
 tests = []
@@ -132,7 +132,7 @@ envs = ["pg", "envoy-k3s"]
 harness = ["TRm (PR)", "K3"]
 owners = ["T23.2", "T23.3", "T23.5"]
 positive = "SA/Pod with intended audience → scoped token for selected tenant/cluster"
-negative = "policy demanding claims TokenReview does not return is rejected"
+negative = "policy demanding claims TokenReview does not return is rejected; a TokenReview call through a disabled egress allowlist entry is denied with no fallback"
 matrix_sha256 = "25cb88c0336622e2c1ec1e1e34938fa431b5d169cbc763e049f78f2a1b286962"
 
 [[scenario.stage]]
@@ -1122,8 +1122,8 @@ layers = ["integration"]
 envs = ["pg"]
 harness = ["OP", "local verifier", "empty PG"]
 owners = ["T13.3", "T13.8", "T13.10"]
-positive = "full chain with no SQL; with `single_actor_mode` set in deployment configuration, one `security_admin` turns `widening_second_approver` on or off"
-negative = "each step without its role; with `single_actor_mode` off, a `widening_second_approver` toggle without a distinct second `security_admin` approver; an online write to `single_actor_mode` or the audit sink fields"
+positive = "full chain with no SQL; with `single_actor_mode` off, a `widening_second_approver` toggle takes effect only when an `approve` operation by a distinct second `security_admin` applies it; with `single_actor_mode` set in deployment configuration, one `security_admin` turns it on or off"
+negative = "each step without its role; with `single_actor_mode` off, a `widening_second_approver` toggle without a distinct second `security_admin` approver; self-approval of the toggle by the requesting actor; an approver without `security_admin`; an online write to `single_actor_mode` or the audit sink fields"
 matrix_sha256 = "b8a76c42ecc0b3468a3c006debfde7a70ba2459b3024ee44de57c474227cea87"
 
 [[scenario.stage]]
