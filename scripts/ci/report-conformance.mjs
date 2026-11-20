@@ -27,7 +27,8 @@
 //                     repository). Its registry is checked first with
 //                     check-conformance-registry.mjs; any error stops the
 //                     report.
-//   --today DATE      Judging date for waiver expiry (default: today, UTC).
+//   --today DATE      Judging date for waiver expiry (default: today, UTC);
+//                     an impossible date is a usage error.
 //   --docs-only       The docs-only classifier skipped the build jobs: the
 //                     summary starts with "runtime conformance: not run
 //                     (docs-only change)".
@@ -589,7 +590,10 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   };
   if (!o.commit || !/^[0-9a-f]{40}$/.test(o.commit)) return usage('--commit must be a full 40-character lowercase hex SHA');
   const today = o.today ?? now.toISOString().slice(0, 10);
-  if (!/^\d{4}-\d\d-\d\d$/.test(today)) return usage('--today must be YYYY-MM-DD');
+  // A calendar date: Date rolls 2026-02-30 over to March, so the round trip
+  // catches it.
+  const day = new Date(`${today}T00:00:00Z`);
+  if (!/^\d{4}-\d\d-\d\d$/.test(today) || Number.isNaN(day.getTime()) || day.toISOString().slice(0, 10) !== today) return usage('--today must be a calendar date YYYY-MM-DD');
   if (o.requireMilestone !== undefined && !MILESTONES.includes(o.requireMilestone)) return usage(`--require-milestone must be one of ${MILESTONES.join(', ')}`);
   const root = resolve(o.root);
 

@@ -195,7 +195,7 @@ node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts \
 | `--commit SHA` | Required. The judged commit; waivers match it. |
 | `--artifacts DIR` | The layout above. Omitted: no results, so every implemented stage is not run. |
 | `--waivers FILE` | `waivers.toml` from the tip of `main` (layout §3: the waived commit's own tree cannot hold its waiver). Validated by the registry check's waiver rule; an error stops the report (exit 2). |
-| `--today YYYY-MM-DD` | Judging date for waiver expiry; default today (UTC). A waiver is valid through its `expires` date. |
+| `--today YYYY-MM-DD` | Judging date for waiver expiry; default today (UTC). An impossible date such as `2026-02-30` is a usage error. A waiver is valid through its `expires` date. |
 | `--docs-only` | The docs-only classifier skipped the build jobs: the summary starts with `runtime conformance: not run (docs-only change)`. |
 | `--require-milestone M` | Exit 1 unless every required stage of milestone M is passed. |
 | `--require-history` | Passed to the registry check: no history is an error. |

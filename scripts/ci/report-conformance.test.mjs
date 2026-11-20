@@ -965,7 +965,11 @@ describe('cli', () => {
       [[], /--commit must be a full 40-character lowercase hex SHA/],
       [['--commit', 'abc'], /--commit must be/],
       [['--commit', SHA.toUpperCase()], /--commit must be/],
-      [['--commit', SHA, '--today', '19.11.2026'], /--today must be YYYY-MM-DD/],
+      [['--commit', SHA, '--today', '19.11.2026'], /--today must be a calendar date YYYY-MM-DD/],
+      [['--commit', SHA, '--today', '0000-00-00'], /--today must be a calendar date/],
+      [['--commit', SHA, '--today', '2026-02-30'], /--today must be a calendar date/],
+      [['--commit', SHA, '--today', '2026-13-01'], /--today must be a calendar date/],
+      [['--commit', SHA, '--today', '2025-02-29'], /--today must be a calendar date/],
       [['--commit', SHA, '--require-milestone', 'M9'], /--require-milestone must be one of M0, M1a/],
       [['--commit', SHA, '--bogus'], /^usage: /],
       [['--commit'], /^usage: /],
@@ -988,6 +992,7 @@ describe('cli', () => {
   test('--json writes indented JSON', () => {
     const j = join(tmp('report-json-'), 'out.json');
     assert.equal(run(['--root', root(), '--commit', SHA, '--today', TODAY, '--json', j], { log: () => {}, logErr: () => {} }), 0);
+    assert.equal(run(['--root', root(), '--commit', SHA, '--today', '2028-02-29', '--json', j], { log: () => {}, logErr: () => {} }), 0, 'a leap day is a date');
     assert.ok(readFileSync(j, 'utf8').startsWith('{\n  "format": 1,\n  "commit": "'));
   });
 
