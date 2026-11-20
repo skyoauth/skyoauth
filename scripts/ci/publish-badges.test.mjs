@@ -55,6 +55,13 @@ const GIT_CONFIG = {
   'credential.helper': '',
 };
 
+// No GIT_* variable is inherited. That covers the repository-location
+// variables a git hook or `git rebase --exec` exports (GIT_DIR,
+// GIT_WORK_TREE, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,
+// GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_COMMON_DIR, GIT_NAMESPACE,
+// GIT_QUARANTINE_PATH, GIT_PREFIX, ...), which would point every git the
+// tests run at that repository, as well as identity and configuration
+// variables.
 const ENV = Object.fromEntries(
   Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_') && !key.startsWith('BADGES_')),
 );
@@ -165,6 +172,12 @@ function badge(remote, path) {
   return { color, title };
 }
 const summary = (remote, branch) => JSON.parse(git(remote, 'show', `badges:${branch}/summary.json`));
+
+test('the child environment carries no inherited git repository location', () => {
+  const location = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_QUARANTINE_PATH', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES'];
+  assert.deepEqual(location.filter((key) => key in ENV), []);
+  assert.deepEqual(Object.keys(ENV).filter((key) => key.startsWith('GIT_') && !key.startsWith('GIT_CONFIG')), ['GIT_TERMINAL_PROMPT', 'GIT_ALLOW_PROTOCOL']);
+});
 
 describe('coverage badge colour follows the gate', () => {
   test('a failed gate is red whatever the figure', () => {
