@@ -43,12 +43,22 @@ CREATE DOMAIN skyoauth_string_list AS jsonb
     CHECK (jsonb_typeof(VALUE) = 'array' AND NOT jsonb_path_exists(VALUE,
         'strict $[*] ? (@.type() != "string" || @ == "")', '{}', true));
 
--- ResourceServer (IR-070, IR-071). The audience is globally unique, exact
--- and immutable. Its syntax and comparison rules are open (OQ-IR-9), so the
--- database compares it byte-wise and only rejects an empty value.
+-- Unique free-text keys are bounded and cleaned as
+-- egress_allowlist_entry.exact_destination is in 0002 (lead decision,
+-- 2026-11-20): at most 2048 bytes, well below the btree limit of the unique
+-- index, and, where the value is a name, no whitespace or control character
+-- ([:space:] is ASCII whitespace under "C"; [:cntrl:] is U+0000-U+001F and
+-- U+007F-U+009F in every collation). Other syntax and Unicode normalization
+-- stay with the service.
+
+-- ResourceServer (IR-070, IR-071). The audience is globally unique and exact
+-- (IR-070); that it never changes is (inferred). Its syntax and comparison
+-- rules are open (OQ-IR-9), so the database compares it byte-wise.
 CREATE TABLE resource_server (
     id                   text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
-    audience             text COLLATE "C" NOT NULL UNIQUE CHECK (audience <> ''),
+    audience             text COLLATE "C" NOT NULL UNIQUE CHECK (audience <> '')
+        CHECK (audience !~ '[[:space:][:cntrl:]]')
+        CHECK (octet_length(audience) <= 2048),
     name                 text        NOT NULL CHECK (name <> ''),
     allowed_profiles     skyoauth_profile_list NOT NULL,
     scopes               skyoauth_scope_list   NOT NULL,
@@ -70,8 +80,11 @@ CREATE TABLE resource_server (
 -- tenant rows.
 CREATE TABLE audience_tenant_assignment (
     id                   text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
-    resource_server_id   text COLLATE "C" NOT NULL REFERENCES resource_server (id),
-    tenant_id            text COLLATE "C" NOT NULL REFERENCES tenant (id),
+    resource_server_id   text COLLATE "C" NOT NULL
+        CONSTRAINT audience_tenant_assignment_resource_server_id_fkey
+        REFERENCES resource_server (id),
+    tenant_id            text COLLATE "C" NOT NULL
+        CONSTRAINT audience_tenant_assignment_tenant_id_fkey REFERENCES tenant (id),
     allowed_profiles     skyoauth_profile_list NOT NULL,
     allowed_scopes       skyoauth_scope_list   NOT NULL,
     -- As resource_server.constraint_versions (inferred).
@@ -89,11 +102,15 @@ CREATE TABLE audience_tenant_assignment (
 -- allowed_tenant_ids are the rows of resource_server_checker_tenant.
 CREATE TABLE resource_server_checker (
     id                    text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
-    resource_server_id    text COLLATE "C" NOT NULL REFERENCES resource_server (id),
-    -- The public mTLS identity. Its form (for example a certificate or key
-    -- fingerprint) is not specified; the service canonicalizes it, so that
-    -- the unique constraint compares like with like (inferred).
-    public_mtls_identity  text COLLATE "C" NOT NULL UNIQUE CHECK (public_mtls_identity <> ''),
+    resource_server_id    text COLLATE "C" NOT NULL
+        CONSTRAINT resource_server_checker_resource_server_id_fkey
+        REFERENCES resource_server (id),
+    -- The public mTLS identity. Its form (for example a key fingerprint or a
+    -- subject DN, which has spaces) is not specified, so only its length is
+    -- bounded; the service canonicalizes it, so that the unique constraint
+    -- compares like with like (inferred). It may be rotated (inferred).
+    public_mtls_identity  text COLLATE "C" NOT NULL UNIQUE CHECK (public_mtls_identity <> '')
+        CHECK (octet_length(public_mtls_identity) <= 2048),
     status                text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
     revision              bigint      NOT NULL DEFAULT 1 CHECK (revision >= 1),
     -- Target of the composite reference from resource_server_checker_tenant.
@@ -109,15 +126,18 @@ CREATE TABLE resource_server_checker (
 -- Leaving out a tenant whose assignment is disabled stays with the service,
 -- without editing these rows. A row is added or deleted, never changed; the
 -- set is part of the checker, so the service advances the checker's revision
--- with it (inferred: no status or revision of its own).
+-- with it (inferred: no status or revision of its own). The primary key
+-- makes checker_id and tenant_id NOT NULL.
 CREATE TABLE resource_server_checker_tenant (
-    checker_id          text COLLATE "C" NOT NULL,
+    checker_id          text COLLATE "C",
     resource_server_id  text COLLATE "C" NOT NULL,
-    tenant_id           text COLLATE "C" NOT NULL,
+    tenant_id           text COLLATE "C",
     PRIMARY KEY (checker_id, tenant_id),
-    FOREIGN KEY (checker_id, resource_server_id)
+    CONSTRAINT resource_server_checker_tenant_checker_fkey
+        FOREIGN KEY (checker_id, resource_server_id)
         REFERENCES resource_server_checker (id, resource_server_id),
-    FOREIGN KEY (tenant_id, resource_server_id)
+    CONSTRAINT resource_server_checker_tenant_assignment_fkey
+        FOREIGN KEY (tenant_id, resource_server_id)
         REFERENCES audience_tenant_assignment (tenant_id, resource_server_id)
 );
 
@@ -127,24 +147,32 @@ CREATE TABLE resource_server_checker_tenant (
 -- section 7.4).
 CREATE TABLE resource_action (
     id                            text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
-    resource_server_id            text COLLATE "C" NOT NULL REFERENCES resource_server (id),
+    resource_server_id            text COLLATE "C" NOT NULL
+        CONSTRAINT resource_action_resource_server_id_fkey REFERENCES resource_server (id),
     -- The canonical action coordinate the checker sends; no syntax is
-    -- specified (inferred: non-empty).
-    action_name                   text COLLATE "C" NOT NULL CHECK (action_name <> ''),
+    -- specified, so it is a bounded name as above (inferred).
+    action_name                   text COLLATE "C" NOT NULL CHECK (action_name <> '')
+        CHECK (action_name !~ '[[:space:][:cntrl:]]')
+        CHECK (octet_length(action_name) <= 2048),
     required_scopes               skyoauth_scope_list   NOT NULL,
     accepted_profiles             skyoauth_profile_list NOT NULL,
     -- Dimension names of the resource server's constraint schema (inferred:
     -- non-empty strings).
     required_resource_dimensions  skyoauth_string_list  NOT NULL,
+    -- No default: the service always states it (inferred).
     live_check_required           boolean     NOT NULL,
     status                        text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
     revision                      bigint      NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    -- One rule per action coordinate of a resource server (inferred: the
+    -- service looks up "the" persisted action, API-072).
     UNIQUE (resource_server_id, action_name)
 );
 
--- Immutable selectors (tasks section 3 "IDs/names"): the IDs, the audience,
--- the resource server each row belongs to, an assignment's tenant, an
--- action's name and every column of a checker tenant row.
+-- IDs are immutable selectors (tasks section 3 "IDs/names"). The audience,
+-- the resource server each row belongs to, an assignment's tenant and an
+-- action's name are immutable too (inferred: they select what the row
+-- governs), as is every column of a checker tenant row (lead decision,
+-- 2026-11-20).
 CREATE TRIGGER resource_server_immutable
     BEFORE UPDATE ON resource_server
     FOR EACH ROW EXECUTE FUNCTION skyoauth_reject_immutable_change('id', 'audience');

@@ -159,27 +159,40 @@ first gets the committed head and succeeds.
 as `resource_server`, `audience_tenant_assignment`,
 `resource_server_checker` with its tenant rows in
 `resource_server_checker_tenant`, and `resource_action`. It adds no
-function: every table reuses `skyoauth_reject_immutable_change(…)` and
-`skyoauth_check_revision()` from `0002`, with `ENABLE ALWAYS` triggers, and
-`status` is `enabled` or `disabled` (inferred; the sources speak of
-disabling and re-enabling, and of an "active" assignment, read as
-`enabled`).
+function: every table reuses `skyoauth_reject_immutable_change(…)` from
+`0002`, and every table except `resource_server_checker_tenant`, which has
+no revision, also `skyoauth_check_revision()`; all their triggers are
+`ENABLE ALWAYS`. `status` is `enabled` or `disabled` (inferred; the sources
+speak of disabling and re-enabling, and of an "active" assignment, read as
+`enabled`). Every column is `NOT NULL`.
 
-- **Keys.** `resource_server.audience` is globally unique, compared
-  byte-wise and immutable (IR-070); its syntax is open (OQ-IR-9), so only an
-  empty value is rejected. `(resource_server_id, action_name)` is unique
-  (IR-100). One assignment per resource server and tenant (inferred from
-  ADR-018 item 6 and the single assignment ceiling of IR-062).
-  `public_mtls_identity` is unique across all checkers, disabled ones
-  included, so an identity is bound to one resource server (IR-090).
-- **Immutable selectors** (`SK001`): the IDs, the audience, each row's
-  `resource_server_id`, an assignment's `tenant_id`, an action's
-  `action_name` and every column of a checker tenant row. A checker's
-  identity may be rotated.
+- **Keys.** `resource_server.audience` is globally unique and exact
+  (IR-070) and compared byte-wise. `(resource_server_id, action_name)` is
+  unique (inferred: the service looks up "the" persisted action of a
+  resource server, API-072). One assignment per resource server and tenant
+  (inferred from ADR-018 item 6 and the single assignment ceiling of
+  IR-062). `public_mtls_identity` is unique across all checkers, disabled
+  ones included, so an identity is bound to one resource server (IR-090;
+  including disabled rows is inferred).
+- **Free-text keys** are bounded and cleaned as `exact_destination` is in
+  `0002` (lead decision, 2026-11-20): `audience`, `action_name` and
+  `public_mtls_identity` are non-empty and at most 2048 bytes, so an
+  over-long value fails with `23514` instead of the btree error `54000`;
+  `audience` and `action_name` also reject whitespace and control characters
+  (`[[:space:][:cntrl:]]`, as for egress destinations). `public_mtls_identity`
+  may contain spaces, since its form is not specified and may be a subject
+  DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
+  (NFC or NFD) of these values is a service rule: the database compares
+  bytes, so two spellings of one name are two keys.
+- **Immutable selectors** (`SK001`): the IDs (tasks §3 "IDs/names"), and
+  (inferred) the audience, each row's `resource_server_id`, an assignment's
+  `tenant_id` and an action's `action_name`; every column of a checker
+  tenant row (lead decision, 2026-11-20). A checker's identity may be
+  rotated (inferred).
 - **Checker tenants** (lead decision, 2026-11-20): the model and API field
   `ResourceServerChecker.allowed_tenant_ids` is derived from the rows of
-  `resource_server_checker_tenant (checker_id, resource_server_id,
-  tenant_id)`, primary key `(checker_id, tenant_id)`. Composite foreign keys
+  `resource_server_checker_tenant` (`checker_id`, `resource_server_id`,
+  `tenant_id`), primary key `(checker_id, tenant_id)`. Composite foreign keys
   to the checker's `(id, resource_server_id)` and to the assignment's
   `(tenant_id, resource_server_id)` hold the existence half of OQ-ADR018-1:
   a checker can only list a tenant that has an assignment to its own
@@ -188,11 +201,25 @@ disabling and re-enabling, and of an "active" assignment, read as
   or revision of their own (inferred: the set is part of the revisioned
   checker).
 - **References.** Assignments, checkers and actions reference their
-  resource server, and assignments their tenant, without cascade. The unique
+  resource server, and assignments their tenant, with no action on delete or
+  update and not deferrable. Each foreign key is named, so the service can
+  map a `23503` by its constraint name:
+
+  | Constraint                                           | Columns                                            |
+  | ---------------------------------------------------- | -------------------------------------------------- |
+  | `audience_tenant_assignment_resource_server_id_fkey` | `resource_server_id` → `resource_server`           |
+  | `audience_tenant_assignment_tenant_id_fkey`          | `tenant_id` → `tenant`                             |
+  | `resource_server_checker_resource_server_id_fkey`    | `resource_server_id` → `resource_server`           |
+  | `resource_server_checker_tenant_checker_fkey`        | `(checker_id, resource_server_id)` → the checker   |
+  | `resource_server_checker_tenant_assignment_fkey`     | `(tenant_id, resource_server_id)` → the assignment |
+  | `resource_action_resource_server_id_fkey`            | `resource_server_id` → `resource_server`           |
+
+  The unique
   `(tenant_id, resource_server_id)` of the assignment is the target for
   composite foreign keys from later tenant-owned records that name an
   audience (grants, services, clients, origins, human policies; IR-080), so
   they cannot name an audience assigned only to another tenant.
+
 - **Lists** are `jsonb` arrays checked through three domains, so each rule
   is written once (a domain `CHECK` is stored as an expression tree and
   resolves no names at run time): `skyoauth_scope_list` holds RFC 6749
@@ -204,16 +231,20 @@ disabling and re-enabling, and of an "active" assignment, read as
   `constraint_versions` only has to be an array: the type of a version and
   its relation to the constraints `version` member are open (OQ-TP-7). Empty
   arrays and duplicate elements are accepted (inferred: no source forbids
-  them).
+  them). An empty requirement (`required_scopes`,
+  `required_resource_dimensions`) requires nothing; an empty ceiling
+  (`scopes`, `allowed_profiles`, `allowed_scopes`, `accepted_profiles`)
+  allows nothing, so it fails closed.
 - **M1a fields only.** `resource_action` has no stream fields
   (`stream_capable`, `max_stream_duration_seconds`, `stream_class`,
   `max_session_lease_seconds`); T14.4 adds them in M1b.
+  `live_check_required` has no default (inferred): the service states it.
 
 The database does not enforce these rules; the service must:
 
-- validate the audience syntax (OQ-IR-9), canonicalize
-  `public_mtls_identity` before it is stored, and parse, pin and match the
-  checker's mTLS certificate;
+- validate the audience syntax (OQ-IR-9), normalize the Unicode form of
+  audiences and action names, canonicalize `public_mtls_identity` before it
+  is stored, and parse, pin and match the checker's mTLS certificate;
 - check scope vocabulary: that assignment and action scopes lie within the
   resource server's scopes, and that profiles and constraint versions do
   too, where a source requires it (IR-062, IR-110, IR-141);
@@ -296,13 +327,20 @@ Open for all registry tables:
 
 - Delete and truncate guards. One follow-up migration adds them for every
   instance- and tenant-level registry table, decided together, not table by
-  table (lead decision, 2026-11-20). It covers `tenant` and `principal`
-  (including `TRUNCATE principal`, which nothing references yet), the four
-  `0003` registry tables and `resource_server_checker_tenant`, whose rows
-  are deleted to shrink a checker's tenant set. ADR-008 item 3 settles hard
-  delete for bindings and grants only; for the other tables it is open, and
-  the admin endpoints of `0003` have no `DELETE` (public-api §7). Until
-  then only foreign keys hold back a delete.
+  table (lead decision, 2026-11-20). It is a prerequisite before any code
+  snapshots an `(id, revision)` pair (tasks §3 "Policy revisions") or relies
+  on revisions only increasing: a row deleted and recreated with the same ID
+  starts again at revision 1, so an old snapshot could match the new row.
+  Today only foreign keys hold back a delete, so these rows can be deleted:
+  `tenant` and `principal` rows nothing references (and
+  `TRUNCATE principal`), every `resource_action` row (nothing references
+  one), checkers with no tenant rows, assignments no checker tenant row
+  references, and resource servers with no assignment, checker or action.
+  `resource_server_checker_tenant` is different: deleting a row is how a
+  checker's tenant set shrinks, so its rows stay deletable and only the
+  checker's revision records the change. ADR-008 item 3 settles hard delete
+  for bindings and grants only; for the other tables it is open, and the
+  admin endpoints of `0003` have no `DELETE` (public-api §7).
 
 Not done in `0002`:
 

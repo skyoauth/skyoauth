@@ -172,6 +172,91 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
     .await
     .unwrap();
     assert_eq!(not_c, [("resource_server".into(), "name".into())]);
+
+    // No column is nullable by design.
+    let nullable: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.relname::text, a.attname::text FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+         WHERE c.relnamespace = to_regnamespace(current_schema()) AND c.relname = ANY($1)
+           AND a.attnum > 0 AND NOT a.attisdropped AND NOT a.attnotnull
+         ORDER BY 1, 2",
+    )
+    .bind(&tables)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(nullable.is_empty(), "{nullable:?}");
+
+    // Foreign keys are named for the service's 23503 mapping, take no
+    // action on delete or update and are checked at once.
+    let mut foreign_keys: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT conname::text, confdeltype::text || confupdtype::text,
+                condeferrable::text || condeferred::text
+         FROM pg_constraint
+         WHERE contype = 'f' AND conrelid = ANY($1::text[]::regclass[])",
+    )
+    .bind(&tables)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    foreign_keys.sort();
+    let expected: Vec<(String, String, String)> = [
+        "audience_tenant_assignment_resource_server_id_fkey",
+        "audience_tenant_assignment_tenant_id_fkey",
+        "resource_action_resource_server_id_fkey",
+        "resource_server_checker_resource_server_id_fkey",
+        "resource_server_checker_tenant_assignment_fkey",
+        "resource_server_checker_tenant_checker_fkey",
+    ]
+    .map(|name| (name.into(), "aa".into(), "falsefalse".into()))
+    .into();
+    assert_eq!(foreign_keys, expected);
+    db.drop([pool]).await;
+}
+
+/// The unique free-text keys are bounded below the btree limit, so an
+/// over-long value is a check violation, not 54000; names also carry no
+/// whitespace or control characters. The mTLS identity may be a subject DN,
+/// so it may contain spaces.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn free_text_keys_are_bounded_and_names_have_no_whitespace_or_controls() {
+    let (db, pool) = seeded().await;
+    rejects(&pool, r"
+        23514 INSERT INTO resource_server VALUES ('rs_3', repeat('a', 2049), 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', repeat('é', 1025), 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', repeat('a', 5000), 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', 'x-api ', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', ' x-api', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', 'x api', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', E'x-api\t', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', E'x-api\n', 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', 'x-api' || chr(1), 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', 'x-api' || chr(127), 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_server VALUES ('rs_3', 'x-api' || chr(133), 'X', '[]', '[]', '[]', 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', repeat('a', 2049), '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', repeat('a', 5000), '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'projects.list ', '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', E'projects.list\t', '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', E'projects.list\n', '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'projects.list' || chr(1), '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'projects.list' || chr(127), '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'projects.list' || chr(133), '[]', '[]', '[]', false, 'enabled')
+        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', repeat('a', 2049), 'enabled')
+        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', repeat('a', 5000), 'enabled')
+    ").await;
+    // 2048 bytes is the largest accepted value; a DN with spaces is an
+    // identity.
+    run(
+        &pool,
+        "INSERT INTO resource_server VALUES
+             ('rs_3', repeat('a', 2048), 'X', '[]', '[]', '[]', 'enabled');
+         INSERT INTO resource_action VALUES
+             ('act_2', 'rs_1', repeat('a', 2048), '[]', '[]', '[]', false, 'enabled');
+         INSERT INTO resource_server_checker VALUES
+             ('chk_2', 'rs_1', 'CN=billing checker, O=Example Corp', 'enabled'),
+             ('chk_3', 'rs_1', repeat('a', 2048), 'enabled')",
+    )
+    .await;
     db.drop([pool]).await;
 }
 
@@ -442,6 +527,8 @@ async fn checker_tenants_are_assigned_to_the_checkers_resource_server() {
         23503 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', 'ten_x')
         23505 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', 'ten_a')
         23502 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', NULL)
+        23502 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', NULL, 'ten_c')
+        23502 INSERT INTO resource_server_checker_tenant VALUES (NULL, 'rs_1', 'ten_b')
         SK001 UPDATE resource_server_checker_tenant SET tenant_id = 'ten_a' WHERE checker_id = 'chk_2'
         SK001 UPDATE resource_server_checker_tenant SET checker_id = 'chk_2' WHERE tenant_id = 'ten_a'
         SK001 UPDATE resource_server_checker_tenant SET resource_server_id = 'rs_2' WHERE checker_id = 'chk_1'
