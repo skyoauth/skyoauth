@@ -140,15 +140,17 @@ GitHub Actions runs on pushes to `main` and on pull requests:
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. On pushes to `main`, CI generates separate Rust and TypeScript tests and
 line-coverage badges as SVG files on the `badges` branch
-(`scripts/ci/publish-badges.sh`, rendered by `scripts/ci/badge.sh`) — Rust test
+(`scripts/ci/publish-badges.sh`, rendered by `scripts/ci/badge.sh`), so they
+need no external service and render in a private repository too. Rust test
 counts come from `service-nextest` (all workspace tests, including PostgreSQL
-tests) and Rust line coverage from `rust-coverage`; TypeScript test counts and
-line coverage come from `typescript-coverage` — so they need no external
-service and render in a private repository too. The publishing job checks that
-GitHub serves them as images from the rendered README
-(`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`, which
-publishes nothing, runs the same check. To protect `main`, require the `CI
-passed` check: it passes when `Docs consistency` and `Conformance registry`
+tests) and Rust line coverage comes from `rust-coverage` (which excludes the
+PostgreSQL-backed tests); TypeScript test counts and line coverage come from
+`typescript-coverage`. When a suite fails on `main`, CI publishes red failure
+badges (`N failed` or `failing`) rather than leaving stale passing figures. The
+publishing job checks that GitHub serves them as images from the rendered
+README (`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`,
+which publishes nothing, runs the same check. To protect `main`, require the
+`CI passed` check: it passes when `Docs consistency` and `Conformance registry`
 passed and every other job passed or was skipped. Dependabot keeps actions,
 crates and npm packages up to date.
 
