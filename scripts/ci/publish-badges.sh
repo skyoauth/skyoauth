@@ -276,12 +276,49 @@ gate() {
 
 # `junit_attr FILE NAME`: the count in the NAME attribute of FILE's
 # <testsuites> element, without leading zeros (which `$(( ))` reads as
-# octal), or nothing when it is absent. Fails for a value that is not a
-# whole number (empty, negative, fractional, with other characters), and
-# for a count of more than 9 digits, which `test` and `$(( ))` cannot be
+# octal), or nothing when it is absent. The element may span lines, and
+# its attributes may be single- or double-quoted with spaces around `=`.
+# Fails when there is no such element or it cannot be read attribute by
+# attribute (an unquoted or unterminated value, a missing space between
+# attributes, a repeated attribute), for a value that is not a whole
+# number (empty, negative, fractional, with other characters), and for a
+# count of more than 9 digits, which `test` and `$(( ))` cannot be
 # trusted with.
 junit_attr() {
-    value=$(sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([^\"]*\)\".*/=\1/p" "$1" | head -n 1)
+    rc=0
+    value=$(tr '\r\t' '  ' <"$1" | awk -v want="$2" -v sq="'" '
+        { s = s $0 " " }
+        END {
+            if (!match(s, /<testsuites[ \/>]/)) exit 2
+            s = substr(s, RSTART + 11)
+            for (;;) {
+                sub(/^ +/, "", s)
+                if (s ~ /^\/?>/) break
+                if (!match(s, /^[A-Za-z_:][-A-Za-z0-9_:.]*/)) exit 2
+                name = substr(s, 1, RLENGTH)
+                s = substr(s, RLENGTH + 1)
+                if (!match(s, /^ *= */)) exit 2
+                s = substr(s, RLENGTH + 1)
+                q = substr(s, 1, 1)
+                if (q != "\"" && q != sq) exit 2
+                s = substr(s, 2)
+                e = index(s, q)
+                if (e == 0) exit 2
+                v = substr(s, 1, e - 1)
+                s = substr(s, e + 1)
+                if (s !~ /^( |\/?>)/) exit 2
+                if (name == want) {
+                    if (found) exit 2
+                    found = 1
+                    out = v
+                }
+            }
+            if (found) printf "=%s", out
+        }') || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "publish-badges: cannot parse the <testsuites> element in $1" >&2
+        return 1
+    fi
     [ -n "$value" ] || return 0
     value=${value#=}
     case $value in

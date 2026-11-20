@@ -499,6 +499,51 @@ describe('numeric settings and counts', () => {
     });
   }
 
+  // XML lets the root element span lines, quote values with ' or ", and
+  // put spaces around `=`. A count missed in any of these would read as
+  // absent (zero), and a report with failures would show as green.
+  for (const [form, root] of [
+    ['single-quoted', "<testsuites name='t' tests='12' failures='3' errors='0' skipped='1'>"],
+    ['single-quoted among double-quoted', `<testsuites name="t" tests="12" failures='3' errors="0" skipped="1">`],
+    ['spaced around =', '<testsuites name = "t" tests= "12" failures ="3" errors = \'0\' skipped  =  "1">'],
+    ['multi-line', '<testsuites name="t" tests="12"\n    failures="3"\r\n\terrors="0"\n    skipped="1"\n>'],
+    ['with a > inside a value', '<testsuites name="a > b" tests="12" failures="3" errors="0" skipped="1">'],
+  ]) {
+    test(`reads the counts of a ${form} JUnit root element`, () => {
+      const { remote, sha, work, file } = setup();
+      const xml = `<?xml version="1.0"?>\n${root}<testsuite name="s"/></testsuites>\n`;
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', xml)]);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 3 failed' });
+      const { status, passed, failed } = summary(remote, 'main').rust_tests;
+      assert.deepEqual({ status, passed, failed }, { status: 'failed', passed: 8, failed: 3 });
+    });
+  }
+
+  // What cannot be read attribute by attribute is not guessed at.
+  for (const [form, xml] of [
+    ['an unquoted value', junit('tests="12" failures=3 errors="0" skipped="0"')],
+    ['an unterminated value', '<testsuites name="t" tests="12" failures="3>\n<testsuite name=s/></testsuites>\n'],
+    ['no space between attributes', junit('tests="12"failures="3" errors="0" skipped="0"')],
+    ['a repeated attribute', junit('tests="12" failures="0" errors="0" skipped="0" failures="3"')],
+    ['no <testsuites> element', '<?xml version="1.0"?><testsuite name="s" tests="12" failures="3"/>'],
+  ]) {
+    test(`rejects a JUnit root element with ${form}`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', xml)]);
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /cannot parse the <testsuites> element in .*junit\.xml/);
+      assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+    });
+
+    test(`a JUnit root element with ${form} from a failed job publishes a red failing badge`, () => {
+      const { remote, sha, work, file } = setup();
+      const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', xml), '--rust-tests-failed']);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: failing' });
+    });
+  }
+
   for (const value of ['99999999999999999999', 'abc']) {
     test(`a JUnit count failures="${value}" from a failed job publishes a red failing badge`, () => {
       const { remote, sha, work, file } = setup();
