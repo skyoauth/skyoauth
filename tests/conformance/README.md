@@ -276,6 +276,7 @@ Only **passed** counts; `CI passed` is never read and is not a conformance signa
 
 - Runtime tests, fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry`.
 - A workflow job that downloads the artifacts of a commit, runs the reporter and posts or uploads its result; the gate job that runs `--gate-pr` and the reporter for the gate PR's merge-base ([Gate PRs](#gate-prs), layout §6 "Still open", item 7); the release check.
+- A release-manifest PR check: `--gate-pr` does not read the release manifest, which does not exist yet. A PR that adds a shipped feature to it must be one commit on its merge-base with the stages of the conditional sub-IDs it makes count implemented and passed there (layout §3 **Release**); nothing checks that yet.
 - The artifact manifest check (layout §6 "Still open", item 6): comparing the downloaded runs, attempts and artifacts with what the Actions API lists, so that a missing download is an input error.
 - A check that the `--root` checkout is clean: the reporter compares `HEAD` with `--commit`, but uncommitted changes to the registry files are not detected.
 - The reporter's fixture count check of layout §1.3 (per consumer and kind, executed JUnit cases equal fixtures on disk). Each fixture case is listed as its own registered test, so a missing case already makes its pair not run.
