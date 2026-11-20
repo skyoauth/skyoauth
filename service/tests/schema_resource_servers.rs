@@ -16,7 +16,7 @@ use skyoauth_service::persistence::{self, PgPool};
 use sqlx::{Executor, PgConnection, Postgres};
 
 /// Two tenants, two resource servers, and on `rs_1` an assignment to
-/// `ten_a`, a checker and an action.
+/// `ten_a`, a checker that lists `ten_a`, and an action.
 const SEED: &str = r#"
     INSERT INTO tenant VALUES ('ten_a', 'a', 'ns_a', 'enabled'), ('ten_b', 'b', 'ns_b', 'enabled');
     INSERT INTO resource_server VALUES
@@ -24,7 +24,8 @@ const SEED: &str = r#"
         ('rs_2', 'billing-api', 'Billing', '["human_session"]', '[]', '[]', 'enabled');
     INSERT INTO audience_tenant_assignment VALUES
         ('ata_1', 'rs_1', 'ten_a', '["wif"]', '["projects:read"]', '[1]', 'enabled');
-    INSERT INTO resource_server_checker VALUES ('chk_1', 'rs_1', 'sha256:aa', '["ten_a"]', 'enabled');
+    INSERT INTO resource_server_checker VALUES ('chk_1', 'rs_1', 'sha256:aa', 'enabled');
+    INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', 'ten_a');
     INSERT INTO resource_action VALUES
         ('act_1', 'rs_1', 'projects.get', '["projects:read"]', '["wif"]', '["projects"]', true, 'enabled')"#;
 
@@ -112,7 +113,8 @@ async fn resource_server_migration_is_recorded_once_and_rerun_is_a_no_op() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
     let (db, pool) = seeded().await;
-    let tables: Vec<String> = TABLES.iter().map(|t| t.to_string()).collect();
+    let mut tables: Vec<String> = TABLES.iter().map(|t| t.to_string()).collect();
+    tables.push("resource_server_checker_tenant".into());
 
     // Every trigger of 0003 is a guard that fires in every
     // session_replication_role and calls a function with a pinned path.
@@ -133,6 +135,12 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
         .flat_map(|t| {
             ["immutable", "revision"].map(|g| (t.to_string(), format!("{t}_{g}"), "A".into(), true))
         })
+        .chain([(
+            "resource_server_checker_tenant".into(),
+            "resource_server_checker_tenant_immutable".into(),
+            "A".into(),
+            true,
+        )])
         .collect();
     expected.sort();
     assert_eq!(triggers, expected);
@@ -243,10 +251,7 @@ async fn list_columns_are_arrays_of_well_formed_elements() {
         23514 INSERT INTO audience_tenant_assignment VALUES ('ata_2', 'rs_1', 'ten_b', '[]', '["a b"]', '[]', 'enabled')
         23514 INSERT INTO audience_tenant_assignment VALUES ('ata_2', 'rs_1', 'ten_b', '[]', '[]', '{}', 'enabled')
         23514 INSERT INTO audience_tenant_assignment VALUES ('ata_2', 'rs_1', 'ten_b', '[]', '[]', '[]', 'active')
-        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', 'sha256:bb', '[""]', 'enabled')
-        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', 'sha256:bb', '[1]', 'enabled')
-        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', 'sha256:bb', '"ten_a"', 'enabled')
-        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', 'sha256:bb', '[]', 'active')
+        23514 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_1', 'sha256:bb', 'active')
         23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'x', '["a b"]', '[]', '[]', false, 'enabled')
         23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'x', '[]', '["human"]', '[]', false, 'enabled')
         23514 INSERT INTO resource_action VALUES ('act_2', 'rs_1', 'x', '[]', '[]', '[""]', false, 'enabled')
@@ -346,29 +351,28 @@ async fn checker_identity_is_registered_once_for_one_resource_server() {
     let (db, pool) = seeded().await;
     run(
         &pool,
-        r#"INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_2', 'sha256:bb', '[]', 'disabled')"#,
+        "INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_2', 'sha256:bb', 'disabled')",
     )
     .await;
     rejects(&pool, r#"
-        23505 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_2', 'sha256:aa', '["ten_a"]', 'enabled')
-        23505 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:aa', '["ten_b"]', 'enabled')
-        23505 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:bb', '["ten_a"]', 'enabled')
-        23503 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_x', 'sha256:cc', '[]', 'enabled')
-        23514 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', '', '[]', 'enabled')
-        23502 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:cc', NULL, 'enabled')
-        SK001 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:cc', '[]', 'enabled', 5)
+        23505 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_2', 'sha256:aa', 'enabled')
+        23505 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:aa', 'enabled')
+        23505 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:bb', 'enabled')
+        23503 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_x', 'sha256:cc', 'enabled')
+        23514 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', '', 'enabled')
+        23502 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', NULL, 'enabled')
+        SK001 INSERT INTO resource_server_checker VALUES ('chk_3', 'rs_1', 'sha256:cc', 'enabled', 5)
         SK001 UPDATE resource_server_checker SET resource_server_id = 'rs_2', revision = revision + 1 WHERE id = 'chk_1'
         SK001 UPDATE resource_server_checker SET id = 'chk_9', revision = revision + 1 WHERE id = 'chk_1'
-        SK001 UPDATE resource_server_checker SET allowed_tenant_ids = '[]' WHERE id = 'chk_1'
+        SK001 UPDATE resource_server_checker SET status = 'disabled' WHERE id = 'chk_1'
         23505 UPDATE resource_server_checker SET public_mtls_identity = 'sha256:bb', revision = revision + 1 WHERE id = 'chk_1'
     "#).await;
-    // The identity may be rotated and the tenant set edited.
+    // The identity may be rotated.
     run(
         &pool,
-        r#"UPDATE resource_server_checker SET public_mtls_identity = 'sha256:cc',
-               allowed_tenant_ids = '["ten_a", "ten_b"]', status = 'disabled',
-               revision = revision + 1
-           WHERE id = 'chk_1'"#,
+        "UPDATE resource_server_checker SET public_mtls_identity = 'sha256:cc',
+             status = 'disabled', revision = revision + 1
+         WHERE id = 'chk_1'",
     )
     .await;
     assert_eq!(revision(&pool, "resource_server_checker").await, [2, 1]);
@@ -409,6 +413,63 @@ async fn action_name_is_unique_per_resource_server_and_immutable() {
     db.drop([pool]).await;
 }
 
+/// A checker lists only tenants assigned to its own resource server
+/// (OQ-ADR018-1, existence half): not `ten_c`, which has no assignment, nor
+/// `ten_a` for `chk_2`, since `ten_a` is assigned to `rs_1` only, and a row
+/// cannot pair a checker with another resource server. Whether the
+/// assignment is enabled is the service's rule, so a disabled one still
+/// allows the row.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn checker_tenants_are_assigned_to_the_checkers_resource_server() {
+    let (db, pool) = seeded().await;
+    run(
+        &pool,
+        "INSERT INTO tenant VALUES ('ten_c', 'c', 'ns_c', 'enabled');
+         INSERT INTO audience_tenant_assignment VALUES
+             ('ata_2', 'rs_2', 'ten_b', '[]', '[]', '[]', 'enabled'),
+             ('ata_3', 'rs_1', 'ten_b', '[]', '[]', '[]', 'disabled');
+         INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_2', 'sha256:bb', 'enabled');
+         INSERT INTO resource_server_checker_tenant VALUES
+             ('chk_1', 'rs_1', 'ten_b'), ('chk_2', 'rs_2', 'ten_b')",
+    )
+    .await;
+    rejects(&pool, "
+        23503 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', 'ten_c')
+        23503 INSERT INTO resource_server_checker_tenant VALUES ('chk_2', 'rs_2', 'ten_a')
+        23503 INSERT INTO resource_server_checker_tenant VALUES ('chk_2', 'rs_1', 'ten_a')
+        23503 INSERT INTO resource_server_checker_tenant VALUES ('chk_x', 'rs_1', 'ten_a')
+        23503 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', 'ten_x')
+        23505 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', 'ten_a')
+        23502 INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', NULL)
+        SK001 UPDATE resource_server_checker_tenant SET tenant_id = 'ten_a' WHERE checker_id = 'chk_2'
+        SK001 UPDATE resource_server_checker_tenant SET checker_id = 'chk_2' WHERE tenant_id = 'ten_a'
+        SK001 UPDATE resource_server_checker_tenant SET resource_server_id = 'rs_2' WHERE checker_id = 'chk_1'
+        23503 DELETE FROM audience_tenant_assignment WHERE id = 'ata_3'
+        23503 DELETE FROM resource_server_checker WHERE id = 'chk_2'
+    ").await;
+    // Removing a tenant from the set deletes its row.
+    run(
+        &pool,
+        "DELETE FROM resource_server_checker_tenant WHERE checker_id = 'chk_1' AND tenant_id = 'ten_b'",
+    )
+    .await;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT checker_id, tenant_id FROM resource_server_checker_tenant ORDER BY 1, 2",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("chk_1".into(), "ten_a".into()),
+            ("chk_2".into(), "ten_b".into())
+        ]
+    );
+    db.drop([pool]).await;
+}
+
 /// `ENABLE ALWAYS` keeps the guards firing in replica mode, which would
 /// otherwise skip ordinary triggers; domain and table CHECKs hold anyway.
 #[tokio::test]
@@ -423,7 +484,8 @@ async fn resource_server_guards_hold_under_replica_role() {
         SK001 UPDATE audience_tenant_assignment SET tenant_id = 'ten_b', revision = revision + 1
         SK001 UPDATE audience_tenant_assignment SET status = 'disabled', revision = 5
         SK001 UPDATE resource_server_checker SET resource_server_id = 'rs_2', revision = revision + 1
-        SK001 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_2', 'sha256:bb', '[]', 'enabled', 2)
+        SK001 INSERT INTO resource_server_checker VALUES ('chk_2', 'rs_2', 'sha256:bb', 'enabled', 2)
+        SK001 UPDATE resource_server_checker_tenant SET tenant_id = 'ten_b'
         SK001 UPDATE resource_action SET action_name = 'projects.list', revision = revision + 1
         SK001 INSERT INTO resource_action VALUES ('act_2', 'rs_2', 'x', '[]', '[]', '[]', false, 'enabled', 0)
         23514 UPDATE resource_server SET scopes = '["a b"]', revision = revision + 1

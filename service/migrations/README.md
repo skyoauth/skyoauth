@@ -157,8 +157,9 @@ first gets the committed head and succeeds.
 `0003_resource_servers.sql` is the second slice of the M1a domain schema
 (T10.1): the instance audience registry of identity-registry §7 and ADR-018,
 as `resource_server`, `audience_tenant_assignment`,
-`resource_server_checker` and `resource_action`. It adds no function: every
-table reuses `skyoauth_reject_immutable_change(…)` and
+`resource_server_checker` with its tenant rows in
+`resource_server_checker_tenant`, and `resource_action`. It adds no
+function: every table reuses `skyoauth_reject_immutable_change(…)` and
 `skyoauth_check_revision()` from `0002`, with `ENABLE ALWAYS` triggers, and
 `status` is `enabled` or `disabled` (inferred; the sources speak of
 disabling and re-enabling, and of an "active" assignment, read as
@@ -172,9 +173,20 @@ disabling and re-enabling, and of an "active" assignment, read as
   `public_mtls_identity` is unique across all checkers, disabled ones
   included, so an identity is bound to one resource server (IR-090).
 - **Immutable selectors** (`SK001`): the IDs, the audience, each row's
-  `resource_server_id`, an assignment's `tenant_id` and an action's
-  `action_name`. A checker's identity may be rotated and its tenant set
-  edited.
+  `resource_server_id`, an assignment's `tenant_id`, an action's
+  `action_name` and every column of a checker tenant row. A checker's
+  identity may be rotated.
+- **Checker tenants** (lead decision, 2026-11-20): the model and API field
+  `ResourceServerChecker.allowed_tenant_ids` is derived from the rows of
+  `resource_server_checker_tenant (checker_id, resource_server_id,
+  tenant_id)`, primary key `(checker_id, tenant_id)`. Composite foreign keys
+  to the checker's `(id, resource_server_id)` and to the assignment's
+  `(tenant_id, resource_server_id)` hold the existence half of OQ-ADR018-1:
+  a checker can only list a tenant that has an assignment to its own
+  resource server (`23503` otherwise), whatever that assignment's status.
+  The set is edited by inserting and deleting rows; the rows have no status
+  or revision of their own (inferred: the set is part of the revisioned
+  checker).
 - **References.** Assignments, checkers and actions reference their
   resource server, and assignments their tenant, without cascade. The unique
   `(tenant_id, resource_server_id)` of the assignment is the target for
@@ -186,7 +198,9 @@ disabling and re-enabling, and of an "active" assignment, read as
   resolves no names at run time): `skyoauth_scope_list` holds RFC 6749
   scope tokens (IR-066), `skyoauth_profile_list` `wif`, `human_cli` and
   `human_session` (token-profiles §3), and `skyoauth_string_list` non-empty
-  strings (`allowed_tenant_ids`, `required_resource_dimensions`; inferred).
+  strings (`required_resource_dimensions`; inferred). The scope domain
+  checks the IR-066 grammar, not only non-empty strings (lead decision,
+  2026-11-20).
   `constraint_versions` only has to be an array: the type of a version and
   its relation to the constraints `version` member are open (OQ-TP-7). Empty
   arrays and duplicate elements are accepted (inferred: no source forbids
@@ -205,10 +219,10 @@ The database does not enforce these rules; the service must:
   too, where a source requires it (IR-062, IR-110, IR-141);
 - give `constraint_versions` its meaning and check that each listed
   version exists;
-- check that every tenant in `allowed_tenant_ids` exists and has an enabled
-  assignment to the checker's resource server, and leave out tenants whose
-  assignment is disabled (OQ-ADR018-1); a `jsonb` element carries no
-  foreign key;
+- leave out of a checker's effective tenant set every tenant whose
+  assignment is disabled, without editing its rows, so that re-enabling the
+  assignment restores it (the other half of OQ-ADR018-1), and advance the
+  checker's revision when its tenant rows change;
 - refuse references outside an enabled same-tenant assignment at write and
   at issuance (IR-080, IR-081); a composite key proves only that the
   assignment exists;
@@ -278,12 +292,20 @@ The database does not enforce these rules; the service must:
 
 ## Follow-ups
 
+Open for all registry tables:
+
+- Delete and truncate guards. One follow-up migration adds them for every
+  instance- and tenant-level registry table, decided together, not table by
+  table (lead decision, 2026-11-20). It covers `tenant` and `principal`
+  (including `TRUNCATE principal`, which nothing references yet), the four
+  `0003` registry tables and `resource_server_checker_tenant`, whose rows
+  are deleted to shrink a checker's tenant set. ADR-008 item 3 settles hard
+  delete for bindings and grants only; for the other tables it is open, and
+  the admin endpoints of `0003` have no `DELETE` (public-api §7). Until
+  then only foreign keys hold back a delete.
+
 Not done in `0002`:
 
-- Delete guards for `tenant` and `principal`, including
-  `TRUNCATE principal`, which nothing references yet. ADR-008 item 3 settles hard
-  delete for bindings and grants only; for tenants and principals it is
-  open, and today only foreign keys hold back a delete.
 - An `audit_event` detail column, for example the affected source IDs that
   the audit event of an egress entry write lists (IR-152, OQ-IR-12).
 - A `revision` on `tenant` and `principal`: updates require
@@ -294,17 +316,9 @@ Not done in `0002`:
 
 Not done in `0003`:
 
-- Delete guards for the four `0003` tables. The admin endpoints have no
-  `DELETE` (public-api §7) and ADR-018 keeps dependent records when a
-  resource server is disabled, but no source says these rows are never
-  deleted.
 - The M1b stream fields of `resource_action`, with the lease range of
   IR-101 (default 15, at most 300) and `stream_class` once OQ-IR-8 defines
-  its values.
-- A child table for `ResourceServerChecker.allowed_tenant_ids` with a
-  foreign key to the assignment, if the lead wants the database to hold the
-  subset rule of OQ-ADR018-1 (only the existence half; "enabled" stays with
-  the service).
+  its values (T14.4; kept out of `0003` by lead decision, 2026-11-20).
 - Rejecting duplicate list elements, if a source makes these lists sets.
 - Whether IR-021 (names unique within entity type and tenant) applies to
   instance-owned names such as `resource_server.name`.

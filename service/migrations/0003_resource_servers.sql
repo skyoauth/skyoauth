@@ -10,9 +10,10 @@
 -- status is 'enabled' or 'disabled' everywhere (inferred): the sources speak
 -- of disabling and re-enabling resource servers and assignments (ADR-018
 -- items 4 and 6) and of an "active" assignment (IR-080), read as enabled.
--- Rows are disabled, not deleted (no DELETE endpoint, public-api section 7);
--- whether a delete is ever allowed is open, so only foreign keys hold one
--- back (README.md "Follow-ups").
+-- Rows are disabled, not deleted (no DELETE endpoint, public-api section 7).
+-- Delete and truncate guards for all registry tables come in one later
+-- migration, decided together (lead decision, 2026-11-20; README.md
+-- "Follow-ups"); until then only foreign keys hold back a delete.
 
 -- The list-valued columns are jsonb arrays. Their shape is checked through
 -- domains, so each rule is written once; a domain CHECK is stored as an
@@ -37,7 +38,7 @@ CREATE DOMAIN skyoauth_profile_list AS jsonb
             || (@ != "wif" && @ != "human_cli" && @ != "human_session"))',
         '{}', true));
 
--- IDs and names with no specified syntax: non-empty strings (inferred).
+-- Names with no specified syntax: non-empty strings (inferred).
 CREATE DOMAIN skyoauth_string_list AS jsonb
     CHECK (jsonb_typeof(VALUE) = 'array' AND NOT jsonb_path_exists(VALUE,
         'strict $[*] ? (@.type() != "string" || @ == "")', '{}', true));
@@ -65,7 +66,8 @@ CREATE TABLE resource_server (
 -- reads one assignment ceiling per credential). The unique pair is also the
 -- target of composite references from tenant-owned records that name an
 -- audience (grants, services, clients, origins, human policies; IR-080), so
--- a tenant can only reference an audience assigned to it.
+-- a tenant can only reference an audience assigned to it, and of checker
+-- tenant rows.
 CREATE TABLE audience_tenant_assignment (
     id                   text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
     resource_server_id   text COLLATE "C" NOT NULL REFERENCES resource_server (id),
@@ -83,7 +85,8 @@ CREATE TABLE audience_tenant_assignment (
 -- a principal or ServiceIdentity, so no principal carries checker
 -- credentials. It is bound to one resource server, and an mTLS identity is
 -- registered at most once, disabled rows included, so it cannot be usable
--- for another audience (IR-090; including disabled rows is inferred).
+-- for another audience (IR-090; including disabled rows is inferred). Its
+-- allowed_tenant_ids are the rows of resource_server_checker_tenant.
 CREATE TABLE resource_server_checker (
     id                    text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
     resource_server_id    text COLLATE "C" NOT NULL REFERENCES resource_server (id),
@@ -91,12 +94,31 @@ CREATE TABLE resource_server_checker (
     -- fingerprint) is not specified; the service canonicalizes it, so that
     -- the unique constraint compares like with like (inferred).
     public_mtls_identity  text COLLATE "C" NOT NULL UNIQUE CHECK (public_mtls_identity <> ''),
-    -- Tenant IDs. That each is a tenant with an enabled assignment to this
-    -- resource server (OQ-ADR018-1) is checked by the service: a jsonb
-    -- element cannot carry a foreign key.
-    allowed_tenant_ids    skyoauth_string_list NOT NULL,
     status                text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
-    revision              bigint      NOT NULL DEFAULT 1 CHECK (revision >= 1)
+    revision              bigint      NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    -- Target of the composite reference from resource_server_checker_tenant.
+    UNIQUE (id, resource_server_id)
+);
+
+-- ResourceServerChecker.allowed_tenant_ids, one row per tenant (lead
+-- decision, 2026-11-20): the model and API field is derived from these rows.
+-- The checker's tenant set must be a subset of its resource server's
+-- assignments (OQ-ADR018-1). The composite references hold the existence
+-- half: a row names a checker and an assignment of the same resource server,
+-- so a checker can only list a tenant assigned to its own resource server.
+-- Leaving out a tenant whose assignment is disabled stays with the service,
+-- without editing these rows. A row is added or deleted, never changed; the
+-- set is part of the checker, so the service advances the checker's revision
+-- with it (inferred: no status or revision of its own).
+CREATE TABLE resource_server_checker_tenant (
+    checker_id          text COLLATE "C" NOT NULL,
+    resource_server_id  text COLLATE "C" NOT NULL,
+    tenant_id           text COLLATE "C" NOT NULL,
+    PRIMARY KEY (checker_id, tenant_id),
+    FOREIGN KEY (checker_id, resource_server_id)
+        REFERENCES resource_server_checker (id, resource_server_id),
+    FOREIGN KEY (tenant_id, resource_server_id)
+        REFERENCES audience_tenant_assignment (tenant_id, resource_server_id)
 );
 
 -- ResourceAction, M1a fields (IR-100, IR-104; T14.4). The M1b stream fields
@@ -121,8 +143,8 @@ CREATE TABLE resource_action (
 );
 
 -- Immutable selectors (tasks section 3 "IDs/names"): the IDs, the audience,
--- the resource server each row belongs to, an assignment's tenant and an
--- action's name.
+-- the resource server each row belongs to, an assignment's tenant, an
+-- action's name and every column of a checker tenant row.
 CREATE TRIGGER resource_server_immutable
     BEFORE UPDATE ON resource_server
     FOR EACH ROW EXECUTE FUNCTION skyoauth_reject_immutable_change('id', 'audience');
@@ -138,6 +160,13 @@ CREATE TRIGGER resource_server_checker_immutable
     BEFORE UPDATE ON resource_server_checker
     FOR EACH ROW EXECUTE FUNCTION skyoauth_reject_immutable_change('id', 'resource_server_id');
 ALTER TABLE resource_server_checker ENABLE ALWAYS TRIGGER resource_server_checker_immutable;
+
+CREATE TRIGGER resource_server_checker_tenant_immutable
+    BEFORE UPDATE ON resource_server_checker_tenant
+    FOR EACH ROW EXECUTE FUNCTION
+        skyoauth_reject_immutable_change('checker_id', 'resource_server_id', 'tenant_id');
+ALTER TABLE resource_server_checker_tenant
+    ENABLE ALWAYS TRIGGER resource_server_checker_tenant_immutable;
 
 CREATE TRIGGER resource_action_immutable
     BEFORE UPDATE ON resource_action
