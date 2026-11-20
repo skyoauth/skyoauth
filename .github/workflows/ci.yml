@@ -654,13 +654,15 @@ jobs:
   # README embeds `main/` through github.com, so the badges also render in a
   # private repository and need no external service. A separate job so that
   # only this step, which runs no project code, holds a write-capable token.
-  # Runs on pushes to main and on manual dispatch (any branch, so the
-  # mechanism can be exercised before merge). scripts/ci/publish-badges.sh
-  # skips figures for a commit that is no longer its branch's tip. Runs on
-  # both passing and failing coverage/test jobs: a threshold-only miss
-  # publishes the percentage in red (whatever its value: the TypeScript gate
-  # also covers branches, functions and statements), and test or build failures
-  # publish red `N failed` / `failing` badges so stale passing figures never
+  # Runs only for `main`: on pushes to it and on a manual dispatch on it (to
+  # republish); a dispatch on any other branch publishes nothing, so no
+  # work branch can write to the badges branch.
+  # scripts/ci/publish-badges.sh skips figures for a commit that is no
+  # longer its branch's tip. Runs on both passing and failing coverage/test
+  # jobs: a threshold-only miss publishes the percentage in red (whatever
+  # its value: the TypeScript gate also covers branches, functions and
+  # statements), and test or build failures publish red `N failed` /
+  # `failing` badges so stale passing figures never
   # remain on a red `main`. A docs-only change skips coverage and tests and
   # publishes nothing; the script keeps publishing for a commit that only
   # such changes followed.
@@ -671,8 +673,8 @@ jobs:
       (needs.rust-coverage.result != 'skipped' ||
        needs.service-nextest.result != 'skipped' ||
        needs.typescript-coverage.result != 'skipped') &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [rust-coverage, service-nextest, typescript-coverage]
     runs-on: ubuntu-24.04
     permissions:
