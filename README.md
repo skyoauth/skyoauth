@@ -170,8 +170,9 @@ PostgreSQL-backed tests); TypeScript test counts and line coverage come from
 badges (`N failed` or `failing`) rather than leaving stale passing figures, and
 a coverage badge is red whenever its gate failed, whatever percentage it shows. The
 publishing job checks that GitHub serves them as images from the rendered
-README (`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`,
-which publishes nothing, runs the same check. To protect `main`, require the
+README (`scripts/ci/verify-badges-render.sh`); every pull request, and a
+docs-only push to `main`, which publishes nothing, run the same check against
+the badges already published for `main`. To protect `main`, require the
 `CI passed` check: it passes when `Docs consistency` and `Conformance registry`
 passed and every other job passed or was skipped. Dependabot keeps actions,
 crates and npm packages up to date.

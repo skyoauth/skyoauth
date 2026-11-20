@@ -190,9 +190,11 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.1
 
+      # `shell: bash` runs with -o pipefail, so a failing gate is not masked
+      # by `tee`.
       - name: Check coverage threshold
+        shell: bash
         run: |
-          set -o pipefail
           mkdir -p target/coverage
           cargo coverage --locked --json --summary-only --output-path target/coverage/coverage.json 2>&1 \
             | tee target/coverage/coverage.log
@@ -629,17 +631,20 @@ jobs:
             echo complete=true >> "$GITHUB_OUTPUT"
           fi
 
-  # A docs-only push to main publishes no badges but may have changed the
-  # README that embeds them, so check that it still renders the badges
-  # already published for main. Like publish-badges, only in
-  # skyoauth/skyoauth: the README embeds that repository's badges, which a
-  # fork does not publish.
+  # Checks that the README still renders the badges already published for
+  # main: on every pull request (its merge commit), so a change that drops
+  # or renames a badge fails before it reaches main, and on a docs-only push
+  # to main, which publishes no badges but may have changed the README
+  # (other pushes to main check after publishing, in publish-badges). Like
+  # publish-badges, only in skyoauth/skyoauth: the README embeds that
+  # repository's badges, which a fork does not publish.
   verify-badges:
     name: Verify README badges
     needs: changes
     if: >-
       github.repository == 'skyoauth/skyoauth' &&
-      needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+      (github.event_name == 'pull_request' ||
+       (needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -651,7 +656,7 @@ jobs:
       - name: Verify the README badges render
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/ci/verify-badges-render.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+        run: sh scripts/ci/verify-badges-render.sh "$GITHUB_REPOSITORY" main "$GITHUB_SHA"
 
   # Publishes the Rust and TypeScript coverage and test-count badges for the
   # pushed branch to the `badges` branch (path `<branch>/`) as SVG files; the

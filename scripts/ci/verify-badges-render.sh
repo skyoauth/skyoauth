@@ -2,7 +2,8 @@
 # Checks what CI can prove about the README badges of this (possibly
 # private) repository, after a publication for BRANCH:
 #
-#   1. the README as GitHub renders it (the HTML the web page embeds)
+#   1. the README at README_REF (default: BRANCH) as GitHub renders it (the
+#      HTML the web page embeds)
 #      carries exactly the four badge <img> elements — rust-tests.svg,
 #      rust-coverage.svg, typescript-tests.svg, and
 #      typescript-coverage.svg — each once, and GitHub left their
@@ -17,13 +18,18 @@
 # path redirects a browser. Whether the images finally appear in the page
 # is confirmed by a signed-in viewer of the README on `main`.
 #
-#   GH_TOKEN=... scripts/ci/verify-badges-render.sh OWNER/REPO BRANCH
+# README_REF is a branch or commit; a pull request passes its merge commit
+# with BRANCH `main`, to check that the README it would merge still embeds
+# the badges published for main.
+#
+#   GH_TOKEN=... scripts/ci/verify-badges-render.sh OWNER/REPO BRANCH [README_REF]
 set -eu
 repo=${1:?owner/repo}
 branch=${2:?branch}
+readme_ref=${3:-$branch}
 html=$(curl -sS -f -H "Authorization: Bearer ${GH_TOKEN:?}" \
     -H "Accept: application/vnd.github.html+json" \
-    "https://api.github.com/repos/$repo/readme?ref=$branch")
+    "https://api.github.com/repos/$repo/readme?ref=$readme_ref")
 urls=$(printf '%s' "$html" | grep -o '<img[^>]*>' | grep -E 'coverage\.svg|tests\.svg' \
     | sed -E 's/^<img[^>]*[[:space:]]src="([^"]*)".*/\1/' || true)
 if [ -z "$urls" ]; then
