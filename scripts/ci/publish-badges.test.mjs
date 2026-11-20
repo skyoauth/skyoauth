@@ -158,8 +158,10 @@ describe('coverage badge colour follows the gate', () => {
 describe('push retries', () => {
   // Lands a commit on `badges` from inside the remote while the push is in
   // flight, once: the push then fails as GitHub's does when two updates
-  // race, with "cannot lock ref ... is at X but expected Y" and
-  // "(failed to update ref)" rather than a non-fast-forward.
+  // race, with a ref-update error rather than a non-fast-forward. Its
+  // wording depends on the Git version ("cannot lock ref ... is at X but
+  // expected Y", "(failed to update ref)", "incorrect old value provided"),
+  // so no test matches it.
   const RACE_HOOK = `#!/bin/sh
 [ -e "$GIT_DIR/raced" ] && exit 0
 touch "$GIT_DIR/raced"
@@ -185,7 +187,7 @@ exit 1
     hook(remote, RACE_HOOK);
     const r = publish(work[0], args(sha, file, 91));
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stderr, /failed to update ref/);
+    assert.match(r.stdout, /push rejected \(badges moved from [0-9a-f]+ to [0-9a-f]+: another publication landed\)/);
     assert.match(r.stdout, /published main .* attempt 2\)/);
     assert.equal(badge(remote, 'main/rust-coverage.svg').title, 'rust coverage: 91.0%');
     assert.match(git(remote, 'log', '--format=%s', 'badges'), /^badges: main .*91\.0%.*\nconcurrent publication\nbadges: main .*90\.0%/);
