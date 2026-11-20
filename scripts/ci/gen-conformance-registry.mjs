@@ -372,7 +372,11 @@ export function taskLines(text) {
 // TOML subset reader (what this script writes: comments, [[tables]], keys with
 // basic strings, integers, booleans, arrays and inline tables, plus local
 // dates such as a waiver's `expires = 2026-12-31`). Each [[table]] object
-// carries its header line in the non-enumerable property __line.
+// carries its header line in the non-enumerable symbol property LINE. Every
+// key, `__proto__` and `constructor` included, is an own property: tables are
+// ordinary objects, set with Object.defineProperty and read with Object.hasOwn.
+
+export const LINE = Symbol('line');
 
 // A TOML local date (YYYY-MM-DD). Offset and local date-times and times are
 // not part of the subset.
@@ -405,6 +409,15 @@ export function parseToml(text, file = 'toml') {
   const err = (msg) => {
     throw new SpecError(`${file}:${line}: ${msg}`);
   };
+  // The arrays that [[headers]] create; every other value is final.
+  const headerArrays = new WeakSet();
+  const own = (obj, k) => (Object.hasOwn(obj, k) ? obj[k] : undefined);
+  const unique = (obj, k) => {
+    if (Object.hasOwn(obj, k)) err(`duplicate key ${k}`);
+  };
+  // An own data property even for `__proto__`, which a plain assignment would
+  // take as the prototype.
+  const set = (obj, k, v) => Object.defineProperty(obj, k, { value: v, writable: true, enumerable: true, configurable: true });
   const ws = (nl) => {
     for (;;) {
       const c = text[i];
@@ -476,7 +489,8 @@ export function parseToml(text, file = 'toml') {
         ws(false);
         if (text[i++] !== '=') err('expected "="');
         ws(false);
-        obj[k] = value();
+        unique(obj, k);
+        set(obj, k, value());
         ws(false);
         if (text[i] === ',') i++;
         else if (text[i] === '}') {
@@ -504,27 +518,40 @@ export function parseToml(text, file = 'toml') {
     if (text.startsWith('[[', i)) {
       const end = text.indexOf(']]', i);
       if (end < 0) err('unterminated table header');
-      const path = text.slice(i + 2, end).trim().split('.');
+      const header = text.slice(i + 2, end).trim();
+      const path = header.split('.');
       i = end + 2;
+      // An existing value of a header's key must be an array that headers made.
+      const tables = (obj, k) => {
+        const a = own(obj, k);
+        if (a !== undefined && !headerArrays.has(a)) err(`[[${header}]]: key ${k} already holds a value that is not an array of tables`);
+        return a;
+      };
       let parent = root;
       for (const p of path.slice(0, -1)) {
-        const a = parent[p];
-        if (!Array.isArray(a) || !a.length) err(`[[${path.join('.')}]] without a parent`);
+        const a = tables(parent, p);
+        if (a === undefined) err(`[[${header}]] without a parent`);
         parent = a[a.length - 1];
       }
       const last = path[path.length - 1];
       cur = {};
-      // The header's line, for duplicate-key errors; not enumerable, so it
-      // never shows up as a field.
-      Object.defineProperty(cur, '__line', { value: line });
-      (parent[last] ??= []).push(cur);
+      // The header's line, for error messages; a symbol, so it never shows up
+      // as a field and no key can collide with it.
+      Object.defineProperty(cur, LINE, { value: line });
+      let a = tables(parent, last);
+      if (a === undefined) {
+        a = [];
+        headerArrays.add(a);
+        set(parent, last, a);
+      }
+      a.push(cur);
     } else {
       const k = key();
       ws(false);
       if (text[i++] !== '=') err('expected "="');
       ws(false);
-      if (k in cur) err(`duplicate key ${k}`);
-      cur[k] = value();
+      unique(cur, k);
+      set(cur, k, value());
     }
     ws(false);
     if (i < text.length && text[i] !== '\n') err('expected end of line');
@@ -614,12 +641,12 @@ function duplicateErrors(doc, file, table) {
   const errors = [];
   const ids = new Map();
   for (const e of doc[table] ?? []) {
-    if (ids.has(e.id)) errors.push(`${file}:${e.__line}: duplicate ${table} ${e.id} (first at line ${ids.get(e.id)})`);
-    else ids.set(e.id, e.__line);
+    if (ids.has(e.id)) errors.push(`${file}:${e[LINE]}: duplicate ${table} ${e.id} (first at line ${ids.get(e.id)})`);
+    else ids.set(e.id, e[LINE]);
     const ms = new Map();
     for (const s of e.stage ?? []) {
-      if (ms.has(s.milestone)) errors.push(`${file}:${s.__line}: duplicate stage ${e.id} ${s.milestone} (first at line ${ms.get(s.milestone)})`);
-      else ms.set(s.milestone, s.__line);
+      if (ms.has(s.milestone)) errors.push(`${file}:${s[LINE]}: duplicate stage ${e.id} ${s.milestone} (first at line ${ms.get(s.milestone)})`);
+      else ms.set(s.milestone, s[LINE]);
     }
   }
   return errors;
@@ -804,9 +831,9 @@ export function generate(root) {
     const registered = new Map();
     for (const e of old.scenario ?? []) {
       if (e.kind === 'scenario') registered.set(e.id, e);
-      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e.__line}: ${e.id}: kind must be scenario or contract`);
+      else if (e.kind !== 'contract') errors.push(`${SCENARIOS}:${e[LINE]}: ${e.id}: kind must be scenario or contract`);
     }
-    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e.__line}: scenario ${id} is not a row of ${TASKS} §8`);
+    for (const [id, e] of registered) if (!aIds.includes(id)) errors.push(`${SCENARIOS}:${e[LINE]}: scenario ${id} is not a row of ${TASKS} §8`);
     const scenarios = [];
     for (const r of a.rows) {
       const s = registered.get(r.id);
@@ -814,14 +841,14 @@ export function generate(root) {
         errors.push(`${TASKS}:${r.n}: scenario ${r.id} has no [[scenario]] entry in ${SCENARIOS}; add one with its layout §2 columns and stages`);
         continue;
       }
-      const where = `${SCENARIOS}:${s.__line}: ${r.id}`;
+      const where = `${SCENARIOS}:${s[LINE]}: ${r.id}`;
       if (!validScenario(s, where, codes, tasksById, errors)) continue;
       const e = { id: r.id, layers: s.layers, envs: s.envs, harness: s.harness, owners: s.owners, note: s.note, positive: s.positive, negative: s.negative, matrix_sha256: sha256(r.line) };
-      const at = (st) => `${SCENARIOS}:${st.__line}: ${r.id} ${st.milestone}`;
+      const at = (st) => `${SCENARIOS}:${st[LINE]}: ${r.id} ${st.milestone}`;
       const before = errors.length;
       e.stages = s.stage.map((st) => {
         const full = { ...st, legs: st.legs ?? defaultLegs(e, st, catalogue), status: st.status ?? 'planned', tests: st.tests ?? [] };
-        Object.defineProperty(full, '__line', { value: st.__line });
+        Object.defineProperty(full, LINE, { value: st[LINE] });
         stageErrors(full, at(full), errors);
         if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${at(full)}: implemented_sha256 must be a string`);
         return full;
@@ -838,7 +865,7 @@ export function generate(root) {
     const byId = new Map([...registered].filter(([id]) => aIds.includes(id)));
     const subBlocks = [];
     for (const s of subs) {
-      const where = `${SUBCASES}:${s.__line}: ${s.id}`;
+      const where = `${SUBCASES}:${s[LINE]}: ${s.id}`;
       const before = errors.length;
       if (typeof s.id !== 'string' || !/^A\d\d\.\d\d$/.test(s.id)) errors.push(`${where}: id must look like A58.07`);
       else if (s.parent !== s.id.slice(0, 3) || !byId.has(s.parent)) errors.push(`${where}: parent must be the registered scenario ${s.id.slice(0, 3)}`);
@@ -850,7 +877,7 @@ export function generate(root) {
       if (errors.length > before) continue;
       for (const x of s.layers) if (!Object.values(LAYERS).includes(x)) errors.push(`${where}: unknown layer "${x}"`);
       for (const x of s.envs) if (!Object.values(codes).includes(x)) errors.push(`${where}: unknown env "${x}"`);
-      const stageAt = (st) => `${SUBCASES}:${st.__line}: ${s.id} ${st.milestone}`;
+      const stageAt = (st) => `${SUBCASES}:${st[LINE]}: ${s.id} ${st.milestone}`;
       for (const st of s.stage) {
         stageErrors(st, stageAt(st), errors);
         if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${stageAt(st)}: implemented_sha256 must be a string`);

@@ -1,6 +1,6 @@
 # Conformance test layout (proposal)
 
-> Status: proposal only. Nothing below exists yet except the bootstrap `service/tests/shutdown.rs`, the vitest suite in `clients/typescript/test/`, the two coverage gates, `scripts/ci/docs-only.sh`, and the registry in `tests/conformance/` with its generator and the static part of `check-conformance-registry` (section 3). The Rust gate is the `cargo coverage` alias in `.cargo/config.toml` (85 % **lines** only). The TypeScript gate is in `clients/typescript/vitest.config.ts` (85 % lines, functions, branches **and** statements). Sources: tasks §1, §8 (A01–A64), §9 DAG, §10, T50.8, T51, T52; design §2 (C01–C10), §5.6, §10. Lead decisions on the former open questions are recorded in section 5.
+> Status: proposal, partly in place. What exists: the bootstrap `service/tests/shutdown.rs`, the vitest suite in `clients/typescript/test/`, the two coverage gates, `scripts/ci/docs-only.sh`, the registry in `tests/conformance/` with its generator and the static part of `check-conformance-registry` (section 3, run by the `conformance-registry` job), the `service-nextest` job (workspace tests under cargo-nextest with a JUnit report), and the `scenarios-pg` job, which selects no tests until the first scenario test lands. Everything else below is still a proposal. The Rust gate is the `cargo coverage` alias in `.cargo/config.toml` (85 % **lines** only). The TypeScript gate is in `clients/typescript/vitest.config.ts` (85 % lines, functions, branches **and** statements). Sources: tasks §1, §8 (A01–A64), §9 DAG, §10, T50.8, T51, T52; design §2 (C01–C10), §5.6, §10. Lead decisions on the former open questions are recorded in section 5.
 
 ## 1. Layout and ownership
 
@@ -295,7 +295,7 @@ An `implemented` stage lists at least one test and carries `implemented_sha256`:
 | `operator/tests` | `operator` (ubuntu, macos, windows); `recovery-offline` chain | native-3os |
 | `clients/typescript/test/*.test.ts` | `typescript` (Node 22, 24) | hermetic |
 | `clients/typescript/test/browser/` | `typescript-browser` (Chromium, Firefox, WebKit) | browser |
-| `service/tests`, `service/src` | `rust` today runs plain `cargo test`, which emits no JUnit | none: not registrable |
+| `service/tests`, `service/src` | `service-nextest` runs them under cargo-nextest with a JUnit report, but section 1.1 has no leg string for it | none: not registrable until section 1.1 gives that job a leg |
 
 Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, which depends on `skyoauth-service`. A `service/` test can be registered only after a nextest job for that package is added; the same rule then applies to it. Every job above that produces registered tests runs cargo-nextest, vitest or Playwright with a JUnit reporter.
 
@@ -365,7 +365,7 @@ A tag push does carry `event_name: push`, but its `ref` is `refs/tags/…`; the 
 
 | Milestone | New jobs (Rust jobs keep the x86_64/aarch64 matrix where the bootstrap has it) | Required on PR | Post-merge / nightly / release |
 | --- | --- | --- | --- |
-| M0 | `conformance-registry` (static check, runs even for docs-only changes); fixture schema validation once M0 wire examples land as fixtures. **This is the only conformance-harness deliverable in M0: 64 planned scenarios and 10 planned contracts, 0 implemented.** The M0 milestone itself is T00's reviewed contracts and threat model (tasks §9). | yes, via `ci-passed` | — |
+| M0 | `conformance-registry` (static check, runs even for docs-only changes); fixture schema validation once M0 wire examples land as fixtures. **This is the only conformance-harness deliverable that M0 requires: 64 planned scenarios and 10 planned contracts, 0 implemented.** It is in place; `scenarios-pg` (M1a) also already runs, with an empty test selection. The M0 milestone itself is T00's reviewed contracts and threat model (tasks §9). | yes, via `ci-passed` | — |
 | M1a | `skyoauth-scenarios` member with `scenarios-hermetic` and `scenarios-pg`, plus the `rust` and coverage-alias changes from section 1.2; `operator` matrix ubuntu/macos/windows; `recovery-offline` three-job chain (Q6); registry resolution and reporter | yes | — |
 | M1b | Same jobs extended with the human chain, T13.9 transitions, A46 origin resolution and A58 persistence sub-IDs | yes | — |
 | M2 | Mock GH/TRm in `scenarios-hermetic`/`scenarios-pg`; `clients-rust` (Linux WIF, minimal/default/all features, `cargo package` and consumer); `scenarios-envoy-k3s` (pinned k3s, Envoy Gateway/egctl/Envoy, RB; A36 negatives); `live-wif-push` (positive and wrong-audience negative from the push to `main` run only) and `live-wif-negative` (denials and the test-only positive control from schedule/dispatch runs); neither runs on PRs | hermetic and PG yes; `scenarios-envoy-k3s` yes if runtime ≤ ~15 min, else post-merge | `live-wif-push` on push to `main`; `live-wif-negative` nightly and on dispatch; `scenarios-envoy-k3s-nightly` (A54 kubelet rotation) |
@@ -426,7 +426,7 @@ Still open:
 
 1. **Merge queue before M3** (maintainers): enabling a merge queue needs a repository setting and a `merge_group:` trigger in `ci.yml`. Until then, slow jobs that miss the PR budget gate only after merge.
 2. **Code-owner review** (maintainers): turn on "Require review from Code Owners" for `main` and add `.github/CODEOWNERS` for the waiver file, the registry files and the release manifest (section 3). Without it, "lead approved" is a convention, not a check.
-3. **Service-side conformance evidence:** the `rust` job runs plain `cargo test`, which emits no JUnit, so `service/` tests cannot be registered (section 3). Is replaying service-consumer fixtures from `skyoauth-scenarios` acceptable, or should the `rust` job move to nextest?
+3. **Service-side conformance evidence:** the `service-nextest` job now runs the `service/` tests under cargo-nextest with a JUnit report, but section 1.1 gives it no leg string, so `service/` tests cannot be registered yet (section 3). Is replaying service-consumer fixtures from `skyoauth-scenarios` acceptable, or should `service-nextest` get a leg string?
 
 Risks:
 

@@ -22,7 +22,10 @@
 //             carries the implemented_sha256 stamp of its (id, milestone,
 //             scope, matrix_sha256); a planned stage carries none.
 //   legs      Every leg is a §1.1 leg string, its env is one of the entry's
-//             envs, and every env has a leg in some stage.
+//             envs, its job exists at the stage's milestone (JOB_FROM), and
+//             every env has a leg in some stage.
+//   gates     Every stage of a milestone in gates_passed is implemented
+//             (layout §3 Gates; the reporter part of that rule is not here).
 //   table     The layout §2 table and its counts sentences equal the ones
 //             rendered from the registry (gen-conformance-registry.mjs renders
 //             both; this check imports that code).
@@ -40,8 +43,8 @@
 //             and leg is one of its stages' legs; expires is a TOML date.
 //
 // The commit check needs the full history and origin/main. Without them it is
-// skipped with a note, unless --require-history is given (CI), which makes
-// it an error.
+// skipped with a note, unless --require-history is given (CI): that probes
+// the history up front and makes its absence an error, waivers or not.
 //
 // Errors exit 1. Usage and internal errors exit 2.
 
@@ -62,6 +65,7 @@ import {
   FULL_ROW,
   idRows,
   isConditionalNumber,
+  JOB_FROM,
   LAYERS,
   LAYOUT,
   LocalDate,
@@ -248,10 +252,13 @@ function checkLegs(e, catalogue, stageErr, err) {
   const used = new Set();
   for (const s of e.stage) {
     if (!Array.isArray(s.legs)) continue;
+    // An unknown milestone is the stages rule's error; it has no jobs to check.
+    const at = MILESTONES.indexOf(s.milestone);
     for (const leg of s.legs) {
       const c = catalogue.get(leg);
       if (!c) stageErr(s.milestone, `${e.id} ${s.milestone}: leg "${leg}" is not in the layout §1.1 Leg strings column`);
       else if (!e.envs.includes(c.env)) stageErr(s.milestone, `${e.id} ${s.milestone}: leg "${leg}" runs in job ${c.job} of env ${c.env}, which is not one of envs`);
+      else if (at >= 0 && MILESTONES.indexOf(JOB_FROM[c.job]) > at) stageErr(s.milestone, `${e.id} ${s.milestone}: leg "${leg}" runs in job ${c.job}, which exists only from ${JOB_FROM[c.job]}`);
       else used.add(c.env);
     }
   }
@@ -340,7 +347,8 @@ export function history(root) {
   };
 }
 
-function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
+// `hist` is history(root) when --require-history probed it, else null.
+function checkWaivers(doc, at, stagesByTest, root, requireHistory, hist, report) {
   const bad = (i, msg) => report.error(WAIVERS, at.get(`waiver/${i}`), 'waivers', msg);
   unknownKeys(doc, ['waiver'], (msg) => report.error(WAIVERS, null, 'fields', msg));
   const waivers = doc.waiver ?? [];
@@ -348,7 +356,6 @@ function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
     report.error(WAIVERS, null, 'fields', 'waiver must be an array of tables ([[waiver]])');
     return 0;
   }
-  let hist = null;
   waivers.forEach((w, i) => {
     unknownKeys(w, KEYS.waiver, (msg) => bad(i, msg));
     for (const k of KEYS.waiver) if (w[k] === undefined) bad(i, `missing required field ${k}`);
@@ -359,7 +366,7 @@ function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
         const on = hist.onMain(w.commit);
         if (on === 'no') bad(i, `commit ${w.commit} is not on main (not an ancestor of origin/main)`);
         else if (on === 'unknown') bad(i, `commit ${w.commit} is not in this repository's history`);
-      } else if (requireHistory) bad(i, `cannot check that commit ${w.commit} is on main: ${hist.reason}`);
+      }
     }
     if (w.test !== undefined) {
       const stages = typeof w.test === 'string' ? stagesByTest.get(w.test) : undefined;
@@ -384,6 +391,10 @@ const readMaybe = (root, rel) => (existsSync(join(root, rel)) ? readFileSync(joi
 export function checkRegistry(root, { requireHistory = false } = {}) {
   const report = new Report();
   const done = (summary = null) => ({ errors: report.errors, notes: report.notes, summary });
+  // CI asks for the history whether or not a waiver needs it, so a checkout
+  // that lost it (fetch-depth) fails before the first waiver lands.
+  const hist = requireHistory ? history(root) : null;
+  if (hist && !hist.onMain) report.error(null, null, 'waivers', `--require-history: cannot check waiver commits against origin/main: ${hist.reason} (CI checks out with fetch-depth: 0)`);
   const texts = {};
   for (const rel of [TASKS, DESIGN, LAYOUT, SCENARIOS, SUBCASES]) {
     texts[rel] = readMaybe(root, rel);
@@ -427,6 +438,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   if (!Array.isArray(reg.gates_passed) || !reg.gates_passed.every((g) => MILESTONES.includes(g)) || new Set(reg.gates_passed).size !== reg.gates_passed.length) {
     report.error(SCENARIOS, null, 'fields', `gates_passed must be a list of distinct milestones (${MILESTONES.join(', ')})`);
   }
+  const gates = Array.isArray(reg.gates_passed) ? reg.gates_passed.filter((g) => MILESTONES.includes(g)) : [];
   const all = Array.isArray(reg.scenario) ? reg.scenario : [];
   if (!Array.isArray(reg.scenario)) report.error(SCENARIOS, null, 'fields', 'scenario must be an array of tables ([[scenario]])');
   const ofKind = (kind, re) =>
@@ -484,6 +496,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
     checkStages(e, stageErr('stages'));
     checkLegs(e, catalogue, stageErr('legs'), (msg) => report.error(file, where.get(e.id), 'legs', msg));
     for (const s of e.stage) {
+      if (gates.includes(s.milestone) && s.status !== 'implemented') stageErr('gates')(s.milestone, `${e.id} ${s.milestone}: gates_passed lists ${s.milestone}, but this stage is ${s.status}, not implemented`);
       for (const t of Array.isArray(s.tests) ? s.tests : []) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: Array.isArray(s.legs) ? s.legs : [] }]);
     }
   };
@@ -552,7 +565,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   }
 
   const fixtures = checkFixtures(root, scenarioIds, new Set(subs.map((s) => s.id)), report);
-  const waivers = wdoc ? checkWaivers(wdoc, locate(waiverText), stagesByTest, root, requireHistory, report) : 0;
+  const waivers = wdoc ? checkWaivers(wdoc, locate(waiverText), stagesByTest, root, requireHistory, hist, report) : 0;
   return done(`${scenarios.length} scenarios, ${contracts.length} contracts, ${subs.length} subcases, ${fixtures} fixtures, ${waivers} waivers`);
 }
 

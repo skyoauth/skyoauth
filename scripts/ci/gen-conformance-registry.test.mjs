@@ -17,6 +17,7 @@ import {
   DESIGN,
   generate,
   LAYOUT,
+  LINE,
   LocalDate,
   parseConditional,
   parseToml,
@@ -26,6 +27,7 @@ import {
   run,
   SCENARIOS,
   sha256,
+  SpecError,
   SUBCASES,
   TASKS,
 } from './gen-conformance-registry.mjs';
@@ -68,6 +70,10 @@ function replaceOnce(text, from, to) {
 }
 
 const specLine = (text, id) => text.split('\n').find((l) => l.startsWith(`| ${id} |`));
+// matrix_sha256 of a spec row, derived from the repository so that an amended
+// row needs no change in this test.
+const rowHash = (rel, id) => sha256(specLine(readFileSync(join(REPO, rel), 'utf8'), id));
+const A24_HASH = rowHash(TASKS, 'A24');
 
 describe('committed registry', () => {
   test('--check passes on the repository', () => {
@@ -86,11 +92,11 @@ describe('committed registry', () => {
     assert.deepEqual(subs, ['A18.90', 'A27.90', 'A33.90', 'A58.90']);
   });
 
-  test('layout §3 example hashes (A24, A64, C07) are reproduced', () => {
+  test('the A24, A64 and C07 hashes are those of their spec rows', () => {
     const byId = new Map(parseToml(read(REPO, SCENARIOS)).scenario.map((e) => [e.id, e]));
-    assert.equal(byId.get('A24').matrix_sha256, 'b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443');
-    assert.equal(byId.get('A64').matrix_sha256, '078ca6a19a34b32f05d2982cb296c71cf5a182e64f2e6589767807fd36eaeec3');
-    assert.equal(byId.get('C07').matrix_sha256, '060bdd6d1424c821626c7f63561da93b9fbf89a6869d9f363128efca9fcbbf0b');
+    assert.equal(byId.get('A24').matrix_sha256, A24_HASH);
+    assert.equal(byId.get('A64').matrix_sha256, rowHash(TASKS, 'A64'));
+    assert.equal(byId.get('C07').matrix_sha256, rowHash(DESIGN, 'C07'));
     assert.deepEqual(byId.get('C07').covered_by, ['A15', 'A35']);
   });
 
@@ -166,7 +172,7 @@ describe('drift is detected', () => {
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
     const want = sha256(specLine(read(root, TASKS), 'A24'));
-    assert.match(r.stderr, new RegExp(`A24: matrix_sha256 is b4df384e[0-9a-f]+, but its spec line hashes to ${want}`));
+    assert.match(r.stderr, new RegExp(`A24: matrix_sha256 is ${A24_HASH}, but its spec line hashes to ${want}`));
   });
 
   test('an edited design §2 row fails --check with a hash mismatch', () => {
@@ -180,7 +186,8 @@ describe('drift is detected', () => {
     const root = fixture((rel, t) => (rel === TASKS ? replaceOnce(t, '**T40.6** Device flow conditional:', '**T40.6** Device flow, conditional:') : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /A27\.90: matrix_sha256 is 02c64cda/);
+    const t40_6 = read(REPO, TASKS).split('\n').find((l) => l.startsWith('- [ ] **T40.6** '));
+    assert.match(r.stderr, new RegExp(`A27\\.90: matrix_sha256 is ${sha256(t40_6)}, but`));
   });
 
   test('a hand-edited §2 table row fails --check, and the write mode renders it back', () => {
@@ -215,10 +222,10 @@ describe('drift is detected', () => {
   });
 
   test('a hand-edited matrix_sha256 fails --check', () => {
-    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443', '0'.repeat(64)) : t));
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, A24_HASH, '0'.repeat(64)) : t));
     const r = cli('--root', root, '--check');
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /A24: matrix_sha256 is 0{64}, but its spec line hashes to b4df384e/);
+    assert.match(r.stderr, new RegExp(`A24: matrix_sha256 is 0{64}, but its spec line hashes to ${A24_HASH} `));
   });
 
   test('a formatting-only change fails --check with a line number', () => {
@@ -300,6 +307,40 @@ describe('spec errors stop generation', () => {
   test('a contract without a covered_by mapping', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? t.replace(/^\| C05 .*\n/m, '') : t));
     assert.match(errorsOf(root), /contract C05 has no "Covered by" row/);
+  });
+
+  test('a §5 covered_by mapping with an unknown scenario, twice, or for a non-contract', () => {
+    const c05 = (t) => /^\| C05 .*$/m.exec(t)[0];
+    const edit = (f) => fixture((rel, t) => (rel === LAYOUT ? f(t) : t));
+    assert.match(errorsOf(edit((t) => replaceOnce(t, c05(t), c05(t).replace(/^(\| C05 [^|]*\| )/, '$1A99, ')))), /conformance-layout\.md:\d+: C05 is covered by unknown scenario A99/);
+    assert.match(errorsOf(edit((t) => replaceOnce(t, c05(t), `${c05(t)}\n${c05(t)}`))), /conformance-layout\.md:\d+: duplicate contract mapping C05/);
+    assert.match(errorsOf(edit((t) => replaceOnce(t, c05(t), `${c05(t)}\n${c05(t).replace('| C05 ', '| C11 ')}`))), /§5 maps C11, which is not a contract of docs\/skyoauth-design\.md §2/);
+  });
+
+  test('covered_by is rendered from §5, so a hand-edited covered_by fails --check', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, 'covered_by = ["A15", "A35"]', 'covered_by = ["A15"]') : t));
+    const r = cli('--root', root, '--check');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /scenarios\.toml: C07: covered_by differs from the specs/);
+    const { files, errors } = generate(root);
+    assert.deepEqual(errors, []);
+    assert.match(files[SCENARIOS], /id = "C07"\nkind = "contract"\ncovered_by = \["A15", "A35"\]/);
+  });
+
+  // clients-rust (env hermetic) exists from M2 (JOB_FROM).
+  const A03_LEGS = '"scenarios-hermetic/x86_64", "scenarios-hermetic/aarch64", "scenarios-pg/x86_64"';
+  const a03Legs = (stageAt, extra) => fixture((rel, t) => (rel === SCENARIOS ? editStageAt(t, 'A03', stageAt, `legs = [${A03_LEGS}]`, `legs = [\n  ${A03_LEGS.split(', ').join(',\n  ')},\n  ${extra},\n]`) : t));
+
+  test('a leg whose job does not exist yet at the stage milestone', () => {
+    failsBothModes(a03Legs('M1a', '"clients-rust/x86_64"'), /A03 M1a: job clients-rust exists only from M2$/m);
+  });
+
+  test('a leg whose job exists from the stage milestone, or earlier, is accepted', () => {
+    for (const [m, leg] of [['M2', '"clients-rust/x86_64"'], ['M1a', '"typescript/node22"']]) {
+      const root = a03Legs(m, leg);
+      assert.deepEqual(generate(root).errors, [], `${m} ${leg}`);
+      assert.equal(cli('--root', root, '--check').status, 0, `${m} ${leg}`);
+    }
   });
 
   test('an unknown leg in a hand-authored stage', () => {
@@ -578,6 +619,15 @@ function editStage(text, table, id, from, to) {
   const end = next < 0 ? block.length : next;
   return replaceOnce(text, block, block.slice(0, at) + replaceOnce(block.slice(at, end), from, to) + block.slice(end));
 }
+// Replaces `from` with `to` once inside the `m` stage of scenario `id`.
+function editStageAt(text, id, m, from, to) {
+  const block = entryBlock(text, 'scenario', id);
+  const at = block.indexOf(`[[scenario.stage]]\nmilestone = "${m}"`);
+  assert.ok(at >= 0, `no stage ${m} of ${id}`);
+  const next = block.indexOf('[[scenario.stage]]', at + 1);
+  const end = next < 0 ? block.length : next;
+  return replaceOnce(text, block, block.slice(0, at) + replaceOnce(block.slice(at, end), from, to) + block.slice(end));
+}
 const stageLine = (text, table, id) => lineOf(text, `[[${table}]]\nid = "${id}"`) + entryBlock(text, table, id).slice(0, entryBlock(text, table, id).indexOf(`[[${table}.stage]]`)).split('\n').length - 1;
 const entryLine = (text, table, id) => lineOf(text, `[[${table}]]\nid = "${id}"`);
 
@@ -712,7 +762,7 @@ describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
   });
 });
 
-const STAMP_A24 = (scope = 'consume primitive', matrix = 'b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443') => stageStamp('A24', 'M1a', scope, matrix);
+const STAMP_A24 = (scope = 'consume primitive', matrix = A24_HASH) => stageStamp('A24', 'M1a', scope, matrix);
 const A24_TESTS = 'tests = [\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x",\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y",\n]';
 // scenarios.toml with A24's M1a stage implemented, stamped with `stamp`.
 const implementedA24 = (t, stamp = STAMP_A24()) =>
@@ -841,6 +891,90 @@ describe('TOML', () => {
       assert.throws(() => parseToml(`a = ${dt}`, 'x'), /x:1: only local dates are supported, not date-times/);
     }
     assert.deepEqual(parseToml('a = 2026-12-31\nb = 2026'), { a: new LocalDate('2026-12-31'), b: 2026 });
+  });
+
+  // Keys that name Object.prototype members are ordinary TOML keys.
+  const PROTO_KEYS = ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'];
+
+  test('__proto__ is an own key of an inline table, a table and the root', () => {
+    const d = parseToml('x = { __proto__ = "y", b = 1 }\n__proto__ = 2\n[[t]]\n__proto__ = { __proto__ = 3 }\n');
+    assert.equal(Object.getPrototypeOf(d.x), Object.prototype);
+    assert.ok(Object.hasOwn(d.x, '__proto__'));
+    assert.deepEqual(Object.keys(d.x), ['__proto__', 'b']);
+    assert.equal(d.x.__proto__, 'y');
+    assert.ok(Object.hasOwn(d, '__proto__'));
+    assert.equal(JSON.stringify(d), '{"x":{"__proto__":"y","b":1},"__proto__":2,"t":[{"__proto__":{"__proto__":3}}]}');
+    // Ordinary data properties, as JSON.parse makes them: writable and configurable.
+    assert.deepEqual(Object.getOwnPropertyDescriptors(d.x), Object.getOwnPropertyDescriptors(JSON.parse('{"__proto__":"y","b":1}')));
+    assert.deepEqual(Object.getOwnPropertyDescriptor(d.t[0], '__proto__'), Object.getOwnPropertyDescriptor(JSON.parse('{"__proto__":{"__proto__":3}}'), '__proto__'));
+    // The key never reaches the prototype chain.
+    assert.equal({}.y, undefined);
+    assert.equal(Object.getPrototypeOf(d.t[0]), Object.prototype);
+  });
+
+  test('__proto__ as a table header key', () => {
+    const d = parseToml('[[__proto__]]\na = 1\n[[__proto__]]\na = 2\n[[t]]\n[[t.__proto__]]\nb = 3\n');
+    assert.ok(Array.isArray(d.__proto__) && Object.hasOwn(d, '__proto__'));
+    assert.equal(JSON.stringify(d), '{"__proto__":[{"a":1},{"a":2}],"t":[{"__proto__":[{"b":3}]}]}');
+  });
+
+  for (const k of PROTO_KEYS.slice(1)) {
+    test(`${k} is an ordinary key at the top level, in tables and as a header`, () => {
+      assert.equal(JSON.stringify(parseToml(`${k} = 1\n`)), `{"${k}":1}`);
+      assert.equal(JSON.stringify(parseToml(`[[t]]\n${k} = "v"\n`)), `{"t":[{"${k}":"v"}]}`);
+      assert.equal(JSON.stringify(parseToml(`x = { ${k} = { ${k} = true } }\n`)), `{"x":{"${k}":{"${k}":true}}}`);
+      assert.equal(JSON.stringify(parseToml(`[[${k}]]\na = 1\n[[${k}]]\n`)), `{"${k}":[{"a":1},{}]}`);
+      assert.equal(JSON.stringify(parseToml(`[[scenario]]\nid = "A01"\n[[scenario.${k}]]\nb = 2\n`)), `{"scenario":[{"id":"A01","${k}":[{"b":2}]}]}`);
+    });
+  }
+
+  test('duplicate keys are still rejected, prototype names included', () => {
+    for (const k of ['a', ...PROTO_KEYS]) {
+      const dup = (line) => (ex) => ex instanceof SpecError && ex.message === `x:${line}: duplicate key ${k}`;
+      assert.throws(() => parseToml(`${k} = 1\n# c\n${k} = [\n2]\n`, 'x'), dup(3));
+      assert.throws(() => parseToml(`[[t]]\nb = 0\n${k} = 1\n${k} = 2\n`, 'x'), dup(4));
+      assert.throws(() => parseToml(`\nx = { ${k} = 1, ${k} = 2 }\n`, 'x'), dup(2));
+    }
+    // The same key in two tables, or in a table and an inline table, is fine.
+    assert.equal(JSON.stringify(parseToml('a = { a = 1 }\n[[t]]\na = 2\n[[t]]\na = 3\n')), '{"a":{"a":1},"t":[{"a":2},{"a":3}]}');
+  });
+
+  test('a header whose key already holds a value, or has no parent, is a clean error', () => {
+    for (const [text, line, msg] of [
+      ['x = 1\n[[x]]\n', 2, '[[x]]: key x already holds a value that is not an array of tables'],
+      ['x = []\n[[x]]\n', 2, '[[x]]: key x already holds a value that is not an array of tables'],
+      ['x = [{ a = 1 }]\n\n[[x.b]]\n', 3, '[[x.b]]: key x already holds a value that is not an array of tables'],
+      ['[[a]]\nb = 1\n[[a.b]]\n', 3, '[[a.b]]: key b already holds a value that is not an array of tables'],
+      ['[[a]]\n[[b.c]]\n', 2, '[[b.c]] without a parent'],
+      ['[[constructor.x]]\n', 1, '[[constructor.x]] without a parent'],
+      ['[[toString.x]]\n', 1, '[[toString.x]] without a parent'],
+      ['[[__proto__.x]]\n', 1, '[[__proto__.x]] without a parent'],
+    ]) {
+      assert.throws(() => parseToml(text, 'x'), (ex) => ex instanceof SpecError && ex.message === `x:${line}: ${msg}`, text);
+    }
+  });
+
+  test('the header line is a symbol, so __line is an ordinary key', () => {
+    const d = parseToml('\n[[t]]\n__line = 7\n');
+    assert.equal(d.t[0][LINE], 2);
+    assert.equal(d.t[0].__line, 7);
+    assert.deepEqual(Object.keys(d.t[0]), ['__line']);
+    assert.equal(JSON.stringify(d), '{"t":[{"__line":7}]}');
+  });
+
+  test('prototype-named keys survive a JSON round trip and deep equality', () => {
+    const text = `${PROTO_KEYS.map((k, n) => `${k} = ${n}`).join('\n')}\nx = { __proto__ = { constructor = "c" } }\n[[t]]\nvalueOf = [1, 2]\n[[t.__proto__]]\n`;
+    const d = parseToml(text);
+    assert.deepEqual(JSON.parse(JSON.stringify(d)), d);
+    assert.deepEqual(Object.keys(d), [...PROTO_KEYS, 'x', 't']);
+    assert.deepEqual(Object.keys(d.t[0]), ['valueOf', '__proto__']);
+  });
+
+  test('the generator reports prototype-named fields of an entry as unknown fields', () => {
+    for (const k of ['__proto__', 'constructor', 'toString']) {
+      const root = fixture((rel, t) => (rel === SCENARIOS ? replaceOnce(t, entryBlock(t, 'scenario', 'A26'), entryBlock(t, 'scenario', 'A26').replace('kind = "scenario"\n', `kind = "scenario"\n${k} = "x"\n`)) : t));
+      failsBothModes(root, new RegExp(`scenarios\\.toml:${entryLine(read(root, SCENARIOS), 'scenario', 'A26')}: A26: unknown field ${k}$`, 'm'));
+    }
   });
 
   test('python3 tomllib parses both files', (t) => {

@@ -116,8 +116,9 @@ const su = (id, from, to) => (t) => editEntry(t, 'subcase', id, from, to);
 
 const failing = (rel, edit) => check(fixture({ [rel]: edit }));
 
-// A24's M1a stage, implemented: stamp and tests.
-const A24_HASH = 'b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443';
+// A24's M1a stage, implemented: stamp and tests. The hash is derived from the
+// tasks §8 row, so an amended row needs no change here.
+const A24_HASH = sha256(repoText(TASKS).split('\n').find((l) => l.startsWith('| A24 |')));
 const A24_NEG = 'nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y';
 const A24_TESTS = `tests = ["nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x", "${A24_NEG}"]`;
 const implementedA24 = (t, { stamp = stageStamp('A24', 'M1a', 'consume primitive', A24_HASH), tests = A24_TESTS } = {}) =>
@@ -153,6 +154,30 @@ function insertSub(t, id, entry) {
 }
 const withSub = (id, extra) => (t) => insertSub(t, id, requiredA58(id, extra));
 
+// Every `m` stage of the `table` entries (except entry `except`), implemented
+// with its stamp and one test.
+function implementAll(t, table, m, except = null) {
+  let id;
+  let matrix;
+  return t
+    .split('\n\n')
+    .map((b) => {
+      const e = new RegExp(`^\\[\\[${table}\\]\\]\\nid = "([^"]+)"`).exec(b);
+      if (e) {
+        id = e[1];
+        matrix = /^matrix_sha256 = "([0-9a-f]+)"$/m.exec(b)[1];
+        return b;
+      }
+      if (id === except || !b.startsWith(`[[${table}.stage]]\nmilestone = "${m}"\n`)) return b;
+      const scope = JSON.parse(/^scope = (".*")$/m.exec(b)[1]);
+      return replaceOnce(b, 'status = "planned"\ntests = []', `status = "implemented"\nimplemented_sha256 = "${stageStamp(id, m, scope, matrix)}"\ntests = ["nextest:gate::${id.toLowerCase()}_pos_x"]`);
+    })
+    .join('\n\n');
+}
+
+const A03_LEGS = '"scenarios-hermetic/x86_64", "scenarios-hermetic/aarch64", "scenarios-pg/x86_64"';
+const HISTORY_ERROR = (reason) => `error [waivers] --require-history: cannot check waiver commits against origin/main: ${reason} (CI checks out with fetch-depth: 0)`;
+
 // ---------------------------------------------------------------------------
 
 describe('the repository', () => {
@@ -185,7 +210,16 @@ describe('cli', () => {
     assert.match(soft.stdout, /^note: waivers: commit reachability not checked: the root is not a git checkout\ncheck-conformance-registry: OK \(.*, 1 waivers\)\n$/);
     const strict = cli('--require-history', '--root', root);
     assert.equal(strict.status, 1);
-    assert.match(strict.stderr, /waivers\.toml:1: error \[waivers\] cannot check that commit a{40} is on main: the root is not a git checkout/);
+    assert.equal(strict.stderr, `${HISTORY_ERROR('the root is not a git checkout')}\ncheck-conformance-registry: 1 error(s)\n`);
+  });
+
+  test('--require-history fails without the history even with no waivers', () => {
+    const root = fixture();
+    assert.equal(cli('--root', root).status, 0);
+    const strict = cli('--require-history', '--root', root);
+    assert.equal(strict.status, 1);
+    assert.equal(strict.stderr, `${HISTORY_ERROR('the root is not a git checkout')}\ncheck-conformance-registry: 1 error(s)\n`);
+    assert.equal(strict.stdout, '');
   });
 
   test('exit 0 and OK on the repository (default root)', () => {
@@ -197,7 +231,7 @@ describe('cli', () => {
 
   test('exit 1 with file:line errors and a count', () => {
     const root = fixture({ [SCENARIOS]: sc('A24', `matrix_sha256 = "${A24_HASH}"`, `matrix_sha256 = "${'0'.repeat(64)}"`) });
-    const r = cli('--root', root, '--require-history');
+    const r = cli('--root', root);
     assert.equal(r.status, 1);
     const line = entryLine(read(root, SCENARIOS), 'scenario', 'A24');
     assert.match(r.stderr, new RegExp(`^tests/conformance/scenarios\\.toml:${line}: error \\[hash\\] A24: matrix_sha256 is 0{64}, but docs/skyoauth-tasks\\.md:\\d+ hashes to ${A24_HASH}`, 'm'));
@@ -295,9 +329,25 @@ describe('rule toml', () => {
   });
 
   test('the two readers disagree', () => {
-    // The subset reader drops an inline-table key named __proto__.
-    const res = failing(SUBCASES, (t) => `x = { __proto__ = "y" }\n${t}`);
+    // The subset reader takes a [[header]] key verbatim, quotes included, so
+    // [["x"]] is the table x to smol-toml but the table "x" to the subset reader.
+    const text = '[["x"]]\n';
+    assert.equal(JSON.stringify(plain(parseStrict(text))), '{"x":[{}]}');
+    assert.equal(JSON.stringify(plain(parseToml(text))), '{"\\"x\\"":[{}]}');
+    const res = failing(SUBCASES, (t) => `${t}\n${text}`);
     expectOnly(res, 'toml', /^tests\/conformance\/subcases\.toml: error \[toml\] smol-toml and the gen-conformance-registry\.mjs reader return different data$/);
+  });
+
+  test('keys named after Object.prototype members: both readers agree, and the fields rule reports them', () => {
+    for (const k of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      for (const text of [`${k} = 1\n`, `x = { ${k} = { ${k} = "y" } }\n`, `[[${k}]]\n${k} = 2\n`, `[[t]]\n[[t.${k}]]\n`]) {
+        assert.equal(JSON.stringify(plain(parseToml(text))), JSON.stringify(plain(parseStrict(text))), text);
+      }
+      expectOnly(failing(SUBCASES, (t) => `${k} = { ${k} = "y" }\n${t}`), 'fields', new RegExp(`^tests/conformance/subcases\\.toml: error \\[fields\\] unknown field ${k}$`));
+      expectOnly(failing(SUBCASES, (t) => `${t}\n[[${k}]]\n`), 'fields', new RegExp(`^tests/conformance/subcases\\.toml: error \\[fields\\] unknown field ${k}$`));
+      const res = failing(SCENARIOS, (t) => `${t}\n[[scenario.${k}]]\n`);
+      expectOnly(res, 'fields', new RegExp(`^tests/conformance/scenarios\\.toml:\\d+: error \\[fields\\] C10: unknown field ${k}$`));
+    }
   });
 
   test('a waivers.toml error does not hide the registry checks', () => {
@@ -321,7 +371,7 @@ describe('rule fields', () => {
   });
 
   test('gates_passed', () => {
-    expectOk(check(fixture({ [SCENARIOS]: (t) => replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M0", "M1a"]') })));
+    expectOk(check(fixture({ [SCENARIOS]: (t) => implementAll(replaceOnce(t, 'gates_passed = []', 'gates_passed = ["M0", "M1a"]'), 'scenario', 'M1a') })));
     for (const v of ['["M9"]', '["M0", "M0"]', '"M0"']) {
       expectOnly(failing(SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', `gates_passed = ${v}`)), 'fields', /gates_passed must be a list of distinct milestones \(M0, M1a, M1b, M2, M3, M4, M5\)/);
     }
@@ -620,6 +670,30 @@ describe('rule legs', () => {
     expectOnly(res, 'legs', /A24 M1a: leg "scenarios-envoy-k3s\/x86_64" runs in job scenarios-envoy-k3s of env envoy-k3s, which is not one of envs$/);
   });
 
+  test('a leg whose job does not exist yet at the stage milestone', () => {
+    // clients-rust (env hermetic) exists from M2: not in A03's M1a stage, but in its M2 stage.
+    const t = st('A03', 'M1a', `legs = [${A03_LEGS}]`, `legs = [${A03_LEGS}, "clients-rust/x86_64"]`)(repoText(SCENARIOS));
+    expectOnly(failing(SCENARIOS, () => t), 'legs', new RegExp(`scenarios\\.toml:${stageLine(t, 'scenario', 'A03', 'M1a')}: error \\[legs\\] A03 M1a: leg "clients-rust/x86_64" runs in job clients-rust, which exists only from M2$`));
+    expectOk(check(fixture({ [SCENARIOS]: st('A03', 'M2', `legs = [${A03_LEGS}]`, `legs = [${A03_LEGS}, "clients-rust/x86_64"]`) })));
+    // A job that exists from M0 is fine in a stage of any milestone.
+    expectOk(check(fixture({ [SCENARIOS]: st('A03', 'M1a', `legs = [${A03_LEGS}]`, `legs = [${A03_LEGS}, "typescript/node22"]`) })));
+  });
+
+  test('an M0 stage, the first milestone, is checked too', () => {
+    const t = st('A03', 'M1a', 'milestone = "M1a"', 'milestone = "M0"')(repoText(SCENARIOS));
+    const res = failing(SCENARIOS, () => t);
+    const legs = res.errors.filter((e) => e.rule === 'legs').map(formatError);
+    const at = stageLine(t, 'scenario', 'A03', 'M0');
+    assert.deepEqual(legs, ['scenarios-hermetic/x86_64', 'scenarios-hermetic/aarch64', 'scenarios-pg/x86_64'].map((leg) => `tests/conformance/scenarios.toml:${at}: error [legs] A03 M0: leg "${leg}" runs in job ${leg.split('/')[0]}, which exists only from M1a`));
+  });
+
+  test('a leg of a stage with an unknown milestone is not checked against JOB_FROM', () => {
+    const res = failing(SCENARIOS, st('A03', 'M1a', 'milestone = "M1a"', 'milestone = "M9"'));
+    // The table rule fires too (the rendered row shows M9); no legs error does.
+    assert.ok(!res.errors.some((e) => e.rule === 'legs'), dump(res));
+    expectError(res, 'stages', /A03 M9: unknown milestone/);
+  });
+
   test('an env without a leg', () => {
     const t = sc('A24', 'envs = ["pg"]', 'envs = ["pg", "envoy-k3s"]')(repoText(SCENARIOS));
     const res = failing(SCENARIOS, () => t);
@@ -646,6 +720,39 @@ describe('rule legs', () => {
   test('layout §1.1 missing', () => {
     const res = failing(LAYOUT, (t) => replaceOnce(t, '### 1.1', '### 1.x'));
     expectOnly(res, 'legs', /^error \[legs\] docs\/testing\/conformance-layout\.md: subsection "### 1\.1" not found$/);
+  });
+});
+
+describe('rule gates', () => {
+  const gate = (v) => (t) => replaceOnce(t, 'gates_passed = []', `gates_passed = ${v}`);
+  const m1aStages = (t) => (t.match(/^\[\[scenario\.stage\]\]\nmilestone = "M1a"$/gm) ?? []).length;
+
+  test('an empty gates_passed (the repository) and a gate without stages pass', () => {
+    assert.equal(m1aStages(repoText(SCENARIOS)) > 1, true);
+    assert.deepEqual(parseStrict(repoText(SCENARIOS)).gates_passed, []);
+    expectOk(check(fixture({ [SCENARIOS]: gate('["M0"]') })));
+  });
+
+  test('a gate whose stages are all implemented passes', () => {
+    expectOk(check(fixture({ [SCENARIOS]: (t) => implementAll(gate('["M1a"]')(t), 'scenario', 'M1a') })));
+  });
+
+  test('a gate with one planned stage', () => {
+    const t = implementAll(gate('["M0", "M1a"]')(repoText(SCENARIOS)), 'scenario', 'M1a', 'A24');
+    const res = failing(SCENARIOS, () => t);
+    expectOnly(res, 'gates', new RegExp(`^tests/conformance/scenarios\\.toml:${stageLine(t, 'scenario', 'A24', 'M1a')}: error \\[gates\\] A24 M1a: gates_passed lists M1a, but this stage is planned, not implemented$`));
+  });
+
+  test('a gate with every stage planned reports each stage', () => {
+    const res = failing(SCENARIOS, gate('["M1a"]'));
+    assert.equal(res.errors.length, m1aStages(repoText(SCENARIOS)), dump(res));
+    assert.ok(res.errors.every((e) => e.rule === 'gates' && /: gates_passed lists M1a, but this stage is planned, not implemented$/.test(e.msg)), dump(res));
+    expectError(res, 'gates', /scenarios\.toml:\d+: error \[gates\] A64 M1a: /);
+  });
+
+  test('a subcase stage counts too', () => {
+    const res = check(fixture({ [SCENARIOS]: (t) => implementAll(gate('["M1b"]')(t), 'scenario', 'M1b'), [SUBCASES]: withSub('A58.07') }));
+    expectOnly(res, 'gates', new RegExp(`^tests/conformance/subcases\\.toml:\\d+: error \\[gates\\] A58\\.07 M1b: gates_passed lists M1b, but this stage is planned, not implemented$`));
   });
 });
 
@@ -1013,10 +1120,21 @@ describe('rule waivers', () => {
       expectOk(soft);
       assert.deepEqual(soft.notes, [`waivers: commit reachability not checked: ${reason}`]);
       const strict = check(root, { requireHistory: true });
-      expectOnly(strict, 'waivers', new RegExp(`waivers\\.toml:1: error \\[waivers\\] cannot check that commit a{40} is on main: ${reason}$`));
+      assert.deepEqual(strict.errors.map(formatError), [HISTORY_ERROR(reason)]);
       assert.deepEqual(strict.notes, []);
+      // The probe does not wait for a waiver: a lost fetch-depth: 0 fails at once.
+      rmSync(join(root, WAIVERS));
+      assert.deepEqual(check(root, { requireHistory: true }).errors.map(formatError), [HISTORY_ERROR(reason)]);
+      expectOk(check(root));
     });
   }
+
+  test('--require-history passes with the history and no waivers', () => {
+    const { root } = gitRoot();
+    const res = check(root, { requireHistory: true });
+    expectOk(res);
+    assert.deepEqual(res.notes, []);
+  });
 
   test('history() of the repository answers yes for origin/main itself when available', () => {
     const h = history(REPO);
