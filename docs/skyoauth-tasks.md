@@ -139,8 +139,11 @@ Implementation PRs adding/moving modules, workspace members or package entry poi
 | POST / PATCH | `/admin/v1/application-origin-registrations` | Instance security_admin | Enroll canonical HTTPS origin and tenant ownership; validate ingress/callback mapping, reject collisions |
 | GET / POST / PATCH | `/admin/v1/route-controller-identities` | Instance security_admin | Register independent controller mTLS/Kubernetes principal and gateway/origin scope; credential_protection_scopes is read-only from registered assignments with readiness checked separately, not a second enrollment path. No signer, WIF or human authority |
 | GET / PATCH | `/admin/v1/instance-capacity-policy` | Instance security_admin | Independent operational revision, session ceiling 1–64 and finite shared quotas/rates; no credential or bundle invalidation |
+| GET / PATCH | `/admin/v1/instance-security-policy` (path inferred, OQ-API-13) | Instance security_admin; turning widening_second_approver on or off needs a distinct second security_admin approver, or one actor when single_actor_mode is on | Audited revision-checked InstanceSecurityPolicy; only widening_second_approver is writable online; single_actor_mode and the audit sink digest/validation time are read-only mirrors of deployment configuration (OQ-ADR008-3, OQ-TM-12) |
+| GET / POST / PATCH | `/admin/v1/egress-allowlist` (path inferred, OQ-API-13) | Instance security_admin; tenant operators only choose from it | Audited revision-checked EgressAllowlistEntry: purpose oidc_discovery/jwks/token_review and exact URL, unique per purpose; disable fails closed for new fetches and marks dependent sources degraded (OQ-TM-13) |
 | GET / POST / PATCH | `/admin/v1/tenants/{tenant}/principals`, `/services` | Tenant trust_admin | Workload/service principal creation only; service and svc principal atomic; no human/operator escalation |
 | GET / POST / PATCH | `/admin/v1/tenants/{tenant}/trust-sources`, `/keysets`, `/bindings`, `/grants` | Tenant trust_admin | Same-tenant IDs, registered audience ceilings, typed verifiers, disable/revisions and explicit widening approval |
+| DELETE | `/admin/v1/tenants/{tenant}/bindings`, `/grants` | Tenant trust_admin | Audited widening-class delete of a whole binding or grant only when it is disabled and unreferenced; soft disable is fail-safe and not widening (ADR-008; public-api §7.1) |
 | GET / POST / PATCH | `/admin/v1/tenants/{tenant}/oauth-clients`, `/human-access-policies` | Tenant client_admin | Registered native clients/generated client IDs and bounded human issuance policy |
 | GET / PATCH | `/admin/v1/tenants/{tenant}/application-origins/{id}` | Tenant client_admin | Read active/staged versions; configuration PATCH appends an unpinned version, cannot change origin ownership or active values |
 | GET / PATCH | `/admin/v1/tenants/{tenant}/application-origins/{id}/capacity-policy` | Tenant client_admin | Separately revisioned per-session cap, default 8 within current instance ceiling; lower only new admissions |
@@ -179,8 +182,6 @@ Implementation PRs adding/moving modules, workspace members or package entry poi
 | Workstation command | `skyoauth-operator` | Independent operator/recovery key | M1a three-platform mTLS client/offline signer; human commands M1b; no native OAuth dependency |
 
 Grouped sibling paths share the full prefix preceding them (rows need both a sibling and a child reading; open question OQ-API-11). Private listeners are never public gateway routes. All writes use validation, optimistic revision checks and audit; high-frequency observation refreshes are operational telemetry, not new policy-change events. Device and impersonation-activation endpoints are absent in v0.1; adding them requires a later reviewed feature contract. Native upstream callbacks are not app callbacks or loopback callbacks: the browser returns upstream -> issuer, confirms there, then receives a SkyOAuth code at its CLI loopback.
-
-Follow-up: the matrix needs a DELETE row for `/bindings` and `/grants`; a whole binding or grant may be deleted only when it is disabled and unreferenced (ADR-008; public-api §7.1).
 
 ### Exchange selection and scope
 
