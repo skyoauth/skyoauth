@@ -192,8 +192,13 @@ jobs:
           rustup default stable
           rustup component add --toolchain stable llvm-tools-preview
 
-      # Pinned: publish-badges reads this tool's JSON report, so a format
-      # change in a new release must arrive as a reviewed bump.
+      # Pinned so the cargo-llvm-cov side of the coverage run is
+      # reproducible. The JSON report itself comes from llvm-cov in the
+      # unpinned stable toolchain installed above, so its format can still
+      # change; what protects the badge is that a report the
+      # `Check for a complete coverage report` step cannot read fails the
+      # publish job (scripts/ci/publish-badges-ci.sh) instead of keeping
+      # the old badge.
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
