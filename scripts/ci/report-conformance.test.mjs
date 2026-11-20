@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { clean, code, InputError, JOB_RUNNER, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -226,6 +226,73 @@ describe('statuses', () => {
     const none = report(root(), ['--require-milestone', 'M0']);
     assert.equal(none.code, 1);
     assert.match(none.err, /milestone M0 is no stages, not passed/);
+  });
+
+  // Every required M1b stage implemented (all on scenarios-pg), so the M1b
+  // gate can pass; A24 M1a and the conditional A33.90 M3 implemented too.
+  const M1B = gateStages('M1b');
+  const m1bIds = [...REG.scenario, ...SUB.subcase].filter((e) => e.conditional_on === undefined && e.stage?.some((st) => st.milestone === 'M1b')).map((e) => e.id);
+  const pgTest = (id, pol) => rust('skyoauth-scenarios', 'pg', `x::${id.toLowerCase().replace('.', '_')}_${pol}_t`);
+  const pgPair = (id) => [pgTest(id, 'pos'), pgTest(id, 'neg')];
+  const gateRoot = () =>
+    root({
+      [SCENARIOS]: compose(...m1bIds.map((id) => implement('scenario', id, 'M1b', ids(pgPair(id)))), implement('scenario', 'A24', 'M1a', ids(A24))),
+      [SUBCASES]: implement('subcase', 'A33.90', 'M3', ids(pgPair('A33.90'))),
+    });
+  const gateRun = (fails, args = []) => {
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    return report(gateRoot(), ['--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }]), ...args]);
+  };
+
+  test('--require-milestone M: exit 0 iff the gate of M passed; failures elsewhere, conditional ones included, stay in the report only', () => {
+    assert.equal(m1bIds.length, M1B, 'every M1b stage is a scenario stage');
+    const fails = [A24_NEG, pgTest('A33.90', 'pos')];
+    const gate = gateRun(fails, ['--require-milestone', 'M1b']);
+    assert.equal(gate.code, 0, gate.err);
+    assert.equal(gate.json.milestones.M1b.gate, 'passed');
+    assert.equal(gate.json.trusted, true);
+    assert.match(gate.err, /note: implemented stages outside the M1b gate failed; they do not change the exit status/);
+    assert.equal(stage(gate.json, 'A33.90', 'M3').status, 'failed');
+    assert.match(gate.out, /\| A33\.90 \(conditional: back-channel-logout\) M3: full row \| failed \|/);
+    assert.match(gate.out, /\| A24 M1a: consume primitive \| failed \|/);
+    // Without the flag, any failed implemented stage exits 1.
+    const plainRun = gateRun(fails);
+    assert.equal(plainRun.code, 1);
+    assert.match(plainRun.err, /some implemented stage has a failed result/);
+    // Only the conditional stage failed: still 1 without the flag.
+    assert.equal(gateRun([pgTest('A33.90', 'neg')]).code, 1);
+    assert.equal(gateRun([]).code, 0);
+    // The gate's own failure: 1, and no note about other stages.
+    const own = gateRun([pgTest('A47', 'neg')], ['--require-milestone', 'M1b']);
+    assert.equal(own.code, 1);
+    assert.match(own.err, /milestone M1b is failed, not passed/);
+    assert.doesNotMatch(own.err, /outside the M1b gate/);
+    const m1a = gateRun([], ['--require-milestone', 'M1a']);
+    assert.equal(m1a.code, 1);
+    assert.match(m1a.err, /milestone M1a is planned, not passed/);
+  });
+
+  test('--require-milestone with input errors: exit 2 even when the gate passed, and the JSON says trusted: false', () => {
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }, { leg: null, name: 'mystery', junit: null }])]);
+    assert.equal(r.code, 2);
+    assert.equal(r.json.milestones.M1b.gate, 'passed');
+    assert.equal(r.json.trusted, false);
+    assert.equal(r.json.input_errors.length, 1);
+    assert.match(r.err, /1 input error\(s\); the report cannot be trusted/);
+    assert.doesNotMatch(r.err, /milestone M1b/);
+  });
+
+  test('exitStatus', () => {
+    const ms = (gate) => Object.fromEntries(['M0', 'M1a'].map((m) => [m, { gate: m === 'M1a' ? gate : 'no stages' }]));
+    const res = (o) => ({ input_errors: [], failed: false, milestones: ms('passed'), ...o });
+    assert.deepEqual(exitStatus(res({}), undefined), [0, null]);
+    assert.deepEqual(exitStatus(res({ failed: true }), undefined), [1, 'some implemented stage has a failed result']);
+    assert.deepEqual(exitStatus(res({ failed: true }), 'M1a'), [0, null]);
+    assert.deepEqual(exitStatus(res({ milestones: ms('not run') }), 'M1a'), [1, 'milestone M1a is not run, not passed']);
+    assert.deepEqual(exitStatus(res({}), 'M0'), [1, 'milestone M0 is no stages, not passed']);
+    assert.deepEqual(exitStatus(res({ input_errors: ['x'] }), 'M1a'), [2, '1 input error(s); the report cannot be trusted']);
+    assert.deepEqual(exitStatus(res({ input_errors: ['x', 'y'], failed: true }), undefined), [2, '2 input error(s); the report cannot be trusted']);
   });
 
   test('a failed attempt stays failed after a passing re-run, in either order and across runs', () => {

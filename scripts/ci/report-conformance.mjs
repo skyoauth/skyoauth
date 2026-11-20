@@ -66,15 +66,18 @@
 // Output: a Markdown summary on stdout (appended to --summary FILE too, such
 // as "$GITHUB_STEP_SUMMARY"), and JSON with --json FILE.
 //
-// Exit status
-//   0  the report was produced, no implemented stage has a failed pair, and
-//      the --require-milestone gate (if given) passed;
-//   1  some implemented stage has a failed (unwaived) pair, or the stages of
-//      the --require-milestone milestone are not all passed;
-//   2  usage errors, registry or waiver-file errors (no report), or input
-//      errors (malformed JUnit, duplicate artifacts, a bad leg file or
-//      artifact name). The report is still printed for input errors, but
-//      it cannot be trusted.
+// Exit status (exitStatus below; tests/conformance/README.md "Output and
+// exit status" is the one place that documents it)
+//   2  usage, registry or waiver-file errors (no report), or input errors
+//      (the report is printed with trusted: false, but cannot be trusted);
+//   with --require-milestone M, otherwise:
+//   0  the gate of M is passed (every stage it covers is passed);
+//   1  it is not. Stages of other milestones and of conditional sub-IDs do
+//      not change the exit status; their failures stay in the report;
+//   without --require-milestone, otherwise:
+//   1  some implemented stage, of any milestone, conditional sub-IDs
+//      included, has a failed (unwaived) pair;
+//   0  none has.
 
 import { appendFileSync, existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -733,6 +736,16 @@ const USAGE =
 
 const VALUE_FLAGS = ['--commit', '--artifacts', '--waivers', '--root', '--today', '--require-milestone', '--json', '--summary'];
 
+// The exit status of a report (see the header) and the message for stderr.
+export function exitStatus(res, requireMilestone) {
+  if (res.input_errors.length) return [2, `${res.input_errors.length} input error(s); the report cannot be trusted`];
+  if (requireMilestone !== undefined) {
+    const gate = res.milestones[requireMilestone].gate;
+    return gate === 'passed' ? [0, null] : [1, `milestone ${requireMilestone} is ${gate}, not passed`];
+  }
+  return res.failed ? [1, 'some implemented stage has a failed result'] : [0, null];
+}
+
 export function run(argv, { log = console.log, logErr = console.error, now = new Date() } = {}) {
   const o = { root: resolve(dirname(fileURLToPath(import.meta.url)), '..', '..'), docsOnly: false, requireHistory: false };
   for (let i = 0; i < argv.length; i++) {
@@ -816,25 +829,20 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   const art = o.artifacts === undefined ? { reports: [], ignored: [], notes: [], errors: [] } : readArtifacts(resolve(o.artifacts), catalogue);
   const res = judge({ scenarios, subcases, contracts, reports: art.reports, waivers, commit: o.commit, today, docsOnly: o.docsOnly });
   res.input_errors = art.errors;
+  res.trusted = art.errors.length === 0;
   res.notes = art.notes;
   res.ignored_artifacts = art.ignored;
   const md = renderMarkdown(res, { inputErrors: art.errors, notes: art.notes, ignored: art.ignored });
   log(md);
   if (o.summary !== undefined) appendFileSync(o.summary, `${md}\n`);
   if (o.json !== undefined) writeFileSync(o.json, `${JSON.stringify(res, null, 2)}\n`);
-  if (art.errors.length) {
-    logErr(`report-conformance: ${art.errors.length} input error(s)`);
-    return 2;
+  const [status, why] = exitStatus(res, o.requireMilestone);
+  if (why) logErr(`report-conformance: ${why}`);
+  const outside = (st) => st.status === 'failed' && !(st.milestone === o.requireMilestone && st.conditional_on === null);
+  if (o.requireMilestone !== undefined && status !== 2 && res.stages.some(outside)) {
+    logErr(`report-conformance: note: implemented stages outside the ${o.requireMilestone} gate failed; they do not change the exit status (see the report)`);
   }
-  if (res.failed) {
-    logErr('report-conformance: some implemented stage has a failed result');
-    return 1;
-  }
-  if (o.requireMilestone !== undefined && res.milestones[o.requireMilestone].gate !== 'passed') {
-    logErr(`report-conformance: milestone ${o.requireMilestone} is ${res.milestones[o.requireMilestone].gate}, not passed`);
-    return 1;
-  }
-  return 0;
+  return status;
 }
 
 const isMain = (() => {
