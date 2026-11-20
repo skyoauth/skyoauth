@@ -121,13 +121,14 @@ jobs:
         run: node --test scripts/ci/gen-conformance-registry.test.mjs
 
       # publish-badges.sh against local bare repositories (no network, no
-      # git configuration of the runner); one round of the concurrent
-      # publishers' stress test.
-      - name: Self-test the badge publisher
+      # git configuration of the runner), with one round of the concurrent
+      # publishers' stress test; verify-badges-render.sh against a stub curl
+      # (no network).
+      - name: Self-test the badge scripts
         if: success() || failure()
         env:
           PUBLISH_BADGES_STRESS_ROUNDS: 1
-        run: node --test scripts/ci/publish-badges.test.mjs
+        run: node --test scripts/ci/publish-badges.test.mjs scripts/ci/verify-badges-render.test.mjs
 
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
@@ -647,11 +648,15 @@ jobs:
 
   # Checks that the README still renders the badges already published for
   # main: on every pull request (its merge commit), so a change that drops
-  # or renames a badge fails before it reaches main, and on a docs-only push
-  # to main, which publishes no badges but may have changed the README
-  # (other pushes to main check after publishing, in publish-badges). Like
-  # publish-badges, only in skyoauth/skyoauth: the README embeds that
-  # repository's badges, which a fork does not publish.
+  # a badge, or renames one in the README alone, fails before it reaches
+  # main, and on a docs-only push to main, which publishes no badges but
+  # may have changed the README (other pushes to main check after
+  # publishing, in publish-badges). On a pull request (--pull-request),
+  # fetch failures it cannot have caused (transport errors, 429 and 5xx
+  # after retries) and a badge not published yet (404, as for one the
+  # pull request adds or renames) are warnings; the push to main is
+  # strict. Like publish-badges, only in skyoauth/skyoauth: the README
+  # embeds that repository's badges, which a fork does not publish.
   verify-badges:
     name: Verify README badges
     needs: changes
@@ -670,7 +675,14 @@ jobs:
       - name: Verify the README badges render
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/ci/verify-badges-render.sh "$GITHUB_REPOSITORY" main "$GITHUB_SHA"
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            set -- --pull-request
+          else
+            set --
+          fi
+          sh scripts/ci/verify-badges-render.sh "$@" "$GITHUB_REPOSITORY" main "$GITHUB_SHA"
 
   # Publishes the Rust and TypeScript coverage and test-count badges for the
   # pushed branch to the `badges` branch (path `<branch>/`) as SVG files; the
