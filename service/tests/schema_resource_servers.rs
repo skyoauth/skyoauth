@@ -211,13 +211,13 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
     .into();
     assert_eq!(foreign_keys, expected);
 
-    // The full set of checks on the 0003 tables, and the bound 0003 adds to
+    // The full set of checks on the 0003 tables, and the bounds 0003 adds to
     // the 0002 tenant. The bounds and character rules are named for the
     // service's 23514 mapping (README.md); the others keep generated names.
     let mut checks: Vec<(String, String)> = sqlx::query_as(
         "SELECT conname::text, pg_get_constraintdef(oid) FROM pg_constraint
          WHERE contype = 'c' AND (conrelid = ANY($1::text[]::regclass[])
-           OR conname = 'tenant_id_octet_length_check')",
+           OR conname IN ('tenant_id_octet_length_check', 'tenant_secret_namespace_octet_length_check'))",
     )
     .bind(&tables)
     .fetch_all(&pool)
@@ -320,6 +320,10 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
             at_most("tenant_id", 255),
         ),
         ("tenant_id_octet_length_check", at_most("id", 255)),
+        (
+            "tenant_secret_namespace_octet_length_check",
+            at_most("secret_namespace", 255),
+        ),
     ]
     .into_iter()
     .map(|(name, def)| (name.into(), def))
@@ -363,7 +367,16 @@ async fn ids_in_composite_keys_are_bounded() {
         Some("tenant_id_octet_length_check"),
         "{err}"
     );
-    // The single-column primary keys: 256 and 3008 incompressible bytes.
+    // The unique tenant namespace and the single-column primary keys: 256 and
+    // 3008 incompressible bytes.
+    for value in [md5_hex(1, 8), md5_hex(1, 94)] {
+        violates(
+            &pool,
+            format!("INSERT INTO tenant VALUES ('ten_c', 'c', {value}, 'enabled')"),
+            "tenant_secret_namespace_octet_length_check",
+        )
+        .await;
+    }
     for (table, rest, constraint) in [
         (
             "audience_tenant_assignment",
@@ -390,7 +403,7 @@ async fn ids_in_composite_keys_are_bounded() {
         &pool,
         "CREATE TEMP TABLE incompressible AS
              SELECT string_agg(md5(i::text), '' ORDER BY i) AS v FROM generate_series(1, 64) i;
-         INSERT INTO tenant VALUES (repeat('t', 255), 'c', 'ns_c', 'enabled');
+         INSERT INTO tenant SELECT repeat('t', 255), 'c', left(v, 255), 'enabled' FROM incompressible;
          INSERT INTO resource_server VALUES
              (repeat('r', 255), 'x-api', 'X', '[]', '[]', '[]', 'enabled');
          INSERT INTO audience_tenant_assignment
@@ -405,7 +418,7 @@ async fn ids_in_composite_keys_are_bounded() {
              FROM incompressible",
     )
     .await;
-    let lengths: (i32, i32, i32, i32) = sqlx::query_as(
+    let lengths: (i32, i32, i32, i32, i32) = sqlx::query_as(
         "SELECT (SELECT octet_length(action_name) FROM resource_action
                  WHERE resource_server_id = repeat('r', 255)),
                 (SELECT octet_length(public_mtls_identity) FROM resource_server_checker
@@ -413,12 +426,13 @@ async fn ids_in_composite_keys_are_bounded() {
                 (SELECT octet_length(id) FROM resource_action
                  WHERE resource_server_id = repeat('r', 255)),
                 (SELECT octet_length(id) FROM audience_tenant_assignment
-                 WHERE resource_server_id = repeat('r', 255))",
+                 WHERE resource_server_id = repeat('r', 255)),
+                (SELECT octet_length(secret_namespace) FROM tenant WHERE id = repeat('t', 255))",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(lengths, (2048, 2048, 255, 255));
+    assert_eq!(lengths, (2048, 2048, 255, 255, 255));
     db.drop([pool]).await;
 }
 

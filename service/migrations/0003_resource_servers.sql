@@ -57,14 +57,19 @@ CREATE DOMAIN skyoauth_string_list AS jsonb
 -- before the row enters any index but the foreign key check runs after it).
 -- Each composite key then stays below the btree limit of about 2700 bytes
 -- even when the values do not compress, and an over-long value fails with
--- 23514. These checks are named, so the service can tell them apart
--- (README.md).
+-- 23514. With tenant.secret_namespace below, every primary key, unique and
+-- foreign key column of these five tables and of tenant has a named
+-- octet_length bound. These checks are named, so the service can tell them
+-- apart (README.md).
 
--- A forward-only bound on a 0002 table (lead decision, 2026-11-20): 0002 is
--- frozen, so 0003 adds it. It is validated against existing rows (no NOT
--- VALID).
+-- Forward-only bounds on a 0002 table (lead decision, 2026-11-20): 0002 is
+-- frozen, so 0003 adds them. They are validated against existing rows (no
+-- NOT VALID). secret_namespace is unique and NOT NULL; it gets only the
+-- length bound, no character rule.
 ALTER TABLE tenant ADD CONSTRAINT tenant_id_octet_length_check
     CHECK (octet_length(id) <= 255);
+ALTER TABLE tenant ADD CONSTRAINT tenant_secret_namespace_octet_length_check
+    CHECK (octet_length(secret_namespace) <= 255);
 
 -- ResourceServer (IR-070, IR-071). The audience is globally unique and exact
 -- (IR-070); that it never changes is (inferred). Its syntax and comparison

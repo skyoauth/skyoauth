@@ -201,6 +201,12 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   255 plus 2048 bytes, the checker's `(id, resource_server_id)`, the child
   primary key `(checker_id, tenant_id)` and the assignment's
   `(tenant_id, resource_server_id)` at most 255 plus 255.
+  `0003` also bounds the unique `tenant.secret_namespace` to 255 bytes with
+  `tenant_secret_namespace_octet_length_check` (lead decision, 2026-11-20;
+  length only, no character rule). Every primary key, unique and foreign key
+  column of the five tables and of `tenant` therefore has a named
+  `octet_length` bound: 255 bytes for IDs, references and the namespace, 2048
+  for the free-text keys.
 - **Immutable selectors** (`SK001`): the IDs (tasks §3 "IDs/names"), and
   (inferred) the audience, each row's `resource_server_id`, an assignment's
   `tenant_id` and an action's `action_name`; every column of a checker
@@ -245,6 +251,7 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   | Constraint                                                        | Rule                                        |
   | ----------------------------------------------------------------- | ------------------------------------------- |
   | `tenant_id_octet_length_check`                                    | `tenant.id` at most 255 bytes               |
+  | `tenant_secret_namespace_octet_length_check`                      | `tenant.secret_namespace` at most 255 bytes |
   | `resource_server_id_octet_length_check`                           | `id` at most 255 bytes                      |
   | `resource_server_audience_no_space_check`                         | `audience` has no whitespace or controls    |
   | `resource_server_audience_octet_length_check`                     | `audience` at most 2048 bytes               |
