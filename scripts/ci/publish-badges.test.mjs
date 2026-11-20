@@ -28,6 +28,7 @@ import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'publish-badges.sh');
+const CI_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'publish-badges-ci.sh');
 const PUBLISHERS = Number(process.env.PUBLISH_BADGES_STRESS_PUBLISHERS ?? 24);
 const ROUNDS = Number(process.env.PUBLISH_BADGES_STRESS_ROUNDS ?? 3);
 
@@ -440,5 +441,89 @@ describe('numeric settings and counts', () => {
     const r = publish(work[0], ['main', sha, '--ts-results', file('results.json', '{"success":true,"numPassedTests":1e30,"numFailedTests":0}')]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /cannot read typescript test results/);
+  });
+});
+
+describe('the CI job (publish-badges-ci.sh)', () => {
+  // Lays out the reports where the publish-badges job downloads them, in
+  // the clone the script runs in, and runs it with the given job results.
+  const run = (cwd, sha, results, reports = {}) => {
+    const put = (path, text) => {
+      mkdirSync(dirname(join(cwd, path)), { recursive: true });
+      writeFileSync(join(cwd, path), text);
+    };
+    if (reports.rustCoverage) put('target/coverage/coverage.json', JSON.stringify(rustReport(reports.rustCoverage)));
+    if (reports.junit) put('target/nextest-artifacts/service-nextest-junit-1/junit.xml', reports.junit);
+    if (reports.tsCoverage) put('clients/typescript/coverage/coverage-summary.json', JSON.stringify(tsSummary(reports.tsCoverage)));
+    if (reports.tsResults) put('clients/typescript/coverage/test-results.json', JSON.stringify(reports.tsResults));
+    return spawnSync('sh', [CI_SCRIPT], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 60_000,
+      killSignal: 'SIGKILL',
+      env: {
+        ...ENV,
+        GITHUB_REF_NAME: 'main',
+        GITHUB_SHA: sha,
+        RUST_COVERAGE_OK: '',
+        RUST_COVERAGE_RESULT: 'skipped',
+        RUST_TESTS_RESULT: 'skipped',
+        TS_OK: '',
+        TS_RESULT: 'skipped',
+        ...results,
+      },
+    });
+  };
+  const failedJunit = '<testsuites name="t" tests="5" failures="2" errors="0" skipped="0"><testsuite name="s"/></testsuites>';
+  const passedJunit = '<testsuites name="t" tests="5" failures="0" errors="0" skipped="0"><testsuite name="s"/></testsuites>';
+  const published = (remote, path) => spawnSync('git', ['cat-file', '-e', `badges:${path}`], { cwd: remote, env: ENV }).status === 0;
+
+  test('a coverage job that succeeded without a report still lets failed tests go red, then fails', () => {
+    const { remote, sha, work } = setup();
+    const r = run(work[0], sha, { RUST_COVERAGE_RESULT: 'success', RUST_TESTS_RESULT: 'failure' }, { junit: failedJunit });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /rust-coverage succeeded without a complete coverage report/);
+    assert.deepEqual(badge(remote, 'main/rust-tests.svg'), { color: RED, title: 'rust tests: 2 failed' });
+    assert.equal(published(remote, 'main/rust-coverage.svg'), false);
+    assertNoScriptLeftovers();
+  });
+
+  test('a missing TypeScript report or JUnit file fails after the other badges are published', () => {
+    const { remote, sha, work } = setup();
+    const r = run(work[0], sha, { RUST_COVERAGE_OK: 'true', RUST_COVERAGE_RESULT: 'success', RUST_TESTS_RESULT: 'success', TS_RESULT: 'success' }, { rustCoverage: 97.7 });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /service-nextest succeeded without a junit\.xml/);
+    assert.match(r.stderr, /typescript-coverage succeeded without a complete coverage report/);
+    assert.equal(badge(remote, 'main/rust-coverage.svg').title, 'rust coverage: 97.7%');
+  });
+
+  test('with nothing known it publishes nothing and still fails', () => {
+    const { remote, sha, work } = setup();
+    const r = run(work[0], sha, { RUST_COVERAGE_RESULT: 'success' });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stdout, /no badge to publish/);
+    assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1);
+  });
+
+  test('all reports present publishes the four badges and succeeds', () => {
+    const { remote, sha, work } = setup();
+    const r = run(
+      work[0], sha,
+      { RUST_COVERAGE_OK: 'true', RUST_COVERAGE_RESULT: 'success', RUST_TESTS_RESULT: 'success', TS_OK: 'true', TS_RESULT: 'success' },
+      { rustCoverage: 97.7, junit: passedJunit, tsCoverage: 100, tsResults: { success: true, numPassedTests: 7, numFailedTests: 0 } },
+    );
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.equal(badge(remote, 'main/rust-tests.svg').title, 'rust tests: 5 passed');
+    assert.equal(badge(remote, 'main/typescript-tests.svg').title, 'typescript tests: 7 passed');
+    assert.equal(badge(remote, 'main/typescript-coverage.svg').title, 'typescript coverage: 100.0%');
+  });
+
+  test('cancelled jobs publish red failing badges', () => {
+    const { remote, sha, work } = setup();
+    const r = run(work[0], sha, { RUST_COVERAGE_RESULT: 'cancelled', RUST_TESTS_RESULT: 'cancelled', TS_RESULT: 'cancelled' });
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    for (const name of ['rust-coverage', 'rust-tests', 'typescript-coverage', 'typescript-tests']) {
+      assert.equal(badge(remote, `main/${name}.svg`).color, RED, name);
+    }
   });
 });
