@@ -908,6 +908,17 @@ describe('waivers', () => {
     const missing = report(dir, ['--waivers', join(dir, 'nope.toml')], { commit: head });
     assert.equal(missing.code, 2);
     assert.match(missing.err, /--waivers .*nope\.toml: no such file/);
+    // A directory, such as tests/conformance instead of its waivers.toml, or
+    // a character device: a usage error with no report, not an internal
+    // error and not an empty waiver list.
+    for (const path of [join(dir, 'tests', 'conformance'), dir, '/dev/null']) {
+      const r = report(dir, ['--waivers', path, '--artifacts', failedThenPassed(head)], { commit: head });
+      assert.equal(r.code, 2, path);
+      assert.equal(r.err.split('\n')[0], `report-conformance: --waivers ${path}: not a regular file (give the waivers.toml file, not its directory)`);
+      assert.doesNotMatch(r.err, /internal error/);
+      assert.equal(r.out, '');
+      assert.equal(r.json, null);
+    }
   });
 
   test('waivers for other commits get only the shape checks; errors name the --waivers file and line', () => {

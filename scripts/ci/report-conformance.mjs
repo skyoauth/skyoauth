@@ -37,7 +37,8 @@
 //                     (layout §3 "Waivers"); the caller fetches it, for
 //                     example with `git show origin/main:tests/conformance/waivers.toml`.
 //                     The waivers for --commit get the registry check's full
-//                     waiver rule, the others only its shape checks.
+//                     waiver rule, the others only its shape checks. A FILE
+//                     that is missing or not a regular file is a usage error.
 //   --root DIR        Checkout of the judged commit (default: this
 //                     repository). In a git checkout, HEAD must be --commit
 //                     (else exit 2, no report; --allow-commit-mismatch
@@ -926,6 +927,9 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   let waivers = [];
   if (o.waivers !== undefined) {
     if (!existsSync(o.waivers)) return usage(`--waivers ${o.waivers}: no such file`);
+    // A directory (or a FIFO, a device) is a wrong argument, not an empty
+    // waiver list and not an internal error.
+    if (!statSync(o.waivers).isFile()) return usage(`--waivers ${o.waivers}: not a regular file (give the waivers.toml file, not its directory)`);
     const text = readFileSync(o.waivers, 'utf8');
     const rep = new Report();
     const doc = load(text, o.waivers, rep);
