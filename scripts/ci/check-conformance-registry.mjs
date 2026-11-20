@@ -43,9 +43,10 @@
 //   waivers   tests/conformance/waivers.toml (optional): every waiver has all
 //             fields; commit is a 40-hex SHA on origin/main; test is registered
 //             and leg is one of its stages' legs; expires is a TOML date.
-//   gate-pr   (--gate-pr only) The gate PR is one commit on its merge-base
-//             with origin/main and changes only the gates_passed line (no
-//             other path, and not the mode or type of scenarios.toml).
+//   gate-pr   (--gate-pr only) scenarios.toml parses at the merge-base with
+//             origin/main and at HEAD. The gate PR is one commit on that
+//             merge-base and changes only the gates_passed line (no other
+//             path, and not the mode or type of scenarios.toml).
 //
 // The commit check needs the full history and origin/main. Without them it is
 // skipped with a note, unless --require-history is given (CI): that probes
@@ -58,12 +59,15 @@
 // the merge-base of HEAD with origin/main. When gates_passed at HEAD adds a
 // milestone to the one at the merge-base, it requires (rule gate-pr) that HEAD
 // is a single commit whose only parent is that merge-base, and that its diff
-// changes nothing but the gates_passed line of scenarios.toml. It then runs
+// changes nothing but the gates_passed line of scenarios.toml, which stays at
+// the same line. It then runs
 // the whole check above on the specs and tests/conformance AS OF THE
 // MERGE-BASE, with HEAD's gates_passed, so every stage of each gated
 // milestone must be implemented, with a valid stamp, at the merge-base (rule
 // gates). When gates_passed does not grow, the PR is not a gate PR and
-// nothing is checked. On success stdout ends with `merge_base=<sha>` and
+// nothing is checked. When scenarios.toml at the merge-base or at HEAD is not
+// valid TOML, whether it grows cannot be told, and that is an error (rule
+// gate-pr). On success stdout ends with `merge_base=<sha>` and
 // `reporter_milestones=<added milestones but M0>`, for the gate job's
 // report-conformance.mjs --commit <merge_base> --require-milestone <M> runs.
 // M0 has no stages; ADR ratification and the doc checks gate it, not the
@@ -365,14 +369,17 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // objects). With an inherited GIT_DIR, a plain directory would pass as a
 // checkout of that repository, and with GIT_SHALLOW_FILE naming a missing
 // file a shallow clone would pass as complete, so every git run here goes
-// without them.
+// without them. Replace refs (refs/replace/*, in the repository itself) would
+// swap one object for another wherever git reads it, such as the gate
+// commit's parent or the history of origin/main, so every git run here also
+// passes --no-replace-objects.
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
 
-// `git -C root ...args`, run without GIT_LOCATION; `options` (encoding,
-// maxBuffer) are passed to spawnSync.
+// `git --no-replace-objects -C root ...args`, run without GIT_LOCATION;
+// `options` (encoding, maxBuffer) are passed to spawnSync.
 export function gitIn(root, options = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
-  return (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', ...options, env });
+  return (...args) => spawnSync('git', ['--no-replace-objects', '-C', root, ...args], { encoding: 'utf8', ...options, env });
 }
 
 // Whether origin/main's full history is available in `root`: { onMain(sha) }
@@ -637,18 +644,17 @@ const GATE_PATHS = [TASKS, DESIGN, LAYOUT, 'tests/conformance'];
 // The generator writes gates_passed on one line (at most 7 short milestones),
 // as `gates_passed = [` and `]` around quoted strings separated by ", ". Only
 // a line of exactly that form is the gates_passed line: any other form of it
-// (several lines, a comment after it, other spacing) is a change outside it.
+// (several lines, a comment after it, other spacing, trailing whitespace or a
+// CR, literal 'strings', backslash escapes) is a change outside it.
 const GATES_LINE = /^gates_passed = \[(?:"[^"\\]*"(?:, "[^"\\]*")*)?\]$/;
 
 // The milestone strings of gates_passed in a scenarios.toml text, or [] when
-// the text has no such list (the registry check reports what is wrong).
+// there is no file or it has no such list (the registry check reports what
+// is wrong). A text that is not valid TOML throws: whether gates_passed grows
+// cannot be told from it, so the caller fails closed.
 function gatesOf(text) {
-  try {
-    const g = text === null ? undefined : parseStrict(text).gates_passed;
-    return Array.isArray(g) ? g.filter((x) => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
+  const g = text === null ? undefined : parseStrict(text).gates_passed;
+  return Array.isArray(g) ? g.filter((x) => typeof x === 'string') : [];
 }
 
 // Returns { errors, notes, mergeBase, added, reporter }: the merge-base of
@@ -687,8 +693,19 @@ export function checkGatePr(root) {
   };
   const baseText = blob(`${mb}:${SCENARIOS}`)?.toString('utf8') ?? null;
   const headText = blob(`${head}:${SCENARIOS}`)?.toString('utf8') ?? null;
-  const before = gatesOf(baseText);
-  const after = gatesOf(headText);
+  // A side that does not parse could hide a grown gates_passed: fail closed
+  // instead of calling the PR "not a gate PR".
+  const gates = (text, where) => {
+    try {
+      return gatesOf(text);
+    } catch (ex) {
+      err(`${SCENARIOS} at ${where} is not valid TOML: ${String(ex?.message).split('\n')[0]}; --gate-pr cannot tell whether gates_passed grows`, SCENARIOS, ex?.line ?? null);
+      return null;
+    }
+  };
+  const before = gates(baseText, `the merge-base ${mb}`);
+  const after = gates(headText, `HEAD ${head}`);
+  if (before === null || after === null) return out;
   out.added = [...new Set(after.filter((g) => !before.includes(g)))];
   // A PR that only drops milestones (a revocation) is an ordinary reviewed
   // PR, not a gate PR: nothing here applies to it.
@@ -723,9 +740,13 @@ export function checkGatePr(root) {
   const rest = (ls, i) => ls.filter((_, j) => j !== i);
   const [br, hr] = [rest(b, bi), rest(h, hi)];
   const k = Array.from({ length: Math.max(br.length, hr.length) }, (_, j) => j).find((j) => br[j] !== hr[j]);
-  if (k !== undefined || bi < 0 || hi < 0) {
-    // The first changed line of HEAD's file, counting its gates_passed line.
-    const line = k === undefined ? Math.max(hi, 0) + 1 : hi >= 0 && k >= hi ? k + 2 : k + 1;
+  // The gates_passed line stays where it is: with the rest of the file the
+  // same line for line, a line at another index than at the merge-base has
+  // moved, which is a change outside it.
+  if (k !== undefined || bi < 0 || hi < 0 || bi !== hi) {
+    // The first changed line of HEAD's file, counting its gates_passed line
+    // (for a moved one, the first line where the two files differ).
+    const line = k !== undefined ? (hi >= 0 && k >= hi ? k + 2 : k + 1) : bi >= 0 && hi >= 0 ? Math.min(bi, hi) + 1 : Math.max(hi, 0) + 1;
     err('the gate PR changes this file outside the gates_passed line; a gate PR changes only that line', SCENARIOS, line);
   }
   // A gate PR only adds milestones: it may not also revoke one.
