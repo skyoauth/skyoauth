@@ -640,7 +640,8 @@ const GATE_PATHS = [TASKS, DESIGN, LAYOUT, 'tests/conformance'];
 // The generator writes gates_passed on one line (at most 7 short milestones),
 // as `gates_passed = [` and `]` around quoted strings separated by ", ". Only
 // a line of exactly that form is the gates_passed line: any other form of it
-// (several lines, a comment after it, other spacing) is a change outside it.
+// (several lines, a comment after it, other spacing, trailing whitespace or a
+// CR, literal 'strings', backslash escapes) is a change outside it.
 const GATES_LINE = /^gates_passed = \[(?:"[^"\\]*"(?:, "[^"\\]*")*)?\]$/;
 
 // The milestone strings of gates_passed in a scenarios.toml text, or [] when

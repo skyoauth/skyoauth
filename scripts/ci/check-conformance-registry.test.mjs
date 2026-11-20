@@ -1506,6 +1506,23 @@ describe('--gate-pr', () => {
     }
   });
 
+  // Forms that parse to the same list as the generator's line but are not it:
+  // trailing whitespace, a CR, literal (single-quoted) strings, and escapes.
+  test('gates_passed at HEAD with trailing whitespace, single quotes or a backslash escape', () => {
+    const lines = ['gates_passed = ["M1a"] ', 'gates_passed = ["M1a"]\t', 'gates_passed = ["M1a"]\r', "gates_passed = ['M1a']", 'gates_passed = ["M0", \'M1a\']', 'gates_passed = ["M\\u0031a"]', 'gates_passed = ["M1\\u0061"]', 'gates_passed = ["\\u004D1a"]'];
+    for (const line of lines) {
+      const { root, mb } = mainRoot();
+      const n = read(root, SCENARIOS).split('\n').indexOf('gates_passed = []') + 1;
+      edit(root, SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', line));
+      assert.ok(parseStrict(read(root, SCENARIOS)).gates_passed.includes('M1a'), `${JSON.stringify(line)} parses with M1a`);
+      commit(root, 'gate');
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.ok(res.added.includes('M1a'), `${JSON.stringify(line)}: a gate PR`);
+      expectOnly(res, 'gate-pr', new RegExp(`^tests/conformance/scenarios\\.toml:${n}: error \\[gate-pr\\] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line$`));
+    }
+  });
+
   test('a comment that quotes a gates_passed line is not the gates_passed line', () => {
     const { root, mb } = mainRoot((t) => replaceOnce(allM1a(t), 'gates_passed = []', '# was: gates_passed = []\ngates_passed = []'));
     gateCommit(root, '["M1a"]');
