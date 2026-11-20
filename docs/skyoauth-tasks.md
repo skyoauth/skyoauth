@@ -213,6 +213,7 @@ ResourceAction(id, resource_server_id, action_name, required_scopes,
                accepted_profiles, required_resource_dimensions,
                live_check_required, stream_capable, max_stream_duration_seconds?,
                stream_class, max_session_lease_seconds, status, revision)
+               -- stream_capable, max_stream_duration_seconds, stream_class and max_session_lease_seconds arrive with T14.4 in M1b
 ApplicationOrigin(id, tenant_id, canonical_origin, security_status,
                   security_reason?, security_revision, created_at)
 ApplicationOriginVersion(id, tenant_id, application_origin_id, revision,
