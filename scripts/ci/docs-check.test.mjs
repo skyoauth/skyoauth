@@ -724,7 +724,7 @@ describe('links and anchors', () => {
   // obeys them, so the tracked files would be another repository's and a
   // broken doc tracked only in --root would go unchecked.
   test('an inherited GIT_DIR does not replace the tracked files of --root', () => {
-    assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES']);
+    assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS']);
     const other = fixture();
     execFileSync('git', ['init', '-q', other], { stdio: 'ignore', env: GIT_ENV });
     execFileSync('git', ['-C', other, 'add', 'docs'], { env: GIT_ENV });
