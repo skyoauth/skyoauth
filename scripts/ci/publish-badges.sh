@@ -5,20 +5,30 @@
 # service.
 #
 #   scripts/ci/publish-badges.sh BRANCH SHA \
-#       [--rust-coverage coverage.json | --rust-coverage-failed] \
+#       [--rust-coverage coverage.json --rust-coverage-result RESULT |
+#        --rust-coverage-failed] \
 #       [--rust-junit junit.xml] [--rust-tests-failed] \
-#       [--ts-coverage coverage-summary.json | --ts-coverage-failed] \
+#       [--ts-coverage coverage-summary.json --ts-coverage-result RESULT |
+#        --ts-coverage-failed] \
 #       [--ts-results test-results.json] [--ts-tests-failed]
 #
 # BRANCH is the source branch the figures were measured on and SHA the
 # full commit they were measured at. At least one metric input must be
 # passed:
 #   --rust-coverage         `cargo llvm-cov --json --summary-only` report (line %)
+#   --rust-coverage-result  result of the job that measured it (`success`,
+#                           `failure` or `cancelled`), required with
+#                           --rust-coverage. Anything but `success` means the
+#                           coverage gate did not pass: the badge is red
+#                           whatever the percentage (84.96 % shows as 85.0 %)
 #   --rust-coverage-failed  publish a red `failing` rust coverage badge
 #   --rust-junit            `cargo nextest` JUnit report (passed or failed tests)
 #   --rust-tests-failed     mark the rust tests job as failed (uses the JUnit
 #                           failure count when present, else red `failing`)
 #   --ts-coverage           Vitest `coverage-summary.json` report (line %)
+#   --ts-coverage-result    as --rust-coverage-result, for --ts-coverage (the
+#                           gate also covers branches, functions and
+#                           statements, which the badge does not show)
 #   --ts-coverage-failed    publish a red `failing` typescript coverage badge
 #   --ts-results            Vitest `--reporter=json` test report
 #   --ts-tests-failed       mark the typescript tests job as failed (uses the
@@ -56,10 +66,12 @@ source_sha=${2:?source commit}
 shift 2
 
 rust_coverage=
+rust_coverage_result=
 rust_coverage_failed=0
 rust_junit=
 rust_tests_failed=0
 ts_coverage=
+ts_coverage_result=
 ts_coverage_failed=0
 ts_results=
 ts_tests_failed=0
@@ -67,6 +79,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --rust-coverage)
             rust_coverage=${2:?--rust-coverage requires a path}
+            shift 2 ;;
+        --rust-coverage-result)
+            rust_coverage_result=${2:?--rust-coverage-result requires a job result}
             shift 2 ;;
         --rust-coverage-failed)
             rust_coverage_failed=1
@@ -79,6 +94,9 @@ while [ "$#" -gt 0 ]; do
             shift ;;
         --ts-coverage)
             ts_coverage=${2:?--ts-coverage requires a path}
+            shift 2 ;;
+        --ts-coverage-result)
+            ts_coverage_result=${2:?--ts-coverage-result requires a job result}
             shift 2 ;;
         --ts-coverage-failed)
             ts_coverage_failed=1
@@ -102,6 +120,26 @@ if [ -n "$ts_coverage" ] && [ "$ts_coverage_failed" -eq 1 ]; then
     echo "publish-badges: --ts-coverage and --ts-coverage-failed are mutually exclusive" >&2
     exit 2
 fi
+# `check_result NAME COVERAGE RESULT`: a coverage report needs the result
+# of the job that measured it, and only a report needs one.
+check_result() {
+    if [ -n "$2" ]; then
+        case $3 in
+            success | failure | cancelled) ;;
+            '')
+                echo "publish-badges: --$1 requires --$1-result" >&2
+                exit 2 ;;
+            *)
+                echo "publish-badges: --$1-result must be success, failure or cancelled, got '$3'" >&2
+                exit 2 ;;
+        esac
+    elif [ -n "$3" ]; then
+        echo "publish-badges: --$1-result requires --$1" >&2
+        exit 2
+    fi
+}
+check_result rust-coverage "$rust_coverage" "$rust_coverage_result"
+check_result ts-coverage "$ts_coverage" "$ts_coverage_result"
 if [ -z "$rust_coverage" ] && [ "$rust_coverage_failed" -eq 0 ] &&
     [ -z "$rust_junit" ] && [ "$rust_tests_failed" -eq 0 ] &&
     [ -z "$ts_coverage" ] && [ "$ts_coverage_failed" -eq 0 ] &&
@@ -136,14 +174,22 @@ source_is_current() {
 }
 source_is_current
 
+# `coverage_color PERCENT RESULT`: red whenever the gate did not pass (a
+# job result other than `success`), otherwise by band.
 coverage_color() {
     whole=${1%.*}
-    if [ "$whole" -ge 90 ]; then printf '%s' brightgreen
+    if [ "$2" != success ]; then printf '%s' red
+    elif [ "$whole" -ge 90 ]; then printf '%s' brightgreen
     elif [ "$whole" -ge 80 ]; then printf '%s' green
     elif [ "$whole" -ge 70 ]; then printf '%s' yellowgreen
     elif [ "$whole" -ge 60 ]; then printf '%s' yellow
     else printf '%s' red
     fi
+}
+
+# `gate RESULT`: the coverage gate outcome recorded in summary.json.
+gate() {
+    if [ "$1" = success ]; then printf '%s' passed; else printf '%s' failed; fi
 }
 
 junit_attr() {
@@ -163,9 +209,9 @@ if [ -n "$rust_coverage" ]; then
     fi
     rust_percent=$(jq '.data[0].totals.lines.percent' "$rust_coverage" | awk '{printf "%.1f", $1}')
     rust_cov_value="${rust_percent}%"
-    rust_cov_color=$(coverage_color "$rust_percent")
-    rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg c "$sha" \
-        '{status: "ok", lines_percent: ($p | tonumber), commit: $c}')
+    rust_cov_color=$(coverage_color "$rust_percent" "$rust_coverage_result")
+    rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg g "$(gate "$rust_coverage_result")" --arg c "$sha" \
+        '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
 elif [ "$rust_coverage_failed" -eq 1 ]; then
     rust_cov_value=failing
     rust_cov_color=red
@@ -241,9 +287,9 @@ if [ -n "$ts_coverage" ]; then
     fi
     ts_percent=$(jq '.total.lines.pct' "$ts_coverage" | awk '{printf "%.1f", $1}')
     ts_cov_value="${ts_percent}%"
-    ts_cov_color=$(coverage_color "$ts_percent")
-    ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg c "$sha" \
-        '{status: "ok", lines_percent: ($p | tonumber), commit: $c}')
+    ts_cov_color=$(coverage_color "$ts_percent" "$ts_coverage_result")
+    ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg g "$(gate "$ts_coverage_result")" --arg c "$sha" \
+        '{status: "ok", lines_percent: ($p | tonumber), gate: $g, commit: $c}')
 elif [ "$ts_coverage_failed" -eq 1 ]; then
     ts_cov_value=failing
     ts_cov_color=red

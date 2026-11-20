@@ -656,7 +656,8 @@ jobs:
   # mechanism can be exercised before merge). scripts/ci/publish-badges.sh
   # skips figures for a commit that is no longer its branch's tip. Runs on
   # both passing and failing coverage/test jobs: a threshold-only miss
-  # publishes the below-threshold percentage, and test or build failures
+  # publishes the percentage in red (whatever its value: the TypeScript gate
+  # also covers branches, functions and statements), and test or build failures
   # publish red `N failed` / `failing` badges so stale passing figures never
   # remain on a red `main`. A docs-only change skips coverage and tests and
   # publishes nothing; the script keeps publishing for a commit that only
@@ -717,7 +718,7 @@ jobs:
         run: |
           set -- "$GITHUB_REF_NAME" "$GITHUB_SHA"
           if [ "$RUST_COVERAGE_OK" = true ]; then
-            set -- "$@" --rust-coverage target/coverage/coverage.json
+            set -- "$@" --rust-coverage target/coverage/coverage.json --rust-coverage-result "$RUST_COVERAGE_RESULT"
           elif [ "$RUST_COVERAGE_RESULT" = failure ]; then
             set -- "$@" --rust-coverage-failed
           fi
@@ -738,6 +739,7 @@ jobs:
           fi
           if [ "$TS_OK" = true ]; then
             set -- "$@" --ts-coverage clients/typescript/coverage/coverage-summary.json \
+              --ts-coverage-result "$TS_RESULT" \
               --ts-results clients/typescript/coverage/test-results.json
           elif [ "$TS_RESULT" = failure ]; then
             set -- "$@" --ts-coverage-failed --ts-tests-failed

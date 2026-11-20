@@ -166,7 +166,8 @@ counts come from `service-nextest` (all workspace tests, including PostgreSQL
 tests) and Rust line coverage comes from `rust-coverage` (which excludes the
 PostgreSQL-backed tests); TypeScript test counts and line coverage come from
 `typescript-coverage`. When a suite fails on `main`, CI publishes red failure
-badges (`N failed` or `failing`) rather than leaving stale passing figures. The
+badges (`N failed` or `failing`) rather than leaving stale passing figures, and
+a coverage badge is red whenever its gate failed, whatever percentage it shows. The
 publishing job checks that GitHub serves them as images from the rendered
 README (`scripts/ci/verify-badges-render.sh`), and a docs-only push to `main`,
 which publishes nothing, runs the same check. To protect `main`, require the
