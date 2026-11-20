@@ -90,7 +90,7 @@ for example `printf '%s\n%s\n%s\n%s' A24 M1a 'consume primitive' "$matrix_sha256
 
 Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, inside the annex range that the parent's `note` declares; today only A58 declares one (`A58.01–A58.89`), and a declared range must itself lie within .01–.89. The T32.3 owner drafts A58's required sub-IDs; none exist yet.
 
-`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
+`table_text` is the sentence the parent's row ends with: `Conditional sub-ID [Axx.9y] (<feature>, <first owner>): …`. Its feature and task must equal `conditional_on` and the first owner, and that owner must be the feature's own task (layout §2: `device-flow` T40.6, `back-channel-logout` T30.6, `forwardauth` T32.9), since `conditional_on` keeps the sub-ID out of the gates. The check compares the annex with the committed §2 table: a conditional sub-ID that the table names with a number must exist under that number; an unnumbered one, such as the two ForwardAuth sub-IDs, must match exactly one entry by parent, feature and task; a conditional entry the table does not name fails. A required sub-ID has neither `conditional_on` nor `table_text` and need not be named.
 
 ## The registry check
 
@@ -105,13 +105,14 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `hash` | Every `matrix_sha256` matches its source line. |
 | `owners` | Every owner is a task in tasks.md. |
 | `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
-| `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, no leg repeats in a stage, and every env has a leg. |
+| `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, its job exists at the stage's milestone, no leg repeats in a stage, and every env has a leg. |
+| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The reporter half of layout §3 **Gates** (every such stage **passed** on `main`) is not part of the static check. |
 | `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
 | `subcases` | The sub-ID rules above. |
 | `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
 | `waivers` | The waiver format below. |
 
-The generator reports the same spec and registry errors; the check adds `toml`, `fixtures`, `waivers` and line numbers, and is what CI gates on.
+The generator reports the same spec and registry errors; the check adds `toml`, `gates`, `fixtures`, `waivers` and line numbers, and is what CI gates on.
 
 ### Waivers
 
@@ -128,7 +129,7 @@ reason = "PostgreSQL service container lost mid-test; runner fault, not product 
 expires = 2026-12-31                                   # a TOML local date, not a string
 ```
 
-The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays, inline tables, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI, which makes it an error. Expiry against the current date and the reporter's use of waivers are not part of the static check.
+The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays, inline tables, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI: that probes the history up front, so a checkout without it fails even when there are no waivers. Expiry against the current date and the reporter's use of waivers are not part of the static check.
 
 ## Legs
 

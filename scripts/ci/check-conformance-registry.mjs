@@ -22,7 +22,12 @@
 //             carries the implemented_sha256 stamp of its (id, milestone,
 //             scope, matrix_sha256); a planned stage carries none.
 //   legs      Every leg is a §1.1 leg string, its env is one of the entry's
-//             envs, and every env has a leg in some stage.
+//             envs, its job exists at the stage's milestone (JOB_FROM), and
+//             every env has a leg in some stage.
+//   gates     Every scenario or required-subcase stage of a milestone in
+//             gates_passed is implemented (layout §3 Gates; the reporter part
+//             of that rule is not here). Conditional subcases are skipped
+//             until a release manifest selects their feature.
 //   table     The layout §2 table and its counts sentences equal the ones
 //             rendered from the registry (gen-conformance-registry.mjs renders
 //             both; this check imports that code).
@@ -40,8 +45,8 @@
 //             and leg is one of its stages' legs; expires is a TOML date.
 //
 // The commit check needs the full history and origin/main. Without them it is
-// skipped with a note, unless --require-history is given (CI), which makes
-// it an error.
+// skipped with a note, unless --require-history is given (CI): that probes
+// the history up front and makes its absence an error, waivers or not.
 //
 // Errors exit 1. Usage and internal errors exit 2.
 
@@ -56,12 +61,14 @@ import {
   annexRange,
   checkNamedSubcases,
   DESIGN,
+  FEATURE_TASK,
   FEATURES,
   findCounts,
   findTable,
   FULL_ROW,
   idRows,
   isConditionalNumber,
+  JOB_FROM,
   LAYERS,
   LAYOUT,
   LocalDate,
@@ -75,6 +82,7 @@ import {
   SCENARIOS,
   section,
   sha256,
+  show,
   SpecError,
   stageStamp,
   STATUSES,
@@ -221,7 +229,7 @@ function columnsValid(e, codes, err) {
 function checkStages(e, stageErr) {
   const n = e.stage.length;
   e.stage.forEach((s, i) => {
-    const se = (msg) => stageErr(s.milestone, `${e.id} ${s.milestone}: ${msg}`);
+    const se = (msg) => stageErr(s.milestone, `${show(e.id)} ${show(s.milestone)}: ${msg}`);
     unknownKeys(s, KEYS.stage, se);
     if (!MILESTONES.includes(s.milestone)) se(`unknown milestone (known: ${MILESTONES.join(', ')})`);
     else if (i > 0 && MILESTONES.indexOf(s.milestone) <= MILESTONES.indexOf(e.stage[i - 1].milestone)) se('stage milestones must increase, so that the last stage is the full milestone');
@@ -236,7 +244,7 @@ function checkStages(e, stageErr) {
       const want = stageStamp(e.id, s.milestone, s.scope, e.matrix_sha256);
       if (s.implemented_sha256 !== want) {
         se(
-          `implemented_sha256 is ${s.implemented_sha256 ?? 'missing'}, but the stage's (id, milestone, scope, matrix_sha256) stamps to ${want}; ` +
+          `implemented_sha256 is ${s.implemented_sha256 === undefined ? 'missing' : show(s.implemented_sha256)}, but the stage's (id, milestone, scope, matrix_sha256) stamps to ${want}; ` +
             'a changed scope, milestone or spec row needs review: set status = "planned" or re-stamp the stage',
         );
       }
@@ -248,19 +256,24 @@ function checkLegs(e, catalogue, stageErr, err) {
   const used = new Set();
   for (const s of e.stage) {
     if (!Array.isArray(s.legs)) continue;
+    // An unknown milestone is the stages rule's error; it has no jobs to check.
+    const at = MILESTONES.indexOf(s.milestone);
     for (const leg of s.legs) {
       const c = catalogue.get(leg);
-      if (!c) stageErr(s.milestone, `${e.id} ${s.milestone}: leg "${leg}" is not in the layout §1.1 Leg strings column`);
-      else if (!e.envs.includes(c.env)) stageErr(s.milestone, `${e.id} ${s.milestone}: leg "${leg}" runs in job ${c.job} of env ${c.env}, which is not one of envs`);
+      if (!c) stageErr(s.milestone, `${show(e.id)} ${show(s.milestone)}: leg ${JSON.stringify(leg)} is not in the layout §1.1 Leg strings column`);
+      else if (!e.envs.includes(c.env)) stageErr(s.milestone, `${show(e.id)} ${show(s.milestone)}: leg "${leg}" runs in job ${c.job} of env ${c.env}, which is not one of envs`);
+      else if (at >= 0 && MILESTONES.indexOf(JOB_FROM[c.job]) > at) stageErr(s.milestone, `${show(e.id)} ${s.milestone}: leg "${leg}" runs in job ${c.job}, which exists only from ${JOB_FROM[c.job]}`);
       else used.add(c.env);
     }
   }
-  for (const env of e.envs) if (!used.has(env)) err(`${e.id}: env ${env} has no leg in any stage`);
+  for (const env of e.envs) if (!used.has(env)) err(`${show(e.id)}: env ${env} has no leg in any stage`);
 }
 
 // IDs of `entries` must strictly increase in file order.
 function checkOrder(entries, file, at, report) {
   for (let i = 1; i < entries.length; i++) {
+    // A non-string ID is the ids rule's error; it has no order.
+    if (typeof entries[i].id !== 'string' || typeof entries[i - 1].id !== 'string') continue;
     if (!(entries[i].id > entries[i - 1].id)) report.error(file, at.get(entries[i].id), 'order', `${entries[i].id} follows ${entries[i - 1].id}: IDs must increase`);
   }
 }
@@ -340,7 +353,8 @@ export function history(root) {
   };
 }
 
-function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
+// `hist` is history(root) when --require-history probed it, else null.
+function checkWaivers(doc, at, stagesByTest, root, requireHistory, hist, report) {
   const bad = (i, msg) => report.error(WAIVERS, at.get(`waiver/${i}`), 'waivers', msg);
   unknownKeys(doc, ['waiver'], (msg) => report.error(WAIVERS, null, 'fields', msg));
   const waivers = doc.waiver ?? [];
@@ -348,7 +362,6 @@ function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
     report.error(WAIVERS, null, 'fields', 'waiver must be an array of tables ([[waiver]])');
     return 0;
   }
-  let hist = null;
   waivers.forEach((w, i) => {
     unknownKeys(w, KEYS.waiver, (msg) => bad(i, msg));
     for (const k of KEYS.waiver) if (w[k] === undefined) bad(i, `missing required field ${k}`);
@@ -359,7 +372,7 @@ function checkWaivers(doc, at, stagesByTest, root, requireHistory, report) {
         const on = hist.onMain(w.commit);
         if (on === 'no') bad(i, `commit ${w.commit} is not on main (not an ancestor of origin/main)`);
         else if (on === 'unknown') bad(i, `commit ${w.commit} is not in this repository's history`);
-      } else if (requireHistory) bad(i, `cannot check that commit ${w.commit} is on main: ${hist.reason}`);
+      }
     }
     if (w.test !== undefined) {
       const stages = typeof w.test === 'string' ? stagesByTest.get(w.test) : undefined;
@@ -384,12 +397,17 @@ const readMaybe = (root, rel) => (existsSync(join(root, rel)) ? readFileSync(joi
 export function checkRegistry(root, { requireHistory = false } = {}) {
   const report = new Report();
   const done = (summary = null) => ({ errors: report.errors, notes: report.notes, summary });
+  // CI asks for the history whether or not a waiver needs it, so a checkout
+  // that lost it (fetch-depth) fails before the first waiver lands.
+  const hist = requireHistory ? history(root) : null;
+  if (hist && !hist.onMain) report.error(null, null, 'waivers', `--require-history: cannot check waiver commits against origin/main: ${hist.reason} (CI checks out with fetch-depth: 0)`);
   const texts = {};
   for (const rel of [TASKS, DESIGN, LAYOUT, SCENARIOS, SUBCASES]) {
     texts[rel] = readMaybe(root, rel);
     if (texts[rel] === null) report.error(rel, null, 'fields', 'not found');
   }
-  if (report.errors.length) return done();
+  // A missing file stops the check; a history error does not.
+  if (Object.values(texts).includes(null)) return done();
 
   // Spec side: leg catalogue, task lines, §8 and §2 rows, the §2 table. A spec
   // that cannot be read at all stops the check after these errors.
@@ -427,6 +445,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   if (!Array.isArray(reg.gates_passed) || !reg.gates_passed.every((g) => MILESTONES.includes(g)) || new Set(reg.gates_passed).size !== reg.gates_passed.length) {
     report.error(SCENARIOS, null, 'fields', `gates_passed must be a list of distinct milestones (${MILESTONES.join(', ')})`);
   }
+  const gates = Array.isArray(reg.gates_passed) ? reg.gates_passed.filter((g) => MILESTONES.includes(g)) : [];
   const all = Array.isArray(reg.scenario) ? reg.scenario : [];
   if (!Array.isArray(reg.scenario)) report.error(SCENARIOS, null, 'fields', 'scenario must be an array of tables ([[scenario]])');
   const ofKind = (kind, re) =>
@@ -436,7 +455,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
       report.error(SCENARIOS, at.get(e.id), 'ids', `${JSON.stringify(e.id)}: a ${kind} ID looks like ${kind === 'scenario' ? 'A24' : 'C07'}`);
       return false;
     });
-  for (const e of all) if (e.kind !== 'scenario' && e.kind !== 'contract') report.error(SCENARIOS, at.get(e.id), 'fields', `${e.id}: kind must be scenario or contract`);
+  for (const e of all) if (e.kind !== 'scenario' && e.kind !== 'contract') report.error(SCENARIOS, at.get(e.id), 'fields', `${show(e.id)}: kind must be scenario or contract`);
   const scenarios = ofKind('scenario', /^A\d\d$/);
   const contracts = ofKind('contract', /^C\d\d$/);
 
@@ -450,7 +469,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
       const r = byRow.get(e.id);
       if (!r) report.error(SCENARIOS, at.get(e.id), 'ids', `${e.id} is not a ${what} row of ${specFile}`);
       else if (e.matrix_sha256 !== sha256(r.line)) {
-        report.error(SCENARIOS, at.get(e.id), 'hash', `${e.id}: matrix_sha256 is ${e.matrix_sha256}, but ${specFile}:${r.n} hashes to ${sha256(r.line)}; review the entry and run the generator`);
+        report.error(SCENARIOS, at.get(e.id), 'hash', `${e.id}: matrix_sha256 is ${show(e.matrix_sha256)}, but ${specFile}:${r.n} hashes to ${sha256(r.line)}; review the entry and run the generator`);
       }
     }
     for (const r of rows) if (!seen.has(r.id)) report.error(specFile, r.n, 'ids', `${what} ${r.id} has no registry entry in ${SCENARIOS}`);
@@ -471,19 +490,26 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   let rendered = true;
   const stagesByTest = new Map();
   const checkEntry = (e, file, where, keys) => {
+    const id = show(e.id);
     const err = (msg) => report.error(file, where.get(e.id), 'fields', msg);
-    unknownKeys(e, keys, (msg) => err(`${e.id}: ${msg}`));
-    if (!columnsValid(e, codes, (msg) => err(`${e.id}: ${msg}`))) {
+    unknownKeys(e, keys, (msg) => err(`${id}: ${msg}`));
+    if (!columnsValid(e, codes, (msg) => err(`${id}: ${msg}`))) {
       rendered = false;
       return;
     }
-    for (const o of e.owners) if (!tasksById.has(o)) report.error(file, where.get(e.id), 'owners', `${e.id}: owner ${o} is not a task in ${TASKS}`);
+    for (const o of e.owners) if (!tasksById.has(o)) report.error(file, where.get(e.id), 'owners', `${id}: owner ${o} is not a task in ${TASKS}`);
     const r = annexRange(e.id, e.note);
-    if (r && (r.from < 1 || r.to > 89 || r.from > r.to)) report.error(file, where.get(e.id), 'subcases', `${e.id}: annex range ${r.text} must lie within ${e.id}.01–${e.id}.89`);
-    const stageErr = (rule) => (m, msg) => report.error(file, where.get(`${e.id}/${m}`) ?? where.get(e.id), rule, msg);
+    if (r && (r.from < 1 || r.to > 89 || r.from > r.to)) report.error(file, where.get(e.id), 'subcases', `${id}: annex range ${r.text} must lie within ${id}.01–${id}.89`);
+    const stageErr = (rule) => (m, msg) => report.error(file, where.get(`${id}/${show(m)}`) ?? where.get(e.id), rule, msg);
     checkStages(e, stageErr('stages'));
     checkLegs(e, catalogue, stageErr('legs'), (msg) => report.error(file, where.get(e.id), 'legs', msg));
+    // Layout §3 Release: a conditional sub-ID is required only when the release
+    // manifest lists its feature as shipped. No manifest exists yet, so its
+    // stages join the gate once one selects their feature.
+    // A scenario is always gated, even with a stray conditional_on key.
+    const gated = keys !== KEYS.subcase || e.conditional_on === undefined;
     for (const s of e.stage) {
+      if (gated && gates.includes(s.milestone) && s.status !== 'implemented') stageErr('gates')(s.milestone, `${id} ${s.milestone}: gates_passed lists ${s.milestone}, but this stage is ${show(s.status)}, not implemented`);
       for (const t of Array.isArray(s.tests) ? s.tests : []) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: Array.isArray(s.legs) ? s.legs : [] }]);
     }
   };
@@ -494,33 +520,36 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   const subs = Array.isArray(sub.subcase) ? sub.subcase : [];
   if (sub.subcase !== undefined && !Array.isArray(sub.subcase)) report.error(SUBCASES, null, 'fields', 'subcase must be an array of tables ([[subcase]])');
   for (const s of subs) {
-    const err = (rule, msg) => report.error(SUBCASES, subAt.get(s.id), rule, `${s.id}: ${msg}`);
+    const err = (rule, msg) => report.error(SUBCASES, subAt.get(s.id), rule, `${show(s.id)}: ${msg}`);
     if (s.kind !== 'subcase') err('fields', 'kind must be subcase');
     if (typeof s.id !== 'string' || !/^A\d\d\.\d\d$/.test(s.id)) err('ids', 'a sub-ID looks like A58.07');
     else if (s.parent !== s.id.slice(0, 3) || !scenarioIds.has(s.parent)) err('subcases', `parent must be the registered scenario ${s.id.slice(0, 3)}`);
     const owner = Array.isArray(s.owners) ? s.owners[0] : undefined;
     if (owner === undefined || !tasksById.has(owner)) err('hash', 'the first owner must be a task, whose tasks.md line matrix_sha256 hashes');
-    else if (s.matrix_sha256 !== sha256(tasksById.get(owner))) err('hash', `matrix_sha256 is ${s.matrix_sha256}, but the ${TASKS} line of ${owner} hashes to ${sha256(tasksById.get(owner))}; review the entry and run the generator`);
+    else if (s.matrix_sha256 !== sha256(tasksById.get(owner))) err('hash', `matrix_sha256 is ${show(s.matrix_sha256)}, but the ${TASKS} line of ${owner} hashes to ${sha256(tasksById.get(owner))}; review the entry and run the generator`);
     const parent = scenarios.find((e) => e.id === s.parent);
     if (s.conditional_on === undefined) {
       if (s.table_text !== undefined) err('subcases', 'table_text is only for a conditional sub-ID');
       const r = annexRange(s.parent, parent?.note);
-      const n = Number(String(s.id).slice(4));
-      if (!r) err('subcases', `required sub-ID, but the note of ${s.parent} declares no annex range`);
-      else if (n < r.from || n > r.to) err('subcases', `required sub-ID is outside the annex range ${r.text} that the note of ${s.parent} declares`);
+      const n = Number(show(s.id).slice(4));
+      if (!r) err('subcases', `required sub-ID, but the note of ${show(s.parent)} declares no annex range`);
+      else if (n < r.from || n > r.to) err('subcases', `required sub-ID is outside the annex range ${r.text} that the note of ${show(s.parent)} declares`);
     } else if (typeof s.id === 'string' && !isConditionalNumber(s.id)) {
-      err('subcases', `a conditional sub-ID is numbered ${s.parent}.90–${s.parent}.99`);
+      err('subcases', `a conditional sub-ID is numbered ${show(s.parent)}.90–${show(s.parent)}.99`);
     } else if (!Object.values(FEATURES).includes(s.conditional_on)) {
       err('subcases', `conditional_on must be one of ${Object.values(FEATURES).join(', ')}`);
     } else {
+      // Only the feature's own task can declare a sub-ID conditional (and so
+      // keep it out of the gates).
+      if (owner !== FEATURE_TASK[s.conditional_on]) err('subcases', `conditional_on ${s.conditional_on} is the feature of task ${FEATURE_TASK[s.conditional_on]}, but the first owner is ${show(owner)}`);
       const t = isCell(s.table_text) ? parseConditional(s.table_text) : null;
       if (!t) {
-        err('subcases', `table_text must be a "Conditional sub-ID ${s.id} (<feature>, Txx.y): ..." sentence`);
+        err('subcases', `table_text must be a "Conditional sub-ID ${show(s.id)} (<feature>, Txx.y): ..." sentence`);
         rendered = false;
       } else {
         if (t.id !== null && t.id !== s.id) err('subcases', `table_text names ${t.id}`);
         if (t.feature !== s.conditional_on) err('subcases', `table_text names feature ${t.feature ?? t.label}, but conditional_on is ${s.conditional_on}`);
-        if (t.task !== owner) err('subcases', `table_text names ${t.task}, but the first owner is ${owner}`);
+        if (t.task !== owner) err('subcases', `table_text names ${t.task}, but the first owner is ${show(owner)}`);
       }
     }
     checkEntry(s, SUBCASES, subAt, KEYS.subcase);
@@ -552,7 +581,7 @@ export function checkRegistry(root, { requireHistory = false } = {}) {
   }
 
   const fixtures = checkFixtures(root, scenarioIds, new Set(subs.map((s) => s.id)), report);
-  const waivers = wdoc ? checkWaivers(wdoc, locate(waiverText), stagesByTest, root, requireHistory, report) : 0;
+  const waivers = wdoc ? checkWaivers(wdoc, locate(waiverText), stagesByTest, root, requireHistory, hist, report) : 0;
   return done(`${scenarios.length} scenarios, ${contracts.length} contracts, ${subs.length} subcases, ${fixtures} fixtures, ${waivers} waivers`);
 }
 

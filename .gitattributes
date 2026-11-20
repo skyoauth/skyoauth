@@ -1,0 +1,5 @@
+# LF in the files the CI scripts hash or compare line by line (matrix_sha256
+# of spec lines, the layout §2 table, the registry TOML), on every checkout.
+docs/** text=auto eol=lf
+tests/conformance/** text=auto eol=lf
+scripts/ci/** text=auto eol=lf
