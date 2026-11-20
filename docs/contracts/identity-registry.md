@@ -262,16 +262,26 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   is never a principal or an operator identity. Provisional until the audit
   writer ships. (lead decision, 2026-11-20, OQ-IR-14)
 - **IR-059** `AuditEvent.action` is a dotted lowercase `<resource>.<verb>`
-  name, such as `tenant.create`. The table below is the full list of action
-  names; an action that is not listed MUST NOT be written, and a new action
-  needs an entry here in the same change. Provisional until the audit writer
-  ships. (lead decision, 2026-11-20, OQ-IR-14)
+  name, such as `tenant.create`. `<resource>` is the audited entity's name
+  in lowercase snake case: `Tenant` gives `tenant`,
+  `InstanceSecurityPolicy` gives `instance_security_policy` and
+  `EgressAllowlistEntry` gives `egress_allowlist_entry` (inferred). The
+  decision fixes only this syntax, not the set of actions. The table below
+  gives examples and is incomplete until OQ-IR-15 is answered and the audit
+  writer PR names the actions: events this registry already requires, such
+  as the startup event of IR-053, the sink-change event, the IR-152 egress
+  entry writes and the T13.3 administrative events, are written whether or
+  not they are listed here. Provisional until the audit writer ships. (lead
+  decision, 2026-11-20, OQ-IR-14)
 
-  | Action                            | Event                                            |
-  | --------------------------------- | ------------------------------------------------ |
-  | `tenant.create`                   | Tenant created                                   |
-  | `instance_security_policy.update` | `InstanceSecurityPolicy` row updated             |
-  | `egress_allowlist.enable`         | `EgressAllowlistEntry` enabled or re-enabled     |
+  | Action                            | Event                                               |
+  | --------------------------------- | --------------------------------------------------- |
+  | `tenant.create`                   | Tenant created                                      |
+  | `instance_security_policy.update` | The online IR-052 `widening_second_approver` toggle |
+  | `egress_allowlist_entry.enable`   | `EgressAllowlistEntry` enabled or re-enabled        |
+
+  The startup mirror of IR-053 and the sink-change event also write the
+  `InstanceSecurityPolicy` row, but their action names are open (OQ-IR-15).
 
 ## 6. Scopes
 
@@ -684,7 +694,7 @@ follow-up. All other items are not resolved by this contract.
 - **OQ-IR-14 — Identity of instance-scope audit events.** **Decided** (lead
   decision, 2026-11-20; provisional until the audit writer ships): the event
   hash (IR-056), `instance_id` (IR-057), the reserved system actor (IR-058)
-  and the `action` namespace (IR-059). Already decided before that (lead
+  and the `action` syntax (IR-059). Already decided before that (lead
   decision, 2026-11-20; `service/migrations/README.md`): the T10.1 schema
   records the startup event that mirrors `single_actor_mode` (IR-053) and the
   sink-change event with `tenant_id` null, the `InstanceSecurityPolicy`
@@ -707,5 +717,9 @@ follow-up. All other items are not resolved by this contract.
     (format and precision); whether an absent value is a JSON `null` or an
     omitted member. `service/migrations/README.md` requires only that absent
     and present values hash differently.
-  - **Action names.** Not stated: the action names of the startup event that
-    mirrors `single_actor_mode` and of the sink-change event.
+  - **Action names.** IR-059 fixes only the `<resource>.<verb>` syntax, and
+    its table is incomplete. Not stated: the full set of action names,
+    including those of the startup event that mirrors `single_actor_mode`,
+    of the sink-change event, of the IR-152 egress entry writes other than
+    enabling and of the T13.3 administrative events. The audit writer PR
+    names them.

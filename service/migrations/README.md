@@ -120,9 +120,11 @@ egress rows are never deleted.
   generated once at first bootstrap and immutable (IR-057). Events the
   service writes on its own record the reserved actor
   `{"type": "system", "id": "system"}`, never a principal (IR-058). `action`
-  is a dotted lowercase `<resource>.<verb>` name listed in identity-registry
-  IR-059. These are lead decisions (2026-11-20, OQ-IR-14), provisional until
-  the audit writer ships.
+  is a dotted lowercase `<resource>.<verb>` name (identity-registry IR-059).
+  The decision fixes only that syntax: IR-059 lists examples, and the action
+  names, including those of these two events, are open until the audit
+  writer (OQ-IR-15). These are lead decisions (2026-11-20, OQ-IR-14),
+  provisional until the audit writer ships.
 
 The database does not enforce these rules; the service must:
 
@@ -239,6 +241,7 @@ Not done in `0002`:
   it with the next event's `prev_hash` or the head's `head_hash`. Still open
   before the writer ships (identity-registry OQ-IR-15): the text
   serialization of an object `actor`, the envelope's member names, the
-  timestamp format, the encoding of absent values, and the action names of
-  the startup-mirror and sink-change events.
+  timestamp format, the encoding of absent values, and the action names
+  (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
+  startup-mirror and sink-change events.
   Tests assert chain linkage and verification outcomes, never hash values.
