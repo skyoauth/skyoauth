@@ -62,7 +62,7 @@ impl TestDb {
         let connect = PgConnectOptions::from_str(&admin_url)
             .unwrap()
             .database(&name);
-        let config = DatabaseConfig::new(connect, 4, Duration::from_secs(10)).unwrap();
+        let config = DatabaseConfig::new(connect, None, 4, Duration::from_secs(10)).unwrap();
         Self {
             admin_url,
             name,

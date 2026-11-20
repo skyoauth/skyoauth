@@ -47,7 +47,8 @@ impl<'a> MakeWriter<'a> for Captured {
 /// and asserts that the connection fails without the password showing up in
 /// the error or the logs.
 async fn assert_failure_omits_password(connect: PgConnectOptions) {
-    let config = DatabaseConfig::new(connect.password(SECRET), 2, Duration::from_secs(2)).unwrap();
+    let config =
+        DatabaseConfig::new(connect.password(SECRET), None, 2, Duration::from_secs(2)).unwrap();
     let logs = Captured::default();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(Level::TRACE)

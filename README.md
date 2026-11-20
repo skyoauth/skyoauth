@@ -47,10 +47,16 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
   remote host and sqlx's `prefer` for `localhost`, a loopback address or a Unix
   socket; the ambient `PGSSLMODE` variable is ignored. An explicit `sslmode`
   in the URL is used as written, and a mode weaker than `verify-full` for a
-  remote host logs a WARN. The server certificate is checked against the
-  public (webpki) roots, so a private CA needs `sslrootcert=/path/ca.pem` in
-  the URL. Other `PG*` variables (`PGHOST`, `PGUSER`, `PGSSLROOTCERT` and so
-  on) are still read for settings the URL omits; put what matters in the URL.
+  remote host logs a WARN. A host is remote by its `hostaddr` when one is set
+  (sqlx dials that address), else by its name. sqlx's `sslmode=allow` is
+  plaintext only; it never negotiates TLS. The server certificate is checked
+  against the public (webpki) roots, so a private CA needs
+  `sslrootcert=/path/ca.pem` in the URL. Under `verify-ca` and `verify-full`
+  the server needs a leaf certificate issued by a CA: the self-signed
+  `CA:TRUE` certificate from a default `openssl req -x509` fails with
+  `CaUsedAsEndEntity`. Other `PG*` variables (`PGHOST`, `PGUSER`,
+  `PGSSLROOTCERT` and so on) are still read for settings the URL omits; put
+  what matters in the URL.
 - Conventions for writing migrations, and the limits of the append-only
   triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
 

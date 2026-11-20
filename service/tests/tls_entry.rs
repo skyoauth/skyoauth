@@ -16,7 +16,7 @@
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -24,6 +24,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+/// How long one `migrate` run may take before it is killed. Each run fails
+/// within the 1-second acquire timeout; the margin is for slow CI machines.
+const DEADLINE: Duration = Duration::from_secs(30);
 
 /// The first eight bytes of a PostgreSQL `SSLRequest`.
 const SSL_REQUEST: [u8; 8] = [0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f];
@@ -138,13 +142,51 @@ fn migrate_with_env(
     if let Some(address) = pghostaddr {
         command.env("PGHOSTADDR", address);
     }
-    let started = Instant::now();
-    let output = command.output().unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
-        "migrate took too long"
-    );
+    let output = output_within(&mut command, DEADLINE);
     (server.finish(), output)
+}
+
+/// Runs `command` to completion and collects its output, killing it if it
+/// is still running after `deadline`. stdout and stderr are drained on their
+/// own threads, so a chatty child cannot block on a full pipe.
+fn output_within(command: &mut Command, deadline: Duration) -> Output {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = drain(Box::new(child.stdout.take().unwrap()));
+    let stderr = drain(Box::new(child.stderr.take().unwrap()));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let (stdout, stderr) = (stdout.join().unwrap(), stderr.join().unwrap());
+            panic!(
+                "migrate did not finish within {deadline:?}:\n{}{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr)
+            );
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
 }
 
 fn all_output(output: &Output) -> String {
@@ -153,9 +195,23 @@ fn all_output(output: &Output) -> String {
     text
 }
 
+/// The log lines carrying the weak-TLS WARN.
+fn weak_tls_warnings(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| line.contains("weaker than verify-full"))
+        .collect()
+}
+
 #[test]
 fn a_remote_host_without_sslmode_ignores_pgsslmode_and_refuses_plaintext() {
-    for pgsslmode in [None, Some("disable"), Some("allow"), Some("prefer")] {
+    for pgsslmode in [
+        None,
+        Some("disable"),
+        Some("allow"),
+        Some("prefer"),
+        Some("require"),
+        Some("verify-ca"),
+    ] {
         let (seen, output) = migrate_against_fake_server(
             |port| format!("postgres://skyoauth:{SECRET}@0.0.0.0:{port}/skyoauth"),
             pgsslmode,
@@ -190,8 +246,35 @@ fn an_explicit_weaker_mode_for_a_remote_host_is_honored_with_a_warning() {
         "the explicit prefer should fall back to plaintext: {seen:?}"
     );
     let text = all_output(&output);
-    assert!(text.contains("weaker than verify-full"), "{text}");
-    assert!(text.contains("0.0.0.0"), "{text}");
+    let warnings = weak_tls_warnings(&text);
+    assert_eq!(warnings.len(), 1, "{text}");
+    assert!(warnings[0].contains("WARN"), "{text}");
+    assert!(warnings[0].contains("host=\"0.0.0.0\""), "{text}");
+    assert!(!text.contains(SECRET), "{text}");
+}
+
+/// The WARN names the dialed `hostaddr` as well as the host name.
+#[test]
+fn the_warning_for_a_remote_hostaddr_names_the_address() {
+    let (seen, output) = migrate_against_fake_server(
+        |port| {
+            format!(
+                "postgres://skyoauth:{SECRET}@localhost:{port}/skyoauth?hostaddr=0.0.0.0&sslmode=prefer"
+            )
+        },
+        None,
+    );
+    assert!(
+        seen.iter()
+            .any(|c| c.ssl_request && c.startup_after_refusal),
+        "the explicit prefer should fall back to plaintext: {seen:?}"
+    );
+    let text = all_output(&output);
+    let warnings = weak_tls_warnings(&text);
+    assert_eq!(warnings.len(), 1, "{text}");
+    assert!(warnings[0].contains("host=\"localhost\""), "{text}");
+    assert!(warnings[0].contains("hostaddr=0.0.0.0"), "{text}");
+    assert!(text.contains("hostaddr: Some(0.0.0.0)"), "{text}");
     assert!(!text.contains(SECRET), "{text}");
 }
 

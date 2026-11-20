@@ -23,11 +23,23 @@
 //!
 //! TLS to the database is strict by default: without `sslmode` in the URL, a
 //! remote host gets `verify-full` and a loopback or Unix-socket host gets
-//! `prefer`, whatever `PGSSLMODE` says (see [`DatabaseConfig`]). An explicit
-//! weaker mode for a remote host is accepted with a WARN log. [`DatabaseConfig`]'s
-//! `Debug` shows the SSL mode and omits the password, and the connection-failure tests in
-//! `service/tests/redaction.rs` check that errors and trace-level logs do not
-//! contain it.
+//! `prefer`, whatever `PGSSLMODE` says (see [`DatabaseConfig`]). "Remote" is
+//! judged on the `hostaddr` when one is set (in the URL, through `PGHOSTADDR`
+//! or as [`DatabaseConfig::new`]'s argument), because sqlx dials it instead of
+//! the host name, and on the host name otherwise. An explicit weaker mode for
+//! a remote host is accepted with a WARN log. sqlx's `sslmode=allow` is
+//! plaintext only: it never negotiates TLS. Under `verify-ca` and
+//! `verify-full` the server certificate must not be a CA: the self-signed
+//! `CA:TRUE` certificate a default `openssl req -x509` produces fails with
+//! `CaUsedAsEndEntity`, so issue the server a leaf certificate from a
+//! separate CA and name that CA in `sslrootcert`.
+//!
+//! [`DatabaseConfig`]'s `Debug` shows the SSL mode and the `hostaddr` and
+//! omits the password, and a URL whose password has an unencoded `@`, `/`,
+//! `?` or `#` is rejected before sqlx parses it, so the password cannot
+//! surface as a database name or an unrecognized query parameter. The
+//! connection-failure tests in `service/tests/redaction.rs` check that
+//! errors and trace-level logs do not contain the password.
 
 mod config;
 

@@ -29,22 +29,36 @@ const ACQUIRE_TIMEOUT_SECS: RangeInclusive<u32> = 1..=300;
 /// needs `sslrootcert=<path>` in the URL.
 ///
 /// "Remote" is judged on the address sqlx will dial: a `hostaddr` (from the
-/// URL, else `PGHOSTADDR`) when one is set, otherwise the host name. A
-/// loopback host name paired with a non-loopback `hostaddr` is therefore
-/// remote.
+/// URL or [`DatabaseConfig::new`]'s argument, else `PGHOSTADDR`) when one is
+/// set, otherwise the host name. A loopback host name paired with a
+/// non-loopback `hostaddr` is therefore remote. sqlx's `sslmode=allow` never
+/// negotiates TLS (it connects in plaintext, like `disable`).
+///
+/// # URL encoding
+///
+/// [`DatabaseConfig::from_lookup`] rejects, before sqlx parses it, a URL with
+/// an unencoded `@`, `/`, `?` or `#` in the user name or password, an
+/// unencoded `@` or `/` in the database name, or an unencoded `@` anywhere
+/// after the host. Such a URL splits in the wrong place, and sqlx would then
+/// log part of the password as an unrecognized query parameter or keep it as
+/// the database name (which `Debug` prints). Percent-encode these characters
+/// (`@` as `%40`, `/` as `%2F`, `?` as `%3F`, `#` as `%23`).
 ///
 /// sqlx still reads the other `PG*` variables (`PGHOST`, `PGPORT`, `PGUSER`,
 /// `PGPASSWORD`, `PGDATABASE`, `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`,
 /// `PGOPTIONS`, `PGAPPNAME`, `PGHOSTADDR`) for settings the URL does not
 /// carry. Set what matters in the URL.
 ///
-/// `Debug` prints host, port, database, username, the SSL mode and the pool
-/// limits, never the password or the URL. The parsed sqlx connect options are
-/// not exposed outside the `persistence` module, because their `Debug`
-/// includes the password.
+/// `Debug` prints host, `hostaddr`, port, database, username, the SSL mode
+/// and the pool limits, never the password or the URL. The parsed sqlx
+/// connect options are not exposed outside the `persistence` module, because
+/// their `Debug` includes the password.
 #[derive(Clone)]
 pub struct DatabaseConfig {
     connect: PgConnectOptions,
+    /// The address sqlx dials instead of resolving the host name. Kept here
+    /// because [`PgConnectOptions`] has no getter for it.
+    hostaddr: Option<IpAddr>,
     max_connections: u32,
     acquire_timeout: Duration,
 }
@@ -57,6 +71,9 @@ pub enum ConfigError {
     Missing(&'static str),
     /// The connection URL is not a valid `postgres://` or `postgresql://` URL.
     InvalidUrl,
+    /// The connection URL has a reserved character that must be
+    /// percent-encoded, such as an `@`, `/`, `?` or `#` in the password.
+    UnencodedUrlCharacter,
     /// A numeric setting is not an integer within its bounds.
     OutOfRange {
         var: &'static str,
@@ -71,6 +88,13 @@ impl fmt::Display for ConfigError {
             Self::InvalidUrl => write!(
                 f,
                 "{DATABASE_URL_VAR} is not a valid postgres:// or postgresql:// URL"
+            ),
+            Self::UnencodedUrlCharacter => write!(
+                f,
+                "{DATABASE_URL_VAR} has a character that must be percent-encoded: \
+                 '@', '/', '?' or '#' in the user name or password, '@' or '/' in \
+                 the database name, or '@' in the query (for example '@' as %40 \
+                 and '/' as %2F)"
             ),
             Self::OutOfRange { var, bounds } => write!(
                 f,
@@ -88,17 +112,46 @@ impl DatabaseConfig {
     /// Builds a configuration from parsed connect options, enforcing the
     /// same bounds as [`DatabaseConfig::from_env`].
     ///
-    /// The options carry no record of a `hostaddr` set through the URL, so
-    /// for the weak-TLS warning this reads `PGHOSTADDR` from the environment,
-    /// as sqlx does; [`DatabaseConfig::from_lookup`] sees the URL as well.
+    /// `hostaddr` is the address to dial instead of resolving the host name;
+    /// when set, it is applied to `connect` and decides whether the target is
+    /// remote. A `hostaddr` set on `connect` itself cannot be read back
+    /// ([`PgConnectOptions`] has no getter), so pass it here instead. When
+    /// `hostaddr` is `None`, `PGHOSTADDR` from the environment is used, as
+    /// sqlx does.
     pub fn new(
         connect: PgConnectOptions,
+        hostaddr: Option<IpAddr>,
         max_connections: u32,
         acquire_timeout: Duration,
     ) -> Result<Self, ConfigError> {
-        Self::build(connect, env_hostaddr(), max_connections, acquire_timeout)
+        Self::with_ambient_hostaddr(
+            connect,
+            hostaddr,
+            env_hostaddr(),
+            max_connections,
+            acquire_timeout,
+        )
     }
 
+    /// [`DatabaseConfig::new`] with the `PGHOSTADDR` value passed in, so
+    /// tests do not depend on the environment.
+    fn with_ambient_hostaddr(
+        connect: PgConnectOptions,
+        hostaddr: Option<IpAddr>,
+        ambient_hostaddr: Option<IpAddr>,
+        max_connections: u32,
+        acquire_timeout: Duration,
+    ) -> Result<Self, ConfigError> {
+        Self::build(
+            connect,
+            hostaddr.or(ambient_hostaddr),
+            max_connections,
+            acquire_timeout,
+        )
+    }
+
+    /// `hostaddr` is the address that will be dialed, if any; it is applied
+    /// to `connect` so that the two cannot disagree.
     fn build(
         connect: PgConnectOptions,
         hostaddr: Option<IpAddr>,
@@ -114,15 +167,21 @@ impl DatabaseConfig {
         {
             return Err(out_of_range(ACQUIRE_TIMEOUT_VAR, ACQUIRE_TIMEOUT_SECS));
         }
+        let connect = match hostaddr {
+            Some(address) => connect.hostaddr(address),
+            None => connect,
+        };
         if is_weaker_than_verify_full_for_remote(&connect, hostaddr) {
             tracing::warn!(
                 host = connect.get_host(),
+                hostaddr = hostaddr.map(tracing::field::display),
                 ssl_mode = ?connect.get_ssl_mode(),
                 "database TLS is weaker than verify-full for a remote host"
             );
         }
         Ok(Self {
             connect: connect.application_name("skyoauth-service"),
+            hostaddr,
             max_connections,
             acquire_timeout,
         })
@@ -135,17 +194,34 @@ impl DatabaseConfig {
 
     /// Reads the configuration through `lookup`, which maps a variable name
     /// to its value. Unset or empty numeric settings take their defaults.
+    ///
+    /// `PGHOSTADDR` is read from the process environment, not through
+    /// `lookup`, because that is where sqlx reads it.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        Self::from_lookup_with_ambient_hostaddr(lookup, env_hostaddr())
+    }
+
+    /// [`DatabaseConfig::from_lookup`] with the `PGHOSTADDR` value passed in,
+    /// so tests do not depend on the environment.
+    fn from_lookup_with_ambient_hostaddr(
+        lookup: impl Fn(&str) -> Option<String>,
+        ambient_hostaddr: Option<IpAddr>,
+    ) -> Result<Self, ConfigError> {
         let get = |var| lookup(var).filter(|value| !value.is_empty());
         let url = get(DATABASE_URL_VAR).ok_or(ConfigError::Missing(DATABASE_URL_VAR))?;
         let scheme = url.split_once("://").map(|(scheme, _)| scheme);
         if !matches!(scheme, Some("postgres" | "postgresql")) {
             return Err(ConfigError::InvalidUrl);
         }
+        // Checked before sqlx sees the URL: sqlx logs unrecognized query
+        // parameters while parsing.
+        if has_unencoded_url_character(&url) {
+            return Err(ConfigError::UnencodedUrlCharacter);
+        }
         // The parse error is dropped: its message may echo part of the URL.
         let connect = PgConnectOptions::from_str(&url).map_err(|_| ConfigError::InvalidUrl)?;
         let pairs = query_pairs(&url).ok_or(ConfigError::InvalidUrl)?;
-        let hostaddr = url_hostaddr(&pairs).or_else(env_hostaddr);
+        let hostaddr = url_hostaddr(&pairs).or(ambient_hostaddr);
         let mode = effective_ssl_mode(
             url_sets_ssl_mode(&pairs),
             is_remote(&connect, hostaddr),
@@ -187,6 +263,7 @@ impl fmt::Debug for DatabaseConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatabaseConfig")
             .field("host", &self.connect.get_host())
+            .field("hostaddr", &self.hostaddr)
             .field("port", &self.connect.get_port())
             .field("database", &self.connect.get_database())
             .field("username", &self.connect.get_username())
@@ -195,6 +272,30 @@ impl fmt::Debug for DatabaseConfig {
             .field("acquire_timeout", &self.acquire_timeout)
             .finish_non_exhaustive()
     }
+}
+
+/// Whether the raw URL has a reserved character that was not
+/// percent-encoded and moves a component boundary, which would let part of
+/// the password land where sqlx logs it or `Debug` prints it:
+///
+/// - a second `@` in the authority: an `@` in the user name or password;
+/// - an `@` after the authority (in the path, query or fragment): the
+///   authority ended early at a `/`, `?` or `#` in the password, or the
+///   database name or a query value has an `@`;
+/// - a `/` in the path after the leading one: a `/` in the database name.
+///
+/// The authority ends at the first `/`, `?` or `#`, as in the URL parser.
+/// This looks at the string as written, not at what a parser made of it,
+/// because a parser accepts most of these URLs with a different meaning.
+fn has_unencoded_url_character(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let (authority, tail) = rest.split_at(rest.find(['/', '?', '#']).unwrap_or(rest.len()));
+    let path = tail.split(['?', '#']).next().unwrap_or_default();
+    authority.matches('@').count() > 1
+        || tail.contains('@')
+        || path.get(1..).is_some_and(|name| name.contains('/'))
 }
 
 /// The URL's decoded query pairs, which is how sqlx reads them (so an
@@ -285,12 +386,25 @@ mod tests {
 
     const SECRET: &str = "s3cr3t-pw";
 
+    /// Reads a configuration from `vars` alone: `PGHOSTADDR` is taken as
+    /// unset whatever the environment says. (sqlx itself still reads the
+    /// `PG*` variables; every URL here sets what the assertions depend on.)
     fn config(vars: &[(&str, &str)]) -> Result<DatabaseConfig, ConfigError> {
-        DatabaseConfig::from_lookup(|var| {
-            vars.iter()
-                .find(|(k, _)| *k == var)
-                .map(|(_, v)| v.to_string())
-        })
+        config_with_ambient_hostaddr(vars, None)
+    }
+
+    fn config_with_ambient_hostaddr(
+        vars: &[(&str, &str)],
+        ambient_hostaddr: Option<IpAddr>,
+    ) -> Result<DatabaseConfig, ConfigError> {
+        DatabaseConfig::from_lookup_with_ambient_hostaddr(
+            |var| {
+                vars.iter()
+                    .find(|(k, _)| *k == var)
+                    .map(|(_, v)| v.to_string())
+            },
+            ambient_hostaddr,
+        )
     }
 
     #[test]
@@ -518,9 +632,11 @@ mod tests {
     // tracing caches each callsite's interest process-wide, so a scoped
     // subscriber races with other tests running in parallel threads.
     fn warns(url: &str) -> bool {
-        let config = config(&[(DATABASE_URL_VAR, url)]).unwrap();
-        let hostaddr = url_hostaddr(&query_pairs(url).unwrap());
-        is_weaker_than_verify_full_for_remote(config.connect_options(), hostaddr)
+        flagged(&config(&[(DATABASE_URL_VAR, url)]).unwrap())
+    }
+
+    fn flagged(config: &DatabaseConfig) -> bool {
+        is_weaker_than_verify_full_for_remote(config.connect_options(), config.hostaddr)
     }
 
     #[test]
@@ -550,5 +666,144 @@ mod tests {
         assert!(format!("{remote:?}").contains("ssl_mode: VerifyFull"));
         let local = config(&[(DATABASE_URL_VAR, "postgres://u@localhost/skyoauth")]).unwrap();
         assert!(format!("{local:?}").contains("ssl_mode: Prefer"));
+    }
+
+    #[test]
+    fn unencoded_reserved_characters_that_move_a_boundary_are_detected() {
+        for url in [
+            // `?`, `/` or `#` in the password ends the authority early.
+            "postgres://u:40417?tail@db.example/db",
+            "postgres://u:40417/tail@db.example/db",
+            "postgres://u:/tail@db.example/db",
+            "postgres://u:40417#tail@db.example/db",
+            "postgres://u:a?b/c#d@db.example:5432/db?sslmode=require",
+            // `@` in the user name or password.
+            "postgres://u:p@ss@db.example/db",
+            "postgres://admin@server:pw@db.example/db",
+            // `@` or `/` in the database name, `@` in the query or fragment.
+            "postgres://u@db.example/d@b",
+            "postgres://u@db.example/a/b",
+            "postgres://u@db.example//db",
+            "postgres://u@db.example/db?user=admin@server",
+            "postgres://u@db.example/db#a@b",
+            "postgres://db.example?x@y",
+        ] {
+            assert!(has_unencoded_url_character(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn encoded_or_well_placed_reserved_characters_are_accepted() {
+        for url in [
+            "postgres://u:40417%3Ftail@db.example/db",
+            "postgres://u:40417%2Ftail%23x@db.example/db",
+            "postgres://u:p%40ss@db.example/db",
+            "postgres://admin%40server:pw@db.example/db",
+            "postgres://u@db.example/a%2Fb",
+            "postgres://u:pw@db.example",
+            "postgres://u:pw@db.example/",
+            "postgres://u:pw@[::1]:5432/db",
+            "postgres://db.example/db",
+            "postgres:///db?host=/var/run/postgresql",
+            "postgres://u@db.example/db?sslrootcert=/etc/ssl/ca.pem&sslmode=verify-full",
+            "postgres://u@db.example/db?password=a/b?c",
+            "postgres://u@db.example/db?user=admin%40server",
+        ] {
+            assert!(!has_unencoded_url_character(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn a_url_with_an_unencoded_password_character_is_rejected_without_echoing_it() {
+        for separator in ["?", "/", "#", "@"] {
+            let url = format!("postgres://u:40417{separator}{SECRET}@db.example/skyoauth");
+            let err = config(&[(DATABASE_URL_VAR, &url)]).unwrap_err();
+            assert_eq!(err, ConfigError::UnencodedUrlCharacter, "{url}");
+            let message = err.to_string();
+            assert!(message.contains("percent-encoded"), "{message}");
+            for fragment in [SECRET, "40417", "db.example"] {
+                assert!(!message.contains(fragment), "{message}");
+            }
+        }
+        let encoded = format!("postgres://u:40417%3F{SECRET}@db.example/skyoauth");
+        assert!(config(&[(DATABASE_URL_VAR, &encoded)]).is_ok());
+    }
+
+    const REMOTE: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5));
+    const LOOPBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+    /// Connect options that depend on no ambient `PG*` setting the tests
+    /// look at.
+    fn options(host: &str) -> PgConnectOptions {
+        PgConnectOptions::new_without_pgpass()
+            .host(host)
+            .ssl_mode(PgSslMode::Prefer)
+    }
+
+    fn new_config(
+        host: &str,
+        hostaddr: Option<IpAddr>,
+        ambient_hostaddr: Option<IpAddr>,
+    ) -> DatabaseConfig {
+        DatabaseConfig::with_ambient_hostaddr(
+            options(host),
+            hostaddr,
+            ambient_hostaddr,
+            1,
+            Duration::from_secs(1),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_hostaddr_given_to_new_is_dialed_and_decides_remote() {
+        let config = new_config("localhost", Some(REMOTE), None);
+        assert_eq!(config.hostaddr, Some(REMOTE));
+        assert!(flagged(&config));
+        assert!(format!("{config:?}").contains("hostaddr: Some(10.0.0.5)"));
+        // Applied to the options, so the dialed address is the judged one.
+        let options = format!("{:?}", config.connect_options());
+        assert!(options.contains("hostaddr: Some(10.0.0.5)"), "{options}");
+
+        let config = new_config("db.example", Some(LOOPBACK), None);
+        assert!(!flagged(&config));
+    }
+
+    #[test]
+    fn a_hostaddr_given_to_new_overrides_the_ambient_one() {
+        let config = new_config("db.example", Some(LOOPBACK), Some(REMOTE));
+        assert_eq!(config.hostaddr, Some(LOOPBACK));
+        assert!(!flagged(&config));
+        assert!(format!("{config:?}").contains("hostaddr: Some(127.0.0.1)"));
+
+        let config = new_config("localhost", Some(REMOTE), Some(LOOPBACK));
+        assert!(flagged(&config));
+    }
+
+    #[test]
+    fn without_a_hostaddr_new_uses_the_ambient_one() {
+        let config = new_config("localhost", None, Some(REMOTE));
+        assert_eq!(config.hostaddr, Some(REMOTE));
+        assert!(flagged(&config));
+
+        let config = new_config("localhost", None, None);
+        assert_eq!(config.hostaddr, None);
+        assert!(!flagged(&config));
+        assert!(format!("{config:?}").contains("hostaddr: None"));
+    }
+
+    #[test]
+    fn the_url_hostaddr_overrides_the_ambient_one() {
+        let ambient = |url: &str| {
+            let config =
+                config_with_ambient_hostaddr(&[(DATABASE_URL_VAR, url)], Some(REMOTE)).unwrap();
+            (config.connect_options().get_ssl_mode(), config.hostaddr)
+        };
+        let (mode, hostaddr) = ambient("postgres://u@localhost/db");
+        assert!(matches!(mode, PgSslMode::VerifyFull), "{mode:?}");
+        assert_eq!(hostaddr, Some(REMOTE));
+        let (mode, hostaddr) = ambient("postgres://u@localhost/db?hostaddr=127.0.0.1");
+        assert!(matches!(mode, PgSslMode::Prefer), "{mode:?}");
+        assert_eq!(hostaddr, Some(LOOPBACK));
     }
 }

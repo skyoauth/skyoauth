@@ -63,3 +63,38 @@ fn migrate_connection_failure_does_not_log_the_password() {
     assert!(text.contains("127.0.0.1"), "{text}");
     assert!(!text.contains("s3cr3t-pw"), "{text}");
 }
+
+/// A password with an unencoded `?`, `/` or `#` ends the URL authority
+/// early, so the rest of it would reach sqlx's "unrecognized connect
+/// parameter" WARN or the database name in the `connecting` log line. Such a
+/// URL is rejected before sqlx parses it, and nothing of the password is
+/// printed, even at trace level.
+#[test]
+fn migrate_rejects_an_unencoded_password_character_without_printing_the_password() {
+    // The head is numeric so that, unchecked, it would parse as a port and
+    // the URL would be accepted.
+    const HEAD: &str = "40417";
+    const TAIL: &str = "t4il-k9zq";
+    for url in [
+        format!("postgres://skyoauth:{HEAD}?{TAIL}@127.0.0.1:1/skyoauth"),
+        format!("postgres://skyoauth:{HEAD}/{TAIL}@127.0.0.1:1/skyoauth"),
+        format!("postgres://skyoauth:/{TAIL}@127.0.0.1:1/skyoauth"),
+        format!("postgres://skyoauth:{HEAD}#{TAIL}@127.0.0.1:1/skyoauth"),
+        format!("postgres://skyoauth:{HEAD}@{TAIL}@127.0.0.1:1/skyoauth"),
+    ] {
+        let output = run(
+            &["migrate"],
+            &[
+                ("SKYOAUTH_DATABASE_URL", &url),
+                ("SKYOAUTH_DATABASE_ACQUIRE_TIMEOUT_SECS", "1"),
+                ("RUST_LOG", "trace"),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{url}");
+        let text = all_output(&output);
+        assert!(text.contains("must be percent-encoded"), "{url}: {text}");
+        for fragment in [HEAD, TAIL] {
+            assert!(!text.contains(fragment), "{url}: {fragment} in {text}");
+        }
+    }
+}
