@@ -13,13 +13,18 @@
 # Report paths are relative to the current directory, where the job
 # downloads the artifacts.
 #
-# A job that succeeded must have left a usable report. A missing one fails
-# this script rather than silently keeping the previous badge, but only
-# after the badges that are known have been published, so that a red
-# update (for instance, failed tests) is never dropped. A cancelled job
-# counts as failed, so no badge stays green while the run that should have
-# refreshed it went red. Exits with publish-badges.sh's status when that
-# failed, else 1 when a report was missing, else 0.
+# A job that succeeded must have left a usable report. A missing one (no
+# complete coverage report, no junit.xml) is not passed to
+# publish-badges.sh: its badge is left as it was, the other badges are
+# published, and this script then exits 1. A report that is present but
+# cannot be used fails publish-badges.sh in the same way (see there; for a
+# failed tests job it gives a red `failing` badge instead). Either way a
+# red update (for instance, failed tests) is never dropped. A cancelled
+# job counts as failed, so no badge stays green while the run that should
+# have refreshed it went red. Exits with publish-badges.sh's status when
+# that failed, else 1 when a report was missing, else 0. publish-badges.sh
+# exits 0 for a run found superseded, even with an unusable report; this
+# script then still exits 1 when a report was missing.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
