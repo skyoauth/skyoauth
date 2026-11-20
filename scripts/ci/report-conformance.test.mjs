@@ -114,8 +114,12 @@ const H_POS = rust('skyoauth-scenarios', 'hermetic', 'integration::a64::a64_pos_
 const H_NEG = rust('skyoauth-scenarios', 'hermetic', 'integration::a64::a64_neg_expired_challenge');
 const PG_POS = rust('skyoauth-scenarios', 'pg', 'integration::a64::a64_pos_remote_write');
 const PG_NEG = rust('skyoauth-scenarios', 'pg', 'integration::a64::a64_neg_key_export');
-const OP_POS = rust('skyoauth-operator', 'recovery', 'a64_pos_offline_recovery');
-const OP_NEG = rust('skyoauth-operator', 'recovery', 'a64_neg_wrong_instance');
+// skyoauth-operator: target operator runs in the operator job, target
+// recovery_offline in the recovery-offline chain (layout §3, §6).
+const OP_POS = rust('skyoauth-operator', 'operator', 'a64_pos_remote_scoped_write');
+const OP_NEG = rust('skyoauth-operator', 'operator', 'a64_neg_unsupported_adapter');
+const RO_POS = rust('skyoauth-operator', 'recovery_offline', 'a64_pos_offline_recovery');
+const RO_NEG = rust('skyoauth-operator', 'recovery_offline', 'a64_neg_wrong_instance');
 const VT_POS = { id: 'vitest:test/csrf.test.ts/csrf > A40 pos: same origin', classname: 'test/csrf.test.ts', name: 'csrf > A40 pos: same origin' };
 const VT_NEG = { id: 'vitest:test/csrf.test.ts/csrf > A40 neg: foreign origin', classname: 'test/csrf.test.ts', name: 'csrf > A40 neg: foreign origin' };
 const PW_POS = { id: 'playwright:browser/csrf.spec.ts/csrf › A40 pos: same origin', classname: 'browser/csrf.spec.ts', name: 'csrf › A40 pos: same origin' };
@@ -123,7 +127,7 @@ const PW_NEG = { id: 'playwright:browser/csrf.spec.ts/A40 neg: foreign origin', 
 
 const ids = (tests) => tests.map((t) => t.id);
 const withA24 = { [SCENARIOS]: implement('scenario', 'A24', 'M1a', ids(A24)) };
-const A64_TESTS = [H_POS, H_NEG, PG_POS, PG_NEG, OP_POS, OP_NEG];
+const A64_TESTS = [H_POS, H_NEG, PG_POS, PG_NEG, OP_POS, OP_NEG, RO_POS, RO_NEG];
 const withA64 = { [SCENARIOS]: implement('scenario', 'A64', 'M1a', ids(A64_TESTS)) };
 
 // ---------------------------------------------------------------------------
@@ -487,9 +491,9 @@ describe('legs', () => {
     'operator/ubuntu': [OP_POS, OP_NEG],
     'operator/macos': [OP_POS, OP_NEG],
     'operator/windows': [OP_POS, OP_NEG],
-    'recovery-offline/ubuntu': [OP_POS, OP_NEG],
-    'recovery-offline/macos': [OP_POS, OP_NEG],
-    'recovery-offline/windows': [OP_POS, OP_NEG],
+    'recovery-offline/ubuntu': [RO_POS, RO_NEG],
+    'recovery-offline/macos': [RO_POS, RO_NEG],
+    'recovery-offline/windows': [RO_POS, RO_NEG],
   };
   const a64 = (skip = [], commit = SHA) => artifacts(Object.entries(LEGS).filter(([leg]) => !skip.includes(leg)).map(([leg, tests]) => ({ leg, junit: allPass(tests) })), { commit });
 
@@ -510,7 +514,7 @@ describe('legs', () => {
       [OP_POS.id, 'operator/windows', 'not run'],
       [OP_NEG.id, 'operator/windows', 'not run'],
     ]);
-    assert.match(r.out, /a64_pos_offline_recovery` on `operator\/windows`: not run<br>`nextest:skyoauth-operator\/recovery\/a64_neg_wrong_instance` on `operator\/windows`: not run \|/);
+    assert.match(r.out, /a64_pos_remote_scoped_write` on `operator\/windows`: not run<br>`nextest:skyoauth-operator\/operator\/a64_neg_unsupported_adapter` on `operator\/windows`: not run \|/);
     const dir = root(withA64);
     const head = commitRoot(dir);
     assert.equal(report(dir, ['--artifacts', a64(['operator/windows'], head), '--require-milestone', 'M1a'], { commit: head }).code, 1);
@@ -537,9 +541,10 @@ describe('legs', () => {
   });
 
   test('each job of a stage needs its own pos and neg test: a neg test of another job does not count', () => {
-    // scenarios-pg has only a pos test; the hermetic and operator jobs have
-    // both, so neg tests exist in the stage, just not from scenarios-pg.
-    const tests = [H_POS, H_NEG, PG_POS, OP_POS, OP_NEG];
+    // scenarios-pg has only a pos test; the hermetic, operator and
+    // recovery-offline jobs have both, so neg tests exist in the stage, just
+    // not from scenarios-pg.
+    const tests = [H_POS, H_NEG, PG_POS, OP_POS, OP_NEG, RO_POS, RO_NEG];
     const r = report(root({ [SCENARIOS]: implement('scenario', 'A64', 'M1a', ids(tests)) }), [
       '--artifacts',
       artifacts(['scenarios-hermetic/x86_64', 'scenarios-hermetic/aarch64', PG, 'operator/ubuntu', 'operator/macos', 'operator/windows', 'recovery-offline/ubuntu', 'recovery-offline/macos', 'recovery-offline/windows'].map((leg) => ({ leg, junit: allPass(tests) }))),
@@ -548,6 +553,121 @@ describe('legs', () => {
     assert.deepEqual(st.problems, ['job scenarios-pg produces no neg test of this stage']);
     assert.equal(st.status, 'not run');
     assert.ok(st.pairs.every((p) => p.status === 'passed'));
+  });
+
+  // skyoauth-operator has one job per test target (layout §3 "Which job
+  // produces a test", §6): target operator runs in operator, target
+  // recovery_offline in recovery-offline; any other target is produced by no
+  // job.
+  describe('skyoauth-operator targets', () => {
+    const jobLegs = (job) => Object.keys(LEGS).filter((leg) => leg.startsWith(`${job}/`));
+    const legsOfPairs = (st, t) => st.pairs.filter((p) => p.test === t.id).map((p) => p.leg);
+    // The legs of stage `m` of scenario `id`, replaced by `legs`.
+    const withLegs = (id, m, legs) => (text) => {
+      const start = text.indexOf(`[[scenario]]\nid = "${id}"`);
+      const at = text.indexOf(`[[scenario.stage]]\nmilestone = "${m}"`, start);
+      assert.ok(start >= 0 && at >= 0, `no stage ${m} of ${id}`);
+      const from = text.indexOf('legs = [', at);
+      const to = text.indexOf(']', from) + 1;
+      return text.slice(0, from) + `legs = [${legs.map((l) => JSON.stringify(l)).join(', ')}]` + text.slice(to);
+    };
+
+    test('in A64, which lists both jobs, a target operator test is judged by the operator legs alone and a target recovery_offline test by the recovery-offline legs alone', () => {
+      // Each operator leg reports only target operator tests, each
+      // recovery-offline leg only target recovery_offline tests.
+      const r = report(root(withA64), ['--artifacts', a64()]);
+      assert.equal(r.code, 0, r.err);
+      const st = stage(r.json, 'A64', 'M1a');
+      assert.deepEqual(st.problems, []);
+      assert.equal(st.status, 'passed');
+      for (const t of [OP_POS, OP_NEG]) assert.deepEqual(legsOfPairs(st, t), jobLegs('operator'), t.id);
+      for (const t of [RO_POS, RO_NEG]) assert.deepEqual(legsOfPairs(st, t), jobLegs('recovery-offline'), t.id);
+    });
+
+    test('A64 needs a pos and a neg test from each target: one target does not cover the other job', () => {
+      const legs = Object.keys(LEGS);
+      for (const [tests, job] of [
+        [[OP_POS, OP_NEG], 'recovery-offline'],
+        [[RO_POS, RO_NEG], 'operator'],
+      ]) {
+        const all = [H_POS, H_NEG, PG_POS, PG_NEG, ...tests];
+        const r = report(root({ [SCENARIOS]: implement('scenario', 'A64', 'M1a', ids(all)) }), ['--artifacts', artifacts(legs.map((leg) => ({ leg, junit: allPass(all) })))]);
+        assert.equal(r.code, 0, r.err);
+        const st = stage(r.json, 'A64', 'M1a');
+        assert.deepEqual(st.problems, [`job ${job} produces no pos test of this stage`, `job ${job} produces no neg test of this stage`], job);
+        assert.equal(st.status, 'not run');
+        assert.deepEqual(
+          st.pairs.filter((p) => p.leg.startsWith(`${job}/`)),
+          [],
+          `no pair on the ${job} legs`,
+        );
+      }
+    });
+
+    test('a stage whose legs list operator but not recovery-offline (A20 M3): a target operator test is judged by operator alone, a target recovery_offline test is produced by none of its jobs', () => {
+      const PG20 = [rust('skyoauth-scenarios', 'pg', 'integration::a20::a20_pos_operator_during_outage'), rust('skyoauth-scenarios', 'pg', 'integration::a20::a20_neg_fresh_login_fails_closed')];
+      const OP20 = [rust('skyoauth-operator', 'operator', 'a20_pos_recovery_during_outage'), rust('skyoauth-operator', 'operator', 'a20_neg_no_session')];
+      const RO20 = rust('skyoauth-operator', 'recovery_offline', 'a20_pos_offline_recovery');
+      const legsA20 = [PG, ...jobLegs('operator'), ...jobLegs('recovery-offline')];
+      // Every leg, a recovery-offline leg too, reports every test passed.
+      const run20 = (tests) => report(root({ [SCENARIOS]: implement('scenario', 'A20', 'M3', ids(tests)) }), ['--artifacts', artifacts(legsA20.map((leg) => ({ leg, junit: allPass(tests) })))]);
+
+      const ok = run20([...PG20, ...OP20]);
+      assert.equal(ok.code, 0, ok.err);
+      const st = stage(ok.json, 'A20', 'M3');
+      assert.deepEqual(st.problems, []);
+      assert.equal(st.status, 'passed');
+      for (const t of OP20) assert.deepEqual(legsOfPairs(st, t), jobLegs('operator'), t.id);
+
+      const bad = run20([...PG20, ...OP20, RO20]);
+      assert.equal(bad.code, 0, bad.err);
+      const st2 = stage(bad.json, 'A20', 'M3');
+      assert.deepEqual(st2.problems, [`${RO20.id} is produced by none of the jobs of the stage's legs (scenarios-pg, operator)`]);
+      assert.equal(st2.status, 'not run');
+      assert.deepEqual(legsOfPairs(st2, RO20), []);
+    });
+
+    test('a stage whose legs list recovery-offline but not operator: a target recovery_offline test is judged by recovery-offline alone, a target operator test is produced by none of its jobs', () => {
+      const legs = Object.keys(LEGS).filter((leg) => !leg.startsWith('operator/'));
+      const fixture = (tests) => ({ [SCENARIOS]: compose(withLegs('A64', 'M1a', legs), implement('scenario', 'A64', 'M1a', ids(tests))) });
+      // Every leg, the operator legs too, reports every test passed.
+      const run64 = (tests) => report(root(fixture(tests)), ['--artifacts', artifacts(Object.keys(LEGS).map((leg) => ({ leg, junit: allPass(tests) })))]);
+
+      const ok = run64([H_POS, H_NEG, PG_POS, PG_NEG, RO_POS, RO_NEG]);
+      assert.equal(ok.code, 0, ok.err);
+      const st = stage(ok.json, 'A64', 'M1a');
+      assert.deepEqual(st.legs, legs);
+      assert.deepEqual(st.problems, []);
+      assert.equal(st.status, 'passed');
+      for (const t of [RO_POS, RO_NEG]) assert.deepEqual(legsOfPairs(st, t), jobLegs('recovery-offline'), t.id);
+
+      const bad = run64([H_POS, H_NEG, PG_POS, PG_NEG, RO_POS, RO_NEG, OP_POS]);
+      assert.equal(bad.code, 0, bad.err);
+      const st2 = stage(bad.json, 'A64', 'M1a');
+      assert.deepEqual(st2.problems, [`${OP_POS.id} is produced by none of the jobs of the stage's legs (scenarios-hermetic, scenarios-pg, recovery-offline)`]);
+      assert.equal(st2.status, 'not run');
+      assert.deepEqual(legsOfPairs(st2, OP_POS), []);
+    });
+
+    test('a test of any other skyoauth-operator target, or of its lib, is produced by no job: its stage is not run though every leg reports it passed', () => {
+      const JOBS = 'scenarios-hermetic, scenarios-pg, operator, recovery-offline';
+      for (const odd of [
+        rust('skyoauth-operator', 'recovery', 'a64_pos_offline_recovery'),
+        rust('skyoauth-operator', 'recovery-offline', 'a64_neg_wrong_instance'),
+        rust('skyoauth-operator', 'Operator', 'a64_pos_remote_scoped_write'),
+        rust('skyoauth-operator', 'bin/skyoauth-operator', 'a64_neg_cli'),
+        { id: 'nextest:skyoauth-operator/a64_pos_lib', classname: 'skyoauth-operator', name: 'a64_pos_lib' },
+      ]) {
+        const tests = [...A64_TESTS, odd];
+        const r = report(root({ [SCENARIOS]: implement('scenario', 'A64', 'M1a', ids(tests)) }), ['--artifacts', artifacts(Object.keys(LEGS).map((leg) => ({ leg, junit: allPass([...LEGS[leg], odd]) })))]);
+        assert.equal(r.code, 0, r.err);
+        const st = stage(r.json, 'A64', 'M1a');
+        assert.deepEqual(st.problems, [`${odd.id} is produced by none of the jobs of the stage's legs (${JOBS})`], odd.id);
+        assert.equal(st.status, 'not run', odd.id);
+        assert.deepEqual(legsOfPairs(st, odd), [], odd.id);
+        assert.ok(st.pairs.every((p) => p.status === 'passed'), odd.id);
+      }
+    });
   });
 
   test('a problem stage with a failed pair is failed', () => {
@@ -768,6 +888,12 @@ describe('test names', () => {
     assert.deepEqual(pick('nextest:skyoauth-scenarios/live/a01_neg_x'), [true, 'A01', 'neg', 'live-wif-push,live-wif-negative']);
     assert.deepEqual(pick('nextest:skyoauth-scenarios/other/a01_neg_x'), [true, 'A01', 'neg', '']);
     assert.deepEqual(pick('nextest:skyoauth-client/x/a41_pos_x'), [true, 'A41', 'pos', 'clients-rust,clients-rust-native']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/operator/a64_pos_x'), [true, 'A64', 'pos', 'operator']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/recovery_offline/a64_neg_x'), [true, 'A64', 'neg', 'recovery-offline']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/recovery_offline/m::a20_pos_x'), [true, 'A20', 'pos', 'recovery-offline']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/recovery/a64_pos_x'), [true, 'A64', 'pos', '']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/recovery-offline/a64_pos_x'), [true, 'A64', 'pos', '']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/a64_pos_x'), [true, 'A64', 'pos', '']);
     assert.deepEqual(pick('nextest:skyoauth-service/a01_pos_x'), [true, 'A01', 'pos', '']);
     assert.deepEqual(pick('nextest:skyoauth-scenarios/pg/m::a24_pos_'), [true, null, null, 'scenarios-pg']);
     assert.deepEqual(pick('nextest:skyoauth-scenarios/pg/a24_x::helper'), [false, null, null, 'scenarios-pg']);
