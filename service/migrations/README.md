@@ -188,11 +188,13 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
   are bounded by lead decision (2026-11-20), `tenant.id` with
   `tenant_id_octet_length_check`, a forward-only constraint on the frozen
-  `0002` table; `resource_server_checker.id` and every reference column are
-  bounded the same way (inferred). The reference columns need their own
-  bound: a `CHECK` runs before the row enters any index, but the foreign key
-  check runs after it, so an over-long reference naming a missing row would
-  otherwise fail with the btree error `54000`. With the bounds, an over-long
+  `0002` table; every other ID column (`id` of the assignment, checker and
+  action) and every reference column is bounded the same way (inferred).
+  Without its bound, an over-long ID would fail with the btree error `54000`
+  on its key's index. The reference columns need their own bound too: a
+  `CHECK` runs before the row enters any index, but the foreign key check
+  runs after it, so an over-long reference naming a missing row would
+  otherwise fail with `54000` as well. With the bounds, an over-long
   ID value fails with `23514` even when it names a missing row, and every
   composite key stays below the btree limit of about 2700 bytes even for
   values that do not compress: `(resource_server_id, action_name)` at most
@@ -246,6 +248,7 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   | `resource_server_id_octet_length_check`                           | `id` at most 255 bytes                      |
   | `resource_server_audience_no_space_check`                         | `audience` has no whitespace or controls    |
   | `resource_server_audience_octet_length_check`                     | `audience` at most 2048 bytes               |
+  | `audience_tenant_assignment_id_octet_length_check`                | `id` at most 255 bytes                      |
   | `audience_tenant_assignment_server_id_octet_length_check`         | `resource_server_id` at most 255 bytes      |
   | `audience_tenant_assignment_tenant_id_octet_length_check`         | `tenant_id` at most 255 bytes               |
   | `resource_server_checker_id_octet_length_check`                   | `id` at most 255 bytes                      |
@@ -254,12 +257,30 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   | `resource_server_checker_tenant_checker_id_octet_length_check`    | `checker_id` at most 255 bytes              |
   | `resource_server_checker_tenant_server_id_octet_length_check`     | `resource_server_id` at most 255 bytes      |
   | `resource_server_checker_tenant_tenant_id_octet_length_check`     | `tenant_id` at most 255 bytes               |
+  | `resource_action_id_octet_length_check`                           | `id` at most 255 bytes                      |
   | `resource_action_resource_server_id_octet_length_check`           | `resource_server_id` at most 255 bytes      |
   | `resource_action_action_name_no_space_check`                      | `action_name` has no whitespace or controls |
   | `resource_action_action_name_octet_length_check`                  | `action_name` at most 2048 bytes            |
 
-  The remaining checks (non-empty values, list domains, `status`,
-  `revision`) keep the names PostgreSQL generates.
+  The other checks on the five tables keep the names PostgreSQL generates
+  (the list domains carry their own checks, which are not table
+  constraints):
+  - `resource_server`: `resource_server_id_check`,
+    `resource_server_audience_check`, `resource_server_name_check`,
+    `resource_server_constraint_versions_check`,
+    `resource_server_status_check`, `resource_server_revision_check`;
+  - `audience_tenant_assignment`: `audience_tenant_assignment_id_check`,
+    `audience_tenant_assignment_constraint_versions_check`,
+    `audience_tenant_assignment_status_check`,
+    `audience_tenant_assignment_revision_check`;
+  - `resource_server_checker`: `resource_server_checker_id_check`,
+    `resource_server_checker_public_mtls_identity_check`,
+    `resource_server_checker_status_check`,
+    `resource_server_checker_revision_check`;
+  - `resource_action`: `resource_action_id_check`,
+    `resource_action_action_name_check`, `resource_action_status_check`,
+    `resource_action_revision_check`;
+  - `resource_server_checker_tenant`: none.
 
 - **Lists** are `jsonb` arrays checked through three domains, so each rule
   is written once (a domain `CHECK` is stored as an expression tree and

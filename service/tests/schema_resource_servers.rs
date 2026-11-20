@@ -237,6 +237,10 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
         ),
         ("audience_tenant_assignment_id_check", non_empty("id")),
         (
+            "audience_tenant_assignment_id_octet_length_check",
+            at_most("id", 255),
+        ),
+        (
             "audience_tenant_assignment_revision_check",
             revision.clone(),
         ),
@@ -262,6 +266,7 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
             at_most("action_name", 2048),
         ),
         ("resource_action_id_check", non_empty("id")),
+        ("resource_action_id_octet_length_check", at_most("id", 255)),
         (
             "resource_action_resource_server_id_octet_length_check",
             at_most("resource_server_id", 255),
@@ -334,9 +339,9 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
     db.drop([pool]).await;
 }
 
-/// IDs in composite keys are at most 255 bytes, so every composite index
-/// stays below the btree limit even for values that do not compress
-/// (md5 hex), and an over-long ID is a check violation, not 54000.
+/// Every ID is at most 255 bytes, so every key index stays below the btree
+/// limit even for values that do not compress (md5 hex), and an over-long ID
+/// is a check violation, not 54000.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn ids_in_composite_keys_are_bounded() {
@@ -358,6 +363,28 @@ async fn ids_in_composite_keys_are_bounded() {
         Some("tenant_id_octet_length_check"),
         "{err}"
     );
+    // The single-column primary keys: 256 and 3008 incompressible bytes.
+    for (table, rest, constraint) in [
+        (
+            "audience_tenant_assignment",
+            "'rs_2', 'ten_b', '[]', '[]', '[]', 'enabled'",
+            "audience_tenant_assignment_id_octet_length_check",
+        ),
+        (
+            "resource_action",
+            "'rs_1', 'projects.list', '[]', '[]', '[]', false, 'enabled'",
+            "resource_action_id_octet_length_check",
+        ),
+    ] {
+        for value in [md5_hex(1, 8), md5_hex(1, 94)] {
+            violates(
+                &pool,
+                format!("INSERT INTO {table} VALUES ({value}, {rest})"),
+                constraint,
+            )
+            .await;
+        }
+    }
     // 255-byte IDs with 2048-byte incompressible names in every composite key.
     run(
         &pool,
@@ -366,26 +393,32 @@ async fn ids_in_composite_keys_are_bounded() {
          INSERT INTO tenant VALUES (repeat('t', 255), 'c', 'ns_c', 'enabled');
          INSERT INTO resource_server VALUES
              (repeat('r', 255), 'x-api', 'X', '[]', '[]', '[]', 'enabled');
-         INSERT INTO audience_tenant_assignment VALUES
-             ('ata_2', repeat('r', 255), repeat('t', 255), '[]', '[]', '[]', 'enabled');
+         INSERT INTO audience_tenant_assignment
+             SELECT left(v, 255), repeat('r', 255), repeat('t', 255), '[]', '[]', '[]', 'enabled'
+             FROM incompressible;
          INSERT INTO resource_server_checker
              SELECT repeat('c', 255), repeat('r', 255), v, 'enabled' FROM incompressible;
          INSERT INTO resource_server_checker_tenant
              VALUES (repeat('c', 255), repeat('r', 255), repeat('t', 255));
          INSERT INTO resource_action
-             SELECT 'act_2', repeat('r', 255), v, '[]', '[]', '[]', false, 'enabled'
+             SELECT left(v, 255), repeat('r', 255), v, '[]', '[]', '[]', false, 'enabled'
              FROM incompressible",
     )
     .await;
-    let lengths: (i32, i32) = sqlx::query_as(
-        "SELECT (SELECT octet_length(action_name) FROM resource_action WHERE id = 'act_2'),
+    let lengths: (i32, i32, i32, i32) = sqlx::query_as(
+        "SELECT (SELECT octet_length(action_name) FROM resource_action
+                 WHERE resource_server_id = repeat('r', 255)),
                 (SELECT octet_length(public_mtls_identity) FROM resource_server_checker
-                 WHERE id = repeat('c', 255))",
+                 WHERE id = repeat('c', 255)),
+                (SELECT octet_length(id) FROM resource_action
+                 WHERE resource_server_id = repeat('r', 255)),
+                (SELECT octet_length(id) FROM audience_tenant_assignment
+                 WHERE resource_server_id = repeat('r', 255))",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(lengths, (2048, 2048));
+    assert_eq!(lengths, (2048, 2048, 255, 255));
     db.drop([pool]).await;
 }
 

@@ -51,13 +51,14 @@ CREATE DOMAIN skyoauth_string_list AS jsonb
 -- U+007F-U+009F in every collation). Other syntax and Unicode normalization
 -- stay with the service. Every ID column, own ID or reference, is at most
 -- 255 bytes: resource_server.id and tenant.id (lead decision, 2026-11-20),
--- resource_server_checker.id and every reference column (inferred, as a
--- consequence: a CHECK runs before the row enters any index, but the foreign
--- key check runs after it, so an unbounded reference naming a missing row
--- would fail with the btree error 54000). Each composite key then stays below
--- the btree limit of about 2700 bytes even when the values do not compress,
--- and an over-long value fails with 23514. These checks are named, so the
--- service can tell them apart (README.md).
+-- and every other ID and reference column (inferred, as a consequence: an
+-- over-long ID would fail with the btree error 54000 on its key's index, and
+-- so would an over-long reference naming a missing row, since a CHECK runs
+-- before the row enters any index but the foreign key check runs after it).
+-- Each composite key then stays below the btree limit of about 2700 bytes
+-- even when the values do not compress, and an over-long value fails with
+-- 23514. These checks are named, so the service can tell them apart
+-- (README.md).
 
 -- A forward-only bound on a 0002 table (lead decision, 2026-11-20): 0002 is
 -- frozen, so 0003 adds it. It is validated against existing rows (no NOT
@@ -97,7 +98,9 @@ CREATE TABLE resource_server (
 -- a tenant can only reference an audience assigned to it, and of checker
 -- tenant rows.
 CREATE TABLE audience_tenant_assignment (
-    id                   text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
+    id                   text COLLATE "C" PRIMARY KEY CHECK (id <> '')
+        CONSTRAINT audience_tenant_assignment_id_octet_length_check
+        CHECK (octet_length(id) <= 255),
     -- The name abbreviates resource_server_id: the full one would exceed the
     -- 63-byte identifier limit.
     resource_server_id   text COLLATE "C" NOT NULL
@@ -182,7 +185,9 @@ CREATE TABLE resource_server_checker_tenant (
 -- max_session_lease_seconds) come with M1b (T14.4; identity-registry
 -- section 7.4).
 CREATE TABLE resource_action (
-    id                            text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
+    id                            text COLLATE "C" PRIMARY KEY CHECK (id <> '')
+        CONSTRAINT resource_action_id_octet_length_check
+        CHECK (octet_length(id) <= 255),
     resource_server_id            text COLLATE "C" NOT NULL
         CONSTRAINT resource_action_resource_server_id_octet_length_check
         CHECK (octet_length(resource_server_id) <= 255)
