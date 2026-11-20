@@ -894,6 +894,12 @@ describe('test names', () => {
     assert.deepEqual(pick('nextest:skyoauth-operator/recovery/a64_pos_x'), [true, 'A64', 'pos', '']);
     assert.deepEqual(pick('nextest:skyoauth-operator/recovery-offline/a64_pos_x'), [true, 'A64', 'pos', '']);
     assert.deepEqual(pick('nextest:skyoauth-operator/a64_pos_x'), [true, 'A64', 'pos', '']);
+    // A target name maps to its job only in its own package, and only as the
+    // whole target: not a prefix of it, not its last segment.
+    assert.deepEqual(pick('nextest:skyoauth-scenarios/operator/a64_pos_x'), [true, 'A64', 'pos', '']);
+    assert.deepEqual(pick('nextest:skyoauth-service/recovery_offline/a64_neg_x'), [true, 'A64', 'neg', '']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/operator_real_time/a64_pos_x'), [true, 'A64', 'pos', '']);
+    assert.deepEqual(pick('nextest:skyoauth-operator/bin/operator/a64_pos_x'), [true, 'A64', 'pos', '']);
     assert.deepEqual(pick('nextest:skyoauth-service/a01_pos_x'), [true, 'A01', 'pos', '']);
     assert.deepEqual(pick('nextest:skyoauth-scenarios/pg/m::a24_pos_'), [true, null, null, 'scenarios-pg']);
     assert.deepEqual(pick('nextest:skyoauth-scenarios/pg/a24_x::helper'), [false, null, null, 'scenarios-pg']);
