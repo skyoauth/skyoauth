@@ -63,8 +63,9 @@
 # fails immediately with stderr intact. Environment:
 #   BADGES_REMOTE       git remote to push to (default: origin)
 #   BADGES_BRANCH       branch that holds the badges (default: badges)
-#   BADGES_ATTEMPTS     push attempts before giving up (default: 5)
-#   BADGES_RETRY_SLEEP  seconds to sleep before retrying a rejected push (default: 1)
+#   BADGES_ATTEMPTS     push attempts before giving up, 1 to 99 (default: 5)
+#   BADGES_RETRY_SLEEP  seconds to sleep before retrying a rejected push,
+#                       0 to 60 (default: 1)
 #   GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL (and COMMITTER) for the commit
 set -eu
 
@@ -159,13 +160,22 @@ remote=${BADGES_REMOTE:-origin}
 badges_branch=${BADGES_BRANCH:-badges}
 attempts=${BADGES_ATTEMPTS:-5}
 retry_sleep=${BADGES_RETRY_SLEEP:-1}
+# Numeric settings are checked by pattern, before any `test` compares them:
+# `[ 9223372036854775808 -lt 1 ]` fails with an error, which an `if` takes
+# for false, and a leading zero reads as octal in `$(( ))`. An empty value
+# means the default, as for an unset one.
 case $attempts in
-    '' | *[!0-9]*) attempts=0 ;;
+    [1-9] | [1-9][0-9]) ;;
+    *)
+        echo "publish-badges: BADGES_ATTEMPTS must be a whole number from 1 to 99 without leading zeros, got '$attempts'" >&2
+        exit 2 ;;
 esac
-if [ "$attempts" -lt 1 ]; then
-    echo "publish-badges: BADGES_ATTEMPTS must be a positive integer, got '${BADGES_ATTEMPTS:-}'" >&2
-    exit 2
-fi
+case $retry_sleep in
+    [0-9] | [1-5][0-9] | 60) ;;
+    *)
+        echo "publish-badges: BADGES_RETRY_SLEEP must be a whole number of seconds from 0 to 60 without leading zeros, got '$retry_sleep'" >&2
+        exit 2 ;;
+esac
 here=$(cd "$(dirname "$0")" && pwd)
 
 # Exits 0 (nothing to do) unless the source branch on the remote still
@@ -251,8 +261,18 @@ gate() {
     if [ "$1" = success ]; then printf '%s' passed; else printf '%s' failed; fi
 }
 
+# `junit_attr FILE NAME`: the count in the NAME attribute of FILE's
+# <testsuites> element, without leading zeros (which `$(( ))` reads as
+# octal), or nothing when it is absent. Fails for a count of more than 9
+# digits, which `test` and `$(( ))` cannot be trusted with.
 junit_attr() {
-    sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([0-9][0-9]*\)\".*/\1/p" "$1" | head -n 1
+    value=$(sed -n "s/.*<testsuites[^>]*[[:space:]]$2=\"\([0-9][0-9]*\)\".*/\1/p" "$1" | head -n 1 |
+        sed 's/^0*\([0-9]\)/\1/')
+    if [ "${#value}" -gt 9 ]; then
+        echo "publish-badges: $2=\"$value\" in $1 is out of range" >&2
+        return 1
+    fi
+    printf '%s' "$value"
 }
 
 sha=$(git rev-parse --short "$source_sha")
@@ -369,10 +389,12 @@ ts_tests_color=
 ts_tests_json=
 if [ -n "$ts_results" ]; then
     if [ -s "$ts_results" ] &&
-        jq -e '(.success | type == "boolean") and (.numPassedTests | type == "number" and . >= 0 and . == floor) and (.numFailedTests | type == "number" and . >= 0 and . == floor)' "$ts_results" >/dev/null 2>&1; then
+        jq -e '(.success | type == "boolean") and (.numPassedTests | type == "number" and . >= 0 and . < 1e9 and . == floor) and (.numFailedTests | type == "number" and . >= 0 and . < 1e9 and . == floor)' "$ts_results" >/dev/null 2>&1; then
         ts_success=$(jq -r '.success' "$ts_results")
-        ts_passed=$(jq '.numPassedTests' "$ts_results")
-        ts_failed=$(jq '.numFailedTests' "$ts_results")
+        # `floor` makes jq print a computed integer (`7`), not the
+        # report's literal (`7.0`, which `test` rejects).
+        ts_passed=$(jq '.numPassedTests | floor' "$ts_results")
+        ts_failed=$(jq '.numFailedTests | floor' "$ts_results")
         if [ "$ts_failed" -gt 0 ]; then
             ts_tests_value="$ts_failed failed"
             ts_tests_color=red

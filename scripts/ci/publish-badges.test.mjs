@@ -283,6 +283,13 @@ tip=$(git rev-parse refs/heads/badges)
 new=$(git commit-tree "$tip^{tree}" -p "$tip" -m "concurrent publication")
 git update-ref refs/heads/badges "$new" "$tip"
 `;
+  // The same on every push: the publisher never gets through.
+  const ALWAYS_RACE_HOOK = `#!/bin/sh
+unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+tip=$(git rev-parse refs/heads/badges)
+new=$(git commit-tree "$tip^{tree}" -p "$tip" -m "concurrent publication")
+git update-ref refs/heads/badges "$new" "$tip"
+`;
   const DECLINE_HOOK = `#!/bin/sh
 echo "declined by policy" >&2
 exit 1
@@ -321,15 +328,16 @@ exit 1
     assertNoScriptLeftovers();
   });
 
-  test('rejects a BADGES_ATTEMPTS that is not a positive integer', () => {
-    const { sha, work, file } = setup();
-    for (const attempts of ['0', 'x', '-1']) {
-      const r = publish(work[0], args(sha, file, 90), { BADGES_ATTEMPTS: attempts });
-      assert.equal(r.status, 2, attempts);
-      assert.match(r.stderr, /BADGES_ATTEMPTS must be a positive integer/);
-    }
+  test('gives up after BADGES_ATTEMPTS pushes when every one loses a race', () => {
+    const { remote, sha, work, file } = setup();
+    assert.equal(publish(work[0], args(sha, file, 90)).status, 0);
+    hook(remote, ALWAYS_RACE_HOOK);
+    const r = publish(work[0], args(sha, file, 91), { BADGES_ATTEMPTS: '3' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /push rejected 3 times; giving up/);
+    assert.equal(r.stdout.match(/regenerating on the new tip/g)?.length, 2);
+    assertNoScriptLeftovers();
   });
-
   // Each retry follows a publication that landed, so N concurrent
   // publishers need at most N attempts. The first round also races the
   // creation of the badges branch itself.
@@ -353,5 +361,84 @@ exit 1
       assert.equal(Number(git(remote, 'rev-list', '--count', 'badges')), PUBLISHERS * round, `round ${round}: one commit per publication`);
       assertNoScriptLeftovers();
     }
+  });
+});
+
+describe('numeric settings and counts', () => {
+  const args = (sha, file) => ['main', sha, '--rust-coverage', file('rust.json', rustReport(90)), '--rust-coverage-result', 'success'];
+  // `main` has moved past `sha` by a code change, so a valid run is
+  // superseded and exits 0 without publishing: a setting must be rejected
+  // before that, not only on the paths that compare it.
+  const superseded = () => {
+    const ctx = setup();
+    writeFileSync(join(ctx.work[0], 'more.rs'), '// more\n');
+    git(ctx.work[0], 'add', '.');
+    git(ctx.work[0], 'commit', '-q', '-m', 'more code');
+    git(ctx.work[0], 'push', '-q', 'origin', 'main');
+    return ctx;
+  };
+
+  test('a valid setting on a superseded commit publishes nothing', () => {
+    const { sha, work, file } = superseded();
+    const r = publish(work[0], args(sha, file), { BADGES_ATTEMPTS: '5' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /superseded, not publishing/);
+  });
+
+  for (const [name, values] of [
+    ['BADGES_ATTEMPTS', ['9223372036854775808', '99999999999999999999', '100', '0', '00', '05', '-1', '+3', ' 3', '3 ', 'x', '1e1', '0x10']],
+    ['BADGES_RETRY_SLEEP', ['9223372036854775808', '61', '05', '-1', '0.5', 'x']],
+  ]) {
+    test(`rejects an out-of-range or malformed ${name}`, () => {
+      const { sha, work, file } = superseded();
+      for (const value of values) {
+        const r = publish(work[0], args(sha, file), { [name]: value });
+        assert.equal(r.status, 2, `${name}='${value}': ${r.stdout}${r.stderr}`);
+        assert.match(r.stderr, new RegExp(`${name} must be a whole number`));
+      }
+    });
+  }
+
+  test('accepts the ends of the BADGES_ATTEMPTS range, and an empty value means the default', () => {
+    const { remote, sha, work, file } = setup();
+    for (const [value, percent] of [['1', 90], ['99', 91], ['', 92]]) {
+      const r = publish(work[0], ['main', sha, '--rust-coverage', file(`r${percent}.json`, rustReport(percent)), '--rust-coverage-result', 'success'], {
+        BADGES_ATTEMPTS: value,
+        BADGES_RETRY_SLEEP: '60',
+      });
+      assert.equal(r.status, 0, `'${value}': ${r.stderr}`);
+      assert.equal(badge(remote, 'main/rust-coverage.svg').title, `rust coverage: ${percent}.0%`);
+    }
+  });
+
+  const junit = (attrs) => `<?xml version="1.0"?><testsuites name="t" ${attrs}><testsuite name="s"/></testsuites>`;
+
+  test('reads JUnit counts with leading zeros as decimal', () => {
+    const { remote, sha, work, file } = setup();
+    const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', junit('tests="010" failures="0" errors="00" skipped="0"'))]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(badge(remote, 'main/rust-tests.svg').title, 'rust tests: 10 passed');
+  });
+
+  test('rejects a JUnit count too large to compare', () => {
+    const { remote, sha, work, file } = setup();
+    const r = publish(work[0], ['main', sha, '--rust-junit', file('junit.xml', junit('tests="12" failures="99999999999999999999" errors="0" skipped="0"'))]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /failures="99999999999999999999" .* is out of range/);
+    assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', 'badges'], { cwd: remote, env: ENV }).status, 1, 'nothing published');
+  });
+
+  test('counts a Vitest failure written as 1.0', () => {
+    const { remote, sha, work, file } = setup();
+    const r = publish(work[0], ['main', sha, '--ts-results', file('results.json', '{"success":true,"numPassedTests":7,"numFailedTests":1.0}')]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(badge(remote, 'main/typescript-tests.svg'), { color: RED, title: 'typescript tests: 1 failed' });
+  });
+
+  test('rejects a Vitest count too large to compare', () => {
+    const { sha, work, file } = setup();
+    const r = publish(work[0], ['main', sha, '--ts-results', file('results.json', '{"success":true,"numPassedTests":1e30,"numFailedTests":0}')]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /cannot read typescript test results/);
   });
 });
