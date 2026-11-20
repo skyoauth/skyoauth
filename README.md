@@ -64,7 +64,14 @@ cargo nextest run --workspace --all-features --run-ignored all
 # or: cargo test --workspace --all-features -- --include-ignored
 ```
 
-The replica-role append-only test needs a superuser role.
+Some tests need more than `CREATEDB`, but none needs a superuser
+(PostgreSQL 15 or later; CI connects as the service container's superuser):
+
+| Test role privilege                                         | Needed by                                       |
+| ----------------------------------------------------------- | ----------------------------------------------- |
+| `CREATEDB`                                                  | every database test                             |
+| `CREATEROLE`                                                | the search-path tests, which create login roles |
+| `GRANT SET ON PARAMETER session_replication_role TO <role>` | the replica-role tests                          |
 
 ## TypeScript client
 

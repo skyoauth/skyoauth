@@ -13,12 +13,17 @@
 -- SK001 and is ENABLE ALWAYS, so it also fires under
 -- session_replication_role = replica (inferred for guards that are not
 -- append-only); like the 0001 guard they are a tripwire, not a boundary.
+-- Every function pins search_path with pg_temp last (README.md), so neither
+-- a temporary object nor a schema the caller puts ahead of pg_catalog can
+-- shadow a type, function or operator it uses.
 
 -- Rejects an UPDATE that changes any column named in the trigger arguments.
 -- An argument that names no column of the table is an error, so a typo
 -- cannot silently disable the guard.
 CREATE FUNCTION skyoauth_reject_immutable_change() RETURNS trigger
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 DECLARE
     old_row jsonb := to_jsonb(OLD);
     new_row jsonb := to_jsonb(NEW);
@@ -41,7 +46,9 @@ $$;
 -- A revisioned row is inserted at revision 1 and every UPDATE advances it by
 -- exactly 1. The expected-revision compare-and-set is the service's job.
 CREATE FUNCTION skyoauth_check_revision() RETURNS trigger
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 BEGIN
     IF TG_OP = 'INSERT' AND NEW.revision <> 1 THEN
         RAISE EXCEPTION '% rows start at revision 1, not %', TG_TABLE_NAME, NEW.revision
@@ -145,7 +152,9 @@ ALTER TABLE instance_security_policy ENABLE ALWAYS TRIGGER instance_security_pol
 -- cannot tell which digest a later timestamp validated; that stays with the
 -- service.
 CREATE FUNCTION skyoauth_check_sink_validation() RETURNS trigger
-    LANGUAGE plpgsql AS $$
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
 BEGIN
     IF NEW.audit_sink_config_digest IS DISTINCT FROM OLD.audit_sink_config_digest
         AND NEW.audit_sink_validated_at IS NOT NULL
@@ -186,7 +195,8 @@ CREATE TABLE egress_allowlist_entry (
     -- An exact URL (scheme, host, port and path). The sources state no scheme
     -- or syntax rule for it, so the service validates the URL (inferred).
     -- The database only rejects an empty value, whitespace and control
-    -- characters (under "C" the classes cover ASCII only) and values over
+    -- characters ([:space:] is ASCII whitespace under "C"; [:cntrl:] is
+    -- U+0000-U+001F and U+007F-U+009F in every collation) and values over
     -- 2048 bytes, well below the btree limit of the unique index (lead
     -- decision).
     exact_destination  text COLLATE "C" NOT NULL CHECK (exact_destination <> '')
@@ -285,19 +295,21 @@ ALTER TABLE audit_event ENABLE ALWAYS TRIGGER audit_event_no_truncate;
 -- through the caller's search_path: a role with only DML grants could
 -- shadow audit_chain_head with a temporary table and forge the chain, and
 -- logical-replication apply or a data-only restore, which run with an
--- empty search_path, would fail. @schema@ below is replaced by the quoted
--- schema name.
+-- empty search_path, would fail. @schema@ in a body is replaced by the
+-- quoted schema name, and the body is then passed as a quoted literal (%L),
+-- never inside a dollar-quoted one, since a schema name may contain $$.
 DO $migration$
 DECLARE
-    schema_name constant text := quote_ident(current_schema());
+    schema_name constant text := current_schema();
+    create_function constant text := 'CREATE FUNCTION %I() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, %I, pg_temp
+    AS %L';
 BEGIN
     -- Rule 1. Locking the head makes concurrent appenders wait for each
     -- other and recheck against the committed head.
-    EXECUTE replace($function$
-CREATE FUNCTION skyoauth_audit_event_extends_head() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path = pg_catalog, @schema@, pg_temp
-    AS $$
+    EXECUTE format(create_function, 'skyoauth_audit_event_extends_head', schema_name,
+        replace($body$
 DECLARE
     head @schema@.audit_chain_head;
 BEGIN
@@ -310,15 +322,11 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$
-$function$, '@schema@', schema_name);
+$body$, '@schema@', quote_ident(schema_name)));
 
     -- Rule 3, checked at commit.
-    EXECUTE replace($function$
-CREATE FUNCTION skyoauth_audit_event_head_reached() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path = pg_catalog, @schema@, pg_temp
-    AS $$
+    EXECUTE format(create_function, 'skyoauth_audit_event_head_reached', schema_name,
+        replace($body$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM @schema@.audit_chain_head WHERE sequence >= NEW.sequence
@@ -328,15 +336,11 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
-$$
-$function$, '@schema@', schema_name);
+$body$, '@schema@', quote_ident(schema_name)));
 
     -- Rule 2.
-    EXECUTE replace($function$
-CREATE FUNCTION skyoauth_audit_chain_head_advance() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path = pg_catalog, @schema@, pg_temp
-    AS $$
+    EXECUTE format(create_function, 'skyoauth_audit_chain_head_advance', schema_name,
+        replace($body$
 BEGIN
     IF NEW.singleton IS DISTINCT FROM OLD.singleton
         OR NEW.sequence IS DISTINCT FROM OLD.sequence + 1 THEN
@@ -350,8 +354,7 @@ BEGIN
     END IF;
     RETURN NEW;
 END;
-$$
-$function$, '@schema@', schema_name);
+$body$, '@schema@', quote_ident(schema_name)));
 END;
 $migration$;
 

@@ -29,16 +29,27 @@ not a migration.
   records are soft-disabled through a status column instead.
 - **Types:** timestamps are `timestamptz`; revisions are `bigint` and only
   increase.
-- **Functions that read tables** name each table with its schema and pin
-  `SET search_path = pg_catalog, <schema>, pg_temp` (`pg_temp` last). A
-  trigger function otherwise resolves names through the caller's
-  `search_path`, in which `pg_temp` comes first: any role with DML grants and
-  the default `TEMP` privilege could shadow a table with a temporary one, and
-  logical-replication apply and `pg_dump` restores, which run with an empty
-  `search_path`, would not find the table. Migrations do not hard-code
-  `public`: `0002` resolves the schema with `current_schema()` at migrate
-  time and creates such functions with `EXECUTE` in a `DO` block. Functions
-  that only use `NEW`, `OLD` and built-ins need neither.
+- **Every function a migration creates pins its `search_path`**, with
+  `pg_temp` last: `SET search_path = pg_catalog, pg_temp`, or, for a
+  function that reads tables, `pg_catalog, <schema>, pg_temp` with every
+  table named with its schema. A function otherwise resolves names through
+  the caller's `search_path`, in which `pg_temp` comes first for tables and
+  types: any role with DML grants and the default `TEMP` privilege could
+  shadow a table, or a type such as `jsonb`, with a temporary table, and a
+  role that can create objects in some schema could put it ahead of
+  `pg_catalog` and shadow built-in functions and operators (`=`, `+`,
+  `to_jsonb`), turning a guard into a no-op. Logical-replication apply and
+  `pg_dump` restores, which run with an empty `search_path`, would not find
+  the tables. With the pin, built-ins resolve in `pg_catalog`, and `pg_temp`,
+  never searched for functions or operators, can no longer shadow a type.
+  Migrations do not hard-code `public`: `0002` resolves the schema with
+  `current_schema()` at migrate time and creates table-reading functions
+  with `EXECUTE format(…)` in a `DO` block, passing the body as a quoted
+  literal (`%L`), never inside a dollar-quoted one, since a schema name may
+  contain `$$`. The one exception is `skyoauth_reject_mutation()` from the
+  frozen `0001`: it resolves no names (it only raises with `TG_OP` and
+  `TG_TABLE_NAME`), so it needs no pin. A catalog test checks every other
+  function.
 - **Append-only tables** attach `skyoauth_reject_mutation()` (from `0001`)
   and enable the triggers with `ENABLE ALWAYS`, so they also fire under
   `session_replication_role = replica`:
@@ -79,9 +90,12 @@ egress rows are never deleted.
   From `NULL`, any time is accepted. The database cannot tell which digest a
   later timestamp validated; that stays with the service.
 - **Egress destinations** reject whitespace and control characters
-  (`[[:space:][:cntrl:]]`; under `"C"` these classes cover ASCII only) and
-  values over 2048 bytes, well below the btree limit of the unique index.
-  Everything else about the URL is validated by the service.
+  (`[[:space:][:cntrl:]]`: under `"C"`, `[:space:]` is ASCII whitespace
+  only, and `[:cntrl:]` is the C0 and C1 controls U+0000–U+001F and
+  U+007F–U+009F in every collation) and values over 2048 bytes, well below
+  the btree limit of the unique index. Other Unicode spaces and format
+  characters, such as U+00A0, U+2028 and U+200B, pass; everything else about
+  the URL is validated by the service.
 - **Audit chain.** It is enforced in order: an event must extend the chain
   head (`sequence` = head + 1, `prev_hash` = head hash; the first event has
   a `NULL` `prev_hash`), checked when the event is inserted; the head may
@@ -143,9 +157,9 @@ first gets the committed head and succeeds.
   security boundary. The table owner or a superuser can disable or drop
   them, or rewrite rows with `ALTER TABLE … ALTER COLUMN … TYPE … USING`.
   The real control is a runtime role that does not own the tables, together
-  with the pinned `search_path` of the functions that read tables: a
-  non-owner role alone is not enough, because without the pin a temporary
-  table shadows the chain head for it. Today one `SKYOAUTH_DATABASE_URL`
+  with the pinned `search_path` of the guard functions: a non-owner role
+  alone is not enough, because without the pin a temporary table shadows the
+  chain head for it. Today one `SKYOAUTH_DATABASE_URL`
   serves both `migrate` and the server, and separating the roles is a
   follow-up.
 - Under `session_replication_role = replica` (logical-replication apply,
@@ -155,12 +169,32 @@ first gets the committed head and succeeds.
 - An initial logical-replication table sync or a data-only reload of
   `audit_event` cannot pass the chain triggers: each copied event is checked
   against a head the copy does not advance, and the migration has already
-  inserted the head row. Such a load needs the table owner to disable the
-  user triggers for it (`ALTER TABLE … DISABLE TRIGGER USER`; the
-  `pg_restore --disable-triggers` option needs a superuser) and to
-  reconcile the head row.
-  Streaming apply of committed transactions works, since each carries its
-  event insert and head update together.
+  inserted the head row. Nor can a reload of a revisioned row past revision
+  1 (a policy or egress entry at revision 2 fails with "rows start at
+  revision 1"). A data-only reload is therefore owner-level surgery: the
+  table owner disables the user triggers for it
+  (`ALTER TABLE … DISABLE TRIGGER USER`; the `pg_restore --disable-triggers`
+  option needs a superuser), reconciles the head row, and then re-enables
+  every guard with
+  `ALTER TABLE <table> ENABLE ALWAYS TRIGGER <name>`. `ENABLE TRIGGER USER`
+  or `ALL`, which `pg_restore` uses, sets them to origin mode only, so they
+  would no longer fire under `replica`. This query lists the user triggers
+  that are not `ALWAYS`:
+
+  ```sql
+  SELECT tgrelid::regclass, tgname, tgenabled FROM pg_trigger
+  WHERE NOT tgisinternal AND tgenabled <> 'A';
+  ```
+
+- Streaming apply of committed transactions carries each event insert and
+  head update together, but the deferred chain check cannot run in the
+  security-restricted operation in which the apply worker runs as a table
+  owner other than the subscription owner: the first `audit_event` insert
+  fails with "cannot fire deferred trigger within security-restricted
+  operation". The subscription owner must own the tables, or the
+  subscription must use `run_as_owner = true`. The deferred trigger stays
+  `ENABLE ALWAYS` (lead decision): logical replication of the audit chain is
+  not a v0.1 requirement.
 - The migration role must own the database, or at least have `CREATE` on
   the `public` schema (PostgreSQL 15 and later no longer grant that to
   every role).

@@ -3,9 +3,9 @@
 //! egress allowlist and the audit hash chain.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
-//! test creates and drops its own database, and the search-path test also a
-//! login role. The URL's role must therefore be able to create roles too
-//! (as the superuser of the CI service container can).
+//! test creates and drops its own database, and the search-path tests also a
+//! login role. The URL's role therefore needs `CREATEROLE` too, and the
+//! replica-role test `SET` on `session_replication_role` (`common/mod.rs`).
 //!
 //! No test name here may match the scenario pattern
 //! `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, so `scenarios-pg` never selects them.
@@ -151,6 +151,90 @@ const FOUNDATION_TABLES: [&str; 6] = [
     "audit_chain_head",
 ];
 
+/// Functions of the frozen `0001` migration that pin no `search_path`. Each
+/// must resolve no names through the caller's path: `skyoauth_reject_mutation`
+/// only raises with `TG_OP` and `TG_TABLE_NAME`.
+const UNPINNED_FROZEN_FUNCTIONS: [&str; 1] = ["skyoauth_reject_mutation"];
+
+/// Functions that read tables, so pin the migration's schema too.
+const TABLE_READING_FUNCTIONS: [&str; 3] = [
+    "skyoauth_audit_chain_head_advance",
+    "skyoauth_audit_event_extends_head",
+    "skyoauth_audit_event_head_reached",
+];
+
+const BUILTIN_ONLY_FUNCTIONS: [&str; 3] = [
+    "skyoauth_check_revision",
+    "skyoauth_check_sink_validation",
+    "skyoauth_reject_immutable_change",
+];
+
+/// Every function the migrations created in the current schema, other than
+/// extension members and [`UNPINNED_FROZEN_FUNCTIONS`], pins `search_path`
+/// to `pg_catalog`, optionally the schema, and `pg_temp` last; functions that
+/// read tables name each one with the schema.
+async fn assert_functions_pin_search_path(pool: &PgPool) {
+    let schema: String = sqlx::query_scalar("SELECT quote_ident(current_schema())")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let functions: Vec<(String, Option<Vec<String>>, String)> = sqlx::query_as(
+        "SELECT p.proname::text, p.proconfig, p.prosrc FROM pg_proc p
+         WHERE p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())
+           AND p.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+           AND NOT EXISTS (
+               SELECT 1 FROM pg_depend d
+               WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let names: Vec<&str> = functions.iter().map(|(name, _, _)| name.as_str()).collect();
+    for name in UNPINNED_FROZEN_FUNCTIONS
+        .iter()
+        .chain(&TABLE_READING_FUNCTIONS)
+        .chain(&BUILTIN_ONLY_FUNCTIONS)
+    {
+        assert!(names.contains(name), "{name} missing from {names:?}");
+    }
+    for (name, config, source) in &functions {
+        if UNPINNED_FROZEN_FUNCTIONS.contains(&name.as_str()) {
+            assert_eq!(config, &None, "{name}");
+            continue;
+        }
+        let path = config
+            .iter()
+            .flatten()
+            .find_map(|setting| setting.strip_prefix("search_path="))
+            .unwrap_or_else(|| panic!("{name} does not pin search_path: {config:?}"));
+        let path: Vec<&str> = path.split(", ").collect();
+        assert_eq!(path.first(), Some(&"pg_catalog"), "{name}: {path:?}");
+        assert_eq!(path.last(), Some(&"pg_temp"), "{name}: {path:?}");
+        if TABLE_READING_FUNCTIONS.contains(&name.as_str()) {
+            assert_eq!(path, ["pg_catalog", &schema, "pg_temp"], "{name}");
+            let mut tables = 0;
+            for table in ["audit_chain_head", "audit_event"] {
+                for (at, _) in source.match_indices(table) {
+                    assert!(
+                        source[..at].ends_with(&format!("{schema}.")),
+                        "{name} names {table} without its schema: {source}"
+                    );
+                    tables += 1;
+                }
+            }
+            assert!(tables > 0, "{name}: {source}");
+        } else if BUILTIN_ONLY_FUNCTIONS.contains(&name.as_str()) {
+            assert_eq!(path, ["pg_catalog", "pg_temp"], "{name}");
+        } else {
+            assert!(
+                path.len() == 2 || path == ["pg_catalog", &schema, "pg_temp"],
+                "{name}: {path:?}"
+            );
+        }
+    }
+}
+
 /// Catalog properties that behaviour tests cannot see directly.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -223,41 +307,7 @@ async fn foundation_catalog_pins_collation_triggers_indexes_and_search_path() {
     .unwrap();
     assert_eq!(default, None);
 
-    // The chain functions pin search_path and name every table with the
-    // schema, so neither the caller's path nor a temporary table matters.
-    let schema: String = sqlx::query_scalar("SELECT current_schema()")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    let functions: Vec<(String, Option<Vec<String>>, String)> = sqlx::query_as(
-        "SELECT proname::text, proconfig, prosrc FROM pg_proc
-         WHERE proname IN ('skyoauth_audit_event_extends_head',
-                           'skyoauth_audit_event_head_reached',
-                           'skyoauth_audit_chain_head_advance')
-         ORDER BY 1",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(functions.len(), 3);
-    for (name, config, source) in &functions {
-        assert_eq!(
-            config.as_deref(),
-            Some(&[format!("search_path=pg_catalog, {schema}, pg_temp")][..]),
-            "{name}"
-        );
-        let mut tables = 0;
-        for table in ["audit_chain_head", "audit_event"] {
-            for (at, _) in source.match_indices(table) {
-                assert!(
-                    source[..at].ends_with(&format!("{schema}.")),
-                    "{name} names {table} without its schema: {source}"
-                );
-                tables += 1;
-            }
-        }
-        assert!(tables > 0, "{name}: {source}");
-    }
+    assert_functions_pin_search_path(&pool).await;
     db.drop([pool]).await;
 }
 
@@ -272,6 +322,8 @@ async fn tenant_secret_namespace_is_unique_non_null_and_immutable() {
         23505 INSERT INTO tenant VALUES ('ten_c', 'c', 'ns_a', 'enabled')
         23502 INSERT INTO tenant VALUES ('ten_c', 'c', NULL, 'enabled')
         23514 INSERT INTO tenant VALUES ('ten_c', 'c', '', 'enabled')
+        23514 INSERT INTO tenant VALUES ('', 'c', 'ns_c', 'enabled')
+        23514 INSERT INTO tenant VALUES ('ten_c', '', 'ns_c', 'enabled')
         23514 INSERT INTO tenant VALUES ('ten_c', 'c', 'ns_c', 'active')
         SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'
         SK001 UPDATE tenant SET id = 'ten_z' WHERE id = 'ten_a'
@@ -309,10 +361,13 @@ async fn principal_belongs_to_one_tenant_and_backs_composite_references() {
         "
         23503 INSERT INTO principal VALUES ('wld_2', 'ten_x', 'workload', 'w', 'enabled')
         23514 INSERT INTO principal VALUES ('adm_1', 'ten_a', 'operator', 'o', 'enabled')
+        23514 INSERT INTO principal VALUES ('wld_2', 'ten_a', 'workload', '', 'enabled')
+        23514 INSERT INTO principal VALUES ('wld_2', 'ten_a', 'workload', 'w', 'active')
         23503 INSERT INTO owned VALUES ('ten_b', 'wld_1')
         SK001 UPDATE principal SET tenant_id = 'ten_b' WHERE id = 'svc_1'
         SK001 UPDATE principal SET kind = 'workload' WHERE id = 'svc_1'
         SK001 UPDATE principal SET id = 'svc_2' WHERE id = 'svc_1'
+        SK001 UPDATE principal SET created_at = now() - interval '1 day'
     ",
     )
     .await;
@@ -434,6 +489,13 @@ async fn audit_sink_validation_belongs_to_the_current_digest() {
               audit_sink_validated_at = '2026-01-01T00:00:00Z', revision = revision + 1",
     )
     .await;
+    // Without a digest change the validation time may stay as it is.
+    run(
+        &pool,
+        "UPDATE instance_security_policy SET widening_second_approver = true,
+             revision = revision + 1",
+    )
+    .await;
     rejects(&pool, r"
         SK001 UPDATE instance_security_policy SET audit_sink_config_digest = '\x02', revision = revision + 1
         SK001 UPDATE instance_security_policy SET audit_sink_config_digest = '\x02', audit_sink_validated_at = '2026-01-01T00:00:00Z', revision = revision + 1
@@ -459,7 +521,7 @@ async fn audit_sink_validation_belongs_to_the_current_digest() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(row, (Some(vec![3]), true, 5));
+    assert_eq!(row, (Some(vec![3]), true, 6));
     // Removing the sink clears the validation with it.
     run(
         &pool,
@@ -488,6 +550,7 @@ async fn egress_entry_purpose_is_checked_and_unique_per_destination() {
         23514 INSERT INTO egress_allowlist_entry VALUES ('egr_3', 'jwks', 'https://keys.example:443/', 'degraded')
         23514 INSERT INTO egress_allowlist_entry VALUES ('egr_3', 'token_review', '', 'enabled')
         SK001 INSERT INTO egress_allowlist_entry VALUES ('egr_3', 'jwks', 'https://keys.example:443/', 'enabled', 3)
+        23514 ALTER TABLE egress_allowlist_entry DISABLE TRIGGER USER; INSERT INTO egress_allowlist_entry VALUES ('egr_3', 'jwks', 'https://keys.example:443/', 'enabled', 0)
     ").await;
     db.drop([pool]).await;
 }
@@ -507,6 +570,7 @@ async fn egress_destination_has_no_whitespace_or_controls_and_is_bounded() {
         23514 INSERT INTO egress_allowlist_entry VALUES ('egr_1', 'jwks', E'https://keys.example:443/\x01', 'enabled')
         23514 INSERT INTO egress_allowlist_entry VALUES ('egr_1', 'jwks', E'https://keys.example:443/\x7f', 'enabled')
         23514 INSERT INTO egress_allowlist_entry VALUES ('egr_1', 'jwks', 'https://k.example/' || repeat('a', 2031), 'enabled')
+        23514 INSERT INTO egress_allowlist_entry VALUES ('egr_1', 'jwks', 'https://k.example/' || repeat('é', 1016), 'enabled')
     ").await;
     // 2048 bytes is the largest accepted value.
     run(
@@ -583,6 +647,7 @@ async fn audit_chain_appends_in_order_and_head_tracks_the_last_event() {
         SK001 UPDATE audit_chain_head SET sequence = 3, head_hash = '\x03'
         SK001 UPDATE audit_chain_head SET sequence = 1, head_hash = '\x01'
         SK001 UPDATE audit_chain_head SET head_hash = '\x09'
+        23514 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_3', 3, '\x6832', now(), 'adm_1', 'x', 'ten_a', 'success'); UPDATE audit_chain_head SET sequence = 3, head_hash = NULL
         SK001 DELETE FROM audit_chain_head
         SK001 TRUNCATE audit_chain_head
     ",
@@ -604,6 +669,8 @@ async fn audit_event_insert_must_extend_the_head_before_commit() {
 
     for (sequence, prev_hash) in [
         (4, Some(&b"h3"[..])), // ahead of the head
+        (4, Some(&b"h2"[..])), // ahead of the head, right previous hash
+        (2, Some(&b"h2"[..])), // the head's own sequence, right previous hash
         (3, Some(&b"h1"[..])), // next sequence, wrong previous hash
         (3, None),             // next sequence, no previous hash
     ] {
@@ -674,6 +741,16 @@ async fn audit_event_references_its_tenant_and_needs_a_unique_sequence_and_times
     )
     .await;
     tx.commit().await.unwrap();
+    // Each case is one implicit transaction, so the error also rolls back
+    // the owner's DISABLE TRIGGER, which lets a case reach a CHECK that the
+    // chain trigger would otherwise reject first.
+    rejects(&pool, r"
+        23514 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_2', 2, '\x01', now(), 'adm_1', 'x', 'ten_a', '')
+        23514 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, previous_revision, outcome) VALUES ('evt_2', 2, '\x01', now(), 'adm_1', 'x', 'ten_a', 0, 'success')
+        23514 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, new_revision, outcome) VALUES ('evt_2', 2, '\x01', now(), 'adm_1', 'x', 'ten_a', 0, 'success')
+        23514 ALTER TABLE audit_event DISABLE TRIGGER USER; INSERT INTO audit_event (id, sequence, timestamp, actor, action, object_id, outcome) VALUES ('evt_2', 2, now(), 'adm_1', 'x', 'ten_a', 'success')
+        23514 ALTER TABLE audit_event DISABLE TRIGGER USER; INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_2', 1, '\x01', now(), 'adm_1', 'x', 'ten_a', 'success')
+    ").await;
 
     // The chain trigger rejects a reused sequence first; with the owner's
     // user triggers disabled, the unique constraint still does.
@@ -878,6 +955,168 @@ async fn audit_chain_guards_ignore_the_callers_search_path() {
     db.drop([pool]).await;
 }
 
+/// Seeds one row in each table with an update guard and returns a login role
+/// that may only read and update them.
+async fn update_guard_writer(db: &mut TestDb, pool: &PgPool) -> PgConnection {
+    run(pool, TENANTS).await;
+    run(pool, POLICY).await;
+    run(
+        pool,
+        "INSERT INTO egress_allowlist_entry VALUES
+             ('egr_1', 'jwks', 'https://keys.example:443/', 'enabled')",
+    )
+    .await;
+    let (role, connect) = db.create_login_role().await;
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "GRANT SELECT, UPDATE ON tenant, instance_security_policy, egress_allowlist_entry
+         TO {role}"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+    let mut writer = PgConnection::connect_with(&connect).await.unwrap();
+    let superuser: bool =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(&mut writer)
+            .await
+            .unwrap();
+    assert!(!superuser);
+    writer
+}
+
+/// A temporary table named `jsonb` is also a type that the caller's
+/// search_path finds before `pg_catalog.jsonb`; the immutable-column guard
+/// must still use the built-in type.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn update_guards_ignore_a_temporary_jsonb_type() {
+    let (mut db, pool) = migrated().await;
+    let mut writer = update_guard_writer(&mut db, &pool).await;
+    // Before any guard runs in this session, so none is compiled yet.
+    run(&mut writer, "CREATE TEMP TABLE jsonb (x int)").await;
+    assert_rejected(
+        &mut writer,
+        "SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'",
+    )
+    .await;
+    run(
+        &mut writer,
+        "UPDATE tenant SET name = 'x' WHERE id = 'ten_a'",
+    )
+    .await;
+    writer.close().await.unwrap();
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM tenant WHERE secret_namespace = 'ns_a' AND name = 'x'"
+        )
+        .await,
+        1
+    );
+    db.drop([pool]).await;
+}
+
+/// A role that can create objects in some schema puts it ahead of
+/// `pg_catalog` with an `=` that calls everything equal. The guards compare
+/// with the built-in operators all the same.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn update_guards_ignore_operators_on_the_callers_search_path() {
+    let (mut db, pool) = migrated().await;
+    let mut writer = update_guard_writer(&mut db, &pool).await;
+    run(
+        &pool,
+        r"UPDATE instance_security_policy SET audit_sink_validated_at = '2026-01-01T00:00:00Z',
+              revision = revision + 1",
+    )
+    .await;
+    let role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    run(&pool, "CREATE SCHEMA evil").await;
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "GRANT USAGE, CREATE ON SCHEMA evil TO {role}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    run(
+        &mut writer,
+        "CREATE FUNCTION evil.same(jsonb, jsonb) RETURNS boolean LANGUAGE sql AS 'SELECT true';
+         CREATE OPERATOR evil.= (LEFTARG = jsonb, RIGHTARG = jsonb, FUNCTION = evil.same);
+         CREATE FUNCTION evil.same(bigint, bigint) RETURNS boolean LANGUAGE sql AS 'SELECT true';
+         CREATE OPERATOR evil.= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = evil.same);
+         CREATE FUNCTION evil.same(bytea, bytea) RETURNS boolean LANGUAGE sql AS 'SELECT true';
+         CREATE OPERATOR evil.= (LEFTARG = bytea, RIGHTARG = bytea, FUNCTION = evil.same);
+         SET search_path = evil, pg_catalog, public",
+    )
+    .await;
+    // The shadow is in effect for the caller's own expressions.
+    let shadowed: bool = sqlx::query_scalar("SELECT 1::bigint = 2::bigint")
+        .fetch_one(&mut writer)
+        .await
+        .unwrap();
+    assert!(shadowed);
+    assert_rejected(&mut writer, r"
+        SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'
+        SK001 UPDATE egress_allowlist_entry SET purpose = 'token_review', revision = revision + 1
+        SK001 UPDATE instance_security_policy SET widening_second_approver = true, revision = 7
+        SK001 UPDATE egress_allowlist_entry SET status = 'disabled', revision = 7
+        SK001 UPDATE instance_security_policy SET audit_sink_config_digest = '\x02', revision = revision + 1
+    ").await;
+    run(
+        &mut writer,
+        "UPDATE tenant SET name = 'x' WHERE id = 'ten_a'",
+    )
+    .await;
+    writer.close().await.unwrap();
+    let row: (Option<Vec<u8>>, bool, i64) = sqlx::query_as(
+        "SELECT audit_sink_config_digest, widening_second_approver, revision
+         FROM instance_security_policy",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (Some(vec![1]), false, 2));
+    db.drop([pool]).await;
+}
+
+/// A schema name may contain `$$`, which must not end a function body early.
+/// The migration runs in that schema, and the chain works there.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn foundation_migrates_and_chains_in_a_schema_named_with_dollar_quotes() {
+    let db = TestDb::create().await;
+    let admin = db.pool().await;
+    run(&admin, r#"CREATE SCHEMA "audit$$2026""#).await;
+    let pool = db.pool_with_search_path(r#""audit$$2026""#).await;
+    persistence::migrate(&pool).await.unwrap();
+    let schema: String = sqlx::query_scalar("SELECT current_schema()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(schema, "audit$$2026");
+    assert_eq!(
+        count(&admin, "SELECT count(*) FROM pg_tables WHERE tablename = 'audit_event' AND schemaname = 'audit$$2026'").await,
+        1
+    );
+    assert_eq!(
+        count(
+            &admin,
+            "SELECT count(*) FROM pg_tables WHERE schemaname = 'public'"
+        )
+        .await,
+        0
+    );
+    assert_functions_pin_search_path(&pool).await;
+    append(&pool, 1, None, b"h1").await.unwrap();
+    let err = append(&pool, 3, Some(b"h1"), b"h3").await.unwrap_err();
+    assert_eq!(sqlstate(&err), "SK001", "{err}");
+    assert_eq!(head(&pool).await, (1, Some(b"h1".to_vec())));
+    db.drop([admin, pool]).await;
+}
+
 /// Runs, on one connection after `setup`, writes that the foundation guards
 /// must reject with SK001.
 async fn assert_guards_hold(pool: &PgPool, setup: &'static str) {
@@ -928,7 +1167,8 @@ async fn foundation_guards_reject_forbidden_writes() {
 }
 
 /// `ENABLE ALWAYS` keeps the guards firing in replica mode, which would
-/// otherwise skip ordinary triggers. Setting the mode needs a superuser.
+/// otherwise skip ordinary triggers. Setting the mode needs a superuser or
+/// `SET` on the parameter.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn foundation_guards_hold_under_replica_role() {

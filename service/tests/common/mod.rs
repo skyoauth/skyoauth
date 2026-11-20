@@ -1,7 +1,10 @@
 //! Shared helper for the database integration tests.
 //!
 //! The tests need `SKYOAUTH_IT_DATABASE_URL`, a URL for a role that may
-//! create databases; each test creates and drops its own database. They are
+//! create databases (`CREATEDB`); each test creates and drops its own
+//! database. Tests that create login roles also need `CREATEROLE`, and the
+//! replica-role tests `GRANT SET ON PARAMETER session_replication_role`
+//! (PostgreSQL 15 or later); no test needs a superuser. They are
 //! `#[ignore]`d, so runs without a database report them as ignored; run them
 //! with `cargo nextest run --run-ignored all` (as the `service-nextest` CI
 //! job does) or `cargo test -- --include-ignored`. An ignored test that is
@@ -79,10 +82,26 @@ impl TestDb {
         persistence::connect(&self.config).await.unwrap()
     }
 
+    /// A pool for this test's database whose sessions start with
+    /// `search_path` set to `search_path`.
+    #[allow(dead_code, reason = "not every test binary sets a search_path")]
+    pub async fn pool_with_search_path(&self, search_path: &str) -> PgPool {
+        let connect = PgConnectOptions::from_str(&self.admin_url)
+            .unwrap()
+            .database(&self.name)
+            .options([("search_path", search_path)]);
+        let config = DatabaseConfig::new(connect, 4, Duration::from_secs(10)).unwrap();
+        persistence::connect(&config).await.unwrap()
+    }
+
     /// Creates a login role with no attributes (not a superuser, owns
     /// nothing) and returns its name and options to connect to this test's
     /// database as it. It gets only the privileges `PUBLIC` has; the test
     /// grants the rest. It is dropped with the database.
+    ///
+    /// # Panics
+    ///
+    /// When the role of `SKYOAUTH_IT_DATABASE_URL` may not create roles.
     #[allow(dead_code, reason = "not every test binary creates roles")]
     pub async fn create_login_role(&mut self) -> (String, PgConnectOptions) {
         // Roles are cluster-wide, so the name derives from the database's.
@@ -99,7 +118,12 @@ impl TestDb {
         )))
         .execute(&mut admin)
         .await
-        .unwrap();
+        .unwrap_or_else(|err| {
+            panic!(
+                "CREATE ROLE failed: {err}; this test needs the role of \
+                 {IT_DATABASE_URL_VAR} to have CREATEROLE (or be a superuser)"
+            )
+        });
         self.roles.push(role.clone());
         let connect = PgConnectOptions::from_str(&self.admin_url)
             .unwrap()

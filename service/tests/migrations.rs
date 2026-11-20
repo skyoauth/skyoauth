@@ -204,7 +204,8 @@ async fn append_only_guard_rejects_update_delete_and_truncate() {
 }
 
 /// `ENABLE ALWAYS` keeps the guard firing in replica mode, which would
-/// otherwise skip ordinary triggers. Setting the mode needs a superuser.
+/// otherwise skip ordinary triggers. Setting the mode needs a superuser or
+/// `SET` on the parameter.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn append_only_guard_holds_under_replica_role() {
