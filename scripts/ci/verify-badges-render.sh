@@ -215,7 +215,11 @@ for url in $urls; do
     file=${url##*/badges/main/}
     raw="https://raw.githubusercontent.com/$repo/badges/$branch/$file"
     fetch "$tmp/badge" "$raw" -L -H "Authorization: token $GH_TOKEN"
-    echo "README embeds $url"
+    if [ "$readme" = "rendered README" ]; then
+        echo "README embeds $url"
+    else
+        echo "badge file $file (not read from the README, which is unchanged from the base branch)"
+    fi
     echo "  published file $raw -> ${code:-000} ${ctype:-?}"
     if [ "$transient" -eq 1 ]; then
         transient_problem "could not fetch $raw ($what)"

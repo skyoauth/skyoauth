@@ -193,6 +193,8 @@ describe('verify-badges-render.sh with a stub curl', () => {
         assert.deepEqual(warnings(r), []);
         assert.equal(r.calls.length, 5);
         for (const badge of BADGES) assert.match(r.stdout, new RegExp(`${raw(badge)} -> 200 image/svg\\+xml`));
+        assert.equal(r.stdout.match(/^README embeds https:\/\/github\.com\/.*\.svg$/gm)?.length, 4, r.stdout);
+        assert.doesNotMatch(r.stdout, /^badge file /m);
         assert.deepEqual(r.leftovers, []);
       });
 
@@ -394,6 +396,17 @@ describe('verify-badges-render.sh with a stub curl', () => {
 
     // The README paths are the checkout's top-level ones wherever the
     // script runs; a subdirectory's own README.md is not one of them.
+    // The fallback never reads the README, so its log must not claim to
+    // report what the README embeds.
+    test('logs the badge files it checks, not what the README embeds', () => {
+      const r = verify({ pr: true, rules: down });
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /README embeds/);
+      for (const file of ['rust-tests', 'rust-coverage', 'typescript-tests', 'typescript-coverage']) {
+        assert.ok(r.stdout.includes(`badge file ${file}.svg (not read from the README, which is unchanged from the base branch)\n  published file https://raw.githubusercontent.com/${REPO}/badges/main/${file}.svg -> 200 image/svg+xml\n`), r.stdout);
+      }
+    });
+
     test('run from a subdirectory, a changed README still fails', () => {
       const r = verify({ pr: true, rules: down, md: changed, sub: 'lib/inner', extra: { 'lib/inner/README.md': '# inner\n' }, baseFiles: { 'lib/inner/README.md': '# inner\n' } });
       assert.equal(r.status, 1, r.stdout + r.stderr);
