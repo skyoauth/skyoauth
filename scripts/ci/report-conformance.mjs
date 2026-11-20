@@ -282,7 +282,7 @@ export function testId(runner, classname, name) {
   return `nextest:${k < 0 ? classname : `${classname.slice(0, k)}/${classname.slice(k + 2)}`}/${name}`;
 }
 
-const TS_FILE = /^(.*?\.(?:test|spec)\.[cm]?[jt]sx?)\/(.+)$/;
+const TS_FILE = /^(.*?\.(?:test|spec)\.[cm]?[jt]sx?)\/(.+)$/s;
 const RUST_LIKE = /^a\d\d_/;
 const RUST_NAME = /^a(\d\d)(?:_(\d\d))?_(pos|neg)_\w+$/;
 const VITEST_LIKE = /(?:^|> )A\d\d[ .]/;
@@ -296,7 +296,7 @@ const PW_NAME = /^A(\d\d)(?:\.(\d\d))? (pos|neg): \S/;
 // any " > " segment for vitest, the own title for Playwright); `entry`
 // ("A24" or "A58.07") and `polarity` are set when it is also well-formed.
 export function testInfo(id) {
-  const m = /^(nextest|vitest|playwright):(.+)$/.exec(id);
+  const m = /^(nextest|vitest|playwright):(.+)$/s.exec(id);
   if (!m) return null;
   const [, runner, rest] = m;
   let pkg = null;
@@ -329,8 +329,10 @@ export function testInfo(id) {
 
 const RANK = { passed: 0, skipped: 1, failed: 2 };
 
-// The files of a conformance (leg) artifact.
+// The files of a conformance (leg) artifact, and the most bytes each may
+// hold: a leg string is short, and the reports are not read unbounded.
 const LEG_FILES = ['leg', 'junit.xml'];
+export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
 // Artifacts of jobs that are not conformance legs (ci.yml): the only ones
 // that may lack a leg file. Any other artifact without one is an input error.
 export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/];
@@ -372,7 +374,12 @@ function readArtifact(dir, run, artifact, catalogue) {
   }
   const extra = entries.filter((x) => !LEG_FILES.includes(x));
   if (extra.length) return { error: `${rel}: a leg artifact holds only leg and junit.xml, not ${extra.join(', ')}` };
-  for (const f of LEG_FILES) if (kinds.has(f) && kinds.get(f) !== 'file') return { error: `${rel}/${f}: ${KIND[kinds.get(f)]}, not a regular file` };
+  for (const f of LEG_FILES) {
+    if (!kinds.has(f)) continue;
+    if (kinds.get(f) !== 'file') return { error: `${rel}/${f}: ${KIND[kinds.get(f)]}, not a regular file` };
+    const size = lstatSync(join(path, f)).size;
+    if (size > MAX_BYTES[f]) return { error: `${rel}/${f}: ${size} bytes, more than the ${MAX_BYTES[f]} it may hold; not read` };
+  }
   const leg = readFileSync(join(path, 'leg'), 'utf8').trim();
   const attempt = /(?:^|-)attempt-([1-9]\d*)$/.exec(artifact);
   if (!catalogue.has(leg)) return { error: `${rel}: leg file names ${JSON.stringify(leg)}, which is not a layout §1.1 leg string` };
@@ -608,13 +615,36 @@ export function judge({ scenarios, subcases, contracts, reports, waivers = [], c
 // ---------------------------------------------------------------------------
 // Markdown
 
-const code = (s) => `\`${String(s).replaceAll('`', "'")}\``;
-const cell = (s) => String(s).replaceAll('|', '\\|').replaceAll('\n', ' ');
+// Every string that reaches the Markdown from outside this script (artifact
+// and file names, leg files, JUnit names, XML error messages, registry and
+// waiver text) passes clean(): control characters (CR and LF included),
+// U+2028/2029, zero-width and bidirectional controls become a space, and the
+// result is cut to MAX_TEXT characters. text() then escapes it for prose
+// (HTML and Markdown); code() quotes it as a code span, where neither HTML
+// nor Markdown is interpreted. Lists are cut to MAX_LIST items; the JSON
+// keeps everything.
+export const MAX_TEXT = 300;
+export const MAX_LIST = 50;
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]+/g;
+export const clean = (s) => {
+  const t = String(s).replace(UNSAFE, ' ');
+  const chars = Array.from(t);
+  return chars.length > MAX_TEXT ? `${chars.slice(0, MAX_TEXT).join('')}…` : t;
+};
+export const text = (s) =>
+  clean(s)
+    .replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c])
+    .replace(/[\\`*_[\]~]/g, '\\$&');
+export const code = (s) => `\`${clean(s).replaceAll('`', "'")}\``;
+// A table cell: | would end the cell, even inside a code span.
+const cell = (s) => String(s).replaceAll('|', '\\|');
+const capped = (items, line, what) =>
+  items.length > MAX_LIST ? [...items.slice(0, MAX_LIST).map(line), `- … and ${items.length - MAX_LIST} more ${what} (the JSON lists all of them)`] : items.map(line);
 
 export function renderMarkdown(res, { inputErrors = [], notes = [], ignored = [] } = {}) {
   const out = [`## Conformance results for ${code(res.commit)}`, ''];
   if (res.headline) out.push(`**${res.headline}**`, '');
-  if (inputErrors.length) out.push(`**Input errors: this report cannot be trusted (${inputErrors.length}).**`, '', ...inputErrors.map((e) => `- ${cell(e)}`), '');
+  if (inputErrors.length) out.push(`**Input errors: this report cannot be trusted (${inputErrors.length}).**`, '', ...capped(inputErrors, (e) => `- ${text(e)}`, 'input errors'), '');
   out.push(`Judged on ${res.judged_on} from ${res.reports.length} JUnit report(s). Only **passed** counts; \`CI passed\` is not a conformance signal.`, '');
   out.push('| Milestone | Stages | Passed | Failed | Not run | Planned | Gate |', '| --- | --- | --- | --- | --- | --- | --- |');
   for (const [m, v] of Object.entries(res.milestones)) out.push(`| ${m} | ${v.stages} | ${v.passed} | ${v.failed} | ${v['not run']} | ${v.planned} | ${v.gate} |`);
@@ -625,38 +655,44 @@ export function renderMarkdown(res, { inputErrors = [], notes = [], ignored = []
   else {
     out.push('| Stage | Status | Details |', '| --- | --- | --- |');
     for (const st of impl) {
-      const details = [...st.problems];
+      const details = st.problems.map(text);
       for (const p of st.pairs) {
         const bad = p.attempts.filter((a) => a.status === 'failed' && !p.waived.some((w) => w.run_id === a.run_id && w.run_attempt === a.run_attempt));
         let d = `${code(p.test)} on ${code(p.leg)}: ${p.status}`;
         if (bad.length) d += ` (failed in ${bad.map((a) => `run ${a.run_id} attempt ${a.run_attempt}`).join(', ')})`;
-        for (const w of p.waived) d += `; waiver applied to run ${w.run_id} attempt ${w.run_attempt}: ${w.reason} (expires ${w.expires})`;
+        for (const w of p.waived) d += `; waiver applied to run ${w.run_id} attempt ${w.run_attempt}: ${text(w.reason)} (expires ${w.expires})`;
         if (p.status !== 'passed' || p.waived.length) details.push(d);
       }
-      const label = `${st.id}${st.conditional_on ? ` (conditional: ${st.conditional_on})` : ''} ${st.milestone}: ${st.scope}`;
-      out.push(`| ${cell(label)} | ${st.status} | ${details.length ? cell(details.join('<br>')) : `${st.pairs.length} pair(s) passed`} |`);
+      const label = text(`${st.id}${st.conditional_on ? ` (conditional: ${st.conditional_on})` : ''} ${st.milestone}: ${st.scope}`);
+      const shown = details.length > MAX_LIST ? [...details.slice(0, MAX_LIST), `… and ${details.length - MAX_LIST} more (the JSON lists all of them)`] : details;
+      out.push(`| ${cell(label)} | ${st.status} | ${details.length ? cell(shown.join('<br>')) : `${st.pairs.length} pair(s) passed`} |`);
     }
     out.push('');
   }
   const forCommit = res.waivers.filter((w) => w.commit === res.commit);
   if (forCommit.length) {
     out.push('### Waivers for this commit', '');
-    for (const w of forCommit) {
+    const line = (w) => {
       const what = `${code(w.test)} on ${code(w.leg)}, run ${w.run_id} attempt ${w.run_attempt}`;
-      out.push(w.applied ? `- applied: ${what}: ${cell(w.reason)} (expires ${w.expires})` : `- **not applied**: ${what}: ${w.why}`);
-    }
+      return w.applied ? `- applied: ${what}: ${text(w.reason)} (expires ${w.expires})` : `- **not applied**: ${what}: ${text(w.why)}`;
+    };
+    out.push(...capped(forCommit, line, 'waivers'));
     out.push('');
   }
   const u = res.uncounted;
   if (u.planned.length || u.unregistered.length || u.unknown.length) {
     out.push('### Results not counted', '');
-    for (const x of u.planned) out.push(`- planned stage, stays planned: ${code(x.test)} on ${code(x.leg)} ${x.status} (run ${x.run_id} attempt ${x.run_attempt})`);
-    for (const x of u.unregistered) out.push(`- not in any stage's tests: ${code(x.test)} on ${code(x.leg)} ${x.status} (run ${x.run_id} attempt ${x.run_attempt})`);
-    for (const x of u.unknown) out.push(`- unknown scenario test (${x.why}): ${code(x.test)} on ${code(x.leg)} ${x.status} (run ${x.run_id} attempt ${x.run_attempt})`);
+    const at = (x) => `${code(x.test)} on ${code(x.leg)} ${x.status} (run ${x.run_id} attempt ${x.run_attempt})`;
+    out.push(...capped(u.planned, (x) => `- planned stage, stays planned: ${at(x)}`, 'results of planned stages'));
+    out.push(...capped(u.unregistered, (x) => `- not in any stage's tests: ${at(x)}`, 'unregistered results'));
+    out.push(...capped(u.unknown, (x) => `- unknown scenario test (${text(x.why)}): ${at(x)}`, 'unknown scenario tests'));
     out.push('');
   }
-  for (const n of notes) out.push(`- note: ${cell(n)}`);
-  if (ignored.length) out.push(`- note: ${ignored.length} artifact(s) without a \`leg\` file ignored (not conformance legs): ${ignored.map(code).join(', ')}`);
+  out.push(...capped(notes, (n) => `- note: ${text(n)}`, 'notes'));
+  if (ignored.length) {
+    const more = ignored.length > MAX_LIST ? ` and ${ignored.length - MAX_LIST} more` : '';
+    out.push(`- note: ${ignored.length} artifact(s) without a \`leg\` file ignored (not conformance legs): ${ignored.slice(0, MAX_LIST).map(code).join(', ')}${more}`);
+  }
   if (notes.length || ignored.length) out.push('');
   return out.join('\n');
 }

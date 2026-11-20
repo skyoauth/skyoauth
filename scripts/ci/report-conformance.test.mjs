@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { InputError, judge, MAX_DEPTH, parseXml, readJUnit, renderMarkdown, run, testId, testInfo, worst } from './report-conformance.mjs';
+import { clean, code, InputError, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -180,6 +180,8 @@ function report(rootDir, args = [], { commit = SHA } = {}) {
   }
   return { code, out: out.join('\n'), err: err.join('\n'), json };
 }
+// The Markdown with text() escapes undone, for matching prose.
+const plain = (md) => md.replace(/\\([\\`*_[\]~|])/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 const stage = (json, id, m) => json.stages.find((s) => s.id === id && s.milestone === m);
 const pair = (json, id, m, test, leg) => stage(json, id, m).pairs.find((p) => p.test === test.id && p.leg === leg);
 
@@ -288,7 +290,7 @@ describe('statuses', () => {
     const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: null }])]);
     assert.equal(r.code, 0);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
-    assert.match(r.out, /note: 100\/junit-scenarios-pg-x86_64-attempt-1: no junit\.xml; leg scenarios-pg\/x86_64 has no result from run 100 attempt 1/);
+    assert.match(plain(r.out), /note: 100\/junit-scenarios-pg-x86_64-attempt-1: no junit\.xml; leg scenarios-pg\/x86_64 has no result from run 100 attempt 1/);
   });
 
   test('no artifacts at all: implemented stages are not run, exit 0', () => {
@@ -350,7 +352,7 @@ describe('legs', () => {
       const st = stage(r.json, 'A24', 'M1a');
       assert.equal(st.status, 'not run', tests.join());
       assert.ok(st.problems.some((p) => re.test(p)), `${re} not in ${st.problems}`);
-      assert.match(r.out, re);
+      assert.match(plain(r.out), re);
     }
   });
 
@@ -763,7 +765,7 @@ describe('input errors', () => {
     const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: truncated }])]);
     assert.equal(r.code, 2);
     assert.match(r.err, /1 input error\(s\)/);
-    assert.match(r.out, /\*\*Input errors: this report cannot be trusted \(1\)\.\*\*\n\n- 100\/junit-scenarios-pg-x86_64-attempt-1\/junit\.xml: malformed JUnit: line \d+: <testsuite> is not closed; its results are not used/);
+    assert.match(plain(r.out), /\*\*Input errors: this report cannot be trusted \(1\)\.\*\*\n\n- 100\/junit-scenarios-pg-x86_64-attempt-1\/junit\.xml: malformed JUnit: line \d+: <testsuite> is not closed; its results are not used/);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
     assert.equal(r.json.reports.length, 0);
     assert.equal(r.json.input_errors.length, 1);
@@ -778,7 +780,7 @@ describe('input errors', () => {
       ]),
     ]);
     assert.equal(r.code, 2);
-    assert.match(r.out, /- 100\/junit-scenarios-pg-x86_64-attempt-1: duplicate artifact for leg scenarios-pg\/x86_64, run 100 attempt 1 \(also 100\/copy-attempt-1\)/);
+    assert.match(plain(r.out), /- 100\/junit-scenarios-pg-x86_64-attempt-1: duplicate artifact for leg scenarios-pg\/x86_64, run 100 attempt 1 \(also 100\/copy-attempt-1\)/);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'failed');
     assert.equal(r.json.reports.length, 2);
   });
@@ -1002,7 +1004,7 @@ describe('XML and JUnit reader', () => {
     assert.notEqual(x, allPass(A24));
     const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: x }])]);
     assert.equal(r.code, 2);
-    assert.match(r.out, /junit\.xml: malformed JUnit: a suite-level <error> in <testsuite name="skyoauth-scenarios::pg">/);
+    assert.match(plain(r.out), /junit\.xml: malformed JUnit: a suite-level <error> in <testsuite name="skyoauth-scenarios::pg">/);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
   });
 
@@ -1146,11 +1148,60 @@ describe('aggregation', () => {
     assert.ok(renderMarkdown(res([])).endsWith('(a waiver never applies to not run or planned)\n'));
   });
 
-  test('renderMarkdown escapes table cells', () => {
+  test('one sanitiser for outside text: control characters, line and bidi separators, length; text() escapes HTML and Markdown, code() quotes', () => {
+    const ch = (...cps) => String.fromCodePoint(...cps);
+    assert.equal(clean(`a${ch(13)}b${ch(10, 13)}c${ch(0)}d${ch(0x7f, 0x85)}e${ch(0x2028)}f${ch(0x2029)}g${ch(0x202e)}h${ch(0x200b)}i${ch(0xfeff)}j`), 'a b c d e f g h i j');
+    assert.equal(clean('x'.repeat(MAX_TEXT)), 'x'.repeat(MAX_TEXT));
+    assert.equal(clean('x'.repeat(MAX_TEXT + 1)), `${'x'.repeat(MAX_TEXT)}…`);
+    assert.equal(clean(ch(0x1f600).repeat(MAX_TEXT + 1)), `${ch(0x1f600).repeat(MAX_TEXT)}…`, 'cut by code point, not inside a surrogate pair');
+    assert.equal(text('<h1>a & b</h1>'), '&lt;h1&gt;a &amp; b&lt;/h1&gt;');
+    assert.equal(text('&lt;h1&gt;'), '&amp;lt;h1&amp;gt;', 'entity text stays text');
+    assert.equal(text('*b* _i_ `c` [l](u) ~s~ \\'), '\\*b\\* \\_i\\_ \\`c\\` \\[l\\](u) \\~s\\~ \\\\');
+    assert.equal(code('a`b<c>&lt;'), "`a'b<c>&lt;`");
+    assert.equal(code(`a${ch(13)}b`), '`a b`');
+  });
+
+  test('renderMarkdown passes every outside string through the sanitiser, escapes table cells and caps lists', () => {
     const res = judge({ scenarios: [], subcases: [], contracts: [], reports: [], commit: SHA, today: TODAY });
-    const md = renderMarkdown(res, { inputErrors: ['a|b\nc'], notes: ['x|y'] });
-    assert.match(md, /- a\\\|b c\n/);
-    assert.match(md, /- note: x\\\|y/);
+    const md = renderMarkdown(res, { inputErrors: ['a|b\nc<i>'], notes: ['x|y*'], ignored: ['5/`x`'] });
+    assert.match(md, /^- a\|b c&lt;i&gt;$/m);
+    assert.match(md, /^- note: x\|y\\\*$/m);
+    assert.match(md, /`5\/'x'`/);
+    const many = (n, f) => Array.from({ length: n }, (_, i) => f(i));
+    const big = renderMarkdown(res, { inputErrors: many(MAX_LIST + 10, (i) => `e${i}`), notes: many(MAX_LIST + 1, (i) => `n${i}`), ignored: many(MAX_LIST + 2, (i) => `9/i${i}`) });
+    assert.equal((big.match(/^- e\d+$/gm) ?? []).length, MAX_LIST);
+    assert.match(big, /^- … and 10 more input errors \(the JSON lists all of them\)$/m);
+    assert.equal((big.match(/^- note: n\d+$/gm) ?? []).length, MAX_LIST);
+    assert.match(big, /^- … and 1 more notes \(the JSON lists all of them\)$/m);
+    assert.match(big, /^- note: 52 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `9\/i0`.*`9\/i49` and 2 more$/m);
+    // A stage label and its problems from the registry go through text()
+    // and cell().
+    const P = 'nextest:skyoauth-scenarios/pg/a24_pos_<b>|x';
+    const st = judge({ scenarios: [{ id: 'A24', stage: [{ milestone: 'M1a', scope: 'a|b <i>', legs: [PG], status: 'implemented', tests: [P] }] }], subcases: [], contracts: [], reports: [], commit: SHA, today: TODAY });
+    const row = renderMarkdown(st).split('\n').find((l) => l.startsWith('| A24'));
+    assert.equal(row.split(/(?<!\\)\|/).length, 5, row);
+    assert.ok(row.startsWith('| A24 M1a: a\\|b &lt;i&gt; | not run | '), row);
+    assert.doesNotMatch(row, /<b>|<i>/);
+  });
+
+  test('hostile artifacts: raw HTML in a leg file, entity text and a lone CR in testcase names, a 3 MB leg file', () => {
+    const name = 'junit-scenarios-pg-x86_64-attempt-1';
+    const d = artifacts([
+      { run: 1, leg: '<h1>hi</h1><img src=x onerror=alert(1)>', name, junit: null },
+      { run: 2, leg: PG, name, junit: junit([[rust('skyoauth-scenarios', 'pg', 'x::a99_pos_&lt;h1&gt;y'), 'passed'], [rust('skyoauth-scenarios', 'pg', `x::a98_neg_a${String.fromCharCode(13)}| b`), 'failed']]) },
+      { run: 3, leg: null, name, junit: null },
+    ]);
+    writeFileSync(join(d, '3', name, 'leg'), `${PG}\n${'x'.repeat(3 * 1024 * 1024)}`);
+    const r = report(root(withA24), ['--artifacts', d]);
+    assert.equal(r.code, 2);
+    assert.match(r.out, /^- 1\/junit-scenarios-pg-x86\\_64-attempt-1: leg file names "&lt;h1&gt;hi&lt;\/h1&gt;&lt;img src=x onerror=alert\(1\)&gt;", which is not a layout §1\.1 leg string$/m);
+    assert.match(r.out, /^- 3\/junit-scenarios-pg-x86\\_64-attempt-1\/leg: 3145748 bytes, more than the 1024 it may hold; not read$/m);
+    // The XML entity &amp;lt; is the text "&lt;": it stays text in a code span.
+    assert.match(r.out, /^- unknown scenario test \(not a well-formed pos\/neg scenario name\): `nextest:skyoauth-scenarios\/pg\/x::a99_pos_&lt;h1&gt;y` on/m);
+    assert.match(r.out, /^- unknown scenario test \(not a well-formed pos\/neg scenario name\): `nextest:skyoauth-scenarios\/pg\/x::a98_neg_a \| b` on `scenarios-pg\/x86_64` failed/m);
+    assert.equal(r.json.uncounted.unknown[1].test, `nextest:skyoauth-scenarios/pg/x::a98_neg_a${String.fromCharCode(13)}| b`, 'the JSON keeps the raw name');
+    assert.doesNotMatch(r.out, /<h1>|<img|\r/);
+    assert.ok(r.out.length < 20000, `${r.out.length} characters`);
   });
 });
 

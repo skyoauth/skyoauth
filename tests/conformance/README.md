@@ -215,7 +215,7 @@ node scripts/ci/report-conformance.mjs --commit "$sha" --artifacts artifacts \
 
 ### Output and exit status
 
-The Markdown summary has a per-milestone table (stages passed, failed, not run, planned, and the gate), each implemented stage with its non-passed pairs and applied waivers, the waivers for the commit, the results not counted, and notes. The JSON (`format: 1`) holds the same data: `milestones`, `stages` (with `pairs` and their per-attempt statuses), `scenarios` (`status` and `by_milestone`), `contracts`, `waivers`, `uncounted`, `input_errors`, `notes`.
+The Markdown summary has a per-milestone table (stages passed, failed, not run, planned, and the gate), each implemented stage with its non-passed pairs and applied waivers, the waivers for the commit, the results not counted, and notes. Artifacts are untrusted, and so is the text of the judged commit's registry and of the waiver file, so every such string passes one sanitiser before it reaches the Markdown: control characters (CR and LF included), U+2028/2029 and zero-width or bidirectional controls become a space, and the string is cut to 300 characters; prose is then HTML- and Markdown-escaped, and test IDs and artifact names are quoted as code spans. Each list in the summary shows at most 50 items and says how many more the JSON holds. A `leg` file over 1 KiB or a `junit.xml` over 64 MiB is an input error and is not read. The JSON (`format: 1`) holds the same data: `milestones`, `stages` (with `pairs` and their per-attempt statuses), `scenarios` (`status` and `by_milestone`), `contracts`, `waivers`, `uncounted`, `input_errors`, `notes`.
 
 | Exit | When |
 | --- | --- |
