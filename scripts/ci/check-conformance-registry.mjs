@@ -360,10 +360,13 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // Waivers
 
 // The variables that point git at another repository than the one it finds
-// from -C (a git hook or `git rebase --exec` exports some of them). With an
-// inherited GIT_DIR, a plain directory would pass as a checkout of that
-// repository, so every git run here goes without them.
-export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES'];
+// from -C (a git hook or `git rebase --exec` exports some of them), or that
+// change the history it sees there (another shallow file, grafts, replace
+// objects). With an inherited GIT_DIR, a plain directory would pass as a
+// checkout of that repository, and with GIT_SHALLOW_FILE naming a missing
+// file a shallow clone would pass as complete, so every git run here goes
+// without them.
+export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
 
 // `git -C root ...args`, run without GIT_LOCATION; `options` (encoding,
 // maxBuffer) are passed to spawnSync.

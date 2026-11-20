@@ -1223,7 +1223,7 @@ describe('rule waivers', () => {
   // obeys them, so a plain directory would borrow another repository's
   // history (and its origin/main) for the waiver rule.
   test('an inherited GIT_DIR does not make a plain directory a checkout', () => {
-    assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES']);
+    assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS']);
     assert.deepEqual(DOCS_GIT_LOCATION, GIT_LOCATION, 'docs-check.mjs keeps its own copy of the list');
     const other = gitRoot();
     const plainRoot = withWaiver(fixture({ [SCENARIOS]: implementedA24 }), waiver({ commit: `"${other.head}"` }));
@@ -1232,6 +1232,23 @@ describe('rule waivers', () => {
       const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', plainRoot], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
       assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
       assert.equal(r.stderr, `${HISTORY_ERROR('the root is not a git checkout')}\ncheck-conformance-registry: 1 error(s)\n`);
+    }
+  });
+
+  // GIT_SHALLOW_FILE names the file git reads the shallow commits from in
+  // place of .git/shallow: a missing one makes a shallow clone look complete,
+  // and the history checks would run on its truncated history.
+  test('an inherited GIT_SHALLOW_FILE does not hide a shallow clone from --require-history', () => {
+    const { root } = gitRoot();
+    git(root, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'second');
+    const clone = mkdtempSync(join(tmpdir(), 'check-registry-clone-'));
+    roots.push(clone);
+    const c = spawnSync('git', ['clone', '-q', '--depth', '1', '--no-local', `file://${root}`, clone], { encoding: 'utf8', env: GIT_ENV });
+    assert.equal(c.status, 0, c.stderr);
+    for (const env of [{}, { GIT_SHALLOW_FILE: '/nonexistent' }, { GIT_SHALLOW_FILE: join(clone, 'no-such-shallow') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', clone], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.equal(r.stderr, `${HISTORY_ERROR('the checkout is shallow')}\ncheck-conformance-registry: 1 error(s)\n`);
     }
   });
 

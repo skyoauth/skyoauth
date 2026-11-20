@@ -102,11 +102,12 @@ function sortDiagnostics(list) {
 // File discovery
 
 // The variables that point git at another repository than the one it finds
-// from -C (a git hook or `git rebase --exec` exports some of them); git runs
-// here without them, so the tracked files are root's own. The same list as
+// from -C (a git hook or `git rebase --exec` exports some of them), or that
+// change the history it sees there; git runs here without them, so the
+// tracked files are root's own. The same list as
 // GIT_LOCATION in check-conformance-registry.mjs, which this script cannot
 // import (it has no dependencies).
-export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES'];
+export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS'];
 
 function gitTracked(root) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
