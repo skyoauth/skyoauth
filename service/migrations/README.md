@@ -791,3 +791,39 @@ Not done in `0004`:
 - Rejecting the private-key member names of post-quantum JWK types in a
   keyset version (T11.3); the check covers the RFC 7518 and RFC 8037
   members only.
+
+## Rust registry surface
+
+`skyoauth_service::persistence::registry` is the typed Rust entry point to
+the registry tables of `0002` and `0003`: create, get, list and
+revision-checked update for `resource_server`, `audience_tenant_assignment`,
+`resource_server_checker` (with its tenant rows) and `resource_action`;
+create, get and list for `tenant` and `principal`, which have no revision
+yet; and reads of `instance_security_policy` and `egress_allowlist_entry`.
+Every function runs one statement on any executor (pool, connection or
+caller transaction). Writes take caller-supplied IDs (T10.2 generates
+them). An update is a compare-and-set: it sets `revision = expected + 1`
+where `revision = expected`, as `skyoauth_check_revision()` requires, and
+touches only the columns these migrations leave mutable. Adding or removing
+a checker tenant row advances the checker's revision in the same statement.
+A principal is read by tenant and ID; lists are ordered by ID byte-wise and
+paged after an ID cursor.
+
+Errors map by SQLSTATE and, for constraint errors, by the constraint names
+in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
+catalog by a test). Error text carries constraint names only, never a
+value:
+
+| SQLSTATE | Rust error                                      |
+| -------- | ----------------------------------------------- |
+| —        | `NotFound`, `StaleRevision` (no row matched)    |
+| `23505`  | `AlreadyExists { constraint }`                  |
+| `23503`  | `Invariant { kind: ForeignKey, constraint }`    |
+| `23514`  | `Invariant { kind: Check, constraint }`         |
+| `23502`  | `Invariant { kind: NotNull, constraint: None }` |
+| `SK001`  | `Guard`                                         |
+| other    | `Other`, also for a constraint not listed       |
+
+The registry does not authorize writes (API-147; T14.1, T14.2), write
+audit events (T13.x), check the rules listed under "The database does not
+enforce these rules" above, generate IDs or run migrations.
