@@ -152,6 +152,156 @@ since advanced waits for that transaction and then fails with `SK001` under
 `SERIALIZABLE`. The database does not retry; a writer that locked the head
 first gets the committed head and succeeds.
 
+## What 0004 adds
+
+`0004_trust_binding_grant.sql` is the third slice of the M1a domain schema
+(T10.1): `trust_keyset`, `trust_keyset_version`, `trust_source`,
+`principal_binding`, `service_identity` and `service_grant`, with the list
+tables `service_identity_resource_server`, `service_grant_binding` and
+`service_grant_resource_server`. It requires `0003` (the
+`audience_tenant_assignment` key and the list domains). All of them are
+tenant-owned, `status` is `enabled` or `disabled` (inferred, as in `0003`),
+and every table but the keyset versions and the list tables carries a
+`revision` checked by `skyoauth_check_revision()`. Immutable columns fail
+with `SK001` through `skyoauth_reject_immutable_change(…)`; every trigger is
+`ENABLE ALWAYS`. The replay table (T10.9) and the policy revision are not
+part of it.
+
+- **Keys and exact strings.** Two domains, both `text COLLATE "C"`, reject
+  an empty value and `[[:space:][:cntrl:]]` as the egress destinations of
+  `0002` do, and bound the length in bytes, so an over-long value fails with
+  `23514`, never with the btree size error `54000`: `skyoauth_id` (at most
+  255 bytes, inferred) holds every ID and every reference to one, including
+  `cluster_id`; `skyoauth_exact_string` (at most 2048 bytes, inferred) holds
+  the values compared exactly that the service does not generate:
+  `exact_issuer`, `discovery_url`, `token_review_endpoint`, `ca_bundle_ref`,
+  `ca_fingerprint`, `reviewer_credential_ref` and the keyset version
+  `fingerprint`. IDs are bounded at 255 rather than 2048 bytes because
+  several keys combine three of them, or a tenant ID and a name, and must
+  stay below the btree limit of 2704 bytes for any content.
+- **Names** are human labels: default collation, non-empty, at most 2048
+  bytes, spaces allowed (inferred), unique per table and tenant (IR-021),
+  disabled rows included (inferred).
+- **Unicode normalisation is a service rule.** The database compares bytes:
+  it neither normalises nor rejects unnormalised IDs, names, issuers or
+  claim values, so two spellings of the same text are two values.
+- **Trust sources** (ADR-005 item 1). `kind` fixes which fields are set:
+  `discovery_url` exactly for `oidc_discovery`, `jwks_keyset_id` exactly for
+  `uploaded_jwks`, and `cluster_id`, `token_review_endpoint`,
+  `ca_bundle_ref`, `ca_fingerprint`, `reviewer_credential_ref` and
+  `review_timeout_ms` all for `kubernetes_token_review` and none otherwise;
+  `algorithms` is set for every kind but TokenReview, which also requires
+  `projected_service_account` (each inferred). `stale_revocation_acknowledged`
+  is `true` exactly for `projected_service_account` on `oidc_discovery` or
+  `uploaded_jwks`, and `NULL` elsewhere (IR-151; `false` is rejected,
+  inferred). `single_use` replay needs `on_demand_jwt` on `oidc_discovery`
+  or `uploaded_jwks` (OQ-ADR005-2). `cluster_id` is unique across tenants
+  (inferred). `kind`, `cluster_id` and `jwks_keyset_id` are immutable
+  (inferred). `discovery_url` and `token_review_endpoint` are not foreign
+  keys to egress entries: a write that leaves them unchanged must not fail
+  for a missing or disabled entry (IR-152).
+- **Keysets and versions.** A version holds a JWK Set whose `keys` is a
+  nonempty array of objects (nonempty inferred), none with a private or
+  symmetric member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k`), so a
+  private-key upload is rejected here too (ADR-005 items 2 and 8). Versions
+  are immutable (tasks §3 "Ownership"); that `status` alone may change is
+  inferred. `expires_at`, when set, is after `effective_at`; versions may
+  overlap.
+- **Workload and service kinds.** `principal` gains
+  `principal_tenant_id_id_kind_key UNIQUE (tenant_id, id, kind)`. A binding
+  and a grant actor reference `(tenant_id, id, kind)` with a constant
+  `'workload'` column, and a service identity with a constant `'service'`
+  column, so the database pins the principal kind as well as the tenant.
+- **Bindings.** `profile` is `github_production`, `kubernetes_production`
+  or `generic_production` (the source's examples, taken as the whole set,
+  inferred); `claim_match_policy` is a nonempty object of string values.
+  The source and principal of a binding are immutable (inferred).
+- **Grants.** A direct grant has no `target_service_id`; delegation and
+  impersonation name a same-tenant service identity. An impersonation grant
+  is stored only `disabled` with `activation_state = 'requires_reapproval'`,
+  and the other modes carry `not_required` (inferred). `default_scopes`,
+  when set, is nonempty and within the grant's `scopes` (IR-063). `max_ttl`
+  is in seconds, 1 to 300 (inferred unit). `actor_principal_id`,
+  `target_service_id` and `mode` are immutable (inferred).
+- **List tables.** `ServiceIdentity.resource_server_ids`,
+  `ServiceGrant.resource_server_ids` and `ServiceGrant.allowed_binding_ids`
+  are rows with composite keys, as checker tenants in `0003`. An audience
+  row references `audience_tenant_assignment (tenant_id,
+  resource_server_id)`, so it names an audience assigned to the owner's own
+  tenant. A binding row carries the grant's actor in both references, so it
+  can only name a same-tenant binding of that actor (ADR-022 item 13). A
+  deferred, `ENABLE ALWAYS` constraint trigger
+  (`skyoauth_service_grant_has_binding()`, pinned `search_path`, tables
+  named with the schema) fails the commit with `SK001` when a grant created
+  in the transaction has no binding row, or the last binding row of a
+  surviving grant was deleted. It locks the grant row with
+  `FOR NO KEY UPDATE`, so a role that deletes binding rows needs `UPDATE` on
+  `service_grant`. List rows are added or deleted, never updated.
+- **Empty arrays.** These must be nonempty: `trust_source.audiences`,
+  `algorithms` when set, `default_scopes` when set, the JWK Set `keys`,
+  `claim_match_policy` and a grant's binding rows. These may be empty:
+  `service_grant.scopes`, `service_identity.max_scopes` and the audience
+  rows of a service or grant. An empty set always allows nothing; it never
+  means "unconstrained" (inferred). A `NULL` `default_scopes` means the
+  grant has no defaults.
+- **Not NULL.** Every column is `NOT NULL` except the fields the model
+  marks optional (`expires_at`, `target_service_id`, `default_scopes`,
+  `valid_until`) and the kind-specific trust source fields above. In
+  particular no column of a composite foreign key is nullable, since a
+  `NULL` there would make `MATCH SIMPLE` skip the check; the two nullable
+  references, `jwks_keyset_id` and `target_service_id`, are tied to `kind`
+  and `mode` by `CHECK`s.
+- **Foreign keys** are all `NO ACTION`, not deferrable, and named
+  `<table>_<description>_fkey`:
+  - `trust_keyset_tenant_fkey`;
+  - `trust_keyset_version_tenant_fkey`, `trust_keyset_version_keyset_fkey`;
+  - `trust_source_tenant_fkey`, `trust_source_keyset_fkey`;
+  - `principal_binding_tenant_fkey`, `principal_binding_source_fkey`,
+    `principal_binding_workload_fkey`;
+  - `service_identity_tenant_fkey`, `service_identity_principal_fkey`;
+  - `service_identity_resource_server_service_fkey`,
+    `service_identity_resource_server_assignment_fkey`;
+  - `service_grant_tenant_fkey`, `service_grant_actor_fkey`,
+    `service_grant_target_fkey`;
+  - `service_grant_binding_grant_fkey`, `service_grant_binding_binding_fkey`;
+  - `service_grant_resource_server_grant_fkey`,
+    `service_grant_resource_server_assignment_fkey`.
+
+The database does not enforce these rules; the service must:
+
+- refuse an audience outside an enabled same-tenant assignment at write and
+  at issuance (IR-080, IR-081): the composite key proves only that the
+  assignment exists; and keep a delegation grant's audiences within its
+  target service's audiences;
+- check `discovery_url` and `token_review_endpoint` by value against an
+  enabled egress entry of the matching purpose when they are written
+  (IR-152), and validate them as URLs;
+- resolve `ca_bundle_ref` and `reviewer_credential_ref` only within the
+  tenant's secret namespace (IR-034);
+- require the predicates each binding profile demands (ADR-016 item 4) and
+  never match a disabled binding;
+- check JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
+  upload (T11.3);
+- keep scopes within the service, assignment and resource server ceilings
+  beyond `default_scopes ⊆ scopes` (IR-063), and check resource constraints
+  against their schemas (IR-123, IR-141);
+- keep an impersonation grant dormant and unchanged in meaning when it is
+  reapproved (design §5.6; T10.11): the `CHECK`s only fix its stored state;
+- create a service principal and its service identity in one transaction
+  (identity-registry §5.1);
+- advance the parent's revision when its list rows change, check the
+  expected revision of every write and write the audit event in the same
+  transaction;
+- hard-delete a binding or grant only under ADR-008 item 3, deleting a
+  grant's list rows first; disable the other records instead;
+- normalise Unicode where a source requires it (see above).
+
+The binding-set check sees committed rows under `READ COMMITTED`. Under
+`REPEATABLE READ` two transactions that each delete a different last-but-one
+binding row of the same grant can both commit if neither changes the grant
+row; the revision compare-and-set on the grant, which the service performs
+for every list change, makes the second one fail.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -224,3 +374,14 @@ Not done in `0002`:
 - Who computes the audit event hash, with which algorithm and over which
   input (including the encoding of absent values above). This needs a spec
   decision before the first code that writes events.
+
+Not done in `0004`:
+
+- Delete and truncate guards for its tables, decided with those of the
+  other registry tables. Bindings and grants allow a conditional hard delete
+  (ADR-008 item 3), so their guard must let that through; until then only
+  foreign keys hold back a delete.
+- The single-use replay table (T10.9) and the policy revision.
+- A name-unique key on `principal`, which `0002` does not have
+  (IR-021).
+- Rejecting duplicate list elements, as for `0003`.
