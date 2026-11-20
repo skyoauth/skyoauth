@@ -43,7 +43,8 @@
 # figure, a percentage outside 0..100, a count that is not a whole number
 # of at most 9 digits, or counts that add up to fewer than none passed)
 # never yields a badge. When its tests job is marked as failed
-# (--rust-tests-failed, --ts-tests-failed), the tests badge is a red
+# (--rust-tests-failed, --ts-tests-failed), or its coverage gate did not
+# pass (a --*-coverage-result other than `success`), the badge is a red
 # `failing` one, as without a report. Otherwise that badge is left as it
 # was, the other badges are published, and the script then exits 1 (at
 # once, publishing nothing, when no other badge is known). A run found
@@ -311,16 +312,24 @@ rust_cov_color=
 rust_cov_json=
 if [ -n "$rust_coverage" ]; then
     rust_percent=
+    why=
     if ! jq -e '.data[0].totals.lines.percent | type == "number"' "$rust_coverage" >/dev/null; then
-        unusable "cannot read line coverage percentage from $rust_coverage"
+        why="cannot read line coverage percentage from $rust_coverage"
     else
         rust_raw=$(jq -r '.data[0].totals.lines.percent' "$rust_coverage")
         rust_percent=$(percent_1dp "$rust_raw") || {
             rust_percent=
-            unusable "line coverage percentage '$rust_raw' in $rust_coverage is not a number from 0 to 100"
+            why="line coverage percentage '$rust_raw' in $rust_coverage is not a number from 0 to 100"
         }
     fi
-    if [ -n "$rust_percent" ]; then
+    if [ -z "$rust_percent" ] && [ "$rust_coverage_result" != success ]; then
+        echo "publish-badges: $why; the gate did not pass, so the badge is a red failing one" >&2
+        rust_cov_value=failing
+        rust_cov_color=red
+        rust_cov_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
+    elif [ -z "$rust_percent" ]; then
+        unusable "$why"
+    else
         rust_cov_value="${rust_percent}%"
         rust_cov_color=$(coverage_color "$rust_percent" "$rust_coverage_result")
         rust_cov_json=$(jq -nc --arg p "$rust_percent" --arg g "$(gate "$rust_coverage_result")" --arg c "$sha" \
@@ -391,16 +400,24 @@ ts_cov_color=
 ts_cov_json=
 if [ -n "$ts_coverage" ]; then
     ts_percent=
+    why=
     if ! jq -e '.total.lines.pct | type == "number"' "$ts_coverage" >/dev/null; then
-        unusable "cannot read line coverage percentage from $ts_coverage"
+        why="cannot read line coverage percentage from $ts_coverage"
     else
         ts_raw=$(jq -r '.total.lines.pct' "$ts_coverage")
         ts_percent=$(percent_1dp "$ts_raw") || {
             ts_percent=
-            unusable "line coverage percentage '$ts_raw' in $ts_coverage is not a number from 0 to 100"
+            why="line coverage percentage '$ts_raw' in $ts_coverage is not a number from 0 to 100"
         }
     fi
-    if [ -n "$ts_percent" ]; then
+    if [ -z "$ts_percent" ] && [ "$ts_coverage_result" != success ]; then
+        echo "publish-badges: $why; the gate did not pass, so the badge is a red failing one" >&2
+        ts_cov_value=failing
+        ts_cov_color=red
+        ts_cov_json=$(jq -nc --arg c "$sha" '{status: "failing", commit: $c}')
+    elif [ -z "$ts_percent" ]; then
+        unusable "$why"
+    else
         ts_cov_value="${ts_percent}%"
         ts_cov_color=$(coverage_color "$ts_percent" "$ts_coverage_result")
         ts_cov_json=$(jq -nc --arg p "$ts_percent" --arg g "$(gate "$ts_coverage_result")" --arg c "$sha" \

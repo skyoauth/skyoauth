@@ -271,6 +271,25 @@ describe('coverage percentage is truncated to one decimal, never rounded', () =>
     assert.deepEqual(badge(remote, 'main/rust-coverage.svg'), { color: GREEN, title: 'rust coverage: 89.9%' });
   });
 
+  // With a gate that did not pass, an unusable figure gives the red
+  // `failing` badge rather than leaving the old (possibly green) one.
+  for (const [name, args, badgeName, message] of [
+    ['a Rust percentage above 100 from a failed gate', (file) => ['--rust-coverage', file('r.json', rustReportText('150')), '--rust-coverage-result', 'failure'], 'rust-coverage', /'150' .* is not a number from 0 to 100; the gate did not pass/],
+    ['an unreadable TypeScript percentage from a cancelled job', (file) => ['--ts-coverage', file('t.json', tsSummaryText('"85"')), '--ts-coverage-result', 'cancelled'], 'typescript-coverage', /cannot read line coverage percentage .*; the gate did not pass/],
+  ]) {
+    test(`${name} publishes a red failing badge`, () => {
+      const { remote, sha, work, file } = setup();
+      const green = ['--rust-coverage', file('rg.json', rustReport(95)), '--rust-coverage-result', 'success', '--ts-coverage', file('tg.json', tsSummary(95)), '--ts-coverage-result', 'success'];
+      assert.equal(publish(work[0], ['main', sha, ...green]).status, 0);
+      assert.equal(badge(remote, `main/${badgeName}.svg`).color, BRIGHTGREEN);
+      const r = publish(work[0], ['main', sha, ...args(file)]);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.match(r.stderr, message);
+      assert.deepEqual(badge(remote, `main/${badgeName}.svg`), { color: RED, title: `${badgeName.replace('-', ' ')}: failing` });
+      assert.equal(summary(remote, 'main')[badgeName.replace('-', '_')].status, 'failing');
+    });
+  }
+
   for (const literal of ['100.5', '100.01', '1E+3', '1.7976931348623157e308', '-1']) {
     test(`rejects ${literal}, which is not a percentage`, () => {
       const { remote, sha, work, file } = setup();
@@ -628,6 +647,18 @@ describe('the CI job (publish-badges-ci.sh)', () => {
     assert.equal(badge(remote, 'main/typescript-coverage.svg').title, 'typescript coverage: 90.0%');
     assert.equal(published(remote, 'main/typescript-tests.svg'), false);
     assertNoScriptLeftovers();
+  });
+
+  test('an unusable coverage report from a failed gate publishes a red failing badge', () => {
+    const { remote, sha, work } = setup();
+    const r = run(
+      work[0], sha,
+      { TS_OK: 'true', TS_RESULT: 'failure' },
+      { tsCoverage: 150, tsResults: { success: true, numPassedTests: 7, numFailedTests: 0 } },
+    );
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.deepEqual(badge(remote, 'main/typescript-coverage.svg'), { color: RED, title: 'typescript coverage: failing' });
+    assert.equal(badge(remote, 'main/typescript-tests.svg').title, 'typescript tests: 7 passed');
   });
 
   test('with nothing known it publishes nothing and still fails', () => {
