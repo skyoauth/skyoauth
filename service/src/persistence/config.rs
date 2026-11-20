@@ -20,9 +20,12 @@ const ACQUIRE_TIMEOUT_SECS: RangeInclusive<u32> = 1..=300;
 ///
 /// TLS follows the URL's `sslmode` parameter, which defaults to sqlx's
 /// `prefer` (TLS if the server offers it, otherwise plaintext). Requiring TLS
-/// is a follow-up.
+/// is a follow-up (docs/skyoauth-tasks.md, T10.1).
 ///
-/// `Debug` never prints the password or the connection URL.
+/// `Debug` prints host, port, database, username and the pool limits, never
+/// the password or the URL. The parsed sqlx connect options are not exposed
+/// outside the `persistence` module, because their `Debug` includes the
+/// password.
 #[derive(Clone)]
 pub struct DatabaseConfig {
     connect: PgConnectOptions,
@@ -104,8 +107,9 @@ impl DatabaseConfig {
             return Err(ConfigError::InvalidUrl);
         }
         // The parse error is dropped: its message may echo part of the URL.
-        // TODO(tls): reject or upgrade sslmode values weaker than verify-full
-        // once deployments provide the server CA; until then the URL decides.
+        // TODO(tls): the follow-up appended to T10.1 in docs/skyoauth-tasks.md
+        // defaults sslmode to verify-full for remote hosts; until then the URL
+        // (or sqlx's `prefer`) decides.
         let connect = PgConnectOptions::from_str(&url).map_err(|_| ConfigError::InvalidUrl)?;
         let number = |var, default: u32, bounds| match get(var) {
             None => Ok(default),
@@ -120,8 +124,9 @@ impl DatabaseConfig {
         )
     }
 
-    /// The parsed connect options.
-    pub fn connect_options(&self) -> &PgConnectOptions {
+    /// The parsed connect options. Not public: their `Debug` prints the
+    /// password.
+    pub(super) fn connect_options(&self) -> &PgConnectOptions {
         &self.connect
     }
 

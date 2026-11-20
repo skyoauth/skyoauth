@@ -143,6 +143,33 @@ async fn modified_applied_migration_is_refused() {
 
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn refused_run_releases_the_migration_lock() {
+    let db = TestDb::create().await;
+    let pool = db.pool().await;
+    let replica = db.pool().await;
+    persistence::migrate(&pool).await.unwrap();
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = '\\x00' WHERE version = 1")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // A refused run must not leave the advisory lock held by a pooled
+    // connection: retries on the same pool and runs by another replica would
+    // then wait forever.
+    for pool in [&pool, &pool, &replica, &pool] {
+        let result = tokio::time::timeout(Duration::from_secs(10), persistence::migrate(pool))
+            .await
+            .expect("migrate hung: the advisory lock is still held");
+        assert!(
+            matches!(result, Err(MigrateError::VersionMismatch(1))),
+            "{result:?}"
+        );
+    }
+    db.drop([pool, replica]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn database_newer_than_the_binary_is_refused() {
     let db = TestDb::create().await;
     let pool = db.pool().await;
@@ -211,26 +238,49 @@ async fn concurrent_runners_apply_each_migration_once() {
     db.drop(pools).await;
 }
 
+/// Runs each write on one connection, after `setup`, and checks that the
+/// append-only guard rejects it with SQLSTATE SK001 and leaves the row.
+async fn assert_append_only(pool: &PgPool, setup: &'static str) {
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql(setup).execute(&mut *conn).await.unwrap();
+    for statement in [
+        "UPDATE schema_info SET created_at = now()",
+        "DELETE FROM schema_info",
+        "TRUNCATE schema_info",
+    ] {
+        let err = sqlx::query(statement)
+            .execute(&mut *conn)
+            .await
+            .unwrap_err();
+        let code = err.as_database_error().and_then(|e| e.code());
+        assert_eq!(code.as_deref(), Some("SK001"), "{setup} {statement}: {err}");
+    }
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM schema_info")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1);
+    conn.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn append_only_guard_rejects_update_delete_and_truncate() {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
+    assert_append_only(&pool, "SET session_replication_role = origin").await;
+    db.drop([pool]).await;
+}
 
-    for statement in [
-        "UPDATE schema_info SET created_at = now()",
-        "DELETE FROM schema_info",
-        "TRUNCATE schema_info",
-    ] {
-        let err = sqlx::query(statement).execute(&pool).await.unwrap_err();
-        let code = err.as_database_error().and_then(|e| e.code());
-        assert_eq!(code.as_deref(), Some("23001"), "{statement}: {err}");
-    }
-    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM schema_info")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(rows, 1);
+/// `ENABLE ALWAYS` keeps the guard firing in replica mode, which would
+/// otherwise skip ordinary triggers. Setting the mode needs a superuser.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn append_only_guard_holds_under_replica_role() {
+    let db = TestDb::create().await;
+    let pool = db.pool().await;
+    persistence::migrate(&pool).await.unwrap();
+    assert_append_only(&pool, "SET session_replication_role = replica").await;
     db.drop([pool]).await;
 }
