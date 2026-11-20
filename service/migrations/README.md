@@ -152,6 +152,73 @@ since advanced waits for that transaction and then fails with `SK001` under
 `SERIALIZABLE`. The database does not retry; a writer that locked the head
 first gets the committed head and succeeds.
 
+## What 0003 adds
+
+`0003_resource_servers.sql` is the second slice of the M1a domain schema
+(T10.1): the instance audience registry of identity-registry §7 and ADR-018,
+as `resource_server`, `audience_tenant_assignment`,
+`resource_server_checker` and `resource_action`. It adds no function: every
+table reuses `skyoauth_reject_immutable_change(…)` and
+`skyoauth_check_revision()` from `0002`, with `ENABLE ALWAYS` triggers, and
+`status` is `enabled` or `disabled` (inferred; the sources speak of
+disabling and re-enabling, and of an "active" assignment, read as
+`enabled`).
+
+- **Keys.** `resource_server.audience` is globally unique, compared
+  byte-wise and immutable (IR-070); its syntax is open (OQ-IR-9), so only an
+  empty value is rejected. `(resource_server_id, action_name)` is unique
+  (IR-100). One assignment per resource server and tenant (inferred from
+  ADR-018 item 6 and the single assignment ceiling of IR-062).
+  `public_mtls_identity` is unique across all checkers, disabled ones
+  included, so an identity is bound to one resource server (IR-090).
+- **Immutable selectors** (`SK001`): the IDs, the audience, each row's
+  `resource_server_id`, an assignment's `tenant_id` and an action's
+  `action_name`. A checker's identity may be rotated and its tenant set
+  edited.
+- **References.** Assignments, checkers and actions reference their
+  resource server, and assignments their tenant, without cascade. The unique
+  `(tenant_id, resource_server_id)` of the assignment is the target for
+  composite foreign keys from later tenant-owned records that name an
+  audience (grants, services, clients, origins, human policies; IR-080), so
+  they cannot name an audience assigned only to another tenant.
+- **Lists** are `jsonb` arrays checked through three domains, so each rule
+  is written once (a domain `CHECK` is stored as an expression tree and
+  resolves no names at run time): `skyoauth_scope_list` holds RFC 6749
+  scope tokens (IR-066), `skyoauth_profile_list` `wif`, `human_cli` and
+  `human_session` (token-profiles §3), and `skyoauth_string_list` non-empty
+  strings (`allowed_tenant_ids`, `required_resource_dimensions`; inferred).
+  `constraint_versions` only has to be an array: the type of a version and
+  its relation to the constraints `version` member are open (OQ-TP-7). Empty
+  arrays and duplicate elements are accepted (inferred: no source forbids
+  them).
+- **M1a fields only.** `resource_action` has no stream fields
+  (`stream_capable`, `max_stream_duration_seconds`, `stream_class`,
+  `max_session_lease_seconds`); T14.4 adds them in M1b.
+
+The database does not enforce these rules; the service must:
+
+- validate the audience syntax (OQ-IR-9), canonicalize
+  `public_mtls_identity` before it is stored, and parse, pin and match the
+  checker's mTLS certificate;
+- check scope vocabulary: that assignment and action scopes lie within the
+  resource server's scopes, and that profiles and constraint versions do
+  too, where a source requires it (IR-062, IR-110, IR-141);
+- give `constraint_versions` its meaning and check that each listed
+  version exists;
+- check that every tenant in `allowed_tenant_ids` exists and has an enabled
+  assignment to the checker's resource server, and leave out tenants whose
+  assignment is disabled (OQ-ADR018-1); a `jsonb` element carries no
+  foreign key;
+- refuse references outside an enabled same-tenant assignment at write and
+  at issuance (IR-080, IR-081); a composite key proves only that the
+  assignment exists;
+- let only instance `security_admin` write these tables (API-147); who may
+  assign an audience is authorization, not schema;
+- reject out-of-range or contradictory action rules (IR-103);
+- disable instead of deleting (only foreign keys hold back a delete), check
+  the expected revision of every write and write the audit event in the same
+  transaction.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -224,3 +291,20 @@ Not done in `0002`:
 - Who computes the audit event hash, with which algorithm and over which
   input (including the encoding of absent values above). This needs a spec
   decision before the first code that writes events.
+
+Not done in `0003`:
+
+- Delete guards for the four `0003` tables. The admin endpoints have no
+  `DELETE` (public-api §7) and ADR-018 keeps dependent records when a
+  resource server is disabled, but no source says these rows are never
+  deleted.
+- The M1b stream fields of `resource_action`, with the lease range of
+  IR-101 (default 15, at most 300) and `stream_class` once OQ-IR-8 defines
+  its values.
+- A child table for `ResourceServerChecker.allowed_tenant_ids` with a
+  foreign key to the assignment, if the lead wants the database to hold the
+  subset rule of OQ-ADR018-1 (only the existence half; "enabled" stays with
+  the service).
+- Rejecting duplicate list elements, if a source makes these lists sets.
+- Whether IR-021 (names unique within entity type and tenant) applies to
+  instance-owned names such as `resource_server.name`.
