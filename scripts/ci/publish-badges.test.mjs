@@ -3,16 +3,23 @@
 // Every test publishes into a local bare repository standing in for the
 // GitHub remote, from a clone of it, so nothing touches the network. Git
 // runs with no global or system configuration and fixed identities.
+//
+// The concurrency test starts PUBLISH_BADGES_STRESS_PUBLISHERS publishers
+// (default 24) at once, each for a branch of its own, and repeats that
+// PUBLISH_BADGES_STRESS_ROUNDS times (default 3). The deterministic test
+// next to it reproduces the same race with a pre-receive hook.
 
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'publish-badges.sh');
+const PUBLISHERS = Number(process.env.PUBLISH_BADGES_STRESS_PUBLISHERS ?? 24);
+const ROUNDS = Number(process.env.PUBLISH_BADGES_STRESS_ROUNDS ?? 3);
 
 const RED = '#e05d44';
 const GREEN = '#97ca00';
@@ -77,6 +84,16 @@ function publish(cwd, args, env = {}) {
   return spawnSync('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env }, encoding: 'utf8' });
 }
 
+function publishAsync(cwd, args, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env } });
+    let output = '';
+    child.stdout.on('data', (d) => (output += d));
+    child.stderr.on('data', (d) => (output += d));
+    child.on('close', (status) => resolve({ status, output }));
+  });
+}
+
 // The value colour and text of a published badge, and the summary.
 function badge(remote, path) {
   const svg = git(remote, 'show', `badges:${path}`);
@@ -136,4 +153,87 @@ describe('coverage badge colour follows the gate', () => {
       assert.match(r.stderr, message);
     });
   }
+});
+
+describe('push retries', () => {
+  // Lands a commit on `badges` from inside the remote while the push is in
+  // flight, once: the push then fails as GitHub's does when two updates
+  // race, with "cannot lock ref ... is at X but expected Y" and
+  // "(failed to update ref)" rather than a non-fast-forward.
+  const RACE_HOOK = `#!/bin/sh
+[ -e "$GIT_DIR/raced" ] && exit 0
+touch "$GIT_DIR/raced"
+unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+tip=$(git rev-parse refs/heads/badges)
+new=$(git commit-tree "$tip^{tree}" -p "$tip" -m "concurrent publication")
+git update-ref refs/heads/badges "$new" "$tip"
+`;
+  const DECLINE_HOOK = `#!/bin/sh
+echo "declined by policy" >&2
+exit 1
+`;
+  const hook = (remote, body) => {
+    const path = join(remote, 'hooks', 'pre-receive');
+    writeFileSync(path, body);
+    chmodSync(path, 0o755);
+  };
+  const args = (sha, file, percent) => ['main', sha, '--rust-coverage', file(`rust-${percent}.json`, rustReport(percent)), '--rust-coverage-result', 'success'];
+
+  test('retries when the badges branch moved under a failed push, whatever the error says', () => {
+    const { remote, sha, work, file } = setup();
+    assert.equal(publish(work[0], args(sha, file, 90)).status, 0);
+    hook(remote, RACE_HOOK);
+    const r = publish(work[0], args(sha, file, 91));
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /failed to update ref/);
+    assert.match(r.stdout, /published main .* attempt 2\)/);
+    assert.equal(badge(remote, 'main/rust-coverage.svg').title, 'rust coverage: 91.0%');
+    assert.match(git(remote, 'log', '--format=%s', 'badges'), /^badges: main .*91\.0%.*\nconcurrent publication\nbadges: main .*90\.0%/);
+  });
+
+  test('gives up at once when the push failed and the branch did not move', () => {
+    const { remote, sha, work, file } = setup();
+    assert.equal(publish(work[0], args(sha, file, 90)).status, 0);
+    const before = git(remote, 'rev-parse', 'badges');
+    hook(remote, DECLINE_HOOK);
+    const r = publish(work[0], args(sha, file, 91), { BADGES_ATTEMPTS: '5' });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /declined by policy/);
+    assert.match(r.stderr, /did not move .*not a race, giving up/);
+    assert.doesNotMatch(r.stdout, /regenerating/);
+    assert.equal(git(remote, 'rev-parse', 'badges'), before);
+  });
+
+  test('rejects a BADGES_ATTEMPTS that is not a positive integer', () => {
+    const { sha, work, file } = setup();
+    for (const attempts of ['0', 'x', '-1']) {
+      const r = publish(work[0], args(sha, file, 90), { BADGES_ATTEMPTS: attempts });
+      assert.equal(r.status, 2, attempts);
+      assert.match(r.stderr, /BADGES_ATTEMPTS must be a positive integer/);
+    }
+  });
+
+  // Each retry follows a publication that landed, so N concurrent
+  // publishers need at most N attempts. The first round also races the
+  // creation of the badges branch itself.
+  test(`${PUBLISHERS} concurrent publishers all land, ${ROUNDS} rounds`, { timeout: 120_000 * ROUNDS }, async () => {
+    const branches = Array.from({ length: PUBLISHERS }, (_, i) => `b${i}`);
+    const { remote, sha, work, file } = setup({ branches, clones: PUBLISHERS });
+    for (let round = 1; round <= ROUNDS; round++) {
+      const report = file(`rust-round${round}.json`, rustReport(80 + round));
+      const results = await Promise.all(
+        branches.map((branch, i) =>
+          publishAsync(work[i], [branch, sha, '--rust-coverage', report, '--rust-coverage-result', 'success'], {
+            BADGES_ATTEMPTS: String(PUBLISHERS),
+          }),
+        ),
+      );
+      const failed = results.map((r, i) => [branches[i], r]).filter(([, r]) => r.status !== 0);
+      assert.deepEqual(failed.map(([b, r]) => `${b}: ${r.output}`), [], `round ${round}: ${failed.length}/${PUBLISHERS} failed`);
+      for (const branch of branches) {
+        assert.equal(badge(remote, `${branch}/rust-coverage.svg`).title, `rust coverage: ${80 + round}.0%`, `round ${round}, ${branch}`);
+      }
+      assert.equal(Number(git(remote, 'rev-list', '--count', 'badges')), PUBLISHERS * round, `round ${round}: one commit per publication`);
+    }
+  });
 });

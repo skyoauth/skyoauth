@@ -50,10 +50,12 @@
 # branch that no longer exists on the remote counts as superseded.
 #
 # Every publication is generated on top of the current tip of the badges
-# branch and pushed with a plain fast-forward. If the push is rejected as a
-# non-fast-forward because another publication landed meanwhile, the tip is
-# fetched again and the files are regenerated on top of it; non-retryable
-# push errors fail immediately with stderr intact. Environment:
+# branch and pushed with a plain fast-forward. If the push fails and the
+# badges branch has moved since it was fetched (another publication landed
+# meanwhile, whatever wording the remote used for the rejection), the tip
+# is fetched again and the files are regenerated on top of it, up to
+# BADGES_ATTEMPTS times; a push that fails while the branch did not move
+# fails immediately with stderr intact. Environment:
 #   BADGES_REMOTE       git remote to push to (default: origin)
 #   BADGES_BRANCH       branch that holds the badges (default: badges)
 #   BADGES_ATTEMPTS     push attempts before giving up (default: 5)
@@ -152,6 +154,13 @@ remote=${BADGES_REMOTE:-origin}
 badges_branch=${BADGES_BRANCH:-badges}
 attempts=${BADGES_ATTEMPTS:-5}
 retry_sleep=${BADGES_RETRY_SLEEP:-1}
+case $attempts in
+    '' | *[!0-9]*) attempts=0 ;;
+esac
+if [ "$attempts" -lt 1 ]; then
+    echo "publish-badges: BADGES_ATTEMPTS must be a positive integer, got '${BADGES_ATTEMPTS:-}'" >&2
+    exit 2
+fi
 here=$(cd "$(dirname "$0")" && pwd)
 
 # Exits 0 (nothing to do) unless the source branch on the remote still
@@ -457,19 +466,24 @@ while :; do
         exit 0
     fi
     cat "$push_err" >&2
-    is_non_ff=0
-    if grep -Eiq 'non-fast-forward|fetch first' "$push_err"; then
-        is_non_ff=1
-    fi
     rm -f "$push_err"
-    if [ "$is_non_ff" -eq 0 ]; then
-        echo "publish-badges: push failed with a non-retryable error; giving up" >&2
+    # A push that lost a race with another publication is rejected in
+    # several ways: as a non-fast-forward, or, when both updates reach the
+    # remote at once, with "cannot lock ref ... is at X but expected Y" /
+    # "(failed to update ref)". Rather than matching the wording, re-read
+    # the tip: if it moved, another publication landed and the files are
+    # regenerated on top of it. If it did not move, the error is not a
+    # race (authentication, permissions, a protected branch, ...).
+    new_ref=$(git ls-remote "$remote" "refs/heads/$badges_branch")
+    new_tip=$(printf '%s\n' "$new_ref" | awk 'NR == 1 { print $1 }')
+    if [ "$new_tip" = "$badges_tip" ]; then
+        echo "publish-badges: push failed and $badges_branch did not move (still ${badges_tip:-absent}); not a race, giving up" >&2
         exit 1
     fi
     if [ "$n" -ge "$attempts" ]; then
         echo "publish-badges: push rejected $n times; giving up" >&2
         exit 1
     fi
-    echo "publish-badges: push rejected (another publication landed); regenerating on the new tip (attempt $n/$attempts)"
+    echo "publish-badges: push rejected ($badges_branch moved from ${badges_tip:-absent} to ${new_tip:-absent}: another publication landed); regenerating on the new tip (attempt $n/$attempts)"
     sleep "$retry_sleep"
 done
