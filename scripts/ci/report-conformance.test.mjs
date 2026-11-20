@@ -337,6 +337,36 @@ describe('statuses', () => {
     assert.match(r.err, /milestone M1b is not run, not passed/);
   });
 
+  test('the gate job (layout §3 Gates): --root a worktree of the merge-base, --commit the merge-base, --require-milestone', () => {
+    // main (origin/main) holds the registry; the gate PR is one commit on it.
+    const dir = gateRoot();
+    const mb = commitRoot(dir);
+    write(join(dir, SCENARIOS), replaceOnce(readFileSync(join(dir, SCENARIOS), 'utf8'), 'gates_passed = []', 'gates_passed = ["M1b"]'));
+    git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'gate M1b');
+    const wt = join(tmp('report-wt-'), 'merge-base');
+    git(dir, 'worktree', 'add', '-q', '--detach', wt, mb);
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const gate = (rootDir, tests, extra = []) => report(rootDir, ['--require-history', '--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(tests) }], { commit: mb }), ...extra], { commit: mb });
+    const passed = gate(wt, all);
+    assert.equal(passed.code, 0, passed.err);
+    assert.equal(passed.json.trusted, true);
+    assert.deepEqual(passed.json.notes, []);
+    // A leg of the merge-base without a result yet (a post-merge or live run
+    // that has not finished) is not run: the gate fails until it completes.
+    const waiting = gate(wt, all.filter((t) => t.id !== pgTest('A47', 'neg').id));
+    assert.equal(waiting.code, 1);
+    assert.match(waiting.err, /milestone M1b is not run, not passed/);
+    // The PR head is not the judged commit: no report, and with
+    // --allow-commit-mismatch an untrusted one (exit 2) though the gate passed.
+    const fromHead = gate(dir, all);
+    assert.equal(fromHead.code, 2);
+    assert.match(fromHead.err, /--root is a checkout of [0-9a-f]{40}, not of --commit/);
+    const loose = gate(dir, all, ['--allow-commit-mismatch']);
+    assert.equal(loose.code, 2);
+    assert.equal(loose.json.milestones.M1b.gate, 'passed');
+    assert.equal(loose.json.trusted, false);
+  });
+
   test('--require-milestone on a root not bound to --commit is an input error (exit 2), never a gate verdict', () => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
     const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
@@ -1006,7 +1036,7 @@ describe('waivers', () => {
   // absolute GIT_DIR exported (as in a git hook): they pass and leave that
   // repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^in a git checkout, --root must be', '^an inherited GIT_DIR does not bind', '^the script runs on the repository']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^in a git checkout, --root must be', '^an inherited GIT_DIR does not bind', '^the script runs on the repository', '^the gate job \\(layout']);
   });
 
   test('without history a waiver commit is not checked (note), unless --require-history', () => {

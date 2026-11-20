@@ -22,6 +22,7 @@ node --test scripts/ci/gen-conformance-registry.test.mjs
 
 (cd scripts/ci && npm ci --ignore-scripts)              # once: installs the pinned smol-toml
 node scripts/ci/check-conformance-registry.mjs          # add --require-history to fail without git history
+node scripts/ci/check-conformance-registry.mjs --gate-pr   # on a gate PR's head: see "Gate PRs" below
 node --test scripts/ci/check-conformance-registry.test.mjs
 node --test scripts/ci/report-conformance.test.mjs
 ```
@@ -42,7 +43,7 @@ IDs and hashes are still derived from the specs: the tasks §8 rows decide which
 | | `covered_by` | Derived from the "Covered by" table in layout §5, decision Q11 |
 | Subcases | `matrix_sha256` | Derived from the task line of the subcase's first owner (below) |
 | | every other field | Hand-authored |
-| File | `gates_passed` | Hand-authored. A gate PR changes it (layout §3). |
+| File | `gates_passed` | Hand-authored: a plain list of milestones. A gate PR adds to it and changes nothing else ([Gate PRs](#gate-prs), layout §3 **Gates**); a PR that only removes milestones (a revocation) is an ordinary reviewed PR, not a gate PR. |
 | File | comments | Generated; hand-written comments are dropped |
 | Layout §2 | the scenario table and its counts sentences | Rendered from the registry |
 
@@ -108,7 +109,7 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `owners` | Every owner is a task in tasks.md. |
 | `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
 | `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, its job exists at the stage's milestone, no leg repeats in a stage, and every env has a leg. |
-| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The reporter half of layout §3 **Gates** (every such stage **passed** on `main`) is not part of the static check. |
+| `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The rest of layout §3 **Gates** is `--gate-pr` ([below](#gate-prs)) and the reporter (every such stage **passed** on the gate PR's merge-base). |
 | `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
 | `subcases` | The sub-ID rules above. |
 | `fixtures` | Each `fixtures/` entry not starting with `_` is a directory named after a registered scenario (`a61`), holding only `.json` cases with the layout §1.3 envelope (`fixture_version`, `kind`, `scenario`, a unique `case`, `polarity`, `consumers`, `input`, `expected`, an optional registered `subcase`). An absent `fixtures/` is fine. JSON Schema validation is not implemented: any file in `schema/` fails the check until the PR that adds the first schema extends it. |
@@ -136,6 +137,25 @@ expires = 2026-12-31                                   # a TOML local date, not 
 ```
 
 The file must stay inside the TOML subset the generator reads (basic strings, integers, booleans, local dates, arrays and inline tables nested at most 64 levels deep, `[[table]]` headers). The check confirms that `commit` is an ancestor of `origin/main`. That needs a full, non-shallow checkout with `origin/main`. Without one the commit check is skipped with a note, unless `--require-history` is given, as in CI: that probes the history up front, so a checkout without it fails even when there are no waivers. Expiry against the current date and the reporter's use of waivers are not part of the static check.
+
+### Gate PRs
+
+`node scripts/ci/check-conformance-registry.mjs --gate-pr` checks a gate PR (layout §3 **Gates**, decided by the lead on 2026-11-20) instead of running the plain check. `--root` (default: this checkout) must be a full, non-shallow checkout of the PR head with `origin/main`: the judged commit is `git merge-base origin/main HEAD`, so without that history the mode fails (rule `gate-pr`). Only commits are read; uncommitted changes do not count. When `gates_passed` at `HEAD` adds no milestone to the merge-base's list, the PR is not a gate PR and nothing else is checked; that includes a revocation, a PR that only removes milestones, which is an ordinary reviewed PR. Otherwise every error names its rule:
+
+| Rule | Checks |
+| --- | --- |
+| `gate-pr` | `HEAD` is a single commit whose only parent is the merge-base (`HEAD <sha> is not a single commit on top of the merge-base <sha> with origin/main (its parents: …)`); its diff (`git diff-tree --raw --no-renames --ignore-submodules=none`, so a rename, copy, deletion, mode or type change counts too, and so does a submodule's gitlink that `.gitmodules` marks `ignore = all`) changes no path but `scenarios.toml` (`the gate PR changes <path>; …`), not that file's mode or type (`the gate PR changes the mode of tests/conformance/scenarios.toml from 100644 to 100755; …`), and no line of it but `gates_passed`, which stays one line as the generator writes it, such as `gates_passed = ["M0", "M1a"]` (another form, such as several lines, a trailing comment or other spacing, is a change outside it: `scenarios.toml:<line>: … the gate PR changes this file outside the gates_passed line; …`); and that line removes no milestone of the merge-base's list (`scenarios.toml:<line>: … the gate PR removes <milestones> from gates_passed; a gate PR only adds milestones …`). |
+| every rule of the plain check | Run on the specs and `tests/conformance` of the **merge-base**, with `HEAD`'s `gates_passed` line, and the waiver commits checked against this repository's `origin/main`. So `gates` requires every stage of each new milestone to be `implemented`, with a valid stamp, at the merge-base, even if the PR's own registry differs. |
+
+On success stdout ends with two lines for the gate job, `merge_base=<sha>` and `reporter_milestones=<milestones>`: the added milestones except M0, which has no stages and is gated by ADR ratification and the doc checks. For each of them the job runs the reporter on the merge-base, with `--root` a checkout of it, since `--allow-commit-mismatch` makes a report untrusted (exit 2):
+
+```sh
+git worktree add --detach "$RUNNER_TEMP/merge-base" "$merge_base"
+node scripts/ci/report-conformance.mjs --root "$RUNNER_TEMP/merge-base" --commit "$merge_base" \
+  --require-milestone "$m" --require-history --artifacts artifacts "$@"   # "$@": --waivers, as in the reporter script below
+```
+
+A post-merge or live leg of the merge-base without a result is not run, so that run exits 1 until the leg has completed and passed. The gate job is not in `ci.yml` yet; its checkout, live runs on a commit that is not the tip, and re-triggering are open questions 7a–7d of layout §6 "Still open", item 7. The default until the lead decides them: a gate PR is based on a pushed tip of `main` (only such a commit gets a `live-wif-push` run), and the job checks out `pull_request.head.sha` with `fetch-depth: 0`, since the default merge ref's commit has two parents and `--gate-pr` would refuse it.
 
 ## Legs
 
@@ -175,8 +195,8 @@ The default legs are used only when a stage has none committed. For each env of 
 
 In a workflow, mind which commit is checked out. For `pull_request` events, `actions/checkout` checks out the merge ref (`refs/pull/N/merge`, the PR head merged into its base, which is also `github.sha`), not the PR head and not the base, so with the default checkout `HEAD` is a merge commit that no run judged, and the `HEAD` = `--commit` binding does not hold (exit 2, no report). Check out the commit you pass as `--commit`. That commit depends on what the report is for:
 
-- **A diagnostic report for a PR** judges the PR head: check out `ref: ${{ github.event.pull_request.head.sha }}` and pass that SHA as `--commit`, with the artifacts and `run.json` of the PR head's runs. It is informational only: live and post-merge legs never run on a PR, so their pairs are not run and most milestones cannot pass there. PR runs also build the merge commit (`refs/pull/N/merge`) while their `run.json` names the PR head (`headSha`), so the diagnostic report on a pull request is informational only. Do not pass `--require-milestone` for it.
-- **The milestone gate** (layout §3 "Gates") judges a named commit on `main`, where the live and post-merge legs have run; a PR head cannot have all required runs. The judged commit is `git merge-base origin/main <gate PR head>`, and the gate PR is a single commit on top of it that touches only `gates_passed`. Check out that merge base (with full history, as CI does, for `--require-history`), download the artifacts and `run.json` of that commit's runs, and run the reporter as `node scripts/ci/report-conformance.mjs --commit <merge-base> --require-milestone M` with those `--artifacts`. The checkout must be of the merge base so that `HEAD` = `--commit` holds; otherwise the gate gets no verdict (exit 2).
+- **A diagnostic report for a PR** judges the PR head: check out `ref: ${{ github.event.pull_request.head.sha }}` and pass that SHA as `--commit`, with the artifacts and `run.json` of the PR head's runs. It is informational only: live and post-merge legs never run on a PR, so their pairs are not run and most milestones cannot pass there, and PR runs build the merge commit (`refs/pull/N/merge`) while their `run.json` names the PR head (`headSha`). Do not pass `--require-milestone` for it.
+- **The milestone gate** (layout §3 "Gates") judges a named commit on `main`, where the live and post-merge legs have run; a PR head cannot have all required runs. The judged commit is the merge base, `git merge-base origin/main <gate PR head>`, and the gate PR is a single commit on top of it that touches only `gates_passed` ([Gate PRs](#gate-prs)). The gate job checks out the PR head with full history (`fetch-depth: 0`, the default for open question 7a of layout §6 "Still open"), where `--gate-pr` prints the merge base; it then adds a worktree of the merge base, downloads the artifacts and `run.json` of that commit's runs, and runs the reporter as `node scripts/ci/report-conformance.mjs --root <merge-base worktree> --commit <merge-base> --require-milestone M --require-history` with those `--artifacts`, as in [Gate PRs](#gate-prs). `--root` is a checkout of the merge base, so that its `HEAD` = `--commit` holds; with a checkout of the PR head or of the merge ref the gate gets no verdict (exit 2). The worktree shares the full checkout's history and `origin/main`, which `--require-history` needs.
 
 ### Input
 
@@ -255,7 +275,8 @@ Only **passed** counts; `CI passed` is never read and is not a conformance signa
 ## Not here yet
 
 - Runtime tests, fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry`.
-- A workflow job that downloads the artifacts of a commit, runs the reporter and posts or uploads its result; the gate check that reads the reporter result for a gate PR's base commit (layout §3 "Gates"); the release check.
+- A workflow job that downloads the artifacts of a commit, runs the reporter and posts or uploads its result; the gate job that runs `--gate-pr` and the reporter for the gate PR's merge-base ([Gate PRs](#gate-prs), layout §6 "Still open", item 7); the release check.
+- A release-manifest PR check: `--gate-pr` does not read the release manifest, which does not exist yet. A PR that adds a shipped feature to it must be one commit on its merge-base with the stages of the conditional sub-IDs it makes count implemented and passed there (layout §3 **Release**); nothing checks that yet.
 - The artifact manifest check (layout §6 "Still open", item 6): comparing the downloaded runs, attempts and artifacts with what the Actions API lists, so that a missing download is an input error.
 - A check that the `--root` checkout is clean: the reporter compares `HEAD` with `--commit`, but uncommitted changes to the registry files are not detected.
 - The reporter's fixture count check of layout §1.3 (per consumer and kind, executed JUnit cases equal fixtures on disk). Each fixture case is listed as its own registered test, so a missing case already makes its pair not run.
