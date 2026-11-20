@@ -44,8 +44,9 @@
 //     fails and writes nothing until a reviewer resets the stage to planned
 //     or re-stamps it. Stages are never re-keyed, so a moved stage keeps its
 //     tests;
-//   - conditional sub-IDs are numbered .90-.99 and are the ones the rendered
-//     §2 table names; required sub-IDs lie in the annex range that the
+//   - conditional sub-IDs are numbered .90-.99, are the ones the rendered
+//     §2 table names, and are first owned by their feature's task
+//     (FEATURE_TASK); required sub-IDs lie in the annex range that the
 //     parent's note declares (e.g. "A58.01–A58.89");
 //   - neither file repeats an ID or a (id, milestone) stage.
 //
@@ -927,6 +928,9 @@ export function generate(root) {
       } else if (!Object.values(FEATURES).includes(s.conditional_on)) {
         errors.push(`${where}: conditional_on must be one of ${Object.values(FEATURES).join(', ')}`);
       } else {
+        // Only the feature's own task can declare a sub-ID conditional (and so
+        // keep it out of the gates).
+        if (s.owners[0] !== FEATURE_TASK[s.conditional_on]) errors.push(`${where}: conditional_on ${s.conditional_on} is the feature of task ${FEATURE_TASK[s.conditional_on]}, but the first owner is ${s.owners[0]}`);
         const t = typeof s.table_text === 'string' ? parseConditional(s.table_text) : null;
         if (!t) errors.push(`${where}: table_text must be a "Conditional sub-ID ${s.id} (<feature>, Txx.y): ..." sentence`);
         else {

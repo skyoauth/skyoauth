@@ -542,6 +542,22 @@ describe('subcases are consistent with their §2 sentences', () => {
     failsBothModes(root, /A33\.90: table_text names T30\.6, but the first owner is T31\.2/);
   });
 
+  test("a conditional sub-ID is first owned by its feature's task, even when table_text agrees", () => {
+    for (const [id, feature, task, other] of [
+      ['A27.90', 'device-flow', 'T40.6', 'T40.5'],
+      ['A33.90', 'back-channel-logout', 'T30.6', 'T31.2'],
+      ['A58.90', 'forwardauth', 'T32.9', 'T32.3'],
+    ]) {
+      const root = fixture((rel, t) => {
+        if (rel !== SUBCASES) return t;
+        const b = entryBlock(t, 'subcase', id);
+        return replaceOnce(t, b, replaceOnce(replaceOnce(b, `owners = ["${task}"]`, `owners = ["${other}"]`), `, ${task}): `, `, ${other}): `));
+      });
+      const esc = (s) => s.replaceAll('.', '\\.');
+      failsBothModes(root, new RegExp(`subcases\\.toml:\\d+: ${esc(id)}: conditional_on ${feature} is the feature of task ${esc(task)}, but the first owner is ${esc(other)}$`, 'm'));
+    }
+  });
+
   test('a new conditional sub-ID is rendered into its parent row', () => {
     const root = fixture((rel, t) => {
       if (rel !== SUBCASES) return t;
