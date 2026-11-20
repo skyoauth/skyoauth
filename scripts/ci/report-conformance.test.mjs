@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { assertGitImmune, GIT_ENV, normaliseRegistry } from './registry-fixtures.mjs';
-import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, TEST_JOBS, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -317,6 +317,15 @@ describe('statuses', () => {
     const m1a = gateRun([], ['--require-milestone', 'M1a']);
     assert.equal(m1a.code, 1);
     assert.match(m1a.err, /milestone M1a is planned, not passed/);
+  });
+
+  test('--require-milestone: a failed result seen outside its job leaves a passed gate passed (exit 0, nothing on stderr)', () => {
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const r = boundReport(gateRoot(), [{ leg: PG, junit: allPass(all) }, { leg: 'scenarios-hermetic/x86_64', junit: junit([[pgTest('A47', 'neg'), 'failed']]) }], ['--require-milestone', 'M1b']);
+    assert.equal(r.code, 0, r.err);
+    assert.equal(r.err, '');
+    assert.equal(r.json.milestones.M1b.gate, 'passed');
+    assert.deepEqual(r.json.uncounted.outside_job.map((x) => [x.leg, x.status]), [['scenarios-hermetic/x86_64', 'failed']]);
   });
 
   test('--require-milestone with input errors: exit 2 even when the gate passed, and the JSON says trusted: false', () => {
@@ -719,16 +728,28 @@ describe('legs', () => {
       assert.deepEqual(stage(r.json, 'A64', 'M1a'), stage(base.json, 'A64', 'M1a'));
       assert.deepEqual(r.json.uncounted.outside_job, [{ test: OP_NEG.id, leg: 'recovery-offline/ubuntu', job: 'recovery-offline', produced_by: ['operator'], run_id: 100, run_attempt: 1, status: 'failed' }]);
       assert.match(r.out, /^- seen outside its job, not counted: `nextest:skyoauth-operator\/operator\/a64_neg_unsupported_adapter` on `recovery-offline\/ubuntu` failed \(run 100 attempt 1\); job `recovery-offline` does not produce it, `operator` does$/m);
-      // In gate mode too: the exit status and stderr are those without it.
-      const dir = root(withA64);
-      const head = commitRoot(dir);
-      const spec = (extra) => Object.entries(LEGS).map(([leg, tests]) => ({ leg, junit: junit([...tests.map((t) => [t, 'passed']), ...(leg === 'recovery-offline/ubuntu' ? extra : [])]) }));
-      const gate = (extra) => report(dir, ['--require-milestone', 'M1a', '--artifacts', artifacts(spec(extra), { commit: head })], { commit: head });
-      const g0 = gate([]);
-      const g1 = gate([[OP_NEG, 'failed']]);
-      assert.equal(g1.code, g0.code);
-      assert.equal(g1.err, g0.err);
-      assert.equal(g1.json.uncounted.outside_job.length, 1);
+      // Gate mode needs a gate that passes (the A64 fixture's M1a gate is
+      // planned): see "--require-milestone: a failed result seen outside its
+      // job leaves a passed gate passed" under statuses.
+    });
+
+    test('produced_by is a copy: changing it cannot change which jobs produce a test (TEST_JOBS)', () => {
+      const res = judge({
+        scenarios: [{ id: 'A64', stage: [{ milestone: 'M1a', scope: 'full row', legs: ['operator/ubuntu'], status: 'implemented', tests: ids([OP_POS, OP_NEG]) }] }],
+        subcases: [],
+        contracts: [],
+        commit: SHA,
+        today: TODAY,
+        reports: [{ run_id: 1, run_attempt: 1, leg: 'recovery-offline/ubuntu', artifact: '1/ro-attempt-1', cases: new Map([[OP_POS.id, 'failed']]) }],
+      });
+      const [x] = res.uncounted.outside_job;
+      assert.deepEqual(x.produced_by, ['operator']);
+      // Checked by identity first, so a shared array fails here and is never
+      // changed (which would leak into every later test).
+      assert.notStrictEqual(x.produced_by, testInfo(OP_POS.id).jobs);
+      x.produced_by.push('recovery-offline');
+      assert.deepEqual(testInfo(OP_POS.id).jobs, ['operator']);
+      assert.deepEqual(TEST_JOBS.find(([r, p, t]) => r === 'nextest' && p === 'skyoauth-operator' && t === 'operator')[3], ['operator']);
     });
 
     test('a registered test that no job produces is listed on every leg that reports it, with no producing job', () => {
@@ -1988,6 +2009,38 @@ describe('aggregation', () => {
       reports: [{ run_id: 7, run_attempt: 1, leg: PG, artifact: '7/pg-attempt-1', cases: new Map([['nextest:skyoauth-scenarios/envoy_k3s/a54_pos_x', 'passed']]) }],
     });
     assert.match(renderMarkdown(k3s), /; job `scenarios-pg` does not produce it, `scenarios-envoy-k3s`, `scenarios-envoy-k3s-nightly`, `migration-rehearsal`, `deployed-topology-audit` do\n$/);
+  });
+
+  test('the seen-outside-its-job listing shows failed results first, so the MAX_LIST cap cannot hide one; the JSON keeps report order', () => {
+    const OP = 'operator/ubuntu';
+    const RO = 'recovery-offline/ubuntu';
+    const passing = Array.from({ length: MAX_LIST + 2 }, (_, i) => `nextest:skyoauth-operator/operator/a64_pos_t${i}`);
+    const F1 = 'nextest:skyoauth-operator/operator/a64_neg_f1';
+    const F2 = 'nextest:skyoauth-operator/operator/a64_neg_f2';
+    const res = judge({
+      scenarios: [{ id: 'A64', stage: [{ milestone: 'M1a', scope: 'full row', legs: [OP], status: 'implemented', tests: [...passing, F1, F2] }] }],
+      subcases: [],
+      contracts: [],
+      commit: SHA,
+      today: TODAY,
+      // A failed result in the middle and one past the cap, in report order.
+      reports: [{ run_id: 7, run_attempt: 1, leg: RO, artifact: '7/ro-attempt-1', cases: new Map([...passing.slice(0, 3).map((t) => [t, 'passed']), [F1, 'failed'], ...passing.slice(3).map((t) => [t, 'passed']), [F2, 'failed']]) }],
+    });
+    assert.deepEqual(
+      res.uncounted.outside_job.map((x) => x.test),
+      [...passing.slice(0, 3), F1, ...passing.slice(3), F2],
+      'the JSON keeps report order',
+    );
+    const lines = renderMarkdown(res)
+      .split('\n')
+      .filter((l) => l.startsWith('- seen outside its job, not counted: ') || l.startsWith('- … and '));
+    assert.equal(lines.length, MAX_LIST + 1);
+    assert.deepEqual(
+      lines.slice(0, MAX_LIST).map((l) => /`([^`]+)` on `[^`]+` (\w+) /.exec(l).slice(1).join(' ')),
+      [`${F1} failed`, `${F2} failed`, ...passing.slice(0, MAX_LIST - 2).map((t) => `${t} passed`)],
+      'failed first, then the rest in report order',
+    );
+    assert.equal(lines[MAX_LIST], '- … and 4 more results seen outside their job (the JSON lists all of them)');
   });
 
   test('one sanitiser for outside text: control characters, line and bidi separators, length; text() escapes HTML and Markdown, code() quotes', () => {

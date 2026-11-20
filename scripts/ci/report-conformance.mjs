@@ -697,8 +697,10 @@ export function judge({ scenarios, subcases, contracts, reports, waivers = [], c
       const reg = registered.get(id);
       if (reg?.includes('implemented')) {
         const job = jobOf(r.leg);
+        // testInfo hands out the TEST_JOBS row's own array: the result gets a
+        // copy, so nothing that changes it can change the mapping.
         const producedBy = testInfo(id)?.jobs ?? [];
-        if (!producedBy.includes(job)) uncounted.outside_job.push({ test: id, leg: r.leg, job, produced_by: producedBy, run_id: r.run_id, run_attempt: r.run_attempt, status });
+        if (!producedBy.includes(job)) uncounted.outside_job.push({ test: id, leg: r.leg, job, produced_by: [...producedBy], run_id: r.run_id, run_attempt: r.run_attempt, status });
         continue;
       }
       const info = testInfo(id);
@@ -837,7 +839,10 @@ export function renderMarkdown(res, { inputErrors = [], notes = [], ignored = []
     out.push(...capped(u.unregistered, (x) => `- not in any stage's tests: ${at(x)}`, 'unregistered results'));
     out.push(...capped(u.unknown, (x) => `- unknown scenario test (${text(x.why)}): ${at(x)}`, 'unknown scenario tests'));
     const owners = (x) => (x.produced_by.length ? `job ${code(x.job)} does not produce it, ${x.produced_by.map(code).join(', ')} ${x.produced_by.length > 1 ? 'do' : 'does'}` : 'no job produces it');
-    out.push(...capped(u.outside_job, (x) => `- seen outside its job, not counted: ${at(x)}; ${owners(x)}`, 'results seen outside their job'));
+    // Failed results first, so the MAX_LIST cap cannot hide one; the rest
+    // keep report order (the JSON keeps report order for all).
+    const outside = [...u.outside_job.filter((x) => x.status === 'failed'), ...u.outside_job.filter((x) => x.status !== 'failed')];
+    out.push(...capped(outside, (x) => `- seen outside its job, not counted: ${at(x)}; ${owners(x)}`, 'results seen outside their job'));
     out.push('');
   }
   out.push(...capped(notes, (n) => `- note: ${text(n)}`, 'notes'));
