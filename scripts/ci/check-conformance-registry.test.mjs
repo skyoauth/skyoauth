@@ -1168,6 +1168,23 @@ describe('rule waivers', () => {
     expectOnly(res, 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
   });
 
+  // A replace ref (refs/replace/<oid>) makes git read another object in place
+  // of the one named, so it can rewrite the history git walks. gitIn runs
+  // git with --no-replace-objects.
+  test('a replace ref that puts a side commit into the history of origin/main does not put it on main', () => {
+    const { root, head } = gitRoot();
+    const side = git(root, 'commit-tree', 'HEAD^{tree}', '-m', 'side');
+    // origin/main's commit replaced by one with the same tree on top of side.
+    git(root, 'replace', head, git(root, 'commit-tree', 'HEAD^{tree}', '-p', side, '-m', 'registry'));
+    assert.equal(spawnSync('git', ['-C', root, 'merge-base', '--is-ancestor', side, 'refs/remotes/origin/main'], { env: GIT_ENV }).status, 0, 'git itself sees side on main');
+    withWaiver(root, waiver({ commit: `"${side}"` }));
+    for (const requireHistory of [false, true]) {
+      expectOnly(check(root, { requireHistory }), 'waivers', new RegExp(`^tests/conformance/waivers\\.toml:1: error \\[waivers\\] commit ${side} is not on main \\(not an ancestor of origin/main\\)$`));
+    }
+    const r = spawnSync(process.execPath, [SCRIPT, '--require-history', '--root', root], { encoding: 'utf8', env: GIT_ENV });
+    assert.equal(r.status, 1, r.stdout);
+  });
+
   test('a commit that is not in the repository', () => {
     const { root } = gitRoot();
     const res = check(withWaiver(root, waiver({ commit: `"${'f'.repeat(40)}"` })));
@@ -1255,7 +1272,7 @@ describe('rule waivers', () => {
   // The git fixtures here with an absolute GIT_DIR exported (as in a git
   // hook): they pass and leave that repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr', '^a replace ref that puts a side commit', '^a replace ref that gives the gate commit']);
   });
 
   test('--require-history passes with the history and no waivers', () => {
@@ -1506,6 +1523,52 @@ describe('--gate-pr', () => {
     }
   });
 
+  // Forms that parse to the same list as the generator's line but are not it:
+  // trailing whitespace, a CR, literal (single-quoted) strings, and escapes.
+  test('gates_passed at HEAD with trailing whitespace, single quotes or a backslash escape', () => {
+    const lines = ['gates_passed = ["M1a"] ', 'gates_passed = ["M1a"]\t', 'gates_passed = ["M1a"]\r', "gates_passed = ['M1a']", 'gates_passed = ["M0", \'M1a\']', 'gates_passed = ["M\\u0031a"]', 'gates_passed = ["M1\\u0061"]', 'gates_passed = ["\\u004D1a"]'];
+    for (const line of lines) {
+      const { root, mb } = mainRoot();
+      const n = read(root, SCENARIOS).split('\n').indexOf('gates_passed = []') + 1;
+      edit(root, SCENARIOS, (t) => replaceOnce(t, 'gates_passed = []', line));
+      assert.ok(parseStrict(read(root, SCENARIOS)).gates_passed.includes('M1a'), `${JSON.stringify(line)} parses with M1a`);
+      commit(root, 'gate');
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.ok(res.added.includes('M1a'), `${JSON.stringify(line)}: a gate PR`);
+      expectOnly(res, 'gate-pr', new RegExp(`^tests/conformance/scenarios\\.toml:${n}: error \\[gate-pr\\] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line$`));
+    }
+  });
+
+  // The rest of the file stays line for line; a gates_passed line at another
+  // index than at the merge-base moves it, which is a change outside it.
+  test('the gates_passed line moved to another line', () => {
+    const top = '# Conformance scenario registry';
+    for (const [name, move, line] of [
+      ['to the first line', (t) => `gates_passed = ["M1a"]\n${replaceOnce(t, '\ngates_passed = []\n', '\n')}`, 1],
+      ['one line up, over the blank line before it', (t) => replaceOnce(t, '\n\ngates_passed = []\n', '\ngates_passed = ["M1a"]\n\n'), null],
+      ['one line down, under the blank line after it', (t) => replaceOnce(t, '\ngates_passed = []\n\n', '\n\ngates_passed = ["M1a"]\n'), null],
+    ]) {
+      const { root, mb } = mainRoot();
+      const text = read(root, SCENARIOS);
+      assert.ok(text.startsWith(top));
+      const bi = text.split('\n').indexOf('gates_passed = []');
+      edit(root, SCENARIOS, move);
+      const after = read(root, SCENARIOS).split('\n');
+      const hi = after.indexOf('gates_passed = ["M1a"]');
+      assert.notEqual(hi, bi, name);
+      // Without the gates_passed line, the two texts are the same.
+      assert.deepEqual(after.filter((_, j) => j !== hi), text.split('\n').filter((_, j) => j !== bi), name);
+      commit(root, 'gate');
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.deepEqual(res.added, ['M1a'], name);
+      // The first line where the two texts differ.
+      const n = line ?? Math.min(bi, hi) + 1;
+      expectOnly(res, 'gate-pr', new RegExp(`^tests/conformance/scenarios\\.toml:${n}: error \\[gate-pr\\] the gate PR changes this file outside the gates_passed line; a gate PR changes only that line$`));
+    }
+  });
+
   test('a comment that quotes a gates_passed line is not the gates_passed line', () => {
     const { root, mb } = mainRoot((t) => replaceOnce(allM1a(t), 'gates_passed = []', '# was: gates_passed = []\ngates_passed = []'));
     gateCommit(root, '["M1a"]');
@@ -1529,11 +1592,62 @@ describe('--gate-pr', () => {
     assert.equal(r.stdout, `note: ${NOT_A_GATE(mb)}\ncheck-conformance-registry --gate-pr: OK (not a gate PR)\nmerge_base=${mb}\nreporter_milestones=\n`);
   });
 
+  // Whether gates_passed grows is read from both sides' scenarios.toml; when
+  // either does not parse, --gate-pr cannot tell, so it fails (it does not
+  // pass the PR as "not a gate PR").
+  const BROKEN = '\nnot toml\n';
+  const NOT_TOML = (text, where) => {
+    let ex;
+    try {
+      parseStrict(text);
+    } catch (e) {
+      ex = e;
+    }
+    assert.ok(ex, `${where}: the text does not parse`);
+    return `${SCENARIOS}:${ex.line}: error [gate-pr] ${SCENARIOS} at ${where} is not valid TOML: ${ex.message.split('\n')[0]}; --gate-pr cannot tell whether gates_passed grows`;
+  };
+  for (const [name, base, headEdit, sides] of [
+    ['at HEAD', allM1a, (t) => setGates('["M1a"]')(t) + BROKEN, ['head']],
+    ['at the merge-base (HEAD fixes it)', (t) => allM1a(t) + BROKEN, (t) => t.replace(BROKEN, ''), ['mb']],
+    ['on both sides', (t) => allM1a(t) + BROKEN, setGates('["M1a"]'), ['mb', 'head']],
+  ]) {
+    test(`scenarios.toml that does not parse ${name}`, () => {
+      const { root, mb } = mainRoot(base);
+      const mbText = read(root, SCENARIOS);
+      edit(root, SCENARIOS, headEdit);
+      const head = commit(root, 'gate');
+      const headText = read(root, SCENARIOS);
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.deepEqual(res.errors.map(formatError), sides.map((s) => (s === 'mb' ? NOT_TOML(mbText, `the merge-base ${mb}`) : NOT_TOML(headText, `HEAD ${head}`))));
+      assert.deepEqual([res.added, res.reporter, res.notes], [[], [], []]);
+      const r = cli('--gate-pr', '--root', root);
+      assert.equal(r.status, 1, r.stdout);
+      assert.equal(r.stdout, '');
+      assert.equal(r.stderr, `${res.errors.map(formatError).join('\n')}\ncheck-conformance-registry --gate-pr: ${sides.length} error(s)\n`);
+    });
+  }
+
   test('two commits on top of the merge-base', () => {
     const { root, mb } = mainRoot();
     const first = commit(root, 'first');
     const head = gateCommit(root, '["M1a"]');
     expectOnly(checkGatePr(root), 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+  });
+
+  // A replace ref (refs/replace/<oid>) makes git read another commit in place
+  // of the gate commit; gitIn runs git with --no-replace-objects.
+  test('a replace ref that gives the gate commit the merge-base as its parent does not hide a second commit', () => {
+    const { root, mb } = mainRoot();
+    const first = commit(root, 'first');
+    const head = gateCommit(root, '["M1a"]');
+    git(root, 'replace', head, git(root, 'commit-tree', `${head}^{tree}`, '-p', mb, '-m', 'gate'));
+    assert.equal(git(root, 'rev-list', '--parents', '-n', '1', head), `${head} ${mb}`, 'git itself sees the merge-base as the only parent');
+    const res = checkGatePr(root);
+    assert.equal(res.mergeBase, mb);
+    expectOnly(res, 'gate-pr', new RegExp(`^${ONE_COMMIT(head, mb, first).replace(/[()[\]]/g, '\\$&')}$`));
+    const r = cli('--gate-pr', '--root', root);
+    assert.equal(r.status, 1, r.stdout);
   });
 
   test('a merge commit (main merged into the PR) is not one commit on the merge-base', () => {
