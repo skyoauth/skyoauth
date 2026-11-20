@@ -183,10 +183,12 @@ jobs:
           rustup default stable
           rustup component add --toolchain stable llvm-tools-preview
 
+      # Pinned: publish-badges reads this tool's JSON report, so a format
+      # change in a new release must arrive as a reviewed bump.
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Check coverage threshold
         run: |
@@ -666,9 +668,9 @@ jobs:
     name: Publish badges
     if: >-
       !cancelled() &&
-      (needs.rust-coverage.result == 'success' || needs.rust-coverage.result == 'failure' ||
-       needs.service-nextest.result == 'success' || needs.service-nextest.result == 'failure' ||
-       needs.typescript-coverage.result == 'success' || needs.typescript-coverage.result == 'failure') &&
+      (needs.rust-coverage.result != 'skipped' ||
+       needs.service-nextest.result != 'skipped' ||
+       needs.typescript-coverage.result != 'skipped') &&
       (github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     needs: [rust-coverage, service-nextest, typescript-coverage]
@@ -689,21 +691,25 @@ jobs:
           path: target/coverage
 
       - name: Download Rust test report
-        if: needs.service-nextest.result == 'success' || needs.service-nextest.result == 'failure'
-        continue-on-error: ${{ needs.service-nextest.result == 'failure' }}
+        if: needs.service-nextest.result != 'skipped'
+        continue-on-error: ${{ needs.service-nextest.result != 'success' }}
         uses: actions/download-artifact@v8
         with:
           pattern: service-nextest-junit-*
           path: target/nextest-artifacts
 
       - name: Download TypeScript coverage report
-        if: needs.typescript-coverage.result == 'success' || needs.typescript-coverage.result == 'failure'
-        continue-on-error: ${{ needs.typescript-coverage.result == 'failure' && needs.typescript-coverage.outputs.report != 'true' }}
+        if: needs.typescript-coverage.result != 'skipped'
+        continue-on-error: ${{ needs.typescript-coverage.result != 'success' && needs.typescript-coverage.outputs.report != 'true' }}
         uses: actions/download-artifact@v8
         with:
           name: typescript-coverage
           path: clients/typescript/coverage
 
+      # A job that succeeded must have left a usable report; a missing one
+      # fails this job rather than silently keeping the previous badge. A
+      # cancelled job counts as failed, so no badge stays green while the
+      # run that should have refreshed it went red.
       - name: Publish
         env:
           RUST_COVERAGE_OK: ${{ needs.rust-coverage.outputs.report }}
@@ -719,10 +725,13 @@ jobs:
           set -- "$GITHUB_REF_NAME" "$GITHUB_SHA"
           if [ "$RUST_COVERAGE_OK" = true ]; then
             set -- "$@" --rust-coverage target/coverage/coverage.json --rust-coverage-result "$RUST_COVERAGE_RESULT"
-          elif [ "$RUST_COVERAGE_RESULT" = failure ]; then
+          elif [ "$RUST_COVERAGE_RESULT" = success ]; then
+            echo "publish-badges: rust-coverage succeeded without a complete coverage report" >&2
+            exit 1
+          elif [ "$RUST_COVERAGE_RESULT" = failure ] || [ "$RUST_COVERAGE_RESULT" = cancelled ]; then
             set -- "$@" --rust-coverage-failed
           fi
-          if [ "$RUST_TESTS_RESULT" = success ] || [ "$RUST_TESTS_RESULT" = failure ]; then
+          if [ "$RUST_TESTS_RESULT" != skipped ]; then
             junit=
             if [ -d target/nextest-artifacts ]; then
               junit=$(find target/nextest-artifacts -maxdepth 2 -name junit.xml | sort -V | tail -n 1)
@@ -733,7 +742,7 @@ jobs:
               echo "publish-badges: missing service-nextest junit.xml" >&2
               exit 1
             fi
-            if [ "$RUST_TESTS_RESULT" = failure ]; then
+            if [ "$RUST_TESTS_RESULT" != success ]; then
               set -- "$@" --rust-tests-failed
             fi
           fi
@@ -741,7 +750,10 @@ jobs:
             set -- "$@" --ts-coverage clients/typescript/coverage/coverage-summary.json \
               --ts-coverage-result "$TS_RESULT" \
               --ts-results clients/typescript/coverage/test-results.json
-          elif [ "$TS_RESULT" = failure ]; then
+          elif [ "$TS_RESULT" = success ]; then
+            echo "publish-badges: typescript-coverage succeeded without a complete coverage report" >&2
+            exit 1
+          elif [ "$TS_RESULT" = failure ] || [ "$TS_RESULT" = cancelled ]; then
             set -- "$@" --ts-coverage-failed --ts-tests-failed
             if [ -s clients/typescript/coverage/test-results.json ]; then
               set -- "$@" --ts-results clients/typescript/coverage/test-results.json
