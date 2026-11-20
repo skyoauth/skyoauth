@@ -396,8 +396,8 @@ not part of it.
   grant actor reference `(tenant_id, id, kind)` with a constant `'workload'`
   column, and a service identity with a constant `'service'` column, so the
   database pins the principal kind as well as the tenant (inferred
-  mechanism). The 255-byte bound is a lead decision, consistent with tenant
-  IDs in `0003`: IDs are server-generated, and no M1a database is deployed.
+  mechanism). The 255-byte bound is a lead decision (2026-11-20),
+  consistent with tenant IDs in `0003`: IDs are server-generated, and no M1a database is deployed.
   Up to `0003` the database accepts longer principal IDs, and `0004`
   validates the new checks against existing rows. Upgrade precondition:
   before `0004` is applied to a populated database,
@@ -582,8 +582,9 @@ and `SERIALIZABLE` the check reads the transaction's snapshot, which still
 shows the other transaction's deleted row, so it also locks the grant's
 remaining binding rows with `FOR KEY SHARE`: the later transaction fails
 with `40001`, or `40P01` when the two wait for each other. That lock is
-taken only outside `READ COMMITTED`, where it would turn the `SK001` into a
-deadlock. The database does not retry. Because the check runs with the
+taken only under `REPEATABLE READ` and `SERIALIZABLE`: under
+`READ COMMITTED`, and `READ UNCOMMITTED`, which PostgreSQL runs as
+`READ COMMITTED`, it would turn the `SK001` into a deadlock. The database does not retry. Because the check runs with the
 caller's privileges, a role that creates grants or deletes binding rows
 needs `UPDATE` and `SELECT` on `service_grant` and `SELECT` on
 `service_grant_binding`, and under `REPEATABLE READ` or `SERIALIZABLE` also
@@ -638,9 +639,9 @@ first line.
 - The deferred binding-set check of `0004` works under logical replication
   when the subscription owner owns the tables. Its limits:
   - When the table owner differs from the subscription owner, a replicated
-    `INSERT` into `service_grant` fails with "cannot fire deferred trigger
-    within security-restricted operation", and the apply worker retries it
-    forever.
+    `INSERT` into `service_grant` or `DELETE` from `service_grant_binding`
+    fails with "cannot fire deferred trigger within security-restricted
+    operation", and the apply worker retries it forever.
   - The initial table sync copies each table in its own transaction, so the
     sync of `service_grant` fails with `SK001` if it runs before that of
     `service_grant_binding`. A retry after the binding rows are in recovers;
@@ -671,14 +672,15 @@ Open for all registry tables:
   snapshots an `(id, revision)` pair (tasks §3 "Policy revisions") or relies
   on revisions only increasing: a row deleted and recreated with the same ID
   starts again at revision 1, so an old snapshot could match the new row.
-  Today only foreign keys hold back a delete, so these rows can be deleted:
+  Today only foreign keys (and, for a grant's last binding row, the `0004`
+  binding-set check) hold back a delete, so these rows can be deleted:
   `tenant` and `principal` rows nothing references (and
   `TRUNCATE principal`), every `resource_action` row (nothing references
   one), checkers with no tenant rows, assignments no checker tenant row
   references, and resource servers with no assignment, checker or action.
-  `TRUNCATE resource_server CASCADE` empties all five `0003` tables: a
-  `TRUNCATE` that includes the referencing tables is never held back by
-  foreign keys. `resource_server_checker_tenant` is different: deleting a
+  `TRUNCATE resource_server CASCADE` empties all five `0003` tables: no
+  trigger holds back a `TRUNCATE`, and foreign keys refuse only one that
+  leaves out the referencing tables; `TRUNCATE … CASCADE` includes them. `resource_server_checker_tenant` is different: deleting a
   row is how a checker's tenant set shrinks, so its rows stay deletable and
   only the checker's revision records the change. ADR-008 item 3 already
   decides that "removal of anything referenced or enabled is soft disable
@@ -712,9 +714,10 @@ Open for all registry tables:
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
   grant lock) and `SELECT` on `service_grant_binding`; with only `INSERT`
-  and `SELECT` on `service_grant` the commit fails with `42501`. Deleting a
-  binding row under `REPEATABLE READ` or `SERIALIZABLE` also needs `UPDATE`
-  on `service_grant_binding` (the row locks). The test
+  and `SELECT` on `service_grant` the commit fails with `42501`. Under
+  `REPEATABLE READ` or `SERIALIZABLE`, creating a grant and deleting a
+  binding row also need `UPDATE` on `service_grant_binding` (the row locks),
+  or the commit fails with `42501`. The test
   `grant_binding_check_needs_the_callers_privileges` checks each case.
 - The `no_space` checks of `0002` (`exact_destination`) and `0003`
   (`audience`, `action_name`) do not name a collation in the expression;

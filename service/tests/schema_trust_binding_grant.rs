@@ -1772,11 +1772,12 @@ async fn backend_pid(conn: &mut PgConnection) -> i32 {
 }
 
 /// The SQLSTATEs the losing remover of a grant's last two bindings may get:
-/// SK001 from the binding-set check under READ COMMITTED; under REPEATABLE
+/// SK001 from the binding-set check under READ COMMITTED (and READ
+/// UNCOMMITTED, which PostgreSQL runs as READ COMMITTED); under REPEATABLE
 /// READ and SERIALIZABLE 40001 (`serialization_failure`) or 40P01
 /// (`deadlock_detected`).
 fn loser_codes(level: &str) -> &'static [&'static str] {
-    if level == "READ COMMITTED" {
+    if level == "READ COMMITTED" || level == "READ UNCOMMITTED" {
         &["SK001"]
     } else {
         &["40001", "40P01"]
@@ -1836,6 +1837,12 @@ const REMOVE_FIRST: &str =
 /// for the lock on its binding row otherwise) and loses once the first
 /// commits. The grant keeps the second's binding.
 async fn removal_after_an_immediate_check(level: &str) {
+    removal_after_an_immediate_check_at(level, level).await;
+}
+
+/// As [`removal_after_an_immediate_check`], with the first connection at
+/// `first_level` and the second, which loses, at `level`.
+async fn removal_after_an_immediate_check_at(first_level: &str, level: &str) {
     let (db, pool) = seeded().await;
     let mut first = pool.acquire().await.unwrap().detach();
     let mut second = pool.acquire().await.unwrap().detach();
@@ -1846,7 +1853,7 @@ async fn removal_after_an_immediate_check(level: &str) {
     run_owned(
         &mut first,
         format!(
-            "BEGIN ISOLATION LEVEL {level}; {REMOVE_FIRST};
+            "BEGIN ISOLATION LEVEL {first_level}; {REMOVE_FIRST};
              SET CONSTRAINTS service_grant_binding_keeps_one IMMEDIATE"
         ),
     )
@@ -1961,19 +1968,34 @@ async fn concurrent_binding_removals_under_repeatable_read() {
     removals_committed_together("REPEATABLE READ").await;
 }
 
-/// SERIALIZABLE behaves as REPEATABLE READ.
+/// READ UNCOMMITTED runs as READ COMMITTED, so it takes the same path and
+/// the loser gets SK001, not a deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn concurrent_binding_removals_under_read_uncommitted() {
+    removal_after_an_immediate_check("READ UNCOMMITTED").await;
+    removals_committed_together("READ UNCOMMITTED").await;
+}
+
+/// SERIALIZABLE behaves as REPEATABLE READ. The binding lock matters there
+/// too: predicate locking protects only against other SERIALIZABLE
+/// transactions, so a SERIALIZABLE remover that ran after a READ COMMITTED
+/// one would otherwise pass on its snapshot.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn concurrent_binding_removals_under_serializable() {
     removal_after_an_immediate_check("SERIALIZABLE").await;
     removals_committed_together("SERIALIZABLE").await;
+    removal_after_an_immediate_check_at("READ COMMITTED", "SERIALIZABLE").await;
+    removal_after_an_immediate_check_at("SERIALIZABLE", "READ COMMITTED").await;
 }
 
 /// The binding-set check runs with the caller's privileges (observed by the
 /// review of #47): creating a grant needs UPDATE on service_grant for the
 /// grant lock and SELECT on service_grant_binding, and under REPEATABLE READ
-/// removing a binding also needs UPDATE on service_grant_binding for the
-/// row locks. Each missing privilege fails the commit with 42501.
+/// creating a grant and removing a binding also need UPDATE on
+/// service_grant_binding for the row locks. Each missing privilege fails the
+/// commit with 42501.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn grant_binding_check_needs_the_callers_privileges() {
@@ -2013,6 +2035,21 @@ async fn grant_binding_check_needs_the_callers_privileges() {
     run(&mut writer, create).await;
     run(&mut writer, "COMMIT").await;
 
+    // Under REPEATABLE READ the check also locks the binding rows.
+    let create_rr = "BEGIN ISOLATION LEVEL REPEATABLE READ;
+        INSERT INTO service_grant VALUES ('grt_y', 'ten_a', 'y', 'wld_2', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
+        INSERT INTO service_grant_binding VALUES ('grt_y', 'bnd_3', 'ten_a', 'wld_2')";
+    run(&mut writer, create_rr).await;
+    let err = sqlx::raw_sql("COMMIT")
+        .execute(&mut writer)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        sqlstate(&err),
+        "42501",
+        "creating under REPEATABLE READ without UPDATE on service_grant_binding: {err}"
+    );
+
     as_admin(grant("DELETE ON service_grant_binding")).await;
     let remove = "BEGIN ISOLATION LEVEL REPEATABLE READ;
         DELETE FROM service_grant_binding WHERE grant_id = 'grt_2' AND binding_id = 'bnd_2'";
@@ -2034,6 +2071,8 @@ async fn grant_binding_check_needs_the_callers_privileges() {
     .await;
     as_admin(grant("UPDATE ON service_grant_binding")).await;
     run(&mut writer, remove).await;
+    run(&mut writer, "COMMIT").await;
+    run(&mut writer, create_rr).await;
     run(&mut writer, "COMMIT").await;
     writer.close().await.unwrap();
     assert_eq!(
