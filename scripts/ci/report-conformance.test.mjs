@@ -195,6 +195,27 @@ function report(rootDir, args = [], { commit = SHA } = {}) {
 }
 // The Markdown with text() escapes undone, for matching prose.
 const plain = (md) => md.replace(/\\([\\`*_[\]~|])/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
+const git = (dir, ...args) => {
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  return r.stdout.trim();
+};
+// Commits `dir` as a git repository on main, with origin/main at the same
+// commit, and returns HEAD: the root is then bound to that commit.
+const commitRoot = (dir) => {
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'add', '-A');
+  git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'registry');
+  git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
+  return git(dir, 'rev-parse', 'HEAD');
+};
+// report() on `rootDir` bound to its own commit (gate mode needs that), with
+// artifacts from `spec` (null: none) whose run.json names that commit.
+const boundReport = (rootDir, spec, args = []) => {
+  const head = commitRoot(rootDir);
+  return report(rootDir, [...(spec ? ['--artifacts', artifacts(spec, { commit: head })] : []), ...args], { commit: head });
+};
 const stage = (json, id, m) => json.stages.find((s) => s.id === id && s.milestone === m);
 const pair = (json, id, m, test, leg) => stage(json, id, m).pairs.find((p) => p.test === test.id && p.leg === leg);
 
@@ -235,10 +256,10 @@ describe('statuses', () => {
   });
 
   test('--require-milestone: exit 1 while any stage of the milestone is not passed', () => {
-    const r = report(root(withA24), ['--require-milestone', 'M1a', '--artifacts', artifacts([{ leg: PG, junit: allPass(A24) }])]);
+    const r = boundReport(root(withA24), [{ leg: PG, junit: allPass(A24) }], ['--require-milestone', 'M1a']);
     assert.equal(r.code, 1);
     assert.match(r.err, /milestone M1a is planned, not passed/);
-    const none = report(root(), ['--require-milestone', 'M0']);
+    const none = boundReport(root(), null, ['--require-milestone', 'M0']);
     assert.equal(none.code, 1);
     assert.match(none.err, /milestone M0 is no stages, not passed/);
   });
@@ -256,7 +277,7 @@ describe('statuses', () => {
     });
   const gateRun = (fails, args = []) => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
-    return report(gateRoot(), ['--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }]), ...args]);
+    return boundReport(gateRoot(), [{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }], args);
   };
 
   test('--require-milestone M: exit 0 iff the gate of M passed; failures elsewhere, conditional ones included, stay in the report only', () => {
@@ -297,7 +318,7 @@ describe('statuses', () => {
 
   test('--require-milestone with input errors: exit 2 even when the gate passed, and the JSON says trusted: false', () => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
-    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, t === A24_NEG ? 'failed' : 'passed'])) }, { leg: null, name: 'mystery', junit: null }])]);
+    const r = boundReport(gateRoot(), [{ leg: PG, junit: junit(all.map((t) => [t, t === A24_NEG ? 'failed' : 'passed'])) }, { leg: null, name: 'mystery', junit: null }], ['--require-milestone', 'M1b']);
     assert.equal(r.code, 2);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'failed');
     assert.doesNotMatch(r.err, /outside the M1b gate/, 'an untrusted report gets no note about the gate');
@@ -310,11 +331,38 @@ describe('statuses', () => {
 
   test('--require-milestone M: a gate with a not run stage is not passed (exit 1)', () => {
     const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')].filter((t) => t.id !== pgTest('A47', 'neg').id);
-    const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }])]);
+    const r = boundReport(gateRoot(), [{ leg: PG, junit: allPass(all) }], ['--require-milestone', 'M1b']);
     assert.equal(r.code, 1);
     assert.equal(stage(r.json, 'A47', 'M1b').status, 'not run');
     assert.equal(r.json.milestones.M1b.gate, 'not run');
     assert.match(r.err, /milestone M1b is not run, not passed/);
+  });
+
+  test('--require-milestone on a root not bound to --commit is an input error (exit 2), never a gate verdict', () => {
+    const all = [...m1bIds.flatMap(pgPair), ...A24, ...pgPair('A33.90')];
+    const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
+    // The gate would pass, and would fail: neither verdict is given.
+    for (const fails of [[], [pgTest('A47', 'neg')]]) {
+      const r = report(gateRoot(), ['--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: junit(all.map((t) => [t, fails.some((f) => f.id === t.id) ? 'failed' : 'passed'])) }])]);
+      assert.equal(r.code, 2);
+      assert.equal(r.json.trusted, false);
+      assert.deepEqual(r.json.input_errors, [UNBOUND]);
+      assert.deepEqual(r.json.notes, []);
+      assert.match(r.err, /1 input error\(s\); the report cannot be trusted/);
+    }
+    assert.equal(report(root(), ['--require-milestone', 'M0']).code, 2);
+    // A checkout of another commit, printed with --allow-commit-mismatch, is
+    // unbound too.
+    const dir = gateRoot();
+    commitRoot(dir);
+    const other = 'b'.repeat(40);
+    const mismatch = report(dir, ['--allow-commit-mismatch', '--require-milestone', 'M1b', '--artifacts', artifacts([{ leg: PG, junit: allPass(all) }], { commit: other })], { commit: other });
+    assert.equal(mismatch.code, 2);
+    assert.equal(mismatch.json.milestones.M1b.gate, 'passed');
+    // Without the flag the same unbound root only gets a note.
+    const plainRun = report(gateRoot(), ['--artifacts', artifacts([{ leg: PG, junit: allPass(all) }])]);
+    assert.equal(plainRun.code, 0, plainRun.err);
+    assert.deepEqual(plainRun.json.notes, ['the registry is not bound to --commit: --root is not a git checkout']);
   });
 
   test('exitStatus', () => {
@@ -414,7 +462,7 @@ describe('legs', () => {
     'recovery-offline/macos': [OP_POS, OP_NEG],
     'recovery-offline/windows': [OP_POS, OP_NEG],
   };
-  const a64 = (skip = []) => artifacts(Object.entries(LEGS).filter(([leg]) => !skip.includes(leg)).map(([leg, tests]) => ({ leg, junit: allPass(tests) })));
+  const a64 = (skip = [], commit = SHA) => artifacts(Object.entries(LEGS).filter(([leg]) => !skip.includes(leg)).map(([leg, tests]) => ({ leg, junit: allPass(tests) })), { commit });
 
   test('A64 with every leg passed is passed', () => {
     const r = report(root(withA64), ['--artifacts', a64()]);
@@ -434,7 +482,9 @@ describe('legs', () => {
       [OP_NEG.id, 'operator/windows', 'not run'],
     ]);
     assert.match(r.out, /a64_pos_offline_recovery` on `operator\/windows`: not run<br>`nextest:skyoauth-operator\/recovery\/a64_neg_wrong_instance` on `operator\/windows`: not run \|/);
-    assert.equal(report(root(withA64), ['--artifacts', a64(['operator/windows']), '--require-milestone', 'M1a']).code, 1);
+    const dir = root(withA64);
+    const head = commitRoot(dir);
+    assert.equal(report(dir, ['--artifacts', a64(['operator/windows'], head), '--require-milestone', 'M1a'], { commit: head }).code, 1);
   });
 
   test('a stage whose job has no pos or no neg test, or a test of another entry or job, is not run', () => {
@@ -708,21 +758,11 @@ describe('test names', () => {
 });
 
 describe('waivers', () => {
-  const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.invalid', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.invalid' };
-  const git = (dir, ...args) => {
-    const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
-    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
-    return r.stdout.trim();
-  };
   // A git root (A24 M1a implemented, A24 M2 planned with tests) committed on
   // main; returns { dir, head }.
   const gitRoot = () => {
     const dir = root({ [SCENARIOS]: compose(implement('scenario', 'A24', 'M1a', ids(A24)), listPlanned('A24', 'M2', [A24_POS.id])) });
-    git(dir, 'init', '-q', '-b', 'main');
-    git(dir, 'add', '-A');
-    git(dir, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'registry');
-    git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
-    return { dir, head: git(dir, 'rev-parse', 'HEAD') };
+    return { dir, head: commitRoot(dir) };
   };
   const waiver = (commit, over = {}) => {
     const w = { commit: `"${commit}"`, test: `"${A24_NEG.id}"`, leg: `"${PG}"`, run_id: '100', run_attempt: '1', reason: '"runner lost the database"', expires: '2026-12-31', ...over };
@@ -963,7 +1003,7 @@ describe('docs-only', () => {
     assert.equal(r.json.headline, 'runtime conformance: not run (docs-only change)');
     assert.equal(r.json.docs_only, true);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
-    assert.equal(report(root(withA24), ['--docs-only', '--require-milestone', 'M1a']).code, 1);
+    assert.equal(boundReport(root(withA24), null, ['--docs-only', '--require-milestone', 'M1a']).code, 1);
   });
 });
 

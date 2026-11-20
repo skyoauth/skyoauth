@@ -80,7 +80,9 @@
 // Exit status (exitStatus below; tests/conformance/README.md "Output and
 // exit status" is the one place that documents it)
 //   2  usage, registry or waiver-file errors (no report), or input errors
-//      (the report is printed with trusted: false, but cannot be trusted);
+//      (the report is printed with trusted: false, but cannot be trusted;
+//      with --require-milestone, a --root that is not a git checkout is
+//      one, as the gate would judge a registry not bound to --commit);
 //   with --require-milestone M, otherwise:
 //   0  the gate of M is passed (every stage it covers is passed);
 //   1  it is not. Stages of other milestones and of conditional sub-IDs do
@@ -852,7 +854,11 @@ export function run(argv, { log = console.log, logErr = console.error, now = new
   // to compare (a note); --require-history makes that an error below.
   const bound = { errors: [], notes: [] };
   const head = checkoutHead(root);
-  if (head === undefined) bound.notes.push('the registry is not bound to --commit: --root is not a git checkout');
+  // A gate verdict needs a bound root, so with --require-milestone an
+  // unbound one (not a git checkout here, a mismatch above) is an input
+  // error: exit 2, never a verdict of 0 or 1.
+  if (head === undefined && o.requireMilestone !== undefined) bound.errors.push('--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit\'s');
+  else if (head === undefined) bound.notes.push('the registry is not bound to --commit: --root is not a git checkout');
   else if (head !== o.commit) {
     const msg = `--root is a checkout of ${head ?? 'no commit'}, not of --commit ${o.commit}, so its registry is not the judged commit's`;
     if (!o.allowCommitMismatch) {
