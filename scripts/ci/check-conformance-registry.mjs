@@ -359,10 +359,22 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // ---------------------------------------------------------------------------
 // Waivers
 
+// The variables that point git at another repository than the one it finds
+// from -C (a git hook or `git rebase --exec` exports some of them). With an
+// inherited GIT_DIR, a plain directory would pass as a checkout of that
+// repository, so every git run here goes without them.
+export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES'];
+
+// `git -C root ...args`, run without GIT_LOCATION.
+export function gitIn(root) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
+  return (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env });
+}
+
 // Whether origin/main's full history is available in `root`: { onMain(sha) }
 // or { reason } when it is not.
 export function history(root) {
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  const git = gitIn(root);
   const top = git('rev-parse', '--show-toplevel');
   if (top.status !== 0 || realpathSync(top.stdout.trim()) !== realpathSync(root)) return { reason: 'the root is not a git checkout' };
   if (git('rev-parse', '--is-shallow-repository').stdout.trim() !== 'false') return { reason: 'the checkout is shallow' };
