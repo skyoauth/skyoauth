@@ -448,6 +448,7 @@ Not done in `0002`:
   (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
   startup-mirror and sink-change events.
   Tests assert chain linkage and verification outcomes, never hash values.
+
 - Errata for comments and checks in `0002`, which is frozen (its checksum
   covers comments), so they are corrected here and not in the file:
   - Lines 116–118, on `instance_security_policy.instance_id`: "No format or
