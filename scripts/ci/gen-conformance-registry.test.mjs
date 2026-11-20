@@ -218,7 +218,7 @@ describe('drift is detected', () => {
   });
 
   test('a stale counts sentence fails --check and is rendered back', () => {
-    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Counts by first stage: M1a 20 ', 'Counts by first stage: M1a 21 ') : t));
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Counts by first stage: M1a 19 ', 'Counts by first stage: M1a 21 ') : t));
     assert.match(cli('--root', root, '--check').stderr, /conformance-layout\.md:\d+: the §2 counts sentences differ/);
     assert.equal(cli('--root', root).status, 0);
     assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
@@ -928,7 +928,7 @@ describe('hand-authored fields are kept', () => {
     const a24 = parseToml(read(root, SCENARIOS)).scenario.find((e) => e.id === 'A24');
     assert.deepEqual([a24.stage[0].milestone, a24.stage[0].tests.length], ['M1b', 2]);
     assert.match(specLine(read(root, LAYOUT), 'A24'), /\| M1b: consume primitive · M2: exchange \|/);
-    assert.match(read(root, LAYOUT), /Counts by first stage: M1a 19 · M1b 6 /);
+    assert.match(read(root, LAYOUT), /Counts by first stage: M1a 18 · M1b 7 /);
   });
 });
 
