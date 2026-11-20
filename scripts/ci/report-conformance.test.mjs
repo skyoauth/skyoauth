@@ -1263,13 +1263,16 @@ describe('input errors', () => {
     assert.match(r.out, /note: 4 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/rust-coverage`/);
   });
 
-  test('every artifact the workflows upload is a leg artifact or a known non-conformance artifact', () => {
-    // Fails when a workflow gains an artifact without a `leg` file: add it to
-    // NOT_CONFORMANCE (or upload a leg file with it), or the reporter calls
-    // it an input error. A NOT_CONFORMANCE entry no workflow uploads fails too.
+  // The upload-artifact steps of the workflow files `files` ([name, text]
+  // pairs): { at, name, paths } each, from a block-style step
+  // (`uses: actions/upload-artifact@...` on its own line, `with:` below).
+  // Fails closed: every line that names upload-artifact, other than a
+  // comment, must be the `uses:` line of a step parsed here.
+  const workflowUploads = (files) => {
     const uploads = [];
-    for (const wf of readdirSync(join(REPO, '.github', 'workflows')).filter((f) => /\.ya?ml$/.test(f)).sort()) {
-      const lines = repoText(join('.github', 'workflows', wf)).split('\n');
+    for (const [wf, text] of files) {
+      const lines = text.split('\n');
+      const parsed = uploads.length;
       lines.forEach((l, i) => {
         if (!/^\s*(- )?uses: actions\/upload-artifact@/.test(l)) return;
         // The step's `with:` block: the lines after `uses:` indented deeper
@@ -1290,7 +1293,18 @@ describe('input errors', () => {
         }
         uploads.push({ at: `${wf}:${i + 1}`, name, paths });
       });
+      const named = lines.filter((l) => /upload-artifact/i.test(l) && !/^\s*#/.test(l)).length;
+      assert.equal(named, uploads.length - parsed, `${wf}: ${named} non-comment line(s) name upload-artifact, ${uploads.length - parsed} upload step(s) parsed; write each upload step block-style (\`uses: actions/upload-artifact@...\` on its own line)`);
     }
+    return uploads;
+  };
+  const repoWorkflows = () => readdirSync(join(REPO, '.github', 'workflows')).filter((f) => /\.ya?ml$/.test(f)).sort().map((wf) => [wf, repoText(join('.github', 'workflows', wf))]);
+
+  test('every artifact the workflows upload is a leg artifact or a known non-conformance artifact', () => {
+    // Fails when a workflow gains an artifact without a `leg` file: add it to
+    // NOT_CONFORMANCE (or upload a leg file with it), or the reporter calls
+    // it an input error. A NOT_CONFORMANCE entry no workflow uploads fails too.
+    const uploads = workflowUploads(repoWorkflows());
     assert.ok(uploads.length > 0, 'no upload-artifact steps found');
     const asNamed = (name) => name.replace(/\$\{\{\s*github\.run_attempt\s*\}\}/g, '1');
     const bad = uploads.filter(({ name, paths }) => {
@@ -1300,6 +1314,25 @@ describe('input errors', () => {
     });
     assert.deepEqual(bad, [], 'leg artifacts must end in attempt-${{ github.run_attempt }}; others need a NOT_CONFORMANCE entry');
     assert.deepEqual(NOT_CONFORMANCE.filter((re) => !uploads.some(({ name }) => re.test(asNamed(name)))).map(String), [], 'NOT_CONFORMANCE entries no workflow uploads');
+  });
+
+  // The scan above only sees block-style steps, so it must not pass over an
+  // upload written another way: that artifact would escape the
+  // NOT_CONFORMANCE check the README and ci.yml promise.
+  test('the upload scan fails closed: an upload-artifact line it does not parse is an error', () => {
+    const [wf, text] = repoWorkflows().find(([f]) => f === 'ci.yml');
+    const n = workflowUploads([[wf, text]]).length;
+    assert.ok(n > 0);
+    for (const extra of [
+      '      - { name: Upload, uses: actions/upload-artifact@v7, with: { name: stray, path: x } }',
+      '      - name: Upload\n        uses: "actions/upload-artifact@v7"\n        with:\n          name: stray\n          path: x',
+      '      - name: Upload\n        uses: Actions/Upload-Artifact@v7\n        with:\n          name: stray\n          path: x',
+      '      -   uses: actions/upload-artifact@v7\n          with:\n            name: stray\n            path: x',
+    ]) {
+      assert.throws(() => workflowUploads([[wf, `${text}${extra}\n`]]), new RegExp(`^AssertionError.*${wf}: ${n + 1} non-comment line\\(s\\) name upload-artifact, ${n} upload step\\(s\\) parsed`, 's'), extra);
+    }
+    // A comment is not an upload.
+    assert.equal(workflowUploads([[wf, `${text}      # - uses: actions/upload-artifact@v7\n`]]).length, n);
   });
 
   test('a failed attempt whose artifact lost its leg file does not vanish: input error, exit 2', () => {
