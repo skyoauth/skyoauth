@@ -199,8 +199,23 @@ function report(rootDir, args = [], { commit = SHA } = {}) {
 }
 // The Markdown with text() escapes undone, for matching prose.
 const plain = (md) => md.replace(/\\([\\`*_[\]~|])/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+// The variables of a CI runner (GITHUB_*, RUNNER_*, ACTIONS_*, CI) and of
+// the conformance-report job (COMMIT, ARTIFACTS, REPORT_JSON, DOWNLOAD_DIR,
+// DOWNLOADS). Every child that this file spawns gets an environment without
+// them, so a test sees on a runner what it sees on a laptop, and never
+// writes into the real step summary of the job that runs the tests.
+const RUNNER_VAR = /^(?:GITHUB_|RUNNER_|ACTIONS_)|^(?:CI|COMMIT|ARTIFACTS|REPORT_JSON|DOWNLOAD_DIR|DOWNLOADS)$/;
+const withoutRunner = (env) => Object.fromEntries(Object.entries(env).filter(([k]) => !RUNNER_VAR.test(k)));
+// GIT_ENV built at the call, not at load: this process's environment as it
+// is now (a test may have changed it) without its GIT_* variables, plus
+// GIT_ENV's git settings, less the runner's variables.
+const childEnv = () =>
+  withoutRunner({
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
+    ...Object.fromEntries(Object.entries(GIT_ENV).filter(([k]) => k.startsWith('GIT_'))),
+  });
 const git = (dir, ...args) => {
-  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: GIT_ENV });
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: childEnv() });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 };
@@ -1248,7 +1263,7 @@ describe('waivers', () => {
     const UNBOUND = "--require-milestone needs --root bound to --commit, but --root is not a git checkout, so its registry is not known to be the judged commit's";
     for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: plainRoot }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
       const j = join(tmp('report-out-'), 'r.json');
-      const p = spawnSync(process.execPath, [SCRIPT, '--root', plainRoot, '--commit', head, '--today', TODAY, '--require-milestone', 'M1a', '--json', j], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      const p = spawnSync(process.execPath, [SCRIPT, '--root', plainRoot, '--commit', head, '--today', TODAY, '--require-milestone', 'M1a', '--json', j], { encoding: 'utf8', env: { ...childEnv(), ...env } });
       assert.equal(p.status, 2, `${Object.keys(env)}: ${p.stderr}`);
       const json = JSON.parse(readFileSync(j, 'utf8'));
       assert.equal(json.trusted, false);
@@ -1803,13 +1818,20 @@ describe('the conformance-report CI job', () => {
     write(join(bin, 'node'), '#!/bin/sh\nif [ "$1" = -e ]; then exec "$REAL_NODE" "$@"; fi\nprintf \'%s\\n\' "$@" > "$STUB_ARGS"\nexit "$STUB_STATUS"\n');
     chmodSync(join(bin, 'node'), 0o755);
     const out = tmp('report-ci-out-');
-    const e = { ...GIT_ENV, PATH: `${bin}:${process.env.PATH}`, REAL_NODE: process.execPath, STUB_ARGS: join(out, 'args'), STUB_STATUS: String(status) };
-    delete e.NODE_TEST_CONTEXT;
+    const e = { PATH: `${bin}:${process.env.PATH}`, REAL_NODE: process.execPath, STUB_ARGS: join(out, 'args'), STUB_STATUS: String(status) };
     return ciScript(REPO, { ...e, ...env }, out);
   };
-  // Runs report-conformance-ci.sh from checkout `dir` as the job does.
+  // Runs report-conformance-ci.sh from checkout `dir` as the job does: this
+  // process's environment with GIT_ENV's git settings, less the runner's
+  // and the job's variables (childEnv), then this fixture's values for
+  // those, then exactly what the case sets (undefined unsets). On GitHub
+  // Actions the runner's GITHUB_RUN_ID and GITHUB_STEP_SUMMARY reached the
+  // script before, replacing the fixture's.
   const ciScript = (dir, env, out = tmp('report-ci-out-')) => {
+    const base = childEnv();
+    delete base.NODE_TEST_CONTEXT;
     const e = {
+      ...base,
       COMMIT: SHA,
       ARTIFACTS: join(out, 'artifacts'),
       REPORT_JSON: join(out, 'report.json'),
@@ -1856,6 +1878,33 @@ describe('the conformance-report CI job', () => {
     const dispatch = stubbed(0, { GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_HEAD_REF: '' });
     assert.equal(dispatch.status, 0);
     assert.deepEqual(JSON.parse(dispatch.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'workflow_dispatch', headBranch: 'main' });
+  });
+
+  // The regression on GitHub Actions (PR 52, head cf35ed7): the runner's
+  // variables leaked into the script, so GITHUB_RUN_ID replaced the
+  // fixture's and an unset variable was not unset. Reproduced here by
+  // setting them in this process.
+  test('the script sees only the variables a case sets, not those of the runner that runs the tests', () => {
+    const real = join(tmp('report-ci-leak-'), 'step-summary.md');
+    const LEAK = { GITHUB_RUN_ID: '44833181735', GITHUB_RUN_ATTEMPT: '7', GITHUB_WORKFLOW: 'Leaked', GITHUB_STEP_SUMMARY: real, GITHUB_EVENT_NAME: 'pull_request', GITHUB_HEAD_REF: 'leaked/branch', GITHUB_REF_NAME: '52/merge', GITHUB_ACTIONS: 'true', ACTIONS_RUNTIME_TOKEN: 'leaked', CI: 'true', COMMIT: 'b'.repeat(40), ARTIFACTS: '/nonexistent/a', REPORT_JSON: '/nonexistent/r.json', DOWNLOAD_DIR: '/nonexistent/d', DOWNLOADS: 'leaked=junit-leaked-attempt-1', RUNNER_TEMP: '/nonexistent/t' };
+    const saved = Object.fromEntries(Object.keys(LEAK).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, LEAK);
+    try {
+      const r = stubbed(0);
+      assert.equal(r.status, 0, r.out + r.err);
+      assert.deepEqual(JSON.parse(r.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'push', headBranch: 'main' });
+      assert.doesNotMatch(r.summary, /PR head/);
+      for (const k of ['GITHUB_ACTIONS', 'GITHUB_HEAD_REF', 'ACTIONS_RUNTIME_TOKEN', 'CI', 'RUNNER_TEMP', 'DOWNLOAD_DIR', 'DOWNLOADS']) assert.equal(r.env[k], undefined, k);
+      const unset = stubbed(0, { GITHUB_STEP_SUMMARY: undefined });
+      assert.equal(unset.status, 2);
+      assert.match(unset.out, /GITHUB_STEP_SUMMARY is not set/);
+      assert.equal(existsSync(real), false, 'nothing was written into the runner\'s step summary');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
   });
 
   test('a missing or malformed variable, or an existing run.json, is a usage error before the reporter runs', () => {
@@ -1907,9 +1956,7 @@ describe('the conformance-report CI job', () => {
   const job = (co, spec, env = {}) => {
     const out = tmp('report-ci-out-');
     const dir = spec === null ? join(out, 'artifacts') : artifacts(spec, { runs: { 100: null } });
-    const e = { ...GIT_ENV, COMMIT: co.head, ARTIFACTS: dir, ...env };
-    delete e.NODE_TEST_CONTEXT;
-    return ciScript(co.dir, e, out);
+    return ciScript(co.dir, { COMMIT: co.head, ARTIFACTS: dir, ...env }, out);
   };
   // What `cargo nextest run --profile ci` writes to
   // target/nextest/ci/junit.xml in the scenarios-pg job (quick-junit's
@@ -1998,7 +2045,7 @@ describe('the conformance-report CI job', () => {
       if (spec === 'flat') {
         const out = tmp('report-ci-out-');
         flat(join(out, 'artifacts'));
-        r = ciScript(co.dir, { ...GIT_ENV, COMMIT: co.head, ARTIFACTS: join(out, 'artifacts') }, out);
+        r = ciScript(co.dir, { COMMIT: co.head, ARTIFACTS: join(out, 'artifacts') }, out);
       } else r = job(co, spec, env);
       assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
       assert.match(r.out, /^::error title=Conformance report::The conformance reporter found usage, registry or input errors/m, what);
@@ -2565,14 +2612,16 @@ describe('cli', () => {
   // so this case checks only that the report is produced and well-formed.
   test('the script runs on the repository: exit 0 and a milestone table', () => {
     // In a git checkout the judged commit must be HEAD.
-    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: GIT_ENV });
-    const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8' });
+    const head = spawnSync('git', ['-C', REPO, 'rev-parse', 'HEAD'], { encoding: 'utf8', env: childEnv() });
+    // The inherited environment, GIT_DIR included (assertGitImmune runs this
+    // test with one exported), less the runner's variables.
+    const p = spawnSync(process.execPath, [SCRIPT, '--commit', head.status === 0 ? head.stdout.trim() : SHA, '--today', TODAY], { encoding: 'utf8', env: withoutRunner(process.env) });
     assert.equal(p.status, 0, p.stderr);
     for (const m of ['M0', 'M1a', 'M1b', 'M2', 'M3', 'M4', 'M5']) {
       assert.match(p.stdout, new RegExp(`^\\| ${m} \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| \\d+ \\| (?:passed|failed|not run|planned|no stages) \\|$`, 'm'));
     }
     assert.match(p.stdout, /^### Implemented stages \(\d+\)$/m);
-    const bad = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
+    const bad = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8', env: withoutRunner(process.env) });
     assert.equal(bad.status, 2);
   });
 });
