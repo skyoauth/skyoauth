@@ -120,6 +120,15 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/gen-conformance-registry.test.mjs
 
+      # publish-badges.sh against local bare repositories (no network, no
+      # git configuration of the runner); one round of the concurrent
+      # publishers' stress test.
+      - name: Self-test the badge publisher
+        if: success() || failure()
+        env:
+          PUBLISH_BADGES_STRESS_ROUNDS: 1
+        run: node --test scripts/ci/publish-badges.test.mjs
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes

@@ -1,8 +1,18 @@
 // Self-test for publish-badges.sh:  node --test scripts/ci/publish-badges.test.mjs
 //
 // Every test publishes into a local bare repository standing in for the
-// GitHub remote, from a clone of it, so nothing touches the network. Git
-// runs with no global or system configuration and fixed identities.
+// GitHub remote, from a clone of it. The tests are hermetic:
+//   - git reads no global or system configuration and inherits no GIT_*
+//     variable; the identity is set in each temporary repository, the
+//     initial branch is named explicitly, and only the `file` transport is
+//     allowed, so nothing touches the network or a credential helper;
+//   - automatic gc and maintenance are off, so git leaves no background
+//     process behind, and every publisher still running when the tests end
+//     is killed with its process group;
+//   - everything, including the script's own temporary worktrees (TMPDIR),
+//     lives under one temporary directory, removed after the tests whether
+//     they passed or failed.
+// They need node, git, sh and jq, as the script does.
 //
 // The concurrency test starts PUBLISH_BADGES_STRESS_PUBLISHERS publishers
 // (default 24) at once, each for a branch of its own, and repeats that
@@ -11,7 +21,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -25,38 +35,75 @@ const RED = '#e05d44';
 const GREEN = '#97ca00';
 const BRIGHTGREEN = '#4c1';
 
-const ENV = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_AUTHOR_NAME: 'test',
-  GIT_AUTHOR_EMAIL: 'test@example.invalid',
-  GIT_COMMITTER_NAME: 'test',
-  GIT_COMMITTER_EMAIL: 'test@example.invalid',
-  BADGES_RETRY_SLEEP: '0',
-};
-delete ENV.BADGES_REMOTE;
-delete ENV.BADGES_BRANCH;
-delete ENV.BADGES_ATTEMPTS;
+// Everything the tests create lives under TOP; the script's temporary
+// worktrees go to SCRIPT_TMP, which must be empty after every publication.
+const TOP = mkdtempSync(join(tmpdir(), 'publish-badges-test-'));
+const SCRIPT_TMP = join(TOP, 'tmp');
+mkdirSync(SCRIPT_TMP);
 
-const roots = [];
+// Configuration for every git process the tests start. A push to a local
+// remote clears GIT_CONFIG_COUNT for the remote side, so setup() also
+// writes it into the bare remote's own config: otherwise its receive-pack
+// runs `gc --auto` or, from git 2.47 on, a detached
+// `maintenance run --auto` that outlives the push.
+const GIT_CONFIG = {
+  'gc.auto': '0',
+  'gc.autoDetach': 'false',
+  'maintenance.auto': 'false',
+  'receive.autogc': 'false',
+  'credential.helper': '',
+};
+
+const ENV = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_') && !key.startsWith('BADGES_')),
+);
+Object.assign(ENV, {
+  GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_SYSTEM: '/dev/null',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_ALLOW_PROTOCOL: 'file',
+  GIT_CONFIG_COUNT: String(Object.keys(GIT_CONFIG).length),
+  TMPDIR: SCRIPT_TMP,
+  BADGES_RETRY_SLEEP: '0',
+});
+Object.entries(GIT_CONFIG).forEach(([key, value], i) => {
+  ENV[`GIT_CONFIG_KEY_${i}`] = key;
+  ENV[`GIT_CONFIG_VALUE_${i}`] = value;
+});
+
+const children = new Set();
 after(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
+  for (const child of children) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      // Already gone.
+    }
+  }
+  rmSync(TOP, { recursive: true, force: true });
 });
 
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, env: ENV, encoding: 'utf8' }).trim();
 }
 
+function identify(repo) {
+  git(repo, 'config', 'user.name', 'test');
+  git(repo, 'config', 'user.email', 'test@example.invalid');
+}
+
 // A bare remote with `main` and BRANCHES at one source commit, and CLONES
 // clones of it. Returns paths, the source commit, and fixture writers.
 function setup({ branches = [], clones = 1 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'publish-badges-'));
-  roots.push(root);
+  const root = mkdtempSync(join(TOP, 'case-'));
   const remote = join(root, 'remote.git');
   git(root, 'init', '-q', '--bare', '-b', 'main', remote);
+  identify(remote);
+  for (const [key, value] of Object.entries(GIT_CONFIG)) git(remote, 'config', key, value);
   const seed = join(root, 'seed');
   git(root, 'init', '-q', '-b', 'main', seed);
+  identify(seed);
   writeFileSync(join(seed, 'lib.rs'), '// code\n');
   git(seed, 'add', '.');
   git(seed, 'commit', '-q', '-m', 'init');
@@ -67,6 +114,7 @@ function setup({ branches = [], clones = 1 } = {}) {
   for (let i = 0; i < clones; i++) {
     const dir = join(root, `clone${i}`);
     git(root, 'clone', '-q', remote, dir);
+    identify(dir);
     work.push(dir);
   }
   const file = (name, value) => {
@@ -81,18 +129,27 @@ const rustReport = (percent) => ({ data: [{ totals: { lines: { percent } } }] })
 const tsSummary = (lines) => ({ total: { lines: { pct: lines }, branches: { pct: 70 }, functions: { pct: 80 }, statements: { pct: lines } } });
 
 function publish(cwd, args, env = {}) {
-  return spawnSync('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env }, encoding: 'utf8' });
+  return spawnSync('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env }, encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL' });
 }
 
+// Runs in a process group of its own, so that `after` can kill the
+// publisher and its git processes if a test ends while it still runs.
 function publishAsync(cwd, args, env = {}) {
   return new Promise((resolve) => {
-    const child = spawn('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env } });
+    const child = spawn('sh', [SCRIPT, ...args], { cwd, env: { ...ENV, ...env }, detached: true });
+    children.add(child);
     let output = '';
     child.stdout.on('data', (d) => (output += d));
     child.stderr.on('data', (d) => (output += d));
-    child.on('close', (status) => resolve({ status, output }));
+    child.on('close', (status) => {
+      children.delete(child);
+      resolve({ status, output });
+    });
   });
 }
+
+// The script removes its temporary worktrees whether it published or not.
+const assertNoScriptLeftovers = () => assert.deepEqual(readdirSync(SCRIPT_TMP), []);
 
 // The value colour and text of a published badge, and the summary.
 function badge(remote, path) {
@@ -118,6 +175,7 @@ describe('coverage badge colour follows the gate', () => {
     const s = summary(remote, 'main');
     assert.equal(s.rust_coverage.gate, 'failed');
     assert.equal(s.typescript_coverage.gate, 'failed');
+    assertNoScriptLeftovers();
   });
 
   test('a cancelled coverage job is red too', () => {
@@ -191,6 +249,7 @@ exit 1
     assert.match(r.stdout, /published main .* attempt 2\)/);
     assert.equal(badge(remote, 'main/rust-coverage.svg').title, 'rust coverage: 91.0%');
     assert.match(git(remote, 'log', '--format=%s', 'badges'), /^badges: main .*91\.0%.*\nconcurrent publication\nbadges: main .*90\.0%/);
+    assertNoScriptLeftovers();
   });
 
   test('gives up at once when the push failed and the branch did not move', () => {
@@ -204,6 +263,7 @@ exit 1
     assert.match(r.stderr, /did not move .*not a race, giving up/);
     assert.doesNotMatch(r.stdout, /regenerating/);
     assert.equal(git(remote, 'rev-parse', 'badges'), before);
+    assertNoScriptLeftovers();
   });
 
   test('rejects a BADGES_ATTEMPTS that is not a positive integer', () => {
@@ -236,6 +296,7 @@ exit 1
         assert.equal(badge(remote, `${branch}/rust-coverage.svg`).title, `rust coverage: ${80 + round}.0%`, `round ${round}, ${branch}`);
       }
       assert.equal(Number(git(remote, 'rev-list', '--count', 'badges')), PUBLISHERS * round, `round ${round}: one commit per publication`);
+      assertNoScriptLeftovers();
     }
   });
 });

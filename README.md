@@ -161,7 +161,8 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   layout §2 scenario table equals the one rendered from
   `tests/conformance/scenarios.toml`, which is its source. The job also runs
   `node scripts/ci/gen-conformance-registry.mjs --check` and both
-  self-tests. Its one dependency, `smol-toml`, is pinned in
+  self-tests, plus the badge publisher's self-test
+  (`node --test scripts/ci/publish-badges.test.mjs`). Its one dependency, `smol-toml`, is pinned in
   `scripts/ci/package.json` and installed with `npm ci --ignore-scripts`.
   See `tests/conformance/README.md`.
 
