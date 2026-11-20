@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { checkDocs, findCycle, findRefs, formatAnnotation, GIT_LOCATION, githubSlug, MermaidError, parseFlowchart, scanFences } from './docs-check.mjs';
+import { checkDocs, findCycle, findRefs, formatAnnotation, GIT_LOCATION, githubSlug, MermaidError, NO_GRAFTS, parseFlowchart, scanFences } from './docs-check.mjs';
 import { assertGitImmune, GIT_ENV } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'docs-check.mjs');
@@ -725,6 +725,8 @@ describe('links and anchors', () => {
   // broken doc tracked only in --root would go unchecked.
   test('an inherited GIT_DIR does not replace the tracked files of --root', () => {
     assert.deepEqual(GIT_LOCATION, ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES', 'GIT_SHALLOW_FILE', 'GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_NO_REPLACE_OBJECTS']);
+    // GIT_GRAFT_FILE is dropped and then forced to a path that does not exist.
+    assert.equal(NO_GRAFTS, '/nonexistent/skyoauth-no-grafts');
     const other = fixture();
     execFileSync('git', ['init', '-q', other], { stdio: 'ignore', env: GIT_ENV });
     execFileSync('git', ['-C', other, 'add', 'docs'], { env: GIT_ENV });

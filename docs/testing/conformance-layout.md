@@ -453,6 +453,8 @@ Still open:
 
    **Default until decided:** a gate PR is based on a pushed tip of `main`, and its job runs on `pull_request.head.sha` with `fetch-depth: 0`.
 
+   **Note: repairing an unparsable registry.** `--gate-pr` fails closed when `scenarios.toml` at the merge-base or at `HEAD` is not valid TOML, so a PR that repairs an unparsable `scenarios.toml` on `main` fails `--gate-pr` (its merge-base does not parse) and, once the gate job is required in branch protection (7d), needs an admin override to merge.
+
 Risks:
 
 1. **ci.yml coordination.** The `rust` job and the `coverage` alias change in section 1.2 must land with the first M1a scenario PR, and another agent is editing `ci.yml` now. Land the registry check (M0) first.
