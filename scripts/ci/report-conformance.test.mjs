@@ -1516,6 +1516,26 @@ describe('XML and JUnit reader', () => {
     unaccounted(`<testsuites skipped="true"><testsuite name="s" skipped="2">${tcx('n')}</testsuite></testsuites>`, /^<testsuite name="s"> counts 2 skipped or disabled test\(s\), but only 1 of/);
   });
 
+  test('inherited skip flag: a testcase skip attribute is still validated under it', () => {
+    unaccounted('<testsuite name="s" skipped="true"><testcase classname="c" name="n" skipped="yes"/></testsuite>', /^testcase n: skipped="yes" is not true, false, 1 or 0$/);
+    unaccounted('<testsuites disabled="true"><testsuite name="s"><testcase classname="c" name="n" ignored="yes"/></testsuite></testsuites>', /^testcase n: ignored="yes" is not true, false, 1 or 0$/);
+    unaccounted('<testsuites><testsuite name="s" ignored="true"><testcase classname="c" name="n" disabled="2"/></testsuite></testsuites>', /^testcase n: disabled="2" is not true, false, 1 or 0$/);
+  });
+
+  test('end to end: a bad testcase skip attribute under a suite flagged skipped is an input error', () => {
+    for (const [suiteAttr, caseAttr] of [['skipped="true"', 'skipped="yes"'], ['disabled="true"', 'ignored="yes"']]) {
+      const x = allPass(A24)
+        .replace('<testsuites name="nextest-run"', `<testsuites name="nextest-run" ${suiteAttr}`)
+        .replace(/(<testcase name="[^"]*a24_neg_replay")/, `$1 ${caseAttr}`);
+      const r = report(root(withA24), ['--artifacts', artifacts([{ leg: PG, junit: x }])]);
+      assert.equal(r.code, 2, suiteAttr);
+      assert.equal(r.json.trusted, false);
+      assert.equal(r.json.input_errors.length, 1);
+      assert.match(r.json.input_errors[0], new RegExp(`junit\\.xml: malformed JUnit: testcase [^ ]*a24_neg_replay: ${caseAttr} is not true, false, 1 or 0; its results are not used$`));
+      assert.equal(stage(r.json, 'A24', 'M1a').status, 'not run');
+    }
+  });
+
   test('end to end: a testcase marked disabled is not run, and an unaccounted suite count is an input error', () => {
     const marked = allPass(A24).replace(/(<testcase name="[^"]*a24_neg_replay")/, '$1 disabled="true"');
     assert.notEqual(marked, allPass(A24));

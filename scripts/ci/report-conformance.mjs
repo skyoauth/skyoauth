@@ -263,7 +263,8 @@ export function readJUnit(text) {
   if (local(root.name) !== 'testsuites' && local(root.name) !== 'testsuite') throw new InputError(`the root element is <${root.name}>, not <testsuites> or <testsuite>`);
   const cases = [];
   // `skip`: an enclosing suite is flagged skipped (SKIP_ATTRS = "true"), so
-  // every testcase under it is, a failed one excepted.
+  // every testcase under it is, a failed one excepted. A testcase's own skip
+  // attributes are still validated under it (skipFlag runs first).
   const walk = (el, inSuite, skip) => {
     for (const c of el.children) {
       const n = local(c.name);
@@ -277,7 +278,7 @@ export function readJUnit(text) {
         const kids = c.children.map((k) => local(k.name));
         const odd = kids.find((k) => !FAILED_ELEMENTS.has(k) && !SKIPPED_ELEMENTS.has(k) && !QUIET_ELEMENTS.has(k));
         if (odd !== undefined) throw new InputError(`testcase ${name}: unknown element <${odd}>`);
-        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], skip || skipFlag(c.attrs, `testcase ${name}`) ? 'skipped' : 'passed', ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
+        const verdicts = [st === undefined ? 'passed' : STATUS_ATTR[st], skipFlag(c.attrs, `testcase ${name}`) || skip ? 'skipped' : 'passed', ...kids.map((k) => (FAILED_ELEMENTS.has(k) ? 'failed' : SKIPPED_ELEMENTS.has(k) ? 'skipped' : 'passed'))];
         const status = verdicts.includes('failed') ? 'failed' : verdicts.includes('skipped') ? 'skipped' : 'passed';
         cases.push({ classname, name, status });
       } else if (FAILED_ELEMENTS.has(n)) throw new InputError(`a suite-level <${c.name}> in <${el.name}${el.attrs.name !== undefined ? ` name="${el.attrs.name}"` : ''}>: it fails no particular testcase`);
