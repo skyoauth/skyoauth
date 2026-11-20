@@ -109,17 +109,20 @@ egress rows are never deleted.
   previous revision; tenants and principals carry none yet), as are
   `prev_hash` for the first event and `tenant_id` for instance-scope events.
   There is no sentinel: revisions start at 1 and 0 is rejected. The event
-  hash encoding, not yet specified, must encode an absent value differently
-  from every present one (for example JSON `null` against a number), so
-  that adding or dropping a value changes the hash.
+  hash encoding (identity-registry IR-056; see Follow-ups) must encode an absent
+  value differently from every present one (for example JSON `null` against
+  a number), so that adding or dropping a value changes the hash.
 - **Instance-scope events** (lead decision): the startup event that records
   the `single_actor_mode` mirror (IR-053) and the sink-change event have
   `tenant_id` `NULL`, the policy row's `instance_id` as `object_id`, and the
   row's real revisions before and after the write in `previous_revision`
-  and `new_revision`. The source and format of `instance_id`, the reserved
-  actor for events the service writes on its own, and the `action` names
-  (which must name the entity, since `object_id` alone does not) are open:
-  identity-registry OQ-IR-14.
+  and `new_revision`. `instance_id` is a lowercase hyphenated UUIDv7,
+  generated once at first bootstrap and immutable (IR-057). Events the
+  service writes on its own record the reserved actor
+  `{"type": "system", "id": "system"}`, never a principal (IR-058). `action`
+  is a dotted lowercase `<resource>.<verb>` name listed in identity-registry
+  IR-059. These are lead decisions (2026-11-20, OQ-IR-14), provisional until
+  the audit writer ships.
 
 The database does not enforce these rules; the service must:
 
@@ -221,6 +224,18 @@ Not done in `0002`:
   the audit event of an egress entry write lists (IR-152, OQ-IR-12).
 - A `revision` on `tenant` and `principal`: updates require
   ID, tenant and revision (tasks §3 "IDs/names").
-- Who computes the audit event hash, with which algorithm and over which
-  input (including the encoding of absent values above). This needs a spec
-  decision before the first code that writes events.
+- The audit writer. The service computes the event hash (lead decision,
+  2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
+  writer ships). The hash is SHA-256 over the concatenation of:
+  1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
+  2. `prev_hash` as 32 raw bytes, or zero bytes for the first event, whose
+     `prev_hash` column is `NULL`;
+  3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
+     `hash` and `prev_hash` fields.
+
+  The decision stores the hash as lowercase hex, but `prev_hash` and
+  `head_hash` here are raw `bytea`, and `audit_event` has no column for an
+  event's own hash. That mismatch, the text form of `actor`, the envelope's
+  member names, the timestamp format and the encoding of absent values are
+  identity-registry OQ-IR-15; they need an answer before the writer ships.
+  Tests assert chain linkage and verification outcomes, never hash values.

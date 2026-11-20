@@ -856,20 +856,20 @@ describe('rule table', () => {
 
   test('stale counts', () => {
     const counts = /^Counts by first stage: .*$/m.exec(repoText(LAYOUT))[0];
-    const res = failing(LAYOUT, (t) => replaceOnce(t, 'Counts by first stage: M1a 20', 'Counts by first stage: M1a 21'));
+    const res = failing(LAYOUT, (t) => replaceOnce(t, 'Counts by first stage: M1a 19', 'Counts by first stage: M1a 21'));
     const want = /^Counts by first stage: [^.]*\. Counts by final stage: [^.]*\. \d+ rows have more than one stage\./.exec(counts)[0];
     expectOnly(res, 'table', new RegExp(`conformance-layout\\.md:${lineOf(repoText(LAYOUT), 'Counts by first stage')}: error \\[table\\] the counts sentences differ from the registry; expected: ${want.replace(/[|.*+?()[\]\\]/g, '\\$&')}$`));
   });
 
   test('missing counts', () => {
     const res = failing(LAYOUT, (t) => replaceOnce(t, 'Counts by first stage: ', 'Counts by first stage (sic): '));
-    expectOnly(res, 'table', /^docs\/testing\/conformance-layout\.md: error \[table\] the counts sentences after the §2 table are missing; expected: Counts by first stage: M1a 20 /);
+    expectOnly(res, 'table', /^docs\/testing\/conformance-layout\.md: error \[table\] the counts sentences after the §2 table are missing; expected: Counts by first stage: M1a 19 /);
   });
 
   test('moving a stage changes the expected counts', () => {
     const res = failing(SCENARIOS, st('A24', 'M2', 'milestone = "M2"', 'milestone = "M3"'));
     expectError(res, 'table', /row A24 differs .*Expected: .*M1a: consume primitive · M3: exchange/);
-    expectError(res, 'table', /counts sentences differ .*Counts by final stage: M1a 4 · M1b 2 · M2 20 · M3 14 /);
+    expectError(res, 'table', /counts sentences differ .*Counts by final stage: M1a 3 · M1b 3 · M2 20 · M3 14 /);
   });
 
   test('not compared when a subcase table_text is malformed', () => {
@@ -964,8 +964,8 @@ describe('rule subcases', () => {
     const res = check(fixture({ [SUBCASES]: withSub('A58.05') }));
     expectOk(res);
     assert.deepEqual(res.notes, []);
-    const stale = check(fixture({ [SUBCASES]: withSub('A58.05'), [LAYOUT]: (t) => replaceOnce(t, 'Counts by first stage: M1a 20', 'Counts by first stage: M1a 21') }));
-    expectOnly(stale, 'table', /error \[table\] the counts sentences differ from the registry; expected: Counts by first stage: M1a 20 /);
+    const stale = check(fixture({ [SUBCASES]: withSub('A58.05'), [LAYOUT]: (t) => replaceOnce(t, 'Counts by first stage: M1a 19', 'Counts by first stage: M1a 21') }));
+    expectOnly(stale, 'table', /error \[table\] the counts sentences differ from the registry; expected: Counts by first stage: M1a 19 /);
     assert.deepEqual(stale.notes, []);
   });
 

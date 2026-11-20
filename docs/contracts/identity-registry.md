@@ -239,6 +239,38 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   The external sink receives the chain as an append-only JSONL stream over
   syslog-over-TLS or OTLP logs. (design §7; tasks §3 "Instance security
   policy", Gate M1a; lead decision, OQ-TM-12)
+- **IR-056** The audit event `hash` is SHA-256 over the concatenation of:
+  1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
+  2. `prev_hash` as 32 raw bytes, or zero bytes for the first event of a
+     chain, whose stored `prev_hash` is null;
+  3. the RFC 8785 (JCS) canonical JSON of the event envelope without the
+     `hash` and `prev_hash` fields.
+
+  The hash is stored as lowercase hex. Conformance scenarios MUST NOT assert
+  hash values, only chain linkage and verification outcomes. Provisional until
+  the audit writer ships; the details still open are OQ-IR-15. (lead
+  decision, 2026-11-20, OQ-IR-14)
+- **IR-057** `instance_id` is a UUIDv7 in lowercase hyphenated form. It is
+  generated once, at first bootstrap, and stored immutably on the
+  `InstanceSecurityPolicy` row. Instance-scope audit events use it as
+  `object_id`. Provisional until the audit writer ships. (lead decision,
+  2026-11-20, OQ-IR-14)
+- **IR-058** Events that the service writes on its own, with no
+  administrator acting (such as the startup event of IR-053), record the
+  fixed reserved actor `{"type": "system", "id": "system"}`. The system actor
+  is never a principal or an operator identity. Provisional until the audit
+  writer ships. (lead decision, 2026-11-20, OQ-IR-14)
+- **IR-059** `AuditEvent.action` is a dotted lowercase `<resource>.<verb>`
+  name, such as `tenant.create`. The table below is the full list of action
+  names; an action that is not listed MUST NOT be written, and a new action
+  needs an entry here in the same change. Provisional until the audit writer
+  ships. (lead decision, 2026-11-20, OQ-IR-14)
+
+  | Action                            | Event                                            |
+  | --------------------------------- | ------------------------------------------------ |
+  | `tenant.create`                   | Tenant created                                   |
+  | `instance_security_policy.update` | `InstanceSecurityPolicy` row updated             |
+  | `egress_allowlist.enable`         | `EgressAllowlistEntry` enabled or re-enabled     |
 
 ## 6. Scopes
 
@@ -648,14 +680,32 @@ follow-up. All other items are not resolved by this contract.
   deployment-configuration change applied at restart alone can flip the
   value. Interim reading (lead, 2026-11-20): deployment configuration,
   applied at restart and audited at startup (IR-053).
-- **OQ-IR-14 — Identity of instance-scope audit events.** The T10.1 schema
+- **OQ-IR-14 — Identity of instance-scope audit events.** **Decided** (lead
+  decision, 2026-11-20; provisional until the audit writer ships): the event
+  hash (IR-056), `instance_id` (IR-057), the reserved system actor (IR-058)
+  and the `action` namespace (IR-059). Already decided before that (lead
+  decision, 2026-11-20; `service/migrations/README.md`): the T10.1 schema
   records the startup event that mirrors `single_actor_mode` (IR-053) and the
   sink-change event with `tenant_id` null, the `InstanceSecurityPolicy`
   `instance_id` as `object_id`, and the row's revisions before and after the
-  write (lead decision, 2026-11-20; `service/migrations/README.md`). Not
-  stated: where `instance_id` comes from (generated at bootstrap or set in
-  deployment configuration) and its format; which reserved system actor
-  records events that the service writes on its own at startup, when no
-  administrator acts; and the namespace and syntax of `AuditEvent.action`,
-  whose values must name the entity, since `object_id` alone does not say
-  what kind of object it identifies.
+  write. Original question: where `instance_id` comes from and its format;
+  which reserved system actor records events that the service writes on its
+  own; and the namespace and syntax of `AuditEvent.action`.
+- **OQ-IR-15 — Audit hash details left open by the IR-056 to IR-059
+  decision.**
+  - **Stored form.** IR-056 says the hash is stored as lowercase hex, but the
+    0002 schema stores `prev_hash` and `audit_chain_head.head_hash` as raw
+    `bytea`, and `audit_event` has no column for an event's own hash: it
+    appears only as the next event's `prev_hash` and in the chain head. Not
+    stated: whether hex is the text form (JSONL, API) over raw columns, or
+    whether the columns change.
+  - **Actor form.** IR-058 gives the actor as an object, but
+    `AuditEvent.actor` is a text column. Not stated: how an actor is written
+    in the column and in the envelope.
+  - **Envelope.** Not stated: the exact member names (the `AuditEvent` fields
+    of tasks §3 are the evident candidates); how `timestamp` is serialized
+    (format and precision); whether an absent value is a JSON `null` or an
+    omitted member. `service/migrations/README.md` requires only that absent
+    and present values hash differently.
+  - **Action names.** Not stated: the action names of the startup event that
+    mirrors `single_actor_mode` and of the sink-change event.
