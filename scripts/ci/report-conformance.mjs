@@ -250,16 +250,37 @@ export function readJUnit(text) {
 // ---------------------------------------------------------------------------
 // Test IDs and names (layout §3 "Test names", "Which job produces a test")
 
-// The runner whose JUnit a job's legs upload; every other job runs
-// cargo-nextest.
-export const JOB_RUNNER = { typescript: 'vitest', 'typescript-browser': 'playwright' };
-export const runnerOf = (job) => JOB_RUNNER[job] ?? 'nextest';
+// PROVISIONAL (docs/testing/conformance-layout.md §6 "Still open", item 5):
+// the runner whose JUnit each job's legs upload. A job without an entry has
+// no decided runner (bundle-check has no test source; migration-rehearsal
+// drives Playwright and the CLI as well as nextest), so its artifacts are an
+// input error and a stage with one of its legs cannot pass: never guess
+// nextest.
+export const JOB_RUNNER = {
+  'scenarios-hermetic': 'nextest',
+  'scenarios-pg': 'nextest',
+  'scenarios-envoy-k3s': 'nextest',
+  'scenarios-envoy-k3s-nightly': 'nextest',
+  'deployed-topology-audit': 'nextest',
+  'live-wif-push': 'nextest',
+  'live-wif-negative': 'nextest',
+  'clients-rust': 'nextest',
+  'clients-rust-native': 'nextest',
+  operator: 'nextest',
+  'recovery-offline': 'nextest',
+  typescript: 'vitest',
+  'typescript-browser': 'playwright',
+};
+export const runnerOf = (job) => (Object.hasOwn(JOB_RUNNER, job) ? JOB_RUNNER[job] : null);
+const NO_RUNNER = 'has no decided runner (layout §6 "Still open", item 5)';
 export const jobOf = (leg) => leg.split('/')[0];
 
 // Layout §3 "Which job produces a test": [runner, package, target, jobs];
-// null matches any package or target. A test whose package and target fix
-// several jobs is expected from every one of them that its stage lists.
-// skyoauth-service is absent on purpose: it is not registrable (layout §3).
+// null matches any package or target. PROVISIONAL in two ways (layout §6
+// "Still open"): skyoauth-service is absent because service/ tests are not
+// conformance evidence for now (item 3), and a test whose package and target
+// fix several jobs is expected from every one of them that its stage lists,
+// until a per-target job mapping exists (item 4).
 export const TEST_JOBS = [
   ['nextest', 'skyoauth-scenarios', 'hermetic', ['scenarios-hermetic']],
   ['nextest', 'skyoauth-scenarios', 'pg', ['scenarios-pg']],
@@ -271,7 +292,10 @@ export const TEST_JOBS = [
   ['playwright', null, null, ['typescript-browser']],
 ];
 
-// The registry test ID of a JUnit testcase:
+// The registry test ID of a JUnit testcase. Layout §3 fixes only the nextest
+// form with a target; the lib, vitest and Playwright forms are PROVISIONAL
+// (layout §6 "Still open", item 5) until those runners report conformance
+// tests:
 //   nextest     classname "<package>::<binary>" -> nextest:<package>/<binary>/<name>
 //               classname "<package>" (lib)      -> nextest:<package>/<name>
 //   vitest      classname "<file>"               -> vitest:<file>/<name>
@@ -384,6 +408,8 @@ function readArtifact(dir, run, artifact, catalogue) {
   const attempt = /(?:^|-)attempt-([1-9]\d*)$/.exec(artifact);
   if (!catalogue.has(leg)) return { error: `${rel}: leg file names ${JSON.stringify(leg)}, which is not a layout §1.1 leg string` };
   if (!attempt) return { error: `${rel}: the artifact name does not end in attempt-N, so its run attempt is unknown` };
+  const job = catalogue.get(leg).job;
+  if (runnerOf(job) === null) return { error: `${rel}: job ${job} ${NO_RUNNER}, so its JUnit cannot be mapped to test IDs; not read` };
   const report = { run_id: Number(run), run_attempt: Number(attempt[1]), leg, artifact: rel, cases: new Map() };
   if (!kinds.has('junit.xml')) return { report, note: `${rel}: no junit.xml; leg ${leg} has no result from run ${run} attempt ${report.run_attempt}` };
   let cases;
@@ -393,7 +419,7 @@ function readArtifact(dir, run, artifact, catalogue) {
     if (!(ex instanceof InputError)) throw ex;
     return { error: `${rel}/junit.xml: malformed JUnit: ${ex.message}; its results are not used` };
   }
-  const runner = runnerOf(catalogue.get(leg).job);
+  const runner = runnerOf(job);
   for (const c of cases) {
     const id = testId(runner, c.classname, c.name);
     const prev = report.cases.get(id);
@@ -532,6 +558,7 @@ export function judge({ scenarios, subcases, contracts, reports, waivers = [], c
         else if (!info.jobs.some((j) => jobs.includes(j))) st.problems.push(`${info.id} is produced by none of the jobs of the stage's legs (${jobs.join(', ')})`);
       }
       const valid = infos.filter((x) => x.entry === e.id);
+      for (const job of jobs) if (runnerOf(job) === null) st.problems.push(`job ${job} ${NO_RUNNER}: its results cannot be read, so this stage cannot pass`);
       for (const job of jobs) {
         for (const pol of ['pos', 'neg']) {
           if (!valid.some((x) => x.polarity === pol && x.jobs.includes(job))) st.problems.push(`job ${job} produces no ${pol} test of this stage`);

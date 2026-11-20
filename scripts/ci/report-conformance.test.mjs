@@ -18,9 +18,9 @@ import { fileURLToPath } from 'node:url';
 
 import { parse as parseStrict } from 'smol-toml';
 
-import { DESIGN, LAYOUT, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
+import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { normaliseRegistry } from './registry-fixtures.mjs';
-import { clean, code, InputError, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { clean, code, InputError, JOB_RUNNER, judge, MAX_DEPTH, MAX_LIST, MAX_TEXT, parseXml, readJUnit, renderMarkdown, run, runnerOf, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -360,6 +360,40 @@ describe('legs', () => {
     const r = report(root({ [SCENARIOS]: implement('scenario', 'A24', 'M1a', [A24_POS.id]) }), ['--artifacts', artifacts([{ leg: PG, junit: junit([[A24_POS, 'failed']]) }])]);
     assert.equal(r.code, 1);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'failed');
+  });
+
+  test('a job without a decided runner (migration-rehearsal, bundle-check) is never read as nextest: input error, and its stage cannot pass', () => {
+    const MR_POS = rust('skyoauth-scenarios', 'envoy_k3s', 'migration::a14_pos_switch');
+    const MR_NEG = rust('skyoauth-scenarios', 'envoy_k3s', 'migration::a14_neg_rollback');
+    const r = report(root({ [SCENARIOS]: implement('scenario', 'A14', 'M5', ids([MR_POS, MR_NEG])) }), [
+      '--artifacts',
+      artifacts([
+        { leg: 'migration-rehearsal', junit: allPass([MR_POS, MR_NEG]) },
+        { leg: 'bundle-check', junit: allPass([MR_POS]) },
+      ]),
+    ]);
+    assert.equal(r.code, 2);
+    assert.deepEqual(r.json.input_errors, [
+      '100/junit-bundle-check-attempt-1: job bundle-check has no decided runner (layout §6 "Still open", item 5), so its JUnit cannot be mapped to test IDs; not read',
+      '100/junit-migration-rehearsal-attempt-1: job migration-rehearsal has no decided runner (layout §6 "Still open", item 5), so its JUnit cannot be mapped to test IDs; not read',
+    ]);
+    const st = stage(r.json, 'A14', 'M5');
+    assert.equal(st.status, 'not run');
+    assert.deepEqual(st.problems, ['job migration-rehearsal has no decided runner (layout §6 "Still open", item 5): its results cannot be read, so this stage cannot pass']);
+    assert.deepEqual(st.pairs.map((p) => p.status), ['not run', 'not run']);
+  });
+
+  test('runnerOf: every layout §1.1 job but bundle-check and migration-rehearsal has a runner; nothing defaults to nextest', () => {
+    // Fails when the layout gains a job: decide its runner (or leave it
+    // undecided on purpose) here and in JOB_RUNNER.
+    const { catalogue } = parseEnvironments(repoText(LAYOUT), []);
+    const jobs = [...new Set([...catalogue.values()].map((v) => v.job))].sort();
+    assert.deepEqual(jobs.filter((j) => runnerOf(j) === null), ['bundle-check', 'migration-rehearsal']);
+    assert.deepEqual(Object.keys(JOB_RUNNER).filter((j) => !jobs.includes(j)), []);
+    assert.equal(runnerOf('typescript'), 'vitest');
+    assert.equal(runnerOf('typescript-browser'), 'playwright');
+    assert.equal(runnerOf('scenarios-pg'), 'nextest');
+    for (const j of ['service-nextest', 'constructor', '__proto__', 'toString', '']) assert.equal(runnerOf(j), null, j);
   });
 
   test('vitest and Playwright titles: A40 passes on its five legs', () => {
