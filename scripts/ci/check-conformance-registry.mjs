@@ -365,10 +365,11 @@ function checkFixtures(root, scenarioIds, subcaseIds, report) {
 // repository, so every git run here goes without them.
 export const GIT_LOCATION = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE', 'GIT_PREFIX', 'GIT_CEILING_DIRECTORIES'];
 
-// `git -C root ...args`, run without GIT_LOCATION.
-export function gitIn(root) {
+// `git -C root ...args`, run without GIT_LOCATION; `options` (encoding,
+// maxBuffer) are passed to spawnSync.
+export function gitIn(root, options = {}) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !GIT_LOCATION.includes(k)));
-  return (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', env });
+  return (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', ...options, env });
 }
 
 // Whether origin/main's full history is available in `root`: { onMain(sha) }
@@ -657,7 +658,8 @@ export function checkGatePr(root) {
     err(`--gate-pr: cannot find the merge-base with origin/main: ${hist.reason} (the gate job checks out the PR head with fetch-depth: 0)`);
     return out;
   }
-  const git = (args, encoding = 'utf8') => spawnSync('git', ['-C', root, ...args], { encoding, maxBuffer: 1 << 30 });
+  const gitAs = { utf8: gitIn(root, { maxBuffer: 1 << 30 }), buffer: gitIn(root, { encoding: 'buffer', maxBuffer: 1 << 30 }) };
+  const git = (args, encoding = 'utf8') => gitAs[encoding](...args);
   const ok = (args) => {
     const r = git(args);
     if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);

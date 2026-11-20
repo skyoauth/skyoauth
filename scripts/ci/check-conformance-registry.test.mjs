@@ -1238,7 +1238,7 @@ describe('rule waivers', () => {
   // The git fixtures here with an absolute GIT_DIR exported (as in a git
   // hook): they pass and leave that repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^a waiver for a commit on main passes', '^a commit that is not on main$', '^history unavailable: a shallow clone$', '^an inherited GIT_DIR does not make', '^a gate PR: one commit on the merge-base', '^cli: exit 0 with the merge-base', '^an inherited GIT_DIR and its kin do not change the --gate-pr']);
   });
 
   test('--require-history passes with the history and no waivers', () => {
@@ -1356,6 +1356,37 @@ describe('--gate-pr', () => {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, '');
     assert.equal(r.stdout, `note: ${NOTE_AT(mb)}\ncheck-conformance-registry --gate-pr: OK (adds M1a; judged commit: the merge-base ${mb})\nmerge_base=${mb}\nreporter_milestones=M1a\n`);
+  });
+
+  // A git hook or `git rebase --exec` exports GIT_DIR and its kin; git -C
+  // obeys them, so --gate-pr would judge another repository's HEAD and
+  // merge-base. Every git run of --gate-pr goes without them (gitIn).
+  test('an inherited GIT_DIR and its kin do not change the --gate-pr result', () => {
+    const { root } = mainRoot();
+    gateCommit(root, '["M1a"]');
+    const clean = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', root], { encoding: 'utf8', env: GIT_ENV });
+    assert.equal(clean.status, 0, clean.stderr);
+    // Another repository with an origin/main, whose HEAD is not a gate PR.
+    const other = mainRoot((t) => t).root;
+    const gitDir = join(other, '.git');
+    for (const env of [{ GIT_DIR: gitDir }, { GIT_DIR: gitDir, GIT_WORK_TREE: other }, { GIT_DIR: gitDir, GIT_COMMON_DIR: gitDir, GIT_INDEX_FILE: join(gitDir, 'index'), GIT_OBJECT_DIRECTORY: join(gitDir, 'objects') }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.deepEqual({ status: r.status, stdout: r.stdout, stderr: r.stderr }, { status: clean.status, stdout: clean.stdout, stderr: clean.stderr }, Object.keys(env).join(', '));
+    }
+  });
+
+  test('an inherited GIT_DIR of a passing gate PR does not make a failing --root pass', () => {
+    const good = mainRoot().root;
+    gateCommit(good, '["M1a"]');
+    const bad = mainRoot();
+    commit(bad.root, 'first');
+    const head = gateCommit(bad.root, '["M1a"]');
+    const expected = `${ONE_COMMIT(head, bad.mb, git(bad.root, 'rev-parse', 'HEAD^'))}\ncheck-conformance-registry --gate-pr: 1 error(s)\n`;
+    for (const env of [{}, { GIT_DIR: join(good, '.git') }, { GIT_DIR: join(good, '.git'), GIT_WORK_TREE: good }]) {
+      const r = spawnSync(process.execPath, [SCRIPT, '--gate-pr', '--root', bad.root], { encoding: 'utf8', env: { ...GIT_ENV, ...env } });
+      assert.equal(r.status, 1, `${Object.keys(env)}: ${r.stdout}`);
+      assert.equal(r.stderr, expected);
+    }
   });
 
   test('cli: exit 1 with the errors and a count', () => {

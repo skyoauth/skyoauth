@@ -1036,7 +1036,7 @@ describe('waivers', () => {
   // absolute GIT_DIR exported (as in a git hook): they pass and leave that
   // repository alone.
   test('the git fixtures are immune to an inherited GIT_DIR', () => {
-    assertGitImmune(fileURLToPath(import.meta.url), ['^in a git checkout, --root must be', '^an inherited GIT_DIR does not bind', '^the script runs on the repository']);
+    assertGitImmune(fileURLToPath(import.meta.url), ['^in a git checkout, --root must be', '^an inherited GIT_DIR does not bind', '^the script runs on the repository', '^the gate job \\(layout']);
   });
 
   test('without history a waiver commit is not checked (note), unless --require-history', () => {
