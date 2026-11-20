@@ -1529,6 +1529,42 @@ describe('--gate-pr', () => {
     assert.equal(r.stdout, `note: ${NOT_A_GATE(mb)}\ncheck-conformance-registry --gate-pr: OK (not a gate PR)\nmerge_base=${mb}\nreporter_milestones=\n`);
   });
 
+  // Whether gates_passed grows is read from both sides' scenarios.toml; when
+  // either does not parse, --gate-pr cannot tell, so it fails (it does not
+  // pass the PR as "not a gate PR").
+  const BROKEN = '\nnot toml\n';
+  const NOT_TOML = (text, where) => {
+    let ex;
+    try {
+      parseStrict(text);
+    } catch (e) {
+      ex = e;
+    }
+    assert.ok(ex, `${where}: the text does not parse`);
+    return `${SCENARIOS}:${ex.line}: error [gate-pr] ${SCENARIOS} at ${where} is not valid TOML: ${ex.message.split('\n')[0]}; --gate-pr cannot tell whether gates_passed grows`;
+  };
+  for (const [name, base, headEdit, sides] of [
+    ['at HEAD', allM1a, (t) => setGates('["M1a"]')(t) + BROKEN, ['head']],
+    ['at the merge-base (HEAD fixes it)', (t) => allM1a(t) + BROKEN, (t) => t.replace(BROKEN, ''), ['mb']],
+    ['on both sides', (t) => allM1a(t) + BROKEN, setGates('["M1a"]'), ['mb', 'head']],
+  ]) {
+    test(`scenarios.toml that does not parse ${name}`, () => {
+      const { root, mb } = mainRoot(base);
+      const mbText = read(root, SCENARIOS);
+      edit(root, SCENARIOS, headEdit);
+      const head = commit(root, 'gate');
+      const headText = read(root, SCENARIOS);
+      const res = checkGatePr(root);
+      assert.equal(res.mergeBase, mb);
+      assert.deepEqual(res.errors.map(formatError), sides.map((s) => (s === 'mb' ? NOT_TOML(mbText, `the merge-base ${mb}`) : NOT_TOML(headText, `HEAD ${head}`))));
+      assert.deepEqual([res.added, res.reporter, res.notes], [[], [], []]);
+      const r = cli('--gate-pr', '--root', root);
+      assert.equal(r.status, 1, r.stdout);
+      assert.equal(r.stdout, '');
+      assert.equal(r.stderr, `${res.errors.map(formatError).join('\n')}\ncheck-conformance-registry --gate-pr: ${sides.length} error(s)\n`);
+    });
+  }
+
   test('two commits on top of the merge-base', () => {
     const { root, mb } = mainRoot();
     const first = commit(root, 'first');

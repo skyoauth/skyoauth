@@ -43,9 +43,10 @@
 //   waivers   tests/conformance/waivers.toml (optional): every waiver has all
 //             fields; commit is a 40-hex SHA on origin/main; test is registered
 //             and leg is one of its stages' legs; expires is a TOML date.
-//   gate-pr   (--gate-pr only) The gate PR is one commit on its merge-base
-//             with origin/main and changes only the gates_passed line (no
-//             other path, and not the mode or type of scenarios.toml).
+//   gate-pr   (--gate-pr only) scenarios.toml parses at the merge-base with
+//             origin/main and at HEAD. The gate PR is one commit on that
+//             merge-base and changes only the gates_passed line (no other
+//             path, and not the mode or type of scenarios.toml).
 //
 // The commit check needs the full history and origin/main. Without them it is
 // skipped with a note, unless --require-history is given (CI): that probes
@@ -63,7 +64,9 @@
 // MERGE-BASE, with HEAD's gates_passed, so every stage of each gated
 // milestone must be implemented, with a valid stamp, at the merge-base (rule
 // gates). When gates_passed does not grow, the PR is not a gate PR and
-// nothing is checked. On success stdout ends with `merge_base=<sha>` and
+// nothing is checked. When scenarios.toml at the merge-base or at HEAD is not
+// valid TOML, whether it grows cannot be told, and that is an error (rule
+// gate-pr). On success stdout ends with `merge_base=<sha>` and
 // `reporter_milestones=<added milestones but M0>`, for the gate job's
 // report-conformance.mjs --commit <merge_base> --require-milestone <M> runs.
 // M0 has no stages; ADR ratification and the doc checks gate it, not the
@@ -641,14 +644,12 @@ const GATE_PATHS = [TASKS, DESIGN, LAYOUT, 'tests/conformance'];
 const GATES_LINE = /^gates_passed = \[(?:"[^"\\]*"(?:, "[^"\\]*")*)?\]$/;
 
 // The milestone strings of gates_passed in a scenarios.toml text, or [] when
-// the text has no such list (the registry check reports what is wrong).
+// there is no file or it has no such list (the registry check reports what
+// is wrong). A text that is not valid TOML throws: whether gates_passed grows
+// cannot be told from it, so the caller fails closed.
 function gatesOf(text) {
-  try {
-    const g = text === null ? undefined : parseStrict(text).gates_passed;
-    return Array.isArray(g) ? g.filter((x) => typeof x === 'string') : [];
-  } catch {
-    return [];
-  }
+  const g = text === null ? undefined : parseStrict(text).gates_passed;
+  return Array.isArray(g) ? g.filter((x) => typeof x === 'string') : [];
 }
 
 // Returns { errors, notes, mergeBase, added, reporter }: the merge-base of
@@ -687,8 +688,19 @@ export function checkGatePr(root) {
   };
   const baseText = blob(`${mb}:${SCENARIOS}`)?.toString('utf8') ?? null;
   const headText = blob(`${head}:${SCENARIOS}`)?.toString('utf8') ?? null;
-  const before = gatesOf(baseText);
-  const after = gatesOf(headText);
+  // A side that does not parse could hide a grown gates_passed: fail closed
+  // instead of calling the PR "not a gate PR".
+  const gates = (text, where) => {
+    try {
+      return gatesOf(text);
+    } catch (ex) {
+      err(`${SCENARIOS} at ${where} is not valid TOML: ${String(ex?.message).split('\n')[0]}; --gate-pr cannot tell whether gates_passed grows`, SCENARIOS, ex?.line ?? null);
+      return null;
+    }
+  };
+  const before = gates(baseText, `the merge-base ${mb}`);
+  const after = gates(headText, `HEAD ${head}`);
+  if (before === null || after === null) return out;
   out.added = [...new Set(after.filter((g) => !before.includes(g)))];
   // A PR that only drops milestones (a revocation) is an ordinary reviewed
   // PR, not a gate PR: nothing here applies to it.
