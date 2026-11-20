@@ -127,6 +127,16 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/report-conformance.test.mjs
 
+      # publish-badges.sh against local bare repositories (no network, no
+      # git configuration of the runner), with one round of the concurrent
+      # publishers' stress test; verify-badges-render.sh against a stub curl
+      # (no network).
+      - name: Self-test the badge scripts
+        if: success() || failure()
+        env:
+          PUBLISH_BADGES_STRESS_ROUNDS: 1
+        run: node --test scripts/ci/publish-badges.test.mjs scripts/ci/verify-badges-render.test.mjs
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes
@@ -190,14 +200,23 @@ jobs:
           rustup default stable
           rustup component add --toolchain stable llvm-tools-preview
 
+      # Pinned so the cargo-llvm-cov side of the coverage run is
+      # reproducible. The JSON report itself comes from llvm-cov in the
+      # unpinned stable toolchain installed above, so its format can still
+      # change; what protects the badge is that a report the
+      # `Check for a complete coverage report` step cannot read fails the
+      # publish job (scripts/ci/publish-badges-ci.sh) instead of keeping
+      # the old badge.
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
 
+      # `shell: bash` runs with -o pipefail, so a failing gate is not masked
+      # by `tee`.
       - name: Check coverage threshold
+        shell: bash
         run: |
-          set -o pipefail
           mkdir -p target/coverage
           cargo coverage --locked --json --summary-only --output-path target/coverage/coverage.json 2>&1 \
             | tee target/coverage/coverage.log
@@ -634,13 +653,24 @@ jobs:
             echo complete=true >> "$GITHUB_OUTPUT"
           fi
 
-  # A docs-only push to main publishes no badges but may have changed the
-  # README that embeds them, so check that it still renders the badges
-  # already published for main.
+  # Checks that the README still renders the badges already published for
+  # main: on every pull request (its merge commit), so a change that drops
+  # a badge, or renames one in the README alone, fails before it reaches
+  # main, and on a docs-only push to main, which publishes no badges but
+  # may have changed the README (other pushes to main check after
+  # publishing, in publish-badges). On a pull request (--pull-request),
+  # fetch failures it cannot have caused (transport errors, 429 and 5xx
+  # after retries) and a badge not published yet (404, as for one the
+  # pull request adds or renames) are warnings; the push to main is
+  # strict. Like publish-badges, only in skyoauth/skyoauth: the README
+  # embeds that repository's badges, which a fork does not publish.
   verify-badges:
     name: Verify README badges
     needs: changes
-    if: needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'skyoauth/skyoauth' &&
+      (github.event_name == 'pull_request' ||
+       (needs.changes.outputs.code == 'false' && github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -652,31 +682,44 @@ jobs:
       - name: Verify the README badges render
         env:
           GH_TOKEN: ${{ github.token }}
-        run: sh scripts/ci/verify-badges-render.sh "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME"
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            set -- --pull-request
+          else
+            set --
+          fi
+          sh scripts/ci/verify-badges-render.sh "$@" "$GITHUB_REPOSITORY" main "$GITHUB_SHA"
 
   # Publishes the Rust and TypeScript coverage and test-count badges for the
   # pushed branch to the `badges` branch (path `<branch>/`) as SVG files; the
   # README embeds `main/` through github.com, so the badges also render in a
   # private repository and need no external service. A separate job so that
   # only this step, which runs no project code, holds a write-capable token.
-  # Runs on pushes to main and on manual dispatch (any branch, so the
-  # mechanism can be exercised before merge). scripts/ci/publish-badges.sh
-  # skips figures for a commit that is no longer its branch's tip. Runs on
-  # both passing and failing coverage/test jobs: a threshold-only miss
-  # publishes the below-threshold percentage, and test or build failures
-  # publish red `N failed` / `failing` badges so stale passing figures never
+  # Runs only for `main`: on pushes to it and on a manual dispatch on it (to
+  # republish); a dispatch on any other branch publishes nothing, so no
+  # work branch can write to the badges branch.
+  # scripts/ci/publish-badges.sh skips figures for a commit that is no
+  # longer its branch's tip. Runs on both passing and failing coverage/test
+  # jobs: a threshold-only miss publishes the percentage in red (whatever
+  # its value: the TypeScript gate also covers branches, functions and
+  # statements), and test or build failures publish red `N failed` /
+  # `failing` badges so stale passing figures never
   # remain on a red `main`. A docs-only change skips coverage and tests and
   # publishes nothing; the script keeps publishing for a commit that only
-  # such changes followed.
+  # such changes followed. Only in skyoauth/skyoauth, whose badges the README
+  # embeds: a fork would otherwise create a badges branch of its own, and its
+  # render check would fail on the README's links to this repository.
   publish-badges:
     name: Publish badges
     if: >-
       !cancelled() &&
-      (needs.rust-coverage.result == 'success' || needs.rust-coverage.result == 'failure' ||
-       needs.service-nextest.result == 'success' || needs.service-nextest.result == 'failure' ||
-       needs.typescript-coverage.result == 'success' || needs.typescript-coverage.result == 'failure') &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+      github.repository == 'skyoauth/skyoauth' &&
+      (needs.rust-coverage.result != 'skipped' ||
+       needs.service-nextest.result != 'skipped' ||
+       needs.typescript-coverage.result != 'skipped') &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [rust-coverage, service-nextest, typescript-coverage]
     runs-on: ubuntu-24.04
     permissions:
@@ -695,21 +738,25 @@ jobs:
           path: target/coverage
 
       - name: Download Rust test report
-        if: needs.service-nextest.result == 'success' || needs.service-nextest.result == 'failure'
-        continue-on-error: ${{ needs.service-nextest.result == 'failure' }}
+        if: needs.service-nextest.result != 'skipped'
+        continue-on-error: ${{ needs.service-nextest.result != 'success' }}
         uses: actions/download-artifact@v8
         with:
           pattern: service-nextest-junit-*
           path: target/nextest-artifacts
 
       - name: Download TypeScript coverage report
-        if: needs.typescript-coverage.result == 'success' || needs.typescript-coverage.result == 'failure'
-        continue-on-error: ${{ needs.typescript-coverage.result == 'failure' && needs.typescript-coverage.outputs.report != 'true' }}
+        if: needs.typescript-coverage.result != 'skipped'
+        continue-on-error: ${{ needs.typescript-coverage.result != 'success' && needs.typescript-coverage.outputs.report != 'true' }}
         uses: actions/download-artifact@v8
         with:
           name: typescript-coverage
           path: clients/typescript/coverage
 
+      # scripts/ci/publish-badges-ci.sh turns the needed jobs' results into
+      # publish-badges.sh arguments. A job that succeeded without a usable
+      # report fails this step, after the badges that are known (red ones
+      # included) have been published. A cancelled job counts as failed.
       - name: Publish
         env:
           RUST_COVERAGE_OK: ${{ needs.rust-coverage.outputs.report }}
@@ -721,38 +768,7 @@ jobs:
           GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
           GIT_COMMITTER_NAME: github-actions[bot]
           GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
-        run: |
-          set -- "$GITHUB_REF_NAME" "$GITHUB_SHA"
-          if [ "$RUST_COVERAGE_OK" = true ]; then
-            set -- "$@" --rust-coverage target/coverage/coverage.json
-          elif [ "$RUST_COVERAGE_RESULT" = failure ]; then
-            set -- "$@" --rust-coverage-failed
-          fi
-          if [ "$RUST_TESTS_RESULT" = success ] || [ "$RUST_TESTS_RESULT" = failure ]; then
-            junit=
-            if [ -d target/nextest-artifacts ]; then
-              junit=$(find target/nextest-artifacts -maxdepth 2 -name junit.xml | sort -V | tail -n 1)
-            fi
-            if [ -n "$junit" ]; then
-              set -- "$@" --rust-junit "$junit"
-            elif [ "$RUST_TESTS_RESULT" = success ]; then
-              echo "publish-badges: missing service-nextest junit.xml" >&2
-              exit 1
-            fi
-            if [ "$RUST_TESTS_RESULT" = failure ]; then
-              set -- "$@" --rust-tests-failed
-            fi
-          fi
-          if [ "$TS_OK" = true ]; then
-            set -- "$@" --ts-coverage clients/typescript/coverage/coverage-summary.json \
-              --ts-results clients/typescript/coverage/test-results.json
-          elif [ "$TS_RESULT" = failure ]; then
-            set -- "$@" --ts-coverage-failed --ts-tests-failed
-            if [ -s clients/typescript/coverage/test-results.json ]; then
-              set -- "$@" --ts-results clients/typescript/coverage/test-results.json
-            fi
-          fi
-          sh scripts/ci/publish-badges.sh "$@"
+        run: sh scripts/ci/publish-badges-ci.sh
 
       # Fetches the README as GitHub renders it and checks that it embeds
       # all four badges once each and that GitHub serves the files just
