@@ -211,26 +211,126 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
     .into();
     assert_eq!(foreign_keys, expected);
 
-    // 0003 bounds the IDs in its composite keys, including the 0002 tenant.
-    let id_bounds: Vec<(String, String)> = sqlx::query_as(
-        "SELECT conrelid::regclass::text, pg_get_constraintdef(oid) FROM pg_constraint
-         WHERE contype = 'c' AND conrelid = ANY($1::text[]::regclass[])
-           AND pg_get_constraintdef(oid) LIKE '%octet_length(id)%'
-         ORDER BY 1",
+    // The full set of checks on the 0003 tables, and the bound 0003 adds to
+    // the 0002 tenant. The bounds and character rules are named for the
+    // service's 23514 mapping (README.md); the others keep generated names.
+    let mut checks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname::text, pg_get_constraintdef(oid) FROM pg_constraint
+         WHERE contype = 'c' AND (conrelid = ANY($1::text[]::regclass[])
+           OR conname = 'tenant_id_octet_length_check')",
     )
-    .bind(["tenant", "resource_server", "resource_server_checker"])
+    .bind(&tables)
     .fetch_all(&pool)
     .await
     .unwrap();
-    let bound = "CHECK ((octet_length(id) <= 255))";
-    assert_eq!(
-        id_bounds,
-        [
-            ("resource_server".into(), bound.into()),
-            ("resource_server_checker".into(), bound.into()),
-            ("tenant".into(), bound.into()),
-        ]
-    );
+    checks.sort();
+    let non_empty = |column: &str| format!("CHECK (({column} <> ''::text))");
+    let at_most = |column: &str, bytes: u32| format!("CHECK ((octet_length({column}) <= {bytes}))");
+    let no_space = |column: &str| format!("CHECK (({column} !~ '[[:space:][:cntrl:]]'::text))");
+    let status = "CHECK ((status = ANY (ARRAY['enabled'::text, 'disabled'::text])))".to_string();
+    let revision = "CHECK ((revision >= 1))".to_string();
+    let versions = "CHECK ((jsonb_typeof(constraint_versions) = 'array'::text))".to_string();
+    let mut expected: Vec<(String, String)> = [
+        (
+            "audience_tenant_assignment_constraint_versions_check",
+            versions.clone(),
+        ),
+        ("audience_tenant_assignment_id_check", non_empty("id")),
+        (
+            "audience_tenant_assignment_revision_check",
+            revision.clone(),
+        ),
+        (
+            "audience_tenant_assignment_server_id_octet_length_check",
+            at_most("resource_server_id", 255),
+        ),
+        ("audience_tenant_assignment_status_check", status.clone()),
+        (
+            "audience_tenant_assignment_tenant_id_octet_length_check",
+            at_most("tenant_id", 255),
+        ),
+        (
+            "resource_action_action_name_check",
+            non_empty("action_name"),
+        ),
+        (
+            "resource_action_action_name_no_space_check",
+            no_space("action_name"),
+        ),
+        (
+            "resource_action_action_name_octet_length_check",
+            at_most("action_name", 2048),
+        ),
+        ("resource_action_id_check", non_empty("id")),
+        (
+            "resource_action_resource_server_id_octet_length_check",
+            at_most("resource_server_id", 255),
+        ),
+        ("resource_action_revision_check", revision.clone()),
+        ("resource_action_status_check", status.clone()),
+        ("resource_server_audience_check", non_empty("audience")),
+        (
+            "resource_server_audience_no_space_check",
+            no_space("audience"),
+        ),
+        (
+            "resource_server_audience_octet_length_check",
+            at_most("audience", 2048),
+        ),
+        ("resource_server_constraint_versions_check", versions),
+        ("resource_server_id_check", non_empty("id")),
+        ("resource_server_id_octet_length_check", at_most("id", 255)),
+        ("resource_server_name_check", non_empty("name")),
+        ("resource_server_revision_check", revision.clone()),
+        ("resource_server_status_check", status.clone()),
+        ("resource_server_checker_id_check", non_empty("id")),
+        (
+            "resource_server_checker_id_octet_length_check",
+            at_most("id", 255),
+        ),
+        (
+            "resource_server_checker_public_mtls_identity_check",
+            non_empty("public_mtls_identity"),
+        ),
+        (
+            "resource_server_checker_public_mtls_identity_octet_length_check",
+            at_most("public_mtls_identity", 2048),
+        ),
+        (
+            "resource_server_checker_resource_server_id_octet_length_check",
+            at_most("resource_server_id", 255),
+        ),
+        ("resource_server_checker_revision_check", revision),
+        ("resource_server_checker_status_check", status),
+        (
+            "resource_server_checker_tenant_checker_id_octet_length_check",
+            at_most("checker_id", 255),
+        ),
+        (
+            "resource_server_checker_tenant_server_id_octet_length_check",
+            at_most("resource_server_id", 255),
+        ),
+        (
+            "resource_server_checker_tenant_tenant_id_octet_length_check",
+            at_most("tenant_id", 255),
+        ),
+        ("tenant_id_octet_length_check", at_most("id", 255)),
+    ]
+    .into_iter()
+    .map(|(name, def)| (name.into(), def))
+    .collect();
+    expected.sort();
+    assert_eq!(checks, expected);
+
+    // The service always states whether an action needs a live check.
+    let live_check: (bool, bool) = sqlx::query_as(
+        "SELECT attnotnull, atthasdef FROM pg_attribute
+         WHERE attrelid = 'resource_action'::regclass AND attname = 'live_check_required'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live_check, (true, false));
     db.drop([pool]).await;
 }
 
@@ -286,6 +386,89 @@ async fn ids_in_composite_keys_are_bounded() {
     .await
     .unwrap();
     assert_eq!(lengths, (2048, 2048));
+    db.drop([pool]).await;
+}
+
+/// Checks that `sql` fails with 23514 from the check named `constraint`.
+async fn violates(pool: &PgPool, sql: String, constraint: &str) {
+    let err = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.clone()))
+        .execute(pool)
+        .await
+        .expect_err(&sql);
+    assert_eq!(sqlstate(&err), "23514", "{sql}: {err}");
+    assert_eq!(
+        err.as_database_error().and_then(|e| e.constraint()),
+        Some(constraint),
+        "{sql}: {err}"
+    );
+}
+
+/// SQL for incompressible text: the md5 hex digests of `blocks` consecutive
+/// integers from `first`, 32 bytes each.
+fn md5_hex(first: u32, blocks: u32) -> String {
+    format!(
+        "(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series({first}, {}) i)",
+        first + blocks - 1
+    )
+}
+
+/// Every reference column is bounded too: a CHECK runs before the row enters
+/// any index and the foreign key check runs after it, so an over-long
+/// reference naming a missing row is a check violation, not 54000 (or
+/// 23503). The 255-byte references that name existing rows are accepted in
+/// `ids_in_composite_keys_are_bounded`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn references_naming_missing_rows_are_bounded() {
+    let (db, pool) = seeded().await;
+    let cases = [
+        (
+            "INSERT INTO audience_tenant_assignment VALUES ('ata_2', {v}, 'ten_b', '[]', '[]', '[]', 'enabled')",
+            "audience_tenant_assignment_server_id_octet_length_check",
+        ),
+        (
+            "INSERT INTO audience_tenant_assignment VALUES ('ata_2', 'rs_2', {v}, '[]', '[]', '[]', 'enabled')",
+            "audience_tenant_assignment_tenant_id_octet_length_check",
+        ),
+        (
+            "INSERT INTO resource_server_checker VALUES ('chk_2', {v}, 'sha256:bb', 'enabled')",
+            "resource_server_checker_resource_server_id_octet_length_check",
+        ),
+        (
+            "INSERT INTO resource_server_checker_tenant VALUES ({v}, 'rs_1', 'ten_a')",
+            "resource_server_checker_tenant_checker_id_octet_length_check",
+        ),
+        (
+            "INSERT INTO resource_server_checker_tenant VALUES ('chk_1', {v}, 'ten_b')",
+            "resource_server_checker_tenant_server_id_octet_length_check",
+        ),
+        (
+            "INSERT INTO resource_server_checker_tenant VALUES ('chk_1', 'rs_1', {v})",
+            "resource_server_checker_tenant_tenant_id_octet_length_check",
+        ),
+        (
+            "INSERT INTO resource_action VALUES ('act_2', {v}, 'projects.list', '[]', '[]', '[]', false, 'enabled')",
+            "resource_action_resource_server_id_octet_length_check",
+        ),
+    ];
+    // About 3000 incompressible bytes, and 256 bytes in 128 characters.
+    for value in [md5_hex(1, 94), "repeat('é', 128)".to_string()] {
+        for (sql, constraint) in cases {
+            violates(&pool, sql.replace("{v}", &value), constraint).await;
+        }
+    }
+    // A missing 1000-byte server ID with a 2048-byte incompressible name.
+    violates(
+        &pool,
+        format!(
+            "INSERT INTO resource_action VALUES
+                 ('act_2', left({}, 1000), {}, '[]', '[]', '[]', false, 'enabled')",
+            md5_hex(101, 32),
+            md5_hex(1, 64)
+        ),
+        "resource_action_resource_server_id_octet_length_check",
+    )
+    .await;
     db.drop([pool]).await;
 }
 
@@ -556,6 +739,7 @@ async fn action_name_is_unique_per_resource_server_and_immutable() {
         23503 INSERT INTO resource_action VALUES ('act_3', 'rs_x', 'projects.list', '[]', '[]', '[]', false, 'enabled')
         23514 INSERT INTO resource_action VALUES ('act_3', 'rs_1', '', '[]', '[]', '[]', false, 'enabled')
         23502 INSERT INTO resource_action VALUES ('act_3', 'rs_1', 'projects.list', '[]', '[]', '[]', NULL, 'enabled')
+        23502 INSERT INTO resource_action (id, resource_server_id, action_name, required_scopes, accepted_profiles, required_resource_dimensions, status) VALUES ('act_3', 'rs_1', 'projects.list', '[]', '[]', '[]', 'enabled')
         SK001 INSERT INTO resource_action VALUES ('act_3', 'rs_1', 'projects.list', '[]', '[]', '[]', false, 'enabled', 2)
         SK001 UPDATE resource_action SET action_name = 'projects.list', revision = revision + 1 WHERE id = 'act_1'
         SK001 UPDATE resource_action SET resource_server_id = 'rs_2', revision = revision + 1 WHERE id = 'act_1'

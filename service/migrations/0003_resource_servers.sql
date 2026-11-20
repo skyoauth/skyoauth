@@ -49,11 +49,15 @@ CREATE DOMAIN skyoauth_string_list AS jsonb
 -- index, and, where the value is a name, no whitespace or control character
 -- ([:space:] is ASCII whitespace under "C"; [:cntrl:] is U+0000-U+001F and
 -- U+007F-U+009F in every collation). Other syntax and Unicode normalization
--- stay with the service. An ID that is part of a composite unique key is at
--- most 255 bytes, so the key stays below the btree limit of about 2700 bytes
--- even when the values do not compress: resource_server.id and tenant.id
--- (lead decision, 2026-11-20) and resource_server_checker.id (inferred: it is
--- in two composite keys).
+-- stay with the service. Every ID column, own ID or reference, is at most
+-- 255 bytes: resource_server.id and tenant.id (lead decision, 2026-11-20),
+-- resource_server_checker.id and every reference column (inferred, as a
+-- consequence: a CHECK runs before the row enters any index, but the foreign
+-- key check runs after it, so an unbounded reference naming a missing row
+-- would fail with the btree error 54000). Each composite key then stays below
+-- the btree limit of about 2700 bytes even when the values do not compress,
+-- and an over-long value fails with 23514. These checks are named, so the
+-- service can tell them apart (README.md).
 
 -- A forward-only bound on a 0002 table (lead decision, 2026-11-20): 0002 is
 -- frozen, so 0003 adds it. It is validated against existing rows (no NOT
@@ -66,9 +70,12 @@ ALTER TABLE tenant ADD CONSTRAINT tenant_id_octet_length_check
 -- rules are open (OQ-IR-9), so the database compares it byte-wise.
 CREATE TABLE resource_server (
     id                   text COLLATE "C" PRIMARY KEY CHECK (id <> '')
+        CONSTRAINT resource_server_id_octet_length_check
         CHECK (octet_length(id) <= 255),
     audience             text COLLATE "C" NOT NULL UNIQUE CHECK (audience <> '')
+        CONSTRAINT resource_server_audience_no_space_check
         CHECK (audience !~ '[[:space:][:cntrl:]]')
+        CONSTRAINT resource_server_audience_octet_length_check
         CHECK (octet_length(audience) <= 2048),
     name                 text        NOT NULL CHECK (name <> ''),
     allowed_profiles     skyoauth_profile_list NOT NULL,
@@ -91,10 +98,16 @@ CREATE TABLE resource_server (
 -- tenant rows.
 CREATE TABLE audience_tenant_assignment (
     id                   text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
+    -- The name abbreviates resource_server_id: the full one would exceed the
+    -- 63-byte identifier limit.
     resource_server_id   text COLLATE "C" NOT NULL
+        CONSTRAINT audience_tenant_assignment_server_id_octet_length_check
+        CHECK (octet_length(resource_server_id) <= 255)
         CONSTRAINT audience_tenant_assignment_resource_server_id_fkey
         REFERENCES resource_server (id),
     tenant_id            text COLLATE "C" NOT NULL
+        CONSTRAINT audience_tenant_assignment_tenant_id_octet_length_check
+        CHECK (octet_length(tenant_id) <= 255)
         CONSTRAINT audience_tenant_assignment_tenant_id_fkey REFERENCES tenant (id),
     allowed_profiles     skyoauth_profile_list NOT NULL,
     allowed_scopes       skyoauth_scope_list   NOT NULL,
@@ -112,10 +125,12 @@ CREATE TABLE audience_tenant_assignment (
 -- for another audience (IR-090; including disabled rows is inferred). Its
 -- allowed_tenant_ids are the rows of resource_server_checker_tenant.
 CREATE TABLE resource_server_checker (
-    -- At most 255 bytes (inferred): see the comment on the ID bound above.
     id                    text COLLATE "C" PRIMARY KEY CHECK (id <> '')
+        CONSTRAINT resource_server_checker_id_octet_length_check
         CHECK (octet_length(id) <= 255),
     resource_server_id    text COLLATE "C" NOT NULL
+        CONSTRAINT resource_server_checker_resource_server_id_octet_length_check
+        CHECK (octet_length(resource_server_id) <= 255)
         CONSTRAINT resource_server_checker_resource_server_id_fkey
         REFERENCES resource_server (id),
     -- The public mTLS identity. Its form (for example a key fingerprint or a
@@ -123,6 +138,7 @@ CREATE TABLE resource_server_checker (
     -- bounded; the service canonicalizes it, so that the unique constraint
     -- compares like with like (inferred). It may be rotated (inferred).
     public_mtls_identity  text COLLATE "C" NOT NULL UNIQUE CHECK (public_mtls_identity <> '')
+        CONSTRAINT resource_server_checker_public_mtls_identity_octet_length_check
         CHECK (octet_length(public_mtls_identity) <= 2048),
     status                text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
     revision              bigint      NOT NULL DEFAULT 1 CHECK (revision >= 1),
@@ -140,11 +156,18 @@ CREATE TABLE resource_server_checker (
 -- without editing these rows. A row is added or deleted, never changed; the
 -- set is part of the checker, so the service advances the checker's revision
 -- with it (inferred: no status or revision of its own). The primary key
--- makes checker_id and tenant_id NOT NULL.
+-- makes checker_id and tenant_id NOT NULL. The resource_server_id check name
+-- is abbreviated to fit the 63-byte identifier limit.
 CREATE TABLE resource_server_checker_tenant (
-    checker_id          text COLLATE "C",
-    resource_server_id  text COLLATE "C" NOT NULL,
-    tenant_id           text COLLATE "C",
+    checker_id          text COLLATE "C"
+        CONSTRAINT resource_server_checker_tenant_checker_id_octet_length_check
+        CHECK (octet_length(checker_id) <= 255),
+    resource_server_id  text COLLATE "C" NOT NULL
+        CONSTRAINT resource_server_checker_tenant_server_id_octet_length_check
+        CHECK (octet_length(resource_server_id) <= 255),
+    tenant_id           text COLLATE "C"
+        CONSTRAINT resource_server_checker_tenant_tenant_id_octet_length_check
+        CHECK (octet_length(tenant_id) <= 255),
     PRIMARY KEY (checker_id, tenant_id),
     CONSTRAINT resource_server_checker_tenant_checker_fkey
         FOREIGN KEY (checker_id, resource_server_id)
@@ -161,11 +184,15 @@ CREATE TABLE resource_server_checker_tenant (
 CREATE TABLE resource_action (
     id                            text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
     resource_server_id            text COLLATE "C" NOT NULL
+        CONSTRAINT resource_action_resource_server_id_octet_length_check
+        CHECK (octet_length(resource_server_id) <= 255)
         CONSTRAINT resource_action_resource_server_id_fkey REFERENCES resource_server (id),
     -- The canonical action coordinate the checker sends; no syntax is
     -- specified, so it is a bounded name as above (inferred).
     action_name                   text COLLATE "C" NOT NULL CHECK (action_name <> '')
+        CONSTRAINT resource_action_action_name_no_space_check
         CHECK (action_name !~ '[[:space:][:cntrl:]]')
+        CONSTRAINT resource_action_action_name_octet_length_check
         CHECK (octet_length(action_name) <= 2048),
     required_scopes               skyoauth_scope_list   NOT NULL,
     accepted_profiles             skyoauth_profile_list NOT NULL,

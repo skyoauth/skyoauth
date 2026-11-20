@@ -184,17 +184,20 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
   (NFC or NFD) of these values is a service rule: the database compares
   bytes, so two spellings of one name are two keys.
-- **ID bounds in composite keys.** `resource_server.id` is at most 255
-  bytes, and `0003` also bounds `tenant.id` to 255 bytes with
+- **ID column bounds.** Every ID column of `0003`, own IDs and reference
+  columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
+  are bounded by lead decision (2026-11-20), `tenant.id` with
   `tenant_id_octet_length_check`, a forward-only constraint on the frozen
-  `0002` table (both lead decision, 2026-11-20); `resource_server_checker.id`
-  is bounded the same way (inferred: it is in two composite keys). Every
-  composite key in `0003` is therefore bounded on both sides and stays below
-  the btree limit of about 2700 bytes even for values that do not compress,
-  so an over-long value fails with `23514`, not `54000`:
-  `(resource_server_id, action_name)` at most 255 plus 2048 bytes, the
-  checker's `(id, resource_server_id)` and the child primary key
-  `(checker_id, tenant_id)` at most 255 plus 255, and the assignment's
+  `0002` table; `resource_server_checker.id` and every reference column are
+  bounded the same way (inferred). The reference columns need their own
+  bound: a `CHECK` runs before the row enters any index, but the foreign key
+  check runs after it, so an over-long reference naming a missing row would
+  otherwise fail with the btree error `54000`. With the bounds, an over-long
+  ID value fails with `23514` even when it names a missing row, and every
+  composite key stays below the btree limit of about 2700 bytes even for
+  values that do not compress: `(resource_server_id, action_name)` at most
+  255 plus 2048 bytes, the checker's `(id, resource_server_id)`, the child
+  primary key `(checker_id, tenant_id)` and the assignment's
   `(tenant_id, resource_server_id)` at most 255 plus 255.
 - **Immutable selectors** (`SK001`): the IDs (tasks §3 "IDs/names"), and
   (inferred) the audience, each row's `resource_server_id`, an assignment's
@@ -231,6 +234,32 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   composite foreign keys from later tenant-owned records that name an
   audience (grants, services, clients, origins, human policies; IR-080), so
   they cannot name an audience assigned only to another tenant.
+
+- **Named checks.** The bounds and character rules are named too, so the
+  service can map a `23514` by its constraint name. Two names abbreviate
+  `resource_server_id` to `server_id`, because the full name would exceed
+  the 63-byte identifier limit:
+
+  | Constraint                                                        | Rule                                        |
+  | ----------------------------------------------------------------- | ------------------------------------------- |
+  | `tenant_id_octet_length_check`                                    | `tenant.id` at most 255 bytes               |
+  | `resource_server_id_octet_length_check`                           | `id` at most 255 bytes                      |
+  | `resource_server_audience_no_space_check`                         | `audience` has no whitespace or controls    |
+  | `resource_server_audience_octet_length_check`                     | `audience` at most 2048 bytes               |
+  | `audience_tenant_assignment_server_id_octet_length_check`         | `resource_server_id` at most 255 bytes      |
+  | `audience_tenant_assignment_tenant_id_octet_length_check`         | `tenant_id` at most 255 bytes               |
+  | `resource_server_checker_id_octet_length_check`                   | `id` at most 255 bytes                      |
+  | `resource_server_checker_resource_server_id_octet_length_check`   | `resource_server_id` at most 255 bytes      |
+  | `resource_server_checker_public_mtls_identity_octet_length_check` | `public_mtls_identity` at most 2048 bytes   |
+  | `resource_server_checker_tenant_checker_id_octet_length_check`    | `checker_id` at most 255 bytes              |
+  | `resource_server_checker_tenant_server_id_octet_length_check`     | `resource_server_id` at most 255 bytes      |
+  | `resource_server_checker_tenant_tenant_id_octet_length_check`     | `tenant_id` at most 255 bytes               |
+  | `resource_action_resource_server_id_octet_length_check`           | `resource_server_id` at most 255 bytes      |
+  | `resource_action_action_name_no_space_check`                      | `action_name` has no whitespace or controls |
+  | `resource_action_action_name_octet_length_check`                  | `action_name` at most 2048 bytes            |
+
+  The remaining checks (non-empty values, list domains, `status`,
+  `revision`) keep the names PostgreSQL generates.
 
 - **Lists** are `jsonb` arrays checked through three domains, so each rule
   is written once (a domain `CHECK` is stored as an expression tree and
@@ -348,11 +377,17 @@ Open for all registry tables:
   `TRUNCATE principal`), every `resource_action` row (nothing references
   one), checkers with no tenant rows, assignments no checker tenant row
   references, and resource servers with no assignment, checker or action.
-  `resource_server_checker_tenant` is different: deleting a row is how a
-  checker's tenant set shrinks, so its rows stay deletable and only the
-  checker's revision records the change. ADR-008 item 3 settles hard delete
-  for bindings and grants only; for the other tables it is open, and the
-  admin endpoints of `0003` have no `DELETE` (public-api §7).
+  `TRUNCATE resource_server CASCADE` empties all five `0003` tables: a
+  `TRUNCATE` that includes the referencing tables is never held back by
+  foreign keys. `resource_server_checker_tenant` is different: deleting a
+  row is how a checker's tenant set shrinks, so its rows stay deletable and
+  only the checker's revision records the change. ADR-008 item 3 already
+  decides that "removal of anything referenced or enabled is soft disable
+  only" (OQ-ADR008-2). What stays open is only the hard delete of disabled,
+  unreferenced rows: ADR-008 allows it for a binding, by an audited admin
+  write, when no grant, approval or audit-required record references it,
+  and for a disabled, unreferenced grant; for the other tables it is open,
+  and the admin endpoints of `0003` have no `DELETE` (public-api §7).
 
 Not done in `0002`:
 
