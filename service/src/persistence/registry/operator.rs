@@ -54,13 +54,15 @@
 //! first `revoked_at` and returns the row unchanged (inferred: a repeated
 //! revocation is not an error, and the first time is the fact).
 //!
-//! Disabling an identity is one-way here only: this module has no function
-//! that enables an identity or a credential again, but no database guard
-//! keeps `admin_identity.status` or an unrevoked credential's `status` from
-//! going back to `enabled` (inferred: no source asks for one; public-api
-//! section 7.1 names enrollment and disable only). A role binding is
-//! re-enabled rather than assigned twice (`0005`, inferred there), so
-//! [`update_admin_role_binding`] changes its status both ways.
+//! Only credential revocation is one-way. Re-enabling is a plain status
+//! change throughout the registry (lead ruling, 2026-11-21, provisional):
+//! no database guard keeps `admin_identity.status` or an unrevoked
+//! credential's `status` from going back to `enabled`, and this module adds
+//! none (no migration in this slice), though it has no function that
+//! enables an identity or a credential again (public-api section 7.1 names
+//! enrollment and disable only). A role binding is re-enabled rather than
+//! assigned twice (`0005`, inferred there), so [`update_admin_role_binding`]
+//! changes its status both ways.
 //!
 //! # Reserved actor IDs
 //!

@@ -1907,9 +1907,11 @@ in one statement; revoking a revoked credential keeps the first
 revoked credential (`Invariant`), `admin_credential_immutable` keeps the
 key on its row, and the `0006` delete and truncate guards keep the row, so
 `admin_credential_public_identity_key` refuses the revoked key again
-(`AlreadyExists`, naming only the constraint). Disabling an identity is
-one-way only in the registry, which has no enable function; the database
-does not guard it (inferred). A role binding is re-enabled by an update, as
+(`AlreadyExists`, naming only the constraint). Only credential
+revocation is one-way: re-enabling an identity or an unrevoked credential is
+a plain status change the database does not guard, as elsewhere in the
+registry (lead ruling, 2026-11-21, provisional); the registry has no enable
+function for them. A role binding is re-enabled by an update, as
 `0005` intends. `create_admin_identity` rejects the reserved actor IDs
 `deployment_operator` and every ID beginning with `recovery_key:`
 (`DEPLOYMENT_OPERATOR_ACTOR`, `recovery_key_actor(epoch)`) with

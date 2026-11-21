@@ -194,7 +194,12 @@ endpoints ship):
   requested role counts, held by an enabled operator through an enabled,
   unrevoked credential.
 - **Explicit time.** In the operator registry slice, time is always an
-  explicit `now` argument, never the database's `now()`.
+  explicit `now` argument, never the database's `now()`. The tenant code
+  keeps the database default for `created_at`; this divergence is an
+  inferred convention, with no migration to unify it.
+- **Status changes.** Only credential revocation is one-way. Re-enabling an
+  identity or a credential that is not revoked is a plain status change
+  (lead ruling, 2026-11-21, provisional); no database guard is added for it.
 
 The instance security policy is one `InstanceSecurityPolicy` row per instance
 (`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
