@@ -18,7 +18,7 @@
 //! The overlap is built on the partner CI's source, `src_gen`, with
 //! `generic_production` bindings: the repository-wide binding `bnd_0_repo`
 //! of `wld_b` (`sub` and `repository_id`) and the deployment binding
-//! `bnd_a_deploy` of `wld_a` (the same and `environment`), so evidence of a
+//! `bnd_m2` of `wld_a` (the same and `environment`), so evidence of a
 //! production deployment fits both, and `wld_b`'s sorts first. A
 //! `github_production` binding cannot express a repository-wide binding:
 //! its template requires `ref`, `environment` and `workflow_ref` (ADR-016
@@ -51,13 +51,17 @@
 //!
 //! **Precedence.** Design section 5.7 item 4 says that several eligible
 //! bindings of the same actor are ordered by "stable ID ordering" without
-//! defining it. Ascending byte order of the binding ID, as
-//! `service/src/persistence/registry/selection.rs` builds it, is the lead's
-//! reading (provisional). In the fixture the lowest matching ID,
-//! `bnd_Z_repo`, is the repository-wide binding, and `bnd_a_deploy`, which
-//! names one more predicate, sorts after it: the precedence tested is the
-//! ID order alone, and no claim is made about which binding is "more
-//! specific".
+//! defining it. "Lowest ID wins", in ascending byte order of the binding ID
+//! as `service/src/persistence/registry/selection.rs` builds it, is the
+//! lead's reading (provisional), and it is the only precedence tested.
+//! Specificity is deliberately not tested: the spec says nothing about it.
+//! The two same-actor bindings that the same evidence fits therefore have
+//! neutral names, `bnd_m1` and `bnd_m2`, that differ only in byte order and
+//! say nothing about either policy. The lower ID, `bnd_m1`, holds the less
+//! specific policy (repository-wide) and `bnd_m2` the more specific one
+//! (deployment, one more predicate), so an implementation in which the
+//! most specific binding wins fails the test rather than passing it by
+//! coincidence; no claim is made that it should.
 //!
 //! Not covered here: the matching matrices of the service tests
 //! (`service/tests/registry_selection.rs`: every predicate present and
@@ -170,7 +174,7 @@ async fn assert_is_stored(
 }
 
 /// The evidence of a production deployment of the repository fits the
-/// deployment binding of `wld_a` (`bnd_a_deploy`) and the repository-wide
+/// deployment binding of `wld_a` (`bnd_m2`) and the repository-wide
 /// binding of `wld_b` (`bnd_0_repo`), whose ID sorts first. Each grant gets
 /// its own actor's binding.
 #[tokio::test]
@@ -182,7 +186,7 @@ async fn a50_pos_grant_actors_binding_matches_despite_other_actors_overlap() {
         // The overlap: both bindings fit, on the same source, and the other
         // actor's sorts first.
         let (of_a, of_b) = (
-            stored(&pool, side, "bnd_a_deploy").await,
+            stored(&pool, side, "bnd_m2").await,
             stored(&pool, side, "bnd_0_repo").await,
         );
         assert_eq!(
@@ -214,7 +218,7 @@ async fn a50_pos_grant_actors_binding_matches_despite_other_actors_overlap() {
             &pool,
             side,
             match_binding(&grant_a.eligible_bindings, &evidence),
-            "bnd_a_deploy",
+            "bnd_m2",
             "wld_a",
             &case,
         )
@@ -319,7 +323,7 @@ async fn a50_neg_no_eligible_match() {
     for side in [A, B] {
         let t = side.tenant;
         let selected = select_own(&pool, side, GRANT_A_MATCH, GENERIC).await;
-        assert_eq!(ids(&selected), [side.id("bnd_a_deploy")], "{t}");
+        assert_eq!(ids(&selected), [side.id("bnd_m2")], "{t}");
         // The unchanged evidence matches.
         assert_eq!(
             deployment_evidence_with("pipeline_run", Some("4711")),
@@ -329,7 +333,7 @@ async fn a50_neg_no_eligible_match() {
             &pool,
             side,
             match_binding(&selected.eligible_bindings, &deployment_evidence()),
-            "bnd_a_deploy",
+            "bnd_m2",
             "wld_a",
             t,
         )
@@ -397,7 +401,7 @@ async fn a50_neg_ineligible_bindings_never_match() {
         let grant = registry::get_service_grant(&pool, t, &side.id(GRANT_A_MATCH.id))
             .await
             .unwrap();
-        let own = stored(&pool, side, "bnd_a_deploy").await;
+        let own = stored(&pool, side, "bnd_m2").await;
         for (base, status, listed, source) in [
             ("bnd_0_gen_off", Status::Disabled, true, GENERIC),
             ("bnd_0_gen_free", Status::Enabled, false, GENERIC),
@@ -435,10 +439,10 @@ async fn a50_neg_ineligible_bindings_never_match() {
 }
 
 /// `grt_a_multi` lists two bindings of `wld_a` that the evidence fits:
-/// `bnd_Z_repo` and `bnd_a_deploy` ("bnd_Z" sorts before "bnd_a"
-/// byte-wise). The match is `bnd_Z_repo` alone, with its own stored policy
-/// and current revision, in every order of the input and on every
-/// selection.
+/// `bnd_m1` (repository-wide) and `bnd_m2` (deployment), which differ in
+/// name only by byte order. The match is `bnd_m1`, the lowest ID, alone,
+/// with its own stored policy and current revision, in every order of the
+/// input and on every selection.
 #[tokio::test]
 async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
     let (db, pool) = two_tenants_with_matching().await;
@@ -457,8 +461,8 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
     for side in [A, B] {
         let t = side.tenant;
         let (lowest, higher) = (
-            stored(&pool, side, "bnd_Z_repo").await,
-            stored(&pool, side, "bnd_a_deploy").await,
+            stored(&pool, side, "bnd_m1").await,
+            stored(&pool, side, "bnd_m2").await,
         );
         assert!(lowest.id.as_bytes() < higher.id.as_bytes(), "{t}");
         assert_eq!(
@@ -499,7 +503,7 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
 
         // An update of the other binding moves its revision, not the
         // selected one's; an update of the selected binding moves its own.
-        for (updated, base) in [(&higher, "bnd_a_deploy"), (&lowest, "bnd_Z_repo")] {
+        for (updated, base) in [(&higher, "bnd_m2"), (&lowest, "bnd_m1")] {
             registry::update_principal_binding(
                 &pool,
                 t,
@@ -514,13 +518,13 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
             )
             .await
             .unwrap();
-            let current = stored(&pool, side, "bnd_Z_repo").await;
+            let current = stored(&pool, side, "bnd_m1").await;
             let again = select_own(&pool, side, GRANT_A_MULTI, GENERIC).await;
             assert_eq!(
                 again.eligible_bindings,
                 [
                     eligible(&current),
-                    eligible(&stored(&pool, side, "bnd_a_deploy").await)
+                    eligible(&stored(&pool, side, "bnd_m2").await)
                 ],
                 "{t} after {base}"
             );
@@ -530,11 +534,11 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
                 "{t} after {base}"
             );
         }
-        let current = stored(&pool, side, "bnd_Z_repo").await;
+        let current = stored(&pool, side, "bnd_m1").await;
         assert_eq!(
             (
                 current.revision,
-                stored(&pool, side, "bnd_a_deploy").await.revision
+                stored(&pool, side, "bnd_m2").await.revision
             ),
             (lowest.revision + 1, higher.revision + 1),
             "{t}"

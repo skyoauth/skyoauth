@@ -54,18 +54,21 @@
 //! ([`deployment_policy`]):
 //!
 //! - a second source on that issuer, `src_gen2` ([`SECOND_GENERIC`]);
-//! - bindings of `wld_a`: on `src_gen`, the deployment binding
-//!   `bnd_a_deploy` and the repository-wide `bnd_Z_repo`, both enabled, and
+//! - bindings of `wld_a`: on `src_gen`, the repository-wide `bnd_m1` and
+//!   the deployment binding `bnd_m2`, both enabled, whose neutral names
+//!   differ only in byte order (A50 tests the ID order, not specificity),
+//!   and
 //!   three deployment bindings that sort lowest and are never eligible on
 //!   `src_gen`: `bnd_0_gen_off` (disabled, listed), `bnd_0_gen_free`
 //!   (enabled, listed by no grant) and `bnd_0_gen2` (on `src_gen2`,
 //!   listed, so eligible there and only there);
 //! - bindings of `wld_b` on `src_gen`: the repository-wide `bnd_0_repo` of
-//!   the same repository, which sorts before every binding of `wld_a` there,
+//!   the same repository, which sorts before the eligible bindings of
+//!   `wld_a` there (`bnd_m1`, `bnd_m2`),
 //!   and the repository-wide `bnd_b_other` of another repository;
 //! - three direct grants ([`MATCHING_GRANTS`]): `grt_a_match` of `wld_a`
-//!   (listing `bnd_a_deploy`, `bnd_0_gen_off` and `bnd_0_gen2`),
-//!   `grt_a_multi` of `wld_a` (listing `bnd_Z_repo` and `bnd_a_deploy`) and
+//!   (listing `bnd_m2`, `bnd_0_gen_off` and `bnd_0_gen2`),
+//!   `grt_a_multi` of `wld_a` (listing `bnd_m1` and `bnd_m2`) and
 //!   `grt_b_match` of `wld_b` (listing `bnd_0_repo` and `bnd_b_other`).
 //!
 //! [`deployment_evidence`] fits every one of these bindings but
@@ -522,9 +525,9 @@ pub(super) fn other_repository_evidence() -> Evidence {
 /// `Some(repository)` for a repository-wide policy or `None` for the
 /// deployment policy).
 const MATCHING_BINDINGS: [(&str, &str, &str, Status, Option<&str>); 7] = [
-    ("bnd_a_deploy", "wld_a", "src_gen", Status::Enabled, None),
+    ("bnd_m2", "wld_a", "src_gen", Status::Enabled, None),
     (
-        "bnd_Z_repo",
+        "bnd_m1",
         "wld_a",
         "src_gen",
         Status::Enabled,
@@ -566,14 +569,14 @@ pub(super) const GRANT_A_MATCH: MatchingGrant = MatchingGrant {
     id: "grt_a_match",
     name: "a-match",
     actor: "wld_a",
-    listed: &["bnd_a_deploy", "bnd_0_gen_off", "bnd_0_gen2"],
+    listed: &["bnd_m2", "bnd_0_gen_off", "bnd_0_gen2"],
 };
 /// `grt_a_multi`: two bindings of `wld_a` that the same evidence can fit.
 pub(super) const GRANT_A_MULTI: MatchingGrant = MatchingGrant {
     id: "grt_a_multi",
     name: "a-multi",
     actor: "wld_a",
-    listed: &["bnd_Z_repo", "bnd_a_deploy"],
+    listed: &["bnd_m1", "bnd_m2"],
 };
 /// `grt_b_match`: the two repository-wide bindings of `wld_b`.
 pub(super) const GRANT_B_MATCH: MatchingGrant = MatchingGrant {
