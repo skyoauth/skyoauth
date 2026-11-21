@@ -36,6 +36,7 @@ macro_rules! source_columns {
          stale_revocation_acknowledged, replay_mode, status, revision"
     };
 }
+pub(super) use source_columns;
 
 /// Creates a keyset at revision 1.
 pub async fn create_trust_keyset<'e>(

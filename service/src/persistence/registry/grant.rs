@@ -49,6 +49,7 @@ macro_rules! grant_base_columns {
         )
     };
 }
+pub(super) use grant_base_columns;
 
 /// `allowed_binding_ids` and `resource_server_ids` are derived from the
 /// grant's rows, as for service identities.
@@ -65,6 +66,7 @@ macro_rules! grant_columns {
         )
     };
 }
+pub(super) use grant_columns;
 
 /// Adds the row `$4` to a list set of the `$owner` row `$1` of tenant `$3`
 /// at revision `$2`, advancing the owner's revision in the same statement.

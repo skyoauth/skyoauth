@@ -1831,6 +1831,35 @@ a profile change that drops one included: the template-fit check of
 ADR-016 item 4 is the only stop on that downgrade, and it is an open
 follow-up (see "What 0008 adds", "Not checked").
 
+Grant selection (ADR-015 item 4 steps 1, 3 and 4; design §5.7; T12.3; A25,
+A50): `select_grant(tenant, grant, source, expected mode)` loads, in one
+statement, the enabled grant of that tenant and mode, the enabled source of
+that tenant and the grant's eligible bindings: listed in
+`service_grant_binding`, of the grant's tenant and actor, on that source and
+enabled, sorted by ID byte-wise. It checks the tenant and actor again although
+the `0004` foreign keys guarantee them. The grant and source are enabled at
+selection time and step 5 re-checks their current status later: a disabled
+record and a miss map to the same wire error, and the caller must not call a
+disabled source's discovery, JWKS or TokenReview endpoint before it can deny.
+The dormant impersonation grant is disabled by schema, so the same filter
+covers it. A wrong tenant or mode, an unknown, disabled or other-tenant grant
+or source, and a grant with no eligible binding are all the same
+`SelectionError::NotSelectable`, with no detail (ERR-020). The statement's
+`WHERE EXISTS` gate is required: it keeps a miss from returning, and so from
+decoding, a grant row; the Rust non-empty check is defense in depth. A
+statement failure, or a decode failure of a corrupt row (only possible on a
+hit), is `SelectionError::Store` with its `RegistryError`. No claim is made
+that every miss takes the same time. `match_binding` picks, of the eligible
+bindings whose every predicate the verified `Evidence` carries with exactly
+the same string, the one with the byte-wise lowest ID, with its revision for
+provenance; there is no union and no fallback. Selection does not verify the
+proof (step 2) and does not do step 5: the current status of the records
+(T12.6, T12.7, T14.2), the audience assignment, the ceilings and the policy
+revision snapshot (T12.6), wired into the exchange in M2 (T21.4, T21.5). An ID
+is not proof of the actor. How the exchange gets the tenant (IR-033, API-015:
+from the selected source and grant) is an open design question for the T21
+caller.
+
 Follow-ups for the registry surface:
 
 - Parent-scoped lookups and lists, needed by the admin API (T14.1, T14.2)
