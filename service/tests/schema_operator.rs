@@ -16,6 +16,7 @@ mod common;
 use common::TestDb;
 use skyoauth_service::persistence::{self, PgPool};
 use sqlx::{AssertSqlSafe, Connection, Executor, PgConnection, Postgres};
+use std::time::Duration;
 
 /// Two tenants, the instance policy row and three audit events; a single-use
 /// source in each tenant; two operators with one credential each, both
@@ -720,7 +721,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         ),
         (
             "admin_role_binding_scope_check",
-            "CHECK (((tenant_id IS NULL) = (role = 'security_admin'::text)))".to_string(),
+            "CHECK (((role = 'auditor'::text) OR ((tenant_id IS NULL) = (role = 'security_admin'::text))))".to_string(),
         ),
         ("admin_role_binding_status_check", status.clone()),
         ("admin_role_binding_tenant_id_octet_length_check", at_most("tenant_id", 255)),
@@ -731,7 +732,11 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         ),
         (
             "administrative_operation_approve_kind_check",
-            "CHECK (((approves_operation_id IS NOT NULL) = (kind = 'approve'::text)))".to_string(),
+            "CHECK (((kind <> 'approve'::text) OR (approves_operation_id IS NOT NULL)))".to_string(),
+        ),
+        (
+            "administrative_operation_approves_self_check",
+            "CHECK ((approves_operation_id <> id))".to_string(),
         ),
         (
             "administrative_operation_approves_id_octet_length_check",
@@ -752,10 +757,6 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         (
             "administrative_operation_consumed_before_expiry_check",
             "CHECK ((consumed_at < expires_at))".to_string(),
-        ),
-        (
-            "administrative_operation_consumed_or_revoked_check",
-            "CHECK (((consumed_at IS NULL) OR (revoked_at IS NULL)))".to_string(),
         ),
         (
             "administrative_operation_expected_revision_check",
@@ -786,6 +787,10 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         (
             "administrative_operation_revocation_id_octet_length_check",
             at_most("revocation_operation_id", 255),
+        ),
+        (
+            "administrative_operation_revokes_self_check",
+            "CHECK ((revocation_operation_id <> id))".to_string(),
         ),
         (
             "administrative_operation_tenant_id_octet_length_check",
@@ -826,6 +831,200 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     .collect();
     expected.sort();
     assert_eq!(checks, expected);
+    db.drop([pool]).await;
+}
+
+/// Every key column of the whole schema, not only of 0005, is bounded: each
+/// text or bytea column of a primary key, unique constraint or unique index,
+/// and each column on either side of a foreign key, has a named
+/// <table>_<column>_octet_length_check (255 or 2048 bytes, or 32 to 64 bytes
+/// for a digest; the name may abbreviate the column), or a value-set or
+/// constant check named <table>_<column>_check. The one exception is pinned:
+/// the frozen 0002 bound of egress_allowlist_entry.exact_destination keeps
+/// its generated name. 0005 adds the bounds of the 0002 key columns that had
+/// none.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn every_key_column_of_the_schema_has_a_named_bound() {
+    let db = TestDb::create().await;
+    let pool = db.pool().await;
+    persistence::migrate(&pool).await.unwrap();
+    let keys = r"
+        SELECT i.indrelid AS rel, k.attnum
+        FROM pg_index i JOIN pg_class t ON t.oid = i.indrelid, unnest(i.indkey::int2[]) AS k(attnum)
+        WHERE i.indisunique AND t.relnamespace = to_regnamespace(quote_ident(current_schema()))
+        UNION
+        SELECT c.conrelid, k.attnum FROM pg_constraint c, unnest(c.conkey) AS k(attnum)
+        WHERE c.contype = 'f' AND c.connamespace = to_regnamespace(quote_ident(current_schema()))
+        UNION
+        SELECT c.confrelid, k.attnum FROM pg_constraint c, unnest(c.confkey) AS k(attnum)
+        WHERE c.contype = 'f' AND c.connamespace = to_regnamespace(quote_ident(current_schema()))";
+    let columns = format!(
+        "WITH keys AS ({keys})
+         SELECT k.rel, a.attnum, k.rel::regclass::text AS tbl, a.attname::text AS col
+         FROM keys k JOIN pg_attribute a ON a.attrelid = k.rel AND a.attnum = k.attnum
+         WHERE a.atttypid IN ('text'::regtype, 'bytea'::regtype)"
+    );
+    // The key columns exist in every slice, so the check below is not
+    // vacuous.
+    let tables: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT DISTINCT tbl FROM ({columns}) c ORDER BY tbl USING ~<~"
+    )))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for table in [
+        "admin_identity",
+        "audit_event",
+        "egress_allowlist_entry",
+        "instance_security_policy",
+        "principal",
+        "resource_server",
+        "service_grant",
+        "tenant",
+        "trust_source",
+    ] {
+        assert!(tables.iter().any(|t| t == table), "{table}: {tables:?}");
+    }
+    let unbounded: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(format!(
+        r"SELECT tbl, col FROM ({columns}) k
+          WHERE NOT EXISTS (
+              SELECT FROM pg_constraint c
+              WHERE c.conrelid = k.rel AND c.contype = 'c' AND c.conkey = ARRAY[k.attnum]
+                AND ((c.conname ~ ('^' || k.tbl || '_[a-z_]+_octet_length_check$')
+                      AND (pg_get_constraintdef(c.oid)
+                               ~ ('^CHECK \(\(octet_length\(' || k.col || '\) <= (255|2048)\)\)$')
+                           OR pg_get_constraintdef(c.oid)
+                               ~ ('^CHECK \(\(\(octet_length\(' || k.col || '\) >= 32\) AND \(octet_length\('
+                                  || k.col || '\) <= 64\)\)\)$')))
+                  OR (c.conname = k.tbl || '_' || k.col || '_check'
+                      AND (pg_get_constraintdef(c.oid)
+                               ~ ('^CHECK \(\(' || k.col || ' = ANY \(ARRAY\[''[a-z_]+''::text(, ''[a-z_]+''::text)*\]\)\)\)$')
+                           OR pg_get_constraintdef(c.oid)
+                               ~ ('^CHECK \(\(' || k.col || ' = ''[a-z_]+''::text\)\)$')))
+                  OR (k.tbl = 'egress_allowlist_entry' AND k.col = 'exact_destination'
+                      AND c.conname = 'egress_allowlist_entry_exact_destination_check2'
+                      AND pg_get_constraintdef(c.oid) = 'CHECK ((octet_length(exact_destination) <= 2048))')))
+          ORDER BY tbl USING ~<~, col USING ~<~"
+    )))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(unbounded.is_empty(), "{unbounded:?}");
+    // The bounds 0005 adds to 0002 tables.
+    let added: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT conrelid::regclass::text, conname::text, pg_get_constraintdef(oid) FROM pg_constraint
+         WHERE conname = ANY($1)
+         ORDER BY conname::text USING ~<~",
+    )
+    .bind(
+        [
+            "audit_event_id_octet_length_check",
+            "audit_event_tenant_id_octet_length_check",
+            "egress_allowlist_entry_id_octet_length_check",
+            "instance_security_policy_instance_id_octet_length_check",
+        ]
+        .map(String::from)
+        .to_vec(),
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let bound = |table: &str, name: &str, column: &str| {
+        (
+            table.to_string(),
+            name.to_string(),
+            format!("CHECK ((octet_length({column}) <= 255))"),
+        )
+    };
+    assert_eq!(
+        added,
+        [
+            bound("audit_event", "audit_event_id_octet_length_check", "id"),
+            bound(
+                "audit_event",
+                "audit_event_tenant_id_octet_length_check",
+                "tenant_id"
+            ),
+            bound(
+                "egress_allowlist_entry",
+                "egress_allowlist_entry_id_octet_length_check",
+                "id"
+            ),
+            bound(
+                "instance_security_policy",
+                "instance_security_policy_instance_id_octet_length_check",
+                "instance_id"
+            ),
+        ]
+    );
+    db.drop([pool]).await;
+}
+
+/// The 0002 key columns that 0005 bounds reject an over-long value, 256 or
+/// 3008 incompressible bytes or 256 bytes in 128 characters, with 23514
+/// from their named check, never 54000, also where the value names a
+/// missing row; 255 bytes fit.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn foundation_key_columns_are_bounded_by_0005() {
+    let (db, pool) = seeded().await;
+    let event = |id: &str, tenant: &str| {
+        format!(
+            "INSERT INTO audit_event VALUES ({id}, {tenant}, 4, '\\x03', '2026-11-20Z', 'adm_1',
+                 'administrative_operation.create', 'op', NULL, NULL, 'pending')"
+        )
+    };
+    let egress = |id: &str| {
+        format!(
+            "INSERT INTO egress_allowlist_entry (id, purpose, exact_destination, status)
+             VALUES ({id}, 'jwks', 'https://keys.example:443/', 'enabled')"
+        )
+    };
+    let policy =
+        |id: &str| format!("INSERT INTO instance_security_policy (instance_id) VALUES ({id})");
+    for value in [
+        md5_hex(1, 8),
+        md5_hex(1, 94),
+        "repeat('é', 128)".to_string(),
+    ] {
+        violates(
+            &pool,
+            event(&value, "NULL"),
+            "audit_event_id_octet_length_check",
+        )
+        .await;
+        violates(
+            &pool,
+            event("'evt_4'", &value),
+            "audit_event_tenant_id_octet_length_check",
+        )
+        .await;
+        violates(
+            &pool,
+            egress(&value),
+            "egress_allowlist_entry_id_octet_length_check",
+        )
+        .await;
+        violates(
+            &pool,
+            policy(&value),
+            "instance_security_policy_instance_id_octet_length_check",
+        )
+        .await;
+    }
+    let tenant = md5_id(3);
+    accepts(
+        &pool,
+        &format!(
+            "INSERT INTO tenant VALUES ({tenant}, 'big', 'ns_big', 'enabled'); {}",
+            event(&md5_id(1), &tenant)
+        ),
+    )
+    .await;
+    accepts(&pool, &egress(&md5_id(2))).await;
+    // The policy row is single; a 255-byte instance ID fits an empty
+    // instance (the_largest_keys_fit_their_indexes).
     db.drop([pool]).await;
 }
 
@@ -1124,8 +1323,9 @@ async fn digests_and_keys_are_bounded() {
 
 /// The exact strings are at most 2048 bytes; `kind` and `trust_anchor_ref`
 /// also hold no ASCII whitespace or control character (U+0085 included),
-/// while other Unicode spaces pass. `public_identity` may hold spaces: it
-/// may be a subject DN.
+/// while other Unicode spaces pass. `public_identity` is not checked for
+/// them: it is a canonical public-key identity whose encoding the service
+/// fixes.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn exact_strings_are_bounded_and_names_have_no_whitespace() {
@@ -1335,19 +1535,28 @@ async fn operator_credentials_are_registered_once_and_revoked_for_good() {
     db.drop([pool]).await;
 }
 
-/// security_admin is the instance role; the four tenant roles name a tenant.
+/// security_admin is an instance role and trust_admin, client_admin and
+/// provider_admin are tenant roles; auditor is either (ADR-013 OQ-ADR013-3).
 /// No role implies another, and an operator holds each role in each scope
 /// once.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn role_bindings_scope_each_role_explicitly() {
     let (db, pool) = seeded().await;
+    // An instance auditor (instance audit reads) next to a tenant auditor of
+    // the same operator: two separate assignments.
+    run(
+        &pool,
+        "INSERT INTO admin_role_binding VALUES
+             ('rb_i', 'adm_2', 'auditor', NULL, 'enabled'),
+             ('rb_a', 'adm_2', 'auditor', 'ten_a', 'enabled')",
+    )
+    .await;
     rejects(&pool, r"
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'security_admin', 'ten_a', 'enabled')
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'trust_admin', NULL, 'enabled')
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'client_admin', NULL, 'enabled')
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'provider_admin', NULL, 'enabled')
-        23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'auditor', NULL, 'enabled')
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'tenant_admin', 'ten_a', 'enabled')
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'Trust_admin', 'ten_a', 'enabled')
         23514 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'trust_admin', 'ten_a', 'active')
@@ -1357,6 +1566,8 @@ async fn role_bindings_scope_each_role_explicitly() {
         23505 INSERT INTO admin_role_binding VALUES ('rb_1', 'adm_1', 'auditor', 'ten_a', 'enabled')
         23505 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'security_admin', NULL, 'disabled')
         23505 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_2', 'trust_admin', 'ten_a', 'disabled')
+        23505 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_2', 'auditor', NULL, 'disabled')
+        SK001 UPDATE admin_role_binding SET tenant_id = NULL, revision = revision + 1 WHERE id = 'rb_a'
         SK001 INSERT INTO admin_role_binding VALUES ('rb_x', 'adm_1', 'trust_admin', 'ten_a', 'enabled', 2)
         SK001 UPDATE admin_role_binding SET id = 'rb_9', revision = revision + 1 WHERE id = 'rb_3'
         SK001 UPDATE admin_role_binding SET admin_id = 'adm_1', revision = revision + 1 WHERE id = 'rb_3'
@@ -1374,15 +1585,22 @@ async fn role_bindings_scope_each_role_explicitly() {
              ('rb_4', 'adm_2', 'trust_admin', 'ten_b', 'enabled'),
              ('rb_5', 'adm_2', 'client_admin', 'ten_a', 'enabled'),
              ('rb_6', 'adm_2', 'provider_admin', 'ten_a', 'enabled'),
-             ('rb_7', 'adm_2', 'auditor', 'ten_a', 'enabled'),
+             ('rb_7', 'adm_2', 'auditor', 'ten_b', 'enabled'),
              ('rb_8', 'adm_1', 'trust_admin', 'ten_a', 'enabled');
          UPDATE admin_role_binding SET status = 'disabled', revision = revision + 1 WHERE id = 'rb_3'",
     )
     .await;
     assert_eq!(
         revisions(&pool, "admin_role_binding", "id").await,
-        [1, 1, 2, 1, 1, 1, 1, 1]
+        [1, 1, 2, 1, 1, 1, 1, 1, 1, 1]
     );
+    let instance_auditors: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM admin_role_binding WHERE role = 'auditor' AND tenant_id IS NULL",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(instance_auditors, ["rb_i"]);
     db.drop([pool]).await;
 }
 
@@ -1479,29 +1697,31 @@ async fn administrative_operation_keeps_its_plan_and_references() {
                     ("revocation_operation_id", "'op_x9'"),
                 ]),
             ),
-            // Only an approval names an approved operation, and every
-            // approval names one (IR-054).
-            ("23514", op(&[("approves_operation_id", "'op_1'")])),
+            // Every approval names the operation it approves (IR-054), and
+            // no operation approves or revokes itself.
             ("23514", op(&[("kind", "'approve'")])),
+            (
+                "23514",
+                op(&[("kind", "'approve'"), ("approves_operation_id", "'op_x'")]),
+            ),
+            (
+                "23514",
+                op(&[
+                    ("revoked_at", "'2026-11-20Z'"),
+                    ("revocation_operation_id", "'op_x'"),
+                ]),
+            ),
             // Revocation records both the time and the revoking operation.
             ("23514", op(&[("revoked_at", "'2026-11-20Z'")])),
             ("23514", op(&[("revocation_operation_id", "'op_2'")])),
             // A recovery challenge expires.
             ("23514", op(&[("challenge_hash", "sha256('c')")])),
-            // A consumed operation was not expired, and is not revoked.
+            // A consumed operation was not expired.
             (
                 "23514",
                 op(&[
                     ("expires_at", "'2026-11-20 01:00Z'"),
                     ("consumed_at", "'2026-11-20 01:00Z'"),
-                ]),
-            ),
-            (
-                "23514",
-                op(&[
-                    ("consumed_at", "'2026-11-20Z'"),
-                    ("revoked_at", "'2026-11-20Z'"),
-                    ("revocation_operation_id", "'op_2'"),
                 ]),
             ),
             ("SK001", op(&[("revision", "2")])),
@@ -1527,7 +1747,28 @@ async fn administrative_operation_keeps_its_plan_and_references() {
         SK001 UPDATE administrative_operation SET outcome = 'applied', revision = revision + 2 WHERE id = 'op_3'
         23503 DELETE FROM administrative_operation WHERE id = 'op_1'
         SK001 DELETE FROM audit_event WHERE id = 'evt_1'
+        23514 UPDATE administrative_operation SET revoked_at = '2026-11-20Z', revocation_operation_id = 'op_3', revision = revision + 1 WHERE id = 'op_3'
     "#).await;
+    // Kinds other than approve may name what they approve: a route bundle
+    // approval names its preparation. A consumed operation may also be
+    // revoked; see the next test.
+    accepts(
+        &pool,
+        &op(&[
+            ("kind", "'route_bundle_approval'"),
+            ("approves_operation_id", "'op_3'"),
+        ]),
+    )
+    .await;
+    accepts(
+        &pool,
+        &op(&[
+            ("consumed_at", "'2026-11-20Z'"),
+            ("revoked_at", "'2026-11-20Z'"),
+            ("revocation_operation_id", "'op_2'"),
+        ]),
+    )
+    .await;
     // Operations name tenant and instance scopes alike; outcome and revision
     // change.
     run(
@@ -1542,10 +1783,11 @@ async fn administrative_operation_keeps_its_plan_and_references() {
     db.drop([pool]).await;
 }
 
-/// An operation is consumed or revoked once, and neither is ever undone.
+/// An operation is consumed once and revoked once, and neither is ever
+/// undone; a consumed operation may still be revoked.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn administrative_operation_is_consumed_or_revoked_once() {
+async fn administrative_operation_consumption_and_revocation_are_one_way() {
     let (db, pool) = seeded().await;
     run(
         &pool,
@@ -1564,9 +1806,8 @@ async fn administrative_operation_is_consumed_or_revoked_once() {
         SK001 UPDATE administrative_operation SET revoked_at = NULL, revocation_operation_id = NULL, revision = revision + 1 WHERE id = 'op_3'
         SK001 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revision = revision + 1 WHERE id = 'op_3'
         SK001 UPDATE administrative_operation SET revocation_operation_id = 'op_1', revision = revision + 1 WHERE id = 'op_3'
-        23514 UPDATE administrative_operation SET consumed_at = '2026-11-20 00:40Z', revision = revision + 1 WHERE id = 'op_3'
-        23514 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revocation_operation_id = 'op_2', revision = revision + 1 WHERE id = 'op_1'
         23514 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revision = revision + 1 WHERE id = 'op_2'
+        23514 UPDATE administrative_operation SET consumed_at = '2026-11-20 01:00Z', revision = revision + 1 WHERE id = 'op_3'
         23503 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revocation_operation_id = 'op_x', revision = revision + 1 WHERE id = 'op_2'
     ").await;
     // An operation with no expiry is consumed at any time; the guard lets a
@@ -1576,6 +1817,14 @@ async fn administrative_operation_is_consumed_or_revoked_once() {
         "UPDATE administrative_operation SET consumed_at = '2030-01-01Z', revision = revision + 1 WHERE id = 'op_2';
          UPDATE administrative_operation SET consumed_at = '2030-01-01Z', outcome = 'done',
              revision = revision + 1 WHERE id = 'op_2'",
+    )
+    .await;
+    // A revoked operation may still be consumed before its expiry (the
+    // database does not order the two; the service refuses unbegun use).
+    run(
+        &pool,
+        "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:40Z',
+             revision = revision + 1 WHERE id = 'op_3'",
     )
     .await;
     let rows: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(
@@ -1591,7 +1840,12 @@ async fn administrative_operation_is_consumed_or_revoked_once() {
         [
             ("op_1".into(), consumed("2026-11-20 00:30:00"), None, 2),
             ("op_2".into(), consumed("2030-01-01 00:00:00"), None, 3),
-            ("op_3".into(), None, Some("op_2".into()), 2),
+            (
+                "op_3".into(),
+                consumed("2026-11-20 00:40:00"),
+                Some("op_2".into()),
+                3
+            ),
             ("op_4".into(), consumed("2026-11-20 00:01:00"), None, 2),
         ]
     );
@@ -1663,6 +1917,259 @@ async fn consumed_assertions_are_insert_only_and_scoped_to_their_source() {
     db.drop([pool]).await;
 }
 
+/// security_admin may revoke a route bundle approval after begin has
+/// consumed it (tasks section 3 "Route preparation, approval and recovery"):
+/// both stay recorded, and neither can be undone or changed afterwards.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn consumed_route_bundle_approval_can_still_be_revoked() {
+    let (db, pool) = seeded().await;
+    run(
+        &pool,
+        "INSERT INTO administrative_operation VALUES
+             ('op_rb', 'ten_a', 'adm_1', 'route_bundle_approval', sha256('op_rb'), 1,
+              '{\"abort_until\": \"2026-11-20T02:00:00Z\"}', NULL, '2026-11-20 01:00Z', NULL, NULL, NULL,
+              'op_3', 1, 'pending', 'evt_3'),
+             ('op_rv', 'ten_a', 'adm_1', 'route_bundle_approval_revoke', sha256('op_rv'), 1, '{}',
+              NULL, NULL, NULL, NULL, NULL, NULL, 1, 'applied', 'evt_3');
+         UPDATE administrative_operation SET consumed_at = '2026-11-20 00:10Z', outcome = 'begun',
+             revision = revision + 1 WHERE id = 'op_rb';
+         UPDATE administrative_operation SET revoked_at = '2026-11-20 00:20Z', revocation_operation_id = 'op_rv',
+             outcome = 'revoked', revision = revision + 1 WHERE id = 'op_rb'",
+    )
+    .await;
+    rejects(&pool, r#"
+        SK001 UPDATE administrative_operation SET consumed_at = NULL, revision = revision + 1 WHERE id = 'op_rb'
+        SK001 UPDATE administrative_operation SET revoked_at = NULL, revocation_operation_id = NULL, revision = revision + 1 WHERE id = 'op_rb'
+        SK001 UPDATE administrative_operation SET revocation_operation_id = 'op_2', revision = revision + 1 WHERE id = 'op_rb'
+        SK001 UPDATE administrative_operation SET immutable_plan = '{}', revision = revision + 1 WHERE id = 'op_rb'
+    "#)
+    .await;
+    let row: (bool, bool, String, String, i64) = sqlx::query_as(
+        "SELECT consumed_at = '2026-11-20 00:10Z', revoked_at = '2026-11-20 00:20Z',
+                revocation_operation_id, immutable_plan->>'abort_until', revision
+         FROM administrative_operation WHERE id = 'op_rb'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            true,
+            true,
+            "op_rv".to_string(),
+            "2026-11-20T02:00:00Z".to_string(),
+            3
+        )
+    );
+    db.drop([pool]).await;
+}
+
+/// The backend pid of `conn`.
+async fn backend_pid(conn: &mut PgConnection) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(conn)
+        .await
+        .unwrap()
+}
+
+/// Waits until the backend `blocked` waits for a lock held by `holder`.
+async fn wait_until_blocked(pool: &PgPool, blocked: i32, holder: i32) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(holder)
+                .bind(blocked)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if waiting {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the writer never waited for the other one");
+}
+
+/// Runs `sql`, which must not wait for a lock, so the test fails instead of
+/// hanging.
+async fn run_promptly(conn: &mut PgConnection, sql: &str) {
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        sqlx::raw_sql(AssertSqlSafe(sql.to_string())).execute(conn),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("{sql}: waited for a lock"));
+    if let Err(err) = result {
+        panic!("{sql}: {err}");
+    }
+}
+
+type SqlTask = tokio::task::JoinHandle<(PgConnection, Result<(), sqlx::Error>)>;
+
+/// Runs `sql` in a task, then rolls back whatever transaction is left open.
+fn spawn_sql(mut conn: PgConnection, sql: String) -> SqlTask {
+    tokio::spawn(async move {
+        let result = sqlx::raw_sql(AssertSqlSafe(sql))
+            .execute(&mut conn)
+            .await
+            .map(|_| ());
+        sqlx::raw_sql("ROLLBACK").execute(&mut conn).await.unwrap();
+        (conn, result)
+    })
+}
+
+async fn finished(task: SqlTask) -> Result<(), sqlx::Error> {
+    tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("a writer never finished")
+        .unwrap()
+        .1
+}
+
+/// The outcomes of two writers that wait for each other: exactly one is
+/// chosen as the deadlock victim (40P01) and the other completes.
+async fn assert_one_deadlock_victim(first: SqlTask, second: SqlTask) {
+    let mut codes: Vec<String> = Vec::new();
+    for result in [finished(first).await, finished(second).await] {
+        codes.push(match result {
+            Ok(()) => "ok".to_string(),
+            Err(err) => sqlstate(&err),
+        });
+    }
+    codes.sort();
+    assert_eq!(codes, ["40P01", "ok"]);
+}
+
+/// The audit append of a writer that already holds its row locks: lock the
+/// head, insert the next event and advance the head (0002).
+const APPEND_EVENT: &str = r"SELECT FROM audit_chain_head FOR UPDATE;
+    INSERT INTO audit_event VALUES ('evt_4', NULL, 4, '\x03', '2026-11-20Z', 'adm_2',
+        'administrative_operation.create', 'op_5', NULL, NULL, 'pending');
+    UPDATE audit_chain_head SET sequence = 4, head_hash = '\x04'";
+
+/// Deadlock 1 of the README lock-ordering note: a writer that locks a row
+/// with FOR UPDATE and then waits for the audit head deadlocks with a head
+/// holder that inserts an operation referencing that row, because the
+/// insert's foreign-key check takes KEY SHARE, which conflicts with
+/// FOR UPDATE. With FOR NO KEY UPDATE the insert does not wait.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn for_update_on_a_referenced_row_deadlocks_with_the_audit_head() {
+    let (db, pool) = seeded().await;
+    let approve = format!(
+        "BEGIN; {APPEND_EVENT};
+         INSERT INTO administrative_operation VALUES
+             ('op_5', NULL, 'adm_2', 'approve', sha256('op_5'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL,
+              'op_1', 1, 'applied', 'evt_4')"
+    );
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let mut head = pool.acquire().await.unwrap().detach();
+    let (locker_pid, head_pid) = (backend_pid(&mut locker).await, backend_pid(&mut head).await);
+    run_promptly(
+        &mut locker,
+        "BEGIN; SELECT FROM administrative_operation WHERE id = 'op_1' FOR UPDATE",
+    )
+    .await;
+    let inserter = spawn_sql(head, approve.clone());
+    wait_until_blocked(&pool, head_pid, locker_pid).await;
+    let locker = spawn_sql(
+        locker,
+        "SELECT FROM audit_chain_head FOR UPDATE".to_string(),
+    );
+    assert_one_deadlock_victim(inserter, locker).await;
+
+    // The prescribed lock: the insert's KEY SHARE does not conflict with it.
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let mut head = pool.acquire().await.unwrap().detach();
+    run_promptly(
+        &mut locker,
+        "BEGIN; SELECT FROM administrative_operation WHERE id = 'op_1' FOR NO KEY UPDATE",
+    )
+    .await;
+    run_promptly(&mut head, &format!("{approve}; ROLLBACK")).await;
+    run_promptly(
+        &mut locker,
+        "SELECT FROM audit_chain_head FOR UPDATE; ROLLBACK",
+    )
+    .await;
+    db.drop([pool]).await;
+}
+
+/// Deadlock 2 of the README lock-ordering note: a head holder that updates
+/// a row it did not lock before taking the head (here the revoke UPDATE of
+/// the revoked operation) deadlocks with a writer that locked that row
+/// first and then waits for the head. Locking the revoked row with
+/// FOR NO KEY UPDATE before the head, and updating it after the revoking
+/// operation is inserted, makes the second writer wait without holding the
+/// head.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_row_updated_after_the_audit_head_must_be_locked_first() {
+    let (db, pool) = seeded().await;
+    let revoke = |lock_first: &str| {
+        format!(
+            "BEGIN; {lock_first} {APPEND_EVENT};
+             INSERT INTO administrative_operation VALUES
+                 ('op_5', 'ten_a', 'adm_1', 'route_bundle_approval_revoke', sha256('op_5'), 1, '{{}}', NULL,
+                  NULL, NULL, NULL, NULL, NULL, 1, 'applied', 'evt_4');
+             UPDATE administrative_operation SET revoked_at = '2026-11-20 00:30Z', revocation_operation_id = 'op_5',
+                 revision = revision + 1 WHERE id = 'op_3'"
+        )
+    };
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let mut head = pool.acquire().await.unwrap().detach();
+    let (locker_pid, head_pid) = (backend_pid(&mut locker).await, backend_pid(&mut head).await);
+    run_promptly(
+        &mut locker,
+        "BEGIN; SELECT FROM administrative_operation WHERE id = 'op_3' FOR NO KEY UPDATE",
+    )
+    .await;
+    let revoker = spawn_sql(head, revoke(""));
+    wait_until_blocked(&pool, head_pid, locker_pid).await;
+    let locker = spawn_sql(
+        locker,
+        "SELECT FROM audit_chain_head FOR UPDATE".to_string(),
+    );
+    assert_one_deadlock_victim(revoker, locker).await;
+
+    // The prescribed order: the revoker waits for the row before it holds
+    // the head, so the first writer takes the head and finishes.
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let mut head = pool.acquire().await.unwrap().detach();
+    let (locker_pid, head_pid) = (backend_pid(&mut locker).await, backend_pid(&mut head).await);
+    run_promptly(
+        &mut locker,
+        "BEGIN; SELECT FROM administrative_operation WHERE id = 'op_3' FOR NO KEY UPDATE",
+    )
+    .await;
+    let revoker = spawn_sql(
+        head,
+        format!(
+            "{}; COMMIT",
+            revoke("SELECT FROM administrative_operation WHERE id = 'op_3' FOR NO KEY UPDATE;")
+        ),
+    );
+    wait_until_blocked(&pool, head_pid, locker_pid).await;
+    run_promptly(
+        &mut locker,
+        "SELECT FROM audit_chain_head FOR UPDATE; ROLLBACK",
+    )
+    .await;
+    finished(revoker).await.unwrap();
+    let revoked: Option<String> = sqlx::query_scalar(
+        "SELECT revocation_operation_id FROM administrative_operation WHERE id = 'op_3'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(revoked.as_deref(), Some("op_5"));
+    db.drop([pool]).await;
+}
+
 /// Each rule that ties several columns together fails with its own named
 /// check, so the service can map the 23514.
 #[tokio::test]
@@ -1696,8 +2203,15 @@ async fn multi_column_rules_fail_with_their_names() {
             "administrative_operation_approve_kind_check",
         ),
         (
-            op(&[("approves_operation_id", "'op_1'")]),
-            "administrative_operation_approve_kind_check",
+            op(&[("kind", "'approve'"), ("approves_operation_id", "'op_x'")]),
+            "administrative_operation_approves_self_check",
+        ),
+        (
+            op(&[
+                ("revoked_at", "'2026-11-20Z'"),
+                ("revocation_operation_id", "'op_x'"),
+            ]),
+            "administrative_operation_revokes_self_check",
         ),
         (
             op(&[("revoked_at", "'2026-11-20Z'")]),
@@ -1717,14 +2231,6 @@ async fn multi_column_rules_fail_with_their_names() {
                 ("consumed_at", "'2026-11-20 01:00Z'"),
             ]),
             "administrative_operation_consumed_before_expiry_check",
-        ),
-        (
-            op(&[
-                ("consumed_at", "'2026-11-20Z'"),
-                ("revoked_at", "'2026-11-20Z'"),
-                ("revocation_operation_id", "'op_2'"),
-            ]),
-            "administrative_operation_consumed_or_revoked_check",
         ),
         (
             insert(
@@ -1938,7 +2444,7 @@ async fn operator_guards_hold_under_replica_role() {
         SK001 UPDATE administrative_operation SET outcome = 'x' WHERE id = 'op_3'
         SK001 UPDATE consumed_assertion SET retain_until = '2027-01-01Z'
         23514 UPDATE admin_credential SET status = 'enabled' WHERE id = 'crd_2'
-        23514 UPDATE administrative_operation SET revoked_at = now(), revocation_operation_id = 'op_2', revision = revision + 1 WHERE id = 'op_1'
+        23514 UPDATE administrative_operation SET revoked_at = now(), revision = revision + 1 WHERE id = 'op_1'
     ").await;
     // Foreign keys, unlike the guards, are not enforced in replica mode
     // (migrations/README.md "Limits").

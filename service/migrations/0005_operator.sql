@@ -22,9 +22,11 @@
 -- public-api section 7.1). revision defaults to 1, the only value
 -- skyoauth_check_revision() accepts on insert. Delete and truncate guards
 -- come with the one follow-up migration for all registry tables (README.md
--- "Follow-ups"); until then only foreign keys hold back a DELETE, and
--- nothing holds back a TRUNCATE, of these tables too, the one-time state
--- included (README.md lists what that leaves open).
+-- "Follow-ups"); until then only foreign keys hold back a DELETE of these
+-- tables, the one-time state included, and no trigger holds back a
+-- TRUNCATE: foreign keys refuse only a TRUNCATE that leaves out the
+-- referencing tables, and TRUNCATE ... CASCADE includes them (README.md
+-- lists what that leaves open).
 --
 -- Bounds, as in 0003 and 0004 (lead decision, 2026-11-20): every ID column,
 -- own ID or reference, is at most 255 bytes, and every exact string at most
@@ -39,6 +41,22 @@
 -- least a 256-bit digest, at most a 512-bit one; no source names the
 -- algorithm). The other checks of a single column keep the names PostgreSQL
 -- generates; the rules that tie several columns together are named.
+
+-- 0005 makes audit_event and instance_security_policy foreign-key targets,
+-- and every key column of the schema is bounded (lead decision,
+-- 2026-11-20), so the remaining unbounded ID columns of 0002 get named
+-- 255-byte bounds here, as principal's did in 0004: the key of each foreign
+-- key target, audit_event.tenant_id and the egress entry ID. The frozen 0002
+-- file stays unchanged. The checks validate existing rows; README.md has the
+-- upgrade precondition.
+ALTER TABLE audit_event
+    ADD CONSTRAINT audit_event_id_octet_length_check CHECK (octet_length(id) <= 255),
+    ADD CONSTRAINT audit_event_tenant_id_octet_length_check CHECK (octet_length(tenant_id) <= 255);
+ALTER TABLE instance_security_policy
+    ADD CONSTRAINT instance_security_policy_instance_id_octet_length_check
+    CHECK (octet_length(instance_id) <= 255);
+ALTER TABLE egress_allowlist_entry
+    ADD CONSTRAINT egress_allowlist_entry_id_octet_length_check CHECK (octet_length(id) <= 255);
 
 -- Rejects an UPDATE that changes a named column once it is set: once it is
 -- not NULL and, for a boolean, true. So a timestamp or reference is set
@@ -91,11 +109,14 @@ CREATE TABLE admin_credential (
         CONSTRAINT admin_credential_admin_id_octet_length_check
         CHECK (octet_length(admin_id) <= 255)
         CONSTRAINT admin_credential_admin_id_fkey REFERENCES admin_identity (id),
-    -- The public mTLS identity. As resource_server_checker.public_mtls_identity
-    -- in 0003, its form is not specified (it may be a subject DN, which has
-    -- spaces), so only its length is bounded, and the service canonicalizes
-    -- it. It is registered at most once, revoked credentials included, so a
-    -- revoked key can never be registered again (inferred).
+    -- The canonical public-key identity of the mTLS credential, for example
+    -- the SHA-256 digest of its SubjectPublicKeyInfo, which the service
+    -- computes and canonicalizes. Subject DNs are not stored here: a DN names
+    -- a certificate, not a key. Only its length is bounded, as for
+    -- resource_server_checker.public_mtls_identity in 0003. It is registered
+    -- at most once, revoked credentials included, so a revoked key can never
+    -- be registered again while its row exists (inferred; README.md
+    -- "Follow-ups" has the delete guard that keeps the row).
     public_identity   text COLLATE "C" NOT NULL UNIQUE CHECK (public_identity <> '')
         CONSTRAINT admin_credential_public_identity_octet_length_check
         CHECK (octet_length(public_identity) <= 2048),
@@ -118,12 +139,12 @@ CREATE TABLE admin_credential (
 
 -- AdminRoleBinding: one explicit role assignment (design section 7.2;
 -- T13.2). Roles do not inherit one another (public-api API-120).
--- security_admin is an instance role; trust_admin, client_admin,
--- provider_admin and auditor are tenant roles (identity-registry section
--- 5.2), so tenant_id is NULL exactly for security_admin. ADR-013
--- OQ-ADR013-3 also decides an instance-scoped auditor assignment for
--- instance audit reads; this table does not represent it yet (README.md
--- "Not done in 0005").
+-- security_admin is an instance role and trust_admin, client_admin and
+-- provider_admin are tenant roles (identity-registry section 5.2), so
+-- tenant_id is NULL for security_admin and set for those three. auditor is
+-- a tenant or an instance role: an instance-scoped auditor assignment
+-- (tenant_id NULL) is the only grant of instance audit reads (ADR-013
+-- OQ-ADR013-3).
 CREATE TABLE admin_role_binding (
     id         text COLLATE "C" PRIMARY KEY CHECK (id <> '')
         CONSTRAINT admin_role_binding_id_octet_length_check
@@ -142,7 +163,7 @@ CREATE TABLE admin_role_binding (
     status     text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
     revision   bigint      NOT NULL DEFAULT 1 CHECK (revision >= 1),
     CONSTRAINT admin_role_binding_scope_check
-        CHECK ((tenant_id IS NULL) = (role = 'security_admin')),
+        CHECK (role = 'auditor' OR (tenant_id IS NULL) = (role = 'security_admin')),
     -- One binding per operator, role and tenant, disabled rows included, so
     -- a role is re-enabled rather than assigned twice (inferred). NULLS NOT
     -- DISTINCT makes this hold for security_admin too.
@@ -271,10 +292,17 @@ CREATE TABLE administrative_operation (
         CONSTRAINT administrative_operation_audit_id_octet_length_check
         CHECK (octet_length(audit_id) <= 255)
         CONSTRAINT administrative_operation_audit_id_fkey REFERENCES audit_event (id),
-    -- An approval is an operation of kind approve that names the approved
-    -- operation (IR-054); that only an approval names one is (inferred).
+    -- An approval (kind approve) names the operation it approves (IR-054).
+    -- Other kinds may name one too, for example a route_bundle_approval
+    -- names its preparation (tasks section 3 "Route preparation, approval
+    -- and recovery").
     CONSTRAINT administrative_operation_approve_kind_check
-        CHECK ((approves_operation_id IS NOT NULL) = (kind = 'approve')),
+        CHECK (kind <> 'approve' OR approves_operation_id IS NOT NULL),
+    -- No operation approves or revokes itself (inferred).
+    CONSTRAINT administrative_operation_approves_self_check
+        CHECK (approves_operation_id <> id),
+    CONSTRAINT administrative_operation_revokes_self_check
+        CHECK (revocation_operation_id <> id),
     -- revoked_at and revocation_operation_id are recorded together (design
     -- section 4.2; tasks section 3 "Route preparation, approval and
     -- recovery").
@@ -285,20 +313,21 @@ CREATE TABLE administrative_operation (
         CHECK (challenge_hash IS NULL OR expires_at IS NOT NULL),
     -- An expired operation or challenge is never consumed (LT-107;
     -- public-api OQ-API-13: pending operations are single-use and expire).
+    -- An operation may be both consumed and revoked: security_admin revokes
+    -- a route_bundle_approval after begin has consumed it (tasks section 3
+    -- "Route preparation, approval and recovery"). The set-once guard below
+    -- keeps each of the two one-way.
     CONSTRAINT administrative_operation_consumed_before_expiry_check
-        CHECK (consumed_at < expires_at),
-    -- A consumed operation is not revoked, and a revoked one is not consumed
-    -- (inferred).
-    CONSTRAINT administrative_operation_consumed_or_revoked_check
-        CHECK (consumed_at IS NULL OR revoked_at IS NULL)
+        CHECK (consumed_at < expires_at)
 );
 
 -- ConsumedAssertion: the durable replay record of single-use WIF proofs
 -- (T10.9; ADR-016 items 6 and 7; design section 5.3). The service inserts
--- one row per consumed proof, keyed by a keyed digest of (tenant, source_id,
--- exact_issuer, verified_jti); the primary key makes consumption atomic
--- across replicas and grants: a replay fails with 23505 (or inserts nothing
--- under ON CONFLICT DO NOTHING). Rows are never updated (trigger below);
+-- one row per consumed proof and retained digest-key version, keyed by a
+-- keyed digest of (tenant, source_id, exact_issuer, verified_jti), so replay
+-- detection spans digest-key rotation (README.md); the primary key makes
+-- consumption atomic across replicas and grants: a replay fails with 23505
+-- (or inserts nothing under ON CONFLICT DO NOTHING). Rows are never updated (trigger below);
 -- deleting a row after retain_until is the only intended removal, a service
 -- or job rule until the delete-guard migration (README.md).
 CREATE TABLE consumed_assertion (
