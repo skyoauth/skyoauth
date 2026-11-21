@@ -1,7 +1,8 @@
 //! Operator identities, their mTLS credentials and their role bindings
-//! (`0005`), and the operator authorization lookup [`authorize_operator`]
-//! (design section 7.2; identity-registry section 5.2; ADR-013 items 1
-//! and 2; public-api API-002 and API-120; T13.1, T13.2).
+//! (`0005`), and the operator authorization lookups [`authorize_operator`]
+//! and [`authorize_operator_locked`] (design section 7.2; identity-registry
+//! section 5.2; ADR-013 items 1 and 2; public-api API-002 and API-120;
+//! T13.1, T13.2).
 //!
 //! # Rows
 //!
@@ -54,15 +55,21 @@
 //! first `revoked_at` and returns the row unchanged (inferred: a repeated
 //! revocation is not an error, and the first time is the fact).
 //!
-//! Only credential revocation is one-way. Re-enabling is a plain status
-//! change throughout the registry (lead ruling, 2026-11-21, provisional):
-//! no database guard keeps `admin_identity.status` or an unrevoked
-//! credential's `status` from going back to `enabled`, and this module adds
-//! none (no migration in this slice), though it has no function that
-//! enables an identity or a credential again (public-api section 7.1 names
-//! enrollment and disable only). A role binding is re-enabled rather than
-//! assigned twice (`0005`, inferred there), so [`update_admin_role_binding`]
-//! changes its status both ways.
+//! Only credential revocation is one-way in the database. The registry has
+//! no setter that enables or otherwise updates an identity or a credential,
+//! and no way to disable a credential without revoking it: public-api
+//! section 7.1 names enrollment and disable only, so after it is created an
+//! identity can only be disabled ([`disable_admin_identity`]) and a
+//! credential only revoked ([`revoke_admin_credential`]). The database does
+//! not forbid re-enabling either: no guard keeps `admin_identity.status`, or
+//! the `status` of an unrevoked credential (one created `disabled`), from
+//! going back to `enabled` by other means, and this module adds none (no
+//! migration in this slice). The lead ruling that re-enabling is a plain
+//! status change (2026-11-21; provisional until the maintainer ratifies the
+//! ADRs, T00.8 to T00.17, Gate M0) applies to the tables the registry
+//! updates: a role binding is re-enabled rather than assigned twice
+//! (`0005`, inferred there), so [`update_admin_role_binding`] changes its
+//! status both ways.
 //!
 //! # Reserved actor IDs
 //!
@@ -71,7 +78,8 @@
 //! (design section 7.2; `administrative_operation.actor_id` is no foreign
 //! key for that reason). They are recorded as the actor IDs
 //! [`DEPLOYMENT_OPERATOR_ACTOR`] and [`recovery_key_actor`]`(epoch)`, with
-//! the audit actor type `operator` (provisional lead pick, 2026-11-21;
+//! the audit actor type `operator` (lead pick, 2026-11-21; provisional
+//! until the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0;
 //! identity-registry section 5.2). So that no real operator can act under
 //! those IDs, [`create_admin_identity`] rejects `deployment_operator` and
 //! every ID that begins with `recovery_key:` with
@@ -100,10 +108,11 @@
 //!   no tenant, and [`OperatorScope::Tenant`] a binding of exactly that
 //!   tenant. An instance-scoped `auditor` does not satisfy a tenant request
 //!   and a tenant `auditor` does not satisfy an instance request
-//!   (OQ-ADR013-3; provisional lead pick, 2026-11-21). The schema already
-//!   keeps `security_admin` instance-only and the three tenant roles
-//!   tenant-only (`admin_role_binding_scope_check`), so a request of the
-//!   other scope for them finds nothing.
+//!   (OQ-ADR013-3; lead pick, 2026-11-21; provisional until the maintainer
+//!   ratifies the ADRs, T00.8 to T00.17, Gate M0). The schema already keeps
+//!   `security_admin` instance-only and the three tenant roles tenant-only
+//!   (`admin_role_binding_scope_check`), so a request of the other scope
+//!   for them finds nothing.
 //! - Every miss (an unknown key; a disabled or revoked credential; a
 //!   disabled identity; no binding, or a disabled one, of that role and
 //!   scope) is the same `Ok(None)`: the statement returns no row, and the
@@ -124,23 +133,79 @@
 //! (`trust_anchor_ref`); the caller canonicalizes the presented key into
 //! `public_identity` after the handshake (T13.1). It has no OIDC, email,
 //! group or WIF path: those never grant operator authority (API-002). It
-//! does not decide which role an endpoint needs (T14.1, T14.2), and it does
-//! not lock the rows it read. The T13.3 caller writes the audit event of
-//! the authorized write, in the same transaction, and runs the lookup in
-//! that transaction when the decision must hold until the write commits.
+//! does not decide which role an endpoint needs (T14.1, T14.2). The T13.3
+//! caller writes the audit event of the authorized write in the same
+//! transaction.
+//!
+//! Tenant status is not part of either lookup: an operator bound to a
+//! disabled tenant is still found. ADR-014 item 11 lists what a disabled
+//! tenant denies (issuance, live checks, admission and refresh) and does
+//! not name operator writes; T14 must check the tenant's status where a
+//! write needs it.
+//!
+//! [`authorize_operator`] takes no row locks: its answer is a point in
+//! time. Under `READ COMMITTED` a revocation, a disable or a binding change
+//! can commit between the lookup and the caller's write, also when both run
+//! in one transaction. A decision that must hold until the caller's
+//! transaction commits uses [`authorize_operator_locked`].
+//!
+//! # Locked lookup
+//!
+//! [`authorize_operator_locked`] runs in the caller's transaction (it takes
+//! a [`Transaction`], as the audit append does, so that its statements run
+//! on one connection in one open transaction; inferred). It runs the same
+//! lookup; on a miss it returns `None` and locks nothing. On a hit it locks
+//! the three returned rows by ID, one statement and one row each, in the
+//! `0005` lock order of `service/migrations/README.md`: the
+//! `admin_identity` row, then the `admin_credential` row, then the
+//! `admin_role_binding` row. It then repeats the lookup and returns its
+//! result only if it equals the first one; any difference, a miss
+//! included, is `None` (inferred: a change between the two lookups is
+//! denied rather than followed). The locks are held until the caller's
+//! transaction ends, so a revocation, an identity disable or a binding
+//! update of those rows waits for that commit or rollback, and the
+//! decision holds until the authorized write commits.
+//!
+//! - The lock strength is `FOR SHARE` (inferred: the README prescribes
+//!   `FOR NO KEY UPDATE` for rows a write updates or an operation
+//!   references, and nothing for an authorization check). `FOR SHARE`
+//!   conflicts with the `UPDATE` of a status or `revoked_at`, which takes a
+//!   `FOR NO KEY UPDATE` row lock, and not with another `FOR SHARE` or with
+//!   the `FOR KEY SHARE` of a foreign-key check, so concurrent
+//!   authorizations of one operator do not wait for each other.
+//! - The repeat catches a change committed after the first lookup and
+//!   before a lock was granted: under `READ COMMITTED` the repeat reads the
+//!   rows as committed after the locks. Under `REPEATABLE READ` or
+//!   `SERIALIZABLE`, a lock on a row changed after the transaction's
+//!   snapshot fails with `40001` ([`RegistryError::Retry`]), as for any
+//!   locking writer (README, `0005` lock order).
+//! - No deadlock with the registry's writers: every locker of these rows
+//!   takes them in the same table order, identity, credential, binding, and
+//!   this lookup holds at most one row of each table. A revocation, an
+//!   identity disable and a binding update lock only the one row they
+//!   change, and a writer that follows the README's step 1 locks its rows
+//!   in that same order, so no cycle of waits forms.
+//! - Caveat for the caller: once the lookup holds its locks, the caller's
+//!   own later locks of operator rows come after them, outside the README
+//!   order. A transaction that then updates one of the rows it holds
+//!   `FOR SHARE` (upgrading the lock), or locks another operator's rows,
+//!   can deadlock with a transaction that does the same the other way
+//!   round; PostgreSQL then fails one of them with `40P01`, an `Err` and so
+//!   a deny. T13.3 decides how its writes order these locks.
 //!
 //! # Time
 //!
 //! Time is always an explicit argument here, never the database's `now()`
-//! (provisional lead pick, 2026-11-21): [`NewAdminIdentity::created_at`]
-//! and the `now` of [`revoke_admin_credential`]. Times are written as
+//! (lead pick, 2026-11-21; provisional until the maintainer ratifies the
+//! ADRs, T00.8 to T00.17, Gate M0): [`NewAdminIdentity::created_at`] and
+//! the `now` of [`revoke_admin_credential`]. Times are written as
 //! whole microseconds, truncated toward the past, and a time outside the
 //! `0007` range is [`RegistryError::Other`] before any statement runs, as
 //! everywhere in the registry.
 
 use std::time::SystemTime;
 
-use sqlx::{FromRow, PgExecutor, Row, postgres::PgRow};
+use sqlx::{FromRow, PgExecutor, Postgres, Row, Transaction, postgres::PgRow};
 
 use super::{
     AdminRole, RegistryError, Status, compare_and_set, micros,
@@ -150,12 +215,14 @@ use super::{
 
 /// The actor ID of the deployment operator, who runs bootstrap (design
 /// section 7.2; T13.4). Not an operator identity; reserved, so no
-/// [`AdminIdentity`] can have it (provisional lead pick, 2026-11-21).
+/// [`AdminIdentity`] can have it (lead pick, 2026-11-21; provisional until
+/// the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0).
 pub const DEPLOYMENT_OPERATOR_ACTOR: &str = "deployment_operator";
 
 /// The prefix of the actor ID of an offline recovery key holder, followed by
 /// the key's `recovery_key_epoch` (see [`recovery_key_actor`]). Every ID
-/// that begins with it is reserved (provisional lead pick, 2026-11-21).
+/// that begins with it is reserved (lead pick, 2026-11-21; provisional
+/// until the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0).
 pub const RECOVERY_KEY_ACTOR_PREFIX: &str = "recovery_key:";
 
 /// The actor ID of the holder of the recovery key of `epoch`, as
@@ -373,6 +440,12 @@ const AUTHORIZE_OPERATOR: &str = "SELECT i.id AS admin_id, c.id AS credential_id
        AND b.role = $2 \
        AND (($3::text IS NULL AND b.tenant_id IS NULL) OR b.tenant_id = $3::text)";
 
+/// The row locks of [`authorize_operator_locked`], in the `0005` lock order:
+/// identity, credential, binding, each by its ID.
+const LOCK_IDENTITY: &str = "SELECT FROM admin_identity WHERE id = $1 FOR SHARE";
+const LOCK_CREDENTIAL: &str = "SELECT FROM admin_credential WHERE id = $1 FOR SHARE";
+const LOCK_BINDING: &str = "SELECT FROM admin_role_binding WHERE id = $1 FOR SHARE";
+
 /// The error of [`create_admin_identity`] for a reserved ID.
 fn reserved(id: &str) -> Result<(), RegistryError> {
     if is_reserved_actor_id(id) {
@@ -568,8 +641,10 @@ pub async fn update_admin_role_binding<'e>(
 /// its enabled identity, and that identity's enabled binding of exactly
 /// `request.role` in exactly `request.scope` (see the module
 /// documentation, "Authorization lookup"). Every miss is the same
-/// `Ok(None)`; a store failure is an `Err`, also a deny. Reads no clock and
-/// writes nothing.
+/// `Ok(None)`; a store failure is an `Err`, also a deny. Reads no clock,
+/// writes nothing and takes no row locks: the answer is a point in time. A
+/// decision that must hold until the caller's write commits uses
+/// [`authorize_operator_locked`].
 pub async fn authorize_operator<'e>(
     executor: impl PgExecutor<'e>,
     request: &OperatorRequest<'_>,
@@ -584,6 +659,33 @@ pub async fn authorize_operator<'e>(
         .bind(tenant_id)
         .fetch_optional(executor)
         .await?)
+}
+
+/// [`authorize_operator`] whose decision holds until `transaction` ends: on
+/// a hit, locks the identity, credential and binding rows `FOR SHARE` by ID,
+/// in that order, repeats the lookup and returns the hit only if the repeat
+/// gives the same one; otherwise `None` (see the module documentation,
+/// "Locked lookup"). A miss locks nothing. Reads no clock and writes
+/// nothing.
+pub async fn authorize_operator_locked(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &OperatorRequest<'_>,
+) -> Result<Option<AuthorizedOperator>, RegistryError> {
+    let Some(first) = authorize_operator(&mut **transaction, request).await? else {
+        return Ok(None);
+    };
+    for (lock, id) in [
+        (LOCK_IDENTITY, &first.admin_id),
+        (LOCK_CREDENTIAL, &first.credential_id),
+        (LOCK_BINDING, &first.binding_id),
+    ] {
+        sqlx::query(lock)
+            .bind(id)
+            .execute(&mut **transaction)
+            .await?;
+    }
+    let second = authorize_operator(&mut **transaction, request).await?;
+    Ok(second.filter(|second| *second == first))
 }
 
 #[cfg(test)]
@@ -648,6 +750,17 @@ mod tests {
             "instance_auditor",
         ] {
             assert!(other.parse::<AdminRole>().is_err(), "{other}");
+        }
+    }
+
+    #[test]
+    fn the_locks_are_for_share_by_id() {
+        for (lock, table) in [
+            (LOCK_IDENTITY, "admin_identity"),
+            (LOCK_CREDENTIAL, "admin_credential"),
+            (LOCK_BINDING, "admin_role_binding"),
+        ] {
+            assert_eq!(lock, format!("SELECT FROM {table} WHERE id = $1 FOR SHARE"));
         }
     }
 

@@ -315,9 +315,10 @@ pub use operator::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges, AuthorizedOperator,
     DEPLOYMENT_OPERATOR_ACTOR, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
     OperatorRequest, OperatorScope, RECOVERY_KEY_ACTOR_PREFIX, authorize_operator,
-    create_admin_credential, create_admin_identity, create_admin_role_binding,
-    disable_admin_identity, get_admin_credential, get_admin_identity, get_admin_role_binding,
-    is_reserved_actor_id, recovery_key_actor, revoke_admin_credential, update_admin_role_binding,
+    authorize_operator_locked, create_admin_credential, create_admin_identity,
+    create_admin_role_binding, disable_admin_identity, get_admin_credential, get_admin_identity,
+    get_admin_role_binding, is_reserved_actor_id, recovery_key_actor, revoke_admin_credential,
+    update_admin_role_binding,
 };
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use selection::{Selection, SelectionError, select_grant};

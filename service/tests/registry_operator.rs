@@ -32,10 +32,11 @@ use skyoauth_service::persistence::{
         self, AdminCredential, AdminRole, AdminRoleBinding, AdminRoleBindingChanges,
         AuthorizedOperator, DEPLOYMENT_OPERATOR_ACTOR, InvariantKind, NewAdminCredential,
         NewAdminIdentity, NewAdminRoleBinding, NewTenant, OperatorRequest, OperatorScope,
-        RECOVERY_KEY_ACTOR_PREFIX, RegistryError, Status, authorize_operator, recovery_key_actor,
+        RECOVERY_KEY_ACTOR_PREFIX, RegistryError, Status, authorize_operator,
+        authorize_operator_locked, recovery_key_actor,
     },
 };
-use sqlx::{Connection, postgres::PgPoolOptions};
+use sqlx::{Connection, PgConnection, postgres::PgPoolOptions};
 
 /// A time with sub-microsecond digits, so a write truncates it.
 fn at(micros: u64) -> SystemTime {
@@ -194,21 +195,47 @@ async fn operator(
 const E: Status = Status::Enabled;
 const D: Status = Status::Disabled;
 
+/// The role and scope shapes the schema allows, by the short name `<s>` of
+/// the seeded operator `adm_<s>` that holds each one.
+const SHAPES: [(&str, AdminRole, OperatorScope<'static>); 6] = [
+    ("sec", AdminRole::SecurityAdmin, INSTANCE),
+    ("trust", AdminRole::TrustAdmin, TEN_A),
+    ("client", AdminRole::ClientAdmin, TEN_A),
+    ("prov", AdminRole::ProviderAdmin, TEN_A),
+    ("audt", AdminRole::Auditor, TEN_A),
+    ("audi", AdminRole::Auditor, INSTANCE),
+];
+
+/// The status misses seeded for every shape, by suffix: the operator
+/// `adm_<s>_<suffix>` differs from the hit `adm_<s>` only in the status of
+/// its identity, credential or binding, or in its revoked credential.
+const STATUS_MISSES: [(&str, &str, Status, Status, Status); 4] = [
+    ("off", "disabled identity", D, E, E),
+    ("cdis", "disabled credential", E, D, E),
+    ("bdis", "disabled binding", E, E, D),
+    // Created enabled, then revoked, which also disables it.
+    ("rev", "revoked credential", E, E, E),
+];
+
+fn tenant_of(scope: OperatorScope<'_>) -> Option<&str> {
+    match scope {
+        OperatorScope::Instance => None,
+        OperatorScope::Tenant(tenant_id) => Some(tenant_id),
+    }
+}
+
 /// Tenants `ten_a` and `ten_b` and these operators, each with one
 /// credential `key_<x>` (`crd_adm_<x>`) and one binding (`rb_adm_<x>`),
 /// all enabled unless stated:
 ///
-/// - `adm_sec`: `security_admin` of the instance.
-/// - `adm_trust`, `adm_client`, `adm_prov`: `trust_admin`, `client_admin`
-///   and `provider_admin` of `ten_a`.
-/// - `adm_audt`: `auditor` of `ten_a`; `adm_audi`: `auditor` of the
-///   instance.
-/// - `adm_off`: a disabled identity with an enabled credential and an
-///   enabled `trust_admin` binding of `ten_a`.
-/// - `adm_cdis`: a disabled (not revoked) credential, `trust_admin` of
-///   `ten_a`.
-/// - `adm_rev`: a revoked credential, `trust_admin` of `ten_a`.
-/// - `adm_bdis`: a disabled `trust_admin` binding of `ten_a`.
+/// - For each of [`SHAPES`]: `adm_sec`, `security_admin` of the instance;
+///   `adm_trust`, `adm_client`, `adm_prov`, `trust_admin`, `client_admin`
+///   and `provider_admin` of `ten_a`; `adm_audt`, `auditor` of `ten_a`;
+///   `adm_audi`, `auditor` of the instance.
+/// - For each shape `<s>` and each of [`STATUS_MISSES`], `adm_<s>_off` with
+///   a disabled identity, `adm_<s>_cdis` with a disabled (not revoked)
+///   credential, `adm_<s>_bdis` with a disabled binding and `adm_<s>_rev`
+///   with a revoked credential, each with the role and scope of `adm_<s>`.
 /// - `adm_nobind`: an enabled identity and credential with no binding at
 ///   all, while the other operators hold every role and scope.
 /// - `adm_uni`: `security_admin` of the instance, whose key `kéy_uni` has
@@ -216,81 +243,50 @@ const D: Status = Status::Disabled;
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     tenants(&pool).await;
-    let ten_a = Some("ten_a");
-    for (admin, a, key, k, role, tenant, b) in [
-        (
-            "adm_sec",
+    for (s, role, scope) in SHAPES {
+        let tenant = tenant_of(scope);
+        operator(
+            &pool,
+            &format!("adm_{s}"),
             E,
-            "key_sec",
+            &format!("key_{s}"),
             E,
-            AdminRole::SecurityAdmin,
-            None,
+            role,
+            tenant,
             E,
-        ),
-        (
-            "adm_trust",
-            E,
-            "key_trust",
-            E,
-            AdminRole::TrustAdmin,
-            ten_a,
-            E,
-        ),
-        (
-            "adm_client",
-            E,
-            "key_client",
-            E,
-            AdminRole::ClientAdmin,
-            ten_a,
-            E,
-        ),
-        (
-            "adm_prov",
-            E,
-            "key_prov",
-            E,
-            AdminRole::ProviderAdmin,
-            ten_a,
-            E,
-        ),
-        ("adm_audt", E, "key_audt", E, AdminRole::Auditor, ten_a, E),
-        ("adm_audi", E, "key_audi", E, AdminRole::Auditor, None, E),
-        ("adm_off", D, "key_off", E, AdminRole::TrustAdmin, ten_a, E),
-        (
-            "adm_cdis",
-            E,
-            "key_cdis",
-            D,
-            AdminRole::TrustAdmin,
-            ten_a,
-            E,
-        ),
-        ("adm_rev", E, "key_rev", E, AdminRole::TrustAdmin, ten_a, E),
-        (
-            "adm_bdis",
-            E,
-            "key_bdis",
-            E,
-            AdminRole::TrustAdmin,
-            ten_a,
-            D,
-        ),
-        (
-            "adm_uni",
-            E,
-            "k\u{e9}y_uni",
-            E,
-            AdminRole::SecurityAdmin,
-            None,
-            E,
-        ),
-    ] {
-        operator(&pool, admin, a, key, k, role, tenant, b).await;
+        )
+        .await;
+        for (suffix, _, a, k, b) in STATUS_MISSES {
+            let admin = format!("adm_{s}_{suffix}");
+            operator(
+                &pool,
+                &admin,
+                a,
+                &format!("key_{s}_{suffix}"),
+                k,
+                role,
+                tenant,
+                b,
+            )
+            .await;
+            if suffix == "rev" {
+                registry::revoke_admin_credential(&pool, &format!("crd_{admin}"), at(T0 + 1))
+                    .await
+                    .unwrap();
+            }
+        }
     }
-    registry::revoke_admin_credential(&pool, "crd_adm_rev", at(T0 + 1))
-        .await
-        .unwrap();
+    operator(
+        &pool,
+        "adm_uni",
+        E,
+        "k\u{e9}y_uni",
+        E,
+        AdminRole::SecurityAdmin,
+        None,
+        E,
+    )
+    .await;
     registry::create_admin_identity(&pool, &identity("adm_nobind", E))
         .await
         .unwrap();
@@ -877,6 +873,285 @@ async fn a_revoked_public_identity_is_never_registered_again() {
     db.drop([pool]).await;
 }
 
+/// The number of rows of `admin_identity`, `admin_credential` and
+/// `admin_role_binding`.
+async fn operator_row_counts(pool: &PgPool) -> (i64, i64, i64) {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM admin_identity), \
+         (SELECT count(*) FROM admin_credential), \
+         (SELECT count(*) FROM admin_role_binding)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// How the database refuses a statement that would register a revoked key
+/// again or take it off its row.
+#[derive(Debug, Clone, Copy)]
+enum Refusal {
+    /// `SK001` from a guard trigger.
+    Guard,
+    /// `23505` on this unique constraint.
+    Exists(&'static str),
+    /// `23514` on this check constraint.
+    Check(&'static str),
+    /// No error, and no row written (`ON CONFLICT DO NOTHING`).
+    Nothing,
+}
+
+/// Every statement that could register the revoked key again, or move,
+/// delete or re-enable its row, is refused inside an explicit transaction
+/// that has already written other rows; after the rollback the revoked row
+/// is unchanged, the transaction's other writes left no trace, and the key
+/// is still refused and still authorizes nothing.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn re_registering_a_revoked_key_in_a_transaction_is_refused_and_rolled_back() {
+    const KEY: &str = "admin_credential_public_identity_key";
+    let (db, pool) = migrated().await;
+    tenants(&pool).await;
+    operator(
+        &pool,
+        "adm_1",
+        E,
+        "key_1",
+        E,
+        AdminRole::SecurityAdmin,
+        None,
+        E,
+    )
+    .await;
+    registry::create_admin_identity(&pool, &identity("adm_2", E))
+        .await
+        .unwrap();
+    let revoked = registry::revoke_admin_credential(&pool, "crd_adm_1", at(T0))
+        .await
+        .unwrap();
+    let before = operator_row_counts(&pool).await;
+    assert_eq!(before, (2, 1, 1));
+
+    const INSERT: &str = "INSERT INTO admin_credential \
+         (id, admin_id, public_identity, trust_anchor_ref, status) \
+         VALUES ('crd_new', 'adm_2', 'key_1', 'ca', 'enabled')";
+    let cases: [(&str, &'static str, Refusal); 19] = [
+        // UPDATE: the key and the ID are immutable (admin_credential_immutable),
+        // and so is the owner; revoked_at is set once.
+        (
+            "update public_identity",
+            "UPDATE admin_credential SET public_identity = 'key_9' WHERE id = 'crd_adm_1'",
+            Refusal::Guard,
+        ),
+        (
+            "update id",
+            "UPDATE admin_credential SET id = 'crd_9' WHERE id = 'crd_adm_1'",
+            Refusal::Guard,
+        ),
+        (
+            "update admin_id",
+            "UPDATE admin_credential SET admin_id = 'adm_2' WHERE id = 'crd_adm_1'",
+            Refusal::Guard,
+        ),
+        (
+            "update unrevoke",
+            "UPDATE admin_credential SET revoked_at = NULL, status = 'enabled' \
+             WHERE public_identity = 'key_1'",
+            Refusal::Guard,
+        ),
+        (
+            "update enable",
+            "UPDATE admin_credential SET status = 'enabled' WHERE public_identity = 'key_1'",
+            Refusal::Check("admin_credential_revoked_disabled_check"),
+        ),
+        // DELETE and TRUNCATE (0006): the row stays.
+        (
+            "delete",
+            "DELETE FROM admin_credential WHERE public_identity = 'key_1'",
+            Refusal::Guard,
+        ),
+        (
+            "truncate cascade",
+            "TRUNCATE admin_credential CASCADE",
+            Refusal::Guard,
+        ),
+        (
+            "truncate identity cascade",
+            "TRUNCATE admin_identity CASCADE",
+            Refusal::Guard,
+        ),
+        // A second row with the same key.
+        ("re-insert", INSERT, Refusal::Exists(KEY)),
+        (
+            "re-insert, another trust anchor, disabled",
+            "INSERT INTO admin_credential \
+             (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES ('crd_new', 'adm_1', 'key_1', 'other-ca', 'disabled')",
+            Refusal::Exists(KEY),
+        ),
+        // INSERT … ON CONFLICT DO UPDATE reaches the revoked row's guards.
+        (
+            "upsert owner",
+            "INSERT INTO admin_credential \
+             (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES ('crd_new', 'adm_2', 'key_1', 'ca', 'enabled') \
+             ON CONFLICT (public_identity) DO UPDATE SET admin_id = EXCLUDED.admin_id",
+            Refusal::Guard,
+        ),
+        (
+            "upsert unrevoke",
+            "INSERT INTO admin_credential \
+             (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES ('crd_new', 'adm_1', 'key_1', 'ca', 'enabled') \
+             ON CONFLICT (public_identity) DO UPDATE \
+             SET revoked_at = NULL, status = 'enabled'",
+            Refusal::Guard,
+        ),
+        (
+            "upsert enable",
+            "INSERT INTO admin_credential \
+             (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES ('crd_new', 'adm_1', 'key_1', 'ca', 'enabled') \
+             ON CONFLICT (public_identity) DO UPDATE SET status = EXCLUDED.status",
+            Refusal::Check("admin_credential_revoked_disabled_check"),
+        ),
+        (
+            "upsert do nothing",
+            "INSERT INTO admin_credential \
+             (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES ('crd_new', 'adm_2', 'key_1', 'ca', 'enabled') \
+             ON CONFLICT DO NOTHING",
+            Refusal::Nothing,
+        ),
+        // MERGE (PostgreSQL 15 or later).
+        (
+            "merge update owner",
+            "MERGE INTO admin_credential c \
+             USING (VALUES ('crd_new', 'adm_2', 'key_1')) AS v (id, admin_id, public_identity) \
+             ON c.public_identity = v.public_identity \
+             WHEN MATCHED THEN UPDATE SET admin_id = v.admin_id \
+             WHEN NOT MATCHED THEN INSERT (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES (v.id, v.admin_id, v.public_identity, 'ca', 'enabled')",
+            Refusal::Guard,
+        ),
+        (
+            "merge update enable",
+            "MERGE INTO admin_credential c \
+             USING (VALUES ('key_1')) AS v (public_identity) \
+             ON c.public_identity = v.public_identity \
+             WHEN MATCHED THEN UPDATE SET status = 'enabled'",
+            Refusal::Check("admin_credential_revoked_disabled_check"),
+        ),
+        (
+            "merge delete",
+            "MERGE INTO admin_credential c \
+             USING (VALUES ('key_1')) AS v (public_identity) \
+             ON c.public_identity = v.public_identity \
+             WHEN MATCHED THEN DELETE",
+            Refusal::Guard,
+        ),
+        (
+            "merge insert",
+            "MERGE INTO admin_credential c \
+             USING (VALUES ('crd_new', 'adm_2', 'key_1')) AS v (id, admin_id, public_identity) \
+             ON c.id = v.id \
+             WHEN NOT MATCHED THEN INSERT (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES (v.id, v.admin_id, v.public_identity, 'ca', 'enabled')",
+            Refusal::Exists(KEY),
+        ),
+        (
+            "merge insert disabled",
+            "MERGE INTO admin_credential c \
+             USING (VALUES ('crd_new', 'adm_1', 'key_1')) AS v (id, admin_id, public_identity) \
+             ON false \
+             WHEN NOT MATCHED THEN INSERT (id, admin_id, public_identity, trust_anchor_ref, status) \
+             VALUES (v.id, v.admin_id, v.public_identity, 'ca', 'disabled')",
+            Refusal::Exists(KEY),
+        ),
+    ];
+    for (name, sql, refusal) in cases {
+        let mut tx = pool.begin().await.unwrap();
+        // The surrounding transaction has written rows of its own first.
+        registry::create_admin_identity(&mut *tx, &identity("adm_tx", E))
+            .await
+            .unwrap();
+        registry::create_admin_credential(&mut *tx, &credential("crd_tx", "adm_tx", "key_tx", E))
+            .await
+            .unwrap();
+        registry::create_admin_role_binding(
+            &mut *tx,
+            &binding("rb_tx", "adm_tx", AdminRole::Auditor, None, E),
+        )
+        .await
+        .unwrap();
+        let result = sqlx::raw_sql(sql).execute(&mut *tx).await;
+        match refusal {
+            Refusal::Nothing => {
+                assert_eq!(result.unwrap().rows_affected(), 0, "{name}");
+                // The key is still refused in the same transaction.
+                assert_exists(
+                    registry::create_admin_credential(
+                        &mut *tx,
+                        &credential("crd_new", "adm_tx", "key_1", E),
+                    )
+                    .await,
+                    KEY,
+                );
+            }
+            Refusal::Guard => assert_guard(result.map_err(RegistryError::from)),
+            Refusal::Exists(constraint) => {
+                assert_exists(result.map_err(RegistryError::from), constraint);
+            }
+            Refusal::Check(constraint) => assert_invariant(
+                result.map_err(RegistryError::from),
+                InvariantKind::Check,
+                constraint,
+            ),
+        }
+        // The refusal aborted the transaction: nothing more runs in it.
+        let aborted = sqlx::query("SELECT 1")
+            .execute(&mut *tx)
+            .await
+            .expect_err(name);
+        assert_eq!(
+            aborted
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("25P02"),
+            "{name}"
+        );
+        tx.rollback().await.unwrap();
+
+        // The revoked row is unchanged and the transaction left no trace.
+        assert_eq!(
+            registry::get_admin_credential(&pool, "crd_adm_1")
+                .await
+                .unwrap(),
+            revoked,
+            "{name}"
+        );
+        assert_eq!(operator_row_counts(&pool).await, before, "{name}");
+        assert_not_found(registry::get_admin_identity(&pool, "adm_tx").await);
+        assert_not_found(registry::get_admin_credential(&pool, "crd_tx").await);
+        assert_not_found(registry::get_admin_credential(&pool, "crd_new").await);
+        assert_not_found(registry::get_admin_role_binding(&pool, "rb_tx").await);
+        // The key is still refused and still authorizes nothing.
+        assert_exists(
+            registry::create_admin_credential(&pool, &credential("crd_new", "adm_2", "key_1", E))
+                .await,
+            KEY,
+        );
+        assert_eq!(
+            authorize(&pool, "key_1", AdminRole::SecurityAdmin, INSTANCE)
+                .await
+                .unwrap(),
+            None,
+            "{name}"
+        );
+    }
+    db.drop([pool]).await;
+}
+
 /// Real operators cannot take the IDs that bootstrap and recovery act
 /// under. The check runs before any statement: on a closed pool, where any
 /// statement fails with `PoolClosed`, a reserved ID is still
@@ -1027,22 +1302,8 @@ async fn every_miss_is_the_same_none() {
             AdminRole::SecurityAdmin,
             INSTANCE,
         ),
-        // Disabled identity, disabled credential, revoked credential and
-        // disabled binding, each otherwise a hit.
-        ("disabled identity", "key_off", AdminRole::TrustAdmin, TEN_A),
-        (
-            "disabled credential",
-            "key_cdis",
-            AdminRole::TrustAdmin,
-            TEN_A,
-        ),
-        (
-            "revoked credential",
-            "key_rev",
-            AdminRole::TrustAdmin,
-            TEN_A,
-        ),
-        ("disabled binding", "key_bdis", AdminRole::TrustAdmin, TEN_A),
+        // A disabled identity, disabled credential, disabled binding and
+        // revoked credential of every shape are added below.
         // An operator with a credential and no binding, while other
         // operators hold every role and scope.
         (
@@ -1201,31 +1462,116 @@ async fn every_miss_is_the_same_none() {
         // A disabled or revoked key with the wrong scope too.
         (
             "disabled identity, instance",
-            "key_off",
+            "key_trust_off",
             AdminRole::TrustAdmin,
             INSTANCE,
         ),
         (
             "revoked credential, wrong role",
-            "key_rev",
+            "key_trust_rev",
             AdminRole::Auditor,
             TEN_A,
         ),
     ];
-    for (name, key, role, scope) in misses {
-        let result = authorize(&pool, key, role, scope).await;
-        assert!(matches!(result, Ok(None)), "{name}: {result:?}");
-        assert_eq!(format!("{result:?}"), "Ok(None)", "{name}");
-    }
+    // A disabled identity, a disabled credential, a disabled binding and a
+    // revoked credential, for every role and scope shape, each otherwise
+    // the shape's hit.
+    let status_misses: Vec<(String, String, AdminRole, OperatorScope<'_>)> = SHAPES
+        .iter()
+        .flat_map(|&(s, role, scope)| {
+            STATUS_MISSES.iter().map(move |&(suffix, what, ..)| {
+                (
+                    format!("{what}, {s}"),
+                    format!("key_{s}_{suffix}"),
+                    role,
+                    scope,
+                )
+            })
+        })
+        .collect();
+    assert_eq!(status_misses.len(), 24);
+    let misses: Vec<(&str, &str, AdminRole, OperatorScope<'_>)> = misses
+        .into_iter()
+        .chain(
+            status_misses
+                .iter()
+                .map(|(name, key, role, scope)| (&name[..], &key[..], *role, *scope)),
+        )
+        .collect();
+
+    let mut conn = pool.acquire().await.unwrap();
+    assert_every_miss_is_none(&mut conn, &misses).await;
     // Every miss above would be a hit if it named the right key, role and
     // scope; the seed's hits still hold.
-    assert!(
-        authorize(&pool, "key_trust", AdminRole::TrustAdmin, TEN_A)
+    assert_every_shape_hits(&mut conn).await;
+
+    // `revoked_at IS NULL` is checked on its own for every shape (defence
+    // in depth): with `admin_credential_revoked_disabled_check` dropped and
+    // every revoked credential set back to `enabled`, in a transaction
+    // that is rolled back, every miss is still the same `Ok(None)`.
+    let mut tx = conn.begin().await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE admin_credential DROP CONSTRAINT admin_credential_revoked_disabled_check",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let reenabled =
+        sqlx::query("UPDATE admin_credential SET status = 'enabled' WHERE revoked_at IS NOT NULL")
+            .execute(&mut *tx)
             .await
-            .unwrap()
-            .is_some()
-    );
+            .unwrap();
+    assert_eq!(reenabled.rows_affected(), 6);
+    assert_every_miss_is_none(&mut tx, &misses).await;
+    assert_every_shape_hits(&mut tx).await;
+    tx.rollback().await.unwrap();
+    // The rollback restored the check and the revoked credentials' status.
+    let (checks, enabled_revoked): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM pg_constraint \
+                 WHERE conname = 'admin_credential_revoked_disabled_check'), \
+                (SELECT count(*) FROM admin_credential \
+                 WHERE revoked_at IS NOT NULL AND status = 'enabled')",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!((checks, enabled_revoked), (1, 0));
+    drop(conn);
     db.drop([pool]).await;
+}
+
+/// Asserts that each of `misses` (name, key, role, scope) is `Ok(None)`,
+/// printed the same way, from [`authorize_operator`] and from
+/// [`authorize_operator_locked`] (in a transaction, or a savepoint when
+/// `conn` is in one, that is rolled back).
+async fn assert_every_miss_is_none(
+    conn: &mut PgConnection,
+    misses: &[(&str, &str, AdminRole, OperatorScope<'_>)],
+) {
+    let mut tx = conn.begin().await.unwrap();
+    for &(name, key, role, scope) in misses {
+        let request = request(key, role, scope);
+        let unlocked = authorize_operator(&mut *tx, &request).await;
+        let locked = authorize_operator_locked(&mut tx, &request).await;
+        for result in [unlocked, locked] {
+            assert!(matches!(result, Ok(None)), "{name}: {result:?}");
+            assert_eq!(format!("{result:?}"), "Ok(None)", "{name}");
+        }
+    }
+    tx.rollback().await.unwrap();
+}
+
+/// Asserts that the hit of each of [`SHAPES`] holds.
+async fn assert_every_shape_hits(conn: &mut PgConnection) {
+    for (s, role, scope) in SHAPES {
+        assert_eq!(
+            authorize_operator(&mut *conn, &request(&format!("key_{s}"), role, scope))
+                .await
+                .unwrap(),
+            Some(hit(&format!("adm_{s}"), role)),
+            "{s}"
+        );
+    }
 }
 
 /// A store failure is an `Err`, not a miss; a NUL character is one, as
@@ -1275,9 +1621,12 @@ async fn the_lookup_follows_the_rows_and_writes_nothing() {
         expected
     );
     assert_eq!(
-        authorize_operator(&mut *tx, &request("key_off", AdminRole::TrustAdmin, TEN_A))
-            .await
-            .unwrap(),
+        authorize_operator(
+            &mut *tx,
+            &request("key_trust_off", AdminRole::TrustAdmin, TEN_A)
+        )
+        .await
+        .unwrap(),
         None
     );
     tx.commit().await.unwrap();
@@ -1432,5 +1781,410 @@ async fn a_revoked_credential_is_refused_even_without_the_status_check() {
             .unwrap(),
         Some(hit("adm_2", AdminRole::TrustAdmin))
     );
+    db.drop([pool]).await;
+}
+
+async fn backend_pid(connection: &mut PgConnection) -> i32 {
+    sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(connection)
+        .await
+        .unwrap()
+}
+
+/// Waits until the backend `blocked`, which runs `task`, waits for a lock
+/// held by `holder`. Fails at once if `task` finished without waiting.
+async fn wait_until_blocked<T>(
+    pool: &PgPool,
+    blocked: i32,
+    holder: i32,
+    task: &tokio::task::JoinHandle<T>,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(holder)
+                .bind(blocked)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if waiting {
+                return;
+            }
+            assert!(!task.is_finished(), "finished without waiting for the lock");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("never waited for the lock");
+}
+
+/// A change to one of the three rows that authorize an operator.
+#[derive(Debug, Clone, Copy)]
+enum Change {
+    Revoke,
+    DisableIdentity,
+    DisableBinding,
+}
+
+const CHANGES: [Change; 3] = [
+    Change::Revoke,
+    Change::DisableIdentity,
+    Change::DisableBinding,
+];
+
+impl Change {
+    /// Applies the change to the operator `admin` seeded by `operator`.
+    async fn apply(self, conn: &mut PgConnection, admin: &str) {
+        match self {
+            Change::Revoke => {
+                registry::revoke_admin_credential(&mut *conn, &format!("crd_{admin}"), at(T0))
+                    .await
+                    .unwrap();
+            }
+            Change::DisableIdentity => {
+                registry::disable_admin_identity(&mut *conn, admin)
+                    .await
+                    .unwrap();
+            }
+            Change::DisableBinding => {
+                registry::update_admin_role_binding(
+                    &mut *conn,
+                    &format!("rb_{admin}"),
+                    1,
+                    &AdminRoleBindingChanges { status: D },
+                )
+                .await
+                .unwrap();
+            }
+        }
+    }
+}
+
+/// A database with `ten_a` and one enabled `trust_admin` of `ten_a` per
+/// change, `adm_<n>` with key `key_<n>`, `n` its index in [`CHANGES`].
+async fn one_operator_per_change() -> (TestDb, PgPool) {
+    let (db, pool) = migrated().await;
+    tenants(&pool).await;
+    for n in 0..CHANGES.len() {
+        operator(
+            &pool,
+            &format!("adm_{n}"),
+            E,
+            &format!("key_{n}"),
+            E,
+            AdminRole::TrustAdmin,
+            Some("ten_a"),
+            E,
+        )
+        .await;
+    }
+    (db, pool)
+}
+
+/// The locked lookup gives exactly what the unlocked one gives, for every
+/// role and scope shape, when nothing runs concurrently.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_locked_lookup_equals_the_unlocked_one_for_every_shape() {
+    let (db, pool) = seeded().await;
+    let mut tx = pool.begin().await.unwrap();
+    let shapes = SHAPES
+        .iter()
+        .map(|&(s, role, scope)| (format!("key_{s}"), format!("adm_{s}"), role, scope))
+        .chain([(
+            "k\u{e9}y_uni".to_owned(),
+            "adm_uni".to_owned(),
+            AdminRole::SecurityAdmin,
+            INSTANCE,
+        )]);
+    for (key, admin, role, scope) in shapes {
+        let request = request(&key, role, scope);
+        let unlocked = authorize_operator(&mut *tx, &request).await.unwrap();
+        let locked = authorize_operator_locked(&mut tx, &request).await.unwrap();
+        assert_eq!(unlocked, Some(hit(&admin, role)), "{key}");
+        assert_eq!(locked, unlocked, "{key}");
+    }
+    tx.commit().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// A revocation, an identity disable and a binding update of the rows that
+/// authorized a locked lookup wait until the lookup's transaction commits,
+/// and then apply. The order is fixed with `pg_blocking_pids`, not by
+/// timing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_locked_authorization_holds_until_its_transaction_commits() {
+    let (db, pool) = one_operator_per_change().await;
+    for (n, change) in CHANGES.into_iter().enumerate() {
+        let (admin, key) = (format!("adm_{n}"), format!("key_{n}"));
+        let expected = Some(hit(&admin, AdminRole::TrustAdmin));
+        let mut holder = pool.acquire().await.unwrap().detach();
+        let mut writer = pool.acquire().await.unwrap().detach();
+        let (holder_pid, writer_pid) = (
+            backend_pid(&mut holder).await,
+            backend_pid(&mut writer).await,
+        );
+        let mut tx = holder.begin().await.unwrap();
+        let request = request(&key, AdminRole::TrustAdmin, TEN_A);
+        assert_eq!(
+            authorize_operator_locked(&mut tx, &request).await.unwrap(),
+            expected,
+            "{change:?}"
+        );
+        let target = admin.clone();
+        let task = tokio::spawn(async move {
+            change.apply(&mut writer, &target).await;
+            writer
+        });
+        wait_until_blocked(&pool, writer_pid, holder_pid, &task).await;
+        // The decision still holds in the holder's transaction.
+        assert_eq!(
+            authorize_operator(&mut *tx, &request).await.unwrap(),
+            expected,
+            "{change:?}"
+        );
+        tx.commit().await.unwrap();
+        let writer = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("the writer never finished")
+            .unwrap();
+        writer.close().await.unwrap();
+        holder.close().await.unwrap();
+        // The change applied once the holder committed.
+        assert_eq!(
+            authorize(&pool, &key, AdminRole::TrustAdmin, TEN_A)
+                .await
+                .unwrap(),
+            None,
+            "{change:?}"
+        );
+    }
+    let revoked = registry::get_admin_credential(&pool, "crd_adm_0")
+        .await
+        .unwrap();
+    assert_eq!(
+        (revoked.status, revoked.revoked_at),
+        (Status::Disabled, Some(at(T0)))
+    );
+    assert_eq!(
+        registry::get_admin_identity(&pool, "adm_1")
+            .await
+            .unwrap()
+            .status,
+        Status::Disabled
+    );
+    let binding = registry::get_admin_role_binding(&pool, "rb_adm_2")
+        .await
+        .unwrap();
+    assert_eq!((binding.status, binding.revision), (Status::Disabled, 2));
+    db.drop([pool]).await;
+}
+
+/// A change committed before the locked lookup is a miss, and a miss locks
+/// nothing: another transaction takes the rows `FOR UPDATE NOWAIT` while
+/// the lookup's transaction is still open.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_change_committed_before_the_locked_lookup_is_a_miss() {
+    let (db, pool) = one_operator_per_change().await;
+    for (n, change) in CHANGES.into_iter().enumerate() {
+        let (admin, key) = (format!("adm_{n}"), format!("key_{n}"));
+        change
+            .apply(&mut pool.acquire().await.unwrap(), &admin)
+            .await;
+        let mut tx = pool.begin().await.unwrap();
+        assert_eq!(
+            authorize_operator_locked(&mut tx, &request(&key, AdminRole::TrustAdmin, TEN_A))
+                .await
+                .unwrap(),
+            None,
+            "{change:?}"
+        );
+        for (sql, id) in [
+            (
+                "SELECT FROM admin_identity WHERE id = $1 FOR UPDATE NOWAIT",
+                admin.clone(),
+            ),
+            (
+                "SELECT FROM admin_credential WHERE id = $1 FOR UPDATE NOWAIT",
+                format!("crd_{admin}"),
+            ),
+            (
+                "SELECT FROM admin_role_binding WHERE id = $1 FOR UPDATE NOWAIT",
+                format!("rb_{admin}"),
+            ),
+        ] {
+            let mut other = pool.begin().await.unwrap();
+            let locked = sqlx::query(sql)
+                .bind(&id)
+                .execute(&mut *other)
+                .await
+                .unwrap();
+            assert_eq!(locked.rows_affected(), 1, "{change:?} {id}");
+            other.rollback().await.unwrap();
+        }
+        tx.rollback().await.unwrap();
+    }
+    db.drop([pool]).await;
+}
+
+/// A change committed after the locked lookup's first read and before its
+/// lock is caught by the repeated read. Deterministic: the changing
+/// transaction holds the changed row, so the lookup's lock statement waits
+/// for it (seen with `pg_blocking_pids`); the change then commits and the
+/// lookup returns `None`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_change_between_the_lookup_and_its_lock_is_caught() {
+    let (db, pool) = one_operator_per_change().await;
+    for (n, change) in CHANGES.into_iter().enumerate() {
+        let (admin, key) = (format!("adm_{n}"), format!("key_{n}"));
+        let mut changer = pool.acquire().await.unwrap().detach();
+        let mut locker = pool.acquire().await.unwrap().detach();
+        let (changer_pid, locker_pid) = (
+            backend_pid(&mut changer).await,
+            backend_pid(&mut locker).await,
+        );
+        let mut changing = changer.begin().await.unwrap();
+        change.apply(&mut changing, &admin).await;
+        let task = tokio::spawn(async move {
+            let mut tx = locker.begin().await.unwrap();
+            let result =
+                authorize_operator_locked(&mut tx, &request(&key, AdminRole::TrustAdmin, TEN_A))
+                    .await;
+            tx.rollback().await.unwrap();
+            (locker, result)
+        });
+        // The first read saw the committed, enabled rows (a miss would lock
+        // nothing and not wait); the lock now waits for the change.
+        wait_until_blocked(&pool, locker_pid, changer_pid, &task).await;
+        changing.commit().await.unwrap();
+        let (locker, result) = tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("the locked lookup never finished")
+            .unwrap();
+        assert!(matches!(result, Ok(None)), "{change:?}: {result:?}");
+        locker.close().await.unwrap();
+        changer.close().await.unwrap();
+    }
+    db.drop([pool]).await;
+}
+
+/// The locked lookup locks in the `0005` order (identity, credential,
+/// binding), so it does not deadlock with a writer that locks those rows
+/// in the same order (README "What 0005 adds", step 1): the lookup waits
+/// for the writer's identity lock holding nothing, the writer then takes
+/// the credential and binding without waiting, and once it commits the
+/// lookup proceeds. A lookup that locked the binding first would hold it
+/// while it waits for the identity, and the writer's binding lock would
+/// close a cycle (`40P01`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_locked_lookup_waits_for_a_writer_in_lock_order_without_deadlock() {
+    let (db, pool) = one_operator_per_change().await;
+    let mut writer = pool.acquire().await.unwrap().detach();
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let (writer_pid, locker_pid) = (
+        backend_pid(&mut writer).await,
+        backend_pid(&mut locker).await,
+    );
+    let mut writing = writer.begin().await.unwrap();
+    sqlx::query("SELECT FROM admin_identity WHERE id = 'adm_0' FOR NO KEY UPDATE")
+        .execute(&mut *writing)
+        .await
+        .unwrap();
+    let task = tokio::spawn(async move {
+        let mut tx = locker.begin().await.unwrap();
+        let result =
+            authorize_operator_locked(&mut tx, &request("key_0", AdminRole::TrustAdmin, TEN_A))
+                .await;
+        tx.commit().await.unwrap();
+        (locker, result)
+    });
+    wait_until_blocked(&pool, locker_pid, writer_pid, &task).await;
+    for sql in [
+        "SELECT FROM admin_credential WHERE id = 'crd_adm_0' FOR NO KEY UPDATE",
+        "SELECT FROM admin_role_binding WHERE id = 'rb_adm_0' FOR NO KEY UPDATE",
+    ] {
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            sqlx::query(sql).execute(&mut *writing),
+        )
+        .await
+        .expect("the writer waited")
+        .unwrap();
+    }
+    writing.commit().await.unwrap();
+    let (locker, result) = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the locked lookup never finished")
+        .unwrap();
+    assert_eq!(result.unwrap(), Some(hit("adm_0", AdminRole::TrustAdmin)));
+    locker.close().await.unwrap();
+    writer.close().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// The repeated read must give the same hit, not just a hit: with the
+/// binding delete guard dropped (as the table owner can), a binding
+/// deleted and replaced by another of the same operator, role and scope
+/// between the first read and the lock is `None`, not the new binding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_binding_replaced_between_the_lookup_and_its_lock_is_a_miss() {
+    let (db, pool) = one_operator_per_change().await;
+    sqlx::raw_sql("DROP TRIGGER admin_role_binding_no_delete ON admin_role_binding")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut changer = pool.acquire().await.unwrap().detach();
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let (changer_pid, locker_pid) = (
+        backend_pid(&mut changer).await,
+        backend_pid(&mut locker).await,
+    );
+    let mut changing = changer.begin().await.unwrap();
+    // Hold the identity, so the lookup's first lock waits after its first
+    // read, then replace the binding.
+    sqlx::query("SELECT FROM admin_identity WHERE id = 'adm_0' FOR NO KEY UPDATE")
+        .execute(&mut *changing)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM admin_role_binding WHERE id = 'rb_adm_0'")
+        .execute(&mut *changing)
+        .await
+        .unwrap();
+    registry::create_admin_role_binding(
+        &mut *changing,
+        &binding("rb_new", "adm_0", AdminRole::TrustAdmin, Some("ten_a"), E),
+    )
+    .await
+    .unwrap();
+    let task = tokio::spawn(async move {
+        let mut tx = locker.begin().await.unwrap();
+        let result =
+            authorize_operator_locked(&mut tx, &request("key_0", AdminRole::TrustAdmin, TEN_A))
+                .await;
+        tx.rollback().await.unwrap();
+        (locker, result)
+    });
+    wait_until_blocked(&pool, locker_pid, changer_pid, &task).await;
+    changing.commit().await.unwrap();
+    let (locker, result) = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the locked lookup never finished")
+        .unwrap();
+    assert!(matches!(result, Ok(None)), "{result:?}");
+    // The unlocked lookup now finds the new binding.
+    assert_eq!(
+        authorize(&pool, "key_0", AdminRole::TrustAdmin, TEN_A)
+            .await
+            .unwrap()
+            .map(|found| found.binding_id),
+        Some("rb_new".to_owned())
+    );
+    locker.close().await.unwrap();
+    changer.close().await.unwrap();
     db.drop([pool]).await;
 }

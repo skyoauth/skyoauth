@@ -15,7 +15,7 @@ use std::{
     hash::BuildHasher,
     str::FromStr,
     sync::atomic::{AtomicU32, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use skyoauth_service::persistence::{self, DatabaseConfig, PgPool};
@@ -162,12 +162,49 @@ impl TestDb {
         }
         let mut admin = PgConnection::connect(&self.admin_url).await.unwrap();
         for statement in self.cleanup_statements() {
-            sqlx::raw_sql(AssertSqlSafe(statement))
-                .execute(&mut admin)
-                .await
-                .unwrap();
+            execute_cleanup(&mut admin, statement).await.unwrap();
         }
         self.dropped = true;
+    }
+}
+
+/// How long a `DROP DATABASE … WITH (FORCE)` that PostgreSQL refuses with
+/// SQLSTATE 42501 is retried, and how often: the bounds of the scenario
+/// harness's `drop_database` (`tests/src/pg.rs`). The refusal comes while
+/// the dropping role may not terminate a backend of another role still
+/// connected to the database, such as an autovacuum worker, which exits by
+/// itself; a backend that stays still fails the drop at the deadline.
+const DROP_DEADLINE: Duration = Duration::from_secs(5);
+const DROP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Runs one cleanup statement, retrying a `DROP DATABASE` while it fails
+/// with SQLSTATE 42501 until [`DROP_DEADLINE`] (the last retry runs at the
+/// deadline). Any other error, and every error of another statement, is
+/// returned at once.
+async fn execute_cleanup(admin: &mut PgConnection, statement: String) -> sqlx::Result<()> {
+    let deadline = if statement.starts_with("DROP DATABASE ") {
+        DROP_DEADLINE
+    } else {
+        Duration::ZERO
+    };
+    let start = Instant::now();
+    loop {
+        let error = match sqlx::raw_sql(AssertSqlSafe(statement.clone()))
+            .execute(&mut *admin)
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        let elapsed = start.elapsed();
+        let denied = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| code == "42501");
+        if !denied || elapsed >= deadline {
+            return Err(error);
+        }
+        tokio::time::sleep(DROP_POLL_INTERVAL.min(deadline - elapsed)).await;
     }
 }
 
@@ -190,9 +227,7 @@ impl Drop for TestDb {
             runtime.block_on(async {
                 let mut admin = PgConnection::connect(&admin_url).await.ok()?;
                 for statement in statements {
-                    let _ = sqlx::raw_sql(AssertSqlSafe(statement))
-                        .execute(&mut admin)
-                        .await;
+                    let _ = execute_cleanup(&mut admin, statement).await;
                 }
                 Some(())
             })

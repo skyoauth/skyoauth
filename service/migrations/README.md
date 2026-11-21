@@ -884,8 +884,9 @@ The database does not enforce these rules; the service must:
   does not compare the two timestamps;
 - authorize each write by an enabled binding of an enabled operator with an
   enabled, unrevoked credential; the database does not join the statuses.
-  The registry's `authorize_operator` is that lookup (see "Rust registry
-  surface");
+  The registry's `authorize_operator` is that lookup, and
+  `authorize_operator_locked` makes its decision hold until the write
+  commits (see "Rust registry surface");
 - cap the challenge lifetime at 15 minutes (LT-107): the table has no
   creation time to measure it from;
 - refuse a retired recovery key; the table keeps only the current one;
@@ -1959,11 +1960,12 @@ and 2; T13.1, T13.2): `create_admin_identity`, `get_admin_identity` and
 `disable_admin_identity`; `create_admin_credential`,
 `get_admin_credential` and `revoke_admin_credential`; and
 `create_admin_role_binding`, `get_admin_role_binding` and the
-revision-checked `update_admin_role_binding`, which changes only `status`.
-Rows are read by their own ID. Identities and credentials have no
-revision. Time is always the caller's: `created_at` and the `now` of a
-revocation are arguments, never the database's `now()` (provisional lead
-pick, 2026-11-21). A revocation sets `revoked_at` and `status = 'disabled'`
+revision-checked `update_admin_role_binding`, which changes only `status`;
+and the lookups `authorize_operator` and `authorize_operator_locked`. Rows
+are read by their own ID. Identities and credentials have no revision
+(identity-registry OQ-IR-16). Time is always the caller's: `created_at`
+and the `now` of a revocation are arguments, never the database's `now()`
+(lead pick, 2026-11-21; provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). A revocation sets `revoked_at` and `status = 'disabled'`
 in one statement; revoking a revoked credential keeps the first
 `revoked_at` (inferred). Revocation is one-way in the database:
 `admin_credential_set_once` refuses to clear or change `revoked_at`
@@ -1972,11 +1974,15 @@ revoked credential (`Invariant`), `admin_credential_immutable` keeps the
 key on its row, and the `0006` delete and truncate guards keep the row, so
 `admin_credential_public_identity_key` refuses the revoked key again
 (`AlreadyExists`, naming only the constraint). Only credential
-revocation is one-way: re-enabling an identity or an unrevoked credential is
-a plain status change the database does not guard, as elsewhere in the
-registry (lead ruling, 2026-11-21, provisional); the registry has no enable
-function for them. A role binding is re-enabled by an update, as
-`0005` intends. `create_admin_identity` rejects the reserved actor IDs
+revocation is one-way in the database. The registry has no setter that
+enables or otherwise updates an identity or a credential, and no way to
+disable a credential without revoking it (public-api §7.1 names enrollment
+and disable only): after creation an identity can only be disabled and a
+credential only revoked. The database does not forbid re-enabling either:
+no guard keeps an identity's status, or an unrevoked credential's, from
+going back to `enabled` by other means. The lead ruling that re-enabling is
+a plain status change (2026-11-21; provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate M0) applies to the tables the registry
+updates: a role binding is re-enabled by an update, as `0005` intends. `create_admin_identity` rejects the reserved actor IDs
 `deployment_operator` and every ID beginning with `recovery_key:`
 (`DEPLOYMENT_OPERATOR_ACTOR`, `recovery_key_actor(epoch)`) with
 `ReservedActorId` before any statement, byte-wise, so no operator can act
@@ -1988,14 +1994,35 @@ requires the three enabled and the credential unrevoked. No role implies
 another (API-120). Scope fails closed: an instance request needs a binding
 with no tenant and a tenant request a binding of exactly that tenant, so an
 instance `auditor` does not satisfy a tenant request nor a tenant `auditor`
-an instance one (provisional lead pick, 2026-11-21). Every comparison is an
+an instance one (lead pick, 2026-11-21; provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). Every comparison is an
 equality on a `COLLATE "C"` column, byte-wise under any database
 collation, and at most one row can match. Every miss is the same
 `Ok(None)`; inputs are not validated first, as for `select_grant`, so an
 empty or over-long value is a miss and a NUL is `Other` (`22021`). No claim
 is made that every miss takes the same time. The lookup reads no clock and
 writes nothing, no audit event and no `administrative_operation` row; the
-T13.3 caller writes the event in its transaction. The operator constraint
+T13.3 caller writes the event in its transaction. It takes no row locks, so
+its answer is a point in time: under `READ COMMITTED` a revocation, a
+disable or a binding change can commit between it and the caller's write,
+even in one transaction. `authorize_operator_locked(transaction, request)`
+makes the decision hold until the caller's transaction ends: in that
+transaction (it takes a `Transaction`) it runs the same lookup and, on a
+hit, locks the identity, credential and binding rows by ID `FOR SHARE`, one
+statement each, in the order of "What 0005 adds" (identity, credential,
+binding); it then repeats the lookup and returns the hit only if the repeat
+gives the same one, else `None`. A miss locks nothing. A revocation, an
+identity disable or a binding update of the locked rows waits for the
+caller's commit or rollback. `FOR SHARE` and the deny on any change are
+inferred: the lock order prescribes `FOR NO KEY UPDATE` only for rows a
+write updates or an operation references. Every locker takes these rows in
+the same table order, the lookup one row per table, and the single-row
+writers lock only the row they change, so the lookup does not deadlock with
+them; a caller that afterwards locks other operator rows, or updates a row
+it holds `FOR SHARE`, is outside that order and can fail with `40P01`, a
+deny, so T13.3 must order those locks. Neither lookup reads tenant status:
+ADR-014 item 11 lists issuance, live checks, admission and refresh as what
+a disabled tenant denies, not operator writes, and T14 must check it. No
+migration is added. The operator constraint
 names are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_operator.rs`
 tests the surface.
 
