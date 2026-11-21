@@ -18,7 +18,12 @@
 //!   `instance_security_policy.create` stays in the table for a later
 //!   startup path that creates the policy row. A recovery key rotation
 //!   (OQ-TM-8) is `recovery_state.rotate_key`, and the break-glass operator
-//!   restoration (T13.5) is `admin_identity.restore`.
+//!   restoration (T13.5) is `admin_identity.restore`, one event that also
+//!   records the consume, the revocations and the key rotation it makes
+//!   (provisional lead pick, 2026-11-21). The issue of a recovery challenge,
+//!   which inserts its `administrative_operation` row, is
+//!   `administrative_operation.create` (inferred: the `create` verb of an
+//!   insert; added with the recovery registry, PR 3a).
 //! - The IR-152 egress entry writes are a create and a `status` change:
 //!   `egress_allowlist_entry.create`, `.enable` (IR-059) and `.disable`.
 //! - The T13.3 administrative events of M1a are the writes of the operator
@@ -56,6 +61,7 @@ pub const AUDIT_ACTIONS: &[&str] = &[
     "admin_role_binding.disable",
     "admin_role_binding.enable",
     "administrative_operation.approve",
+    "administrative_operation.create",
     "audience_tenant_assignment.create",
     "audience_tenant_assignment.disable",
     "audience_tenant_assignment.enable",

@@ -284,6 +284,55 @@ T00.8–T00.17 and Gate M0):
   These three are provisional lead picks (2026-11-21), recorded with the
   first registry bootstrap (`service/src/persistence/registry/bootstrap.rs`).
 
+Break-glass operator restoration (design §7.2; T13.5) follows these lead
+picks (2026-11-21, provisional until the maintainer ratifies the ADRs,
+T00.8–T00.17, Gate M0), recorded with the recovery registry
+(`service/src/persistence/registry/recovery.rs`):
+
+- **Recovery actors.** Issuing a recovery challenge is recorded with the
+  actor `deployment_operator`, the deployment-local caller who asks for it.
+  The consume and the restoration are recorded with `recovery_key:<epoch>`,
+  where `<epoch>` is the epoch of the key that signed the challenge, the one
+  before the restoration rotates it. Both use the audit actor type
+  `operator`. The consume writes no event of its own: the restoration's one
+  `admin_identity.restore` event, in the same transaction, records it.
+- **Single use.** The consume statement is the only single-use
+  mechanism: one statement marks the challenge consumed only while it is
+  unconsumed, unrevoked, still `issued`, unexpired at the caller's `now`
+  (`now < expires_at`) and bound to the request digest, the instance, the
+  recovery key epoch and the `RecoveryState` revision; the database guards
+  of `0005` refuse a second consume and a consume after a revocation even
+  from a statement without those predicates. Every miss is the same
+  refusal, naming no reason. The registry does not verify the recovery
+  signature: the caller verifies it against the current recovery public
+  key first. The restoration runs the consume statement itself, inside the
+  same savepoint as its writes (inferred), so a failed restoration leaves
+  the challenge unconsumed.
+- **Restoration.** One transaction enrolls a replacement instance
+  `security_admin` (identity, credential and role assignment, under IDs that
+  are not reserved), revokes every unrevoked operator credential, the
+  replaced operators' included, in one statement, and rotates the recovery
+  key to a new one at the next epoch. It disables no identity and no role
+  assignment and changes no workload registry row. The event is
+  `admin_identity.restore` with the new operator's ID as `object_id` and no
+  revisions (inferred: the envelope has no member for the operation).
+- **Errors and uncertain commits.** Issue, consume and restoration each
+  run inside a savepoint of their own and roll it back on every error, so
+  a caller that commits after an error commits none of their rows.
+  Inserts on caller-supplied keys use `ON CONFLICT DO NOTHING` without a
+  conflict target, and a conflict is reported as the existing key. When a
+  commit's outcome is unknown, the caller keeps the request's material
+  (IDs, signed challenge and binding, the replacement's credential, the new
+  recovery key), reconnects, reconciles the durable state and retries the
+  same request: a restoration that committed is then refused as not
+  restorable, with the operation `restored` and the recovery state at the
+  new epoch; one that did not commit restores.
+- **Challenge TTL.** A challenge lives 5 minutes by default and at most 15
+  (OQ-LT-17, LT-107); a TTL of zero is refused (inferred). The issue event
+  is `administrative_operation.create`, with the operation's ID as
+  `object_id` and `new_revision` 1 (inferred name, proposed with the
+  recovery registry).
+
 The instance security policy is one `InstanceSecurityPolicy` row per instance
 (`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
 `audit_sink_validated_at`, `revision`). (tasks §3)
@@ -418,8 +467,9 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   not change the hash of an existing event, since the actor JSON of
   existing events is unchanged. The break-glass recovery challenge is to be
   signed with Ed25519, with the raw 32-byte public key in
-  `recovery_state.recovery_public_key` (lead pick, 2026-11-21; provisional,
-  not implemented).
+  `recovery_state.recovery_public_key` (lead pick, 2026-11-21; provisional).
+  The registry stores and rotates that key (section 5.2); the signature
+  check is not implemented yet.
 - **IR-059** `AuditEvent.action` is a dotted lowercase `<resource>.<verb>`
   name, such as `tenant.create`. `<resource>` is the audited entity's name
   in lowercase snake case: `Tenant` gives `tenant`,
@@ -450,8 +500,9 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   supersedes the earlier pair of a policy and a recovery state event), and
   `instance_security_policy.create` stays in the table for a later startup
   path; a recovery
-  key rotation is `recovery_state.rotate_key` and the break-glass operator
-  restoration `admin_identity.restore`; the IR-152 egress entry writes are
+  key rotation is `recovery_state.rotate_key`, the break-glass operator
+  restoration `admin_identity.restore` and the issue of its challenge
+  `administrative_operation.create`; the IR-152 egress entry writes are
   `egress_allowlist_entry.create`, `.enable` and `.disable`; and the T13.3
   administrative events of M1a are the verbs each table's writes allow (see
   `AUDIT_ACTIONS`) among `create`, `update`, `enable`, `disable` and, for a

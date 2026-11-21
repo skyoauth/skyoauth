@@ -888,8 +888,10 @@ The database does not enforce these rules; the service must:
   `authorize_operator_locked` makes its decision hold until the write
   commits (see "Rust registry surface");
 - cap the challenge lifetime at 15 minutes (LT-107): the table has no
-  creation time to measure it from;
-- refuse a retired recovery key; the table keeps only the current one;
+  creation time to measure it from. The registry's
+  `issue_recovery_challenge` does (see "Rust registry surface");
+- refuse a retired recovery key; the table keeps only the current one. The
+  registry's consume and restoration do;
 - record a consumed proof only for a `single_use` source, and set
   `retain_until` to at least the proof's `exp` plus skew (lifetimes §9);
 - prune `consumed_assertion` with a job that runs the `DELETE` after
@@ -2097,6 +2099,65 @@ restart or an empty configuration cannot reopen it. The constraint names of
 `instance_security_policy` and `recovery_state` are in
 `KNOWN_CONSTRAINTS`, and `service/tests/registry_bootstrap.rs` tests the
 surface.
+
+Recovery (T13.5; design §7.2; ADR-013 item 8; identity-registry §5.2;
+LT-107): `recovery.rs` issues, consumes and acts on break-glass challenges,
+each in the caller's transaction, which it neither commits nor rolls back;
+every time is the caller's `now`, never the database clock. Inputs are
+checked before any statement (encode errors, `Other`). Each function then
+runs its statements inside a savepoint of its own and rolls the savepoint
+back on every `Err`, also one the audit writer returns in Rust after the
+head lock, so a caller that commits after an `Err` commits none of its
+rows; the caller still rolls back on `Err`. `get_recovery_state` reads the
+one `recovery_state` row, if any. `issue_recovery_challenge` takes the
+closed kind `operator_restoration`, a request digest and a challenge hash
+of 32 to 64 bytes, a plan object with a string `instance_id` and an integer
+`recovery_key_epoch`, and a TTL more than zero and at most
+`MAX_CHALLENGE_TTL`, 15 minutes (`DEFAULT_CHALLENGE_TTL` is 5; OQ-LT-17).
+It reads `recovery_state` `FOR SHARE` and refuses with `NotIssuable` when
+there is none, when its `bootstrap_closed` is false, or when the plan names
+another instance or epoch; then it appends the event
+`administrative_operation.create` (actor `deployment_operator`, `object_id`
+the operation's ID, new revision 1), first, since `audit_id` references it,
+and inserts the operation with `ON CONFLICT DO NOTHING` (no conflict
+target; no row returned is `AlreadyExists` on
+`administrative_operation_pkey`), `expected_revision` the `recovery_state`
+revision, `expires_at` `now` plus the TTL and outcome `issued`.
+`consume_recovery_challenge` is one `UPDATE` that sets `consumed_at` to
+`now` only when every predicate holds: the kind, a challenge hash, not
+consumed, not revoked, outcome `issued`, `now < expires_at`, the request
+digest, the expected revision, and a plan whose `instance_id` (a JSON
+string) and `recovery_key_epoch` (a JSON number) are the binding's, with a
+`recovery_state` row of that instance, epoch and revision. Any miss is the
+unit `NotConsumable`, and the `0005` set-once, consume-after-revoke and
+`consumed_before_expiry_check` guards back it. It writes no event. The
+registry does not verify the recovery signature: the caller verifies it
+first. `restore_operator` runs the same consume statement itself, so one
+savepoint covers the consume and the restoration (inferred): it refuses a
+reserved `admin_id` and a key that is not 32 bytes before any statement,
+locks the unrevoked `admin_credential` rows `FOR NO KEY UPDATE` in ID order
+and then `recovery_state`, consumes the challenge against the locked state
+(a miss, or no state, is `NotRestorable`), and refuses a new key equal to
+the current one (`RecoveryKeyUnchanged`). It then revokes every unrevoked
+credential in one statement, inserts the replacement operator, credential
+and instance `security_admin` binding with `ON CONFLICT DO NOTHING` (no
+row returned is `AlreadyExists` naming `admin_identity_pkey`,
+`admin_credential_pkey`, `admin_credential_public_identity_key` or
+`admin_role_binding_pkey`), rotates the key to the next epoch, sets the
+outcome `restored`, and appends `admin_identity.restore` last (actor
+`recovery_key:<old epoch>`, `object_id` the new operator, no revisions).
+Its locks follow the `0005` order (credentials, recovery state, operation)
+with the audit head last. An issue waits for a restoration's
+`recovery_state` lock and sees the new epoch; a restoration waits for an
+issue's share lock. When a commit's outcome is unknown, the caller keeps
+the request's material (IDs, signed challenge and binding, the
+replacement's credential, the new recovery key), reconnects, reconciles
+the durable state (operation `restored` and the new epoch, or the
+challenge unconsumed) and retries the same request: a restoration that
+committed is then `NotRestorable`, one that did not restores. The
+`administrative_operation` constraint names are in `KNOWN_CONSTRAINTS`,
+and `service/tests/registry_recovery.rs` tests the surface. No migration is
+added.
 
 Follow-ups for the registry surface:
 

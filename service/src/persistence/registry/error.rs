@@ -24,8 +24,9 @@ const GUARD: &str = "SK001";
 /// `principal`, `audit_event` and `audit_chain_head`, the five `0003`
 /// tables, the nine `0004` tables, `consumed_assertion` and the operator
 /// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
-/// `0005`, and `instance_security_policy` and `recovery_state`, which
-/// bootstrap writes) and of the three list domains, as migrations `0002` to `0005`, `0007` and
+/// `0005`, `instance_security_policy` and `recovery_state`, which
+/// bootstrap writes, and `administrative_operation`, which the recovery
+/// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007` and
 /// `0008` name them, sorted byte-wise. A unique, foreign key or check
 /// violation maps to a typed variant only for a name listed here. The
 /// database test `registry_constraint_names_match_the_catalog` keeps the
@@ -63,6 +64,39 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "admin_role_binding_status_check",
     "admin_role_binding_tenant_id_fkey",
     "admin_role_binding_tenant_id_octet_length_check",
+    // The operations of `0005`, written by the recovery challenges
+    // (`recovery.rs`).
+    "administrative_operation_actor_id_check",
+    "administrative_operation_actor_id_octet_length_check",
+    "administrative_operation_approve_kind_check",
+    "administrative_operation_approves_id_octet_length_check",
+    "administrative_operation_approves_operation_id_fkey",
+    "administrative_operation_approves_self_check",
+    "administrative_operation_audit_id_fkey",
+    "administrative_operation_audit_id_octet_length_check",
+    "administrative_operation_challenge_expiry_check",
+    "administrative_operation_challenge_hash_octet_length_check",
+    "administrative_operation_consumed_at_range_check",
+    "administrative_operation_consumed_before_expiry_check",
+    "administrative_operation_expected_revision_check",
+    "administrative_operation_expires_at_range_check",
+    "administrative_operation_id_check",
+    "administrative_operation_id_octet_length_check",
+    "administrative_operation_immutable_plan_check",
+    "administrative_operation_kind_check",
+    "administrative_operation_kind_no_space_check",
+    "administrative_operation_kind_octet_length_check",
+    "administrative_operation_outcome_check",
+    "administrative_operation_pkey",
+    "administrative_operation_request_digest_octet_length_check",
+    "administrative_operation_revision_check",
+    "administrative_operation_revocation_check",
+    "administrative_operation_revocation_id_octet_length_check",
+    "administrative_operation_revocation_operation_id_fkey",
+    "administrative_operation_revoked_at_range_check",
+    "administrative_operation_revokes_self_check",
+    "administrative_operation_tenant_id_fkey",
+    "administrative_operation_tenant_id_octet_length_check",
     "audience_tenant_assignment_constraint_versions_check",
     "audience_tenant_assignment_id_check",
     "audience_tenant_assignment_id_octet_length_check",
