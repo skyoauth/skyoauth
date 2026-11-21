@@ -230,11 +230,13 @@
 
 mod assertion;
 mod audience;
+mod ceilings;
 mod error;
 mod grant;
 mod instance;
 mod model;
 mod predicate;
+mod scope;
 mod tenant;
 mod trust;
 
@@ -250,6 +252,7 @@ pub use audience::{
     update_audience_tenant_assignment, update_resource_action, update_resource_server,
     update_resource_server_checker,
 };
+pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{InvariantKind, KNOWN_CONSTRAINTS, RegistryError};
 pub use grant::{
     add_service_grant_binding, add_service_grant_resource_server,
@@ -276,6 +279,7 @@ pub use model::{
     TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
 };
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
+pub use scope::{ScopeCeilings, ScopeError, ScopeRequest, resolve_scopes};
 pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
     update_principal, update_tenant,

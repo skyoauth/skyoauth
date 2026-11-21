@@ -1831,6 +1831,25 @@ a profile change that drops one included: the template-fit check of
 ADR-016 item 4 is the only stop on that downgrade, and it is an open
 follow-up (see "What 0008 adds", "Not checked").
 
+Scope ceilings (IR-062, IR-063; ADR-015 items 7 and 9; design §5.7; T12.8;
+A26): `load_scope_ceilings(tenant, grant, audience)` loads, in one
+statement, the grant's `scopes` and `default_scopes`, the `scopes` of the
+resource server with that exact audience, the tenant's assignment
+`allowed_scopes` for it and, for a grant with a target, the target
+service's `max_scopes`, each with its ID, status and revision. The audience
+must be in the grant's set and assigned to the grant's tenant. A missing
+grant or audience, an audience not assigned or not in the set are all the
+same `None`, mapped to no error code here. Statuses are not checked.
+`resolve_scopes` is pure: an omitted scope uses only the grant's nonempty
+defaults, checked again against every ceiling; an explicit list must be
+nonempty and lie in every ceiling; every token must match the IR-066
+grammar of `skyoauth_scope_list`. Nothing is trimmed or widened, the
+result is deduplicated and sorted byte-wise, and every failure is the
+single `ScopeError::Invalid` (`invalid_scope`, ERR-024), which names no
+scope or ceiling. Error-code mapping and ordering, the `invalid_target`
+audience checks, resource constraint ceilings (IR-123) and TTL caps stay
+with M2.
+
 Follow-ups for the registry surface:
 
 - Parent-scoped lookups and lists, needed by the admin API (T14.1, T14.2)
