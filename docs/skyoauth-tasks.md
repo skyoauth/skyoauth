@@ -25,7 +25,7 @@ The central outcomes are **secretless GitHub Actions → protected cluster API W
 PR #2 landed in `main` at `8f81df23efd4c4a0cfe522f711a9ca56f294aab1`, establishing `service/`, a Cargo workspace, `clients/typescript/` and CI. Retain these homes. The following is a target layout; most auth modules are planned, not present. Add members with their implementations, not empty scaffolding that implies authentication support.
 
 ~~~text
-Cargo.toml            Existing service member; add operator, clients/rust, cli with code
+Cargo.toml            Existing service and tests members; add operator, clients/rust, cli with code
 service/              Existing skyoauth-service (Axum/Tokio)
   src/main.rs         Process/listener wiring; M1a local bootstrap/recovery verifier
   src/lib.rs          Service composition
@@ -64,8 +64,11 @@ deploy/
   examples/envoy/     M2 bearer and M3 session route/security policies
   examples/k3s/       Projected tokens and per-cluster TokenReview RBAC
   examples/github/    No-static-secret caller with generated source/grant IDs
-tests/
-  conformance/        Versioned wire/profile and migration fixtures
+tests/                Existing skyoauth-scenarios member (unpublished conformance scenario tests)
+  Cargo.toml          One [[test]] target per execution environment, added with its first test
+  src/                Shared scenario helpers (PostgreSQL template-DB isolation)
+  pg.rs               Target pg; hermetic.rs, envoy_k3s.rs and live.rs when they get tests
+  conformance/        Versioned wire/profile and migration fixtures; scenario registry
   security/           JWT/OIDC/CSRF/admin/tenant/audience/replay/gateway tests
   integration/        PostgreSQL, mock OIDC, two clusters, Envoy and ConnectRPC
 scripts/ci/           Existing docs-only detection; expand checks with new code
@@ -480,7 +483,7 @@ Only confirmed old-UID absence permits retired and exception removal; transport 
 - [ ] **T10.5** Redacted versioned export/import includes every source kind, keysets, audience/actions/checker public metadata, clients/origin/route/bundle configuration versions, separate capacity policies, human policy, grants/activation state and operator public metadata. Semantic diff/preconditions/approval; exclude secret/live credential material and restorable active route observations.
 - [ ] **T10.6** Separate encrypted DB/key disaster recovery; preserve bootstrap-closed and one-time/replay state or quarantine (default 15 min, ceiling 60 min; OQ-LT-13); where consumed state is not preserved and the quarantine cannot cover it (for example 7-day refresh families), revoke the affected credentials (LT-100, LT-106). Rollback never revives credentials or resets monotonic generations; restored route bundles need fresh observation before activation.
 - [ ] **T10.7** GitOps precedence and full-plan role checks; no wiping omitted objects or partially applying unauthorized sections. Active-provider state and route-runtime pointers/observations are not ordinary writable configuration. Protected gateway resources are applied by the approved controller path, not directly by Helm/Argo/Flux.
-- [ ] **T10.8** Property tests for same-name tenants/sources, same-issuer clusters, cross-tenant object/audience/origin references, deterministic generated-ID resolution, grant-bound matching and privilege ceilings.
+- [ ] **T10.8** Tests for same-name tenants/sources and same-issuer clusters, and property tests for deterministic generated-ID resolution, grant-bound matching and privilege ceilings. Cross-tenant object/audience/origin reference crossings are covered by an enumerated closed list in each A29 stage, not by a property harness, and a new tenant-owned crossing must be added to that list.
 - [ ] **T10.9** M1a delivers durable WIF replay/operator one-time state. M1b delivers OAuth/client/code/browser-flow/authentication/required refresh-family, versioned route/controller/runtime/capacity and continuation state before M3/M4 handlers. Atomic consumption across replicas; human tables are not M2 prerequisites.
 - [ ] **T10.10** Session idle/absolute and authentication epoch relationships; coalesced writes cannot revive/extend expired sessions. Index verified provider/subject/sid logout and switch invalidation.
 - [ ] **T10.11** Store dormant impersonation only disabled/reapproval-required in the existing grant record and preserve it unchanged. No v0.1 activation-approval entity/endpoints; reject enablement, issuance and active unsupported import/startup without silent data deletion.

@@ -1,10 +1,10 @@
 # Conformance registry
 
-This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**. There are no runtime tests, fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job). [`report-conformance.mjs`](#the-reporter) joins the registry with the JUnit results of one commit.
+This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**: the scenario tests themselves live in the `skyoauth-scenarios` package (`tests/Cargo.toml`, layout §1.2), under the layer directories beside this one (`tests/security/` today). There are no fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job). [`report-conformance.mjs`](#the-reporter) joins the registry with the JUnit results of one commit.
 
 | File | What it holds |
 | --- | --- |
-| `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`. **The source of the layout §2 scenario table.** |
+| `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`, except A29's M1a stage, the first `implemented` one (`scenarios-pg/x86_64`). **The source of the layout §2 scenario table.** |
 | `subcases.toml` | Sub-IDs as `[[subcase]]` entries (`kind = "subcase"`, with `parent`). Today it holds the four conditional sub-IDs that layout §2 names; each carries `conditional_on` and `table_text`. |
 | `waivers.toml` | Optional; absent today. Flake waivers (format below). |
 | `fixtures/`, `schema/` | Absent today. Layout §1.3. |
@@ -277,7 +277,7 @@ Only **passed** counts; `CI passed` is never read and is not a conformance signa
 
 ## Not here yet
 
-- Runtime tests, fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry`.
+- Fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry` (that every registered test exists in its package and target, and that its target lists it, for example from `cargo nextest list`).
 - A workflow job that downloads the artifacts of every run for a commit, runs the reporter and posts or uploads its result (`conformance-report` covers only its own run, informationally); the gate job that runs `--gate-pr` and the reporter for the gate PR's merge-base ([Gate PRs](#gate-prs), layout §6 "Still open", item 7); the release check.
 - A release-manifest PR check: `--gate-pr` does not read the release manifest, which does not exist yet. A release-manifest PR, a PR that adds a shipped feature to it, must be one commit on its merge-base with the stages of the conditional sub-IDs it makes count implemented and passed there (layout §3 **Release**); its allowed diff is undecided until the release job exists, and nothing checks any of this yet.
 - The artifact manifest check (layout §6 "Still open", item 6): comparing the downloaded runs, attempts and artifacts with what the Actions API lists, so that a missing download is an input error.

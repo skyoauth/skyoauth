@@ -676,7 +676,7 @@ id = "A29"
 kind = "scenario"
 layers = ["security"]
 envs = ["pg"]
-harness = ["PG", "proptest with fixed seed"]
+harness = ["PG"]
 owners = ["T10.8", "T11.10", "T14.8", "T21.3"]
 positive = "same-issuer and same-name registrations coexist"
 negative = "each crossed reference at write (M1a); a proof from one tenant's source with another tenant's grant at exchange (M2)"
@@ -685,6 +685,28 @@ matrix_sha256 = "4e7e66dde7be120d69d4e2ece31819cce08f831c3e89eb5fa73f4241a0931f2
 [[scenario.stage]]
 milestone = "M1a"
 scope = "registry and references"
+legs = ["scenarios-pg/x86_64"]
+status = "implemented"
+implemented_sha256 = "64740c06694422d42b2cd4279551c6f767959a701f51b404cd9ca8642b397a0a"
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_pos_tenants_reuse_object_names",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_pos_tenants_share_an_issuer",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_binding_of_other_tenants_workload",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_binding_on_other_tenants_source",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_grant_allowing_other_tenants_binding",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_grant_audience_of_other_tenant",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_grant_for_other_tenants_actor",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_grant_targeting_other_tenants_service",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_keyset_version_on_other_tenants_keyset",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_service_identity_audience_of_other_tenant",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_service_identity_of_other_tenants_principal",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_uploaded_source_on_other_tenants_keyset",
+  "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_writes_to_other_tenants_records_find_nothing",
+]
+
+[[scenario.stage]]
+milestone = "M1b"
+scope = "human registry references"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = []

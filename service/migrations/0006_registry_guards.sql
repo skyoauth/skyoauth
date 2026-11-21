@@ -25,9 +25,9 @@
 -- audit_event, audit_chain_head) are unchanged.
 --
 -- The guards do not reuse skyoauth_reject_mutation() of 0001: its message
--- calls the table "append-only", which is false here: the rows of these
--- tables stay updatable, except consumed_assertion, whose rows are pruned
--- (lead decision, 2026-11-21). The unconditional guards
+-- calls the table "append-only", which is false here: their rows are
+-- updated (status, revision) or, for the list tables and consumed_assertion,
+-- deleted (lead decision, 2026-11-21). The unconditional guards
 -- call skyoauth_reject_delete() and skyoauth_reject_truncate(), whose
 -- messages name the operation and the table. None of the new guard
 -- functions reads a table: each pins search_path to pg_catalog, pg_temp, as
@@ -65,6 +65,29 @@ CREATE FUNCTION skyoauth_reject_delete_unless_disabled() RETURNS trigger
     SET search_path = pg_catalog, pg_temp
     AS $$
 BEGIN
+    IF OLD.status IS DISTINCT FROM 'disabled' THEN
+        RAISE EXCEPTION 'only a disabled row of % may be deleted', TG_TABLE_NAME
+            USING ERRCODE = 'SK001';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+
+-- Rejects a DELETE of a grant that is not disabled, and of every
+-- impersonation grant, disabled or not (lead decision, 2026-11-21,
+-- provisional): deleting and recreating a dormant impersonation grant with
+-- caller-supplied IDs is the only way to revive it, so an impersonation
+-- grant is retired by disabling only (ADR-008 item 3, errata). A separate
+-- function from the one above because principal_binding has no mode column.
+CREATE FUNCTION skyoauth_reject_delete_grant_unless_disabled() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF OLD.mode IS NOT DISTINCT FROM 'impersonation' THEN
+        RAISE EXCEPTION 'an impersonation grant of % is never deleted', TG_TABLE_NAME
+            USING ERRCODE = 'SK001';
+    END IF;
     IF OLD.status IS DISTINCT FROM 'disabled' THEN
         RAISE EXCEPTION 'only a disabled row of % may be deleted', TG_TABLE_NAME
             USING ERRCODE = 'SK001';
@@ -180,7 +203,8 @@ ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operat
 
 -- Deleted only when disabled: a binding (by an audited admin write, when no
 -- grant, approval or audit-required record references it) and a grant
--- (with its list rows deleted first), ADR-008 item 3. A grant's binding
+-- other than an impersonation grant (with its list rows deleted first),
+-- ADR-008 item 3. A grant's binding
 -- rows and a binding's grant rows reference them, so the foreign keys
 -- refuse a referenced one (23503).
 CREATE TRIGGER principal_binding_delete_disabled_only
@@ -190,7 +214,7 @@ ALTER TABLE principal_binding ENABLE ALWAYS TRIGGER principal_binding_delete_dis
 
 CREATE TRIGGER service_grant_delete_disabled_only
     BEFORE DELETE ON service_grant
-    FOR EACH ROW EXECUTE FUNCTION skyoauth_reject_delete_unless_disabled();
+    FOR EACH ROW EXECUTE FUNCTION skyoauth_reject_delete_grant_unless_disabled();
 ALTER TABLE service_grant ENABLE ALWAYS TRIGGER service_grant_delete_disabled_only;
 
 -- A consumed proof is pruned only after its retention.
@@ -325,5 +349,5 @@ ALTER TABLE consumed_assertion ENABLE ALWAYS TRIGGER consumed_assertion_no_trunc
 -- Pruning: no pruning job exists yet. The guard above only permits a
 -- DELETE after retain_until; a later service job is to delete expired
 -- proofs with DELETE FROM consumed_assertion WHERE retain_until < now(),
--- which this index serves without a scan of the whole table.
+-- which this index can serve with a range scan.
 CREATE INDEX consumed_assertion_retain_until_idx ON consumed_assertion (retain_until);

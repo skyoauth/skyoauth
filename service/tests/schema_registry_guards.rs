@@ -130,9 +130,10 @@ const CASCADES: [(&str, &str); 22] = [
 ];
 
 /// The functions 0006 adds; none reads a table.
-const FUNCTIONS: [&str; 4] = [
+const FUNCTIONS: [&str; 5] = [
     "skyoauth_reject_delete",
     "skyoauth_reject_delete_before_retention",
+    "skyoauth_reject_delete_grant_unless_disabled",
     "skyoauth_reject_delete_unless_disabled",
     "skyoauth_reject_truncate",
 ];
@@ -331,7 +332,7 @@ async fn every_table_guards_truncate_and_each_delete_guard_is_pinned() {
             trigger(
                 "service_grant",
                 "delete_disabled_only",
-                "skyoauth_reject_delete_unless_disabled",
+                "skyoauth_reject_delete_grant_unless_disabled",
                 DELETE,
             ),
             trigger(
@@ -586,7 +587,10 @@ async fn bindings_and_grants_are_deleted_only_when_disabled() {
         ),
         (
             "DELETE FROM service_grant WHERE id = 'grt_2'",
-            "service_grant_binding_grant_id_fkey",
+            // Two foreign keys reference the grant; which one fires first
+            // depends on the order of their internal triggers, which
+            // follows the OIDs, so either name is accepted.
+            "service_grant_binding_grant_id_fkey|service_grant_resource_server_grant_id_fkey",
         ),
     ] {
         let err = sqlx::raw_sql(AssertSqlSafe(sql))
@@ -594,10 +598,11 @@ async fn bindings_and_grants_are_deleted_only_when_disabled() {
             .await
             .expect_err(sql);
         assert_eq!(sqlstate(&err), "23503", "{sql}: {err}");
-        assert_eq!(
-            err.as_database_error().and_then(|e| e.constraint()),
-            Some(constraint)
-        );
+        let fired = err
+            .as_database_error()
+            .and_then(|e| e.constraint())
+            .unwrap_or_default();
+        assert!(constraint.split('|').any(|c| c == fired), "{sql}: {fired}");
     }
     // In replica mode the status alone is checked: a disabled binding or
     // grant that a list row references goes (migrations/README.md "What
@@ -639,6 +644,59 @@ async fn bindings_and_grants_are_deleted_only_when_disabled() {
         ids(&mut conn, "SELECT id FROM service_grant").await,
         ["grt_1"]
     );
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// An impersonation grant is never deleted, disabled or not (lead decision,
+/// 2026-11-21): deleting and recreating it under caller-supplied IDs would
+/// revive a dormant one. A disabled delegation grant goes; an enabled one
+/// does not.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn impersonation_grants_are_never_deleted() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    let insert = |id: &str, mode: &str, status: &str, activation: &str| {
+        format!(
+            "INSERT INTO service_grant VALUES ('{id}', 'ten_a', '{id}', 'wld_1', 'svc_1', '{mode}', '[\"read\"]', NULL, '{{}}', 300, NULL, '{status}', '{activation}');
+             INSERT INTO service_grant_binding VALUES ('{id}', 'bnd_1', 'ten_a', 'wld_1');
+             INSERT INTO service_grant_resource_server VALUES ('{id}', 'ten_a', 'rs_1');"
+        )
+    };
+    let remove = |id: &str| {
+        format!(
+            "DELETE FROM service_grant_binding WHERE grant_id = '{id}';
+             DELETE FROM service_grant_resource_server WHERE grant_id = '{id}';
+             DELETE FROM service_grant WHERE id = '{id}'"
+        )
+    };
+    let impersonation = insert("grt_i", "impersonation", "disabled", "requires_reapproval");
+    let delegation_off = insert("grt_d", "delegation", "disabled", "not_required");
+    let delegation_on = insert("grt_e", "delegation", "enabled", "not_required");
+    for mode in MODES {
+        run(&mut *conn, mode).await;
+        rejected(
+            &mut conn,
+            &format!("BEGIN; {impersonation} {}", remove("grt_i")),
+            "SK001",
+            Some("an impersonation grant of service_grant is never deleted"),
+        )
+        .await;
+        rejected(
+            &mut conn,
+            &format!("BEGIN; {delegation_on} {}", remove("grt_e")),
+            "SK001",
+            Some("only a disabled row of service_grant may be deleted"),
+        )
+        .await;
+        // A disabled delegation grant, with its list rows first, goes.
+        run(
+            &mut *conn,
+            &format!("BEGIN; {delegation_off} {}; ROLLBACK", remove("grt_d")),
+        )
+        .await;
+    }
     drop(conn);
     db.drop([pool]).await;
 }

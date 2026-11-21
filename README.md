@@ -17,7 +17,7 @@
 ```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo test --workspace --exclude skyoauth-scenarios --all-features
 cargo coverage
 cargo run -p skyoauth-service   # listens on $SKYOAUTH_ADDR (default 127.0.0.1:8080)
 ```
@@ -94,8 +94,10 @@ a UTF-8 one or C/POSIX) and include ignored tests:
 
 ```bash
 export SKYOAUTH_IT_DATABASE_URL=postgres://skyoauth:skyoauth@localhost:5432/skyoauth
-cargo nextest run --workspace --all-features --run-ignored all
-# or: cargo test --workspace --all-features -- --include-ignored
+cargo nextest run --workspace --exclude skyoauth-scenarios --all-features --run-ignored all
+# or: cargo test --workspace --exclude skyoauth-scenarios --all-features -- --include-ignored
+# conformance scenarios of the `pg` environment (never ignored, need the variable):
+cargo test -p skyoauth-scenarios --test pg
 ```
 
 Some tests need more than `CREATEDB`, but none needs a superuser
@@ -133,19 +135,23 @@ GitHub Actions runs on pushes to `main` and on pull requests:
 
 - Rust: formatting, clippy, tests, doctests and rustdoc on x86_64 and aarch64
   Linux; the coverage gate; and a `cargo check` on the minimum supported Rust
-  version declared in `Cargo.toml`. The coverage gate (`rust-coverage`, x86_64
-  Linux) runs `cargo coverage` with `-- --include-ignored` against the same
+  version declared in `Cargo.toml`. The tests, the doctests and the coverage
+  gate exclude the conformance scenario package `skyoauth-scenarios`
+  (`tests/`), which only the `scenarios-*` jobs run. The coverage gate
+  (`rust-coverage`, x86_64 Linux) runs `cargo coverage` with `-- --include-ignored` against the same
   pinned PostgreSQL 17 service container as `service-nextest`, so the
   PostgreSQL tests count toward it.
-- Scenarios on PostgreSQL (`scenarios-pg`): cargo-nextest runs the
-  conformance scenario tests (Rust names `a<NN>_<pos|neg>_…`, see
-  `docs/testing/conformance-layout.md` §3) against a PostgreSQL 17 service
-  container, reached through `SKYOAUTH_IT_DATABASE_URL`, and uploads the
-  JUnit report for the leg `scenarios-pg/x86_64`. While no scenario test
-  exists, the job passes with a warning annotation: no scenario ran, which
-  is not a conformance pass.
-- Service tests (nextest): `cargo nextest run --workspace --all-features
-  --profile ci --run-ignored all` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
+- Scenarios on PostgreSQL (`scenarios-pg`): `cargo nextest run -p
+  skyoauth-scenarios --test pg --profile ci` runs the conformance scenario
+  tests of the `pg` environment (Rust names `a<NN>_<pos|neg>_…`, see
+  `docs/testing/conformance-layout.md` §1.2 and §3) against a PostgreSQL 17
+  service container, reached through `SKYOAUTH_IT_DATABASE_URL`, and uploads
+  the JUnit report for the leg `scenarios-pg/x86_64`. Scenario tests are not
+  `#[ignore]`d: without the database they fail. To run them locally, set
+  that variable to a role that may create databases and run
+  `cargo test -p skyoauth-scenarios --test pg`.
+- Service tests (nextest): `cargo nextest run --workspace --exclude
+  skyoauth-scenarios --all-features --profile ci --run-ignored all` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
@@ -195,8 +201,8 @@ line-coverage badges as SVG files on the `badges` branch
 need no external service and render in a private repository too (only
 `skyoauth/skyoauth` publishes and checks them; a fork does neither). Rust test
 counts come from `service-nextest` (all workspace tests, including PostgreSQL
-tests) and Rust line coverage comes from `rust-coverage` (the workspace
-tests under `cargo llvm-cov`, PostgreSQL tests included); TypeScript test
+tests, but not the conformance scenario package) and Rust line coverage comes
+from `rust-coverage` (the workspace tests under `cargo llvm-cov`, PostgreSQL tests included); TypeScript test
 counts and line coverage come from `typescript-coverage`. When a suite fails
 on `main`, CI publishes red failure
 badges (`N failed` or `failing`) rather than leaving stale passing figures,

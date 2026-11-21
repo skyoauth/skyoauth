@@ -991,16 +991,18 @@ follow-ups of `0002` to `0005` left open, for every registry table at once
 It changes no column, constraint or existing trigger. Every new trigger is
 `ENABLE ALWAYS` and raises `SK001`. The guards do not reuse
 `skyoauth_reject_mutation()` from `0001`: its message calls the table
-"append-only", which is false here, since the rows of these tables stay
-updatable, except `consumed_assertion`, whose rows are pruned (lead
+"append-only", which is false here: their rows are updated (status,
+revision) or, for the list tables and `consumed_assertion`, deleted (lead
 decision, 2026-11-21). The unconditional guards call two new
 functions, `skyoauth_reject_delete()` ("DELETE is not allowed on
 `<table>`") and `skyoauth_reject_truncate()` ("TRUNCATE is not allowed on
-`<table>`"). The two conditional ones are
+`<table>`"). The three conditional ones are
 `skyoauth_reject_delete_unless_disabled()` ("only a disabled row of
-`<table>` may be deleted") and `skyoauth_reject_delete_before_retention()`
-("a row of `<table>` cannot be deleted before its retain_until"). None of
-the four reads a table, so each pins `search_path` to
+`<table>` may be deleted"), its `service_grant` variant
+`skyoauth_reject_delete_grant_unless_disabled()` (the same message, and "an
+impersonation grant of `<table>` is never deleted") and
+`skyoauth_reject_delete_before_retention()` ("a row of `<table>` cannot be
+deleted before its retain_until"). None of the five reads a table, so each pins `search_path` to
 `pg_catalog, pg_temp`.
 
 - **Why.** A row deleted and created again with the same ID starts again at
@@ -1018,8 +1020,7 @@ the four reads a table, so each pins `search_path` to
     `trust_keyset`, `trust_keyset_version`, `trust_source` and
     `service_identity`; `admin_identity`, `admin_credential`,
     `admin_role_binding`, `recovery_state` and `administrative_operation`.
-    With the guards of `0001` and `0002`, no instance, tenant or operator
-    record is deleted. For `tenant`, `principal`, `resource_server`,
+    With the guards of `0001` and `0002`, no record of the tables above is deleted. For `tenant`, `principal`, `resource_server`,
     `audience_tenant_assignment`, `resource_server_checker`,
     `resource_action`, `trust_keyset`, `trust_keyset_version`,
     `trust_source` and `service_identity`, no source defines a hard delete
@@ -1031,7 +1032,11 @@ the four reads a table, so each pins `search_path` to
     (T13.6), and deleting its row would erase the revocation record and
     let its key be registered again (lead decision, 2026-11-21);
   - only when `disabled`: `principal_binding` and `service_grant` (ADR-008
-    item 3). The foreign keys still reject a referenced row with `23503`
+    item 3), except that an impersonation grant (`mode = 'impersonation'`) is
+    never deleted, disabled or not (lead decision, 2026-11-21, provisional):
+    deleting and recreating a dormant impersonation grant under
+    caller-supplied IDs is the only way to revive it, and an ADR-008 errata
+    line records the exception. The foreign keys still reject a referenced row with `23503`
     after the guard, so a binding goes only when no grant row names it, and
     a grant only after its list rows. The `0004` binding-set check passes
     for a grant deleted in the same transaction as its binding rows;
@@ -1048,7 +1053,7 @@ the four reads a table, so each pins `search_path` to
   list tables included (required for `service_grant_binding`; inferred for
   the other three, where a `TRUNCATE` would empty every owner's set without
   advancing a revision). With the guards of `0001` and `0002`, every table
-  of the schema has one. `TRUNCATE … CASCADE` fires the `BEFORE TRUNCATE`
+  of the migrations has one. `TRUNCATE … CASCADE` fires the `BEFORE TRUNCATE`
   triggers of every table it reaches, so the reached table's guard rejects
   a cascade from another table: `TRUNCATE principal_binding CASCADE` and
   `TRUNCATE service_grant_binding` no longer leave a grant without a
@@ -1070,13 +1075,13 @@ the four reads a table, so each pins `search_path` to
   succeeds after a disable. Nothing is deferred.
 - **Triggers:**
 
-  | Trigger                                     | Fires on                   | Function                                    |
-  | ------------------------------------------- | -------------------------- | ------------------------------------------- |
-  | `<table>_no_delete` (the 15 tables above)   | `DELETE`, each row         | `skyoauth_reject_delete()`                  |
-  | `principal_binding_delete_disabled_only`    | `DELETE`, each row         | `skyoauth_reject_delete_unless_disabled()`  |
-  | `service_grant_delete_disabled_only`        | `DELETE`, each row         | `skyoauth_reject_delete_unless_disabled()`  |
-  | `consumed_assertion_delete_after_retention` | `DELETE`, each row         | `skyoauth_reject_delete_before_retention()` |
-  | `<table>_no_truncate` (the 22 tables)       | `TRUNCATE`, each statement | `skyoauth_reject_truncate()`                |
+  | Trigger                                     | Fires on                   | Function                                         |
+  | ------------------------------------------- | -------------------------- | ------------------------------------------------ |
+  | `<table>_no_delete` (the 15 tables above)   | `DELETE`, each row         | `skyoauth_reject_delete()`                       |
+  | `principal_binding_delete_disabled_only`    | `DELETE`, each row         | `skyoauth_reject_delete_unless_disabled()`       |
+  | `service_grant_delete_disabled_only`        | `DELETE`, each row         | `skyoauth_reject_delete_grant_unless_disabled()` |
+  | `consumed_assertion_delete_after_retention` | `DELETE`, each row         | `skyoauth_reject_delete_before_retention()`      |
+  | `<table>_no_truncate` (the 22 tables)       | `TRUNCATE`, each statement | `skyoauth_reject_truncate()`                     |
 
   The catalog test in `service/tests/schema_registry_guards.rs` pins every
   trigger of the schema that fires on `DELETE` or `TRUNCATE`, and fails for
@@ -1087,13 +1092,17 @@ the four reads a table, so each pins `search_path` to
   `ALTER TABLE … ENABLE ALWAYS TRIGGER` take `SHARE ROW EXCLUSIVE` on each
   of the 22 tables, and `CREATE INDEX` takes `SHARE` on
   `consumed_assertion` and scans it. Checked with `pg_locks` in a
-  transaction that applies `0006` to a `0005` database (PostgreSQL 16).
+  transaction that applies `0006` to a `0005` database (PostgreSQL 17.12).
   Neither mode conflicts with the `ACCESS SHARE` lock of a plain read;
   both conflict with the `ROW EXCLUSIVE` lock of a write (PostgreSQL
   documentation, "Table-Level Locks"). So on a populated database, writes
   of these tables wait until the migration commits, and the migration
-  waits for open transactions that wrote them, a brief stall that grows
-  with the size of `consumed_assertion`. No `CHECK` is added and no
+  waits for open transactions that wrote them. The write stall lasts as
+  long as the longest open write transaction on any of the 22 tables: the
+  migration queues behind it, later writes queue behind the migration, and
+  the migration can fail with `40P01` or `55P03` (a retry is safe, since the
+  migration is transactional). The index build adds a stall that grows with
+  the size of `consumed_assertion`. No `CHECK` is added and no
   existing row is
   validated, so the migration cannot fail on existing data and has no
   upgrade precondition. Run the upgrade in a maintenance window.

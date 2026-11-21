@@ -1151,6 +1151,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skyoauth-scenarios"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "skyoauth-service",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "skyoauth-service"
 version = "0.1.0"
 dependencies = [
