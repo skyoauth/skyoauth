@@ -1,7 +1,8 @@
 //! The typed registry surface (`persistence::registry`) against a real
 //! PostgreSQL server: each function's result, not-found and stale-revision
-//! outcomes, the mapping of constraint errors, tenant-scoped reads, pages,
-//! and checker tenant rows.
+//! outcomes, the mapping of constraint errors and of serialization
+//! failures and deadlocks, tenant-scoped reads, pages, and checker tenant
+//! rows.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! test creates and drops its own database. They claim no conformance
@@ -13,6 +14,7 @@
 mod common;
 
 use std::{
+    error::Error as _,
     fmt::Debug,
     time::{Duration, SystemTime},
 };
@@ -195,7 +197,10 @@ async fn registry_constraint_names_match_the_catalog() {
          WHERE (contype IN ('c', 'f', 'p', 'u') AND conrelid = ANY(ARRAY[
                    'tenant', 'principal', 'resource_server', 'audience_tenant_assignment',
                    'resource_server_checker', 'resource_server_checker_tenant',
-                   'resource_action']::regclass[]))
+                   'resource_action', 'trust_keyset', 'trust_keyset_version', 'trust_source',
+                   'principal_binding', 'service_identity', 'service_identity_resource_server',
+                   'service_grant', 'service_grant_binding',
+                   'service_grant_resource_server']::regclass[]))
             OR contypid = ANY(ARRAY[
                    'skyoauth_scope_list', 'skyoauth_profile_list',
                    'skyoauth_string_list']::regtype[])
@@ -277,7 +282,7 @@ async fn tenants_are_created_read_listed_and_keyed() {
 }
 
 /// `Display` and `Debug` never repeat a value from the request (the
-/// `source()` of `Other` may; see the module documentation).
+/// `source()` of `Retry` and `Other` may; see the module documentation).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_errors_do_not_repeat_request_values() {
@@ -729,6 +734,153 @@ async fn a_second_updater_from_the_same_revision_is_stale_after_the_first_commit
     assert_stale(waiting.await.unwrap());
     let current = registry::get_resource_server(&pool, "rs_1").await.unwrap();
     assert_eq!((current.revision, &current.name[..]), (2, "First"));
+    db.drop([pool]).await;
+}
+
+/// The SQLSTATE of a `Retry` error, from its `source()`, the raw
+/// `sqlx::Error`.
+fn retry_sqlstate(err: &RegistryError) -> String {
+    assert!(matches!(err, RegistryError::Retry(_)), "{err:?}");
+    err.source()
+        .and_then(|source| source.downcast_ref::<sqlx::Error>())
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|source| source.code())
+        .unwrap_or_else(|| panic!("no SQLSTATE: {err:?}"))
+        .into_owned()
+}
+
+/// In caller transactions at REPEATABLE READ or SERIALIZABLE, the second
+/// of two updates from one revision waits for the first's row lock and,
+/// once the first commits, fails with `40001` (`serialization_failure`):
+/// `Retry`, never `StaleRevision`, although the revision moved.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_second_updater_from_the_same_revision_must_retry_under_repeatable_read() {
+    for set_level in [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+    ] {
+        let (db, pool) = seeded().await;
+        let mut first = pool.begin().await.unwrap();
+        let mut second = pool.begin().await.unwrap();
+        sqlx::raw_sql(set_level).execute(&mut *first).await.unwrap();
+        sqlx::raw_sql(set_level)
+            .execute(&mut *second)
+            .await
+            .unwrap();
+        // The second's snapshot starts here, before the first updates.
+        let (first_pid, second_pid) = (
+            backend_pid(&mut first).await,
+            backend_pid(&mut second).await,
+        );
+        registry::update_resource_server(&mut *first, "rs_1", 1, &server_changes("First"))
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move {
+            let result = registry::update_resource_server(
+                &mut *second,
+                "rs_1",
+                1,
+                &server_changes("Second"),
+            )
+            .await;
+            second.rollback().await.unwrap();
+            result
+        });
+        wait_until_blocked(&pool, second_pid, first_pid).await;
+        assert!(!waiting.is_finished());
+        first.commit().await.unwrap();
+        let err = tokio::time::timeout(Duration::from_secs(30), waiting)
+            .await
+            .expect("the second updater never finished")
+            .unwrap()
+            .expect_err("both updaters succeeded");
+        assert_eq!(retry_sqlstate(&err), "40001", "{set_level}");
+        assert_eq!(
+            err.to_string(),
+            "registry transaction aborted (SQLSTATE 40001); retry the whole transaction"
+        );
+        assert_eq!(
+            format!("{err:?}"),
+            r#"Retry { sqlstate: Some("40001"), .. }"#
+        );
+        let current = registry::get_resource_server(&pool, "rs_1").await.unwrap();
+        assert_eq!((current.revision, &current.name[..]), (2, "First"));
+        db.drop([pool]).await;
+    }
+}
+
+/// Two transactions that each update one resource server and then the
+/// other's deadlock: the first waits for the second's row lock (checked
+/// with `pg_blocking_pids`) before the second asks for the first's.
+/// PostgreSQL aborts exactly one of them with `40P01`
+/// (`deadlock_detected`), which is `Retry`, and the other goes on. Which one
+/// loses depends on whose deadlock check (after `deadlock_timeout`) runs
+/// first, and changing `deadlock_timeout` needs a superuser, so the test
+/// accepts either, but exactly one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_deadlock_between_two_updaters_must_retry() {
+    let (db, pool) = seeded().await;
+    let mut first = pool.begin().await.unwrap();
+    let mut second = pool.begin().await.unwrap();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    registry::update_resource_server(&mut *first, "rs_1", 1, &server_changes("First"))
+        .await
+        .unwrap();
+    registry::update_resource_server(&mut *second, "rs_2", 1, &server_changes("Second"))
+        .await
+        .unwrap();
+    let first_waits = tokio::spawn(async move {
+        let result =
+            registry::update_resource_server(&mut *first, "rs_2", 1, &server_changes("First"))
+                .await;
+        (first, result)
+    });
+    wait_until_blocked(&pool, first_pid, second_pid).await;
+    let second_waits = tokio::spawn(async move {
+        let result =
+            registry::update_resource_server(&mut *second, "rs_1", 1, &server_changes("Second"))
+                .await;
+        (second, result)
+    });
+    let ((first, first_result), (second, second_result)) =
+        tokio::time::timeout(Duration::from_secs(30), async {
+            (first_waits.await.unwrap(), second_waits.await.unwrap())
+        })
+        .await
+        .expect("the deadlock was never resolved");
+    let (winner, err) = match (first_result, second_result) {
+        (Ok(server), Err(err)) => {
+            assert_eq!(server.revision, 2);
+            second.rollback().await.unwrap();
+            first.commit().await.unwrap();
+            ("First", err)
+        }
+        (Err(err), Ok(server)) => {
+            assert_eq!(server.revision, 2);
+            first.rollback().await.unwrap();
+            second.commit().await.unwrap();
+            ("Second", err)
+        }
+        other => panic!("expected exactly one deadlock victim: {other:?}"),
+    };
+    assert_eq!(retry_sqlstate(&err), "40P01");
+    assert_eq!(
+        err.to_string(),
+        "registry transaction aborted (SQLSTATE 40P01); retry the whole transaction"
+    );
+    assert_eq!(
+        format!("{err:?}"),
+        r#"Retry { sqlstate: Some("40P01"), .. }"#
+    );
+    for id in ["rs_1", "rs_2"] {
+        let current = registry::get_resource_server(&pool, id).await.unwrap();
+        assert_eq!((current.revision, &current.name[..]), (2, winner), "{id}");
+    }
     db.drop([pool]).await;
 }
 

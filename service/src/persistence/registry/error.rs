@@ -12,13 +12,18 @@ const FOREIGN_KEY_VIOLATION: &str = "23503";
 const CHECK_VIOLATION: &str = "23514";
 /// `not_null_violation`.
 const NOT_NULL_VIOLATION: &str = "23502";
+/// `serialization_failure`.
+const SERIALIZATION_FAILURE: &str = "40001";
+/// `deadlock_detected`.
+const DEADLOCK_DETECTED: &str = "40P01";
 /// The project SQLSTATE every guard trigger raises (migrations README,
 /// "Conventions").
 const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
-/// `principal` and the five `0003` tables) and of the three list domains,
-/// as migrations `0002` to `0004` name them, sorted. A unique, foreign key
+/// `principal`, the five `0003` tables and the nine `0004` tables) and of
+/// the three list domains, as migrations `0002` to `0004` name them, sorted
+/// byte-wise. A unique, foreign key
 /// or check violation maps to a typed variant only for a name listed here.
 /// The database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -34,6 +39,26 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_tenant_id_fkey",
     "audience_tenant_assignment_tenant_id_octet_length_check",
     "audience_tenant_assignment_tenant_id_resource_server_id_key",
+    "principal_binding_claim_match_policy_check",
+    "principal_binding_id_check",
+    "principal_binding_id_octet_length_check",
+    "principal_binding_name_check",
+    "principal_binding_name_no_space_check",
+    "principal_binding_name_octet_length_check",
+    "principal_binding_pkey",
+    "principal_binding_profile_check",
+    "principal_binding_revision_check",
+    "principal_binding_status_check",
+    "principal_binding_tenant_id_fkey",
+    "principal_binding_tenant_id_id_key",
+    "principal_binding_tenant_id_id_workload_principal_id_key",
+    "principal_binding_tenant_id_name_key",
+    "principal_binding_tenant_id_octet_length_check",
+    "principal_binding_trust_source_id_fkey",
+    "principal_binding_trust_source_id_octet_length_check",
+    "principal_binding_workload_principal_id_fkey",
+    "principal_binding_workload_principal_id_octet_length_check",
+    "principal_binding_workload_principal_kind_check",
     "principal_id_check",
     "principal_id_octet_length_check",
     "principal_kind_check",
@@ -83,6 +108,66 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "resource_server_pkey",
     "resource_server_revision_check",
     "resource_server_status_check",
+    "service_grant_activation_mode_check",
+    "service_grant_activation_state_check",
+    "service_grant_actor_principal_id_fkey",
+    "service_grant_actor_principal_id_octet_length_check",
+    "service_grant_actor_principal_kind_check",
+    "service_grant_binding_actor_principal_id_octet_length_check",
+    "service_grant_binding_binding_id_fkey",
+    "service_grant_binding_binding_id_octet_length_check",
+    "service_grant_binding_grant_id_fkey",
+    "service_grant_binding_grant_id_octet_length_check",
+    "service_grant_binding_pkey",
+    "service_grant_binding_tenant_id_octet_length_check",
+    "service_grant_default_scopes_check",
+    "service_grant_id_check",
+    "service_grant_id_octet_length_check",
+    "service_grant_impersonation_disabled_check",
+    "service_grant_max_ttl_check",
+    "service_grant_mode_check",
+    "service_grant_name_check",
+    "service_grant_name_no_space_check",
+    "service_grant_name_octet_length_check",
+    "service_grant_pkey",
+    "service_grant_resource_constraints_check",
+    "service_grant_resource_server_assignment_fkey",
+    "service_grant_resource_server_grant_id_fkey",
+    "service_grant_resource_server_grant_id_octet_length_check",
+    "service_grant_resource_server_pkey",
+    "service_grant_resource_server_server_id_octet_length_check",
+    "service_grant_resource_server_tenant_id_octet_length_check",
+    "service_grant_revision_check",
+    "service_grant_status_check",
+    "service_grant_target_mode_check",
+    "service_grant_target_service_id_fkey",
+    "service_grant_target_service_id_octet_length_check",
+    "service_grant_tenant_id_fkey",
+    "service_grant_tenant_id_id_actor_principal_id_key",
+    "service_grant_tenant_id_id_key",
+    "service_grant_tenant_id_name_key",
+    "service_grant_tenant_id_octet_length_check",
+    "service_identity_id_check",
+    "service_identity_id_fkey",
+    "service_identity_id_octet_length_check",
+    "service_identity_max_resource_constraints_check",
+    "service_identity_name_check",
+    "service_identity_name_no_space_check",
+    "service_identity_name_octet_length_check",
+    "service_identity_pkey",
+    "service_identity_principal_kind_check",
+    "service_identity_resource_server_assignment_fkey",
+    "service_identity_resource_server_pkey",
+    "service_identity_resource_server_server_id_octet_length_check",
+    "service_identity_resource_server_service_id_fkey",
+    "service_identity_resource_server_service_id_octet_length_check",
+    "service_identity_resource_server_tenant_id_octet_length_check",
+    "service_identity_revision_check",
+    "service_identity_status_check",
+    "service_identity_tenant_id_fkey",
+    "service_identity_tenant_id_id_key",
+    "service_identity_tenant_id_name_key",
+    "service_identity_tenant_id_octet_length_check",
     "skyoauth_profile_list_check",
     "skyoauth_scope_list_check",
     "skyoauth_string_list_check",
@@ -94,20 +179,99 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "tenant_secret_namespace_key",
     "tenant_secret_namespace_octet_length_check",
     "tenant_status_check",
+    "trust_keyset_id_check",
+    "trust_keyset_id_octet_length_check",
+    "trust_keyset_name_check",
+    "trust_keyset_name_no_space_check",
+    "trust_keyset_name_octet_length_check",
+    "trust_keyset_pkey",
+    "trust_keyset_revision_check",
+    "trust_keyset_status_check",
+    "trust_keyset_tenant_id_fkey",
+    "trust_keyset_tenant_id_id_key",
+    "trust_keyset_tenant_id_name_key",
+    "trust_keyset_tenant_id_octet_length_check",
+    "trust_keyset_version_fingerprint_check",
+    "trust_keyset_version_fingerprint_no_space_check",
+    "trust_keyset_version_fingerprint_octet_length_check",
+    "trust_keyset_version_id_check",
+    "trust_keyset_version_id_octet_length_check",
+    "trust_keyset_version_keyset_id_fkey",
+    "trust_keyset_version_keyset_id_octet_length_check",
+    "trust_keyset_version_pkey",
+    "trust_keyset_version_provenance_check",
+    "trust_keyset_version_public_jwks_check",
+    "trust_keyset_version_status_check",
+    "trust_keyset_version_tenant_id_fkey",
+    "trust_keyset_version_tenant_id_id_key",
+    "trust_keyset_version_tenant_id_octet_length_check",
+    "trust_keyset_version_validity_check",
+    "trust_source_algorithms_check",
+    "trust_source_algorithms_kind_check",
+    "trust_source_assertion_profile_check",
+    "trust_source_audiences_check",
+    "trust_source_ca_bundle_ref_check",
+    "trust_source_ca_bundle_ref_no_space_check",
+    "trust_source_ca_bundle_ref_octet_length_check",
+    "trust_source_ca_fingerprint_check",
+    "trust_source_ca_fingerprint_no_space_check",
+    "trust_source_ca_fingerprint_octet_length_check",
+    "trust_source_cluster_id_check",
+    "trust_source_cluster_id_key",
+    "trust_source_cluster_id_octet_length_check",
+    "trust_source_discovery_url_check",
+    "trust_source_discovery_url_kind_check",
+    "trust_source_discovery_url_no_space_check",
+    "trust_source_discovery_url_octet_length_check",
+    "trust_source_exact_issuer_check",
+    "trust_source_exact_issuer_no_space_check",
+    "trust_source_exact_issuer_octet_length_check",
+    "trust_source_id_check",
+    "trust_source_id_octet_length_check",
+    "trust_source_jwks_keyset_id_fkey",
+    "trust_source_jwks_keyset_id_kind_check",
+    "trust_source_jwks_keyset_id_octet_length_check",
+    "trust_source_kind_check",
+    "trust_source_name_check",
+    "trust_source_name_no_space_check",
+    "trust_source_name_octet_length_check",
+    "trust_source_pkey",
+    "trust_source_proof_bounds_check",
+    "trust_source_replay_mode_check",
+    "trust_source_review_timeout_ms_check",
+    "trust_source_reviewer_credential_ref_check",
+    "trust_source_reviewer_credential_ref_no_space_check",
+    "trust_source_reviewer_credential_ref_octet_length_check",
+    "trust_source_revision_check",
+    "trust_source_single_use_replay_check",
+    "trust_source_stale_revocation_acknowledged_check",
+    "trust_source_stale_revocation_kind_check",
+    "trust_source_status_check",
+    "trust_source_tenant_id_fkey",
+    "trust_source_tenant_id_id_key",
+    "trust_source_tenant_id_name_key",
+    "trust_source_tenant_id_octet_length_check",
+    "trust_source_token_review_endpoint_check",
+    "trust_source_token_review_endpoint_no_space_check",
+    "trust_source_token_review_endpoint_octet_length_check",
+    "trust_source_token_review_fields_kind_check",
+    "trust_source_token_review_profile_check",
 ];
 
 /// The error of a registry function.
 ///
 /// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`],
 /// never a value from the request or the row, and `Display` and `Debug`
-/// print nothing else. The database's own message for an unmapped error is
-/// reachable only through [`std::error::Error::source`] of
-/// [`RegistryError::Other`]: that source is the raw [`sqlx::Error`], whose
-/// message and detail may quote request or row values, so logging must not
-/// walk the source chain.
+/// print nothing else. The database's own message for a retryable or an
+/// unmapped error is reachable only through [`std::error::Error::source`]
+/// of [`RegistryError::Retry`] and [`RegistryError::Other`]: that source is
+/// the raw [`sqlx::Error`], whose message and detail may quote request or
+/// row values, so logging must not walk the source chain.
 pub enum RegistryError {
     /// No row has the given ID (in the given tenant, for a tenant-owned
-    /// table), or a checker does not list the tenant to remove.
+    /// table), or a list set does not contain the item to remove (a
+    /// checker's tenant, or a service identity's audience, a grant's binding
+    /// or a grant's audience).
     NotFound,
     /// The row exists, but its revision is not the expected one: another
     /// write came first. Nothing was changed.
@@ -130,8 +294,20 @@ pub enum RegistryError {
         constraint: Option<&'static str>,
     },
     /// A guard trigger rejected the write (`SK001`), for example a change to
-    /// an immutable column or a revision that does not advance by one.
+    /// an immutable column or a revision that does not advance by one. The
+    /// grant binding-set check (`service_grant_has_binding` and
+    /// `service_grant_binding_keeps_one`) is a deferred constraint trigger,
+    /// so inside a transaction it fails at the caller's commit, not at the
+    /// statement: map the commit's error with `RegistryError::from`.
     Guard,
+    /// The database aborted the transaction with `40001`
+    /// (`serialization_failure`) or `40P01` (`deadlock_detected`): retry
+    /// the whole transaction. A `40001` is never [`Self::StaleRevision`]:
+    /// it means the transaction conflicts with a concurrent one, not that
+    /// the caller must read the row again. As for [`Self::Other`], the
+    /// wrapped [`sqlx::Error`] is reachable only as the
+    /// [`source`](StdError::source).
+    Retry(sqlx::Error),
     /// Any other error: a connection or decode failure, an unexpected
     /// SQLSTATE, or a constraint missing from [`KNOWN_CONSTRAINTS`].
     Other(sqlx::Error),
@@ -167,8 +343,16 @@ fn known_constraint(name: &str) -> Option<&'static str> {
         .map(|index| KNOWN_CONSTRAINTS[index])
 }
 
-/// The typed error for a database error, or `None` when it maps to
-/// [`RegistryError::Other`].
+/// Whether a database error aborted the transaction so that only a retry
+/// of the whole transaction can succeed: [`RegistryError::Retry`].
+fn is_retry(error: &dyn DatabaseError) -> bool {
+    error
+        .code()
+        .is_some_and(|code| matches!(code.as_ref(), SERIALIZATION_FAILURE | DEADLOCK_DETECTED))
+}
+
+/// The typed error for a database error that is not [`is_retry`], or `None`
+/// when it maps to [`RegistryError::Other`].
 fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
     let named = || error.constraint().and_then(known_constraint);
     Some(match error.code()?.as_ref() {
@@ -194,6 +378,9 @@ fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
 
 impl From<sqlx::Error> for RegistryError {
     fn from(error: sqlx::Error) -> Self {
+        if error.as_database_error().is_some_and(is_retry) {
+            return Self::Retry(error);
+        }
         match error.as_database_error().and_then(classify) {
             Some(mapped) => mapped,
             None => Self::Other(error),
@@ -202,10 +389,11 @@ impl From<sqlx::Error> for RegistryError {
 }
 
 impl RegistryError {
-    /// The SQLSTATE of an [`RegistryError::Other`] database error.
-    fn other_sqlstate(&self) -> Option<Cow<'_, str>> {
+    /// The SQLSTATE of the database error wrapped by
+    /// [`RegistryError::Retry`] or [`RegistryError::Other`].
+    fn sqlstate(&self) -> Option<Cow<'_, str>> {
         match self {
-            Self::Other(error) => error.as_database_error()?.code(),
+            Self::Retry(error) | Self::Other(error) => error.as_database_error()?.code(),
             _ => None,
         }
     }
@@ -235,7 +423,17 @@ impl fmt::Display for RegistryError {
                 constraint: None,
             } => write!(f, "registry write violates a {} constraint", kind.as_str()),
             Self::Guard => write!(f, "registry write rejected by a schema guard (SK001)"),
-            Self::Other(_) => match self.other_sqlstate() {
+            Self::Retry(_) => match self.sqlstate() {
+                Some(code) => write!(
+                    f,
+                    "registry transaction aborted (SQLSTATE {code}); retry the whole transaction"
+                ),
+                None => write!(
+                    f,
+                    "registry transaction aborted; retry the whole transaction"
+                ),
+            },
+            Self::Other(_) => match self.sqlstate() {
                 Some(code) => write!(f, "registry database error (SQLSTATE {code})"),
                 None => write!(f, "registry database error"),
             },
@@ -243,9 +441,9 @@ impl fmt::Display for RegistryError {
     }
 }
 
-/// Like `Display`, `Debug` leaves out the wrapped [`sqlx::Error`], whose
-/// `Debug` includes the server's detail line (the key values of a
-/// violation).
+/// Like `Display`, `Debug` leaves out the wrapped [`sqlx::Error`] of
+/// `Retry` and `Other`, whose `Debug` includes the server's detail line
+/// (the key values of a violation).
 impl fmt::Debug for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -261,9 +459,13 @@ impl fmt::Debug for RegistryError {
                 .field("constraint", constraint)
                 .finish(),
             Self::Guard => f.write_str("Guard"),
+            Self::Retry(_) => f
+                .debug_struct("Retry")
+                .field("sqlstate", &self.sqlstate())
+                .finish_non_exhaustive(),
             Self::Other(_) => f
                 .debug_struct("Other")
-                .field("sqlstate", &self.other_sqlstate())
+                .field("sqlstate", &self.sqlstate())
                 .finish_non_exhaustive(),
         }
     }
@@ -272,7 +474,7 @@ impl fmt::Debug for RegistryError {
 impl StdError for RegistryError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::Other(error) => Some(error),
+            Self::Retry(error) | Self::Other(error) => Some(error),
             _ => None,
         }
     }
@@ -399,6 +601,106 @@ mod tests {
             }
             assert_redacted(&error);
         }
+    }
+
+    #[test]
+    fn trust_binding_and_grant_constraints_map_by_name() {
+        for name in [
+            "trust_source_cluster_id_key",
+            "service_grant_binding_pkey",
+            "principal_binding_tenant_id_name_key",
+        ] {
+            let error = map(Some("23505"), Some(name));
+            assert!(
+                matches!(error, RegistryError::AlreadyExists { constraint } if constraint == name),
+                "{error:?}"
+            );
+            assert_redacted(&error);
+        }
+        for (code, kind, name) in [
+            (
+                "23503",
+                InvariantKind::ForeignKey,
+                "service_grant_binding_binding_id_fkey",
+            ),
+            (
+                "23503",
+                InvariantKind::ForeignKey,
+                "service_identity_resource_server_assignment_fkey",
+            ),
+            (
+                "23514",
+                InvariantKind::Check,
+                "trust_source_token_review_fields_kind_check",
+            ),
+            (
+                "23514",
+                InvariantKind::Check,
+                "service_grant_resource_server_server_id_octet_length_check",
+            ),
+            (
+                "23514",
+                InvariantKind::Check,
+                "trust_keyset_version_validity_check",
+            ),
+        ] {
+            let error = map(Some(code), Some(name));
+            match &error {
+                RegistryError::Invariant {
+                    kind: actual,
+                    constraint: Some(constraint),
+                } => assert_eq!((*actual, *constraint), (kind, name)),
+                other => panic!("{other:?}"),
+            }
+            assert_redacted(&error);
+        }
+        // The deferred binding-set check at commit is a guard like any other.
+        assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+    }
+
+    #[test]
+    fn serialization_failure_and_deadlock_map_to_retry_with_the_raw_source() {
+        for (code, constraint) in [
+            ("40001", None),
+            ("40P01", None),
+            // A constraint name does not make it a constraint error.
+            ("40001", Some("tenant_pkey")),
+        ] {
+            let error = map(Some(code), constraint);
+            // Never StaleRevision: the caller retries the transaction.
+            assert!(matches!(error, RegistryError::Retry(_)), "{error:?}");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "registry transaction aborted (SQLSTATE {code}); retry the whole transaction"
+                )
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                format!(r#"Retry {{ sqlstate: Some("{code}"), .. }}"#)
+            );
+            assert_redacted(&error);
+            let source = error
+                .source()
+                .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                .and_then(sqlx::Error::as_database_error)
+                .expect("the raw database error");
+            assert_eq!(source.code().as_deref(), Some(code));
+            assert_eq!(source.message(), SECRET);
+        }
+        // Only those two: the other class 40 codes stay `Other`.
+        for code in ["40000", "40002", "40003"] {
+            assert!(
+                matches!(map(Some(code), None), RegistryError::Other(_)),
+                "{code}"
+            );
+        }
+        let error = RegistryError::Retry(sqlx::Error::PoolTimedOut);
+        assert_eq!(
+            error.to_string(),
+            "registry transaction aborted; retry the whole transaction"
+        );
+        assert_eq!(format!("{error:?}"), "Retry { sqlstate: None, .. }");
     }
 
     #[test]

@@ -1120,6 +1120,12 @@ Open for all registry tables:
   Each guard also covers a `TRUNCATE … CASCADE` that reaches its table
   from another table.
 
+  The same migration adds a `revision` column to
+  `trust_keyset_version`, for a registry `update_trust_keyset_version`
+  (enable or disable) that is a compare-and-set on the version's own
+  revision, not the keyset's (lead decision, 2026-11-21; see "The `0004`
+  tables" below).
+
 - Indexes on the referencing side of several `0004` foreign keys:
   `principal_binding (tenant_id, trust_source_id)`,
   `trust_keyset_version (tenant_id, keyset_id)`,
@@ -1245,15 +1251,17 @@ Of two concurrent updates from one revision exactly one succeeds. Under
 `READ COMMITTED` the second waits for the first's row lock and then gives
 `StaleRevision`. In a caller transaction at `REPEATABLE READ` or
 `SERIALIZABLE` it fails instead with `40001` (`serialization_failure`),
-which maps to `Other`: it means "retry the transaction", so it is
-deliberately not mapped to `StaleRevision`.
+which maps to `Retry`: it means "retry the whole transaction", so it is
+never mapped to `StaleRevision`. A deadlock (`40P01`,
+`deadlock_detected`) is `Retry` too. `Retry`, like `Other`, keeps the raw
+`sqlx::Error` as its `source()`; the registry does not retry.
 
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
 catalog by a test). The `Display` and `Debug` text of an error carries
 constraint names and SQLSTATEs only, never a value. The `source()` of
-`Other` is the raw `sqlx::Error`, which may quote values, so logging must
-not walk the source chain.
+`Retry` and `Other` is the raw `sqlx::Error`, which may quote values, so
+logging must not walk the source chain.
 
 | SQLSTATE | Rust error                                      |
 | -------- | ----------------------------------------------- |
@@ -1263,6 +1271,8 @@ not walk the source chain.
 | `23514`  | `Invariant { kind: Check, constraint }`         |
 | `23502`  | `Invariant { kind: NotNull, constraint: None }` |
 | `SK001`  | `Guard`                                         |
+| `40001`  | `Retry` (retry the whole transaction)           |
+| `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
 
 PostgreSQL text and `jsonb` cannot hold U+0000: a NUL character in any
@@ -1290,3 +1300,108 @@ Follow-ups for the registry surface:
 - Replacing a checker's whole tenant set with `k` adds and removes advances
   its revision by `k`. T14.3 may want a single replace operation that
   advances it by one.
+
+### The `0004` tables
+
+The same module covers the nine `0004` tables, with the same conventions:
+create, get, list and revision-checked update for `trust_keyset`,
+`trust_source`, `principal_binding`, `service_identity` and
+`service_grant`; create, get and a per-keyset list for
+`trust_keyset_version`, which has no revision, so its `status` has no
+update yet (inferred, as for `tenant`). Every one is tenant-owned: reads,
+updates and list-set changes take the tenant and ID, so another tenant's ID
+is `NotFound`, and lists hold one tenant's rows. A trust source is stored
+flat, and the database's `trust_source_*_kind_check`s decide which fields a
+kind takes. Timestamps are written as whole microseconds, truncated toward
+the past (inferred).
+
+The list tables change one row at a time, each a compare-and-set on the
+owner's revision, as checker tenants do: a service identity's audiences, a
+grant's bindings and a grant's audiences. A service identity and a grant
+are created with their initial sets in one statement. That keeps the
+deferred binding-set check whole. The check is two constraint triggers on
+one function: `service_grant_has_binding` (a grant created with no binding)
+and `service_grant_binding_keeps_one` (the removal of a binding), both
+calling `skyoauth_service_grant_has_binding()`. A grant created with a
+binding passes on any executor; a grant created without one, or the removal
+of its last binding, fails with `Guard` at once on a pool, and at the
+caller's commit inside a transaction unless a binding is added first (`RegistryError::from` maps the commit's error). Of two
+removals from one grant revision, the later is `StaleRevision` under
+`READ COMMITTED`; under `REPEATABLE READ` and `SERIALIZABLE` PostgreSQL
+fails it with `40001`, which maps to `Retry`. The `0004` constraint names
+are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
+surface.
+
+Timestamps have a narrower range in the registry than in the tables. The
+`timestamptz` columns of `0002` to `0004` (and of `0005`) accept
+`'infinity'`, `'-infinity'` and finite values up to
+`294276-12-31 23:59:59.999999+00`, but the registry reads a timestamp as
+`(extract(epoch FROM <column>) * 1000000)::bigint`, signed 64-bit
+microseconds from the Unix epoch. A get or list over a row that holds an
+infinity fails with `0A000` (`feature_not_supported`), and over a finite
+value past `294247-01-10 04:00:54.775806+00` (`i64::MAX - 1` microseconds)
+with `22003` (`numeric_value_out_of_range`), except that the first few
+microseconds past it read back rounded down; both errors map to `Other`.
+One such row, for example a restored one, fails the whole page of a list.
+Writes cannot create such a row: `since_epoch` rejects a time before
+PostgreSQL's earliest `timestamptz` (4713 BC,
+`-210_866_803_200_000_000` microseconds) or after `i64::MAX - 1`
+microseconds with `Other` (an encode error, "timestamp out of range")
+before any statement runs. `i64::MAX` itself is excluded because
+PostgreSQL 16's `extract(epoch ...)` rounds exactly that time to
+`9_223_372_036_854_775_800`.
+
+Follow-ups for timestamps (lead decision, 2026-11-21):
+
+- The registry-guards migration adds a named `CHECK` on every `timestamptz`
+  column of `0002` to `0005` that requires a finite value within the signed
+  64-bit epoch-microsecond range (at most `i64::MAX - 1` microseconds, the
+  latest the registry reads back exactly), with a catalog test, and an upgrade
+  precondition: before it runs, this query must return only zero counts
+  (shown for the `0002` to `0004` columns; the `0005` columns are added the
+  same way):
+
+  ```sql
+  SELECT 'tenant.created_at' AS column_name, count(*) FROM tenant
+   WHERE NOT isfinite(created_at)
+      OR created_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'principal.created_at', count(*) FROM principal
+   WHERE NOT isfinite(created_at)
+      OR created_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'instance_security_policy.audit_sink_validated_at', count(*)
+    FROM instance_security_policy
+   WHERE NOT isfinite(audit_sink_validated_at)
+      OR audit_sink_validated_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'audit_event.timestamp', count(*) FROM audit_event
+   WHERE NOT isfinite("timestamp")
+      OR "timestamp" > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'trust_keyset_version.effective_at', count(*) FROM trust_keyset_version
+   WHERE NOT isfinite(effective_at)
+      OR effective_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'trust_keyset_version.expires_at', count(*) FROM trust_keyset_version
+   WHERE NOT isfinite(expires_at)
+      OR expires_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'service_grant.valid_until', count(*) FROM service_grant
+   WHERE NOT isfinite(valid_until)
+      OR valid_until > timestamptz '294247-01-10 04:00:54.775806+00';
+  ```
+
+  Every finite `timestamptz` is at or after the epoch-microsecond lower
+  bound, so only infinities and the upper bound need the test; a `NULL`
+  passes.
+
+- A typed per-row `RegistryError` variant for a row the projection cannot
+  represent, in the next registry PR, instead of `Other`.
+
+Follow-up (lead decision, 2026-11-21): the registry-guards migration (the
+delete and truncate guards under "Follow-ups") adds a `revision` column to
+`trust_keyset_version`. The registry then gets
+`update_trust_keyset_version`, which enables or disables a version as a
+compare-and-set on the version's own revision: the same per-row
+compare-and-set as the other tables, with no tie to the keyset's revision.
