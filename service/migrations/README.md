@@ -575,7 +575,11 @@ The database does not enforce these rules; the service must:
   each template are checked by the database since `0008`, see "What 0008
   adds");
 - check JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
-  upload (T11.3);
+  upload (T11.3). The pure module `skyoauth_service::jwk` now does these
+  checks (provisional picks, its module docs list them): `parse_jwk_set`
+  for one version's set, RFC 7638 thumbprints, and `live_keys` for
+  conflicts between live versions. The keyset write path does not call it
+  yet (T11.9, T24.2);
 - keep `default_scopes` and `scopes` within every other ceiling (service,
   assignment, resource server; IR-063) and check resource constraints
   against their schemas (IR-123, IR-141);
