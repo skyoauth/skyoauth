@@ -11,11 +11,14 @@
 //!   `instance_security_policy.mirror`, and the sink-change event (IR-053)
 //!   is `instance_security_policy.change_sink`: both write the
 //!   `InstanceSecurityPolicy` row (IR-059), so `<resource>` is that row's.
-//! - First bootstrap (IR-057; design section 7.2; T13.4) inserts the policy
-//!   row and the recovery state: `instance_security_policy.create` and
-//!   `recovery_state.create`. A recovery key rotation (OQ-TM-8) is
-//!   `recovery_state.rotate_key`, and the break-glass operator restoration
-//!   (T13.5) is `admin_identity.restore`.
+//! - First bootstrap (IR-057; design section 7.2; T13.4) writes one
+//!   event, `recovery_state.create`, with the `instance_id` as `object_id`,
+//!   also when it inserts the policy row (provisional lead pick,
+//!   2026-11-21; identity-registry section 5.2).
+//!   `instance_security_policy.create` stays in the table for a later
+//!   startup path that creates the policy row. A recovery key rotation
+//!   (OQ-TM-8) is `recovery_state.rotate_key`, and the break-glass operator
+//!   restoration (T13.5) is `admin_identity.restore`.
 //! - The IR-152 egress entry writes are a create and a `status` change:
 //!   `egress_allowlist_entry.create`, `.enable` (IR-059) and `.disable`.
 //! - The T13.3 administrative events of M1a are the writes of the operator

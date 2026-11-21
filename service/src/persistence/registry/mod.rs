@@ -17,7 +17,10 @@
 //! [`authorize_operator`] looks up whether a presented operator credential
 //! holds a role in a scope (design section 7.2; API-002, API-120; see its
 //! module for the one-way rules, the reserved actor IDs and what the lookup
-//! does not do).
+//! does not do). [`bootstrap_instance`] bootstraps the instance once: the
+//! policy row, the closed recovery state, the first `security_admin` and
+//! its audit event, in the caller's transaction (design section 7.2; T13.4,
+//! T13.6; see its module for the adopt rule and closure).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -237,13 +240,17 @@
 //! exceptions to "one statement on any executor": an append is four or five
 //! statements that commit with the audited write. The registry's other writes still do not append
 //! events; the caller does, in the same transaction. Action names are the
-//! closed table [`AUDIT_ACTIONS`].
+//! closed table [`AUDIT_ACTIONS`]. [`bootstrap_instance`] is a third
+//! exception: it runs its writes and appends its own event, last, in a
+//! caller [`Transaction`](sqlx::Transaction), which the caller commits or,
+//! on an error, rolls back.
 //!
 //! # Not done here
 //!
 //! The registry does not authorize (API-147 and the endpoint roles are
 //! T14.1 and T14.2), does not write audit events (T13.x; the caller writes
-//! the event in the same transaction), does not check rules the database
+//! the event in the same transaction; [`bootstrap_instance`] is the
+//! exception), does not check rules the database
 //! does not enforce (an enabled same-tenant assignment behind a reference,
 //! scope and profile vocabulary, leaving a disabled assignment's tenant out
 //! of a checker's effective set; migrations README, "What 0003 adds"; the
@@ -254,6 +261,7 @@
 
 mod assertion;
 mod audience;
+mod bootstrap;
 mod ceilings;
 mod error;
 mod event_actions;
@@ -278,6 +286,10 @@ pub use audience::{
     list_resource_servers, remove_resource_server_checker_tenant,
     update_audience_tenant_assignment, update_resource_action, update_resource_server,
     update_resource_server_checker,
+};
+pub use bootstrap::{
+    BootstrapError, BootstrapOutcome, BootstrapRequest, RECOVERY_PUBLIC_KEY_LENGTH,
+    bootstrap_instance,
 };
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{InvariantKind, KNOWN_CONSTRAINTS, RegistryError};
