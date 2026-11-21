@@ -203,7 +203,8 @@ async fn registry_constraint_names_match_the_catalog() {
                    'service_grant', 'service_grant_binding',
                    'service_grant_resource_server', 'consumed_assertion',
                    'admin_identity', 'admin_credential', 'admin_role_binding',
-                   'instance_security_policy', 'recovery_state']::regclass[]))
+                   'instance_security_policy', 'recovery_state',
+                   'administrative_operation']::regclass[]))
             OR contypid = ANY(ARRAY[
                    'skyoauth_scope_list', 'skyoauth_profile_list',
                    'skyoauth_string_list']::regtype[])
