@@ -24,7 +24,16 @@ cargo run -p skyoauth-service   # listens on $SKYOAUTH_ADDR (default 127.0.0.1:8
 
 `cargo coverage` is an alias (in `.cargo/config.toml`) for `cargo llvm-cov`
 that fails if line coverage is below 85%. It needs `cargo install
-cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
+cargo-llvm-cov` and `rustup component add llvm-tools-preview`. Plain
+`cargo coverage` skips the `#[ignore]`d PostgreSQL tests (see below), so it
+reports less than CI, which runs them. To measure what CI measures, point
+`SKYOAUTH_IT_DATABASE_URL` at a test server and pass `--include-ignored` to
+the test binaries:
+
+```bash
+SKYOAUTH_IT_DATABASE_URL=postgres://skyoauth:skyoauth@localhost:5432/skyoauth \
+  cargo coverage -- --include-ignored
+```
 
 ### Database migrations
 
@@ -124,7 +133,10 @@ GitHub Actions runs on pushes to `main` and on pull requests:
 
 - Rust: formatting, clippy, tests, doctests and rustdoc on x86_64 and aarch64
   Linux; the coverage gate; and a `cargo check` on the minimum supported Rust
-  version declared in `Cargo.toml`.
+  version declared in `Cargo.toml`. The coverage gate (`rust-coverage`, x86_64
+  Linux) runs `cargo coverage` with `-- --include-ignored` against the same
+  pinned PostgreSQL 17 service container as `service-nextest`, so the
+  PostgreSQL tests count toward it.
 - Scenarios on PostgreSQL (`scenarios-pg`): cargo-nextest runs the
   conformance scenario tests (Rust names `a<NN>_<pos|neg>_…`, see
   `docs/testing/conformance-layout.md` §3) against a PostgreSQL 17 service
@@ -138,8 +150,9 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
   DB-backed tests reach a PostgreSQL 17 service container, with the same
-  pinned image as `scenarios-pg`, through `SKYOAUTH_IT_DATABASE_URL`. They
-  are `#[ignore]`d, so jobs without a database report them as ignored.
+  pinned image as `scenarios-pg` and `rust-coverage`, through
+  `SKYOAUTH_IT_DATABASE_URL`. They are `#[ignore]`d, so jobs without a
+  database report them as ignored.
 - TypeScript: formatting, lint, type check, tests and build on Node 22 and 24;
   and the coverage gate.
 - A change that touches only documentation (Markdown files and `LICENSE`, as
@@ -182,9 +195,10 @@ line-coverage badges as SVG files on the `badges` branch
 need no external service and render in a private repository too (only
 `skyoauth/skyoauth` publishes and checks them; a fork does neither). Rust test
 counts come from `service-nextest` (all workspace tests, including PostgreSQL
-tests) and Rust line coverage comes from `rust-coverage` (which excludes the
-PostgreSQL-backed tests); TypeScript test counts and line coverage come from
-`typescript-coverage`. When a suite fails on `main`, CI publishes red failure
+tests) and Rust line coverage comes from `rust-coverage` (the workspace
+tests under `cargo llvm-cov`, PostgreSQL tests included); TypeScript test
+counts and line coverage come from `typescript-coverage`. When a suite fails
+on `main`, CI publishes red failure
 badges (`N failed` or `failing`) rather than leaving stale passing figures,
 and a coverage badge is red whenever its gate failed, whatever percentage it
 shows. Coverage percentages are truncated to one decimal, never rounded up

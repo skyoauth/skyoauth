@@ -10,8 +10,11 @@ publish = false
 [dependencies]
 axum = "0.8.9"
 serde = { version = "1.0.229", features = ["derive"] }
+# The registry's jsonb list columns (`persistence::registry`).
+serde_json = "1.0.154"
 # Exact pin: persistence::migrate calls the `#[doc(hidden)]` `Migrator::run_direct`.
-sqlx = { version = "=0.9.1", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
+# `json` decodes and binds the registry's jsonb columns.
+sqlx = { version = "=0.9.1", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1.44"
 url = "2.5.8"
@@ -19,7 +22,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [dev-dependencies]
 http-body-util = "0.1.5"
-serde_json = "1.0.154"
 # `time` for timeouts that turn a hung database test into a failure.
 tokio = { version = "1.54.1", features = ["time"] }
 tower = { version = "0.5.3", features = ["util"] }
