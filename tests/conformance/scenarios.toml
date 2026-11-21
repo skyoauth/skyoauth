@@ -676,7 +676,7 @@ id = "A29"
 kind = "scenario"
 layers = ["security"]
 envs = ["pg"]
-harness = ["PG", "proptest with fixed seed"]
+harness = ["PG"]
 owners = ["T10.8", "T11.10", "T14.8", "T21.3"]
 positive = "same-issuer and same-name registrations coexist"
 negative = "each crossed reference at write (M1a); a proof from one tenant's source with another tenant's grant at exchange (M2)"
@@ -703,6 +703,13 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_uploaded_source_on_other_tenants_keyset",
   "nextest:skyoauth-scenarios/pg/security::a29::a29_neg_writes_to_other_tenants_records_find_nothing",
 ]
+
+[[scenario.stage]]
+milestone = "M1b"
+scope = "human registry references"
+legs = ["scenarios-pg/x86_64"]
+status = "planned"
+tests = []
 
 [[scenario.stage]]
 milestone = "M2"

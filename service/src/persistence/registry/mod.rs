@@ -52,8 +52,8 @@
 //!   on create; no update touches them. A keyset version's columns are
 //!   also untouched, but only because no update exists yet: the schema
 //!   lets its `status` change, and the `revision` column plus
-//!   `update_trust_keyset_version` come with the registry-guards migration
-//!   (migrations README, "The `0004` tables").
+//!   `update_trust_keyset_version` come with the shape migration (`0007`;
+//!   migrations README, "The `0004` tables").
 //! - `tenant` and `principal` have no revision column yet (migrations
 //!   README, "Not done in `0002`"), so this module offers no update for them:
 //!   an update without an expected revision would break API-003 (inferred;
@@ -74,9 +74,9 @@
 //!   grant are created with their initial sets in the same statement.
 //! - A trust keyset version has no revision column and is immutable but for
 //!   its `status` (`0004`), so this module only creates and reads versions,
-//!   as it does tenants. The registry-guards migration (the delete and
-//!   truncate guards; migrations README, "Follow-ups") adds a `revision`
-//!   column to `trust_keyset_version`, and the registry then gets
+//!   as it does tenants. The shape migration (`0007`, after the delete and
+//!   truncate guards of `0006`; migrations README, "Follow-ups") adds a
+//!   `revision` column to `trust_keyset_version`, and the registry then gets
 //!   `update_trust_keyset_version` (enable or disable) as a compare-and-set
 //!   on the version's own revision, like the other tables, with no tie to
 //!   the keyset's revision (lead decision, 2026-11-21).

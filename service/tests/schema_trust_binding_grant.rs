@@ -135,6 +135,10 @@ fn sqlstate(err: &sqlx::Error) -> String {
 /// `not_null_violation`, 23503 `foreign_key_violation`, 23505
 /// `unique_violation` and 23514 `check_violation` (also raised by a
 /// domain's CHECK).
+///
+/// A `23503` case that deletes a referenced row of a table whose deletes
+/// `0006` guards first disables that table's user triggers; the line's
+/// implicit transaction rolls that back with the failed delete.
 async fn assert_rejected(conn: &mut PgConnection, cases: &'static str) {
     for case in cases.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let (code, sql) = case.split_once(' ').unwrap();
@@ -227,6 +231,22 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
         .chain([
             guard("service_grant", "has_binding", true),
             guard("service_grant_binding", "keeps_one", true),
+        ])
+        // The 0006 delete and truncate guards (schema_registry_guards.rs).
+        .chain(ALL_TABLES.iter().map(|t| guard(t, "no_truncate", false)))
+        .chain(
+            [
+                "trust_keyset",
+                "trust_keyset_version",
+                "trust_source",
+                "service_identity",
+            ]
+            .iter()
+            .map(|t| guard(t, "no_delete", false)),
+        )
+        .chain([
+            guard("principal_binding", "delete_disabled_only", false),
+            guard("service_grant", "delete_disabled_only", false),
         ])
         .collect();
     expected.sort();
@@ -1196,8 +1216,8 @@ async fn keyset_names_are_tenant_local_and_versions_change_only_status() {
     rejects(
         &pool,
         "
-        23503 DELETE FROM trust_keyset WHERE id = 'ks_1'
-        23503 DELETE FROM tenant WHERE id = 'ten_b'
+        23503 ALTER TABLE trust_keyset DISABLE TRIGGER USER; DELETE FROM trust_keyset WHERE id = 'ks_1'
+        23503 ALTER TABLE tenant DISABLE TRIGGER USER; DELETE FROM tenant WHERE id = 'ten_b'
     ",
     )
     .await;
@@ -1421,8 +1441,8 @@ async fn trust_source_names_selectors_and_references() {
     rejects(
         &pool,
         "
-        23503 DELETE FROM trust_source WHERE id = 'src_gh'
-        23503 DELETE FROM trust_keyset WHERE id = 'ks_b'
+        23503 ALTER TABLE trust_source DISABLE TRIGGER USER; DELETE FROM trust_source WHERE id = 'src_gh'
+        23503 ALTER TABLE trust_keyset DISABLE TRIGGER USER; DELETE FROM trust_keyset WHERE id = 'ks_b'
     ",
     )
     .await;
@@ -1465,7 +1485,7 @@ async fn binding_maps_a_same_tenant_source_to_a_workload() {
         SK001 UPDATE principal_binding SET trust_source_id = 'src_up', revision = revision + 1 WHERE id = 'bnd_3'
         SK001 UPDATE principal_binding SET workload_principal_id = 'wld_1', revision = revision + 1 WHERE id = 'bnd_3'
         SK001 UPDATE principal_binding SET status = 'disabled' WHERE id = 'bnd_3'
-        23503 DELETE FROM principal WHERE id = 'wld_2'
+        23503 ALTER TABLE principal DISABLE TRIGGER USER; DELETE FROM principal WHERE id = 'wld_2'
     "#).await;
     // A disabled binding stays referenced by its grants (OQ-ADR022-1).
     run(
@@ -1512,9 +1532,9 @@ async fn service_identity_is_a_service_principal_with_assigned_audiences() {
         SK001 UPDATE service_identity_resource_server SET resource_server_id = 'rs_1' WHERE service_id = 'svc_b'
         SK001 UPDATE service_identity_resource_server SET service_id = 'svc_2' WHERE service_id = 'svc_1'
         SK001 UPDATE service_identity_resource_server SET tenant_id = 'ten_b' WHERE service_id = 'svc_1'
-        23503 DELETE FROM audience_tenant_assignment WHERE id = 'ata_1'
-        23503 DELETE FROM principal WHERE id = 'svc_1'
-        23503 DELETE FROM service_identity WHERE id = 'svc_1'
+        23503 ALTER TABLE audience_tenant_assignment DISABLE TRIGGER USER; DELETE FROM audience_tenant_assignment WHERE id = 'ata_1'
+        23503 ALTER TABLE principal DISABLE TRIGGER USER; DELETE FROM principal WHERE id = 'svc_1'
+        23503 ALTER TABLE service_identity DISABLE TRIGGER USER; DELETE FROM service_identity WHERE id = 'svc_1'
     "#).await;
     run(
         &pool,
@@ -1640,7 +1660,7 @@ async fn grant_references_stay_with_its_actor_and_tenant() {
         SK001 UPDATE service_grant_binding SET grant_id = 'grt_2' WHERE grant_id = 'grt_1'
         SK001 UPDATE service_grant_binding SET tenant_id = 'ten_b' WHERE grant_id = 'grt_1'
         SK001 UPDATE service_grant_binding SET actor_principal_id = 'wld_2' WHERE grant_id = 'grt_1'
-        23503 DELETE FROM principal_binding WHERE id = 'bnd_3'
+        23503 ALTER TABLE principal_binding DISABLE TRIGGER USER; DELETE FROM principal_binding WHERE id = 'bnd_3'
         23503 INSERT INTO service_grant_resource_server VALUES ('grt_1', 'ten_a', 'rs_2')
         23503 INSERT INTO service_grant_resource_server VALUES ('grt_1', 'ten_b', 'rs_2')
         23503 INSERT INTO service_grant_resource_server VALUES ('grt_x', 'ten_a', 'rs_1')
@@ -1648,9 +1668,9 @@ async fn grant_references_stay_with_its_actor_and_tenant() {
         SK001 UPDATE service_grant_resource_server SET resource_server_id = 'rs_1' WHERE grant_id = 'grt_b'
         SK001 UPDATE service_grant_resource_server SET grant_id = 'grt_2' WHERE grant_id = 'grt_1'
         SK001 UPDATE service_grant_resource_server SET tenant_id = 'ten_b' WHERE grant_id = 'grt_1'
-        23503 DELETE FROM audience_tenant_assignment WHERE id = 'ata_2'
-        23503 DELETE FROM service_identity WHERE id = 'svc_1'
-        23503 DELETE FROM service_grant WHERE id = 'grt_1'
+        23503 ALTER TABLE audience_tenant_assignment DISABLE TRIGGER USER; DELETE FROM audience_tenant_assignment WHERE id = 'ata_2'
+        23503 ALTER TABLE service_identity DISABLE TRIGGER USER; DELETE FROM service_identity WHERE id = 'svc_1'
+        23503 ALTER TABLE service_grant DISABLE TRIGGER USER; DELETE FROM service_grant WHERE id = 'grt_1'
     ").await;
     run(
         &pool,
@@ -1713,7 +1733,7 @@ async fn grant_keeps_at_least_one_allowed_binding() {
            INSERT INTO service_grant_binding VALUES ('grt_1', 'bnd_2', 'ten_a', 'wld_1');
            INSERT INTO service_grant VALUES ('grt_4', 'ten_a', 'new', 'wld_2', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
            INSERT INTO service_grant_binding VALUES ('grt_4', 'bnd_3', 'ten_a', 'wld_2');
-           INSERT INTO service_grant VALUES ('grt_5', 'ten_a', 'gone', 'wld_2', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
+           INSERT INTO service_grant VALUES ('grt_5', 'ten_a', 'gone', 'wld_2', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'disabled', 'not_required');
            DELETE FROM service_grant WHERE id = 'grt_5'"#,
     )
     .await;
@@ -1721,7 +1741,8 @@ async fn grant_keeps_at_least_one_allowed_binding() {
     // rows first, then the grant.
     run(
         &pool,
-        "DELETE FROM service_grant_binding WHERE grant_id = 'grt_b';
+        "UPDATE service_grant SET status = 'disabled', revision = revision + 1 WHERE id = 'grt_b';
+         DELETE FROM service_grant_binding WHERE grant_id = 'grt_b';
          DELETE FROM service_grant_resource_server WHERE grant_id = 'grt_b';
          DELETE FROM service_grant WHERE id = 'grt_b'",
     )
