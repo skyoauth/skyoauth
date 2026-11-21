@@ -177,6 +177,7 @@
 //! impersonation grant dormant; "What 0004 adds"), does not generate IDs
 //! (T10.2) and does not run migrations.
 
+mod assertion;
 mod audience;
 mod error;
 mod grant;
@@ -185,6 +186,9 @@ mod model;
 mod tenant;
 mod trust;
 
+pub use assertion::{
+    Consumption, MAX_ASSERTION_SET, NewConsumedAssertion, consume_assertion, consume_assertion_set,
+};
 pub use audience::{
     add_resource_server_checker_tenant, create_audience_tenant_assignment, create_resource_action,
     create_resource_server, create_resource_server_checker, get_audience_tenant_assignment,

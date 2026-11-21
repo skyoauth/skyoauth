@@ -1621,6 +1621,23 @@ The registry does not authorize writes (API-147; T14.1, T14.2), write
 audit events (T13.x), check the rules listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
 
+Consumed assertions (T10.9; ADR-016 items 6 and 7): `consume_assertion`
+inserts one row with `ON CONFLICT … DO NOTHING` and returns `Consumed`, or
+`Replay` when the key exists, leaving that row unchanged.
+`consume_assertion_set` writes the rows of one proof under several
+digest-key versions all or none: a plain multi-row `INSERT`, whose `23505`
+on `consumed_assertion_pkey` is `Replay` with nothing written; inside a
+caller transaction that error aborts the transaction, which the caller
+rolls back. It inserts its rows sorted by the primary key, bytewise, so
+two sets that share keys lock them in the same order and do not deadlock.
+An empty set, or one of more than `MAX_ASSERTION_SET` (8, inferred) rows,
+is rejected before the statement. A replay is not an error; every error, a store failure included,
+is a deny. The digest, `retain_until` with its drain cap, `consumed_at`,
+and the `single_use` and enabled checks of the source stay with the service
+(see the service rules above). The claim that exactly one attempt consumes
+holds under `READ COMMITTED`; under `REPEATABLE READ` or `SERIALIZABLE` a
+loser may get `Retry`.
+
 Follow-ups for the registry surface:
 
 - Parent-scoped lookups and lists, needed by the admin API (T14.1, T14.2)
