@@ -363,23 +363,18 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         ),
     ];
     // The 0006 delete and truncate guards (schema_registry_guards.rs).
-    let reject = "skyoauth_reject_mutation";
     for table in TABLES {
-        expected.push(guard(table, "no_truncate", reject));
+        expected.push(guard(table, "no_truncate", "skyoauth_reject_truncate"));
     }
     for table in [
         "admin_identity",
+        "admin_credential",
         "admin_role_binding",
         "recovery_state",
         "administrative_operation",
     ] {
-        expected.push(guard(table, "no_delete", reject));
+        expected.push(guard(table, "no_delete", "skyoauth_reject_delete"));
     }
-    expected.push(guard(
-        "admin_credential",
-        "no_delete_revoked",
-        "skyoauth_reject_delete_of_revoked",
-    ));
     expected.push(guard(
         "consumed_assertion",
         "delete_after_retention",

@@ -989,39 +989,52 @@ The database does not enforce these rules; the service must:
 follow-ups of `0002` to `0005` left open, for every registry table at once
 (lead decision, 2026-11-20), and the pruning index of `consumed_assertion`.
 It changes no column, constraint or existing trigger. Every new trigger is
-`ENABLE ALWAYS` and raises `SK001`. The unconditional guards reuse
-`skyoauth_reject_mutation()` from `0001`, whose message calls every table
-it guards "append-only" (inferred: no new function for the same rule). The
-three conditional ones are new functions,
-`skyoauth_reject_delete_unless_disabled()`,
-`skyoauth_reject_delete_of_revoked()` and
-`skyoauth_reject_delete_before_retention()`; none reads a table, so each
-pins `search_path` to `pg_catalog, pg_temp`.
+`ENABLE ALWAYS` and raises `SK001`. The guards do not reuse
+`skyoauth_reject_mutation()` from `0001`: its message calls the table
+"append-only", which is false here, since the rows of these tables stay
+updatable, except `consumed_assertion`, whose rows are pruned (lead
+decision, 2026-11-21). The unconditional guards call two new
+functions, `skyoauth_reject_delete()` ("DELETE is not allowed on
+`<table>`") and `skyoauth_reject_truncate()` ("TRUNCATE is not allowed on
+`<table>`"). The two conditional ones are
+`skyoauth_reject_delete_unless_disabled()` ("only a disabled row of
+`<table>` may be deleted") and `skyoauth_reject_delete_before_retention()`
+("a row of `<table>` cannot be deleted before its retain_until"). None of
+the four reads a table, so each pins `search_path` to
+`pg_catalog, pg_temp`.
 
 - **Why.** A row deleted and created again with the same ID starts again at
   revision 1, so an old `(id, revision)` snapshot could match the new row.
   Deleting one-time state undoes it: a new `recovery_state` row could
   reopen bootstrap with a lower key epoch, a deleted operation forgets its
   consumption and revocation, a consumed proof deleted before
-  `retain_until` lets a replay through, and a deleted revoked credential
-  frees its `public_identity` for the revoked key.
+  `retain_until` lets a replay through, and a deleted credential erases
+  its revocation record and frees its `public_identity`, so the key could
+  be registered again.
 - **`DELETE`** is checked per row by a `BEFORE DELETE … FOR EACH ROW`
   trigger, so a `DELETE` that matches no row passes and a rejected one
   deletes nothing:
   - never: `tenant` and `principal`; the four revisioned `0003` tables;
     `trust_keyset`, `trust_keyset_version`, `trust_source` and
-    `service_identity`; `admin_identity`, `admin_role_binding`,
-    `recovery_state` and `administrative_operation`. With the guards of
-    `0001` and `0002`, no instance, tenant or operator record is deleted.
-    ADR-008 item 3 allows a hard delete only of bindings and grants, and
-    leaves it open elsewhere; these tables keep every row (inferred);
+    `service_identity`; `admin_identity`, `admin_credential`,
+    `admin_role_binding`, `recovery_state` and `administrative_operation`.
+    With the guards of `0001` and `0002`, no instance, tenant or operator
+    record is deleted. For `tenant`, `principal`, `resource_server`,
+    `audience_tenant_assignment`, `resource_server_checker`,
+    `resource_action`, `trust_keyset`, `trust_keyset_version`,
+    `trust_source` and `service_identity`, no source defines a hard delete
+    (ADR-008 item 3 allows one only of bindings and grants): offboarding is
+    disable-only, and if a specification ever defines a hard delete, a
+    later forward migration can relax the guard (lead decision,
+    2026-11-21). An `admin_credential` is never deleted, revoked or not,
+    like an `admin_identity`: a credential leaves service by revocation
+    (T13.6), and deleting its row would erase the revocation record and
+    let its key be registered again (lead decision, 2026-11-21);
   - only when `disabled`: `principal_binding` and `service_grant` (ADR-008
     item 3). The foreign keys still reject a referenced row with `23503`
     after the guard, so a binding goes only when no grant row names it, and
     a grant only after its list rows. The `0004` binding-set check passes
     for a grant deleted in the same transaction as its binding rows;
-  - `admin_credential`: never a revoked row. A credential that is not
-    revoked may be deleted, as the follow-up text says (inferred);
   - `consumed_assertion`: only a row whose `retain_until < now()`, where
     `now()` is the start of the deleting transaction; a row whose
     `retain_until` equals it is kept (inferred);
@@ -1042,12 +1055,15 @@ pins `search_path` to `pg_catalog, pg_temp`.
   binding, nor does `TRUNCATE admin_identity CASCADE` empty the operator
   tables. A bare `TRUNCATE` of a table that a foreign key references still
   fails earlier, with `0A000`.
-- **Pruning.** `consumed_assertion_retain_until_idx` indexes
-  `consumed_assertion (retain_until)`. Pruning is a service job, not part
-  of this migration (see Follow-ups), that runs
-  `DELETE FROM consumed_assertion WHERE retain_until < now()`; the index
-  serves its predicate, and the guard rejects the whole statement if a
-  differently written one would delete a row still retained.
+- **Pruning.** No pruning job exists: nothing deletes expired
+  `consumed_assertion` rows yet, and the guard only permits a deletion
+  after `retain_until`; it performs none. The job is a service follow-up,
+  not part of this migration (see Follow-ups), that is to run
+  `DELETE FROM consumed_assertion WHERE retain_until < now()`.
+  `consumed_assertion_retain_until_idx` indexes
+  `consumed_assertion (retain_until)` and serves that predicate, and the
+  guard rejects the whole statement if a differently written one would
+  delete a row still retained.
 - **Concurrency.** A guard judges the row version its `DELETE` locks:
   under `READ COMMITTED`, a delete that waited for a concurrent status
   change sees the committed status, so it fails after a re-enable and
@@ -1056,12 +1072,11 @@ pins `search_path` to `pg_catalog, pg_temp`.
 
   | Trigger                                     | Fires on                   | Function                                    |
   | ------------------------------------------- | -------------------------- | ------------------------------------------- |
-  | `<table>_no_delete` (the 14 tables above)   | `DELETE`, each row         | `skyoauth_reject_mutation()`                |
+  | `<table>_no_delete` (the 15 tables above)   | `DELETE`, each row         | `skyoauth_reject_delete()`                  |
   | `principal_binding_delete_disabled_only`    | `DELETE`, each row         | `skyoauth_reject_delete_unless_disabled()`  |
   | `service_grant_delete_disabled_only`        | `DELETE`, each row         | `skyoauth_reject_delete_unless_disabled()`  |
-  | `admin_credential_no_delete_revoked`        | `DELETE`, each row         | `skyoauth_reject_delete_of_revoked()`       |
   | `consumed_assertion_delete_after_retention` | `DELETE`, each row         | `skyoauth_reject_delete_before_retention()` |
-  | `<table>_no_truncate` (the 22 tables)       | `TRUNCATE`, each statement | `skyoauth_reject_mutation()`                |
+  | `<table>_no_truncate` (the 22 tables)       | `TRUNCATE`, each statement | `skyoauth_reject_truncate()`                |
 
   The catalog test in `service/tests/schema_registry_guards.rs` pins every
   trigger of the schema that fires on `DELETE` or `TRUNCATE`, and fails for
@@ -1091,9 +1106,9 @@ The database does not enforce these rules; the service must:
 - hard-delete a binding only by an audited admin write, and only when no
   approval or audit-required record references it (ADR-008 item 3); the
   database checks only the status and the foreign keys of the schema;
-- decide whether a credential that is not revoked may be deleted rather
-  than revoked: the database lets it go, and its `public_identity` with it;
-- run the pruning job;
+- retire a credential by revoking it (T13.6); the database rejects every
+  `DELETE` of one;
+- build and run the pruning job, which does not exist yet;
 - advance the owner's revision when it deletes a list row (`0003`,
   `0004`).
 
@@ -1181,11 +1196,15 @@ Open for all registry tables:
   leave to the service. They were a prerequisite before any code snapshots
   an `(id, revision)` pair (tasks §3 "Policy revisions") or relies on
   revisions only increasing, and before any code of T13.4 (bootstrap),
-  T13.5 (recovery) or T21.6 (single-use consumption) lands.
-- The `consumed_assertion` pruning job: a service job that runs
-  `DELETE FROM consumed_assertion WHERE retain_until < now()`. `0006` adds
-  the guard that rejects an earlier delete and the index on `retain_until`
-  that the job needs, not the job.
+  T13.5 (recovery) or T21.6 (single-use consumption) lands. For `0005`,
+  `admin_credential` is never deleted, revoked or not (lead decision,
+  2026-11-21, replacing the earlier rule that only a revoked row is kept):
+  a credential leaves service by revocation (T13.6).
+- The `consumed_assertion` pruning job. No pruning job exists: `0006`
+  only permits a `DELETE` after `retain_until` and adds the index on
+  `retain_until` that a job needs. The job, a service job that runs
+  `DELETE FROM consumed_assertion WHERE retain_until < now()`, is not
+  built.
 - A `revision` column on `trust_keyset_version`, for a registry
   `update_trust_keyset_version` (enable or disable) that is a
   compare-and-set on the version's own revision, not the keyset's (lead
@@ -1287,8 +1306,9 @@ Not done in `0004`:
 
 Not done in `0005`:
 
-- The `consumed_assertion` pruning job (see Follow-ups); `0006` adds the
-  delete and truncate guards of the `0005` tables and the pruning index.
+- The `consumed_assertion` pruning job, which does not exist (see
+  Follow-ups); `0006` adds the delete and truncate guards of the `0005`
+  tables, `admin_credential` included, and the pruning index.
 - A unique `audit_id`.
 - The policy revision (tasks §3 "Policy revisions").
 

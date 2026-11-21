@@ -145,18 +145,16 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
             "A".into(),
             true,
         )])
-        // The 0006 delete and truncate guards call the frozen
-        // skyoauth_reject_mutation(), which resolves no names and pins no
-        // path (schema_registry_guards.rs).
+        // The 0006 delete and truncate guards (schema_registry_guards.rs).
         .chain(TABLES.iter().flat_map(|t| {
             ["no_delete", "no_truncate"]
-                .map(|g| (t.to_string(), format!("{t}_{g}"), "A".into(), false))
+                .map(|g| (t.to_string(), format!("{t}_{g}"), "A".into(), true))
         }))
         .chain([(
             "resource_server_checker_tenant".into(),
             "resource_server_checker_tenant_no_truncate".into(),
             "A".into(),
-            false,
+            true,
         )])
         .collect();
     expected.sort();

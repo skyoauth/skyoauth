@@ -1,10 +1,10 @@
 //! Delete and truncate guards of the `0006_registry_guards` migration
 //! against a real PostgreSQL server: every registry table of `0002` to
 //! `0005` rejects `TRUNCATE`, also one that reaches it through
-//! `TRUNCATE ... CASCADE`; the instance, tenant and operator records reject
-//! `DELETE`, bindings and grants accept it only when disabled, a revoked
-//! credential rejects it, a consumed proof accepts it only after
-//! `retain_until`, and the list rows stay deletable.
+//! `TRUNCATE ... CASCADE`; the instance, tenant and operator records,
+//! credentials included, reject `DELETE`, bindings and grants accept it only
+//! when disabled, a consumed proof accepts it only after `retain_until`, and
+//! the list rows stay deletable.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! test creates and drops its own database, the replica-role cases need
@@ -75,8 +75,8 @@ const SEED: &str = r#"
         ('ten_a', 'src_gh', sha256('jti_new'), 'dk_1', now() - interval '1 minute', now() + interval '1 hour')"#;
 
 /// The tables whose rows `0006` never lets go: instance, tenant and operator
-/// records and the one-time state.
-const NO_DELETE: [&str; 14] = [
+/// records, credentials included, and the one-time state.
+const NO_DELETE: [&str; 15] = [
     "tenant",
     "principal",
     "resource_server",
@@ -88,6 +88,7 @@ const NO_DELETE: [&str; 14] = [
     "trust_source",
     "service_identity",
     "admin_identity",
+    "admin_credential",
     "admin_role_binding",
     "recovery_state",
     "administrative_operation",
@@ -129,11 +130,27 @@ const CASCADES: [(&str, &str); 22] = [
 ];
 
 /// The functions 0006 adds; none reads a table.
-const FUNCTIONS: [&str; 3] = [
+const FUNCTIONS: [&str; 4] = [
+    "skyoauth_reject_delete",
     "skyoauth_reject_delete_before_retention",
-    "skyoauth_reject_delete_of_revoked",
     "skyoauth_reject_delete_unless_disabled",
+    "skyoauth_reject_truncate",
 ];
+
+/// The tables of `0001` and `0002` whose `DELETE` or `TRUNCATE` guards
+/// call the frozen `skyoauth_reject_mutation()`.
+const FROZEN_GUARDED: [&str; 5] = [
+    "schema_info",
+    "instance_security_policy",
+    "egress_allowlist_entry",
+    "audit_event",
+    "audit_chain_head",
+];
+
+/// The message of an unconditional `0006` guard.
+fn not_allowed(operation: &str, table: &str) -> String {
+    format!("{operation} is not allowed on {table}")
+}
 
 /// The session modes every guard must hold in: the default one, and the
 /// replica mode of logical-replication apply, which skips triggers that
@@ -269,6 +286,13 @@ async fn every_table_guards_truncate_and_each_delete_guard_is_pinned() {
     const DELETE: i16 = 1 | 2 | 8;
     const UPDATE_OR_DELETE: i16 = 1 | 2 | 8 | 16;
     let reject = "skyoauth_reject_mutation";
+    let truncate = |table: &str| {
+        if FROZEN_GUARDED.contains(&table) {
+            reject
+        } else {
+            "skyoauth_reject_truncate"
+        }
+    };
     let trigger = |table: &str, name: &str, function: &str, tgtype: i16| {
         (
             table.to_string(),
@@ -280,16 +304,20 @@ async fn every_table_guards_truncate_and_each_delete_guard_is_pinned() {
     };
     let mut expected: Vec<_> = tables
         .iter()
-        .map(|t| trigger(t, "no_truncate", reject, TRUNCATE))
+        .map(|t| trigger(t, "no_truncate", truncate(t), TRUNCATE))
         .chain(
             NO_DELETE
                 .iter()
-                .chain(&[
-                    "instance_security_policy",
-                    "egress_allowlist_entry",
-                    "audit_chain_head",
-                ])
-                .map(|t| trigger(t, "no_delete", reject, DELETE)),
+                .map(|t| trigger(t, "no_delete", "skyoauth_reject_delete", DELETE)),
+        )
+        .chain(
+            [
+                "instance_security_policy",
+                "egress_allowlist_entry",
+                "audit_chain_head",
+            ]
+            .iter()
+            .map(|t| trigger(t, "no_delete", reject, DELETE)),
         )
         .chain([
             trigger("schema_info", "append_only", reject, UPDATE_OR_DELETE),
@@ -304,12 +332,6 @@ async fn every_table_guards_truncate_and_each_delete_guard_is_pinned() {
                 "service_grant",
                 "delete_disabled_only",
                 "skyoauth_reject_delete_unless_disabled",
-                DELETE,
-            ),
-            trigger(
-                "admin_credential",
-                "no_delete_revoked",
-                "skyoauth_reject_delete_of_revoked",
                 DELETE,
             ),
             trigger(
@@ -403,9 +425,7 @@ async fn records_and_one_time_state_are_never_deleted() {
                 &mut conn,
                 &format!("DELETE FROM {table}"),
                 "SK001",
-                Some(&format!(
-                    "DELETE on append-only table {table} is not allowed"
-                )),
+                Some(&not_allowed("DELETE", table)),
             )
             .await;
         }
@@ -452,7 +472,7 @@ async fn truncate_is_rejected_directly_and_through_a_cascade() {
     for mode in MODES {
         run(&mut *conn, mode).await;
         for (table, root) in CASCADES {
-            let message = format!("TRUNCATE on append-only table {table} is not allowed");
+            let message = not_allowed("TRUNCATE", table);
             rejected(
                 &mut conn,
                 &format!("TRUNCATE {table} CASCADE"),
@@ -480,9 +500,7 @@ async fn truncate_is_rejected_directly_and_through_a_cascade() {
                 &mut conn,
                 &format!("TRUNCATE {table}"),
                 "SK001",
-                Some(&format!(
-                    "TRUNCATE on append-only table {table} is not allowed"
-                )),
+                Some(&not_allowed("TRUNCATE", table)),
             )
             .await;
         }
@@ -625,26 +643,25 @@ async fn bindings_and_grants_are_deleted_only_when_disabled() {
     db.drop([pool]).await;
 }
 
-/// A revoked credential is never deleted, so its public identity stays
-/// registered; a credential that is not revoked may be (README.md).
+/// A credential is never deleted, revoked or not: it leaves service by
+/// revocation (T13.6), and its row keeps the revocation record and its
+/// public identity registered.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn revoked_credentials_are_never_deleted() {
+async fn credentials_are_never_deleted_revoked_or_not() {
     let (db, pool) = seeded().await;
     let mut conn = pool.acquire().await.unwrap();
+    let message = not_allowed("DELETE", "admin_credential");
     for mode in MODES {
         run(&mut *conn, mode).await;
         for sql in [
+            "DELETE FROM admin_credential WHERE id = 'crd_1'",
             "DELETE FROM admin_credential WHERE id = 'crd_r'",
-            "DELETE FROM admin_credential",
+            "BEGIN;
+             UPDATE admin_credential SET status = 'disabled', revoked_at = '2026-11-21Z' WHERE id = 'crd_1';
+             DELETE FROM admin_credential WHERE id = 'crd_1'",
         ] {
-            rejected(
-                &mut conn,
-                sql,
-                "SK001",
-                Some("a revoked row of admin_credential cannot be deleted"),
-            )
-            .await;
+            rejected(&mut conn, sql, "SK001", Some(&message)).await;
         }
     }
     run(&mut *conn, "SET session_replication_role = origin").await;
@@ -656,15 +673,13 @@ async fn revoked_credentials_are_never_deleted() {
         None,
     )
     .await;
-    run(
-        &mut *conn,
-        "DELETE FROM admin_credential WHERE id = 'crd_1'",
-    )
-    .await;
-    assert_eq!(
-        ids(&mut conn, "SELECT id FROM admin_credential").await,
-        ["crd_r"]
-    );
+    let mut rows: Vec<(String, bool)> =
+        sqlx::query_as("SELECT id, revoked_at IS NOT NULL FROM admin_credential")
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+    rows.sort();
+    assert_eq!(rows, [("crd_1".into(), false), ("crd_r".into(), true)]);
     drop(conn);
     db.drop([pool]).await;
 }

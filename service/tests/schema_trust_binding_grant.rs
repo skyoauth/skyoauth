@@ -232,12 +232,8 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
             guard("service_grant", "has_binding", true),
             guard("service_grant_binding", "keeps_one", true),
         ])
-        // The 0006 delete and truncate guards (schema_registry_guards.rs);
-        // those calling the frozen skyoauth_reject_mutation() pin no path.
-        .chain(ALL_TABLES.iter().map(|t| {
-            let (_, name, enabled, _, deferred) = guard(t, "no_truncate", false);
-            (t.to_string(), name, enabled, false, deferred)
-        }))
+        // The 0006 delete and truncate guards (schema_registry_guards.rs).
+        .chain(ALL_TABLES.iter().map(|t| guard(t, "no_truncate", false)))
         .chain(
             [
                 "trust_keyset",
@@ -246,10 +242,7 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
                 "service_identity",
             ]
             .iter()
-            .map(|t| {
-                let (_, name, enabled, _, deferred) = guard(t, "no_delete", false);
-                (t.to_string(), name, enabled, false, deferred)
-            }),
+            .map(|t| guard(t, "no_delete", false)),
         )
         .chain([
             guard("principal_binding", "delete_disabled_only", false),
