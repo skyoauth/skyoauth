@@ -660,60 +660,89 @@ async fn a24_neg_store_failure_never_consumes() {
     );
     assert_eq!(versions(&pool, A, 0x31).await, Vec::<String>::new());
 
-    // REPEATABLE READ: a consume whose snapshot predates another replica's
-    // committed consumption of key 0x40 is a serialization failure, Retry
-    // (40001), never Consumed; a set in the same position is a Replay.
-    // Retrying the whole transaction is then a Replay.
+    // REPEATABLE READ, with the late transaction's snapshot taken (by a
+    // read) before another replica commits the key. A single consume of key
+    // 0x40 is then a serialization failure, Retry (40001), never Consumed.
+    // A set of key 0x41 and key 0x3f (which sorts first, so it is inserted
+    // before the conflict) is a Replay: its plain INSERT gets 23505 on the
+    // committed key, and neither row is written. Retrying the whole
+    // transaction, with a new snapshot, is then a Replay for both functions
+    // on both keys.
     let rr = Replicas::start(&db, 2).await;
     let [late, early] = rr.pools() else {
         unreachable!()
     };
     let mut late_conn = late.acquire().await.unwrap();
-    let mut tx = Connection::begin(&mut *late_conn).await.unwrap();
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    let seen: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM consumed_assertion WHERE replay_key_digest = $1")
-            .bind(digest(0x40))
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-    assert_eq!(seen, 0);
-    assert_eq!(
-        registry::consume_assertion(early, &proof(A, 0x40, "dk_early"))
-            .await
-            .unwrap(),
-        Consumption::Consumed
-    );
-    match registry::consume_assertion(&mut *tx, &proof(A, 0x40, "dk_late")).await {
-        Err(RegistryError::Retry(err)) => assert_eq!(
-            err.as_database_error()
-                .and_then(|err| err.code())
-                .as_deref(),
-            Some("40001")
-        ),
-        other => panic!("expected Retry (40001): {other:?}"),
-    }
-    tx.rollback().await.unwrap();
-    for set in [false, true] {
+    for (n, set) in [(0x40u8, false), (0x41, true)] {
         let mut tx = Connection::begin(&mut *late_conn).await.unwrap();
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             .execute(&mut *tx)
             .await
             .unwrap();
-        let new = proof(A, 0x40, "dk_late");
-        let outcome = if set {
-            registry::consume_assertion_set(&mut *tx, std::slice::from_ref(&new)).await
+        let count = "SELECT count(*) FROM consumed_assertion WHERE replay_key_digest = $1";
+        let seen: i64 = sqlx::query_scalar(count)
+            .bind(digest(n))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(seen, 0);
+        assert_eq!(
+            registry::consume_assertion(early, &proof(A, n, "dk_early"))
+                .await
+                .unwrap(),
+            Consumption::Consumed
+        );
+        // The snapshot predates the commit: the late transaction still sees
+        // no row for the key.
+        let seen: i64 = sqlx::query_scalar(count)
+            .bind(digest(n))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(seen, 0, "key {n}: the snapshot should predate the commit");
+        let late_proof = proof(A, n, "dk_late");
+        if set {
+            let members = [late_proof, proof(A, 0x3f, "dk_late")];
+            let outcome = registry::consume_assertion_set(&mut *tx, &members).await;
+            assert!(
+                matches!(outcome, Ok(Consumption::Replay)),
+                "set under a predating snapshot: {outcome:?}"
+            );
         } else {
-            registry::consume_assertion(&mut *tx, &new).await
-        };
-        assert_eq!(outcome.unwrap(), Consumption::Replay, "set: {set}");
+            match registry::consume_assertion(&mut *tx, &late_proof).await {
+                Err(RegistryError::Retry(err)) => assert_eq!(
+                    err.as_database_error()
+                        .and_then(|err| err.code())
+                        .as_deref(),
+                    Some("40001")
+                ),
+                other => panic!("expected Retry (40001): {other:?}"),
+            }
+        }
         tx.rollback().await.unwrap();
     }
+    for n in [0x40, 0x41] {
+        for set in [false, true] {
+            let mut tx = Connection::begin(&mut *late_conn).await.unwrap();
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let new = proof(A, n, "dk_late");
+            let outcome = if set {
+                registry::consume_assertion_set(&mut *tx, std::slice::from_ref(&new)).await
+            } else {
+                registry::consume_assertion(&mut *tx, &new).await
+            };
+            assert_eq!(outcome.unwrap(), Consumption::Replay, "key {n}, set: {set}");
+            tx.rollback().await.unwrap();
+        }
+    }
     drop(late_conn);
-    assert_eq!(versions(&pool, A, 0x40).await, ["dk_early"]);
+    for n in [0x40, 0x41] {
+        assert_eq!(versions(&pool, A, n).await, ["dk_early"], "key {n}");
+    }
+    assert_eq!(versions(&pool, A, 0x3f).await, Vec::<String>::new());
 
     // Privileges: a role with INSERT on consumed_assertion alone (the
     // runtime role's grant) consumes and replays through both functions; a
@@ -788,8 +817,8 @@ async fn a24_neg_store_failure_never_consumes() {
     assert_eq!(rows(&pool).await, before);
 
     // In all: the holder's 0x20, the one waiter's 0x30, the early 0x40 and
-    // the writer's three rows.
-    assert_eq!(before.len(), 6);
+    // 0x41, and the writer's three rows.
+    assert_eq!(before.len(), 7);
     let pools = [pool, closed, holder_pool, writer, no_insert]
         .into_iter()
         .chain(timed.into_pools())

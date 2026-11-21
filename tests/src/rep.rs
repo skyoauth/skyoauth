@@ -213,20 +213,25 @@ pub async fn terminate(observer: &PgPool, pid: i32) {
 /// Sets `statement_timeout` for the rest of `conn`'s session, so a
 /// statement that waits longer fails (SQLSTATE 57014) instead of hanging
 /// the test. Pooled connections keep it after they return to the pool.
-/// [`Duration::ZERO`] turns the timeout off.
+/// The timeout is rounded up to whole milliseconds, PostgreSQL's unit, so
+/// any non-zero duration, even one under a microsecond, sets at least 1 ms;
+/// only [`Duration::ZERO`] turns the timeout off.
 pub async fn set_statement_timeout(conn: &mut PgConnection, timeout: Duration) {
     set_timeout(conn, timeout, false).await;
 }
 
 /// Sets `statement_timeout` until the end of `conn`'s current transaction
-/// (`SET LOCAL`); outside a transaction it has no effect.
+/// (`SET LOCAL`); outside a transaction it has no effect. Rounded as for
+/// [`set_statement_timeout`].
 pub async fn set_local_statement_timeout(conn: &mut PgConnection, timeout: Duration) {
     set_timeout(conn, timeout, true).await;
 }
 
 async fn set_timeout(conn: &mut PgConnection, timeout: Duration, local: bool) {
-    // Rounded up, so a short non-zero timeout never turns it off.
-    let millis = format!("{}ms", timeout.as_micros().div_ceil(1000));
+    // Rounded up from nanoseconds, so a non-zero timeout never becomes
+    // "0ms", which turns it off: rounding from microseconds made one under
+    // 1 µs "0ms".
+    let millis = format!("{}ms", timeout.as_nanos().div_ceil(1_000_000));
     sqlx::query("SELECT set_config('statement_timeout', $1, $2)")
         .bind(millis)
         .bind(local)
