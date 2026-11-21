@@ -19,6 +19,7 @@ mod common;
 
 use std::{
     collections::BTreeMap,
+    error::Error as _,
     fmt::Debug,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -713,6 +714,36 @@ async fn keyset_versions_are_created_read_and_listed_per_keyset() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn trust_source_fields_follow_its_kind() {
     let (db, pool) = seeded().await;
+    // All three kinds are listed in their tenant only.
+    let listed: Vec<_> = registry::list_trust_sources(&pool, "ten_a", Page::first(10))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|source| (source.id, source.kind, source.exact_issuer))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (
+                "src_gh".to_string(),
+                TrustSourceKind::OidcDiscovery,
+                "https://token.actions.githubusercontent.com".to_string()
+            ),
+            (
+                "src_k8s".to_string(),
+                TrustSourceKind::KubernetesTokenReview,
+                "https://kubernetes.default.svc".to_string()
+            ),
+            (
+                "src_up".to_string(),
+                TrustSourceKind::UploadedJwks,
+                "https://ci.partner.example".to_string()
+            ),
+        ]
+    );
+    for id in ["src_gh", "src_k8s", "src_up"] {
+        assert_not_found(registry::get_trust_source(&pool, "ten_b", id).await);
+    }
     let oidc = registry::get_trust_source(&pool, "ten_a", "src_gh")
         .await
         .unwrap();
@@ -1627,10 +1658,14 @@ async fn grant_errors_name_their_constraints() {
         }) => {}
         other => panic!("{other:?}"),
     }
-    // A service, a human or another tenant's workload is no actor.
-    for actor in ["svc_1", "usr_1", "wld_b"] {
+    // A service, a human, another tenant's workload or a missing principal
+    // is no actor. The grant has no binding row, which would also break
+    // `service_grant_binding_binding_id_fkey` (a binding row carries the
+    // actor); the deferred binding-set check would fail only at commit,
+    // after the actor's foreign key fails the statement.
+    for actor in ["svc_1", "usr_1", "wld_b", "wld_x"] {
         assert_foreign_key(
-            create(direct_grant("ten_a", "grt_9", actor, &["bnd_1"])).await,
+            create(direct_grant("ten_a", "grt_9", actor, &[])).await,
             "service_grant_actor_principal_id_fkey",
         );
     }
@@ -1656,14 +1691,17 @@ async fn grant_errors_name_their_constraints() {
         create(direct_grant("ten_a", "grt_9", "wld_1", &["bnd_1", "bnd_1"])).await,
         "service_grant_binding_pkey",
     );
-    assert_foreign_key(
-        create(NewServiceGrant {
-            resource_server_ids: strings(&["rs_2"]),
-            ..base()
-        })
-        .await,
-        "service_grant_resource_server_assignment_fkey",
-    );
+    // rs_2 is assigned to ten_b only; rs_x does not exist.
+    for rs in ["rs_2", "rs_x"] {
+        assert_foreign_key(
+            create(NewServiceGrant {
+                resource_server_ids: strings(&[rs]),
+                ..base()
+            })
+            .await,
+            "service_grant_resource_server_assignment_fkey",
+        );
+    }
     assert_exists(
         create(NewServiceGrant {
             resource_server_ids: strings(&["rs_1", "rs_1"]),
@@ -1970,14 +2008,16 @@ async fn backend_pid(conn: &mut PgConnection) -> i32 {
         .unwrap()
 }
 
-/// The SQLSTATE of an `Other` error, from its text.
-fn other_sqlstate(err: &RegistryError) -> String {
-    assert!(matches!(err, RegistryError::Other(_)), "{err:?}");
-    err.to_string()
-        .strip_prefix("registry database error (SQLSTATE ")
-        .and_then(|rest| rest.strip_suffix(')'))
-        .unwrap_or_else(|| panic!("no SQLSTATE: {err}"))
-        .to_string()
+/// The SQLSTATE of a `Retry` error, from its `source()`, the raw
+/// `sqlx::Error`.
+fn retry_sqlstate(err: &RegistryError) -> String {
+    assert!(matches!(err, RegistryError::Retry(_)), "{err:?}");
+    err.source()
+        .and_then(|source| source.downcast_ref::<sqlx::Error>())
+        .and_then(sqlx::Error::as_database_error)
+        .and_then(|source| source.code())
+        .unwrap_or_else(|| panic!("no SQLSTATE: {err:?}"))
+        .into_owned()
 }
 
 /// Two connections at `level` each remove one of `grt_1`'s two bindings
@@ -2049,8 +2089,8 @@ async fn concurrent_binding_removals_through_the_registry_under_read_committed()
 }
 
 /// Under REPEATABLE READ and SERIALIZABLE PostgreSQL fails the later
-/// remover with a serialization failure, which is not typed; the grant
-/// still keeps one binding. A remover whose snapshot predates the other's
+/// remover with a serialization failure (`40001`), which is `Retry`, never
+/// `StaleRevision`; the grant still keeps one binding. A remover whose snapshot predates the other's
 /// commit cannot catch up by passing the new revision: its snapshot shows
 /// the old one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2058,10 +2098,12 @@ async fn concurrent_binding_removals_through_the_registry_under_read_committed()
 async fn concurrent_binding_removals_through_the_registry_under_repeatable_read() {
     for level in ["REPEATABLE READ", "SERIALIZABLE"] {
         let err = race_binding_removals(level).await;
-        let code = other_sqlstate(&err);
-        assert!(
-            ["40001", "40P01"].contains(&code.as_str()),
-            "{level}: {err}"
+        // The later remover waits for the grant row only (the statement
+        // locks it before the binding row), so it cannot deadlock.
+        assert_eq!(retry_sqlstate(&err), "40001", "{level}: {err}");
+        assert_eq!(
+            err.to_string(),
+            "registry transaction aborted (SQLSTATE 40001); retry the whole transaction"
         );
     }
 

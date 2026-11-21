@@ -40,7 +40,7 @@
 //!   [`RegistryError::StaleRevision`]. In a caller transaction at
 //!   `REPEATABLE READ` or `SERIALIZABLE` the second instead fails with
 //!   SQLSTATE `40001` (`serialization_failure`), which is
-//!   [`RegistryError::Other`]: it means "retry the whole transaction", not
+//!   [`RegistryError::Retry`]: it means "retry the whole transaction", not
 //!   "read the row again", so it is deliberately not mapped to
 //!   `StaleRevision`.
 //! - Columns the migrations make immutable (IDs, `secret_namespace`,
@@ -70,8 +70,12 @@
 //!   grant are created with their initial sets in the same statement.
 //! - A trust keyset version has no revision column and is immutable but for
 //!   its `status` (`0004`), so this module only creates and reads versions,
-//!   as it does tenants (inferred; an open question for the coding
-//!   session).
+//!   as it does tenants. The registry-guards migration (the delete and
+//!   truncate guards; migrations README, "Follow-ups") adds a `revision`
+//!   column to `trust_keyset_version`, and the registry then gets
+//!   `update_trust_keyset_version` (enable or disable) as a compare-and-set
+//!   on the version's own revision, like the other tables, with no tie to
+//!   the keyset's revision (lead decision, 2026-11-21).
 //!
 //! # A grant keeps one binding
 //!
@@ -95,7 +99,7 @@
 //! row first: under `READ COMMITTED` the later one is
 //! [`RegistryError::StaleRevision`]; under `REPEATABLE READ` and
 //! `SERIALIZABLE` PostgreSQL fails the later one with `40001`, which maps
-//! to [`RegistryError::Other`] (inferred: no typed retry variant yet).
+//! to [`RegistryError::Retry`].
 //!
 //! # Reads and pages
 //!
@@ -130,15 +134,22 @@
 //! | `23514`  | `check_violation` (table or list domain)   | `Invariant { kind: Check, constraint: Some(_) }`      |
 //! | `23502`  | `not_null_violation`                       | `Invariant { kind: NotNull, constraint: None }`       |
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
+//! | `40001`  | `serialization_failure`                    | `Retry(sqlx::Error)`                                  |
+//! | `40P01`  | `deadlock_detected`                        | `Retry(sqlx::Error)`                                  |
 //! | other    | anything else, or an unlisted constraint   | `Other(sqlx::Error)`                                  |
+//!
+//! `Retry` means "retry the whole transaction": PostgreSQL aborted it, so
+//! the caller rolls back and runs every statement of the transaction again,
+//! reading the rows anew; the registry does not retry. A `40001` is never
+//! `StaleRevision`.
 //!
 //! The `Display` and `Debug` text of a [`RegistryError`] never includes a
 //! value from the request or the row: the variants carry only constraint
-//! names, and `Display` and `Debug` of `Other` print only the SQLSTATE. The
-//! [`source`](std::error::Error::source) of `Other` is the raw
-//! [`sqlx::Error`], whose message and detail may quote request or row values
-//! (for example the key of a unique violation), so logging must not walk
-//! the source chain of a `RegistryError`.
+//! names, and `Display` and `Debug` of `Retry` and `Other` print only the
+//! SQLSTATE. The [`source`](std::error::Error::source) of `Retry` and
+//! `Other` is the raw [`sqlx::Error`], whose message and detail may quote
+//! request or row values (for example the key of a unique violation), so
+//! logging must not walk the source chain of a `RegistryError`.
 //!
 //! PostgreSQL text and `jsonb` cannot hold U+0000. A NUL character in any
 //! string argument (an ID, a name, a page cursor, a list element, or a

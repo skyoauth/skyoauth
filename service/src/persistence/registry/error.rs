@@ -12,6 +12,10 @@ const FOREIGN_KEY_VIOLATION: &str = "23503";
 const CHECK_VIOLATION: &str = "23514";
 /// `not_null_violation`.
 const NOT_NULL_VIOLATION: &str = "23502";
+/// `serialization_failure`.
+const SERIALIZATION_FAILURE: &str = "40001";
+/// `deadlock_detected`.
+const DEADLOCK_DETECTED: &str = "40P01";
 /// The project SQLSTATE every guard trigger raises (migrations README,
 /// "Conventions").
 const GUARD: &str = "SK001";
@@ -258,11 +262,11 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 ///
 /// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`],
 /// never a value from the request or the row, and `Display` and `Debug`
-/// print nothing else. The database's own message for an unmapped error is
-/// reachable only through [`std::error::Error::source`] of
-/// [`RegistryError::Other`]: that source is the raw [`sqlx::Error`], whose
-/// message and detail may quote request or row values, so logging must not
-/// walk the source chain.
+/// print nothing else. The database's own message for a retryable or an
+/// unmapped error is reachable only through [`std::error::Error::source`]
+/// of [`RegistryError::Retry`] and [`RegistryError::Other`]: that source is
+/// the raw [`sqlx::Error`], whose message and detail may quote request or
+/// row values, so logging must not walk the source chain.
 pub enum RegistryError {
     /// No row has the given ID (in the given tenant, for a tenant-owned
     /// table), or a checker does not list the tenant to remove.
@@ -290,6 +294,14 @@ pub enum RegistryError {
     /// A guard trigger rejected the write (`SK001`), for example a change to
     /// an immutable column or a revision that does not advance by one.
     Guard,
+    /// The database aborted the transaction with `40001`
+    /// (`serialization_failure`) or `40P01` (`deadlock_detected`): retry
+    /// the whole transaction. A `40001` is never [`Self::StaleRevision`]:
+    /// it means the transaction conflicts with a concurrent one, not that
+    /// the caller must read the row again. As for [`Self::Other`], the
+    /// wrapped [`sqlx::Error`] is reachable only as the
+    /// [`source`](StdError::source).
+    Retry(sqlx::Error),
     /// Any other error: a connection or decode failure, an unexpected
     /// SQLSTATE, or a constraint missing from [`KNOWN_CONSTRAINTS`].
     Other(sqlx::Error),
@@ -325,8 +337,16 @@ fn known_constraint(name: &str) -> Option<&'static str> {
         .map(|index| KNOWN_CONSTRAINTS[index])
 }
 
-/// The typed error for a database error, or `None` when it maps to
-/// [`RegistryError::Other`].
+/// Whether a database error aborted the transaction so that only a retry
+/// of the whole transaction can succeed: [`RegistryError::Retry`].
+fn is_retry(error: &dyn DatabaseError) -> bool {
+    error
+        .code()
+        .is_some_and(|code| matches!(code.as_ref(), SERIALIZATION_FAILURE | DEADLOCK_DETECTED))
+}
+
+/// The typed error for a database error that is not [`is_retry`], or `None`
+/// when it maps to [`RegistryError::Other`].
 fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
     let named = || error.constraint().and_then(known_constraint);
     Some(match error.code()?.as_ref() {
@@ -352,6 +372,9 @@ fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
 
 impl From<sqlx::Error> for RegistryError {
     fn from(error: sqlx::Error) -> Self {
+        if error.as_database_error().is_some_and(is_retry) {
+            return Self::Retry(error);
+        }
         match error.as_database_error().and_then(classify) {
             Some(mapped) => mapped,
             None => Self::Other(error),
@@ -360,10 +383,11 @@ impl From<sqlx::Error> for RegistryError {
 }
 
 impl RegistryError {
-    /// The SQLSTATE of an [`RegistryError::Other`] database error.
-    fn other_sqlstate(&self) -> Option<Cow<'_, str>> {
+    /// The SQLSTATE of the database error wrapped by
+    /// [`RegistryError::Retry`] or [`RegistryError::Other`].
+    fn sqlstate(&self) -> Option<Cow<'_, str>> {
         match self {
-            Self::Other(error) => error.as_database_error()?.code(),
+            Self::Retry(error) | Self::Other(error) => error.as_database_error()?.code(),
             _ => None,
         }
     }
@@ -393,7 +417,17 @@ impl fmt::Display for RegistryError {
                 constraint: None,
             } => write!(f, "registry write violates a {} constraint", kind.as_str()),
             Self::Guard => write!(f, "registry write rejected by a schema guard (SK001)"),
-            Self::Other(_) => match self.other_sqlstate() {
+            Self::Retry(_) => match self.sqlstate() {
+                Some(code) => write!(
+                    f,
+                    "registry transaction aborted (SQLSTATE {code}); retry the whole transaction"
+                ),
+                None => write!(
+                    f,
+                    "registry transaction aborted; retry the whole transaction"
+                ),
+            },
+            Self::Other(_) => match self.sqlstate() {
                 Some(code) => write!(f, "registry database error (SQLSTATE {code})"),
                 None => write!(f, "registry database error"),
             },
@@ -401,9 +435,9 @@ impl fmt::Display for RegistryError {
     }
 }
 
-/// Like `Display`, `Debug` leaves out the wrapped [`sqlx::Error`], whose
-/// `Debug` includes the server's detail line (the key values of a
-/// violation).
+/// Like `Display`, `Debug` leaves out the wrapped [`sqlx::Error`] of
+/// `Retry` and `Other`, whose `Debug` includes the server's detail line
+/// (the key values of a violation).
 impl fmt::Debug for RegistryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -419,9 +453,13 @@ impl fmt::Debug for RegistryError {
                 .field("constraint", constraint)
                 .finish(),
             Self::Guard => f.write_str("Guard"),
+            Self::Retry(_) => f
+                .debug_struct("Retry")
+                .field("sqlstate", &self.sqlstate())
+                .finish_non_exhaustive(),
             Self::Other(_) => f
                 .debug_struct("Other")
-                .field("sqlstate", &self.other_sqlstate())
+                .field("sqlstate", &self.sqlstate())
                 .finish_non_exhaustive(),
         }
     }
@@ -430,7 +468,7 @@ impl fmt::Debug for RegistryError {
 impl StdError for RegistryError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::Other(error) => Some(error),
+            Self::Retry(error) | Self::Other(error) => Some(error),
             _ => None,
         }
     }
@@ -612,15 +650,51 @@ mod tests {
         }
         // The deferred binding-set check at commit is a guard like any other.
         assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
-        // A serialization failure or deadlock is not typed (inferred).
-        for code in ["40001", "40P01"] {
-            let error = map(Some(code), None);
-            assert!(matches!(error, RegistryError::Other(_)), "{error:?}");
+    }
+
+    #[test]
+    fn serialization_failure_and_deadlock_map_to_retry_with_the_raw_source() {
+        for (code, constraint) in [
+            ("40001", None),
+            ("40P01", None),
+            // A constraint name does not make it a constraint error.
+            ("40001", Some("tenant_pkey")),
+        ] {
+            let error = map(Some(code), constraint);
+            // Never StaleRevision: the caller retries the transaction.
+            assert!(matches!(error, RegistryError::Retry(_)), "{error:?}");
             assert_eq!(
                 error.to_string(),
-                format!("registry database error (SQLSTATE {code})")
+                format!(
+                    "registry transaction aborted (SQLSTATE {code}); retry the whole transaction"
+                )
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                format!(r#"Retry {{ sqlstate: Some("{code}"), .. }}"#)
+            );
+            assert_redacted(&error);
+            let source = error
+                .source()
+                .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                .and_then(sqlx::Error::as_database_error)
+                .expect("the raw database error");
+            assert_eq!(source.code().as_deref(), Some(code));
+            assert_eq!(source.message(), SECRET);
+        }
+        // Only those two: the other class 40 codes stay `Other`.
+        for code in ["40000", "40002", "40003"] {
+            assert!(
+                matches!(map(Some(code), None), RegistryError::Other(_)),
+                "{code}"
             );
         }
+        let error = RegistryError::Retry(sqlx::Error::PoolTimedOut);
+        assert_eq!(
+            error.to_string(),
+            "registry transaction aborted; retry the whole transaction"
+        );
+        assert_eq!(format!("{error:?}"), "Retry { sqlstate: None, .. }");
     }
 
     #[test]

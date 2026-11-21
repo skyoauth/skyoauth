@@ -701,7 +701,11 @@ Open for all registry tables:
   `TRUNCATE service_grant_binding` and `TRUNCATE principal_binding CASCADE`
   leave grants with no binding, so the pending guard must cover these
   tables, including a `TRUNCATE … CASCADE` that reaches them from another
-  table.
+  table. The same migration adds a `revision` column to
+  `trust_keyset_version`, for a registry `update_trust_keyset_version`
+  (enable or disable) that is a compare-and-set on the version's own
+  revision, not the keyset's (lead decision, 2026-11-21; see "The `0004`
+  tables" below).
 - Indexes on the referencing side of several `0004` foreign keys:
   `principal_binding (tenant_id, trust_source_id)`,
   `trust_keyset_version (tenant_id, keyset_id)`,
@@ -815,15 +819,17 @@ Of two concurrent updates from one revision exactly one succeeds. Under
 `READ COMMITTED` the second waits for the first's row lock and then gives
 `StaleRevision`. In a caller transaction at `REPEATABLE READ` or
 `SERIALIZABLE` it fails instead with `40001` (`serialization_failure`),
-which maps to `Other`: it means "retry the transaction", so it is
-deliberately not mapped to `StaleRevision`.
+which maps to `Retry`: it means "retry the whole transaction", so it is
+never mapped to `StaleRevision`. A deadlock (`40P01`,
+`deadlock_detected`) is `Retry` too. `Retry`, like `Other`, keeps the raw
+`sqlx::Error` as its `source()`; the registry does not retry.
 
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
 catalog by a test). The `Display` and `Debug` text of an error carries
 constraint names and SQLSTATEs only, never a value. The `source()` of
-`Other` is the raw `sqlx::Error`, which may quote values, so logging must
-not walk the source chain.
+`Retry` and `Other` is the raw `sqlx::Error`, which may quote values, so
+logging must not walk the source chain.
 
 | SQLSTATE | Rust error                                      |
 | -------- | ----------------------------------------------- |
@@ -833,6 +839,8 @@ not walk the source chain.
 | `23514`  | `Invariant { kind: Check, constraint }`         |
 | `23502`  | `Invariant { kind: NotNull, constraint: None }` |
 | `SK001`  | `Guard`                                         |
+| `40001`  | `Retry` (retry the whole transaction)           |
+| `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
 
 PostgreSQL text and `jsonb` cannot hold U+0000: a NUL character in any
@@ -886,6 +894,13 @@ on a pool, and at the caller's commit inside a transaction unless a binding
 is added first (`RegistryError::from` maps the commit's error). Of two
 removals from one grant revision, the later is `StaleRevision` under
 `READ COMMITTED`; under `REPEATABLE READ` and `SERIALIZABLE` PostgreSQL
-fails it with `40001`, which maps to `Other` (inferred: no typed retry
-error yet). The `0004` constraint names are in `KNOWN_CONSTRAINTS`, and
-`service/tests/registry_trust.rs` tests the surface.
+fails it with `40001`, which maps to `Retry`. The `0004` constraint names
+are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
+surface.
+
+Follow-up (lead decision, 2026-11-21): the registry-guards migration (the
+delete and truncate guards under "Follow-ups") adds a `revision` column to
+`trust_keyset_version`. The registry then gets
+`update_trust_keyset_version`, which enables or disables a version as a
+compare-and-set on the version's own revision: the same per-row
+compare-and-set as the other tables, with no tie to the keyset's revision.
