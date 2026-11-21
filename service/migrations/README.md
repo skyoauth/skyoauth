@@ -946,9 +946,9 @@ The database does not enforce these rules; the service must:
   `REPEATABLE READ` or `SERIALIZABLE`, once the first writer commits an
   update of a row the second one waits for, the second fails with `40001`
   (`serialization_failure`; checked by hand on PostgreSQL 16 at both
-  levels), and its whole transaction must be rerun. The registry returns
-  `40001` as `RegistryError::Other`, documented there as "retry the whole
-  transaction".
+  levels), and its whole transaction must be rerun. The registry reports
+  `40001` as a retry-the-whole-transaction error, never as a stale
+  revision.
 
   The two-connection tests
   `for_update_on_a_referenced_row_deadlocks_with_the_audit_head` and
