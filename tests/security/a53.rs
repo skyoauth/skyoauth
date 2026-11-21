@@ -12,30 +12,30 @@
 //! one fresh database per test; the record is the dormant impersonation
 //! grant (disabled, `requires_reapproval`).
 //!
-//! - **Positive.** `a53_pos_disabled_record_round_trips_through_registry`:
-//!   the disabled, `requires_reapproval` record is created, read and listed
+//! - **Positive.** `a53_pos_dormant_record_stored_and_read_back`: the
+//!   disabled, `requires_reapproval` record is created, read and listed
 //!   unchanged. This is a round trip through the registry API only, **not**
 //!   the export/import round trip of the row, and nothing restarts.
 //! - **Negative.** An impersonation grant created enabled
-//!   (`a53_neg_enabled_create_refused`), approved
-//!   (`a53_neg_approved_create_refused`) or both
-//!   (`a53_neg_enabled_and_approved_create_refused`) is refused by its
+//!   (`a53_neg_enabled_create_refused`), with its reapproval marker cleared
+//!   (`activation_state = not_required`;
+//!   `a53_neg_reapproval_cleared_create_refused`) or both
+//!   (`a53_neg_enabled_reapproval_cleared_create_refused`) is refused by its
 //!   `0004` check and not stored; an update that enables the stored record
 //!   (`a53_neg_enabling_patch_refused`) is refused and changes nothing.
-//!   "Approved" is read as `status = disabled` with `activation_state =
-//!   not_required`, the only stored form of a cleared reapproval marker:
-//!   that reading is an inference, the spec does not define the word for
-//!   this record. "PATCH" is `update_service_grant`; no HTTP API exists
-//!   yet.
+//!   "PATCH" is `update_service_grant`; no HTTP API exists yet. The tests
+//!   are named after the values they write: they do not claim to settle what
+//!   the row's "approved" means for this record, which the spec does not
+//!   define.
 //!
 //! The same storage rules are A38's M1a evidence (`security::a38`); both
 //! modules take the cases and assertions from `security::grant_fixture`, so
 //! each refusal is stated once.
 //!
-//! Not covered here: export and import (rejecting an enabled or approved
-//! record on import), startup with an active unsupported record seeded by
-//! the restore fixture, rewriting nothing on that refusal, and the M1b
-//! forward-migration stage.
+//! Not covered here: export and import (rejecting an enabled or
+//! reapproval-cleared record on import), startup with an active
+//! unsupported record seeded by the restore fixture, rewriting nothing on
+//! that refusal, and the M1b forward-migration stage.
 
 use skyoauth_service::persistence::registry::{ActivationState, GrantMode, Status};
 
@@ -60,7 +60,7 @@ async fn create_refused(case: (Status, ActivationState, &str)) {
 }
 
 #[tokio::test]
-async fn a53_pos_disabled_record_round_trips_through_registry() {
+async fn a53_pos_dormant_record_stored_and_read_back() {
     let (db, pool) = tenant().await;
     assert_stored(&pool, &dormant("grt_imp")).await;
     db.drop([pool]).await;
@@ -77,17 +77,17 @@ async fn a53_neg_enabled_create_refused() {
 }
 
 #[tokio::test]
-async fn a53_neg_approved_create_refused() {
-    let [_, approved, _] = CREATE_REFUSALS;
+async fn a53_neg_reapproval_cleared_create_refused() {
+    let [_, cleared, _] = CREATE_REFUSALS;
     assert_eq!(
-        (approved.0, approved.1),
+        (cleared.0, cleared.1),
         (Status::Disabled, ActivationState::NotRequired)
     );
-    create_refused(approved).await;
+    create_refused(cleared).await;
 }
 
 #[tokio::test]
-async fn a53_neg_enabled_and_approved_create_refused() {
+async fn a53_neg_enabled_reapproval_cleared_create_refused() {
     let [_, _, both] = CREATE_REFUSALS;
     assert_eq!(
         (both.0, both.1),
@@ -101,8 +101,8 @@ async fn a53_neg_enabled_and_approved_create_refused() {
 async fn a53_neg_enabling_patch_refused() {
     let (db, pool) = tenant().await;
     let stored = assert_stored(&pool, &dormant("grt_imp")).await;
-    let [enabling, _, enabling_and_approving] = UPDATE_REFUSALS;
-    for (status, activation_state, constraint) in [enabling, enabling_and_approving] {
+    let [enabling, _, enabling_and_clearing] = UPDATE_REFUSALS;
+    for (status, activation_state, constraint) in [enabling, enabling_and_clearing] {
         assert_eq!(status, Status::Enabled);
         assert_update_refused(&pool, &stored, status, activation_state, constraint).await;
     }

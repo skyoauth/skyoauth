@@ -11,16 +11,21 @@
 //! `CHECK` constraints in alphabetical order by name (documented under
 //! `CREATE TABLE` since 9.5) and reports the first one that fails.
 
-use std::fmt::Debug;
+use std::{
+    fmt::Debug,
+    time::{Duration, UNIX_EPOCH},
+};
 
+use serde_json::json;
 use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
         self, ActivationState, AssertionProfile, BindingProfile, GrantMode, InvariantKind,
-        JsonObject, MAX_PAGE_SIZE, NewPrincipal, NewPrincipalBinding, NewServiceGrant,
-        NewServiceIdentity, NewTenant, NewTrustSource, Page, PrincipalKind, RegistryError,
-        ReplayMode, ServiceGrant, ServiceGrantChanges, Status, TrustSourceKind,
+        JsonObject, MAX_PAGE_SIZE, NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding,
+        NewResourceServer, NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustSource, Page,
+        PrincipalKind, Profile, RegistryError, ReplayMode, ServiceGrant, ServiceGrantChanges,
+        Status, TrustSourceKind,
     },
 };
 
@@ -32,6 +37,8 @@ const BINDING: &str = "bnd_a";
 /// The service principal and identity a delegation or impersonation grant
 /// targets.
 const SERVICE: &str = "svc_a";
+/// The resource server assigned to the tenant, the grant's one audience.
+const AUDIENCE: &str = "rs_a";
 
 /// Allows impersonation only while disabled: `CHECK (mode <> 'impersonation'
 /// OR status = 'disabled')`.
@@ -41,7 +48,7 @@ pub(super) const IMPERSONATION_DISABLED: &str = "service_grant_impersonation_dis
 pub(super) const ACTIVATION_MODE: &str = "service_grant_activation_mode_check";
 
 /// Impersonation creates refused: (status, activation state, the check that
-/// reports it). "Approved" is `not_required` (inferred, see the A53 module).
+/// reports it).
 pub(super) const CREATE_REFUSALS: [(Status, ActivationState, &str); 3] = [
     // Enabled.
     (
@@ -49,13 +56,14 @@ pub(super) const CREATE_REFUSALS: [(Status, ActivationState, &str); 3] = [
         ActivationState::RequiresReapproval,
         IMPERSONATION_DISABLED,
     ),
-    // Approved.
+    // Reapproval marker cleared (`not_required`).
     (
         Status::Disabled,
         ActivationState::NotRequired,
         ACTIVATION_MODE,
     ),
-    // Enabled and approved: both checks fail; the first by name is reported.
+    // Enabled with the reapproval marker cleared: both checks fail; the
+    // first by name is reported.
     (
         Status::Enabled,
         ActivationState::NotRequired,
@@ -90,8 +98,9 @@ fn strings(values: &[&str]) -> Vec<String> {
 }
 
 /// A fresh database with one tenant holding a workload actor with a
-/// binding (on a GitHub source) and a service principal with a service
-/// identity: everything a grant of any mode refers to.
+/// binding (on a GitHub source), a service principal with a service
+/// identity, and a resource server assigned to the tenant: everything a
+/// grant of any mode refers to.
 pub(super) async fn tenant() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
@@ -172,9 +181,37 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
             id: SERVICE.into(),
             tenant_id: TENANT.into(),
             name: "deploy-api".into(),
-            max_scopes: strings(&["read"]),
+            max_scopes: strings(&["read", "deploy"]),
             max_resource_constraints: JsonObject::new(),
             resource_server_ids: vec![],
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    registry::create_resource_server(
+        &pool,
+        &NewResourceServer {
+            id: AUDIENCE.into(),
+            audience: "https://api-a.example".into(),
+            name: "API a".into(),
+            allowed_profiles: vec![Profile::Wif],
+            scopes: strings(&["read", "deploy"]),
+            constraint_versions: vec![],
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    registry::create_audience_tenant_assignment(
+        &pool,
+        &NewAudienceTenantAssignment {
+            id: "ata_a".into(),
+            resource_server_id: AUDIENCE.into(),
+            tenant_id: TENANT.into(),
+            allowed_profiles: vec![Profile::Wif],
+            allowed_scopes: strings(&["read", "deploy"]),
+            constraint_versions: vec![],
             status: Status::Enabled,
         },
     )
@@ -183,8 +220,12 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
     (db, pool)
 }
 
-/// A grant `id` of the fixture's actor with its one binding; a delegation
-/// or impersonation grant targets the fixture's service.
+/// A grant `id` of the fixture's actor with its one binding and its one
+/// audience; a delegation or impersonation grant targets the fixture's
+/// service. Every optional column holds a value that differs from its
+/// default or from another column (default scopes a strict subset of the
+/// scopes, a non-empty constraint object, an expiry), so a write that drops
+/// or substitutes one is seen by the whole-record comparisons.
 pub(super) fn grant(
     id: &str,
     mode: GrantMode,
@@ -198,15 +239,19 @@ pub(super) fn grant(
         actor_principal_id: ACTOR.into(),
         target_service_id: (mode != GrantMode::Direct).then(|| SERVICE.into()),
         mode,
-        scopes: strings(&["read"]),
+        scopes: strings(&["read", "deploy"]),
         default_scopes: Some(strings(&["read"])),
-        resource_constraints: JsonObject::new(),
+        resource_constraints: match json!({"env": "prod"}) {
+            serde_json::Value::Object(map) => map,
+            _ => unreachable!(),
+        },
         max_ttl: 300,
-        valid_until: None,
+        // 2033-05-18T03:33:20Z, a whole second, so storage loses nothing.
+        valid_until: Some(UNIX_EPOCH + Duration::from_secs(2_000_000_000)),
         status,
         activation_state,
         allowed_binding_ids: vec![BINDING.into()],
-        resource_server_ids: vec![],
+        resource_server_ids: vec![AUDIENCE.into()],
     }
 }
 

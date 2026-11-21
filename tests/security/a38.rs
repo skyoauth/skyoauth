@@ -7,7 +7,10 @@
 //! approvable; a delegation grant's re-enable moves its revision forward,
 //! never back (registry API)": the storage half of the row, through the
 //! typed registry API (`skyoauth_service::persistence::registry`) against a
-//! real PostgreSQL, one fresh database per test.
+//! real PostgreSQL, one fresh database per test. In the stage scope, "not
+//! approvable" means only that the record's `requires_reapproval` marker
+//! cannot be cleared (to `not_required`) through the registry API; no
+//! approval operation exists.
 //!
 //! - **Positive.** An impersonation grant created disabled and requiring
 //!   reapproval (with its target service) is stored exactly as given at
