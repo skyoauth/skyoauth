@@ -801,7 +801,7 @@ id = "A32"
 kind = "scenario"
 layers = ["security"]
 envs = ["pg"]
-harness = ["PG", "local verifier", "OP", "barriers"]
+harness = ["REP", "PG", "local verifier", "OP", "barriers"]
 owners = ["T13.4", "T13.5", "T13.6"]
 positive = "one bootstrap, signed recovery restores"
 negative = "concurrent or reopened bootstrap, forged IdP admin, revoked key, replayed recovery"
@@ -812,7 +812,12 @@ milestone = "M1a"
 scope = "full row"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
-tests = []
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a32::a32_pos_one_bootstrap_enrolls_one_operator_and_closes",
+  "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_closed_bootstrap_is_never_reopened",
+  "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_blocked_bootstraps_follow_the_holder_commit_or_rollback",
+  "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_concurrent_bootstraps_across_replicas_have_one_winner",
+]
 
 [[scenario]]
 id = "A33"
