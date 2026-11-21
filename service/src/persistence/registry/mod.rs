@@ -48,8 +48,12 @@
 //!   `tenant_id`, an action's `action_name`, a principal's `tenant_id` and
 //!   `kind`; in `0004` every `tenant_id`, a source's `kind`, `cluster_id`
 //!   and `jwks_keyset_id`, a binding's source and principal, a grant's
-//!   actor, target and mode, and every column of a keyset version and of a
-//!   list row) are set only on create; no update touches them.
+//!   actor, target and mode, and every column of a list row) are set only
+//!   on create; no update touches them. A keyset version's columns are
+//!   also untouched, but only because no update exists yet: the schema
+//!   lets its `status` change, and the `revision` column plus
+//!   `update_trust_keyset_version` come with the registry-guards migration
+//!   (migrations README, "The `0004` tables").
 //! - `tenant` and `principal` have no revision column yet (migrations
 //!   README, "Not done in `0002`"), so this module offers no update for them:
 //!   an update without an expected revision would break API-003 (inferred;
@@ -152,12 +156,13 @@
 //! logging must not walk the source chain of a `RegistryError`.
 //!
 //! PostgreSQL text and `jsonb` cannot hold U+0000. A NUL character in any
-//! string argument (an ID, a name, a page cursor, a list element, or a
-//! string inside a `jsonb` value such as a constraint version) fails the
-//! statement with `22021` (`character_not_in_repertoire`) for a `text`
-//! argument or `22P05` (`untranslatable_character`) for a `jsonb` one (the
-//! lists and constraint versions), both [`RegistryError::Other`]. The
-//! request layer (T14.1) must reject it before calling the registry.
+//! string argument (an ID, a name, a page cursor, an element of a `text[]`
+//! such as `allowed_binding_ids` or `resource_server_ids`, or a string
+//! inside a `jsonb` value such as a scope element or a constraint version)
+//! fails the statement with `22021` (`character_not_in_repertoire`) for a
+//! `text` or `text[]` argument, or `22P05` (`untranslatable_character`) for
+//! a `jsonb` one only, both [`RegistryError::Other`]. The request layer
+//! (T14.1) must reject it before calling the registry.
 //!
 //! # Not done here
 //!

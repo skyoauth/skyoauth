@@ -269,7 +269,9 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 /// row values, so logging must not walk the source chain.
 pub enum RegistryError {
     /// No row has the given ID (in the given tenant, for a tenant-owned
-    /// table), or a list set does not contain the item to remove.
+    /// table), or a list set does not contain the item to remove (a
+    /// checker's tenant, or a service identity's audience, a grant's binding
+    /// or a grant's audience).
     NotFound,
     /// The row exists, but its revision is not the expected one: another
     /// write came first. Nothing was changed.
@@ -292,7 +294,11 @@ pub enum RegistryError {
         constraint: Option<&'static str>,
     },
     /// A guard trigger rejected the write (`SK001`), for example a change to
-    /// an immutable column or a revision that does not advance by one.
+    /// an immutable column or a revision that does not advance by one. The
+    /// grant binding-set check (`service_grant_has_binding` and
+    /// `service_grant_binding_keeps_one`) is a deferred constraint trigger,
+    /// so inside a transaction it fails at the caller's commit, not at the
+    /// statement: map the commit's error with `RegistryError::from`.
     Guard,
     /// The database aborted the transaction with `40001`
     /// (`serialization_failure`) or `40P01` (`deadlock_detected`): retry

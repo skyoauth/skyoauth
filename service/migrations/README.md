@@ -887,11 +887,13 @@ The list tables change one row at a time, each a compare-and-set on the
 owner's revision, as checker tenants do: a service identity's audiences, a
 grant's bindings and a grant's audiences. A service identity and a grant
 are created with their initial sets in one statement. That keeps the
-deferred binding-set check (`service_grant_binding_keeps_one`) whole: a
-grant created with a binding passes on any executor; a grant created
-without one, or the removal of its last binding, fails with `Guard` at once
-on a pool, and at the caller's commit inside a transaction unless a binding
-is added first (`RegistryError::from` maps the commit's error). Of two
+deferred binding-set check whole. The check is two constraint triggers on
+one function: `service_grant_has_binding` (a grant created with no binding)
+and `service_grant_binding_keeps_one` (the removal of a binding), both
+calling `skyoauth_service_grant_has_binding()`. A grant created with a
+binding passes on any executor; a grant created without one, or the removal
+of its last binding, fails with `Guard` at once on a pool, and at the
+caller's commit inside a transaction unless a binding is added first (`RegistryError::from` maps the commit's error). Of two
 removals from one grant revision, the later is `StaleRevision` under
 `READ COMMITTED`; under `REPEATABLE READ` and `SERIALIZABLE` PostgreSQL
 fails it with `40001`, which maps to `Retry`. The `0004` constraint names
