@@ -7,7 +7,7 @@
 //! target and eligible bindings among same-audience grants; a mode
 //! override, a wrong or crossed tenant and a grant name select nothing,
 //! with one error (registry API)": `registry::select_grant` and
-//! `registry::match_binding` (ADR-015 item 4 steps 1, 3 and 4; design
+//! `policy::match_binding` (ADR-015 item 4 steps 1, 3 and 4; design
 //! section 5.7) against a real PostgreSQL, one fresh database per test,
 //! seeded through the typed registry API by the shared fixture
 //! (`tests/security/selection_fixture.rs`): two tenants, each with four
@@ -41,7 +41,7 @@
 //! ones. Where several eligible bindings match, the one with the lowest ID
 //! is selected: the spec says "stable ID ordering" without defining it, and
 //! ascending byte order is the lead's reading (provisional), as in
-//! `service/src/persistence/registry/selection.rs`. These tests do not
+//! `service/src/policy/matching.rs`. These tests do not
 //! depend on it: each grant has one eligible binding per source, so
 //! `match_binding` never chooses among several here, and which of several
 //! matches wins is A50's. The ineligible bindings sort first under that
@@ -73,11 +73,12 @@
 
 use std::error::Error as _;
 
-use skyoauth_service::persistence::{
-    PgPool,
-    registry::{
-        self, EligibleBinding, GrantMode, Selection, SelectionError, match_binding, select_grant,
+use skyoauth_service::{
+    persistence::{
+        PgPool,
+        registry::{self, GrantMode, Selection, SelectionError, select_grant},
     },
+    policy::{EligibleBinding, match_binding},
 };
 
 use super::selection_fixture::{

@@ -34,7 +34,7 @@
 //! `src_gh`, the IDs of the ineligible and other-actor bindings sort lowest
 //! byte-wise (`bnd_0_…` before `bnd_a_…` before `bnd_b_…`), so a selection
 //! that loaded one would have
-//! [`match_binding`](skyoauth_service::persistence::registry::match_binding)
+//! [`match_binding`](skyoauth_service::policy::match_binding)
 //! pick it over the grant's own. On `src_alt` and `src_gen` that holds for
 //! the grant of `wld_b` only: the bindings of `wld_a` sort first there.
 //!
@@ -48,14 +48,17 @@
 use std::collections::BTreeMap;
 
 use skyoauth_scenarios::pg::TestDb;
-use skyoauth_service::persistence::{
-    PgPool,
-    registry::{
-        self, ActivationState, AssertionProfile, BindingProfile, Evidence, GrantMode, JsonObject,
-        NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding, NewResourceServer,
-        NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustSource, PrincipalKind, Profile,
-        ReplayMode, Status, TrustSourceKind,
+use skyoauth_service::{
+    persistence::{
+        PgPool,
+        registry::{
+            self, ActivationState, AssertionProfile, BindingProfile, GrantMode, JsonObject,
+            NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding, NewResourceServer,
+            NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustSource, PrincipalKind, Profile,
+            ReplayMode, Status, TrustSourceKind,
+        },
     },
+    policy::Evidence,
 };
 
 use super::grant_fixture::github_policy;
