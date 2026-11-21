@@ -388,8 +388,9 @@ pub(super) async fn assert_unchanged(pool: &PgPool, grant: &ServiceGrant) {
 }
 
 /// Seven claims, one optional: the six a `github_production` binding must
-/// match (design §5.7, with `workflow_ref`; the A37 required set) and the
-/// optional `repository`, each a non-empty string.
+/// match (the rule in design §5.3; the keys of the binding in the §5.7
+/// example, `workflow_ref` included; the A37 required set) and the optional
+/// `repository`, each a non-empty string.
 pub fn github_policy() -> std::collections::BTreeMap<String, String> {
     [
         ("repository_owner_id", "123456"),

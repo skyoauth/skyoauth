@@ -1,8 +1,8 @@
-//! Shared fixture of the grant-selection scenarios A25 and A50: two tenants
-//! with the same object graph, created through the typed registry API
-//! (`skyoauth_service::persistence::registry`), the grants, sources and
-//! bindings both scenarios select and match, and evidence that every
-//! binding of a source fits. Not a scenario: it holds no test.
+//! Shared fixture of the grant-selection scenarios A25 (and later A50): two
+//! tenants with the same object graph, created through the typed registry
+//! API (`skyoauth_service::persistence::registry`), the grants, sources and
+//! bindings the scenarios select and match, and evidence that every binding
+//! of a source fits. Not a scenario: it holds no test.
 //!
 //! Every ID carries its tenant's suffix, because IDs are global (as in
 //! A29): `wld_a_b` is workload `wld_a` of tenant `ten_b`. Names are the same

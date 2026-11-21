@@ -591,7 +591,7 @@ layers = ["conformance"]
 envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.3", "T12.8", "T21.4", "T21.7"]
-positive = "selector picks the authorized actor/target: each grant ID selects its own grant, actor, target and eligible bindings among same-audience grants (M1a); the generated selector at the exchange (M2)"
+positive = "each grant ID selects its own grant, actor, target and eligible bindings among same-audience grants (M1a); the generated selector picks the authorized actor/target at the exchange, after proof verification at the selected source (M2)"
 negative = "mode override, wrong tenant: a mode override, a wrong or crossed tenant and a grant name select nothing, with one error (M1a); the same denied at the exchange with the wire invalid_grant, and subject/target override (M2)"
 matrix_sha256 = "702f79d7b2cc709c2b2ebba85fcf14485bce61fdf887e2d819abe90f13a579af"
 

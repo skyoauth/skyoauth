@@ -14,7 +14,8 @@
 //! grants of one audience (direct of `wld_a`; delegations `wld_a` to
 //! `svc_1`, `wld_a` to `svc_2` and `wld_b` to `svc_1`), three sources and
 //! bindings whose IDs make any ineligible or other-actor binding sort
-//! first. Every test runs in both tenants.
+//! first. Every test runs in both tenants, and the cross-tenant ones in
+//! both directions.
 //!
 //! - **Positive.** Each grant ID, in its own mode, on each source, selects
 //!   exactly its stored grant (equal to `get_service_grant`), its actor and
@@ -29,10 +30,11 @@
 //!   (`a25_neg_mode_override_selects_nothing`), a grant or source of the
 //!   other tenant, or both crossed (`a25_neg_wrong_tenant_selects_nothing`),
 //!   and a grant's tenant-local name in place of its ID
-//!   (`a25_neg_grant_name_is_not_a_selector`) select nothing. Every miss,
-//!   unknown IDs included, is the same `SelectionError::NotSelectable`, with
-//!   the same `Display` and `Debug` text, no source error and no selector
-//!   in its text (`a25_neg_miss_reveals_no_cause`).
+//!   (`a25_neg_grant_name_is_not_a_selector`) select nothing. Every miss of
+//!   these kinds, a doubly crossed tenant and unknown IDs included, is the
+//!   same `SelectionError::NotSelectable`, with the same `Display` and
+//!   `Debug` text, no source error and no selector in its text
+//!   (`a25_neg_miss_reveals_no_cause`).
 //!
 //! "Selector" here is the `(tenant, grant ID, source ID, expected mode)`
 //! that `select_grant` takes; the IDs are the fixture's, not generated
@@ -40,9 +42,12 @@
 //! is selected: the spec says "stable ID ordering" without defining it, and
 //! ascending byte order is the lead's reading (provisional), as in
 //! `service/src/persistence/registry/selection.rs`. These tests do not
-//! depend on it: each grant has one eligible binding per source, and the
-//! ineligible ones sort first, so they show that selection never loads them,
-//! not which of several matches wins (A50).
+//! depend on it: each grant has one eligible binding per source, so
+//! `match_binding` never chooses among several here, and which of several
+//! matches wins is A50's. The ineligible bindings sort first under that
+//! reading; the one check that relies on this computes the lowest matching
+//! ID itself, only to show that a binding loaded by mistake would be the
+//! one picked, so a change of the reading cannot fail A25.
 //!
 //! The fixture puts `github_production` bindings only on GitHub-issuer
 //! sources and `generic_production` ones only on a non-GitHub source. The
@@ -56,7 +61,8 @@
 //! (`selection_rechecks_the_tenant_and_actor_the_foreign_keys_guarantee`),
 //! the `WHERE EXISTS` gate that keeps a miss from decoding a corrupt row
 //! (`a_miss_decodes_no_grant_row_even_a_corrupt_one`), disabled grants and
-//! sources and the dormant impersonation grant
+//! sources, the dormant impersonation grant, and a grant and source that
+//! are both found but with no eligible binding on that source
 //! (`every_miss_is_the_same_not_selectable`), and the exact-string matching
 //! rules, near-miss claim names and values included. With the foreign keys
 //! in place, a grant can list only bindings of its own actor, so the
@@ -245,12 +251,21 @@ async fn a25_pos_selection_then_match_names_the_grant_actor() {
                     grant.target.map(|target| side.id(target)),
                     "{case}"
                 );
-                // Over every binding on the source, the lowest matching ID
-                // is another one, an ineligible or other-actor binding,
-                // wherever the fixture sorts one first: on src_gh, and for
-                // the grant of wld_b on every source.
+                // Not vacuous: of every binding on the source that matches,
+                // the one with the lowest ID in byte order is another one,
+                // an ineligible or other-actor binding, wherever the fixture
+                // sorts one first (on src_gh, and for the grant of wld_b on
+                // every source). So a selection that loaded it would have it
+                // picked. Byte order is the lead's provisional reading of
+                // "stable ID ordering"; the lowest is computed here, not by
+                // `match_binding`, so a change of that reading cannot fail
+                // this test for a reason outside A25.
                 if source == Source::Github || grant.actor == "wld_b" {
-                    let lowest = match_binding(&on_source, &evidence).unwrap();
+                    let lowest = on_source
+                        .iter()
+                        .filter(|binding| binding.matches(&evidence))
+                        .min_by(|x, y| x.id.as_bytes().cmp(y.id.as_bytes()))
+                        .unwrap();
                     assert_ne!(lowest.id, matched.id, "{case}");
                 }
             }
@@ -315,61 +330,78 @@ async fn a25_neg_wrong_tenant_selects_nothing() {
     db.drop([pool]).await;
 }
 
-/// A wrong tenant, a crossed tenant, a mode override and unknown IDs all
-/// give one value: `NotSelectable`, with the same `Display` and `Debug`
-/// text, no source error, and none of the selector's values in its text.
+/// In both directions, a wrong tenant, the other tenant's source or grant,
+/// both crossed, a mode override, a grant name and unknown IDs all give one
+/// value: `NotSelectable`, with the same `Display` and `Debug` text across
+/// every miss, no source error, and none of the selector's values in its
+/// text.
 #[tokio::test]
 async fn a25_neg_miss_reveals_no_cause() {
     let (db, pool) = two_tenants().await;
     let direct = GRANTS[0];
     let delegation = GRANTS[3];
     let gh = Source::Github;
-    let misses = [
-        // A wrong tenant, the other tenant's source and grant.
-        (B.tenant, A.id(direct.id), gh.id(A), direct.mode),
-        (A.tenant, A.id(direct.id), gh.id(B), direct.mode),
-        (A.tenant, B.id(direct.id), gh.id(A), direct.mode),
-        // Mode overrides.
-        (A.tenant, A.id(direct.id), gh.id(A), GrantMode::Delegation),
-        (
-            A.tenant,
-            A.id(delegation.id),
-            gh.id(A),
-            GrantMode::Impersonation,
-        ),
-        // Unknown tenant, grant and source.
-        ("ten_none", A.id(direct.id), gh.id(A), direct.mode),
-        (A.tenant, "grt_none".into(), gh.id(A), direct.mode),
-        (A.tenant, A.id(direct.id), "src_none".into(), direct.mode),
-    ];
     let mut texts = Vec::new();
-    for (tenant, grant, source, mode) in &misses {
-        let case = format!("{tenant} {grant} {source} {mode}");
-        let err = select(&pool, tenant, grant, source, *mode)
-            .await
-            .expect_err(&case);
-        assert!(
-            matches!(err, SelectionError::NotSelectable),
-            "{case}: {err:?}"
-        );
-        assert_eq!(err, SelectionError::NotSelectable, "{case}");
-        assert!(err.source().is_none(), "{case}");
-        let (display, debug) = (err.to_string(), format!("{err:?}"));
-        for value in [*tenant, grant.as_str(), source.as_str(), mode.as_str()] {
+    for (owner, other) in DIRECTIONS {
+        let own = owner.id(direct.id);
+        let misses = [
+            // A wrong tenant, the other tenant's source, the other tenant's
+            // grant, and both crossed.
+            (other.tenant, own.clone(), gh.id(owner), direct.mode),
+            (owner.tenant, own.clone(), gh.id(other), direct.mode),
+            (owner.tenant, other.id(direct.id), gh.id(owner), direct.mode),
+            (other.tenant, own.clone(), gh.id(other), direct.mode),
+            // Mode overrides.
+            (
+                owner.tenant,
+                own.clone(),
+                gh.id(owner),
+                GrantMode::Delegation,
+            ),
+            (
+                owner.tenant,
+                owner.id(delegation.id),
+                gh.id(owner),
+                GrantMode::Impersonation,
+            ),
+            // The grant's tenant-local name in place of its ID.
+            (owner.tenant, direct.name.into(), gh.id(owner), direct.mode),
+            // Unknown tenant, grant and source.
+            ("ten_none", own.clone(), gh.id(owner), direct.mode),
+            (owner.tenant, "grt_none".into(), gh.id(owner), direct.mode),
+            (owner.tenant, own.clone(), "src_none".into(), direct.mode),
+        ];
+        for (tenant, grant, source, mode) in &misses {
+            let case = format!("{tenant} {grant} {source} {mode}");
+            let err = select(&pool, tenant, grant, source, *mode)
+                .await
+                .expect_err(&case);
             assert!(
-                !display.contains(value) && !debug.contains(value),
-                "{case}: {display:?} {debug:?}"
+                matches!(err, SelectionError::NotSelectable),
+                "{case}: {err:?}"
             );
+            assert_eq!(err, SelectionError::NotSelectable, "{case}");
+            assert!(err.source().is_none(), "{case}");
+            let (display, debug) = (err.to_string(), format!("{err:?}"));
+            for value in [*tenant, grant.as_str(), source.as_str(), mode.as_str()] {
+                assert!(
+                    !display.contains(value) && !debug.contains(value),
+                    "{case}: {display:?} {debug:?}"
+                );
+            }
+            texts.push((case, display, debug));
         }
-        texts.push((display, debug));
     }
-    assert!(
-        texts.iter().all(|text| *text == texts[0]),
-        "the misses differ: {texts:?}"
-    );
-    // The same selectors, corrected, select.
-    select_own(&pool, A, direct, gh).await;
-    select_own(&pool, A, delegation, gh).await;
+    // One text for every miss, of both directions.
+    let (_, display, debug) = &texts[0];
+    for (case, d, g) in &texts {
+        assert_eq!((d, g), (display, debug), "{case}");
+    }
+    // The same selectors, corrected, select in both tenants.
+    for side in [A, B] {
+        select_own(&pool, side, direct, gh).await;
+        select_own(&pool, side, delegation, gh).await;
+    }
     db.drop([pool]).await;
 }
 
