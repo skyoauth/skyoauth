@@ -1,4 +1,4 @@
-//! Shared fixture of the grant-selection scenarios A25 (and later A50): two
+//! Shared fixture of the grant-selection scenarios A25 and A50: two
 //! tenants with the same object graph, created through the typed registry
 //! API (`skyoauth_service::persistence::registry`), the grants, sources and
 //! bindings the scenarios select and match, and evidence that every binding
@@ -57,15 +57,14 @@
 //! - bindings of `wld_a`: on `src_gen`, the repository-wide `bnd_m1` and
 //!   the deployment binding `bnd_m2`, both enabled, whose neutral names
 //!   differ only in byte order (A50 tests the ID order, not specificity),
-//!   and
-//!   three deployment bindings that sort lowest and are never eligible on
-//!   `src_gen`: `bnd_0_gen_off` (disabled, listed), `bnd_0_gen_free`
+//!   and three deployment bindings that sort lowest and are never eligible
+//!   on `src_gen`: `bnd_0_gen_off` (disabled, listed), `bnd_0_gen_free`
 //!   (enabled, listed by no grant) and `bnd_0_gen2` (on `src_gen2`,
 //!   listed, so eligible there and only there);
 //! - bindings of `wld_b` on `src_gen`: the repository-wide `bnd_0_repo` of
 //!   the same repository, which sorts before the eligible bindings of
-//!   `wld_a` there (`bnd_m1`, `bnd_m2`),
-//!   and the repository-wide `bnd_b_other` of another repository;
+//!   `wld_a` there (`bnd_m1`, `bnd_m2`), and the repository-wide
+//!   `bnd_b_other` of another repository;
 //! - three direct grants ([`MATCHING_GRANTS`]): `grt_a_match` of `wld_a`
 //!   (listing `bnd_m2`, `bnd_0_gen_off` and `bnd_0_gen2`),
 //!   `grt_a_multi` of `wld_a` (listing `bnd_m1` and `bnd_m2`) and

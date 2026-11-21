@@ -8,7 +8,7 @@
 //! despite another actor's overlap; an other-actor-only, ineligible or
 //! absent match selects none; several same-actor matches select the
 //! byte-wise lowest ID, one binding, never a union (registry API)":
-//! `registry::select_grant`, then `registry::match_binding` (ADR-015 item 4
+//! `registry::select_grant`, then `policy::match_binding` (ADR-015 item 4
 //! steps 1, 3 and 4; design section 5.7 and section 5.3; ADR-016 item 1)
 //! against a real PostgreSQL, one fresh database per test, seeded through
 //! the typed registry API by the shared fixture
@@ -52,8 +52,8 @@
 //! **Precedence.** Design section 5.7 item 4 says that several eligible
 //! bindings of the same actor are ordered by "stable ID ordering" without
 //! defining it. "Lowest ID wins", in ascending byte order of the binding ID
-//! as `service/src/persistence/registry/selection.rs` builds it, is the
-//! lead's reading (provisional), and it is the only precedence tested.
+//! as `service/src/policy/matching.rs` builds it, is the lead's reading
+//! (provisional), and it is the only precedence tested.
 //! Specificity is deliberately not tested: the spec says nothing about it.
 //! The two same-actor bindings that the same evidence fits therefore have
 //! neutral names, `bnd_m1` and `bnd_m2`, that differ only in byte order and
@@ -76,12 +76,15 @@
 //! revision recorded in the policy revision and audit, and that the issued
 //! permissions are the grant's, never a union over bindings.
 
-use skyoauth_service::persistence::{
-    PgPool,
-    registry::{
-        self, BindingProfile, EligibleBinding, Evidence, GrantMode, Page, PrincipalBinding,
-        PrincipalBindingChanges, Selection, SelectionError, Status, match_binding, select_grant,
+use skyoauth_service::{
+    persistence::{
+        PgPool,
+        registry::{
+            self, BindingProfile, GrantMode, Page, PrincipalBinding, PrincipalBindingChanges,
+            Selection, SelectionError, Status, select_grant,
+        },
     },
+    policy::{EligibleBinding, Evidence, match_binding},
 };
 
 use super::selection_fixture::{
