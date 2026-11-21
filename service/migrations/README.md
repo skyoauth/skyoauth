@@ -2171,10 +2171,25 @@ their statement, the creates before their insert and the binding update
 after its row, in this table order: a restoration waits for such a write
 and its revocation then sees what the write enrolled, and a write that
 waited for a restoration is followed by the caller's lookup, which sees the
-revocation (inferred). A caller locks its operator rows
-(`authorize_operator_locked`) before such a write, the order the
-restoration follows too (credentials, then the recovery state), so the
-two do not deadlock. A restoration that waited for locks still compares
+revocation (inferred). Both hold under `READ COMMITTED` only, and a
+restoration runs only there: it reads `transaction_isolation` inside its
+savepoint before its first lock and refuses any other level with the
+non-retryable `RestoreError::UnsupportedIsolation`, writing nothing and
+leaving the challenge unconsumed (lead ruling). Under `REPEATABLE READ` or
+`SERIALIZABLE` its revocation would read a snapshot older than a write it
+waited for and leave that write's credential active. A caller locks its
+operator rows (`authorize_operator_locked`) before such a write, the order
+the restoration follows too (credentials, then the recovery state); a
+restoration that waits at its credential lock holds no recovery state, so
+the caller's write goes through. One cycle remains and fails closed: a
+credential a write committed between the restoration's credential lock
+and its recovery state lock is not locked by it, and a caller that
+authorizes on that credential and then writes waits for the restoration
+while the restoration's revocation waits for that caller. PostgreSQL fails
+one of them with `40P01` (`RegistryError::Retry`): a restoration that is
+the victim leaves nothing and its challenge unconsumed, and its caller
+retries; a writer that is the victim denies (accepted, lead ruling). A
+restoration that waited for locks still compares
 the expiry with its `now`; the caller takes `now` immediately before the
 call and sets `lock_timeout` and `statement_timeout`, which bound the
 overshoot (inferred). When a commit's outcome is unknown, the
@@ -2218,6 +2233,12 @@ Follow-ups for the registry surface:
   not one equal to an older retired key: `recovery_state` keeps only the
   current key. Refusing reuse needs the retired keys (or their digests)
   kept somewhere; no code yet.
+- A restoration can deadlock (`40P01`, fail-closed, retried) with a caller
+  that authorizes on a credential enrolled between the restoration's
+  credential lock and its `recovery_state` lock and then writes. Closing
+  it means taking the `recovery_state` lock before the authorization, in
+  the caller and in the restoration (the recovery state before the
+  operator rows), which changes the `0005` lock order above; no code yet.
 
 ### The `0004` tables
 

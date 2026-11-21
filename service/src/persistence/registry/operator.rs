@@ -228,23 +228,41 @@
 //!   updated a row.
 //!
 //! The restoration locks every unrevoked credential `FOR NO KEY UPDATE`,
-//! then the `recovery_state` row, and revokes in a later statement. A write
-//! that holds the row `FOR SHARE` makes the restoration wait for its commit,
-//! and the revocation then sees the row it wrote: a credential enrolled that
-//! way is revoked with the others. A write that starts while the
-//! restoration holds the row waits for it to commit, then writes. So a
-//! caller re-authorizes after its write, in the same transaction: under
-//! `READ COMMITTED` that lookup sees the revocation and denies, and the
-//! caller rolls back.
+//! then the `recovery_state` row, and revokes in a later statement. It runs
+//! only under `READ COMMITTED` and refuses other levels
+//! ([`RestoreError::UnsupportedIsolation`](super::RestoreError::UnsupportedIsolation)):
+//! under `REPEATABLE READ` or `SERIALIZABLE` its revocation would read a
+//! snapshot older than a write it waited for. A write that holds the row
+//! `FOR SHARE` makes the restoration wait for its commit, and the
+//! revocation, under `READ COMMITTED`, then sees the row it wrote: a
+//! credential enrolled that way is revoked with the others. A write that
+//! starts while the restoration holds the row waits for it to commit, then
+//! writes. So a caller re-authorizes after its write, in the same
+//! transaction: under `READ COMMITTED` that lookup sees the revocation and
+//! denies, and the caller rolls back. A write under `REPEATABLE READ` or
+//! `SERIALIZABLE` that waited for a restoration that committed fails with
+//! `40001` ([`RegistryError::Retry`]) instead, since the restoration changed
+//! the row it waited for.
 //!
 //! The order for a caller is the README's: [`authorize_operator_locked`]
 //! (identity, credential, binding `FOR SHARE`) first, then the write
 //! (`recovery_state` `FOR SHARE`). The restoration takes credentials before
-//! the recovery state too, so the two never wait for each other in a cycle:
-//! a restoration waiting for a credential the caller holds holds no
-//! `recovery_state` lock yet, and the caller's write goes through. A caller
-//! that writes first and then takes a locked lookup holds the recovery
-//! state while it waits for a credential, outside that order: against a
+//! the recovery state too: a restoration waiting at its credential lock for
+//! a credential the caller holds holds no `recovery_state` lock yet, and the
+//! caller's write goes through. That does not rule out every cycle. A
+//! credential that a write committed after the restoration's credential lock
+//! and before its `recovery_state` lock is not among the credentials it
+//! locked; a caller that authorizes on that credential and then writes
+//! waits for the restoration's `recovery_state` lock while the
+//! restoration's revocation waits for the caller's `FOR SHARE` on the
+//! credential. PostgreSQL fails one of them with `40P01`
+//! ([`RegistryError::Retry`]), either one, and the failure is closed: a
+//! restoration that is the victim leaves nothing and its challenge
+//! unconsumed, and its caller retries; a writer that is the victim denies.
+//! Closing the cycle needs a lock before the authorization, a change of the
+//! `0005` order (a follow-up of the migrations README). A caller that writes
+//! first and then takes a locked lookup holds the recovery state while it
+//! waits for a credential, outside the documented order: against a
 //! restoration that holds the credentials and waits for the recovery state
 //! it fails with `40P01` ([`RegistryError::Retry`]), a deny.
 //!

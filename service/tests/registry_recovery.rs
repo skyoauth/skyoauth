@@ -6,8 +6,10 @@
 //! two concurrent restores of one challenge, the full restoration (enroll,
 //! revoke every credential, rotate the key, two audit events last), that
 //! nothing else changes, that a failed restore rolls the consume back, that
-//! a restore and an issue wait for each other without deadlock, and that an
-//! operator write that adds access serializes with a restore.
+//! a restore runs only at `READ COMMITTED`, that a restore and an issue
+//! wait for each other without deadlock, that an operator write that adds
+//! access serializes with a restore (a colliding create waiting before its
+//! insert), and that the one remaining deadlock fails closed.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests, not
@@ -2991,5 +2993,347 @@ async fn an_authorized_enrollment_does_not_deadlock_with_a_restore() {
         verify(&pool).await,
         ChainVerdict::Intact { last_sequence: 4 }
     );
+    db.drop([pool]).await;
+}
+
+/// The SQLSTATE of a store error.
+fn sqlstate(err: &sqlx::Error) -> String {
+    err.as_database_error()
+        .and_then(|err| err.code())
+        .map(|code| code.into_owned())
+        .unwrap_or_default()
+}
+
+/// A restore at any isolation level but `READ COMMITTED` is
+/// `UnsupportedIsolation`, decided inside its savepoint before its first
+/// lock: it does not wait for an enrollment that holds the recovery state,
+/// writes nothing, leaves the challenge unconsumed and the transaction
+/// usable. The same challenge then restores at `READ COMMITTED`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_runs_only_at_read_committed() {
+    let (db, pool) = issued().await;
+    let before = pool_snapshot(&pool).await;
+    // An uncommitted enrollment holds the recovery state `FOR SHARE`.
+    let mut enrolling = pool.begin().await.unwrap();
+    operator_write(&mut enrolling, 1, "adm_first")
+        .await
+        .unwrap();
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE", "READ UNCOMMITTED"] {
+        let mut connection = pool.acquire().await.unwrap();
+        let mut transaction = connection.begin().await.unwrap();
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "SET TRANSACTION ISOLATION LEVEL {isolation}; SET LOCAL lock_timeout = '5s'"
+        )))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        let inside = snapshot(&mut transaction).await;
+        match restore_operator(&mut transaction, &restore_request("op_1")).await {
+            Err(err @ RestoreError::UnsupportedIsolation) => {
+                assert_eq!(format!("{err:?}"), "UnsupportedIsolation");
+                assert_eq!(
+                    err.to_string(),
+                    "operator restoration runs only at READ COMMITTED"
+                );
+            }
+            other => panic!("{isolation}: expected UnsupportedIsolation: {other:?}"),
+        }
+        assert_eq!(snapshot(&mut transaction).await, inside, "{isolation}");
+        let row = operation(&mut transaction, "op_1").await;
+        assert_eq!((row.consumed_us, row.revision), (None, 1), "{isolation}");
+        transaction.commit().await.unwrap();
+    }
+    enrolling.rollback().await.unwrap();
+    assert_eq!(pool_snapshot(&pool).await, before);
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let restored = consume_and_restore(&mut transaction, "op_1").await.unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
+    transaction.commit().await.unwrap();
+    drop(connection);
+    db.drop([pool]).await;
+}
+
+/// The cycle that remains: a credential enrolled after the restore's
+/// credential lock and before its recovery-state lock is not locked by it.
+/// A writer that then authorizes on that credential (`FOR SHARE`) and
+/// writes, in the documented order, waits for the restore's recovery
+/// state, while the restore's revocation waits for that credential.
+/// PostgreSQL fails one side with `40P01`, a `Retry`, and the outcome is
+/// closed either way: a restore that is the victim leaves nothing and its
+/// challenge unconsumed, and its retry revokes the credential; a writer
+/// that is the victim writes nothing and the restore revokes the
+/// credential. PostgreSQL's deadlock check runs first in the side that
+/// started waiting first, which is then the usual victim:
+/// `restore_waits_first` picks that side.
+async fn documented_order_deadlock(restore_waits_first: bool) {
+    let (db, pool) = issued().await;
+    let mut enroller = pool.acquire().await.unwrap().detach();
+    let mut holder = pool.acquire().await.unwrap().detach();
+    let mut gate = pool.acquire().await.unwrap().detach();
+    let mut restorer = pool.acquire().await.unwrap().detach();
+    let mut writer = pool.acquire().await.unwrap().detach();
+    let (enroller_pid, holder_pid, gate_pid, restorer_pid, writer_pid) = (
+        backend_pid(&mut enroller).await,
+        backend_pid(&mut holder).await,
+        backend_pid(&mut gate).await,
+        backend_pid(&mut restorer).await,
+        backend_pid(&mut writer).await,
+    );
+    // The enrollment of `crd_late` holds the recovery state.
+    let mut enrolling = enroller.begin().await.unwrap();
+    operator_write(&mut enrolling, 1, "adm_first")
+        .await
+        .unwrap();
+    // The operation row is held, so the restore stops at its consume.
+    let mut holding = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM administrative_operation WHERE id = 'op_1' FOR UPDATE")
+        .execute(&mut *holding)
+        .await
+        .unwrap();
+    // The gate holds the writer between its lookup and its write.
+    let mut gating = gate.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(81)")
+        .execute(&mut *gating)
+        .await
+        .unwrap();
+    let restoring = tokio::spawn(async move {
+        let mut other = restorer.begin().await.unwrap();
+        let restored = consume_and_restore(&mut other, "op_1").await;
+        if restored.is_ok() {
+            other.commit().await.unwrap();
+        } else {
+            other.rollback().await.unwrap();
+        }
+        restorer.close().await.unwrap();
+        restored
+    });
+    // Step 1 locked `crd_first` only; step 2 waits for the enrollment,
+    // which commits between the two.
+    wait_until_blocked(&pool, restorer_pid, enroller_pid).await;
+    enrolling.commit().await.unwrap();
+    enroller.close().await.unwrap();
+    // The restore holds the recovery state and waits at its consume.
+    wait_until_blocked(&pool, restorer_pid, holder_pid).await;
+    let writing = tokio::spawn(async move {
+        let mut transaction = writer.begin().await.unwrap();
+        let authorized = registry::authorize_operator_locked(
+            &mut transaction,
+            &security_admin("spki-sha256:late"),
+        )
+        .await
+        .unwrap();
+        assert!(authorized.is_some());
+        if restore_waits_first {
+            sqlx::query("SELECT pg_advisory_xact_lock(81)")
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+        }
+        let written = operator_write(&mut transaction, 0, "adm_first").await;
+        if written.is_ok() {
+            transaction.commit().await.unwrap();
+        } else {
+            transaction.rollback().await.unwrap();
+        }
+        writer.close().await.unwrap();
+        written
+    });
+    if restore_waits_first {
+        // The writer holds `crd_late` and waits at the gate; the restore
+        // goes on to its revocation and waits for the writer; then the
+        // writer writes and waits for the restore.
+        wait_until_blocked(&pool, writer_pid, gate_pid).await;
+        holding.rollback().await.unwrap();
+        wait_until_blocked(&pool, restorer_pid, writer_pid).await;
+        gating.rollback().await.unwrap();
+    } else {
+        // The writer waits for the restore; then the restore goes on to its
+        // revocation and waits for the writer.
+        assert!(waits_for(&pool, writer_pid, restorer_pid, &writing).await);
+        holding.rollback().await.unwrap();
+        gating.rollback().await.unwrap();
+    }
+    holder.close().await.unwrap();
+    gate.close().await.unwrap();
+    let restored = restoring.await.unwrap();
+    let written = writing.await.unwrap();
+    let late = registry::get_admin_credential(&pool, "crd_late")
+        .await
+        .unwrap();
+    let late_identity: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM admin_identity WHERE id = 'adm_late'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let state = get_recovery_state(&pool).await.unwrap().unwrap();
+    let row = pool_operation(&pool, "op_1").await;
+    match (restored, written) {
+        // The restore was the victim: nothing of it persists.
+        (Err(RestoreError::Store(RegistryError::Retry(err))), Ok(())) => {
+            assert_eq!(sqlstate(&err), "40P01");
+            assert_eq!((row.consumed_us, row.revision), (None, 1));
+            assert_eq!(row.outcome, "issued");
+            assert_eq!((state.recovery_key_epoch, state.revision), (1, 1));
+            assert_eq!(state.recovery_public_key, KEY);
+            assert_eq!(late.revoked_at, None);
+            assert_eq!(late_identity, 1);
+            assert_eq!(
+                verify(&pool).await,
+                ChainVerdict::Intact { last_sequence: 2 }
+            );
+            // The retry restores and revokes the enrolled credential.
+            let retried = restore_on(&pool, &restore_request("op_1")).await.unwrap();
+            assert_eq!(retried.revoked_credential_ids, ["crd_first", "crd_late"]);
+        }
+        // The writer was the victim: it wrote nothing, and the restore
+        // revoked the enrolled credential.
+        (Ok(restored), Err(RegistryError::Retry(err))) => {
+            assert_eq!(sqlstate(&err), "40P01");
+            assert_eq!(restored.revoked_credential_ids, ["crd_first", "crd_late"]);
+            assert_eq!(late.revoked_at, Some(now()));
+            assert_eq!(late_identity, 0);
+            assert_eq!(row.outcome, "restored");
+            assert_eq!(state.recovery_key_epoch, 2);
+        }
+        other => panic!("expected one 40P01 victim: {other:?}"),
+    }
+    assert_eq!(
+        authorize_security_admin(&pool, "spki-sha256:late").await,
+        None
+    );
+    db.drop([pool]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_waiting_first_on_a_credential_enrolled_during_it_deadlocks_closed() {
+    documented_order_deadlock(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_writer_waiting_first_on_a_credential_enrolled_during_a_restore_deadlocks_closed() {
+    documented_order_deadlock(false).await;
+}
+
+/// A create that collides with the restore's replacement (its operator,
+/// credential or binding ID, or its credential's public identity) waits for
+/// the restore's recovery-state lock before it inserts, so it holds no key
+/// the restore is about to insert: the restore commits, and the create is
+/// then `AlreadyExists` with the replacement's constraint, with no
+/// deadlock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_create_colliding_with_the_replacement_waits_for_the_restore_first() {
+    let (db, pool) = issued().await;
+    let mut holder = pool.acquire().await.unwrap().detach();
+    let mut restorer = pool.acquire().await.unwrap().detach();
+    let (holder_pid, restorer_pid) = (
+        backend_pid(&mut holder).await,
+        backend_pid(&mut restorer).await,
+    );
+    let mut holding = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM administrative_operation WHERE id = 'op_1' FOR UPDATE")
+        .execute(&mut *holding)
+        .await
+        .unwrap();
+    let restoring = tokio::spawn(async move {
+        let mut other = restorer.begin().await.unwrap();
+        let restored = consume_and_restore(&mut other, "op_1").await;
+        if restored.is_ok() {
+            other.commit().await.unwrap();
+        } else {
+            other.rollback().await.unwrap();
+        }
+        restorer.close().await.unwrap();
+        restored
+    });
+    // The restore holds the recovery state and has inserted nothing yet.
+    wait_until_blocked(&pool, restorer_pid, holder_pid).await;
+    let mut creates = Vec::new();
+    for create in 0..4 {
+        let mut connection = pool.acquire().await.unwrap().detach();
+        let pid = backend_pid(&mut connection).await;
+        let task = tokio::spawn(async move {
+            let mut transaction = connection.begin().await.unwrap();
+            let created = match create {
+                0 => registry::create_admin_identity(
+                    &mut *transaction,
+                    &NewAdminIdentity {
+                        id: "adm_new".into(),
+                        status: Status::Enabled,
+                        created_at: now(),
+                    },
+                )
+                .await
+                .map(drop),
+                1 | 2 => registry::create_admin_credential(
+                    &mut *transaction,
+                    &NewAdminCredential {
+                        id: if create == 1 {
+                            "crd_new"
+                        } else {
+                            "crd_collide"
+                        }
+                        .into(),
+                        admin_id: "adm_first".into(),
+                        public_identity: if create == 1 {
+                            "spki-sha256:collide"
+                        } else {
+                            "spki-sha256:new"
+                        }
+                        .into(),
+                        trust_anchor_ref: "deployment/operator-ca".into(),
+                        status: Status::Enabled,
+                    },
+                )
+                .await
+                .map(drop),
+                _ => registry::create_admin_role_binding(
+                    &mut *transaction,
+                    &NewAdminRoleBinding {
+                        id: "rb_new".into(),
+                        admin_id: "adm_first".into(),
+                        role: AdminRole::Auditor,
+                        tenant_id: None,
+                        status: Status::Enabled,
+                    },
+                )
+                .await
+                .map(drop),
+            };
+            transaction.rollback().await.unwrap();
+            connection.close().await.unwrap();
+            created
+        });
+        assert!(
+            waits_for(&pool, pid, restorer_pid, &task).await,
+            "create {create} did not wait for the restore"
+        );
+        creates.push(task);
+    }
+    holding.rollback().await.unwrap();
+    holder.close().await.unwrap();
+    let restored = restoring.await.unwrap().unwrap();
+    assert_eq!(restored.admin_id, "adm_new");
+    for (task, constraint) in creates.into_iter().zip([
+        "admin_identity_pkey",
+        "admin_credential_pkey",
+        "admin_credential_public_identity_key",
+        "admin_role_binding_pkey",
+    ]) {
+        match task.await.unwrap() {
+            Err(RegistryError::AlreadyExists { constraint: name }) => {
+                assert_eq!(name, constraint)
+            }
+            other => panic!("expected AlreadyExists {constraint}: {other:?}"),
+        }
+    }
     db.drop([pool]).await;
 }

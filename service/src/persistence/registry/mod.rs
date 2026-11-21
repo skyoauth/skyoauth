@@ -25,8 +25,8 @@
 //! operator restoration: an expiring single-use challenge, and a restore
 //! that consumes it and, in the same savepoint, enrolls the replacement
 //! `security_admin` it names, revokes every operator credential and
-//! rotates the recovery key, with their audit events
-//! ([`get_recovery_state`] reads the key
+//! rotates the recovery key, with their audit events, in a
+//! `READ COMMITTED` transaction only ([`get_recovery_state`] reads the key
 //! and its epoch; design section 7.2; T13.5; see its module for the flow and
 //! what stays with the verifier).
 //!

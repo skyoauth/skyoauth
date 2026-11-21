@@ -340,7 +340,21 @@ ADRs (T00.8–T00.17, Gate M0):
   restoration revokes a credential whose enrollment committed while it
   waited, and a caller whose write waited for the restoration sees the
   revocation when it looks its operator up again before committing
-  (inferred lock and order).
+  (inferred lock and order). Both hold only at the `READ COMMITTED`
+  isolation level, and a restoration runs only there: at any other level
+  it is refused with an error of its own (`UnsupportedIsolation`, not
+  retryable as is), before its first lock, writing nothing and leaving the
+  challenge unconsumed (lead ruling). At `REPEATABLE READ` or
+  `SERIALIZABLE` a restoration would read a snapshot older than an
+  enrollment it waited for and leave that credential active. One wait
+  cycle remains and fails closed (accepted, lead ruling): a caller that
+  looks up and locks a credential enrolled after the restoration locked
+  the credentials, and then writes, waits for the restoration while the
+  restoration waits to revoke that credential; the database aborts one of
+  them as a deadlock, which is a retry. A restoration that is aborted
+  leaves nothing and its challenge unconsumed; a writer that is aborted
+  denies. Taking the recovery-state lock before the lookup would close the
+  cycle; it changes the lock order and is a follow-up.
 - **Errors and uncertain commits.** Issue and restoration each run inside
   a savepoint of their own and roll it back on every error, so a caller
   that commits after an error commits none of their rows. Inserts are

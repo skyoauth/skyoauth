@@ -117,6 +117,10 @@
 //! [`restore_operator`] checks its input before any statement, then, inside
 //! a savepoint of its own:
 //!
+//! 0. reads the transaction's `transaction_isolation` and refuses any
+//!    value but `read committed` with
+//!    [`RestoreError::UnsupportedIsolation`] (lead ruling; see "Locks",
+//!    "READ COMMITTED only");
 //! 1. locks every unrevoked `admin_credential` row
 //!    `FOR NO KEY UPDATE`, in key order, in one statement;
 //! 2. locks the `recovery_state` row `FOR NO KEY UPDATE` and reads it;
@@ -189,8 +193,11 @@
 //! waits for a restore holding the row, which does not wait for the issue.
 //! Two restores wait on the credentials or the recovery state, and the
 //! second then finds the challenge consumed or the epoch advanced:
-//! `NotRestorable`. Under `REPEATABLE READ` or `SERIALIZABLE` a waiter
-//! fails with `40001` ([`RegistryError::Retry`]) instead.
+//! `NotRestorable`. An issue may run at any isolation level: under
+//! `REPEATABLE READ` or `SERIALIZABLE`, an issue that waited for a restore
+//! fails with `40001` ([`RegistryError::Retry`]) only when the awaited row
+//! changed after its snapshot (the restore rotated the key and committed).
+//! A wait for a lock alone, on a row nobody changed, ends without `40001`.
 //!
 //! Step 1 waits for every transaction that holds a credential
 //! `FOR SHARE`, the locks of
@@ -198,9 +205,46 @@
 //! step 2 for every operator write that holds the recovery state
 //! `FOR SHARE`: the writes that can add operator access lock it (see the
 //! operator module, "Writes and a restoration"). Such a write commits
-//! before step 6, whose statement then sees what it enrolled and revokes
-//! it; a write that starts after step 2 waits for the restore to commit,
-//! and its caller's lookup after the write then sees the revocation.
+//! before step 6, whose statement, under `READ COMMITTED`, then sees what
+//! it enrolled and revokes it; a write that starts after step 2 waits for
+//! the restore to commit, and its caller's lookup after the write, under
+//! `READ COMMITTED`, then sees the revocation.
+//!
+//! ## READ COMMITTED only
+//!
+//! The revocation of step 6 must see a credential that a write committed
+//! while the restore waited at step 1 or 2. Under `READ COMMITTED` each
+//! statement reads the rows committed before it starts, so it does. Under
+//! `REPEATABLE READ` or `SERIALIZABLE` the restore reads its transaction's
+//! older snapshot: the write only locked the `recovery_state` row and did
+//! not change it, so the restore's lock is granted without `40001`, and the
+//! revocation misses the enrolled credential, which stays active (only
+//! `SERIALIZABLE` against a `SERIALIZABLE` writer fails with `40001`). So a
+//! restore runs only under `READ COMMITTED` (lead ruling): inside its
+//! savepoint, before step 1, it reads `transaction_isolation` and refuses
+//! any other value with [`RestoreError::UnsupportedIsolation`], which is
+//! not retryable as is: the caller retries in a `READ COMMITTED`
+//! transaction. `READ UNCOMMITTED`, which PostgreSQL runs as
+//! `READ COMMITTED`, is refused as well, since the check compares the
+//! setting by name. The refusal writes nothing and leaves the challenge
+//! unconsumed and the caller's transaction usable.
+//!
+//! ## A deadlock that fails closed
+//!
+//! One cycle of waits remains (accepted, lead ruling): a write that commits
+//! after step 1 and before step 2 enrolled a credential that step 1 did not
+//! lock. A caller that then follows the documented order on that
+//! credential, [`authorize_operator_locked`](super::authorize_operator_locked)
+//! (`FOR SHARE`) and then a write (the `recovery_state` row `FOR SHARE`),
+//! waits for the restore, which holds the recovery state from step 2, while
+//! step 6 waits for the credential the caller holds. PostgreSQL fails one of
+//! the two with `40P01` ([`RegistryError::Retry`]), either one. If the
+//! restore is the victim, its savepoint is rolled back: nothing of it
+//! persists and the challenge stays unconsumed, and its caller retries the
+//! whole transaction. If the writer is, its caller denies and rolls back,
+//! and the restore revokes the credential. Locking before the authorization
+//! would close the cycle but changes the `0005` order; it is a follow-up of
+//! the migrations README.
 //!
 //! # Validation
 //!
@@ -255,7 +299,10 @@
 //! (`audit_event_pkey`, from the audit writer), of a taken operation ID
 //! (`administrative_operation_pkey`) and of the replacement's keys (step 7
 //! of "Restore") is the ordinary [`RegistryError::AlreadyExists`] in
-//! `Store`, naming only the constraint.
+//! `Store`, naming only the constraint. A [`RegistryError::Retry`] in
+//! `Store` (`40001`, or `40P01` from the cycle of "Locks") means retrying
+//! the whole transaction; [`RestoreError::UnsupportedIsolation`] means
+//! retrying it at `READ COMMITTED`.
 //!
 //! When the commit's outcome is unknown, for example because the
 //! connection failed during `COMMIT`, the uncertain-commit rule of
@@ -413,6 +460,13 @@ const CONSUME_CHALLENGE: &str = "UPDATE administrative_operation \
        AND EXISTS (SELECT FROM recovery_state r WHERE r.bootstrap_closed \
          AND r.instance_id = $5 AND r.recovery_key_epoch = $6 AND r.revision = $4) \
      RETURNING immutable_plan";
+
+/// Step 0 of a restore: the transaction's isolation level.
+const TRANSACTION_ISOLATION: &str = "SELECT current_setting('transaction_isolation')";
+
+/// The one isolation level a restore runs at, as `transaction_isolation`
+/// names it.
+const READ_COMMITTED: &str = "read committed";
 
 /// Step 1 of a restore: every unrevoked credential, in key order.
 const LOCK_CREDENTIALS: &str = "SELECT id FROM admin_credential WHERE revoked_at IS NULL \
@@ -623,6 +677,11 @@ pub enum RestoreError {
     NotRestorable,
     /// The new recovery key is the current one, which must be retired.
     RecoveryKeyUnchanged,
+    /// The caller's transaction does not run at `READ COMMITTED`, the only
+    /// level at which a restore sees every enrolled credential (see the
+    /// module docs, "READ COMMITTED only"). Not retryable as is: the caller
+    /// retries in a `READ COMMITTED` transaction. No detail.
+    UnsupportedIsolation,
     /// Invalid input or a store failure; see the module docs.
     Store(RegistryError),
 }
@@ -633,6 +692,7 @@ impl PartialEq for RestoreError {
             (self, other),
             (Self::NotRestorable, Self::NotRestorable)
                 | (Self::RecoveryKeyUnchanged, Self::RecoveryKeyUnchanged)
+                | (Self::UnsupportedIsolation, Self::UnsupportedIsolation)
         )
     }
 }
@@ -644,6 +704,9 @@ impl fmt::Display for RestoreError {
             Self::RecoveryKeyUnchanged => {
                 f.write_str("the new recovery public key is the current one")
             }
+            Self::UnsupportedIsolation => {
+                f.write_str("operator restoration runs only at READ COMMITTED")
+            }
             Self::Store(err) => write!(f, "operator restoration failed: {err}"),
         }
     }
@@ -652,7 +715,7 @@ impl fmt::Display for RestoreError {
 impl std::error::Error for RestoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NotRestorable | Self::RecoveryKeyUnchanged => None,
+            Self::NotRestorable | Self::RecoveryKeyUnchanged | Self::UnsupportedIsolation => None,
             Self::Store(err) => Some(err),
         }
     }
@@ -958,12 +1021,19 @@ pub async fn restore_operator(
     }
 }
 
-/// Steps 1 to 10 of a restore, in the savepoint of [`restore_operator`].
+/// Steps 0 to 10 of a restore, in the savepoint of [`restore_operator`].
 async fn restore_steps(
     transaction: &mut Transaction<'_, Postgres>,
     request: &RestoreRequest<'_>,
     now: PgInterval,
 ) -> Result<Restored, RestoreError> {
+    // Step 0: READ COMMITTED only.
+    let isolation: String = sqlx::query_scalar(TRANSACTION_ISOLATION)
+        .fetch_one(&mut **transaction)
+        .await?;
+    if isolation != READ_COMMITTED {
+        return Err(RestoreError::UnsupportedIsolation);
+    }
     // Step 1: every unrevoked credential, in key order.
     sqlx::query(LOCK_CREDENTIALS)
         .execute(&mut **transaction)
@@ -1538,6 +1608,11 @@ mod tests {
                 "the new recovery public key is the current one",
                 "RecoveryKeyUnchanged",
             ),
+            (
+                RestoreError::UnsupportedIsolation,
+                "operator restoration runs only at READ COMMITTED",
+                "UnsupportedIsolation",
+            ),
         ] {
             assert_eq!(error.to_string(), display);
             assert_eq!(format!("{error:?}"), debug);
@@ -1547,6 +1622,14 @@ mod tests {
         assert_ne!(
             RestoreError::NotRestorable,
             RestoreError::RecoveryKeyUnchanged
+        );
+        assert_eq!(
+            RestoreError::UnsupportedIsolation,
+            RestoreError::UnsupportedIsolation
+        );
+        assert_ne!(
+            RestoreError::UnsupportedIsolation,
+            RestoreError::NotRestorable
         );
         let store = RestoreError::from(RegistryError::ReservedActorId);
         assert_ne!(store, RestoreError::from(RegistryError::ReservedActorId));
@@ -1586,6 +1669,11 @@ mod tests {
                 "{predicate}"
             );
         }
+        assert_eq!(
+            TRANSACTION_ISOLATION,
+            "SELECT current_setting('transaction_isolation')"
+        );
+        assert_eq!(READ_COMMITTED, "read committed");
         assert!(SHARE_RECOVERY_STATE.ends_with("FROM recovery_state FOR SHARE"));
         assert!(LOCK_RECOVERY_STATE.ends_with("FROM recovery_state FOR NO KEY UPDATE"));
         assert!(LOCK_CREDENTIALS.ends_with("ORDER BY id COLLATE \"C\" FOR NO KEY UPDATE"));
