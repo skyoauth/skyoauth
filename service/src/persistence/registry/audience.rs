@@ -284,7 +284,7 @@ pub async fn add_resource_server_checker_tenant<'e>(
 ) -> Result<i64, RegistryError> {
     let row = sqlx::query(
         "WITH bumped AS (
-             UPDATE resource_server_checker SET revision = $2 + 1
+             UPDATE resource_server_checker SET revision = revision + 1
              WHERE id = $1 AND revision = $2
              RETURNING id, resource_server_id, revision
          ), added AS (
@@ -318,7 +318,7 @@ pub async fn remove_resource_server_checker_tenant<'e>(
     // revision moved.
     let row = sqlx::query(
         "WITH bumped AS (
-             UPDATE resource_server_checker SET revision = $2 + 1
+             UPDATE resource_server_checker SET revision = revision + 1
              WHERE id = $1 AND revision = $2 AND EXISTS (
                  SELECT FROM resource_server_checker_tenant
                  WHERE checker_id = $1 AND tenant_id = $3)

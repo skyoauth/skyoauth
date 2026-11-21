@@ -25,12 +25,21 @@
 //! - An update replaces every mutable column of the row with the caller's
 //!   values (read, modify, then write back) and is a compare-and-set on the
 //!   revision: the caller passes the expected revision, and the statement
-//!   sets `revision = expected + 1` where `revision = expected`, as the
-//!   `0002` guard `skyoauth_check_revision()` requires. A row at another
-//!   revision gives [`RegistryError::StaleRevision`] and changes nothing; a
-//!   missing row gives [`RegistryError::NotFound`]. Of two concurrent updates
+//!   sets `revision = revision + 1` where `revision = expected`, so the row
+//!   moves to `expected + 1` as the `0002` guard `skyoauth_check_revision()`
+//!   requires. The expected revision is only compared, never computed with,
+//!   so any `i64`, `i64::MAX` included, is a valid argument. A row at
+//!   another revision gives [`RegistryError::StaleRevision`] and changes
+//!   nothing; a missing row gives [`RegistryError::NotFound`].
+//! - Under `READ COMMITTED`, PostgreSQL's default, of two concurrent updates
 //!   from the same revision exactly one succeeds: the second waits for the
-//!   first's row lock, then finds the revision moved.
+//!   first's row lock, then finds the revision moved and gives
+//!   [`RegistryError::StaleRevision`]. In a caller transaction at
+//!   `REPEATABLE READ` or `SERIALIZABLE` the second instead fails with
+//!   SQLSTATE `40001` (`serialization_failure`), which is
+//!   [`RegistryError::Other`]: it means "retry the whole transaction", not
+//!   "read the row again", so it is deliberately not mapped to
+//!   `StaleRevision`.
 //! - Columns the migrations make immutable (IDs, `secret_namespace`,
 //!   `audience`, each row's `resource_server_id`, an assignment's
 //!   `tenant_id`, an action's `action_name`, a principal's `tenant_id` and
@@ -71,10 +80,21 @@
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
 //! | other    | anything else, or an unlisted constraint   | `Other(sqlx::Error)`                                  |
 //!
-//! Error text never includes a value from the request or the row: the
-//! variants carry only constraint names, and `Display` and `Debug` of
-//! `Other` print only the SQLSTATE. Its [`source`](std::error::Error::source)
-//! is the raw [`sqlx::Error`], with the server's message.
+//! The `Display` and `Debug` text of a [`RegistryError`] never includes a
+//! value from the request or the row: the variants carry only constraint
+//! names, and `Display` and `Debug` of `Other` print only the SQLSTATE. The
+//! [`source`](std::error::Error::source) of `Other` is the raw
+//! [`sqlx::Error`], whose message and detail may quote request or row values
+//! (for example the key of a unique violation), so logging must not walk
+//! the source chain of a `RegistryError`.
+//!
+//! PostgreSQL text and `jsonb` cannot hold U+0000. A NUL character in any
+//! string argument (an ID, a name, a page cursor, a list element, or a
+//! string inside a `jsonb` value such as a constraint version) fails the
+//! statement with `22021` (`character_not_in_repertoire`) for a `text`
+//! argument or `22P05` (`untranslatable_character`) for a `jsonb` one (the
+//! lists and constraint versions), both [`RegistryError::Other`]. The
+//! request layer (T14.1) must reject it before calling the registry.
 //!
 //! # Not done here
 //!
@@ -162,6 +182,10 @@ impl<'a> Page<'a> {
 /// mutable columns from `$3` on, `$1` is the ID and `$2` the expected
 /// revision. The statement returns one row: the updated columns, or `NULL`s
 /// when nothing matched, and `found`, whether a row with the ID exists.
+///
+/// The new revision is `revision + 1`, not `$2 + 1`: the planner can fold
+/// `$2 + 1` before any row is matched, so `$2 = i64::MAX` would fail with
+/// `22003` (`numeric_value_out_of_range`) instead of a stale or missing row.
 macro_rules! compare_and_set {
     ($table:literal, $set:literal, $columns:expr) => {
         concat!(
@@ -169,7 +193,7 @@ macro_rules! compare_and_set {
             $table,
             " SET ",
             $set,
-            ", revision = $2 + 1 WHERE id = $1 AND revision = $2 RETURNING ",
+            ", revision = revision + 1 WHERE id = $1 AND revision = $2 RETURNING ",
             $columns,
             ") SELECT updated.*, EXISTS (SELECT FROM ",
             $table,
@@ -225,11 +249,11 @@ mod tests {
     }
 
     #[test]
-    fn compare_and_set_sets_revision_to_expected_plus_one_where_it_matches() {
+    fn compare_and_set_advances_the_revision_by_one_where_it_matches() {
         let sql = compare_and_set!("t", "a = $3", "id, a, revision");
         assert_eq!(
             sql,
-            "WITH updated AS (UPDATE t SET a = $3, revision = $2 + 1 \
+            "WITH updated AS (UPDATE t SET a = $3, revision = revision + 1 \
              WHERE id = $1 AND revision = $2 RETURNING id, a, revision) \
              SELECT updated.*, EXISTS (SELECT FROM t WHERE id = $1) AS found \
              FROM (SELECT) AS one LEFT JOIN updated ON true"

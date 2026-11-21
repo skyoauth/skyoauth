@@ -102,7 +102,9 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 /// never a value from the request or the row, and `Display` and `Debug`
 /// print nothing else. The database's own message for an unmapped error is
 /// reachable only through [`std::error::Error::source`] of
-/// [`RegistryError::Other`].
+/// [`RegistryError::Other`]: that source is the raw [`sqlx::Error`], whose
+/// message and detail may quote request or row values, so logging must not
+/// walk the source chain.
 pub enum RegistryError {
     /// No row has the given ID (in the given tenant, for a tenant-owned
     /// table), or a checker does not list the tenant to remove.
