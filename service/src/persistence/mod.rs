@@ -1,4 +1,5 @@
-//! PostgreSQL connection pool and schema migrations.
+//! PostgreSQL connection pool, schema migrations and the typed registry
+//! surface ([`registry`]).
 //!
 //! PostgreSQL is the authoritative store. The schema is defined by the
 //! forward-only, versioned SQL files in `service/migrations/`, embedded into
@@ -49,6 +50,7 @@
 //! errors and trace-level logs do not contain the password.
 
 mod config;
+pub mod registry;
 
 pub use config::{
     ACQUIRE_TIMEOUT_VAR, ConfigError, DATABASE_URL_VAR, DatabaseConfig, MAX_CONNECTIONS_VAR,

@@ -120,9 +120,9 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/gen-conformance-registry.test.mjs
 
-      # The result reporter (layout §3 "Result join") is not run on real
-      # artifacts yet; its self-test runs here so it is tested on every
-      # change.
+      # The result reporter (layout §3 "Result join") runs on real artifacts
+      # only in `conformance-report`, which code changes alone reach; its
+      # self-test runs here so it is tested on every change.
       - name: Self-test the result reporter
         if: success() || failure()
         run: node --test scripts/ci/report-conformance.test.mjs
@@ -179,14 +179,54 @@ jobs:
   # Line coverage gate. The threshold lives in the `coverage` alias in
   # .cargo/config.toml. Reports are uploaded even when the gate fails. The
   # job has read-only access; badge publication is a separate job.
+  # The gate measures every workspace test, the `#[ignore]`d PostgreSQL
+  # tests included, as `service-nextest` runs them: the job has the same
+  # pinned PostgreSQL service container, SKYOAUTH_IT_DATABASE_URL and check
+  # step, and the coverage step passes `-- --include-ignored` to the test
+  # binaries. That separator and argument are in the step, not the alias:
+  # cargo appends the step's own options after the alias text, so an alias
+  # ending in `-- --include-ignored` would hand `--locked`, `--json` and
+  # `--output-path` to the test binaries. scripts/ci/publish-badges.test.mjs
+  # checks that the permissions, URL, service and check step match
+  # `service-nextest`, that the step ends in `-- --include-ignored`, and
+  # that the alias has no `--` and the same ignore regex as below.
   rust-coverage:
     name: Rust coverage
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     env:
       # Keep in sync with the `coverage` alias in .cargo/config.toml.
       COVERAGE_IGNORE_REGEX: 'main\.rs'
+      SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
+    services:
+      postgres:
+        # postgres:17 (17.12) pinned by its multi-arch index digest. The
+        # same pin is in the `rust-coverage`, `service-nextest` and
+        # `scenarios-pg` jobs; bump all three together. Dependabot is not
+        # configured for this pin; bump it by hand
+        # (docs/testing/conformance-layout.md section 4): take the
+        # multi-arch index digest of the new 17.x tag from Docker Hub and
+        # change tag and digest together. Docker pulls by digest and
+        # ignores the tag, so the check step fails if they disagree or if
+        # the jobs' pins differ.
+        image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
+        env:
+          POSTGRES_USER: skyoauth
+          POSTGRES_PASSWORD: skyoauth
+          POSTGRES_DB: skyoauth
+        ports:
+          - 5432:5432
+        # Probe over TCP: the image's init-time server listens on the Unix
+        # socket only, so a socket probe can report ready before the real
+        # server starts.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U skyoauth -d skyoauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     outputs:
       report: ${{ steps.report.outputs.complete }}
     steps:
@@ -212,13 +252,68 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.1
 
+      # Proves the service container is reachable from the runner with the
+      # URL the tests use and is the pinned major version; that every
+      # `postgres` service in this file has the same tag@digest pin and the
+      # server version matches that tag (catches a tag bumped without its
+      # digest, or the reverse, or a pin bumped in one job only); and that
+      # the role can create, connect to and drop a database, as tests that
+      # create a database each need. The step is identical in
+      # `rust-coverage`, `service-nextest` and `scenarios-pg`.
+      - name: Check PostgreSQL is reachable
+        run: |
+          pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
+          version="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version_num')"
+          echo "server_version_num: $version"
+          if [ "${version%????}" != 17 ]; then
+            echo "::error::Expected PostgreSQL 17, got server_version_num '$version'"
+            exit 1
+          fi
+          workflow=.github/workflows/ci.yml
+          services="$(grep -c '^ *postgres: *$' "$workflow" || true)"
+          images="$(grep '^ *image: .*postgres' "$workflow" | sed 's/^ *image: *//; s/ *$//')"
+          count="$(printf '%s' "$images" | grep -c '' || true)"
+          pinned="$(printf '%s' "$images" | grep -cx 'postgres:[0-9][0-9.]*@sha256:[0-9a-f]\{64\}' || true)"
+          echo "postgres services in $workflow: $services"
+          printf '%s\n' "$images" | sed 's/^/  image: /'
+          if [ "$services" -eq 0 ] || [ "$count" != "$services" ] || [ "$pinned" != "$services" ]; then
+            echo "::error::Each of the $services postgres services in $workflow needs an image 'postgres:<tag>@sha256:<digest>'; $pinned of $count postgres image lines have that form"
+            exit 1
+          fi
+          pin="$(printf '%s\n' "$images" | sort -u)"
+          if [ "$(printf '%s\n' "$pin" | grep -c '')" != 1 ]; then
+            echo "::error::The postgres pins in $workflow differ ($(printf '%s\n' "$pin" | paste -sd ' ' -)); every job must use the same tag and digest, bump them together"
+            exit 1
+          fi
+          tag="${pin#postgres:}"
+          tag="${tag%%@*}"
+          server="$(psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -tAc 'SHOW server_version')"
+          server="${server%% *}"
+          echo "image tag: $tag, server_version: $server"
+          if [ "$tag" != "$server" ]; then
+            echo "::error::Image tag '$tag' does not match server_version '$server'; update tag and digest together"
+            exit 1
+          fi
+          db="skyoauth_smoke_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          trap 'psql "$SKYOAUTH_IT_DATABASE_URL" -qc "DROP DATABASE IF EXISTS $db" || echo "::warning::Could not drop $db"' EXIT
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $db"
+          current="$(psql "${SKYOAUTH_IT_DATABASE_URL%/*}/$db" -v ON_ERROR_STOP=1 -tAc 'SELECT current_database()')"
+          if [ "$current" != "$db" ]; then
+            echo "::error::Connected to '$current' instead of the new database '$db'"
+            exit 1
+          fi
+          psql "$SKYOAUTH_IT_DATABASE_URL" -v ON_ERROR_STOP=1 -qc "DROP DATABASE $db"
+          trap - EXIT
+          echo "The role can create, connect to and drop a database ($db)"
+
       # `shell: bash` runs with -o pipefail, so a failing gate is not masked
-      # by `tee`.
+      # by `tee`. `-- --include-ignored` runs the PostgreSQL tests too; a
+      # failing one fails the step and marks the report incomplete.
       - name: Check coverage threshold
         shell: bash
         run: |
           mkdir -p target/coverage
-          cargo coverage --locked --json --summary-only --output-path target/coverage/coverage.json 2>&1 \
+          cargo coverage --locked --json --summary-only --output-path target/coverage/coverage.json -- --include-ignored 2>&1 \
             | tee target/coverage/coverage.log
 
       - name: Export LCOV report
@@ -259,9 +354,9 @@ jobs:
   # `rust` job does. The artifact name carries the run attempt so a
   # re-run never replaces an earlier attempt's report. DB-backed tests
   # reach the same pinned PostgreSQL service container as `scenarios-pg`
-  # through SKYOAUTH_IT_DATABASE_URL; the official image's user is a
-  # superuser, so tests can create a database each (the check step
-  # proves it). No test filter: every workspace test runs here.
+  # and `rust-coverage` through SKYOAUTH_IT_DATABASE_URL; the official
+  # image's user is a superuser, so tests can create a database each (the
+  # check step proves it). No test filter: every workspace test runs here.
   service-nextest:
     name: Service tests (nextest)
     needs: changes
@@ -274,13 +369,14 @@ jobs:
     services:
       postgres:
         # postgres:17 (17.12) pinned by its multi-arch index digest. The
-        # same pin is in the `service-nextest` and `scenarios-pg` jobs;
-        # bump both together. Dependabot is not configured for this pin;
-        # bump it by hand (docs/testing/conformance-layout.md section 4):
-        # take the multi-arch index digest of the new 17.x tag from Docker
-        # Hub and change tag and digest together. Docker pulls by digest
-        # and ignores the tag, so the check step fails if they disagree or
-        # if the two jobs' pins differ.
+        # same pin is in the `rust-coverage`, `service-nextest` and
+        # `scenarios-pg` jobs; bump all three together. Dependabot is not
+        # configured for this pin; bump it by hand
+        # (docs/testing/conformance-layout.md section 4): take the
+        # multi-arch index digest of the new 17.x tag from Docker Hub and
+        # change tag and digest together. Docker pulls by digest and
+        # ignores the tag, so the check step fails if they disagree or if
+        # the jobs' pins differ.
         image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
         env:
           POSTGRES_USER: skyoauth
@@ -318,7 +414,7 @@ jobs:
       # digest, or the reverse, or a pin bumped in one job only); and that
       # the role can create, connect to and drop a database, as tests that
       # create a database each need. The step is identical in
-      # `service-nextest` and `scenarios-pg`.
+      # `rust-coverage`, `service-nextest` and `scenarios-pg`.
       - name: Check PostgreSQL is reachable
         run: |
           pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
@@ -416,19 +512,25 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    # The name of the leg artifact this job uploaded, from the attempt it
+    # ran in, or empty when the upload produced none: conformance-report
+    # downloads it by this name (layout §3 "Leg artifacts").
+    outputs:
+      junit-artifact: ${{ steps.junit.outputs.artifact-id && format('junit-scenarios-pg-x86_64-attempt-{0}', github.run_attempt) || '' }}
     env:
       SKYOAUTH_CONFORMANCE_LEG: scenarios-pg/x86_64
       SKYOAUTH_IT_DATABASE_URL: postgres://skyoauth:skyoauth@localhost:5432/skyoauth
     services:
       postgres:
         # postgres:17 (17.12) pinned by its multi-arch index digest. The
-        # same pin is in the `service-nextest` and `scenarios-pg` jobs;
-        # bump both together. Dependabot is not configured for this pin;
-        # bump it by hand (docs/testing/conformance-layout.md section 4):
-        # take the multi-arch index digest of the new 17.x tag from Docker
-        # Hub and change tag and digest together. Docker pulls by digest
-        # and ignores the tag, so the check step fails if they disagree or
-        # if the two jobs' pins differ.
+        # same pin is in the `rust-coverage`, `service-nextest` and
+        # `scenarios-pg` jobs; bump all three together. Dependabot is not
+        # configured for this pin; bump it by hand
+        # (docs/testing/conformance-layout.md section 4): take the
+        # multi-arch index digest of the new 17.x tag from Docker Hub and
+        # change tag and digest together. Docker pulls by digest and
+        # ignores the tag, so the check step fails if they disagree or if
+        # the jobs' pins differ.
         image: postgres:17.12@sha256:b60e90042aa6b8dbecd58e224b3e36114dbf8ad754465264c2476ad58a86e45c
         env:
           POSTGRES_USER: skyoauth
@@ -466,7 +568,7 @@ jobs:
       # digest, or the reverse, or a pin bumped in one job only); and that
       # the role can create, connect to and drop a database, as tests that
       # create a database each need. The step is identical in
-      # `service-nextest` and `scenarios-pg`.
+      # `rust-coverage`, `service-nextest` and `scenarios-pg`.
       - name: Check PostgreSQL is reachable
         run: |
           pg_isready -d "$SKYOAUTH_IT_DATABASE_URL" -t 30
@@ -549,6 +651,7 @@ jobs:
           printf '%s\n' "$SKYOAUTH_CONFORMANCE_LEG" > target/nextest/ci/leg
 
       - name: Upload JUnit report
+        id: junit
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -556,6 +659,98 @@ jobs:
           path: |
             target/nextest/ci/junit.xml
             target/nextest/ci/leg
+          if-no-files-found: warn
+
+  # Informational conformance report: runs scripts/ci/report-conformance.mjs
+  # on the leg artifacts of this run (docs/testing/conformance-layout.md §3
+  # "Leg artifacts"), appends its Markdown to the step summary and uploads
+  # its JSON. It judges this run only, not every run for the commit, and no
+  # milestone gate (no --require-milestone, no --require-history), so a
+  # stage that is not run or planned never fails it. Only a reporter error
+  # fails it: usage, registry or input errors, or a crash; a failed
+  # conformance test is a warning here, because it already fails its own
+  # leg job (scripts/ci/report-conformance-ci.sh). It is not in `ci-passed`
+  # and must not be made a required check. A reporter error still fails the
+  # workflow run: on main that turns the README's CI badge red, while
+  # `CI passed` stays green.
+  #
+  # It runs after its leg jobs whatever their result unless the run was
+  # cancelled (`!cancelled()`, as in publish-badges): a failed or timed-out
+  # leg still gets a report, a cancelled run (such as a pull request run
+  # superseded by cancel-in-progress) does not. It does not run when
+  # `changes` skipped the code jobs: a docs-only change gets no conformance
+  # report and no "not run" summary. `needs` lists every job of this
+  # workflow that uploads a leg artifact (`junit-<leg id>-attempt-N`), so all
+  # of them have finished before the download; the PR that adds a leg job to
+  # ci.yml adds it here, with its `junit-artifact` output, a download step
+  # and a DOWNLOADS line (the reporter self-test checks all four). A leg of another
+  # workflow (the schedule-only live-wif-negative and nightly legs) runs in
+  # another run and cannot be needed here. The reporter binds the registry to the
+  # judged commit through the checkout's HEAD, so a pull request run checks
+  # out and judges the PR head, as `gh run view` names it in `headSha`
+  # (tests/conformance/README.md "The reporter").
+  conformance-report:
+    name: Conformance report (informational)
+    needs:
+      - changes
+      - scenarios-pg
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ env.COMMIT }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install reporter dependencies
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
+
+      # One download per leg job, by the name that job gave in its
+      # `junit-artifact` output: never a pattern (one match extracts flat,
+      # several extract into one directory each) and never a name built
+      # here (a re-run of this job alone has another run_attempt). A
+      # download by name extracts the artifact's files directly into
+      # `path`; report-conformance-ci.sh checks them and moves them to
+      # ARTIFACTS/<run_id>/<name>/. A leg job that uploaded nothing has an
+      # empty output: no download, and its legs are not run. A failed
+      # download fails the job before the report step, which has no `if:`.
+      # Whether an artifact of an earlier attempt can be downloaded in a
+      # re-run is not verified (layout §6 "Still open", item 6).
+      - name: Download the scenarios-pg leg artifact
+        if: needs.scenarios-pg.outputs.junit-artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.scenarios-pg.outputs.junit-artifact }}
+          path: ${{ runner.temp }}/conformance-download/scenarios-pg
+
+      - name: Report
+        env:
+          DOWNLOAD_DIR: ${{ runner.temp }}/conformance-download
+          DOWNLOADS: |
+            scenarios-pg=${{ needs.scenarios-pg.outputs.junit-artifact }}
+          ARTIFACTS: ${{ runner.temp }}/conformance-artifacts
+          REPORT_JSON: ${{ runner.temp }}/conformance-report.json
+        run: sh scripts/ci/report-conformance-ci.sh
+
+      # Not a leg artifact: NOT_CONFORMANCE in the reporter lists it.
+      - name: Upload the JSON report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-report-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/conformance-report.json
           if-no-files-found: warn
 
   typescript:
