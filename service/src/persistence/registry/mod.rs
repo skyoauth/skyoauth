@@ -1,11 +1,12 @@
 //! Typed reads and writes of the registry tables of migrations `0002` to
-//! `0004` (T10.1, T10.8): tenants (with their secret namespace), principals,
-//! resource servers, audience tenant assignments, resource server checkers
-//! with their tenant rows, and resource actions; trust keysets and their
-//! versions, trust sources, principal bindings, service identities with
-//! their audience rows, and service grants with their binding and audience
-//! rows; and, read-only, the instance security policy and the egress
-//! allowlist.
+//! `0005` (T10.1, T10.8, T10.9): tenants (with their secret namespace),
+//! principals, resource servers, audience tenant assignments, resource
+//! server checkers with their tenant rows, and resource actions; trust
+//! keysets and their versions, trust sources, principal bindings, service
+//! identities with their audience rows, and service grants with their
+//! binding and audience rows; the consumed single-use proofs
+//! (`consumed_assertion`, insert only); and, read-only, the instance
+//! security policy and the egress allowlist.
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -227,6 +228,7 @@
 //! impersonation grant dormant; "What 0004 adds"), does not generate IDs
 //! (T10.2) and does not run migrations.
 
+mod assertion;
 mod audience;
 mod error;
 mod grant;
@@ -235,6 +237,9 @@ mod model;
 mod tenant;
 mod trust;
 
+pub use assertion::{
+    Consumption, MAX_ASSERTION_SET, NewConsumedAssertion, consume_assertion, consume_assertion_set,
+};
 pub use audience::{
     add_resource_server_checker_tenant, create_audience_tenant_assignment, create_resource_action,
     create_resource_server, create_resource_server_checker, get_audience_tenant_assignment,

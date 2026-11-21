@@ -21,9 +21,9 @@ const DEADLOCK_DETECTED: &str = "40P01";
 const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
-/// `principal`, the five `0003` tables and the nine `0004` tables) and of
-/// the three list domains, as migrations `0002` to `0004` and `0007` name
-/// them, sorted byte-wise. A unique, foreign key
+/// `principal`, the five `0003` tables, the nine `0004` tables and
+/// `consumed_assertion` of `0005`) and of the three list domains, as
+/// migrations `0002` to `0005` and `0007` name them, sorted byte-wise. A unique, foreign key
 /// or check violation maps to a typed variant only for a name listed here.
 /// The database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -39,6 +39,16 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_tenant_id_fkey",
     "audience_tenant_assignment_tenant_id_octet_length_check",
     "audience_tenant_assignment_tenant_id_resource_server_id_key",
+    "consumed_assertion_consumed_at_range_check",
+    "consumed_assertion_digest_key_version_check",
+    "consumed_assertion_digest_key_version_octet_length_check",
+    "consumed_assertion_pkey",
+    "consumed_assertion_replay_key_digest_octet_length_check",
+    "consumed_assertion_retain_until_range_check",
+    "consumed_assertion_retention_check",
+    "consumed_assertion_tenant_id_octet_length_check",
+    "consumed_assertion_trust_source_id_fkey",
+    "consumed_assertion_trust_source_id_octet_length_check",
     "principal_binding_claim_match_policy_check",
     "principal_binding_id_check",
     "principal_binding_id_octet_length_check",
