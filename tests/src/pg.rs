@@ -3,14 +3,30 @@
 //!
 //! The tests need `SKYOAUTH_IT_DATABASE_URL`, a URL for a role that may
 //! create databases (`CREATEDB`) and, for the tests that call
-//! [`TestDb::create_login_role`] (A24), roles (`CREATEROLE`); none needs a
-//! superuser. The pools of [`TestDb::pool`] and
-//! [`TestDb::pool_with_max_connections`], the replicas' included, connect as
-//! that role, so a test may terminate their backends
+//! [`TestDb::create_login_role`] (A24), roles (`CREATEROLE`). CI connects as
+//! a superuser. A role that is not one also needs membership in
+//! `pg_signal_backend` (`GRANT pg_signal_backend TO <role>`): the harness
+//! drops databases with `DROP DATABASE … WITH (FORCE)`, which terminates the
+//! backends still connected to them, and without that membership PostgreSQL
+//! refuses (SQLSTATE 42501, "permission denied to terminate process") while
+//! a backend of another role is among them, such as an autovacuum worker or
+//! a session of a login role of [`TestDb::create_login_role`].
+//! [`drop_database`] retries that refusal until [`DROP_DEADLINE`], so a
+//! backend that exits by itself (autovacuum on a small database) does not
+//! fail the test, but one that stays fails it. The pools of [`TestDb::pool`]
+//! and [`TestDb::pool_with_max_connections`], the replicas' included,
+//! connect as that role, so a test may terminate their backends
 //! ([`crate::rep::terminate`]) without `pg_signal_backend`. Without the
 //! variable [`TestDb::create`] panics: a scenario test never passes
 //! vacuously (layout §1.2, "Loud failure"), and scenario tests are never
 //! `#[ignore]`d.
+//!
+//! Timing. Retrying a refused `DROP DATABASE` has no event to wait on, so
+//! [`drop_database`] polls every [`DROP_POLL_INTERVAL`] until
+//! [`DROP_DEADLINE`], like [`crate::rep::wait_until_blocked`]: a bounded
+//! wait on an observed condition (the statement succeeding), never a fixed
+//! sleep that stands in for one, and the only other exception to the
+//! no-sleep rule (layout §4).
 //!
 //! Every migration of `skyoauth-service` is applied once to a template
 //! database, and each test gets a fresh copy of it (`CREATE DATABASE …
@@ -37,6 +53,7 @@
 
 use std::{
     collections::hash_map::RandomState,
+    fmt,
     hash::{BuildHasher, DefaultHasher, Hash, Hasher},
     str::FromStr,
     sync::atomic::{AtomicU32, Ordering},
@@ -45,9 +62,22 @@ use std::{
 
 use skyoauth_service::persistence::{self, DatabaseConfig, MIGRATOR, PgPool};
 use sqlx::{AssertSqlSafe, Connection, PgConnection, postgres::PgConnectOptions};
+use tokio::time::Instant;
 
 /// The variable that names the PostgreSQL server of the `pg` environment.
 pub const IT_DATABASE_URL_VAR: &str = "SKYOAUTH_IT_DATABASE_URL";
+
+/// How long [`drop_database`] retries a `DROP DATABASE … WITH (FORCE)`
+/// that PostgreSQL refuses with SQLSTATE 42501 before it gives up: long
+/// enough for an autovacuum worker on a test database to finish.
+pub const DROP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// How often [`drop_database`] retries.
+pub const DROP_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// SQLSTATE `insufficient_privilege`, which `DROP DATABASE … WITH (FORCE)`
+/// returns when it may not terminate a backend connected to the database.
+pub const INSUFFICIENT_PRIVILEGE: &str = "42501";
 
 /// The advisory lock key that serializes template builds and copies across
 /// test processes (an arbitrary constant; "skyoauth" in ASCII, truncated).
@@ -173,25 +203,32 @@ impl TestDb {
         (role, persistence::connect(&config.unwrap()).await.unwrap())
     }
 
-    /// Closes `pools` and drops the database, then the login roles.
+    /// Closes `pools` and drops the database ([`drop_database`]), then the
+    /// login roles.
+    ///
+    /// # Panics
+    ///
+    /// When the database or a role cannot be dropped.
     pub async fn drop(mut self, pools: impl IntoIterator<Item = PgPool>) {
         for pool in pools {
             pool.close().await;
         }
         let mut admin = PgConnection::connect(&self.admin_url).await.unwrap();
-        for statement in self.cleanup_statements() {
+        if let Err(err) = drop_database(&mut admin, &self.name).await {
+            panic!("{err}");
+        }
+        for statement in self.role_cleanup_statements() {
             execute(&mut admin, statement).await;
         }
         self.dropped = true;
     }
 
-    /// One statement each: `DROP DATABASE` cannot run in the implicit
-    /// transaction of a multi-statement query. The roles go last: a role
+    /// One statement per role, run after the database is dropped: a role
     /// with privileges in a database cannot be dropped before it.
-    fn cleanup_statements(&self) -> Vec<String> {
-        let database = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name);
-        let roles = (self.roles.iter()).map(|role| format!("DROP ROLE IF EXISTS {role}"));
-        std::iter::once(database).chain(roles).collect()
+    fn role_cleanup_statements(&self) -> Vec<String> {
+        (self.roles.iter())
+            .map(|role| format!("DROP ROLE IF EXISTS {role}"))
+            .collect()
     }
 }
 
@@ -205,7 +242,8 @@ impl Drop for TestDb {
             return;
         }
         let admin_url = self.admin_url.clone();
-        let statements = self.cleanup_statements();
+        let name = self.name.clone();
+        let statements = self.role_cleanup_statements();
         let cleanup = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -213,6 +251,7 @@ impl Drop for TestDb {
                 .ok()?;
             runtime.block_on(async {
                 let mut admin = PgConnection::connect(&admin_url).await.ok()?;
+                let _ = drop_database(&mut admin, &name).await;
                 for statement in statements {
                     let _ = sqlx::raw_sql(AssertSqlSafe(statement))
                         .execute(&mut admin)
@@ -268,11 +307,9 @@ async fn ensure_template(admin: &mut PgConnection, admin_url: &str, template: &s
             .await
             .unwrap();
     for name in stale {
-        execute(
-            admin,
-            format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"),
-        )
-        .await;
+        if let Err(err) = drop_database(admin, &name).await {
+            panic!("{err}");
+        }
     }
     let building = format!("{template}_b{}", std::process::id());
     // UTF8 whatever the cluster's default encoding, as in
@@ -300,6 +337,124 @@ fn config_for(admin_url: &str, database: &str, max_connections: u32) -> Database
         .unwrap()
         .database(database);
     DatabaseConfig::new(connect, None, max_connections, Duration::from_secs(10)).unwrap()
+}
+
+/// Drops `database` with `DROP DATABASE IF EXISTS … WITH (FORCE)` through
+/// `conn`, retrying while PostgreSQL refuses with SQLSTATE 42501
+/// ([`retry_drop`] with [`DROP_DEADLINE`] and [`DROP_POLL_INTERVAL`]).
+/// `database` is a generated name (digits, hex and underscores), never
+/// input. Returns the number of attempts.
+///
+/// # Errors
+///
+/// Any other error at once, and SQLSTATE 42501 still at the deadline
+/// ([`DropError`], which names the database).
+pub async fn drop_database(conn: &mut PgConnection, database: &str) -> Result<u32, DropError> {
+    retry_drop(database, DROP_DEADLINE, DROP_POLL_INTERVAL, async || {
+        drop_database_once(&mut *conn, database).await
+    })
+    .await
+}
+
+/// One `DROP DATABASE IF EXISTS {database} WITH (FORCE)`, not retried.
+/// `database` is as for [`drop_database`].
+///
+/// # Errors
+///
+/// What PostgreSQL returns.
+pub async fn drop_database_once(conn: &mut PgConnection, database: &str) -> sqlx::Result<()> {
+    let statement = format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)");
+    sqlx::raw_sql(AssertSqlSafe(statement))
+        .execute(conn)
+        .await
+        .map(|_| ())
+}
+
+/// Runs `attempt`, the drop of `database`, until it succeeds, retrying
+/// every `interval` while it fails with SQLSTATE 42501
+/// ([`is_insufficient_privilege`]) and `deadline` has not passed since the
+/// first attempt; the last retry runs at the deadline. Returns the number
+/// of attempts. [`drop_database`] is this with the harness's bounds; the
+/// parameters are for testing the retry itself.
+///
+/// # Errors
+///
+/// The first error that is not SQLSTATE 42501, at once; or the last 42501
+/// error when it still fails at the deadline.
+pub async fn retry_drop(
+    database: &str,
+    deadline: Duration,
+    interval: Duration,
+    mut attempt: impl AsyncFnMut() -> sqlx::Result<()>,
+) -> Result<u32, DropError> {
+    let start = Instant::now();
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let error = match attempt().await {
+            Ok(()) => return Ok(attempts),
+            Err(error) => error,
+        };
+        let elapsed = start.elapsed();
+        let denied = is_insufficient_privilege(&error);
+        if !denied || elapsed >= deadline {
+            return Err(DropError {
+                database: database.to_owned(),
+                attempts,
+                deadline: denied.then_some(deadline),
+                error,
+            });
+        }
+        tokio::time::sleep(interval.min(deadline - elapsed)).await;
+    }
+}
+
+/// Whether `error` is PostgreSQL's SQLSTATE 42501 (`insufficient_privilege`).
+pub fn is_insufficient_privilege(error: &sqlx::Error) -> bool {
+    error
+        .as_database_error()
+        .and_then(|db| db.code())
+        .is_some_and(|code| code == INSUFFICIENT_PRIVILEGE)
+}
+
+/// A failed [`retry_drop`].
+#[derive(Debug)]
+pub struct DropError {
+    /// The database that was not dropped.
+    pub database: String,
+    /// How many times the drop was tried.
+    pub attempts: u32,
+    /// The deadline, when the drop still failed with SQLSTATE 42501 at it;
+    /// `None` when it failed with another error, which is never retried.
+    pub deadline: Option<Duration>,
+    /// The last error.
+    pub error: sqlx::Error,
+}
+
+impl fmt::Display for DropError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            database,
+            attempts,
+            deadline,
+            error,
+        } = self;
+        write!(f, "DROP DATABASE {database} WITH (FORCE) failed")?;
+        if let Some(deadline) = deadline {
+            write!(
+                f,
+                " with SQLSTATE {INSUFFICIENT_PRIVILEGE} for {deadline:?} ({attempts} attempts; \
+                 a role that is not a superuser needs `GRANT pg_signal_backend TO <role>`)"
+            )?;
+        }
+        write!(f, ": {error}")
+    }
+}
+
+impl std::error::Error for DropError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 /// Runs one statement built from generated names only (digits, hex and

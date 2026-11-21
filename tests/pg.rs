@@ -9,7 +9,10 @@
 //! registry test ID is `nextest:skyoauth-scenarios/pg/<that name>`
 //! (layout §3). `security::grant_fixture` is a helper module of the A38 and
 //! A53 tests, and `security::selection_fixture` one of the A25 and A50
-//! tests; neither is a scenario.
+//! tests; neither is a scenario. `harness::pg_teardown` tests the
+//! harness's own database teardown (`src/pg.rs`); its tests are not
+//! scenario tests, no name in it matches `a\d\d_`, and the registry
+//! (`tests/conformance/scenarios.toml`) does not list them.
 
 mod security {
     #[path = "a24.rs"]
@@ -28,4 +31,9 @@ mod security {
     mod grant_fixture;
     #[path = "selection_fixture.rs"]
     mod selection_fixture;
+}
+
+mod harness {
+    #[path = "pg_teardown.rs"]
+    mod pg_teardown;
 }

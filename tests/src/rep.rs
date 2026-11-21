@@ -22,10 +22,12 @@
 //! Timing. Scenario tests never sleep to synchronize (layout §4). Waiting
 //! for PostgreSQL to report a lock wait has no event to wait on, so
 //! [`wait_until_blocked`] polls `pg_blocking_pids` every [`POLL_INTERVAL`]
-//! until a [`DEADLINE`]: the one exception, a bounded wait on an observed
-//! condition, never a fixed sleep that stands in for one. Every other wait
-//! here ([`Replicas::race`], [`terminate`]) is bounded by [`DEADLINE`] too,
-//! so a lost wake-up fails the test instead of hanging it.
+//! until a [`DEADLINE`]: one of the two exceptions (the other is the retry
+//! of a refused `DROP DATABASE` in [`crate::pg::drop_database`]), a bounded
+//! wait on an observed condition, never a fixed sleep that stands in for
+//! one. Every other wait here ([`Replicas::race`], [`terminate`]) is
+//! bounded by [`DEADLINE`] too, so a lost wake-up fails the test instead of
+//! hanging it.
 //!
 //! Nothing here is a test, and no name matches `a\d\d_` (layout §1.2).
 
@@ -151,8 +153,8 @@ pub async fn backend_pid(conn: &mut PgConnection) -> i32 {
 /// it, as row-lock waiters after the first wait for that first one. It
 /// follows `pg_blocking_pids` transitively, polling through `observer` (a
 /// pool that is neither the holder nor a blocked replica) every
-/// [`POLL_INTERVAL`]. This polling is the one exception to the no-sleep
-/// rule (module documentation).
+/// [`POLL_INTERVAL`]. This polling is one of the two exceptions to the
+/// no-sleep rule (module documentation).
 ///
 /// # Panics
 ///
