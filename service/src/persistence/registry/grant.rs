@@ -9,7 +9,7 @@ use super::{
     NewPrincipalBinding, NewServiceGrant, NewServiceIdentity, Page, PrincipalBinding,
     PrincipalBindingChanges, RegistryError, ServiceGrant, ServiceGrantChanges, ServiceIdentity,
     ServiceIdentityChanges, list_change, micros, model::optional_since_epoch,
-    tenant_compare_and_set, tenant_list_page, updated,
+    tenant_compare_and_set, tenant_list_page, updated, validate_claim_match_policy,
 };
 
 macro_rules! binding_columns {
@@ -153,11 +153,14 @@ async fn change_list<'e>(
 }
 
 /// Creates a binding at revision 1. Its source and its workload principal
-/// must be of the same tenant, and the principal a workload.
+/// must be of the same tenant, and the principal a workload. Its
+/// `claim_match_policy` must have every predicate its profile requires
+/// ([`validate_claim_match_policy`], checked before the statement).
 pub async fn create_principal_binding<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipalBinding,
 ) -> Result<PrincipalBinding, RegistryError> {
+    validate_claim_match_policy(new.profile, &new.claim_match_policy)?;
     Ok(sqlx::query_as(concat!(
         "INSERT INTO principal_binding \
          (id, tenant_id, name, trust_source_id, profile, claim_match_policy, \
@@ -211,7 +214,12 @@ pub async fn list_principal_bindings<'e>(
 }
 
 /// Replaces the mutable columns of a binding of `tenant_id` at
-/// `expected_revision` and advances its revision by one.
+/// `expected_revision` and advances its revision by one. The new
+/// `claim_match_policy` must have every predicate the new profile requires
+/// ([`validate_claim_match_policy`], checked before the statement, so a
+/// rejected policy is that error whether or not the binding exists).
+/// Removing an optional predicate widens the binding; reviewing that stays
+/// with the service (ADR-016 item 2).
 pub async fn update_principal_binding<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
@@ -219,6 +227,7 @@ pub async fn update_principal_binding<'e>(
     expected_revision: i64,
     changes: &PrincipalBindingChanges,
 ) -> Result<PrincipalBinding, RegistryError> {
+    validate_claim_match_policy(changes.profile, &changes.claim_match_policy)?;
     let row = sqlx::query(tenant_compare_and_set!(
         "principal_binding",
         "name = $4, profile = $5, claim_match_policy = $6, status = $7",

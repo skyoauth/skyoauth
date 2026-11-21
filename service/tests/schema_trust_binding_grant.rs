@@ -62,9 +62,18 @@ const SEED: &str = r#"
          NULL, NULL, NULL, NULL, NULL, NULL, NULL,
          '["https://identity.example.com"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled');
     INSERT INTO principal_binding VALUES
-        ('bnd_1', 'ten_a', 'release', 'src_gh', 'github_production', '{"repository_id": "456789", "event_name": "push"}', 'wld_1', 'enabled'),
-        ('bnd_2', 'ten_a', 'deploy', 'src_gh', 'github_production', '{"repository_id": "456789", "environment": "production"}', 'wld_1', 'enabled'),
-        ('bnd_3', 'ten_a', 'k3s', 'src_k8s', 'kubernetes_production', '{"namespace": "ci", "service_account_uid": "u-1"}', 'wld_2', 'enabled'),
+        ('bnd_1', 'ten_a', 'release', 'src_gh', 'github_production',
+         '{"repository_owner_id": "123456", "repository_id": "456789", "event_name": "push", "ref": "refs/heads/main",
+           "environment": "production", "workflow_ref": "acme/platform/.github/workflows/release.yml@refs/heads/main"}',
+         'wld_1', 'enabled'),
+        ('bnd_2', 'ten_a', 'deploy', 'src_gh', 'github_production',
+         '{"repository_owner_id": "123456", "repository_id": "456789", "event_name": "push", "ref": "refs/heads/main",
+           "environment": "production", "workflow_ref": "acme/platform/.github/workflows/deploy.yml@refs/heads/main"}',
+         'wld_1', 'enabled'),
+        ('bnd_3', 'ten_a', 'k3s', 'src_k8s', 'kubernetes_production',
+         '{"kubernetes.io/serviceaccount/namespace": "ci", "kubernetes.io/serviceaccount/service-account.name": "runner",
+           "kubernetes.io/serviceaccount/service-account.uid": "u-1"}',
+         'wld_2', 'enabled'),
         ('bnd_b', 'ten_b', 'release', 'src_b', 'generic_production', '{"sub": "repo:b"}', 'wld_b', 'enabled');
     INSERT INTO service_identity VALUES
         ('svc_1', 'ten_a', 'deployer', '["read"]', '{"version": 1, "authorization": "allowlist"}', 'enabled'),
@@ -523,10 +532,21 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
     let revision = "CHECK ((revision >= 1))".to_string();
     let expected: Vec<(&str, Option<String>)> = vec![
         ("principal_binding_claim_match_policy_check", None),
+        // The required predicates of each profile, from 0008
+        // (registry_predicates.rs checks their behavior).
+        (
+            "principal_binding_generic_production_predicates_check",
+            None,
+        ),
+        ("principal_binding_github_production_predicates_check", None),
         ("principal_binding_id_check", Some(non_empty("id"))),
         (
             "principal_binding_id_octet_length_check",
             Some(at_most("id", 255)),
+        ),
+        (
+            "principal_binding_kubernetes_production_predicates_check",
+            None,
         ),
         ("principal_binding_name_check", Some(non_empty("name"))),
         (
@@ -1483,14 +1503,6 @@ async fn binding_maps_a_same_tenant_source_to_a_workload() {
         SK001 INSERT INTO principal_binding VALUES ('bnd_x', 'ten_a', 'x', 'src_gh', 'generic_production', '{"sub": "a"}', 'wld_1', 'enabled', 3)
         23514 UPDATE principal_binding SET profile = 'github_staging', revision = revision + 1 WHERE id = 'bnd_1'
         23502 UPDATE principal_binding SET profile = NULL, revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '[]', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '[{"sub": "a"}]', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '"sub"', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": "a", "repository_id": 456789}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": ["a", "b"]}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": null}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": {"eq": "a"}}', revision = revision + 1 WHERE id = 'bnd_1'
         23514 UPDATE principal_binding SET status = 'active', revision = revision + 1 WHERE id = 'bnd_1'
         SK001 UPDATE principal_binding SET id = 'bnd_9', revision = revision + 1 WHERE id = 'bnd_3'
         SK001 UPDATE principal_binding SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'bnd_3'
@@ -1499,13 +1511,70 @@ async fn binding_maps_a_same_tenant_source_to_a_workload() {
         SK001 UPDATE principal_binding SET status = 'disabled' WHERE id = 'bnd_3'
         23503 ALTER TABLE principal DISABLE TRIGGER USER; DELETE FROM principal WHERE id = 'wld_2'
     "#).await;
+    // The 0004 shape of claim_match_policy: an object of string values,
+    // not empty. bnd_1 is a github_production binding, so each of these
+    // would also fail the 0008 check of its profile; the three 0008 checks
+    // are dropped in a rolled-back transaction, so only the 0004 check can
+    // refuse them, and the case asserts its name.
+    let mut conn = pool.acquire().await.unwrap();
+    run(
+        &mut *conn,
+        "BEGIN;
+         ALTER TABLE principal_binding
+             DROP CONSTRAINT principal_binding_github_production_predicates_check,
+             DROP CONSTRAINT principal_binding_kubernetes_production_predicates_check,
+             DROP CONSTRAINT principal_binding_generic_production_predicates_check",
+    )
+    .await;
+    for policy in [
+        "{}",
+        "[]",
+        r#"[{"sub": "a"}]"#,
+        r#""sub""#,
+        r#"{"sub": "a", "repository_id": 456789}"#,
+        r#"{"sub": ["a", "b"]}"#,
+        r#"{"sub": null}"#,
+        r#"{"sub": {"eq": "a"}}"#,
+    ] {
+        let sql = format!(
+            "UPDATE principal_binding SET claim_match_policy = '{policy}', revision = revision + 1
+              WHERE id = 'bnd_1'"
+        );
+        run(&mut *conn, "SAVEPOINT attempt").await;
+        let err = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
+            .execute(&mut *conn)
+            .await
+            .expect_err(&sql);
+        run(&mut *conn, "ROLLBACK TO SAVEPOINT attempt").await;
+        let db_err = err.as_database_error().unwrap();
+        assert_eq!(
+            (db_err.code().as_deref(), db_err.constraint()),
+            (
+                Some("23514"),
+                Some("principal_binding_claim_match_policy_check")
+            ),
+            "{sql}"
+        );
+    }
+    // Without the 0008 checks an object of string values passes, whatever
+    // its keys.
+    run(
+        &mut *conn,
+        r#"UPDATE principal_binding SET claim_match_policy = '{"sub": "a"}', revision = revision + 1
+           WHERE id = 'bnd_1';
+           ROLLBACK"#,
+    )
+    .await;
+    drop(conn);
     // A disabled binding stays referenced by its grants (OQ-ADR022-1).
     run(
         &pool,
         r#"INSERT INTO principal_binding VALUES
-               ('bnd_x', 'ten_a', 'x', 'src_up', 'generic_production', '{"sub": ""}', 'wld_2', 'enabled');
+               ('bnd_x', 'ten_a', 'x', 'src_up', 'generic_production', '{"sub": "repo:x", "actor": ""}', 'wld_2', 'enabled');
            UPDATE principal_binding SET name = 'renamed', profile = 'kubernetes_production',
-               claim_match_policy = '{"namespace": "ci", "service_account_name": "runner", "service_account_uid": "u-1"}',
+               claim_match_policy = '{"kubernetes.io/serviceaccount/namespace": "ci",
+                                      "kubernetes.io/serviceaccount/service-account.name": "builder",
+                                      "kubernetes.io/serviceaccount/service-account.uid": "u-2"}',
                status = 'disabled', revision = revision + 1
            WHERE id = 'bnd_3'"#,
     )

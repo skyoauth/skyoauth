@@ -23,10 +23,11 @@ const GUARD: &str = "SK001";
 /// Every constraint of the tables the registry writes (`tenant`,
 /// `principal`, the five `0003` tables, the nine `0004` tables and
 /// `consumed_assertion` of `0005`) and of the three list domains, as
-/// migrations `0002` to `0005` and `0007` name them, sorted byte-wise. A unique, foreign key
-/// or check violation maps to a typed variant only for a name listed here.
-/// The database test `registry_constraint_names_match_the_catalog` keeps the
-/// list equal to the catalog.
+/// migrations `0002` to `0005`, `0007` and `0008` name them, sorted
+/// byte-wise. A unique, foreign key or check violation maps to a typed
+/// variant only for a name listed here. The database test
+/// `registry_constraint_names_match_the_catalog` keeps the list equal to the
+/// catalog.
 pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_constraint_versions_check",
     "audience_tenant_assignment_id_check",
@@ -50,8 +51,11 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "consumed_assertion_trust_source_id_fkey",
     "consumed_assertion_trust_source_id_octet_length_check",
     "principal_binding_claim_match_policy_check",
+    "principal_binding_generic_production_predicates_check",
+    "principal_binding_github_production_predicates_check",
     "principal_binding_id_check",
     "principal_binding_id_octet_length_check",
+    "principal_binding_kubernetes_production_predicates_check",
     "principal_binding_name_check",
     "principal_binding_name_no_space_check",
     "principal_binding_name_octet_length_check",
