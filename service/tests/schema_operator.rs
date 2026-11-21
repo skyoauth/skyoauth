@@ -78,10 +78,11 @@ const REVISIONED: [&str; 3] = [
     "administrative_operation",
 ];
 
-/// The functions 0005 adds; both resolve no table.
-const FUNCTIONS: [&str; 2] = [
+/// The functions 0005 adds; none resolves a table.
+const FUNCTIONS: [&str; 3] = [
     "skyoauth_check_recovery_key_rotation",
     "skyoauth_reject_change_once_set",
+    "skyoauth_reject_consume_after_revoke",
 ];
 
 /// A row as column and SQL value pairs.
@@ -345,6 +346,11 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         guard("recovery_state", "revision", revision),
         guard("administrative_operation", "immutable", immutable),
         guard("administrative_operation", "set_once", once),
+        guard(
+            "administrative_operation",
+            "no_consume_after_revoke",
+            "skyoauth_reject_consume_after_revoke",
+        ),
         guard("administrative_operation", "revision", revision),
         guard(
             "consumed_assertion",
@@ -355,9 +361,11 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     expected.sort();
     assert_eq!(triggers, expected);
 
-    // Each trigger fires on the operations its guard covers.
-    let mut events: Vec<(String, i16)> = sqlx::query_as(
-        "SELECT t.tgname::text, t.tgtype FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+    // Each trigger fires on the operations its guard covers, whatever
+    // columns an UPDATE names (no UPDATE OF column list).
+    let mut events: Vec<(String, i16, i32)> = sqlx::query_as(
+        "SELECT t.tgname::text, t.tgtype, cardinality(t.tgattr::int2[])
+         FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
          WHERE NOT t.tgisinternal AND c.relname = ANY($1)",
     )
     .bind(&tables)
@@ -365,14 +373,15 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     .await
     .unwrap();
     events.sort();
+    assert_eq!(events.len(), expected.len());
     // tgtype bits: 1 row, 2 before, 4 insert, 16 update.
-    for (name, tgtype) in &events {
+    for (name, tgtype, columns) in &events {
         let want = if name.ends_with("_revision") {
             1 | 2 | 4 | 16
         } else {
             1 | 2 | 16
         };
-        assert_eq!(*tgtype, want, "{name}");
+        assert_eq!((*tgtype, *columns), (want, 0), "{name}");
     }
 
     // The new functions resolve no table: they pin exactly pg_catalog and
@@ -1784,7 +1793,7 @@ async fn administrative_operation_keeps_its_plan_and_references() {
 }
 
 /// An operation is consumed once and revoked once, and neither is ever
-/// undone; a consumed operation may still be revoked.
+/// undone.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn administrative_operation_consumption_and_revocation_are_one_way() {
@@ -1807,7 +1816,6 @@ async fn administrative_operation_consumption_and_revocation_are_one_way() {
         SK001 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revision = revision + 1 WHERE id = 'op_3'
         SK001 UPDATE administrative_operation SET revocation_operation_id = 'op_1', revision = revision + 1 WHERE id = 'op_3'
         23514 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revision = revision + 1 WHERE id = 'op_2'
-        23514 UPDATE administrative_operation SET consumed_at = '2026-11-20 01:00Z', revision = revision + 1 WHERE id = 'op_3'
         23503 UPDATE administrative_operation SET revoked_at = '2026-11-20 00:40Z', revocation_operation_id = 'op_x', revision = revision + 1 WHERE id = 'op_2'
     ").await;
     // An operation with no expiry is consumed at any time; the guard lets a
@@ -1819,14 +1827,12 @@ async fn administrative_operation_consumption_and_revocation_are_one_way() {
              revision = revision + 1 WHERE id = 'op_2'",
     )
     .await;
-    // A revoked operation may still be consumed before its expiry (the
-    // database does not order the two; the service refuses unbegun use).
-    run(
-        &pool,
-        "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:40Z',
-             revision = revision + 1 WHERE id = 'op_3'",
-    )
-    .await;
+    // A revoked operation is not consumed afterwards, also past its expiry:
+    // the guard trigger fires before the expiry check.
+    rejects(&pool, r"
+        SK001 UPDATE administrative_operation SET consumed_at = '2026-11-20 00:40Z', revision = revision + 1 WHERE id = 'op_3'
+        SK001 UPDATE administrative_operation SET consumed_at = '2026-11-20 01:00Z', revision = revision + 1 WHERE id = 'op_3'
+    ").await;
     let rows: Vec<(String, Option<String>, Option<String>, i64)> = sqlx::query_as(
         "SELECT id, (consumed_at AT TIME ZONE 'UTC')::text, revocation_operation_id, revision
          FROM administrative_operation ORDER BY id",
@@ -1840,12 +1846,7 @@ async fn administrative_operation_consumption_and_revocation_are_one_way() {
         [
             ("op_1".into(), consumed("2026-11-20 00:30:00"), None, 2),
             ("op_2".into(), consumed("2030-01-01 00:00:00"), None, 3),
-            (
-                "op_3".into(),
-                consumed("2026-11-20 00:40:00"),
-                Some("op_2".into()),
-                3
-            ),
+            ("op_3".into(), None, Some("op_2".into()), 2),
             ("op_4".into(), consumed("2026-11-20 00:01:00"), None, 2),
         ]
     );
@@ -1962,6 +1963,126 @@ async fn consumed_route_bundle_approval_can_still_be_revoked() {
             "2026-11-20T02:00:00Z".to_string(),
             3
         )
+    );
+    db.drop([pool]).await;
+}
+
+/// Checks that `sql` fails with `code` and exactly `message`.
+async fn assert_rejected_with_message(
+    conn: &mut PgConnection,
+    code: &str,
+    sql: &str,
+    message: &str,
+) {
+    let err = sqlx::raw_sql(AssertSqlSafe(sql.to_string()))
+        .execute(&mut *conn)
+        .await
+        .expect_err(sql);
+    assert_eq!(sqlstate(&err), code, "{sql}: {err}");
+    let text = err.as_database_error().unwrap().message().to_string();
+    assert_eq!(text, message, "{sql}");
+}
+
+/// An operation revoked before it was consumed is never consumed by an
+/// UPDATE, an `ON CONFLICT … DO UPDATE` included (lead decision,
+/// 2026-11-21). A consumed operation may still be revoked, also through
+/// `ON CONFLICT … DO UPDATE`, and an UPDATE that leaves `consumed_at` unset
+/// still works on a revoked row. An INSERT, and an UPDATE that sets both
+/// columns of a row that has neither, are left to the service: the database
+/// does not compare the two timestamps (README.md).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn revoked_operation_is_not_consumed_afterwards() {
+    let (db, pool) = seeded().await;
+    run(
+        &pool,
+        "UPDATE administrative_operation SET revoked_at = '2026-11-20 00:20Z', revocation_operation_id = 'op_2',
+             revision = revision + 1 WHERE id = 'op_3';
+         UPDATE administrative_operation SET consumed_at = '2026-11-20 00:10Z', outcome = 'applied',
+             revision = revision + 1 WHERE id = 'op_1'",
+    )
+    .await;
+    let upsert = |id: &str, set: &str| {
+        format!(
+            "{} ON CONFLICT (id) DO UPDATE SET {set}, revision = administrative_operation.revision + 1",
+            insert(
+                "administrative_operation",
+                OPERATION,
+                &[("id", &format!("'{id}'"))]
+            )
+        )
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    for sql in [
+        "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:30Z', revision = revision + 1 WHERE id = 'op_3'".to_string(),
+        "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:10Z', outcome = 'applied', revision = revision + 1 WHERE id = 'op_3'".to_string(),
+        upsert("op_3", "consumed_at = '2026-11-20 00:30Z'"),
+    ] {
+        assert_rejected_with_message(
+            &mut conn,
+            "SK001",
+            &sql,
+            "column administrative_operation.consumed_at cannot be set on revoked row op_3",
+        )
+        .await;
+    }
+    drop(conn);
+    run_owned(
+        &pool,
+        format!(
+            "UPDATE administrative_operation SET outcome = 'revoked', revision = revision + 1 WHERE id = 'op_3';
+             UPDATE administrative_operation SET consumed_at = NULL, outcome = 'closed',
+                 revision = revision + 1 WHERE id = 'op_3';
+             {}",
+            upsert(
+                "op_1",
+                "revoked_at = '2026-11-20 00:40Z', revocation_operation_id = 'op_2'"
+            )
+        ),
+    )
+    .await;
+    // A row both consumed and revoked still takes an UPDATE that keeps
+    // consumed_at.
+    run(
+        &pool,
+        "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:10Z', outcome = 'revoked',
+             revision = revision + 1 WHERE id = 'op_1'",
+    )
+    .await;
+    // Not guarded: an INSERT carrying both, consumption after revocation,
+    // and an UPDATE that sets both at once.
+    accepts(
+        &pool,
+        &insert(
+            "administrative_operation",
+            OPERATION,
+            &[
+                ("consumed_at", "'2026-11-20 00:30Z'"),
+                ("revoked_at", "'2026-11-20 00:20Z'"),
+                ("revocation_operation_id", "'op_2'"),
+            ],
+        ),
+    )
+    .await;
+    accepts(
+        &pool,
+        "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:02Z', revoked_at = '2026-11-20 00:01Z',
+             revocation_operation_id = 'op_2', revision = revision + 1 WHERE id = 'op_4'",
+    )
+    .await;
+    let rows: Vec<(String, bool, bool, String, i64)> = sqlx::query_as(
+        "SELECT id, consumed_at IS NOT NULL, revoked_at IS NOT NULL, outcome, revision
+         FROM administrative_operation WHERE id IN ('op_1', 'op_3') ORDER BY id COLLATE \"C\"",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("op_1".into(), true, true, "revoked".into(), 4),
+            ("op_3".into(), false, true, "closed".into(), 4),
+        ]
     );
     db.drop([pool]).await;
 }
@@ -2167,6 +2288,80 @@ async fn a_row_updated_after_the_audit_head_must_be_locked_first() {
     .await
     .unwrap();
     assert_eq!(revoked.as_deref(), Some("op_5"));
+    db.drop([pool]).await;
+}
+
+/// The domain-row order of the README lock-order note. Two writers that
+/// update the same two role bindings in opposite orders deadlock when each
+/// locks a row as it updates it. When both first lock the rows with one
+/// statement ordered by the key under "C", the second writer waits for the
+/// first row while holding neither, and proceeds once the first commits:
+/// no 40P01. The plan takes the row locks above the ordered scan, so rows
+/// are locked in the order they are returned.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn writers_locking_rows_in_key_order_wait_instead_of_deadlocking() {
+    let (db, pool) = seeded().await;
+    let update = |id: &str| {
+        format!(
+            "UPDATE admin_role_binding SET status = 'disabled', revision = revision + 1 WHERE id = '{id}'"
+        )
+    };
+    let lock_both = "SELECT id FROM admin_role_binding WHERE id IN ('rb_3', 'rb_2')
+         ORDER BY id COLLATE \"C\" FOR NO KEY UPDATE";
+    let plan: Vec<String> =
+        sqlx::query_scalar(AssertSqlSafe(format!("EXPLAIN (COSTS OFF) {lock_both}")))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(plan[0], "LockRows", "{plan:?}");
+    assert!(
+        plan[1].contains("Sort") || plan[1].contains("Index Scan using admin_role_binding_pkey"),
+        "{plan:?}"
+    );
+
+    // Unordered: each writer holds the row the other one needs.
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    run_promptly(&mut first, &format!("BEGIN; {}", update("rb_3"))).await;
+    run_promptly(&mut second, &format!("BEGIN; {}", update("rb_2"))).await;
+    let first = spawn_sql(first, update("rb_2"));
+    wait_until_blocked(&pool, first_pid, second_pid).await;
+    let second = spawn_sql(second, update("rb_3"));
+    assert_one_deadlock_victim(first, second).await;
+
+    // Ordered: the second writer waits for rb_2 without holding rb_3, so the
+    // first one updates both, in its own order, and commits.
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    run_promptly(&mut first, &format!("BEGIN; {lock_both}")).await;
+    let second = spawn_sql(
+        second,
+        format!(
+            "BEGIN; {lock_both}; {}; {}; COMMIT",
+            update("rb_2"),
+            update("rb_3")
+        ),
+    );
+    wait_until_blocked(&pool, second_pid, first_pid).await;
+    run_promptly(
+        &mut first,
+        &format!("{}; {}; COMMIT", update("rb_3"), update("rb_2")),
+    )
+    .await;
+    finished(second).await.unwrap();
+    assert_eq!(
+        revisions(&pool, "admin_role_binding", "id").await,
+        [1, 3, 3]
+    );
     db.drop([pool]).await;
 }
 
@@ -2423,6 +2618,8 @@ async fn operator_guards_hold_under_replica_role() {
         &pool,
         "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:30Z',
              revision = revision + 1 WHERE id = 'op_1';
+         UPDATE administrative_operation SET revoked_at = '2026-11-20 00:01Z', revocation_operation_id = 'op_2',
+             revision = revision + 1 WHERE id = 'op_4';
          UPDATE admin_credential SET status = 'disabled', revoked_at = '2026-11-20Z' WHERE id = 'crd_2'",
     )
     .await;
@@ -2441,6 +2638,7 @@ async fn operator_guards_hold_under_replica_role() {
         SK001 UPDATE recovery_state SET revision = revision + 2
         SK001 UPDATE administrative_operation SET immutable_plan = '{}', revision = revision + 1 WHERE id = 'op_1'
         SK001 UPDATE administrative_operation SET consumed_at = NULL, revision = revision + 1 WHERE id = 'op_1'
+        SK001 UPDATE administrative_operation SET consumed_at = '2026-11-20 00:02Z', revision = revision + 1 WHERE id = 'op_4'
         SK001 UPDATE administrative_operation SET outcome = 'x' WHERE id = 'op_3'
         SK001 UPDATE consumed_assertion SET retain_until = '2027-01-01Z'
         23514 UPDATE admin_credential SET status = 'enabled' WHERE id = 'crd_2'

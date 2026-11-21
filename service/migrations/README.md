@@ -600,10 +600,12 @@ first line.
 as in the logical model (tasks §3). It also adds the single-use replay table
 that "Not done in `0004`" lists (T10.9). It reuses
 `skyoauth_reject_immutable_change(…)`, `skyoauth_check_revision()` and
-`skyoauth_reject_mutation()` and adds two guard functions,
-`skyoauth_reject_change_once_set(…)` and
-`skyoauth_check_recovery_key_rotation()`. Neither reads a table, so both pin
-`search_path` to `pg_catalog, pg_temp`. Every trigger is `ENABLE ALWAYS`.
+`skyoauth_reject_mutation()` and adds three guard functions,
+`skyoauth_reject_change_once_set(…)`,
+`skyoauth_check_recovery_key_rotation()` and
+`skyoauth_reject_consume_after_revoke()`. None reads a table, so each pins
+`search_path` to `pg_catalog, pg_temp`. Every trigger is `ENABLE ALWAYS`
+and raises `SK001` for a row it rejects.
 
 - **Authority.** Operators, their credentials and the recovery state are
   instance authority: instance security_admin enrolls operators and scoped
@@ -672,7 +674,11 @@ that "Not done in `0004`" lists (T10.9). It reuses
   An operation may be both consumed and revoked: security_admin may revoke a
   `route_bundle_approval` after beginning an attempt consumed it (tasks §3
   "Route preparation, approval and recovery"), and the set-once guard keeps
-  each field one-way. An operation of kind `approve` names the operation it
+  each field one-way. The other order is refused for an `UPDATE` only: an
+  `UPDATE`, `ON CONFLICT … DO UPDATE` included, that sets `consumed_at` on
+  a row already revoked and not consumed fails with `SK001` (lead decision,
+  2026-11-21). An `INSERT` is not checked, and the database never compares
+  the two timestamps (see the service rules below). An operation of kind `approve` names the operation it
   approves; other kinds may name one too, for example a
   `route_bundle_approval` naming its preparation. No operation approves or
   revokes itself. A
@@ -711,7 +717,29 @@ that "Not done in `0004`" lists (T10.9). It reuses
   above. `admin_role_binding`, `recovery_state` and
   `administrative_operation` carry a `revision` checked by
   `skyoauth_check_revision()`. `admin_identity` and `admin_credential` have
-  none, because the model gives them none.
+  none, because the model gives them none. The consume-after-revoke guard
+  rejects an `UPDATE` that sets `consumed_at` on an operation whose
+  `revoked_at` is already set and whose `consumed_at` is not; an `UPDATE`
+  that leaves `consumed_at` unset still passes. The guards, each a
+  `BEFORE … FOR EACH ROW` trigger:
+
+  | Trigger                                            | Fires on           | Function                                 |
+  | -------------------------------------------------- | ------------------ | ---------------------------------------- |
+  | `admin_identity_immutable`                         | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `admin_credential_immutable`                       | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `admin_credential_set_once`                        | `UPDATE`           | `skyoauth_reject_change_once_set(…)`     |
+  | `admin_role_binding_immutable`                     | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `admin_role_binding_revision`                      | `INSERT`, `UPDATE` | `skyoauth_check_revision()`              |
+  | `recovery_state_immutable`                         | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `recovery_state_set_once`                          | `UPDATE`           | `skyoauth_reject_change_once_set(…)`     |
+  | `recovery_state_key_rotation`                      | `UPDATE`           | `skyoauth_check_recovery_key_rotation()` |
+  | `recovery_state_revision`                          | `INSERT`, `UPDATE` | `skyoauth_check_revision()`              |
+  | `administrative_operation_immutable`               | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `administrative_operation_set_once`                | `UPDATE`           | `skyoauth_reject_change_once_set(…)`     |
+  | `administrative_operation_no_consume_after_revoke` | `UPDATE`           | `skyoauth_reject_consume_after_revoke()` |
+  | `administrative_operation_revision`                | `INSERT`, `UPDATE` | `skyoauth_check_revision()`              |
+  | `consumed_assertion_no_update`                     | `UPDATE`           | `skyoauth_reject_mutation()`             |
+
 - **References.** Every foreign key takes no action on delete or update, is
   not deferrable and is named:
 
@@ -807,6 +835,11 @@ The database does not enforce these rules; the service must:
   exports or logs (design §7);
 - insert the first `recovery_state` row with `recovery_key_epoch` 1; the
   database checks only that the epoch is at least 1;
+- never record an operation as consumed after it was revoked, by an
+  `INSERT` that carries both `consumed_at` and `revoked_at` or by one
+  `UPDATE` that sets both on a row that has neither: the consume-after-revoke
+  guard checks only an `UPDATE` of a row already revoked, and the database
+  does not compare the two timestamps;
 - authorize each write by an enabled binding of an enabled operator with an
   enabled, unrevoked credential; the database does not join the statuses;
 - cap the challenge lifetime at 15 minutes (LT-107): the table has no
@@ -830,10 +863,20 @@ The database does not enforce these rules; the service must:
 - order the locks of a write that creates an operation, so that it cannot
   deadlock with another such write:
   1. first lock every existing row that the new operation references or
-     that the write updates, with `SELECT … FOR NO KEY UPDATE`, never
-     `FOR UPDATE`. The foreign-key checks of the operation insert take
-     `FOR KEY SHARE` on the referenced rows, which conflicts with
-     `FOR UPDATE` and not with `FOR NO KEY UPDATE`;
+     that the write updates, with `FOR NO KEY UPDATE`, never `FOR UPDATE`.
+     The foreign-key checks of the operation insert take `FOR KEY SHARE` on
+     the referenced rows, which conflicts with `FOR UPDATE` and not with
+     `FOR NO KEY UPDATE`. Lock the rows in one fixed order: the tables of
+     `0005` in the order of this section (`admin_identity`,
+     `admin_credential`, `admin_role_binding`, `recovery_state`,
+     `administrative_operation`, `consumed_assertion`), then the `0002` to
+     `0004` tables by name, ascending bytewise, leaving out
+     `audit_chain_head`, which step 2 locks; within a table, by primary
+     key, ascending bytewise. Where possible, lock a table's rows with one
+     statement,
+     `SELECT … FROM <table> WHERE … ORDER BY <primary key> COLLATE "C" FOR NO KEY UPDATE`
+     (a `bytea` key column takes no `COLLATE`; it already compares
+     bytewise);
   2. then lock the audit head, insert the audit event and insert the
      operation;
   3. then do the remaining updates. A revocation's `UPDATE` of the revoked
@@ -841,11 +884,30 @@ The database does not enforce these rules; the service must:
      operation, which exists only after step 2; the lock from step 1 keeps
      it from waiting.
 
+  PostgreSQL locks the rows of such a statement as they are returned: the
+  `LockRows` plan node sits above the ordered scan, so the rows are locked
+  in `ORDER BY` order. `EXPLAIN` on `admin_role_binding` shows `LockRows`
+  over a `Sort` of a bitmap scan, and, with sequential scans disabled,
+  `LockRows` over an index scan of the `"C"` primary key; the test
+  `writers_locking_rows_in_key_order_wait_instead_of_deadlocking` checks
+  that shape and its effect. Caveats: only the locking statement's own
+  `ORDER BY` orders its locks, not one in an outer query around a locking
+  subquery; and under `READ COMMITTED` a row whose sort key changed while
+  the statement waited for its lock keeps its old place in the lock order
+  and is returned out of order (PostgreSQL documentation, "The Locking
+  Clause" of `SELECT`), which the immutable IDs rule out here. Rows locked
+  by separate statements are locked in the order of those statements.
+
   The two-connection tests
   `for_update_on_a_referenced_row_deadlocks_with_the_audit_head` and
   `a_row_updated_after_the_audit_head_must_be_locked_first` reproduce the
   `40P01` deadlock that each step 1 rule avoids, and check that the
-  prescribed order does not wait. This reverses the "domain rows first"
+  prescribed order does not wait.
+  `writers_locking_rows_in_key_order_wait_instead_of_deadlocking` shows
+  two writers that update the same two role bindings in opposite orders
+  deadlock when each locks a row as it updates it, and that with the
+  ordered statement the second writer waits for the first while holding
+  neither row and then proceeds, with no `40P01`. This reverses the "domain rows first"
   order of `0002` only for the insert of the event and the operation;
   `audit_id` stays an immediate, not deferrable foreign key, so the event
   is inserted first. Writes that create no operation (consume, outcome)

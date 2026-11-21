@@ -15,6 +15,12 @@
 -- directory has them and the rules left to the service. "(inferred)" marks
 -- a choice the specifications do not dictate.
 --
+-- Guard triggers raise SK001 and are ENABLE ALWAYS, so they also fire under
+-- session_replication_role = replica. They keep IDs and the other immutable
+-- columns unchanged, keep one-way state one-way, keep an operation revoked
+-- before it was consumed from being consumed by an UPDATE (an INSERT is left
+-- to the service), check revisions, and keep consumed proofs unchanged.
+--
 -- Every column is NOT NULL unless the logical model marks the field
 -- optional. Every foreign key is named, takes no action on delete or update
 -- and is not deferrable. status is 'enabled' or 'disabled' everywhere
@@ -316,10 +322,35 @@ CREATE TABLE administrative_operation (
     -- An operation may be both consumed and revoked: security_admin revokes
     -- a route_bundle_approval after begin has consumed it (tasks section 3
     -- "Route preparation, approval and recovery"). The set-once guard below
-    -- keeps each of the two one-way.
+    -- keeps each of the two one-way, and the consume-after-revoke guard
+    -- below keeps an UPDATE from consuming an operation already revoked.
     CONSTRAINT administrative_operation_consumed_before_expiry_check
         CHECK (consumed_at < expires_at)
 );
+
+-- Rejects an UPDATE that consumes an operation already revoked (lead
+-- decision, 2026-11-21): OLD.revoked_at is set, OLD.consumed_at is not, and
+-- NEW.consumed_at is. An ON CONFLICT ... DO UPDATE is an UPDATE too.
+-- Consumption followed by revocation stays allowed, and so do an UPDATE
+-- that leaves consumed_at unset and one that sets both columns of an
+-- unconsumed, unrevoked row at once. Only UPDATE is guarded: an INSERT may
+-- carry both timestamps, and the database does not compare them; the
+-- service must not record, by an INSERT or by one UPDATE that sets both, an
+-- operation consumed after its revocation (README.md). It reads no table,
+-- so it pins only pg_catalog and pg_temp.
+CREATE FUNCTION skyoauth_reject_consume_after_revoke() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, pg_temp
+    AS $$
+BEGIN
+    IF OLD.revoked_at IS NOT NULL AND OLD.consumed_at IS NULL
+        AND NEW.consumed_at IS NOT NULL THEN
+        RAISE EXCEPTION 'column %.consumed_at cannot be set on revoked row %', TG_TABLE_NAME, OLD.id
+            USING ERRCODE = 'SK001';
+    END IF;
+    RETURN NEW;
+END;
+$$;
 
 -- ConsumedAssertion: the durable replay record of single-use WIF proofs
 -- (T10.9; ADR-016 items 6 and 7; design section 5.3). The service inserts
@@ -327,9 +358,10 @@ CREATE TABLE administrative_operation (
 -- keyed digest of (tenant, source_id, exact_issuer, verified_jti), so replay
 -- detection spans digest-key rotation (README.md); the primary key makes
 -- consumption atomic across replicas and grants: a replay fails with 23505
--- (or inserts nothing under ON CONFLICT DO NOTHING). Rows are never updated (trigger below);
--- deleting a row after retain_until is the only intended removal, a service
--- or job rule until the delete-guard migration (README.md).
+-- (or inserts nothing under ON CONFLICT DO NOTHING). Rows are never updated
+-- (trigger below); deleting a row after retain_until is the only intended
+-- removal, a service or job rule until the delete-guard migration
+-- (README.md).
 CREATE TABLE consumed_assertion (
     tenant_id           text COLLATE "C"
         CONSTRAINT consumed_assertion_tenant_id_octet_length_check
@@ -420,6 +452,13 @@ CREATE TRIGGER administrative_operation_set_once
     FOR EACH ROW EXECUTE FUNCTION
         skyoauth_reject_change_once_set('consumed_at', 'revoked_at', 'revocation_operation_id');
 ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operation_set_once;
+
+-- A revoked operation is not consumed afterwards; a consumed one may still
+-- be revoked (function above).
+CREATE TRIGGER administrative_operation_no_consume_after_revoke
+    BEFORE UPDATE ON administrative_operation
+    FOR EACH ROW EXECUTE FUNCTION skyoauth_reject_consume_after_revoke();
+ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operation_no_consume_after_revoke;
 
 -- A consumed proof is a fact: no column of the row ever changes, so an
 -- UPDATE, an ON CONFLICT DO UPDATE included, is rejected (SK001).
