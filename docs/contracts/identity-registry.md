@@ -311,22 +311,29 @@ ADRs (T00.8–T00.17, Gate M0):
   function of its own). One statement marks the challenge consumed only
   while it is unconsumed, unrevoked, still `issued`, of no tenant,
   unexpired at the caller's `now` (`now < expires_at`) and bound to the
-  request digest, the instance (byte-wise), the recovery key epoch and the
-  `RecoveryState` revision of a closed `RecoveryState` (lead ruling for
-  the closed state, the tenant and the byte-wise comparison; the binding
-  to the revision is inferred); the database guards of `0005` refuse a
-  second consume and a consume after a revocation even from a statement
-  without those predicates. Every miss is the same refusal, naming no
-  reason. The registry does not verify the recovery signature: the caller
-  verifies it against the current recovery public key first, over the
-  operation's stored challenge or over one recomputed from exactly the
-  values it passes to `restore_operator`, never over a hash taken from the
-  response or from the operator. The consume checks only that
-  `challenge_hash` is set; it does not compare it with the request, and no
-  registry getter returns the operation row (lead ruling, provisional; a
-  follow-up adds `challenge_hash` to `ChallengeBinding` and compares it in
-  the consume). The restoration runs the consume inside the same savepoint as its writes
-  (inferred), so a failed restoration leaves the challenge unconsumed.
+  request digest, the challenge hash, the instance (byte-wise), the
+  recovery key epoch and the `RecoveryState` revision of a closed
+  `RecoveryState` (lead ruling for the closed state, the tenant and the
+  byte-wise comparison; the binding to the revision is inferred); the
+  database guards of `0005` refuse a second consume and a consume after a
+  revocation even from a statement without those predicates. Every miss
+  is the same refusal, naming no reason. The registry does not verify the
+  recovery signature: the caller verifies it against the current recovery
+  public key first, over the operation's stored challenge or over one
+  recomputed from exactly the values it passes to `restore_operator`,
+  never over a hash taken from the response or from the operator.
+  `ChallengeBinding` carries `challenge_hash`, and the consume compares it
+  byte-wise with the stored one, as it does the request digest, so the
+  binding covers both (the follow-up of the lead ruling that the consume
+  only checked that `challenge_hash` is set; inferred pick, provisional,
+  2026-11-21). A restoration presenting another hash is the same refusal,
+  with nothing written and the challenge unconsumed; a hash that is not
+  32 to 64 bytes is refused before any statement, as at the issue. The
+  registry still does not hash, so that the hash is the signed
+  challenge's is the caller's to check, and no registry getter returns the
+  operation row (lead ruling, provisional). The restoration runs the
+  consume inside the same savepoint as its writes (inferred), so a failed
+  restoration leaves the challenge unconsumed.
 - **Restoration.** One transaction enrolls the replacement instance
   `security_admin` (identity, credential and role assignment, under IDs that
   are not reserved), revokes every unrevoked operator credential, the

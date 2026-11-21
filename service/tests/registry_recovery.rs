@@ -2,14 +2,15 @@
 //! design section 7.2; ADR-013 item 8; identity-registry section 5.2;
 //! lifetimes LT-107; T13.5): the issued challenge and its audit event, the
 //! TTL bounds, single use (in the statement and in the database guards),
-//! every miss of a restore as one value, the replacement the plan binds,
-//! two concurrent restores of one challenge, the full restoration (enroll,
-//! revoke every credential, rotate the key, two audit events last), that
-//! nothing else changes, that a failed restore rolls the consume back, that
-//! a restore runs only at `READ COMMITTED`, that a restore and an issue
-//! wait for each other without deadlock, that an operator write that adds
-//! access serializes with a restore (a colliding create waiting before its
-//! insert), and that the one remaining deadlock fails closed.
+//! every miss of a restore as one value, the challenge hash the binding
+//! carries, the replacement the plan binds, two concurrent restores of one
+//! challenge, the full restoration (enroll, revoke every credential, rotate
+//! the key, two audit events last), that nothing else changes, that a
+//! failed restore rolls the consume back, that a restore runs only at
+//! `READ COMMITTED`, that a restore and an issue wait for each other
+//! without deadlock, that an operator write that adds access serializes
+//! with a restore (a colliding create waiting before its insert), and that
+//! the one remaining deadlock fails closed.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests, not
@@ -52,6 +53,10 @@ const THIRD_KEY: [u8; 32] = [0x33; 32];
 const DIGEST: [u8; 32] = [0xd1; 32];
 const OTHER_DIGEST: [u8; 32] = [0xd2; 32];
 const HASH: [u8; 48] = [0xc7; 48];
+/// Another challenge hash of [`HASH`]'s length.
+const OTHER_HASH: [u8; 48] = [0xc8; 48];
+/// A challenge hash that [`HASH`] is a prefix of.
+const LONG_HASH: [u8; 64] = [0xc7; 64];
 const T0: u64 = 1_790_000_000_123_456;
 
 /// `micros` after `T0`.
@@ -133,6 +138,7 @@ fn issue_request<'a>(id: &'a str, audit: &'a str, plan: &'a JsonObject) -> Issue
 fn binding() -> ChallengeBinding<'static> {
     ChallengeBinding {
         request_digest: &DIGEST,
+        challenge_hash: &HASH,
         instance_id: INSTANCE,
         expected_revision: 1,
         recovery_key_epoch: 1,
@@ -1081,6 +1087,22 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         request_digest: &DIGEST[..31],
         ..bound
     };
+    let other_hash = ChallengeBinding {
+        challenge_hash: &OTHER_HASH,
+        ..bound
+    };
+    let prefix_hash = ChallengeBinding {
+        challenge_hash: &HASH[..32],
+        ..bound
+    };
+    let long_hash = ChallengeBinding {
+        challenge_hash: &LONG_HASH,
+        ..bound
+    };
+    let digest_as_hash = ChallengeBinding {
+        challenge_hash: &DIGEST,
+        ..bound
+    };
     let other_instance = ChallengeBinding {
         instance_id: OTHER_INSTANCE,
         ..bound
@@ -1112,6 +1134,10 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         ("", bound, now()),
         ("op_1", other_digest, now()),
         ("op_1", short_digest, now()),
+        ("op_1", other_hash, now()),
+        ("op_1", prefix_hash, now()),
+        ("op_1", long_hash, now()),
+        ("op_1", digest_as_hash, now()),
         ("op_1", other_instance, now()),
         ("op_1", upper_instance, now()),
         ("op_1", other_revision, now()),
@@ -1160,6 +1186,132 @@ async fn every_consume_miss_is_the_same_not_restorable() {
     restore_on(&pool, &restore_request("raw_good"))
         .await
         .unwrap();
+    db.drop([pool]).await;
+}
+
+/// Restores `op_1` of [`issued`] with the binding's `challenge_hash`
+/// `hash` and asserts the refusal: `NotRestorable`, nothing written, the
+/// challenge unconsumed and still `issued`, and the recovery state and the
+/// audit chain unchanged.
+async fn assert_hash_refused(pool: &PgPool, hash: &[u8], what: &str) {
+    let before = pool_snapshot(pool).await;
+    let operation = pool_operation(pool, "op_1").await;
+    let state = get_recovery_state(pool).await.unwrap();
+    let chain = verify(pool).await;
+    assert_eq!(chain, ChainVerdict::Intact { last_sequence: 2 });
+    let mut request = restore_request("op_1");
+    request.binding.challenge_hash = hash;
+    assert_not_restorable(restore_on(pool, &request).await);
+    assert_eq!(pool_snapshot(pool).await, before, "{what}");
+    let after = pool_operation(pool, "op_1").await;
+    assert_eq!(
+        (after.consumed_us, &after.outcome[..], after.revision),
+        (None, "issued", 1),
+        "{what}"
+    );
+    assert_eq!(after, operation, "{what}");
+    assert_eq!(get_recovery_state(pool).await.unwrap(), state, "{what}");
+    assert_eq!(verify(pool).await, chain, "{what}");
+}
+
+/// The consume compares the binding's `challenge_hash` with the issued
+/// one byte-wise: a restore presenting another hash of a valid length (a
+/// prefix of the issued hash, one the issued hash is a prefix of, or the
+/// request digest) is `NotRestorable` and writes nothing, and the
+/// challenge stays consumable: the issued hash then restores.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_present_the_issued_challenge_hash() {
+    let (db, pool) = issued().await;
+    for (what, hash) in [
+        ("prefix", &HASH[..32]),
+        ("extended", &LONG_HASH[..]),
+        ("request digest", &DIGEST[..]),
+    ] {
+        assert_hash_refused(&pool, hash, what).await;
+    }
+    let restored = restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
+    assert_eq!(pool_operation(&pool, "op_1").await.outcome, "restored");
+    db.drop([pool]).await;
+}
+
+/// A hash of the issued hash's length that differs in its bytes, all of
+/// them or only the first or the last, is `NotRestorable` and writes
+/// nothing; the issued hash then restores.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_challenge_hash_of_the_same_length_with_other_bytes_is_refused() {
+    let (db, pool) = issued().await;
+    let mut first = HASH;
+    first[0] ^= 1;
+    let mut last = HASH;
+    last[HASH.len() - 1] ^= 0x80;
+    for (what, hash) in [
+        ("other", &OTHER_HASH[..]),
+        ("first byte", &first[..]),
+        ("last byte", &last[..]),
+    ] {
+        assert_eq!(hash.len(), HASH.len());
+        assert_hash_refused(&pool, hash, what).await;
+    }
+    restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// A binding `challenge_hash` that is not 32 to 64 bytes is an encode
+/// error before any statement, as at the issue: it writes nothing, leaves
+/// the transaction usable and the challenge unconsumed, and it is returned
+/// even in a transaction that has already failed, where any statement,
+/// the savepoint included, would fail.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_challenge_hash_of_another_length_is_refused_before_any_statement() {
+    let (db, pool) = issued().await;
+    let lengths = [0, 1, 31, 65, 128];
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    let before = snapshot(&mut transaction).await;
+    for length in lengths {
+        let hash = vec![0xc7; length];
+        let mut request = restore_request("op_1");
+        request.binding.challenge_hash = &hash;
+        assert_restore_encode(
+            restore_operator(&mut transaction, &request).await,
+            "challenge hash is not 32 to 64 bytes",
+        );
+    }
+    assert_eq!(snapshot(&mut transaction).await, before);
+    // Still usable, and the challenge still consumable.
+    consume_and_restore(&mut transaction, "op_1").await.unwrap();
+    transaction.rollback().await.unwrap();
+
+    let mut transaction = connection.begin().await.unwrap();
+    let failed = sqlx::query("SELECT 1 / 0")
+        .execute(&mut *transaction)
+        .await
+        .unwrap_err();
+    assert_eq!(sqlstate(&failed), "22012");
+    for length in lengths {
+        let hash = vec![0xc7; length];
+        let mut request = restore_request("op_1");
+        request.binding.challenge_hash = &hash;
+        assert_restore_encode(
+            restore_operator(&mut transaction, &request).await,
+            "challenge hash is not 32 to 64 bytes",
+        );
+    }
+    transaction.rollback().await.unwrap();
+    drop(connection);
+    let operation = pool_operation(&pool, "op_1").await;
+    assert_eq!(
+        (
+            operation.consumed_us,
+            &operation.outcome[..],
+            operation.revision
+        ),
+        (None, "issued", 1)
+    );
     db.drop([pool]).await;
 }
 

@@ -2136,13 +2136,16 @@ and inserts the operation (a taken ID is `AlreadyExists` on
 revision, `expires_at` `now` plus the TTL and outcome `issued`. Later
 T13.3 operation inserts will write the same action name; a consumer joins
 the event's `object_id` to the operation and reads its `kind`.
-`restore_operator` refuses a reserved `admin_id` and a key that is not 32
-bytes before any statement, locks the unrevoked `admin_credential` rows
+`restore_operator` refuses a reserved `admin_id`, a key that is not 32
+bytes and a binding challenge hash that is not 32 to 64 bytes before any
+statement, locks the unrevoked `admin_credential` rows
 `FOR NO KEY UPDATE` in ID order and then `recovery_state`, and consumes the
 challenge against the locked state with one `UPDATE` that sets
 `consumed_at` to `now` only when every predicate holds: no tenant, the
 kind, a challenge hash, not consumed, not revoked, outcome `issued`,
-`now < expires_at`, the request digest, the expected revision, and a plan
+`now < expires_at`, the request digest, the challenge hash (byte-wise;
+the binding covers both, inferred pick, provisional, 2026-11-21, and the
+registry still does not hash), the expected revision, and a plan
 whose `instance_id` (a JSON string, compared `COLLATE "C"`) and
 `recovery_key_epoch` (a JSON number) are the binding's, with a closed
 `recovery_state` row of that instance, epoch and revision. The consume is
