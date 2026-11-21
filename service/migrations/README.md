@@ -2137,8 +2137,9 @@ revision, `expires_at` `now` plus the TTL and outcome `issued`. Later
 T13.3 operation inserts will write the same action name; a consumer joins
 the event's `object_id` to the operation and reads its `kind`.
 `restore_operator` refuses a reserved `admin_id`, a key that is not 32
-bytes and a binding challenge hash that is not 32 to 64 bytes before any
-statement, locks the unrevoked `admin_credential` rows
+bytes and a binding request digest or challenge hash that is not 32 to 64
+bytes before any statement, the digest first and with the issue's messages
+(the lead's follow-up, inferred pick, provisional, 2026-11-21), locks the unrevoked `admin_credential` rows
 `FOR NO KEY UPDATE` in ID order and then `recovery_state`, and consumes the
 challenge against the locked state with one `UPDATE` that sets
 `consumed_at` to `now` only when every predicate holds: no tenant, the

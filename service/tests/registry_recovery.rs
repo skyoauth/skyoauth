@@ -1083,10 +1083,6 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         request_digest: &OTHER_DIGEST,
         ..bound
     };
-    let short_digest = ChallengeBinding {
-        request_digest: &DIGEST[..31],
-        ..bound
-    };
     let other_hash = ChallengeBinding {
         challenge_hash: &OTHER_HASH,
         ..bound
@@ -1133,7 +1129,6 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         ("op_unknown", bound, now()),
         ("", bound, now()),
         ("op_1", other_digest, now()),
-        ("op_1", short_digest, now()),
         ("op_1", other_hash, now()),
         ("op_1", prefix_hash, now()),
         ("op_1", long_hash, now()),
@@ -1259,28 +1254,43 @@ async fn a_challenge_hash_of_the_same_length_with_other_bytes_is_refused() {
     db.drop([pool]).await;
 }
 
-/// A binding `challenge_hash` that is not 32 to 64 bytes is an encode
-/// error before any statement, as at the issue: it writes nothing, leaves
-/// the transaction usable and the challenge unconsumed, and it is returned
-/// even in a transaction that has already failed, where any statement,
-/// the savepoint included, would fail.
+/// Restores `op_1` in `transaction` with a binding `request_digest`, a
+/// `challenge_hash` or both of each length that is not 32 to 64 bytes, and
+/// asserts the issue's encode error, the digest's when both are wrong.
+async fn assert_binding_lengths_refused(transaction: &mut Transaction<'_, Postgres>) {
+    for length in [0, 1, 31, 65, 128] {
+        let bytes = vec![0xc7; length];
+        for (digest, hash, message) in [
+            (true, false, "request digest is not 32 to 64 bytes"),
+            (false, true, "challenge hash is not 32 to 64 bytes"),
+            (true, true, "request digest is not 32 to 64 bytes"),
+        ] {
+            let mut request = restore_request("op_1");
+            if digest {
+                request.binding.request_digest = &bytes;
+            }
+            if hash {
+                request.binding.challenge_hash = &bytes;
+            }
+            assert_restore_encode(restore_operator(transaction, &request).await, message);
+        }
+    }
+}
+
+/// A binding `request_digest` or `challenge_hash` that is not 32 to 64
+/// bytes is an encode error before any statement, with the issue's message,
+/// the digest's when both are: it writes nothing, leaves the transaction
+/// usable and the challenge unconsumed, and it is returned even in a
+/// transaction that has already failed, where any statement, the savepoint
+/// included, would fail. A short digest is therefore not a consume miss.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_challenge_hash_of_another_length_is_refused_before_any_statement() {
+async fn a_binding_of_another_length_is_refused_before_any_statement() {
     let (db, pool) = issued().await;
-    let lengths = [0, 1, 31, 65, 128];
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
     let before = snapshot(&mut transaction).await;
-    for length in lengths {
-        let hash = vec![0xc7; length];
-        let mut request = restore_request("op_1");
-        request.binding.challenge_hash = &hash;
-        assert_restore_encode(
-            restore_operator(&mut transaction, &request).await,
-            "challenge hash is not 32 to 64 bytes",
-        );
-    }
+    assert_binding_lengths_refused(&mut transaction).await;
     assert_eq!(snapshot(&mut transaction).await, before);
     // Still usable, and the challenge still consumable.
     consume_and_restore(&mut transaction, "op_1").await.unwrap();
@@ -1292,15 +1302,7 @@ async fn a_challenge_hash_of_another_length_is_refused_before_any_statement() {
         .await
         .unwrap_err();
     assert_eq!(sqlstate(&failed), "22012");
-    for length in lengths {
-        let hash = vec![0xc7; length];
-        let mut request = restore_request("op_1");
-        request.binding.challenge_hash = &hash;
-        assert_restore_encode(
-            restore_operator(&mut transaction, &request).await,
-            "challenge hash is not 32 to 64 bytes",
-        );
-    }
+    assert_binding_lengths_refused(&mut transaction).await;
     transaction.rollback().await.unwrap();
     drop(connection);
     let operation = pool_operation(&pool, "op_1").await;

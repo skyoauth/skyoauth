@@ -114,13 +114,14 @@
 //!
 //! The binding covers the digest and the challenge hash (inferred pick, a
 //! lead follow-up, provisional, 2026-11-21): a restore presenting another
-//! `challenge_hash` of 32 to 64 bytes, of the stored one's length or
-//! another, is `NotRestorable` like any other miss, with the challenge
-//! left unconsumed; one of another length is refused before any statement
-//! (see "Validation"). The registry still does not hash: it compares the
-//! caller's bytes with the stored ones, and that they are the hash of the
-//! challenge the recovery key signed is the verifier's to check (see
-//! "Flow").
+//! `request_digest` or `challenge_hash` of 32 to 64 bytes, of the stored
+//! one's length or another, is `NotRestorable` like any other miss, with
+//! the challenge left unconsumed; a digest or hash that is not 32 to 64
+//! bytes is refused before any statement, as at the issue (see
+//! "Validation"), and is not a consume miss. The registry still does not
+//! hash: it compares the caller's bytes with the stored ones, and that they
+//! are the hash of the challenge the recovery key signed is the verifier's
+//! to check (see "Flow").
 //!
 //! # Restore
 //!
@@ -271,7 +272,9 @@
 //! - restore: a reserved `admin_id` ([`RegistryError::ReservedActorId`]); a
 //!   new recovery key that is not exactly 32 bytes; an empty or
 //!   over-2048-byte `public_identity` or `trust_anchor_ref`; a binding
-//!   `challenge_hash` not 32 to 64 bytes, as the issue checks it;
+//!   `request_digest` or `challenge_hash` not 32 to 64 bytes, as the issue
+//!   checks them and with its messages, the digest first (inferred pick, a
+//!   lead follow-up, provisional, 2026-11-21);
 //! - both: a `now` outside the `0007` range, or outside the years
 //!   `0000` to `9999` the audit event can carry.
 //!
@@ -896,6 +899,9 @@ fn validate_restore(request: &RestoreRequest<'_>) -> Result<PgInterval, Registry
         return Err(encode_error(
             "trust anchor reference is empty or over 2048 bytes",
         ));
+    }
+    if !digest_length(request.binding.request_digest) {
+        return Err(encode_error("request digest is not 32 to 64 bytes"));
     }
     if !digest_length(request.binding.challenge_hash) {
         return Err(encode_error("challenge hash is not 32 to 64 bytes"));
@@ -1578,21 +1584,56 @@ mod tests {
                 "{length}"
             );
         }
-        // The binding's challenge hash, as the issue checks it.
+        // The binding's request digest and challenge hash, as the issue
+        // checks them, with the issue's messages; the digest first.
+        let plan = good_plan();
         for length in [0, 1, 31, 65, 128] {
-            let hash = vec![2; length];
+            let bytes = vec![2; length];
+            let mut issued = issue(&plan);
+            issued.request_digest = &bytes;
             let mut bad = restore();
-            bad.binding.challenge_hash = &hash;
+            bad.binding.request_digest = &bytes;
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                "request digest is not 32 to 64 bytes",
+                "{length}"
+            );
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                encode(validate_issue(&issued)),
+                "{length}"
+            );
+            let mut issued = issue(&plan);
+            issued.challenge_hash = &bytes;
+            let mut bad = restore();
+            bad.binding.challenge_hash = &bytes;
             assert_eq!(
                 encode(validate_restore(&bad)),
                 "challenge hash is not 32 to 64 bytes",
                 "{length}"
             );
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                encode(validate_issue(&issued)),
+                "{length}"
+            );
+            // Both wrong: the digest is reported.
+            bad.binding.request_digest = &bytes;
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                "request digest is not 32 to 64 bytes",
+                "{length}"
+            );
         }
         for length in [32, 48, 64] {
-            let hash = vec![2; length];
+            let bytes = vec![2; length];
             let mut good = restore();
-            good.binding.challenge_hash = &hash;
+            good.binding.request_digest = &bytes;
+            assert!(validate_restore(&good).is_ok(), "{length}");
+            good.binding.challenge_hash = &bytes;
+            assert!(validate_restore(&good).is_ok(), "{length}");
+            let mut good = restore();
+            good.binding.challenge_hash = &bytes;
             assert!(validate_restore(&good).is_ok(), "{length}");
         }
         let long = "k".repeat(2049);

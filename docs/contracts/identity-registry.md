@@ -327,8 +327,10 @@ ADRs (T00.8–T00.17, Gate M0):
   binding covers both (the follow-up of the lead ruling that the consume
   only checked that `challenge_hash` is set; inferred pick, provisional,
   2026-11-21). A restoration presenting another hash is the same refusal,
-  with nothing written and the challenge unconsumed; a hash that is not
-  32 to 64 bytes is refused before any statement, as at the issue. The
+  with nothing written and the challenge unconsumed; a digest or hash
+  that is not 32 to 64 bytes is refused before any statement, as at the
+  issue and with its messages, the digest first, and is not that refusal
+  (the lead's follow-up, inferred pick, provisional, 2026-11-21). The
   registry still does not hash, so that the hash is the signed
   challenge's is the caller's to check, and no registry getter returns the
   operation row (lead ruling, provisional). The restoration runs the
