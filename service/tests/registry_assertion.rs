@@ -7,10 +7,7 @@
 //! crossing through the composite foreign key, and the constraint mapping.
 //!
 //! The database tests need `SKYOAUTH_IT_DATABASE_URL` (see
-//! `common/mod.rs`); each creates and drops its own database. One test
-//! carries a scenario-style name, `a24_neg_consume_names_other_tenants_source`
-//! (see its comment); it lives in this package, which `scenarios-pg` does
-//! not run, and claims no conformance stage itself.
+//! `common/mod.rs`); each creates and drops its own database.
 
 mod common;
 
@@ -373,8 +370,9 @@ async fn a_set_is_consumed_all_or_none_on_a_pool() {
     let current = proof("ten_a", "src_a", 1, "dk_2");
     let mut retiring = proof("ten_a", "src_a", 2, "dk_1");
     retiring.retain_until = at(T0 + 60_000_000);
+    // Given out of key order: each row keeps its own times.
     assert_eq!(
-        registry::consume_assertion_set(&pool, &[current.clone(), retiring.clone()])
+        registry::consume_assertion_set(&pool, &[retiring.clone(), current.clone()])
             .await
             .unwrap(),
         Consumption::Consumed
@@ -395,13 +393,13 @@ async fn a_set_is_consumed_all_or_none_on_a_pool() {
         );
         assert_eq!(rows(&pool).await, before);
     }
-    // A key twice in one set conflicts with itself: a replay, nothing
-    // written.
-    assert_eq!(
-        registry::consume_assertion_set(&pool, &[fresh(6), fresh(7), fresh(6)])
-            .await
-            .unwrap(),
-        Consumption::Replay
+    // A key twice in one set, under another version too, is refused before
+    // the statement, not reported as a replay; nothing is written.
+    let mut again = fresh(6);
+    again.digest_key_version = "dk_4".into();
+    assert_encode(
+        registry::consume_assertion_set(&pool, &[fresh(6), fresh(7), again]).await,
+        "duplicate key in assertion set",
     );
     assert_eq!(rows(&pool).await, before);
     // The largest set is accepted.
@@ -518,41 +516,56 @@ async fn concurrent_overlapping_sets_have_exactly_one_winner() {
 
 /// The loser of two overlapping sets waits for the winner's open
 /// transaction and is a replay once it commits. Because a set inserts its
-/// rows in key order, it waits on its first shared key without holding a
-/// later one, so the winner can still write that later key in the same
-/// transaction without a deadlock.
+/// rows in primary-key order, it waits on its first shared key without
+/// holding a later one, so the winner can still write that later key in
+/// the same transaction without a deadlock. The keys differ by digest, then
+/// by source under the same digest, so the order must take in the whole key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn overlapping_sets_wait_in_key_order_without_deadlock() {
     let (db, pool) = seeded().await;
-    let ((mut first, first_pid), (mut second, second_pid)) = two_connections(&pool).await;
-    let k1 = proof("ten_a", "src_a", 1, "dk_1");
-    let k2 = proof("ten_a", "src_a", 2, "dk_1");
-    let mut tx = first.begin().await.unwrap();
-    assert_eq!(
-        registry::consume_assertion_set(&mut *tx, std::slice::from_ref(&k1))
-            .await
-            .unwrap(),
-        Consumption::Consumed
-    );
-    // Given in reverse key order.
-    let set = vec![k2.clone(), k1.clone()];
-    let waiting = tokio::spawn(async move {
-        let outcome = registry::consume_assertion_set(&mut second, &set).await;
-        (outcome, second)
-    });
-    wait_until_blocked(&pool, second_pid, first_pid).await;
-    assert_eq!(
-        registry::consume_assertion_set(&mut *tx, std::slice::from_ref(&k2))
-            .await
-            .unwrap(),
-        Consumption::Consumed
-    );
-    tx.commit().await.unwrap();
-    let (outcome, second) = waiting.await.unwrap();
-    assert_eq!(outcome.unwrap(), Consumption::Replay);
-    assert_eq!(rows(&pool).await, [stored(&k1), stored(&k2)]);
-    drop((first, second));
+    let cases = [
+        (
+            proof("ten_a", "src_a", 1, "dk_1"),
+            proof("ten_a", "src_a", 2, "dk_1"),
+        ),
+        (
+            proof("ten_a", "src_a", 3, "dk_1"),
+            proof("ten_a", "src_a2", 3, "dk_1"),
+        ),
+    ];
+    for (k1, k2) in &cases {
+        let ((mut first, first_pid), (mut second, second_pid)) = two_connections(&pool).await;
+        let mut tx = first.begin().await.unwrap();
+        assert_eq!(
+            registry::consume_assertion_set(&mut *tx, std::slice::from_ref(k1))
+                .await
+                .unwrap(),
+            Consumption::Consumed
+        );
+        // Given in reverse key order.
+        let set = vec![k2.clone(), k1.clone()];
+        let waiting = tokio::spawn(async move {
+            let outcome = registry::consume_assertion_set(&mut second, &set).await;
+            (outcome, second)
+        });
+        wait_until_blocked(&pool, second_pid, first_pid).await;
+        assert_eq!(
+            registry::consume_assertion_set(&mut *tx, std::slice::from_ref(k2))
+                .await
+                .unwrap(),
+            Consumption::Consumed
+        );
+        tx.commit().await.unwrap();
+        let (outcome, second) = waiting.await.unwrap();
+        assert_eq!(outcome.unwrap(), Consumption::Replay);
+        drop((first, second));
+    }
+    let expected: Vec<Row> = cases
+        .iter()
+        .flat_map(|(k1, k2)| [stored(k1), stored(k2)])
+        .collect();
+    assert_eq!(rows(&pool).await, expected);
     db.drop([pool]).await;
 }
 
@@ -628,12 +641,12 @@ async fn reading_transaction(
 }
 
 /// Above `READ COMMITTED` a consumer whose snapshot predates the winner's
-/// commit may fail with `40001`, which both functions map to `Retry`:
-/// `consume_assertion` (its `ON CONFLICT`) under `REPEATABLE READ` and
-/// `SERIALIZABLE`, `consume_assertion_set` under `SERIALIZABLE` against a
-/// serializable winner. The set's plain `INSERT` otherwise checks the key
-/// against committed rows whatever the snapshot, so under `REPEATABLE
-/// READ` it is a `Replay`.
+/// commit may fail with `40001`, which both functions map to `Retry`.
+/// `consume_assertion` (its `ON CONFLICT`) does under `REPEATABLE READ` and
+/// `SERIALIZABLE`. `consume_assertion_set` does only when both transactions
+/// are serializable and both read the key's range first; otherwise its
+/// plain `INSERT` gets `23505` on the committed key, a `Replay`, as under
+/// `REPEATABLE READ` here. Both deny.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_serialization_failure_is_retry() {
@@ -736,11 +749,12 @@ async fn a_deadlock_between_caller_transactions_is_retry() {
     db.drop([pool]).await;
 }
 
-/// An empty or oversized set fails before any statement: on a closed pool,
+/// An empty or oversized set, or one with a key twice, fails before any
+/// statement: on a closed pool,
 /// where any statement fails with `PoolClosed`, it is still the encode
 /// error. A store failure is `Other`, which the caller treats as a deny.
 #[tokio::test]
-async fn empty_and_oversized_sets_fail_before_any_statement() {
+async fn empty_oversized_and_duplicate_sets_fail_before_any_statement() {
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://registry-test.invalid/none")
         .unwrap();
@@ -754,6 +768,13 @@ async fn empty_and_oversized_sets_fail_before_any_statement() {
     assert_encode(
         registry::consume_assertion_set(&pool, &oversized).await,
         "assertion set too large",
+    );
+    // A duplicate is found after sorting, wherever it is in the set.
+    let mut twice = row(3);
+    twice.digest_key_version = "dk_2".into();
+    assert_encode(
+        registry::consume_assertion_set(&pool, &[row(3), row(1), row(2), twice]).await,
+        "duplicate key in assertion set",
     );
     // At the cap, and for a single row, the call reaches the pool.
     let largest: Vec<_> = (0..MAX_ASSERTION_SET).map(row).collect();
@@ -787,12 +808,12 @@ async fn empty_and_oversized_sets_fail_before_any_statement() {
 /// one tenant naming another tenant's source, in both directions, on both
 /// functions, and nothing is written.
 ///
-/// The scenario-style name is the coordinator's: the test session owns the
-/// A24 stage in `tests/security/a24.rs`, and the A29 closed list references
-/// this ID.
+/// The conformance scenario for this refusal (stage A24) and its entry in
+/// the A29 closed list are future work of the test session; neither exists
+/// yet, and this registry test is not that scenario.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a24_neg_consume_names_other_tenants_source() {
+async fn consume_naming_another_tenants_source_is_refused() {
     let (db, pool) = seeded().await;
     for (tenant, source) in [("ten_a", "src_b"), ("ten_b", "src_a")] {
         let crossing = proof(tenant, source, 1, "dk_1");
@@ -983,5 +1004,72 @@ async fn another_unique_violation_in_a_set_is_not_a_replay() {
     }
     tx.rollback().await.unwrap();
     assert_eq!(rows(&pool).await, []);
+    db.drop([pool]).await;
+}
+
+/// The registry consumes with `INSERT` alone, the runtime role's only
+/// privilege on `consumed_assertion` (migrations README, "Privileges"):
+/// the foreign key check runs as the table owner, and neither function
+/// names a conflict target, which would need `SELECT` as well.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn registry_consumption_needs_only_insert() {
+    let (mut db, pool) = seeded().await;
+    let (role, connect) = db.create_login_role().await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "GRANT INSERT ON consumed_assertion TO {role}"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut writer = PgConnection::connect_with(&connect).await.unwrap();
+    let one = proof("ten_a", "src_a", 1, "dk_1");
+    let set = [
+        proof("ten_a", "src_a", 3, "dk_1"),
+        proof("ten_a", "src_a", 2, "dk_2"),
+    ];
+    for expected in [Consumption::Consumed, Consumption::Replay] {
+        assert_eq!(
+            registry::consume_assertion(&mut writer, &one)
+                .await
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            registry::consume_assertion_set(&mut writer, &set)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    // The foreign key still refuses another tenant's source.
+    assert_invariant(
+        registry::consume_assertion(&mut writer, &proof("ten_a", "src_b", 4, "dk_1")).await,
+        InvariantKind::ForeignKey,
+        "consumed_assertion_trust_source_id_fkey",
+    );
+    // Naming the conflict target needs SELECT: 42501 under this role.
+    let err = sqlx::query(
+        "INSERT INTO consumed_assertion
+             (tenant_id, trust_source_id, replay_key_digest, digest_key_version, consumed_at,
+              retain_until)
+         VALUES ('ten_a', 'src_a', $1, 'dk_1', now(), now() + interval '1 minute')
+         ON CONFLICT (tenant_id, trust_source_id, replay_key_digest) DO NOTHING",
+    )
+    .bind(vec![5u8; 32])
+    .execute(&mut writer)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.as_database_error()
+            .and_then(|err| err.code())
+            .as_deref(),
+        Some("42501"),
+        "{err:?}"
+    );
+    writer.close().await.unwrap();
+    let mut expected = vec![stored(&one), stored(&set[1]), stored(&set[0])];
+    expected.sort();
+    assert_eq!(rows(&pool).await, expected);
     db.drop([pool]).await;
 }

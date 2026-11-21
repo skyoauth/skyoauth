@@ -38,13 +38,15 @@
 //! transaction and then sees its row. In a caller transaction at
 //! `REPEATABLE READ` or `SERIALIZABLE` the loser may instead fail with
 //! `40001` (`serialization_failure`), [`RegistryError::Retry`], which is a
-//! deny too until the whole transaction is retried: [`consume_assertion`]
-//! does when the winner committed after its snapshot, and
-//! [`consume_assertion_set`] does under `SERIALIZABLE` against a
-//! serializable winner (its plain `INSERT` otherwise sees the committed key
-//! and is a replay). So is a `40P01`
-//! (`deadlock_detected`) of a caller transaction that consumes several
-//! keys in separate calls in an order another transaction reverses.
+//! deny too until the whole transaction is retried. [`consume_assertion`]
+//! fails so when the winner committed after the loser's snapshot.
+//! [`consume_assertion_set`] fails so only under `SERIALIZABLE`, and only
+//! when both transactions are serializable and both read the key's range
+//! first; otherwise its plain `INSERT` sees the committed key and gets
+//! `23505`, which is a [`Consumption::Replay`]. Both outcomes deny. So
+//! does a `40P01` (`deadlock_detected`) of a caller transaction that
+//! consumes several keys in separate calls in an order another transaction
+//! reverses.
 //!
 //! The functions take the tenant and source as given and filter nothing
 //! by tenant: whether the source may be used is the caller's decision, and
@@ -56,9 +58,13 @@
 //! source included) is `Invariant { kind: ForeignKey, constraint:
 //! Some("consumed_assertion_trust_source_id_fkey") }`; the retention check
 //! (`retain_until > consumed_at`), the range and length checks map by name
-//! the same way. `40001` and `40P01` are [`RegistryError::Retry`]; anything
-//! else, a connection or store failure included, is
-//! [`RegistryError::Other`]. The caller denies on every error.
+//! the same way. As elsewhere in the registry, the bounds the schema checks
+//! are left to the database: a `replay_key_digest` outside 32 to 64 bytes is
+//! `Invariant { kind: Check, constraint:
+//! Some("consumed_assertion_replay_key_digest_octet_length_check") }`.
+//! `40001` and `40P01` are [`RegistryError::Retry`]; anything else, a
+//! connection or store failure included, is [`RegistryError::Other`]. The
+//! caller denies on every error.
 
 use std::time::SystemTime;
 
@@ -85,7 +91,8 @@ pub struct NewConsumedAssertion {
     /// A source of `tenant_id`; the composite foreign key refuses another
     /// tenant's.
     pub trust_source_id: String,
-    /// The keyed digest the service computes, 32 to 64 bytes.
+    /// The keyed digest the service computes, 32 to 64 bytes (the database
+    /// checks the bound).
     pub replay_key_digest: Vec<u8>,
     /// The digest-key version, an opaque non-empty string of at most 255
     /// bytes.
@@ -110,10 +117,16 @@ pub enum Consumption {
 }
 
 /// Consumes one proof under one digest-key version: a single-row `INSERT …
-/// ON CONFLICT (tenant_id, trust_source_id, replay_key_digest) DO NOTHING`.
-/// One row inserted is [`Consumption::Consumed`], none is
-/// [`Consumption::Replay`]; the existing row of a replay is left as it is
-/// (`DO NOTHING` never updates).
+/// ON CONFLICT DO NOTHING`. One row inserted is [`Consumption::Consumed`],
+/// none is [`Consumption::Replay`]; the existing row of a replay is left as
+/// it is (`DO NOTHING` never updates).
+///
+/// The clause names no conflict target: naming one needs `SELECT` on the
+/// table, and the runtime role has only `INSERT` on `consumed_assertion`
+/// (migrations README, "Privileges"). The primary key is the table's only
+/// unique index, so today every conflict is a replay of the key. A unique
+/// index added later would also read as [`Consumption::Replay`], which is
+/// still a deny.
 ///
 /// A `consumed_at` or `retain_until` outside the range the registry writes
 /// is an encode error, [`RegistryError::Other`], before the statement runs.
@@ -135,7 +148,7 @@ pub async fn consume_assertion<'e>(
          (tenant_id, trust_source_id, replay_key_digest, digest_key_version, consumed_at, \
          retain_until) VALUES ($1, $2, $3, $4, timestamptz 'epoch' + $5::interval, \
          timestamptz 'epoch' + $6::interval) \
-         ON CONFLICT (tenant_id, trust_source_id, replay_key_digest) DO NOTHING",
+         ON CONFLICT DO NOTHING",
     )
     .bind(&new.tenant_id)
     .bind(&new.trust_source_id)
@@ -166,16 +179,17 @@ pub async fn consume_assertion<'e>(
 /// - Inside a caller transaction the `23505` of a replay aborts the
 ///   transaction, as any PostgreSQL error does: the caller must roll it
 ///   back, which also undoes its earlier statements.
-/// - A key twice in the set conflicts with itself and also reads as
-///   [`Consumption::Replay`]; the caller must not send one.
+/// - A key twice in the set is an encode error, [`RegistryError::Other`],
+///   before any statement runs: it is not a replay of a proof that was
+///   never consumed.
 /// - The rows are inserted sorted by the primary key, bytewise
 ///   (`tenant_id`, then `trust_source_id`, then `replay_key_digest`),
 ///   whatever the order of `set`. Two sets that share keys therefore take
 ///   their row locks in the same order and do not deadlock: the loser
 ///   waits on its first shared key while holding no later one.
 ///
-/// An empty set, or one of more than [`MAX_ASSERTION_SET`] rows, is an
-/// encode error, [`RegistryError::Other`], before any statement runs, as is
+/// An empty set, one of more than [`MAX_ASSERTION_SET`] rows, or one with a
+/// key twice, is an encode error, [`RegistryError::Other`], before any statement runs, as is
 /// a time outside the range the registry writes. Any other `23505` or error
 /// maps as for every registry write.
 pub async fn consume_assertion_set<'e>(
@@ -196,6 +210,9 @@ pub async fn consume_assertion_set<'e>(
             &b.replay_key_digest,
         ))
     });
+    if rows.windows(2).any(|pair| same_key(pair[0], pair[1])) {
+        return Err(sqlx::Error::Encode("duplicate key in assertion set".into()).into());
+    }
     let mut consumed_at = Vec::with_capacity(rows.len());
     let mut retain_until = Vec::with_capacity(rows.len());
     for row in &rows {
@@ -242,6 +259,12 @@ pub async fn consume_assertion_set<'e>(
         Err(error) if is_replay(&error) => Ok(Consumption::Replay),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Whether `a` and `b` have the same primary key.
+fn same_key(a: &NewConsumedAssertion, b: &NewConsumedAssertion) -> bool {
+    (&a.tenant_id, &a.trust_source_id, &a.replay_key_digest)
+        == (&b.tenant_id, &b.trust_source_id, &b.replay_key_digest)
 }
 
 /// Whether `error` is a `23505` on the primary key, a replay.

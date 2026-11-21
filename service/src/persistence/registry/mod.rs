@@ -1,11 +1,12 @@
 //! Typed reads and writes of the registry tables of migrations `0002` to
-//! `0004` (T10.1, T10.8): tenants (with their secret namespace), principals,
-//! resource servers, audience tenant assignments, resource server checkers
-//! with their tenant rows, and resource actions; trust keysets and their
-//! versions, trust sources, principal bindings, service identities with
-//! their audience rows, and service grants with their binding and audience
-//! rows; and, read-only, the instance security policy and the egress
-//! allowlist.
+//! `0005` (T10.1, T10.8, T10.9): tenants (with their secret namespace),
+//! principals, resource servers, audience tenant assignments, resource
+//! server checkers with their tenant rows, and resource actions; trust
+//! keysets and their versions, trust sources, principal bindings, service
+//! identities with their audience rows, and service grants with their
+//! binding and audience rows; the consumed single-use proofs
+//! (`consumed_assertion`, insert only); and, read-only, the instance
+//! security policy and the egress allowlist.
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
