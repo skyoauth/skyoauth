@@ -1,6 +1,6 @@
 //! The scope ceilings of an exchange (`persistence::registry`,
-//! `load_scope_ceilings`, with `resolve_scopes`; IR-062, IR-063; design
-//! section 5.7; T12.8) against a real PostgreSQL server: the loaded values
+//! `load_scope_ceilings`, with `policy::resolve_scopes`; IR-062, IR-063;
+//! design section 5.7; T12.8) against a real PostgreSQL server: the loaded values
 //! are the registry's rows, the target service is a ceiling exactly for a
 //! grant with a target, every miss is the same `None` (including an
 //! audience the target service does not list, IR-083), disabled records are
@@ -20,11 +20,9 @@ mod common;
 use common::TestDb;
 use skyoauth_service::persistence::{
     self, PgPool,
-    registry::{
-        self, CeilingRecord, GrantMode, LoadedCeilings, ScopeError, ScopeRequest, Status,
-        load_scope_ceilings, resolve_scopes,
-    },
+    registry::{self, CeilingRecord, GrantMode, LoadedCeilings, Status, load_scope_ceilings},
 };
+use skyoauth_service::policy::{ScopeError, ScopeRequest, resolve_scopes};
 use sqlx::AssertSqlSafe;
 
 /// Tenants `ten_a` and `ten_b`. Resource servers, by audience:
