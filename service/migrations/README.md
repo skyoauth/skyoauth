@@ -647,6 +647,20 @@ and raises `SK001` for a row it rejects.
   populated database,
   `select (select count(*) from audit_event where octet_length(id) > 255 or octet_length(tenant_id) > 255) + (select count(*) from instance_security_policy where octet_length(instance_id) > 255) + (select count(*) from egress_allowlist_entry where octet_length(id) > 255)`
   must return 0.
+- **Locks on existing tables.** `0005` runs in one transaction, so it holds
+  its locks until it commits. Adding the bound checks takes
+  `ACCESS EXCLUSIVE` on `audit_event`, `instance_security_policy` and
+  `egress_allowlist_entry` and scans each of them to validate the existing
+  rows. The new foreign keys take `SHARE ROW EXCLUSIVE` on the tables they
+  reference: `tenant`, `trust_source`, `audit_event` and
+  `instance_security_policy`. Checked with `pg_locks` in a transaction that
+  applies `0005` to a `0004` database (PostgreSQL 16); an over-long existing
+  `egress_allowlist_entry.id` there makes the migration fail with `23514`.
+  On a populated database, every read and write of the three
+  `ACCESS EXCLUSIVE` tables, and every write of `tenant` and
+  `trust_source`, waits until the migration commits, a brief stall that
+  grows with the size of the three scanned tables. Run the upgrade in a
+  maintenance window.
 - **Roles** (identity-registry §5.2; public-api API-120; ADR-013
   OQ-ADR013-3). `role` is `security_admin`, `trust_admin`, `client_admin`,
   `provider_admin` or `auditor`. `tenant_id` is `NULL` for `security_admin`,
@@ -690,8 +704,9 @@ and raises `SK001` for a row it rejects.
 - **Consumed assertions** (T10.9; ADR-016 items 6 and 7). The primary key
   `(tenant_id, trust_source_id, replay_key_digest)` makes consumption atomic
   across replicas. A replay fails with `23505` on `consumed_assertion_pkey`,
-  or inserts nothing under `ON CONFLICT DO NOTHING`. A consumed proof has one
-  row per retained digest-key version (see the service rules below). Rows
+  or inserts nothing under `ON CONFLICT DO NOTHING`. A consumed proof has a
+  row under the current digest-key version and, while a retiring version
+  drains, one under that version too (see the service rules below). Rows
   are insert-only: an `UPDATE`, including an `ON CONFLICT … DO UPDATE`,
   fails with `SK001`. `retain_until` is after `consumed_at`. The only
   intended removal is a `DELETE` after `retain_until`, a service or job rule
@@ -700,8 +715,14 @@ and raises `SK001` for a row it rejects.
   optional: `admin_credential.revoked_at`, `admin_role_binding.tenant_id`,
   and `administrative_operation`'s `tenant_id`, `challenge_hash`,
   `expires_at`, `consumed_at`, `revoked_at`, `revocation_operation_id` and
-  `approves_operation_id`. The `CHECK`s above tie each of those references to
-  a role, a kind or a timestamp. Only `admin_identity.created_at` (`now()`)
+  `approves_operation_id`. The `CHECK`s above tie
+  `admin_credential.revoked_at` to `status`, `admin_role_binding.tenant_id`
+  to the role, `revoked_at` and `revocation_operation_id` to each other,
+  `challenge_hash` to `expires_at`, and `consumed_at` to `expires_at` when
+  both are set; `approves_operation_id` is required only for kind
+  `approve`. `administrative_operation.tenant_id` is tied to nothing: the
+  service sets it to the `tenant_id` of its audit event (see the service
+  rules below). Only `admin_identity.created_at` (`now()`)
   and `revision` (1) have defaults.
 - **One-way and immutable state** (`SK001`). The set-once guard rejects a
   change to a named column once that column is not `NULL` and not `false`.
@@ -828,8 +849,8 @@ The database does not enforce these rules; the service must:
   in its tenant, stay service rules (accepted in review of `0005`);
 - give an operation the `tenant_id` of the audit event that records it; the
   database checks neither against the other;
-- give every pending gated write, approval and recovery challenge an
-  `expires_at`; the database requires one only with a `challenge_hash`;
+- give every pending gated write, `route_bundle_approval` and recovery
+  challenge an `expires_at`; the database requires one only with a `challenge_hash`;
 - keep secrets out of `immutable_plan`: it is kept for the life of the row
   and read back by auditors, and secrets never appear in configuration
   exports or logs (design §7);
@@ -851,15 +872,40 @@ The database does not enforce these rules; the service must:
   delete-guard migration checks it (see Follow-ups);
 - generate every ID and the `replay_key_digest` (a keyed digest; ADR-016
   item 6);
-- keep replay detection across digest-key rotation (tasks §3 "One-time
-  state"; ADR-016 item 7; T21.8). The primary key compares digests, and the
-  same proof has a different digest under each key version, so a row
-  written under one version does not conflict with a replay digested under
-  another. The service inserts, in one transaction, one row per digest-key
-  version still retained (any version whose rows may be before
-  `retain_until`), each with its `digest_key_version`; a conflict on any of
-  them is a replay and rolls back all of them. An equivalent protocol that
-  checks every retained version atomically also meets the rule;
+- keep replay detection across digest-key rotation with a drain deadline
+  (lead decision, 2026-11-21; tasks §3 "One-time state"; ADR-016 items 6
+  and 7; T21.8). This protocol must land before any T21.8 code. The primary
+  key compares digests, and the same proof has a different digest under
+  each key version, so a row written under one version does not conflict
+  with a replay digested under another. The protocol:
+  - at the cutover (`cutover_at`) a new version becomes current, and each
+    retiring version gets a fixed drain deadline
+    `drain_until = cutover_at + max_proof_ttl + skew`;
+  - a consumption writes, in one transaction, a row under the current
+    version with the proof's full `retain_until`, and, only while
+    `consumed_at < drain_until`, a row under each retiring version with
+    `retain_until = least(proof_retain_until, drain_until)`. A conflict on
+    any of them is a replay and rolls back all of them. The capped
+    `retain_until` is still after `consumed_at`, since both
+    `proof_retain_until` and `drain_until` are, so
+    `consumed_assertion_retention_check` holds;
+  - after `drain_until` nothing is written under a retiring version.
+
+  Invariant: every proof is replay-protected for its whole validity under
+  at least one retained key. A proof consumed before the cutover has its
+  row under the old version, written with its full `retain_until`, for its
+  whole retention; a replay during the drain conflicts with that row, and
+  the proof expires by `drain_until`, since it was issued before
+  `cutover_at`. A proof consumed during the drain also has a row under the
+  new version with its full `retain_until`, so capping its old-version row
+  at `drain_until` loses nothing: from `drain_until` on, a proof is checked
+  and consumed under the new version alone. The default is this write-side
+  drain with capped rows. The follow-up, once every replica writes the new
+  version, switches a retired version to `SELECT` checks: the service looks
+  for an existing row under it and no longer writes there. That needs
+  `SELECT` on `consumed_assertion` for the runtime role, which consumption
+  otherwise does not need (see "Privileges" above);
+
 - order the locks of a write that creates an operation, so that it cannot
   deadlock with another such write:
   1. first lock every existing row that the new operation references or
@@ -881,37 +927,47 @@ The database does not enforce these rules; the service must:
      operation;
   3. then do the remaining updates. A revocation's `UPDATE` of the revoked
      row comes here, after the head lock, because it names the revoking
-     operation, which exists only after step 2; the lock from step 1 keeps
-     it from waiting.
+     operation, which exists only after step 2. It does not wait here: the
+     revoker already waited in step 1 for the locks of the rows it needs,
+     before it took the audit head.
 
-  PostgreSQL locks the rows of such a statement as they are returned: the
-  `LockRows` plan node sits above the ordered scan, so the rows are locked
-  in `ORDER BY` order. `EXPLAIN` on `admin_role_binding` shows `LockRows`
-  over a `Sort` of a bitmap scan, and, with sequential scans disabled,
-  `LockRows` over an index scan of the `"C"` primary key; the test
-  `writers_locking_rows_in_key_order_wait_instead_of_deadlocking` checks
-  that shape and its effect. Caveats: only the locking statement's own
+  PostgreSQL locks the rows of such a statement as they are returned. The
+  test `writers_locking_rows_in_key_order_wait_instead_of_deadlocking`
+  asserts that the plan of its statement has `LockRows` on top, with a
+  `Sort` or an index scan of the primary key directly below it, so the rows
+  are locked in key order. Caveats: only the locking statement's own
   `ORDER BY` orders its locks, not one in an outer query around a locking
   subquery; and under `READ COMMITTED` a row whose sort key changed while
   the statement waited for its lock keeps its old place in the lock order
   and is returned out of order (PostgreSQL documentation, "The Locking
   Clause" of `SELECT`), which the immutable IDs rule out here. Rows locked
-  by separate statements are locked in the order of those statements.
+  by separate statements are locked in the order of those statements. A
+  waiting writer proceeds only under `READ COMMITTED`: under
+  `REPEATABLE READ` or `SERIALIZABLE`, once the first writer commits an
+  update of a row the second one waits for, the second fails with `40001`
+  (`serialization_failure`; checked by hand on PostgreSQL 16 at both
+  levels), and its whole transaction must be rerun. The registry returns
+  `40001` as `RegistryError::Other`, documented there as "retry the whole
+  transaction".
 
   The two-connection tests
   `for_update_on_a_referenced_row_deadlocks_with_the_audit_head` and
   `a_row_updated_after_the_audit_head_must_be_locked_first` reproduce the
-  `40P01` deadlock that each step 1 rule avoids, and check that the
-  prescribed order does not wait.
+  `40P01` deadlock that each step 1 rule avoids. In the prescribed order the
+  first test's insert does not wait at all, and in the second the revoker
+  waits in step 1 for the revoked row's lock, before it takes the head, and
+  then finishes.
   `writers_locking_rows_in_key_order_wait_instead_of_deadlocking` shows
   two writers that update the same two role bindings in opposite orders
   deadlock when each locks a row as it updates it, and that with the
   ordered statement the second writer waits for the first while holding
-  neither row and then proceeds, with no `40P01`. This reverses the "domain rows first"
-  order of `0002` only for the insert of the event and the operation;
-  `audit_id` stays an immediate, not deferrable foreign key, so the event
-  is inserted first. Writes that create no operation (consume, outcome)
-  update their rows before the head, in the `0002` order.
+  neither row and then proceeds, with no `40P01`. Against the "domain rows
+  first" order of `0002`, a write that creates an operation still locks its
+  domain rows first, but makes its writes after the head lock: the event,
+  the operation and the remaining updates of step 3. `audit_id` stays an
+  immediate, not deferrable foreign key, so the event is inserted first.
+  Writes that create no operation (consume, outcome) update their rows
+  before the head, in the `0002` order.
 
 - `0005` makes two `0002` tables foreign-key targets, so a bare `TRUNCATE`
   of them now fails with `0A000` (a table referenced in a foreign key) before
@@ -1048,9 +1104,14 @@ Open for all registry tables:
   `TRUNCATE … CASCADE` includes them, so `TRUNCATE admin_identity CASCADE`
   empties `admin_identity`, `admin_credential` and `admin_role_binding`
   together. The guards for these tables:
+  - `admin_identity` and `admin_role_binding`: no `DELETE` and no
+    `TRUNCATE`; their rows are only disabled. Deleting a role binding and
+    creating it again restarts its revision at 1, so the new binding could
+    match a snapshot of the old one, and `TRUNCATE admin_identity CASCADE`
+    empties identities, credentials and bindings together;
+  - `admin_credential`: no `DELETE` of a revoked row, and no `TRUNCATE`;
   - `recovery_state`: no `DELETE` and no `TRUNCATE`;
   - `administrative_operation`: no `DELETE` and no `TRUNCATE`;
-  - `admin_credential`: no `DELETE` of a revoked row;
   - `consumed_assertion`: a `DELETE` only of rows whose
     `retain_until < now()`, checked in the database, and no `TRUNCATE`.
     Pruning, a job that runs that `DELETE`, lands with it, together with

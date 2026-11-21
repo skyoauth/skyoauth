@@ -17,9 +17,10 @@
 --
 -- Guard triggers raise SK001 and are ENABLE ALWAYS, so they also fire under
 -- session_replication_role = replica. They keep IDs and the other immutable
--- columns unchanged, keep one-way state one-way, keep an operation revoked
--- before it was consumed from being consumed by an UPDATE (an INSERT is left
--- to the service), check revisions, and keep consumed proofs unchanged.
+-- columns unchanged, keep one-way state one-way, reject an UPDATE that
+-- consumes an operation that is already revoked, check revisions, and keep
+-- consumed proofs unchanged. An INSERT that carries both consumed_at and
+-- revoked_at, or one UPDATE that sets both, is left to the service.
 --
 -- Every column is NOT NULL unless the logical model marks the field
 -- optional. Every foreign key is named, takes no action on delete or update
@@ -50,7 +51,7 @@
 
 -- 0005 makes audit_event and instance_security_policy foreign-key targets,
 -- and every key column of the schema is bounded (lead decision,
--- 2026-11-20), so the remaining unbounded ID columns of 0002 get named
+-- 2026-11-20), so the remaining unbounded key columns of 0002 get named
 -- 255-byte bounds here, as principal's did in 0004: the key of each foreign
 -- key target, audit_event.tenant_id and the egress entry ID. The frozen 0002
 -- file stays unchanged. The checks validate existing rows; README.md has the
@@ -118,7 +119,7 @@ CREATE TABLE admin_credential (
     -- The canonical public-key identity of the mTLS credential, for example
     -- the SHA-256 digest of its SubjectPublicKeyInfo, which the service
     -- computes and canonicalizes. Subject DNs are not stored here: a DN names
-    -- a certificate, not a key. Only its length is bounded, as for
+    -- a certificate's subject, not a key. Only its length is bounded, as for
     -- resource_server_checker.public_mtls_identity in 0003. It is registered
     -- at most once, revoked credentials included, so a revoked key can never
     -- be registered again while its row exists (inferred; README.md
@@ -354,9 +355,11 @@ $$;
 
 -- ConsumedAssertion: the durable replay record of single-use WIF proofs
 -- (T10.9; ADR-016 items 6 and 7; design section 5.3). The service inserts
--- one row per consumed proof and retained digest-key version, keyed by a
--- keyed digest of (tenant, source_id, exact_issuer, verified_jti), so replay
--- detection spans digest-key rotation (README.md); the primary key makes
+-- a row for a consumed proof under the current digest-key version, keyed by
+-- a keyed digest of (tenant, source_id, exact_issuer, verified_jti), and,
+-- during a digest-key cutover, also under the retiring version until that
+-- version's drain deadline, so replay detection spans digest-key rotation
+-- (README.md has the drain protocol); the primary key makes
 -- consumption atomic across replicas and grants: a replay fails with 23505
 -- (or inserts nothing under ON CONFLICT DO NOTHING). Rows are never updated
 -- (trigger below); deleting a row after retain_until is the only intended

@@ -45,7 +45,7 @@ const SEED: &str = r#"
     INSERT INTO admin_identity VALUES ('adm_1', 'enabled'), ('adm_2', 'enabled');
     INSERT INTO admin_credential VALUES
         ('crd_1', 'adm_1', 'sha256:aa', 'ops-ca', 'enabled', NULL),
-        ('crd_2', 'adm_2', 'CN=Operator Two,O=Example', 'ops-ca', 'enabled', NULL);
+        ('crd_2', 'adm_2', 'sha256:13d29e4a916a98f85b3637e0dbafd3c1bda532d9029737d021b920e0981ff9d9', 'ops-ca', 'enabled', NULL);
     INSERT INTO admin_role_binding VALUES
         ('rb_1', 'adm_1', 'security_admin', NULL, 'enabled'),
         ('rb_2', 'adm_2', 'security_admin', NULL, 'enabled'),
@@ -1445,6 +1445,7 @@ async fn the_largest_keys_fit_their_indexes() {
     run_owned(&pool, sql).await;
     let lengths: Vec<(i32, i32, i32)> = sqlx::query_as(
         "SELECT octet_length(admin_id), octet_length(id), octet_length(public_identity) FROM admin_credential
+             WHERE id NOT IN ('crd_1', 'crd_2')
          UNION ALL SELECT octet_length(admin_id), octet_length(id), octet_length(tenant_id) FROM admin_role_binding
              WHERE tenant_id IS NOT NULL
          UNION ALL SELECT octet_length(id), octet_length(tenant_id), octet_length(revocation_operation_id)
@@ -2296,8 +2297,9 @@ async fn a_row_updated_after_the_audit_head_must_be_locked_first() {
 /// locks a row as it updates it. When both first lock the rows with one
 /// statement ordered by the key under "C", the second writer waits for the
 /// first row while holding neither, and proceeds once the first commits:
-/// no 40P01. The plan takes the row locks above the ordered scan, so rows
-/// are locked in the order they are returned.
+/// no 40P01 (under READ COMMITTED). The statement's plan has LockRows on
+/// top, with a Sort or an index scan of the primary key directly below, so
+/// the rows are locked in key order.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn writers_locking_rows_in_key_order_wait_instead_of_deadlocking() {
