@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { assertGitImmune, GIT_ENV, normaliseRegistry } from './registry-fixtures.mjs';
+import { assertGitImmune, GIT_ENV, normaliseRegistry, reLiteral, scenarioValue } from './registry-fixtures.mjs';
 import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, jobOf, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, TEST_JOBS, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
@@ -38,6 +38,9 @@ const tmp = (prefix) => {
   return d;
 };
 const repoText = (rel) => readFileSync(join(REPO, rel), 'utf8');
+// A24's committed M1a scope, as the report shows it: the tests implement that
+// real stage, so they read its scope from the registry.
+const A24_SCOPE = scenarioValue(repoText(SCENARIOS), 'A24', 'scope', 'M1a');
 const write = (path, text) => {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, text);
@@ -258,7 +261,7 @@ describe('statuses', () => {
     const a24 = r.json.scenarios.find((s) => s.id === 'A24');
     assert.deepEqual(a24.by_milestone, { M1a: 'passed', M1b: 'passed', M2: 'planned', M3: 'planned', M4: 'planned', M5: 'planned' });
     assert.equal(a24.status, 'planned');
-    assert.match(r.out, /\| A24 M1a: consume primitive \| passed \| 2 pair\(s\) passed \|/);
+    assert.match(r.out, new RegExp(`\\| A24 M1a: ${reLiteral(A24_SCOPE)} \\| passed \\| 2 pair\\(s\\) passed \\|`));
     assert.ok(r.out.includes(`| M1a | ${M1A} | 1 | 0 | 0 | ${M1A - 1} | planned |`), r.out);
     assert.equal(r.json.headline, null);
     assert.equal(r.json.format, 1);
@@ -269,7 +272,7 @@ describe('statuses', () => {
     assert.ok(r.out.includes(`| M5 | ${m5} | 0 | 0 | 0 | ${m5} | planned |\n\nThe counts`), r.out);
     assert.match(r.out, /\| planned \|\n\nThe counts cover required stages\. Stages of conditional sub-IDs are listed with the implemented stages but gate no milestone\.\n\n### Implemented stages \(1\)\n\n\| Stage \| Status \| Details \|\n\| --- \| --- \| --- \|\n\| A24 M1a/);
     for (const re of [/docs-only/, /Input errors/, /Results not counted/, /Waivers for this commit/, /\*\*null\*\*/]) assert.doesNotMatch(r.out, re);
-    assert.ok(r.out.endsWith('| A24 M1a: consume primitive | passed | 2 pair(s) passed |\n\n- note: the registry is not bound to --commit: --root is not a git checkout\n'), JSON.stringify(r.out.slice(-160)));
+    assert.ok(r.out.endsWith(`| A24 M1a: ${A24_SCOPE} | passed | 2 pair(s) passed |\n\n- note: the registry is not bound to --commit: --root is not a git checkout\n`), JSON.stringify(r.out.slice(-160)));
     assert.deepEqual(r.json.notes, ['the registry is not bound to --commit: --root is not a git checkout']);
     assert.deepEqual(r.json.reports, [{ run_id: 100, run_attempt: 1, workflow: 'CI', leg: PG, artifact: '100/junit-scenarios-pg-x86_64-attempt-1', cases: 2 }]);
   });
@@ -309,7 +312,7 @@ describe('statuses', () => {
     assert.match(gate.err, /note: implemented stages outside the M1b gate failed; they do not change the exit status/);
     assert.equal(stage(gate.json, 'A33.90', 'M3').status, 'failed');
     assert.match(gate.out, /\| A33\.90 \(conditional: back-channel-logout\) M3: full row \| failed \|/);
-    assert.match(gate.out, /\| A24 M1a: consume primitive \| failed \|/);
+    assert.match(gate.out, new RegExp(`\\| A24 M1a: ${reLiteral(A24_SCOPE)} \\| failed \\|`));
     // Without the flag, any failed implemented stage exits 1.
     const plainRun = gateRun(fails);
     assert.equal(plainRun.code, 1);

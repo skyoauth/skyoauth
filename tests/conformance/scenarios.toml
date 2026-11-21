@@ -560,16 +560,22 @@ layers = ["security"]
 envs = ["pg"]
 harness = ["REP", "PG", "barriers"]
 owners = ["T10.9", "T21.6", "T21.8", "T52.7"]
-positive = "exactly one issuance across N replicas and grants"
-negative = "missing jti, replay, store failure"
+positive = "one consumption across N replica pools, once per source (M1a); exactly one issuance across N replicas and grants (M2)"
+negative = "replay and store failure denied at the consume primitive: a consumed proof replayed sequentially, concurrently, past its retain_until or as one member of a set, a closed pool, a statement timeout, a killed holder, a serialization failure, a missing INSERT privilege, an invalid row and another tenant's source never consume, once per source (M1a); missing jti, replay and store failure denied at issuance across grants, the wire error (OQ-ERR-7), a retry that needs a fresh assertion (M2); digest-key rotation (A35)"
 matrix_sha256 = "b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "consume primitive"
+scope = "consume primitive: one consumption across replica pools; replay and store failure denied (registry API)"
 legs = ["scenarios-pg/x86_64"]
-status = "planned"
-tests = []
+status = "implemented"
+implemented_sha256 = "19ab38736d6758e68420f9010da31047e59e577848b09e1393817eb97665d15f"
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_pos_one_consumption_across_replica_pools",
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_consume_names_other_tenants_source",
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_replay_after_consumption",
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_store_failure_never_consumes",
+]
 
 [[scenario.stage]]
 milestone = "M2"

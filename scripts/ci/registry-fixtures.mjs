@@ -26,6 +26,34 @@ export function normaliseRegistry(text) {
   return text.replace(/^gates_passed = \[.*\]$/m, 'gates_passed = []').replace(STATUS, 'status = "planned"\ntests = []');
 }
 
+// The committed value of `key`, a one-line basic string, of the scenario `id`
+// in scenarios.toml `text`, or of its stage `milestone` when given, as written
+// between the quotes. The self-tests use a real stage (A24 M1a) as their
+// example, so they read its scope and the entry's texts from the registry,
+// like the row hashes, and a re-scoped stage needs no change in them.
+export function scenarioValue(text, id, key, milestone) {
+  const start = text.indexOf(`[[scenario]]\nid = "${id}"\n`);
+  if (start < 0) throw new Error(`no scenario ${id}`);
+  const next = text.indexOf('\n[[scenario]]\n', start + 1);
+  let block = text.slice(start, next < 0 ? text.length : next);
+  if (milestone !== undefined) {
+    const stage = block.indexOf(`[[scenario.stage]]\nmilestone = "${milestone}"\n`);
+    if (stage < 0) throw new Error(`no stage ${id} ${milestone}`);
+    block = block.slice(stage);
+    const end = block.indexOf('\n[[scenario.stage]]\n');
+    if (end >= 0) block = block.slice(0, end);
+  } else {
+    const stage = block.indexOf('[[scenario.stage]]\n');
+    if (stage >= 0) block = block.slice(0, stage);
+  }
+  const m = new RegExp(`^${key} = "((?:[^"\\\\\\n]|\\\\.)*)"$`, 'm').exec(block);
+  if (!m) throw new Error(`no ${key} in ${id}${milestone === undefined ? '' : ` ${milestone}`}`);
+  return m[1];
+}
+
+// `text` as a literal in a RegExp.
+export const reLiteral = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // Every way of giving one key of the `[[table]]` entry `id` (its stages
 // included) the TOML `value`, and of adding the keys `extra.entry` to the entry
 // and `extra.stage` to each stage with that value: [label, text] pairs, for
