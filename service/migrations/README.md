@@ -1424,6 +1424,13 @@ Open for all registry tables:
 - Timestamp ranges: done in `0007`, a named check on every `timestamptz`
   column of `0001` to `0005`, with the upgrade precondition query ("What
   0007 adds").
+- Open spec question: name uniqueness (IR-021). IR-021 says a `name` is
+  unique within its entity type and tenant, but the schema has no unique
+  constraint on `tenant.name` or `principal.name`. The open question is a
+  unique `(tenant_id, name)` for principals and a rule for tenant names.
+  The lead decides the spec text; no migration is added until then. The
+  registry test `tenant_and_principal_names_need_not_be_unique` pins the
+  current schema and fails once such a constraint exists.
 - Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
@@ -1499,7 +1506,8 @@ Not done in `0003`:
 Not done in `0004`:
 
 - The single-use replay table (T10.9) and the policy revision.
-- A name-unique key on `principal` (IR-021), which `0002` does not have.
+- A name-unique key on `principal` (IR-021), which `0002` does not have:
+  an open spec question (see Follow-ups).
 - Rejecting duplicate list elements, as for `0003`.
 - An upper bound on `review_timeout_ms`: a service rule.
 - Rejecting the private-key member names of post-quantum JWK types in a
@@ -1655,5 +1663,11 @@ returned row maps it to `UnreadableTimestamp { table, column, id }`, a
 variant of its own, not an `Invariant` kind (lead ruling, 2026-11-21). A
 list stops at the first such row in its order. `Display` and `Debug` name
 the table and column but leave out the row ID (inferred: the ID is a row
-value). The range checks of the tables the registry writes are in
+value). The marker cannot collide with a stored time, since the range
+checks cap stored values at `i64::MAX - 1` microseconds; a test reads rows
+at both bounds back exactly. With the checks in force, an update of a row
+holding such a time fails with `23514` naming the range check, since
+PostgreSQL checks the whole new row; with the checks dropped, the update
+applies its write and then returns `UnreadableTimestamp`, so outside a
+caller transaction the write is committed. The range checks of the tables the registry writes are in
 `KNOWN_CONSTRAINTS`.

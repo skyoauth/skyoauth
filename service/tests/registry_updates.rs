@@ -569,6 +569,68 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
     db.drop([pool]).await;
 }
 
+/// The marker for an unreadable time cannot collide with a stored one: rows
+/// at both bounds of the `0007` range checks read back as themselves on
+/// every read path, the latest one at `i64::MAX - 1` microseconds, one below
+/// the marker.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn times_at_the_range_check_bounds_read_back_exactly() {
+    const EARLIEST: i64 = -210_866_803_200_000_000;
+    const LATEST: i64 = i64::MAX - 1;
+    let at = |micros: i64| {
+        let offset = Duration::from_micros(micros.unsigned_abs());
+        if micros >= 0 {
+            UNIX_EPOCH + offset
+        } else {
+            UNIX_EPOCH - offset
+        }
+    };
+    let (db, pool) = seeded().await;
+    sqlx::raw_sql(
+        "INSERT INTO tenant (id, name, secret_namespace, status, created_at) VALUES
+             ('ten_early', 'early', 'ns_early', 'enabled', '4714-11-24 00:00:00+00 BC'),
+             ('ten_late', 'late', 'ns_late', 'enabled', '294247-01-10 04:00:54.775806+00');
+         INSERT INTO principal (id, tenant_id, kind, name, status, created_at) VALUES
+             ('wld_late', 'ten_late', 'workload', 'late', 'enabled',
+              '294247-01-10 04:00:54.775806+00')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (id, micros) in [("ten_early", EARLIEST), ("ten_late", LATEST)] {
+        let tenant = registry::get_tenant(&pool, id).await.unwrap();
+        assert_eq!(tenant.created_at, at(micros), "{id}");
+        let updated = registry::update_tenant(&pool, id, 1, &name("renamed"))
+            .await
+            .unwrap();
+        assert_eq!(updated.created_at, at(micros), "{id}");
+    }
+    let listed: Vec<_> = registry::list_tenants(&pool, Page::first(10))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|tenant| tenant.id == "ten_early" || tenant.id == "ten_late")
+        .map(|tenant| tenant.created_at)
+        .collect();
+    assert_eq!(listed, [at(EARLIEST), at(LATEST)]);
+    let principal = registry::get_principal(&pool, "ten_late", "wld_late")
+        .await
+        .unwrap();
+    assert_eq!(principal.created_at, at(LATEST));
+    let updated = registry::update_principal(
+        &pool,
+        "ten_late",
+        "wld_late",
+        1,
+        &principal_patch(name("x")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.created_at, at(LATEST));
+    db.drop([pool]).await;
+}
+
 /// An empty patch fails before any statement: on a closed pool, where any
 /// statement would fail with `PoolClosed`, it is still the encode error.
 #[tokio::test]

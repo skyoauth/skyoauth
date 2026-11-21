@@ -89,6 +89,11 @@ pub async fn list_tenants<'e>(
 /// statement runs. Re-enabling a disabled tenant is a plain status change
 /// here; whether it needs an approval, and any other widening rule, belongs
 /// to the service layer (provisional lead pick, 2026-11-21).
+///
+/// A row holding a time outside the `0007` range checks fails the update
+/// with `23514` while the checks are in force; with them dropped, the write
+/// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
+/// the module documentation, "Timestamps").
 pub async fn update_tenant<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
@@ -163,6 +168,11 @@ pub async fn get_principal<'e>(
 /// disabled principal is a plain status change here; whether it needs an
 /// approval, and any other widening rule, belongs to the service layer
 /// (provisional lead pick, 2026-11-21).
+///
+/// A row holding a time outside the `0007` range checks fails the update
+/// with `23514` while the checks are in force; with them dropped, the write
+/// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
+/// the module documentation, "Timestamps").
 pub async fn update_principal<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,

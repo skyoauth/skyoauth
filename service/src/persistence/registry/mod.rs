@@ -137,6 +137,18 @@
 //! `0A000` or `22003` (lead ruling, 2026-11-21). A list stops at the first
 //! such row (inferred).
 //!
+//! An update ([`update_tenant`], [`update_principal`],
+//! [`update_trust_keyset_version`], or any other on a table with a
+//! timestamp) of a row holding such a time behaves in one of two ways:
+//!
+//! - With the `0007` range checks in force, PostgreSQL checks the whole new
+//!   row, so the update fails with `23514` naming the range check
+//!   ([`RegistryError::Invariant`]) and changes nothing.
+//! - With the checks dropped, the update applies its write and then returns
+//!   [`RegistryError::UnreadableTimestamp`] for the row it read back. On a
+//!   pool or a bare connection the write is committed; inside a caller
+//!   transaction the caller can roll it back.
+//!
 //! # Errors
 //!
 //! Database errors map to [`RegistryError`] by SQLSTATE and, for constraint
@@ -302,6 +314,8 @@ macro_rules! micros {
             $column,
             " >= timestamptz '4714-11-24 00:00:00+00 BC' AND ",
             $column,
+            // The marker, i64::MAX: no stored value can produce it, since
+            // the 0007 range checks cap stored values at i64::MAX - 1.
             " <= timestamptz '294247-01-10 04:00:54.775806+00') THEN 9223372036854775807 \
              ELSE (extract(epoch FROM ",
             $column,
@@ -315,6 +329,12 @@ use micros;
 
 /// The value [`micros!`] gives for a time outside the readable range:
 /// `i64::MAX`, one past the latest readable microsecond.
+///
+/// It cannot collide with a stored time: the `0007` range checks cap stored
+/// values at `i64::MAX - 1` microseconds, and [`micros!`] gives the marker
+/// for anything later before it extracts a value. The registry test
+/// `times_at_the_range_check_bounds_read_back_exactly` reads rows at both
+/// bounds back as themselves.
 const UNREADABLE_MICROSECONDS: i64 = i64::MAX;
 
 /// The columns of a compare-and-set update of `$table`: `$set` assigns the

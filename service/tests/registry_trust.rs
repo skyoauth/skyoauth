@@ -2925,11 +2925,37 @@ async fn times_outside_the_range_checks_are_unreadable_timestamps_naming_the_row
             "inst_1",
         ),
     );
-    // The row an update returns is read the same way.
+    // The row an update returns is read the same way. With the check
+    // dropped the write applies, and the caller gets the error.
     assert_unreadable(
         registry::update_trust_keyset_version(&mut *tx, "ten_a", "kv_late", 1, Status::Disabled)
             .await,
         ("trust_keyset_version", "expires_at", "kv_late"),
+    );
+    let written: (String, i64) =
+        sqlx::query_as("SELECT status, revision FROM trust_keyset_version WHERE id = 'kv_late'")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(written, ("disabled".into(), 2));
+    // With the check in force (here added back NOT VALID, so the row stays)
+    // PostgreSQL checks the whole new row: the update fails with 23514 and
+    // aborts the transaction.
+    sqlx::raw_sql(
+        "ALTER TABLE tenant ADD CONSTRAINT tenant_created_at_range_check
+             CHECK (created_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+                AND created_at <= timestamptz '294247-01-10 04:00:54.775806+00') NOT VALID",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let patch = registry::TenantPatch {
+        status: Some(Status::Disabled),
+        ..registry::TenantPatch::default()
+    };
+    assert_check(
+        registry::update_tenant(&mut *tx, "ten_inf", 1, &patch).await,
+        "tenant_created_at_range_check",
     );
     tx.rollback().await.unwrap();
 
