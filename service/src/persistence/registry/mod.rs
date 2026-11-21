@@ -221,6 +221,18 @@
 //! a `jsonb` one only, both [`RegistryError::Other`]. The request layer
 //! (T14.1) must reject it before calling the registry.
 //!
+//! # Audit events
+//!
+//! [`append_audit_event`] appends one event to the instance's audit hash
+//! chain in a caller [`Transaction`](sqlx::Transaction), after the domain
+//! rows (a write that creates an `administrative_operation` inserts the
+//! operation after the event; see their module), and [`verify_audit_chain`]
+//! recomputes and checks the whole chain (IR-055 to IR-059). They are the
+//! exceptions to "one statement on any executor": an append is four or five
+//! statements that commit with the audited write. The registry's other writes still do not append
+//! events; the caller does, in the same transaction. Action names are the
+//! closed table [`AUDIT_ACTIONS`].
+//!
 //! # Not done here
 //!
 //! The registry does not authorize (API-147 and the endpoint roles are
@@ -238,6 +250,8 @@ mod assertion;
 mod audience;
 mod ceilings;
 mod error;
+mod event_actions;
+mod events;
 mod grant;
 mod instance;
 mod model;
@@ -260,6 +274,11 @@ pub use audience::{
 };
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{InvariantKind, KNOWN_CONSTRAINTS, RegistryError};
+pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
+pub use events::{
+    AUDIT_HASH_PREFIX, AuditActor, AuditEvent, ChainBreak, ChainVerdict, MAX_ENVELOPE_INTEGER,
+    NewAuditEvent, append_audit_event, verify_audit_chain,
+};
 pub use grant::{
     add_service_grant_binding, add_service_grant_resource_server,
     add_service_identity_resource_server, create_principal_binding, create_service_grant,

@@ -57,11 +57,15 @@
 //! Specificity is deliberately not tested: the spec says nothing about it.
 //! The two same-actor bindings that the same evidence fits therefore have
 //! neutral names, `bnd_m1` and `bnd_m2`, that differ only in byte order and
-//! say nothing about either policy. The lower ID, `bnd_m1`, holds the less
-//! specific policy (repository-wide) and `bnd_m2` the more specific one
-//! (deployment, one more predicate), so an implementation in which the
-//! most specific binding wins fails the test rather than passing it by
-//! coincidence; no claim is made that it should.
+//! say nothing about either policy, and they are equally specific and not
+//! comparable: `bnd_m1` names `sub`, `repository_id` and `ref`, `bnd_m2`
+//! names `sub`, `repository_id` and `environment`, so neither is a subset
+//! of the other. No ordering by specificity can tell them apart, and a rule
+//! that ranks specificity first and breaks ties by ID passes these tests as
+//! well as plain ID order does. The tests also cannot tell byte order from
+//! a case-insensitive order: on every pair of binding IDs they compare, the
+//! two orders agree. This is deliberate: they do not lock the provisional
+//! reading in any further than "the lowest ID wins".
 //!
 //! Not covered here: the matching matrices of the service tests
 //! (`service/tests/registry_selection.rs`: every predicate present and
@@ -76,6 +80,8 @@
 //! revision recorded in the policy revision and audit, and that the issued
 //! permissions are the grant's, never a union over bindings.
 
+use std::collections::BTreeMap;
+
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -89,8 +95,8 @@ use skyoauth_service::{
 
 use super::selection_fixture::{
     A, B, GRANT_A_MATCH, GRANT_A_MULTI, GRANT_B_MATCH, MATCHING_GRANTS, MatchingGrant,
-    OTHER_REPOSITORY_ID, REPOSITORY_ID, SECOND_GENERIC, Side, deployment_evidence,
-    deployment_policy, other_repository_evidence, two_tenants_with_matching,
+    OTHER_REPOSITORY_ID, REPOSITORY_ID, SECOND_GENERIC, Side, deployment_claims,
+    deployment_evidence, other_repository_evidence, two_tenants_with_matching,
 };
 
 /// The ID base of the partner CI's first source.
@@ -141,9 +147,13 @@ fn eligible(binding: &PrincipalBinding) -> EligibleBinding {
 /// exactly its value: the matching rule, restated here so that the
 /// fixture's preconditions do not rest on the code under test.
 fn fits(binding: &PrincipalBinding, evidence: &Evidence) -> bool {
-    !binding.claim_match_policy.is_empty()
-        && binding
-            .claim_match_policy
+    policy_fits(&binding.claim_match_policy, evidence)
+}
+
+/// [`fits`] for a policy on its own.
+fn policy_fits(policy: &BTreeMap<String, String>, evidence: &Evidence) -> bool {
+    !policy.is_empty()
+        && policy
             .iter()
             .all(|(claim, value)| evidence.get(claim) == Some(value.as_str()))
 }
@@ -236,19 +246,19 @@ async fn a50_pos_grant_actors_binding_matches_despite_other_actors_overlap() {
             &case,
         )
         .await;
-        // Matched over both grants' bindings at once, the other actor's
-        // would be chosen for wld_a: the overlap is real.
-        let both: Vec<EligibleBinding> = grant_a
+        // Over both grants' bindings at once, the lowest fitting ID is the
+        // other actor's, so a matcher that ignored the actor would choose
+        // it for wld_a: the overlap is real. Computed here, not by
+        // `match_binding`, so that this precondition takes no side on how
+        // a binding with fewer predicates ranks against one with more.
+        let lowest_fitting = grant_a
             .eligible_bindings
             .iter()
             .chain(&grant_b.eligible_bindings)
-            .cloned()
-            .collect();
-        assert_eq!(
-            match_binding(&both, &evidence).map(|binding| binding.id.as_str()),
-            Some(of_b.id.as_str()),
-            "{t}"
-        );
+            .filter(|binding| policy_fits(&binding.claim_match_policy, &evidence))
+            .map(|binding| binding.id.as_str())
+            .min_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        assert_eq!(lowest_fitting, Some(of_b.id.as_str()), "{t}");
     }
     db.drop([pool]).await;
 }
@@ -306,8 +316,7 @@ async fn a50_neg_only_other_actors_binding_matches_gives_none() {
 
 /// `deployment_evidence` with `claim` set to `value`, or removed.
 fn deployment_evidence_with(claim: &str, value: Option<&str>) -> Evidence {
-    let mut claims = deployment_policy();
-    claims.insert("pipeline_run".into(), "4711".into());
+    let mut claims = deployment_claims();
     match value {
         Some(value) => claims.insert(claim.into(), value.into()),
         None => claims.remove(claim),
@@ -442,10 +451,10 @@ async fn a50_neg_ineligible_bindings_never_match() {
 }
 
 /// `grt_a_multi` lists two bindings of `wld_a` that the evidence fits:
-/// `bnd_m1` (repository-wide) and `bnd_m2` (deployment), which differ in
-/// name only by byte order. The match is `bnd_m1`, the lowest ID, alone,
-/// with its own stored policy and current revision, in every order of the
-/// input and on every selection.
+/// `bnd_m1` (branch) and `bnd_m2` (deployment), equally specific and not
+/// comparable, whose names differ only by byte order. The match is
+/// `bnd_m1`, the lowest ID, alone, with its own stored policy and current
+/// revision, in every order of the input and on every selection.
 #[tokio::test]
 async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
     let (db, pool) = two_tenants_with_matching().await;
@@ -472,8 +481,23 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
             lowest.claim_match_policy["repository_id"], REPOSITORY_ID,
             "{t}"
         );
-        // The two policies differ, so a merge of them differs from each.
-        assert_ne!(lowest.claim_match_policy, higher.claim_match_policy, "{t}");
+        // Equally specific and not comparable: as many predicates, and
+        // neither a subset of the other. So a merge of them differs from
+        // each, and no ranking by specificity decides between them.
+        let subset = |a: &PrincipalBinding, b: &PrincipalBinding| {
+            a.claim_match_policy
+                .iter()
+                .all(|(claim, value)| b.claim_match_policy.get(claim) == Some(value))
+        };
+        assert_eq!(
+            lowest.claim_match_policy.len(),
+            higher.claim_match_policy.len(),
+            "{t}"
+        );
+        assert!(
+            !subset(&lowest, &higher) && !subset(&higher, &lowest),
+            "{t}"
+        );
 
         let selected = select_own(&pool, side, GRANT_A_MULTI, GENERIC).await;
         assert_eq!(

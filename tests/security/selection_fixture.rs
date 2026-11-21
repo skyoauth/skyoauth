@@ -50,14 +50,16 @@
 //! its expected eligible bindings stay as above. All are
 //! `generic_production` bindings on the partner CI's issuer, a
 //! repository-wide policy being `sub` and `repository_id`
-//! ([`repo_wide_policy`]) and a deployment policy adding `environment`
-//! ([`deployment_policy`]):
+//! ([`repo_wide_policy`]), a deployment policy adding `environment`
+//! ([`deployment_policy`]) and a branch policy adding `ref` instead
+//! ([`branch_policy`]):
 //!
 //! - a second source on that issuer, `src_gen2` ([`SECOND_GENERIC`]);
-//! - bindings of `wld_a`: on `src_gen`, the repository-wide `bnd_m1` and
-//!   the deployment binding `bnd_m2`, both enabled, whose neutral names
-//!   differ only in byte order (A50 tests the ID order, not specificity),
-//!   and three deployment bindings that sort lowest and are never eligible
+//! - bindings of `wld_a`: on `src_gen`, the branch binding `bnd_m1` and
+//!   the deployment binding `bnd_m2`, both enabled, equally specific (three
+//!   predicates each, neither a subset of the other) and with neutral names
+//!   that differ only in byte order (A50 tests the ID order, not
+//!   specificity), and three deployment bindings that sort lowest and are never eligible
 //!   on `src_gen`: `bnd_0_gen_off` (disabled, listed), `bnd_0_gen_free`
 //!   (enabled, listed by no grant) and `bnd_0_gen2` (on `src_gen2`,
 //!   listed, so eligible there and only there);
@@ -72,6 +74,7 @@
 //!
 //! [`deployment_evidence`] fits every one of these bindings but
 //! `bnd_b_other`; [`other_repository_evidence`] fits `bnd_b_other` only.
+//! [`deployment_claims`] are the claims of [`deployment_evidence`].
 //! `generic_production` bindings stay on non-GitHub sources, as above.
 
 use std::collections::BTreeMap;
@@ -494,6 +497,9 @@ pub(super) fn repo_wide_policy(repository_id: &str) -> BTreeMap<String, String> 
     ])
 }
 
+/// The `ref` of [`branch_policy`] and of the evidence.
+const MATCHING_REF: &str = "refs/heads/main";
+
 /// A deployment policy: the repository-wide policy of [`REPOSITORY_ID`]
 /// and the `production` environment.
 pub(super) fn deployment_policy() -> BTreeMap<String, String> {
@@ -502,52 +508,111 @@ pub(super) fn deployment_policy() -> BTreeMap<String, String> {
     policy
 }
 
-/// Verified claims of a `production` deployment of [`REPOSITORY_ID`]: every
-/// predicate of [`deployment_policy`], plus a claim no binding names. It
-/// fits every A50 binding but `bnd_b_other`.
-pub(super) fn deployment_evidence() -> Evidence {
+/// A branch policy: the repository-wide policy of [`REPOSITORY_ID`] and the
+/// `main` branch. It has as many predicates as [`deployment_policy`], and
+/// neither is a subset of the other.
+pub(super) fn branch_policy() -> BTreeMap<String, String> {
+    let mut policy = repo_wide_policy(REPOSITORY_ID);
+    policy.insert("ref".into(), MATCHING_REF.into());
+    policy
+}
+
+/// Verified claims of a `production` deployment of [`REPOSITORY_ID`] from
+/// its `main` branch: every predicate of [`deployment_policy`] and
+/// [`branch_policy`], plus a claim no binding names. They fit every A50
+/// binding but `bnd_b_other`.
+pub(super) fn deployment_claims() -> BTreeMap<String, String> {
     let mut claims = deployment_policy();
+    claims.extend(branch_policy());
     claims.insert("pipeline_run".into(), "4711".into());
-    Evidence::new(claims)
+    claims
+}
+
+/// [`deployment_claims`] as evidence.
+pub(super) fn deployment_evidence() -> Evidence {
+    Evidence::new(deployment_claims())
 }
 
 /// [`deployment_evidence`] of [`OTHER_REPOSITORY_ID`]: it fits
 /// `bnd_b_other` (of `wld_b`) and no other binding.
 pub(super) fn other_repository_evidence() -> Evidence {
-    let mut claims = deployment_policy();
+    let mut claims = deployment_claims();
     claims.insert("repository_id".into(), OTHER_REPOSITORY_ID.into());
-    claims.insert("pipeline_run".into(), "4711".into());
     Evidence::new(claims)
 }
 
+/// The policy of an A50 binding.
+#[derive(Clone, Copy)]
+enum MatchingPolicy {
+    /// [`repo_wide_policy`] of this repository.
+    RepoWide(&'static str),
+    /// [`deployment_policy`].
+    Deployment,
+    /// [`branch_policy`].
+    Branch,
+}
+
+impl MatchingPolicy {
+    fn claims(self) -> BTreeMap<String, String> {
+        match self {
+            Self::RepoWide(repository_id) => repo_wide_policy(repository_id),
+            Self::Deployment => deployment_policy(),
+            Self::Branch => branch_policy(),
+        }
+    }
+}
+
 /// The A50 bindings of a tenant: (ID base, actor, source ID base, status,
-/// `Some(repository)` for a repository-wide policy or `None` for the
-/// deployment policy).
-const MATCHING_BINDINGS: [(&str, &str, &str, Status, Option<&str>); 7] = [
-    ("bnd_m2", "wld_a", "src_gen", Status::Enabled, None),
+/// policy).
+const MATCHING_BINDINGS: [(&str, &str, &str, Status, MatchingPolicy); 7] = [
+    (
+        "bnd_m2",
+        "wld_a",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::Deployment,
+    ),
     (
         "bnd_m1",
         "wld_a",
         "src_gen",
         Status::Enabled,
-        Some(REPOSITORY_ID),
+        MatchingPolicy::Branch,
     ),
-    ("bnd_0_gen_off", "wld_a", "src_gen", Status::Disabled, None),
-    ("bnd_0_gen_free", "wld_a", "src_gen", Status::Enabled, None),
-    ("bnd_0_gen2", "wld_a", SECOND_GENERIC, Status::Enabled, None),
+    (
+        "bnd_0_gen_off",
+        "wld_a",
+        "src_gen",
+        Status::Disabled,
+        MatchingPolicy::Deployment,
+    ),
+    (
+        "bnd_0_gen_free",
+        "wld_a",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::Deployment,
+    ),
+    (
+        "bnd_0_gen2",
+        "wld_a",
+        SECOND_GENERIC,
+        Status::Enabled,
+        MatchingPolicy::Deployment,
+    ),
     (
         "bnd_0_repo",
         "wld_b",
         "src_gen",
         Status::Enabled,
-        Some(REPOSITORY_ID),
+        MatchingPolicy::RepoWide(REPOSITORY_ID),
     ),
     (
         "bnd_b_other",
         "wld_b",
         "src_gen",
         Status::Enabled,
-        Some(OTHER_REPOSITORY_ID),
+        MatchingPolicy::RepoWide(OTHER_REPOSITORY_ID),
     ),
 ];
 
@@ -599,11 +664,8 @@ async fn seed_matching(pool: &PgPool, side: Side) {
     )
     .await
     .unwrap();
-    for (base, actor, on, status, repository) in MATCHING_BINDINGS {
-        let claim_match_policy = match repository {
-            Some(repository_id) => repo_wide_policy(repository_id),
-            None => deployment_policy(),
-        };
+    for (base, actor, on, status, policy) in MATCHING_BINDINGS {
+        let claim_match_policy = policy.claims();
         registry::create_principal_binding(
             pool,
             &NewPrincipalBinding {

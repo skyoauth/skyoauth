@@ -1215,7 +1215,7 @@ envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.3", "T21.4", "T21.7"]
 positive = "grant actor's binding matches despite another actor's overlap: the grant actor's eligible binding is matched while another actor's binding, sorting first, fits the same evidence (M1a); the exchange issues for the grant with that binding (M2)"
-negative = "no eligible match; several same-actor matches give a stable ID with no union: evidence that only another actor's binding fits, or only a disabled, unlisted or other-source binding of the grant's actor, and evidence with a differing value, a missing claim or a value differing only in case, match no binding, and several same-actor matches give the byte-wise lowest ID, one binding with its own policy and revision (M1a); the denial on the wire, the selected binding's provenance recorded in the policy revision and audit, and no union of issued permissions (M2)"
+negative = "no eligible match; several same-actor matches give a stable ID with no union: evidence that only another actor's binding fits, and evidence with a differing value, a missing claim or a value differing only in case, match no binding; an ineligible binding is never selected, even when it fits and sorts first; and several same-actor matches give the byte-wise lowest ID (provisional reading of design §5.7 'stable ID ordering'), one binding with its own policy and revision (M1a); the denial on the wire, the selected binding's provenance recorded in the policy revision and audit, and no union of issued permissions (M2)"
 matrix_sha256 = "201e9ea125b2bc4ce6789877a9ceb62204a53a478a449facf0b19a2b90d322b3"
 
 [[scenario.stage]]
