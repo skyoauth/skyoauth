@@ -554,9 +554,11 @@ The database does not enforce these rules; the service must:
   validate them as URLs;
 - resolve `ca_bundle_ref` and `reviewer_credential_ref` only within the
   tenant's secret namespace (IR-034);
-- check that a binding's template fits its source, require the predicates
-  each template demands (ADR-016 item 4), and never match a disabled
-  binding;
+- check that a binding's template fits its source (ADR-016 item 4), review
+  the removal of a predicate as widening, a profile change that drops one
+  included, and never match a disabled binding (the required predicates of
+  each template are checked by the database since `0008`, see "What 0008
+  adds");
 - check JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
   upload (T11.3);
 - keep `default_scopes` and `scopes` within every other ceiling (service,
@@ -1375,6 +1377,157 @@ writes (`tenant_revision_check`, `principal_revision_check`,
 the new revisions and updates tenants, principals and versions as
 compare-and-sets on them (see "Rust registry surface").
 
+## What 0008 adds
+
+`0008_binding_required_predicates.sql` adds one named check per binding
+profile template to `principal_binding`: a binding whose
+`claim_match_policy` lacks a predicate its profile requires is rejected
+(ADR-016 items 2 to 4; design §5.3; T12.2; conformance A37). It adds no
+function, column, trigger or index and changes nothing else. Choices marked
+"(inferred)" are its own.
+
+- **Required predicates.** A required predicate is present when its claim
+  name is a key of `claim_match_policy` and its value is a non-empty JSON
+  string. The sets:
+
+  | Profile                 | Check                                                      | Claim names                                                                                                                                       |
+  | ----------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `github_production`     | `principal_binding_github_production_predicates_check`     | `repository_owner_id`, `repository_id`, `event_name`, `ref`, `environment`, `workflow_ref`                                                        |
+  | `kubernetes_production` | `principal_binding_kubernetes_production_predicates_check` | `kubernetes.io/serviceaccount/namespace`, `kubernetes.io/serviceaccount/service-account.name`, `kubernetes.io/serviceaccount/service-account.uid` |
+  | `generic_production`    | `principal_binding_generic_production_predicates_check`    | `sub`                                                                                                                                             |
+  | `github_production`     | optional (inferred)                                        | `job_workflow_ref`                                                                                                                                |
+
+  The GitHub set is the ADR-016 item 3 set as the keys of the design §5.7
+  example. The reusable-workflow identity that item 3 requires "when used"
+  (`job_workflow_ref`, inferred) is optional and not checked: a policy does
+  not show whether the job uses one. The Kubernetes names are the flat
+  claim names (inferred: no source names the keys). They are the
+  normalized evidence keys the Kubernetes adapters (T23.3, T23.6) must
+  produce from the service-account identity and UID that a TokenReview
+  returns or a locally validated projected token carries (ADR-005 items 4
+  and 7; design §5.4); the documents do not say how the namespace and name
+  are taken from that identity. Changing a key needs a new migration and
+  rewriting every `kubernetes_production` binding. Every other key is
+  optional and, omitted, unconstrained (ADR-016 item 1). Each check holds
+  for every row of another profile, and applies to every row of its own, a
+  disabled binding included (inferred). A value that is not a string
+  already fails `principal_binding_claim_match_policy_check` of `0004`; the
+  new checks also require the string. A whitespace-only value is a
+  non-empty string: it is accepted, and matches only a token carrying
+  exactly that value (exact match, design §5.3). A failing row gives
+  `23514` naming the check.
+
+- **One table.** The registry checks the same sets before its statement
+  (`service/src/persistence/registry/predicate.rs`, see "Rust registry
+  surface"), where `GITHUB_JOB_WORKFLOW_REF` names the optional key.
+  Changing a set needs a new migration that replaces the check, and the
+  registry table changes with it.
+- **Not checked.**
+  - Removing an optional predicate widens the binding and needs review
+    (ADR-016 item 2; ADR-008 items 12 and 13); that stays with the service.
+  - A profile change that drops a predicate is such a removal: a
+    `github_production` binding moved to `generic_production` with a
+    policy of only `sub` meets the new set and passes both checks. The
+    check that the template fits the source and its `assertion_profile`
+    (ADR-016 item 4) is the only stop on that downgrade. No task in
+    `docs/skyoauth-tasks.md` names it, so it is an open follow-up; the
+    closest task is T12.2.
+  - At match time (T22.2), a token whose `job_workflow_ref` differs from
+    its `workflow_ref` comes from a reusable workflow, and matches only a
+    binding that pins `job_workflow_ref` (inferred).
+- **Locks on existing tables.** Checked with `pg_locks` in a transaction
+  that applies `0008` to a `0007` database, on PostgreSQL 16 and 17.12: the
+  `ALTER TABLE` takes `ACCESS EXCLUSIVE` on `principal_binding`, the only
+  table it locks, and scans it once to validate the checks; the table is
+  not rewritten (its `relfilenode` stays the same). Nothing reads or writes
+  bindings until the migration commits.
+- **Upgrade precondition.** A row that fails a new check makes `0008` fail
+  with `23514` and roll back, leaving the database at `0007`. Before the
+  upgrade, this query must return no row; it lists every binding that
+  would fail:
+
+  ```sql
+  SELECT tenant_id, id, profile, status FROM principal_binding
+   WHERE NOT (
+         (profile <> 'github_production'
+          OR (claim_match_policy ?& ARRAY['repository_owner_id', 'repository_id', 'event_name',
+                                          'ref', 'environment', 'workflow_ref']
+              AND jsonb_typeof(claim_match_policy -> 'repository_owner_id') = 'string'
+              AND (claim_match_policy ->> 'repository_owner_id') COLLATE "C" <> ''
+              AND jsonb_typeof(claim_match_policy -> 'repository_id') = 'string'
+              AND (claim_match_policy ->> 'repository_id') COLLATE "C" <> ''
+              AND jsonb_typeof(claim_match_policy -> 'event_name') = 'string'
+              AND (claim_match_policy ->> 'event_name') COLLATE "C" <> ''
+              AND jsonb_typeof(claim_match_policy -> 'ref') = 'string'
+              AND (claim_match_policy ->> 'ref') COLLATE "C" <> ''
+              AND jsonb_typeof(claim_match_policy -> 'environment') = 'string'
+              AND (claim_match_policy ->> 'environment') COLLATE "C" <> ''
+              AND jsonb_typeof(claim_match_policy -> 'workflow_ref') = 'string'
+              AND (claim_match_policy ->> 'workflow_ref') COLLATE "C" <> ''))
+     AND (profile <> 'kubernetes_production'
+          OR (claim_match_policy ?& ARRAY['kubernetes.io/serviceaccount/namespace',
+                                          'kubernetes.io/serviceaccount/service-account.name',
+                                          'kubernetes.io/serviceaccount/service-account.uid']
+              AND jsonb_typeof(claim_match_policy -> 'kubernetes.io/serviceaccount/namespace')
+                  = 'string'
+              AND (claim_match_policy ->> 'kubernetes.io/serviceaccount/namespace')
+                  COLLATE "C" <> ''
+              AND jsonb_typeof(
+                      claim_match_policy -> 'kubernetes.io/serviceaccount/service-account.name')
+                  = 'string'
+              AND (claim_match_policy ->> 'kubernetes.io/serviceaccount/service-account.name')
+                  COLLATE "C" <> ''
+              AND jsonb_typeof(
+                      claim_match_policy -> 'kubernetes.io/serviceaccount/service-account.uid')
+                  = 'string'
+              AND (claim_match_policy ->> 'kubernetes.io/serviceaccount/service-account.uid')
+                  COLLATE "C" <> ''))
+     AND (profile <> 'generic_production'
+          OR (claim_match_policy ? 'sub'
+              AND jsonb_typeof(claim_match_policy -> 'sub') = 'string'
+              AND (claim_match_policy ->> 'sub') COLLATE "C" <> ''))
+   )
+   ORDER BY tenant_id, id;
+  ```
+
+  The predicate is the negation of the three checks, so it lists exactly
+  the rows they reject; no part of it is `NULL` for a stored row. `tenant_id`
+  and `id` are `COLLATE "C"`, so the order is byte-wise.
+  `service/tests/registry_predicates.rs` runs this query from this file.
+
+  A listed binding is repaired by its owner, the tenant `trust_admin`,
+  never by disabling a guard and never silently:
+  - Add the missing predicates, with the values the workload's verified
+    tokens carry, by an ordinary binding update (with the registry,
+    `update_principal_binding` at the binding's revision, which advances
+    it). `profile` and `claim_match_policy` are mutable columns, so no
+    trigger is disabled. Adding an ANDed predicate narrows the binding; it
+    is not widening. Record the change in the audit trail, as for every
+    binding update. A repair by direct SQL must also set
+    `revision = revision + 1`: the revision trigger rejects an update that
+    does not advance it by one.
+  - Or, when no right value is known, retire the binding: disable it, and,
+    if it must go, delete it under ADR-008 item 3 once no grant lists it
+    (see "What 0006 adds"). Disabling alone does not satisfy the
+    precondition: the checks apply to a disabled binding too.
+  - A disabled binding that a disabled grant still lists, with no right
+    value known: in one transaction, delete the disabled grant with its list
+    rows, then the binding (ADR-008 item 3); or put placeholder values on
+    the disabled binding's missing predicates, a narrowing update at
+    `revision + 1` that keeps it disabled. An enabled grant that lists the
+    binding is disabled first, by its own audited update.
+
+  Then run the query again: it must return no row before the upgrade.
+
+- **Frozen comments.** The `0004` comments on `profile` and
+  `claim_match_policy` stay true: every template still requires at least
+  one predicate, so the object is still not empty.
+
+The registry's `KNOWN_CONSTRAINTS` lists the three checks, so a database
+rejection maps to `Invariant { kind: Check, constraint }` naming one; the
+registry's own check before the statement normally rejects the policy
+first (see "Rust registry surface").
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -1662,6 +1815,21 @@ drain cap, `consumed_at`, and the `single_use` and enabled checks of the
 source stay with the service (see the service rules above). The claim that
 exactly one attempt consumes holds under `READ COMMITTED`; under
 `REPEATABLE READ` or `SERIALIZABLE` a loser may get `Retry`.
+
+Required binding predicates (T12.2; ADR-016 items 2 to 4; A37):
+`required_claims(profile)` is the one table of the claim names each
+binding profile requires, the sets of "What 0008 adds", and
+`validate_claim_match_policy` checks that a policy has each with a
+non-empty value. `create_principal_binding` and `update_principal_binding`
+call it before their statement, so a missing or empty required predicate is
+an encode error, `Other`, as for an empty patch; the message names the
+claim and the profile, never a value. An update is checked whether or not
+the binding exists. A whitespace-only value is not empty and passes, as in
+the database. Optional predicates, `GITHUB_JOB_WORKFLOW_REF` among them,
+are not checked, and reviewing the removal of one stays with the service,
+a profile change that drops one included: the template-fit check of
+ADR-016 item 4 is the only stop on that downgrade, and it is an open
+follow-up (see "What 0008 adds", "Not checked").
 
 Follow-ups for the registry surface:
 

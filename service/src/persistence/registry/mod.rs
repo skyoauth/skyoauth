@@ -234,6 +234,7 @@ mod error;
 mod grant;
 mod instance;
 mod model;
+mod predicate;
 mod tenant;
 mod trust;
 
@@ -274,6 +275,7 @@ pub use model::{
     ServiceIdentityChanges, Status, Tenant, TenantPatch, TrustKeyset, TrustKeysetChanges,
     TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
 };
+pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
     update_principal, update_tenant,

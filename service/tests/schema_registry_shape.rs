@@ -44,7 +44,7 @@ const SEED: &str = r#"
          NULL, NULL, NULL, NULL, NULL, NULL, NULL,
          '["https://identity.example.com"]', '["RS256"]', '{}', 'on_demand_jwt', NULL, 'single_use', 'enabled');
     INSERT INTO principal_binding VALUES
-        ('bnd_1', 'ten_a', 'live', 'src_gh', 'github_production', '{"repository_id": "1"}', 'wld_1', 'enabled');
+        ('bnd_1', 'ten_a', 'live', 'src_gh', 'generic_production', '{"sub": "repo:1"}', 'wld_1', 'enabled');
     INSERT INTO service_identity VALUES ('svc_1', 'ten_a', 'deployer', '["read"]', '{}', 'enabled');
     INSERT INTO service_identity_resource_server VALUES ('svc_1', 'ten_a', 'rs_1');
     INSERT INTO service_grant VALUES
