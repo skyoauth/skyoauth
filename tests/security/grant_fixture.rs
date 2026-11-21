@@ -168,7 +168,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
             name: "release".into(),
             trust_source_id: "src_a".into(),
             profile: BindingProfile::GithubProduction,
-            claim_match_policy: [("repository".to_string(), "example/release".to_string())].into(),
+            claim_match_policy: github_policy(),
             workload_principal_id: ACTOR.into(),
             status: Status::Enabled,
         },
@@ -385,4 +385,24 @@ pub(super) async fn assert_unchanged(pool: &PgPool, grant: &ServiceGrant) {
         .unwrap();
     assert_eq!(read.revision, grant.revision);
     assert_eq!(&read, grant);
+}
+
+/// The six claims a `github_production` binding must match (design §5.7,
+/// with `workflow_ref`; the A37 required set), each a non-empty string.
+pub fn github_policy() -> std::collections::BTreeMap<String, String> {
+    [
+        ("repository_owner_id", "123456"),
+        ("repository_id", "987654"),
+        ("repository", "example/release"),
+        ("event_name", "push"),
+        ("ref", "refs/heads/main"),
+        ("environment", "production"),
+        (
+            "workflow_ref",
+            "example/release/.github/workflows/deploy.yml@refs/heads/main",
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
 }
