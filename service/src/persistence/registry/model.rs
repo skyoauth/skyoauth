@@ -197,7 +197,10 @@ text_enum! {
 }
 
 /// Reads a text enumeration column.
-fn text<T: FromStr<Err = UnknownValue>>(row: &PgRow, column: &str) -> Result<T, sqlx::Error> {
+pub(super) fn text<T: FromStr<Err = UnknownValue>>(
+    row: &PgRow,
+    column: &str,
+) -> Result<T, sqlx::Error> {
     row.try_get::<&str, _>(column)?
         .parse()
         .map_err(|source: UnknownValue| sqlx::Error::ColumnDecode {
@@ -207,12 +210,15 @@ fn text<T: FromStr<Err = UnknownValue>>(row: &PgRow, column: &str) -> Result<T, 
 }
 
 /// Reads a `jsonb` column.
-fn json<T: DeserializeOwned>(row: &PgRow, column: &str) -> Result<T, sqlx::Error> {
+pub(super) fn json<T: DeserializeOwned>(row: &PgRow, column: &str) -> Result<T, sqlx::Error> {
     Ok(row.try_get::<Json<T>, _>(column)?.0)
 }
 
 /// Reads a nullable `jsonb` column.
-fn optional_json<T: DeserializeOwned>(row: &PgRow, column: &str) -> Result<Option<T>, sqlx::Error> {
+pub(super) fn optional_json<T: DeserializeOwned>(
+    row: &PgRow,
+    column: &str,
+) -> Result<Option<T>, sqlx::Error> {
     Ok(row
         .try_get::<Option<Json<T>>, _>(column)?
         .map(|json| json.0))
