@@ -505,6 +505,8 @@ jobs:
   # never `#[ignore]`d: they fail without the database. The nextest `ci`
   # profile has retries = 0 and writes JUnit to target/nextest/ci/junit.xml.
   # An empty selection fails the run (nextest's default `--no-tests=fail`).
+  # The job also runs the resolution part of the registry check (§3), which
+  # needs the built test list.
   scenarios-pg:
     name: Scenarios (PostgreSQL, x86_64)
     needs: changes
@@ -658,6 +660,35 @@ jobs:
             target/nextest/ci/junit.xml
             target/nextest/ci/leg
           if-no-files-found: warn
+
+      # Resolution part of the registry check (layout §3): every test that an
+      # implemented stage lists is in the nextest list of its package and
+      # target, is not #[ignore]d or filtered out, and comes from the job of
+      # one of the stage's legs, each of those jobs with a pos and a neg
+      # test; and every listed scenario-named test (a<NN>_…) is in some
+      # stage's tests. Listing needs the build (the test run above made it)
+      # but no database. The list covers every package whose tests a stage
+      # lists, so a PR that registers a test of another package adds it here
+      # with -p; until then that test fails the check. It runs whatever the
+      # tests did, after the leg artifact is uploaded. smol-toml comes from
+      # the scripts/ci lockfile, installed without lifecycle scripts.
+      - uses: actions/setup-node@v7
+        if: success() || failure()
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install check dependencies
+        if: success() || failure()
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
+
+      - name: Check that the registered tests exist
+        if: success() || failure()
+        run: |
+          cargo nextest list --locked -p skyoauth-scenarios --profile ci --message-format json > "$RUNNER_TEMP/nextest-list.json"
+          node scripts/ci/check-conformance-registry.mjs --nextest-list "$RUNNER_TEMP/nextest-list.json"
 
   # Informational conformance report: runs scripts/ci/report-conformance.mjs
   # on the leg artifacts of this run (docs/testing/conformance-layout.md §3

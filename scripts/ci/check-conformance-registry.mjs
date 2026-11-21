@@ -52,6 +52,31 @@
 // skipped with a note, unless --require-history is given (CI): that probes
 // the history up front and makes its absence an error, waivers or not.
 //
+//   node scripts/ci/check-conformance-registry.mjs [--root DIR] [--require-history]
+//        --nextest-list FILE... [--libtest-list PKG/TARGET=FILE...]
+//
+// With a test list, the check also runs the resolution part of layout §3 (a
+// code job runs it, since the list needs a build; scenarios-pg in ci.yml).
+// --nextest-list takes the JSON of `cargo nextest list --message-format json`
+// (CI); --libtest-list the text of `cargo test -p PKG --test TARGET -- --list`
+// (a local fallback, which cannot show #[ignore], so that is not checked, with
+// a note). Both may be repeated. On every implemented stage:
+//   resolve   Each test ID names a test of the list: its package and target
+//             (nextest binary) are listed, the test is in that binary's list,
+//             and it is neither #[ignore]d nor filtered out. vitest and
+//             Playwright IDs, and the legs of jobs that report with those
+//             runners or with no decided runner, are not resolvable yet
+//             (layout §6 "Still open", item 5): an error, not a skip.
+//   same-job  Each test is produced (TEST_JOBS in report-conformance.mjs) by
+//             the job of one of the stage's legs.
+//   pos-neg   Each test is a pos/neg test of the stage's own entry, and each
+//             job among the legs produces at least one pos and one neg test.
+// And on the list:
+//   orphans   Each listed test whose last path segment matches a\d\d_ is in
+//             some stage's tests (any stage, planned ones included).
+//   list      Each list is well-formed and lists at least one test; no nextest
+//             binary is listed twice.
+//
 //   node scripts/ci/check-conformance-registry.mjs [--root DIR] --gate-pr
 //
 // --gate-pr checks a gate PR (layout §3 Gates) instead: the root must be a
@@ -117,6 +142,10 @@ import {
   TASKS,
   taskLines,
 } from './gen-conformance-registry.mjs';
+// report-conformance.mjs imports this module too. The cycle is safe because
+// neither module uses the other's bindings before both have been evaluated:
+// only functions called from run() or the tests read them.
+import { jobOf, runnerOf, testId, testInfo } from './report-conformance.mjs';
 
 export const WAIVERS = 'tests/conformance/waivers.toml';
 export const FIXTURES = 'tests/conformance/fixtures';
@@ -455,6 +484,164 @@ export function checkWaivers(doc, at, stagesByTest, root, requireHistory, hist, 
 }
 
 // ---------------------------------------------------------------------------
+// Resolution part (layout §3): test lists
+
+// A test list: Map from nextest binary ID (`<package>` for a lib,
+// `<package>::<target>` for an integration test target, `<package>::bin/<name>`
+// for a bin) to { pkg, source, status, tests }, where tests maps each test
+// name to { ignored, filter }: ignored is true, false or null (unknown, for a
+// libtest list), filter is null or the reason nextest's filter left it out.
+export class ListError extends Error {}
+
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// The JSON of `cargo nextest list --message-format json`. Throws ListError.
+export function parseNextestList(text) {
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (ex) {
+    throw new ListError(`not valid JSON: ${ex.message}`);
+  }
+  if (!isObject(doc) || !isObject(doc['rust-suites'])) throw new ListError('not the JSON of cargo nextest list --message-format json: no "rust-suites" object');
+  const binaries = new Map();
+  for (const [key, s] of Object.entries(doc['rust-suites'])) {
+    const where = `rust-suites ${JSON.stringify(key)}`;
+    if (!isObject(s)) throw new ListError(`${where} is not an object`);
+    const pkg = s['package-name'];
+    if (s['binary-id'] !== key) throw new ListError(`${where}: binary-id is ${JSON.stringify(s['binary-id'])}, not its key`);
+    if (!isText(pkg) || !(key === pkg || key.startsWith(`${pkg}::`))) throw new ListError(`${where}: package-name ${JSON.stringify(pkg)} does not name the package of the binary`);
+    if (s.status !== 'listed' && s.status !== 'skipped') throw new ListError(`${where}: status must be "listed" or "skipped", not ${JSON.stringify(s.status)}`);
+    if (!isObject(s.testcases)) throw new ListError(`${where}: testcases is not an object`);
+    const tests = new Map();
+    for (const [name, c] of Object.entries(s.testcases)) {
+      const fm = c?.['filter-match'];
+      if (!isObject(c) || typeof c.ignored !== 'boolean' || !isObject(fm) || (fm.status !== 'matches' && fm.status !== 'mismatch')) {
+        throw new ListError(`${where}: test ${JSON.stringify(name)} needs a boolean "ignored" and a "filter-match" with status "matches" or "mismatch"`);
+      }
+      tests.set(name, { ignored: c.ignored, filter: fm.status === 'matches' ? null : String(fm.reason ?? 'unknown reason') });
+    }
+    binaries.set(key, { pkg, status: s.status, tests });
+  }
+  return binaries;
+}
+
+// The text of `cargo test -p PKG --test TARGET -- --list`: one `<name>: test`
+// line per test (benchmarks are skipped), and libtest's `N tests, M
+// benchmarks` footer. libtest does not mark #[ignore]d tests in it, so their
+// ignored is null. Throws ListError.
+export function parseLibtestList(text, pkg, target) {
+  const tests = new Map();
+  text.split('\n').forEach((raw, i) => {
+    const line = raw.replace(/\r$/, '');
+    if (line === '' || /^\d+ tests?, \d+ benchmarks?$/.test(line) || /: benchmark$/.test(line)) return;
+    const m = /^(\S(?:.*\S)?): test$/.exec(line);
+    if (!m) throw new ListError(`line ${i + 1} is not "<test name>: test": ${JSON.stringify(line.slice(0, 200))}`);
+    tests.set(m[1], { ignored: null, filter: null });
+  });
+  return new Map([[`${pkg}::${target}`, { pkg, status: 'listed', tests }]]);
+}
+
+const LIBTEST_SPEC = /^([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)=(.+)$/s;
+
+// Reads the lists of `specs` ([{ kind: 'nextest' | 'libtest', file, text,
+// pkg, target }]) into one listing, reporting list errors. Returns null when
+// no list could be read.
+function readLists(specs, report) {
+  const binaries = new Map();
+  const notes = [];
+  let ok = 0;
+  for (const spec of specs) {
+    let got;
+    try {
+      got = spec.kind === 'nextest' ? parseNextestList(spec.text) : parseLibtestList(spec.text, spec.pkg, spec.target);
+    } catch (ex) {
+      if (!(ex instanceof ListError)) throw ex;
+      report.error(spec.file, null, 'list', `${spec.kind === 'nextest' ? 'nextest' : 'libtest'} list: ${ex.message}`);
+      continue;
+    }
+    const count = [...got.values()].reduce((n, b) => n + b.tests.size, 0);
+    if (!count) {
+      report.error(spec.file, null, 'list', 'the test list lists no tests: was it built from the right packages and targets?');
+      continue;
+    }
+    ok++;
+    for (const [id, b] of got) {
+      if (binaries.has(id)) report.error(spec.file, null, 'list', `binary ${id} is also in ${binaries.get(id).source}; give each binary in one list only`);
+      else binaries.set(id, { ...b, source: spec.file });
+    }
+    if (spec.kind === 'libtest') notes.push(`resolution: the libtest list ${spec.file} cannot show #[ignore], so its tests are not checked for it (CI uses --nextest-list)`);
+  }
+  for (const n of notes) report.note(n);
+  return ok ? binaries : null;
+}
+
+// The rules resolve, same-job, pos-neg and orphans (header). `implemented`
+// holds { e, s, err } for each implemented stage with valid columns, where
+// err(rule, msg) reports against the stage; `registered` holds every test ID
+// of every stage. Returns the number of listed tests.
+function checkResolution(binaries, implemented, registered, report) {
+  const packages = [...new Set([...binaries.values()].map((b) => b.pkg))].sort();
+  const lookup = (info) => {
+    const id = info.target === '' ? info.pkg : `${info.pkg}::${info.target}`;
+    const b = binaries.get(id);
+    if (!b) {
+      if (!packages.includes(info.pkg)) return `its package ${info.pkg} is not in the test list (which lists ${packages.join(', ')}); list it in the job that produces the test`;
+      const targets = [...binaries.keys()].filter((k) => binaries.get(k).pkg === info.pkg).map((k) => (k === info.pkg ? '(lib)' : k.slice(info.pkg.length + 2)));
+      return `its target ${info.target === '' ? '(lib)' : info.target} of ${info.pkg} is not in the test list (listed targets of ${info.pkg}: ${targets.join(', ')})`;
+    }
+    if (b.status !== 'listed') return `its binary ${id} was not listed (status ${b.status})`;
+    const name = info.id.slice(`nextest:${info.pkg}/${info.target === '' ? '' : `${info.target}/`}`.length);
+    const t = b.tests.get(name);
+    if (!t) return `it is not in the test list of ${id} (${b.source})`;
+    if (t.ignored === true) return `it is #[ignore]d (${b.source}), so its job never runs it`;
+    if (t.filter !== null) return `it is filtered out of the list of ${id} (${t.filter}), so its job does not run it`;
+    return null;
+  };
+  for (const { e, s, err } of implemented) {
+    const jobs = [...new Set(s.legs.filter(isText).map(jobOf))];
+    for (const job of jobs) {
+      const runner = runnerOf(job);
+      if (runner === null) err('resolve', `job ${job} has no decided runner (layout §6 "Still open", item 5), so the tests of its legs cannot be resolved`);
+      else if (runner !== 'nextest') err('resolve', `job ${job} reports ${runner} tests, whose test IDs are provisional (layout §6 "Still open", item 5): the tests-exist check cannot resolve them yet`);
+    }
+    const valid = [];
+    for (const t of s.tests) {
+      const info = testInfo(t);
+      if (!info) {
+        err('resolve', `${JSON.stringify(t)} is not a test ID such as nextest:<package>/<target>/<path>`);
+        continue;
+      }
+      if (info.entry !== e.id) err('pos-neg', `${t} is not a pos/neg scenario test of ${e.id}`);
+      else valid.push(info);
+      if (!info.jobs.some((j) => jobs.includes(j))) {
+        err('same-job', `${t} is produced by ${info.jobs.length ? `job ${info.jobs.join(', ')}` : 'no job'} (TEST_JOBS), not by the job of a leg of this stage (${jobs.join(', ')})`);
+      }
+      if (info.runner !== 'nextest') {
+        err('resolve', `${t}: ${info.runner} test IDs are provisional (layout §6 "Still open", item 5); the tests-exist check cannot resolve them yet`);
+        continue;
+      }
+      const why = lookup(info);
+      if (why) err('resolve', `${t}: ${why}`);
+    }
+    for (const job of jobs) {
+      for (const pol of ['pos', 'neg']) {
+        if (!valid.some((x) => x.polarity === pol && x.jobs.includes(job))) err('pos-neg', `job ${job} produces no ${pol} test of this stage`);
+      }
+    }
+  }
+  let listed = 0;
+  for (const [bin, b] of binaries) {
+    for (const name of b.tests.keys()) {
+      listed++;
+      const id = testId('nextest', bin, name);
+      if (testInfo(id)?.like && !registered.has(id)) report.error(b.source, null, 'orphans', `${id} is a listed scenario-named test (a\\d\\d_) that no stage lists in its tests`);
+    }
+  }
+  return listed;
+}
+
+// ---------------------------------------------------------------------------
 // The check
 
 const readMaybe = (root, rel) => (existsSync(join(root, rel)) ? readFileSync(join(root, rel), 'utf8') : null);
@@ -462,7 +649,10 @@ const readMaybe = (root, rel) => (existsSync(join(root, rel)) ? readFileSync(joi
 // Returns { errors, notes, summary }. `hist`, when given, is the history()
 // that waiver commits are checked against instead of root's (--gate-pr
 // checks a copy of the merge-base's files against the repository's).
-export function checkRegistry(root, { requireHistory = false, hist: given = null } = {}) {
+// `lists`, when given, are the test lists of the resolution part:
+// [{ kind: 'nextest', file, text }] or [{ kind: 'libtest', file, text, pkg,
+// target }], where `file` names the list in errors.
+export function checkRegistry(root, { requireHistory = false, hist: given = null, lists = null } = {}) {
   const report = new Report();
   const done = (summary = null) => ({ errors: report.errors, notes: report.notes, summary });
   // CI asks for the history whether or not a waiver needs it, so a checkout
@@ -557,6 +747,7 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
   // Scenario and subcase entries: columns, owners, stages, legs.
   let rendered = true;
   const stagesByTest = new Map();
+  const implemented = [];
   const checkEntry = (e, file, where, keys) => {
     const id = show(e.id);
     const err = (msg) => report.error(file, where.get(e.id), 'fields', msg);
@@ -579,6 +770,10 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
     for (const s of e.stage) {
       if (gated && gates.includes(s.milestone) && s.status !== 'implemented') stageErr('gates')(s.milestone, `${id} ${s.milestone}: gates_passed lists ${s.milestone}, but this stage is ${show(s.status)}, not implemented`);
       for (const t of Array.isArray(s.tests) ? s.tests : []) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: Array.isArray(s.legs) ? s.legs : [] }]);
+      // The stages rule reports tests or legs of the wrong type.
+      if (s.status === 'implemented' && isList(s.tests, isText) && Array.isArray(s.legs)) {
+        implemented.push({ e, s, err: (rule, msg) => stageErr(rule)(s.milestone, `${id} ${show(s.milestone)}: ${msg}`) });
+      }
     }
   };
   for (const e of scenarios) checkEntry(e, SCENARIOS, at, KEYS.scenario);
@@ -653,7 +848,13 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
 
   const fixtures = checkFixtures(root, scenarioIds, new Set(subs.map((s) => s.id)), report);
   const waivers = wdoc ? checkWaivers(wdoc, locate(waiverText), stagesByTest, root, requireHistory, hist, report) : 0;
-  return done(`${scenarios.length} scenarios, ${contracts.length} contracts, ${subs.length} subcases, ${fixtures} fixtures, ${waivers} waivers`);
+  const summary = `${scenarios.length} scenarios, ${contracts.length} contracts, ${subs.length} subcases, ${fixtures} fixtures, ${waivers} waivers`;
+  if (!lists) return done(summary);
+  const binaries = readLists(lists, report);
+  if (!binaries) return done(summary);
+  const listed = checkResolution(binaries, implemented, new Set(stagesByTest.keys()), report);
+  const tests = implemented.reduce((n, x) => n + x.s.tests.length, 0);
+  return done(`${summary}; resolution: ${tests} tests of ${implemented.length} implemented stages against ${listed} listed tests`);
 }
 
 // ---------------------------------------------------------------------------
@@ -816,22 +1017,45 @@ function runGatePr(root, log, logErr) {
   return 0;
 }
 
+export const USAGE = 'usage: check-conformance-registry.mjs [--root DIR] [--require-history] [--gate-pr] [--nextest-list FILE]... [--libtest-list PKG/TARGET=FILE]...';
+
 export function run(argv, log = console.log, logErr = console.error) {
   let root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
   let requireHistory = false;
   let gatePr = false;
+  const specs = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--require-history') requireHistory = true;
     else if (argv[i] === '--gate-pr') gatePr = true;
     else if (argv[i] === '--root' && argv[i + 1]) root = resolve(argv[++i]);
-    else {
-      logErr('usage: check-conformance-registry.mjs [--root DIR] [--require-history] [--gate-pr]');
+    else if (argv[i] === '--nextest-list' && argv[i + 1]) specs.push({ kind: 'nextest', file: argv[++i] });
+    else if (argv[i] === '--libtest-list' && LIBTEST_SPEC.test(argv[i + 1] ?? '')) {
+      const [, pkg, target, file] = LIBTEST_SPEC.exec(argv[++i]);
+      specs.push({ kind: 'libtest', file, pkg, target });
+    } else {
+      logErr(USAGE);
       return 2;
     }
   }
+  // --gate-pr checks the merge-base's registry, which no test list of this
+  // checkout's build describes.
+  if (gatePr && specs.length) {
+    logErr(`${USAGE}\n--gate-pr takes no test list`);
+    return 2;
+  }
   // --gate-pr always needs the history; --require-history adds nothing to it.
   if (gatePr) return runGatePr(root, log, logErr);
-  const { errors, notes, summary } = checkRegistry(root, { requireHistory });
+  // A list that cannot be read is a usage error; one that is read but
+  // malformed is a check error (rule list).
+  for (const spec of specs) {
+    try {
+      spec.text = readFileSync(spec.file, 'utf8');
+    } catch (ex) {
+      logErr(`check-conformance-registry: cannot read the test list ${spec.file}: ${ex.message}`);
+      return 2;
+    }
+  }
+  const { errors, notes, summary } = checkRegistry(root, { requireHistory, lists: specs.length ? specs : null });
   for (const n of notes) log(`note: ${n}`);
   for (const e of errors) logErr(formatError(e));
   if (errors.length) {
