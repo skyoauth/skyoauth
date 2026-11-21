@@ -23,7 +23,7 @@ use skyoauth_service::persistence::{
     self, PgPool,
     registry::{
         self, BindingProfile, EligibleBinding, Evidence, GrantMode, PrincipalBindingChanges,
-        Selection, SelectionError, Status, match_binding, select_grant,
+        RegistryError, Selection, SelectionError, Status, match_binding, select_grant,
     },
 };
 
@@ -31,8 +31,9 @@ use skyoauth_service::persistence::{
 const SUB: &str = "repo:acme/platform:environment:production";
 
 /// Tenants `ten_a` and `ten_b`. In `ten_a`: workloads `wld_a` and `wld_b`,
-/// services `svc_1` and `svc_2`, the audience `rs_1` and sources `src_gh`
-/// and `src_alt`. Bindings, all `generic_production`:
+/// services `svc_1` and `svc_2`, the audience `rs_1`, sources `src_gh`
+/// and `src_alt`, and the disabled source `src_off`. Bindings, all
+/// `generic_production`:
 ///
 /// - `bnd_a_repo` of `wld_a` on `src_gh`: repo-wide (`sub` and the
 ///   repository).
@@ -44,6 +45,8 @@ const SUB: &str = "repo:acme/platform:environment:production";
 ///   list it.
 /// - `bnd_b_deploy` of `wld_b` on `src_gh`: the deployment binding, the
 ///   same predicates as `bnd_Z_env`.
+/// - `bnd_a_srcoff` of `wld_a` on the disabled `src_off`: enabled, `sub`
+///   only.
 ///
 /// Grants, all with the audience `rs_1`:
 ///
@@ -53,6 +56,14 @@ const SUB: &str = "repo:acme/platform:environment:production";
 /// - `grt_b`: delegation of `wld_b` to `svc_1`, listing `bnd_b_deploy`.
 /// - `grt_a_off`: direct, `wld_a`, listing only `bnd_a_off`.
 /// - `grt_a_alt`: direct, `wld_a`, listing only `bnd_a_alt`.
+/// - `grt_a_srcoff`: direct, `wld_a`, listing only `bnd_a_srcoff`.
+/// - `grt_a_dis`: direct, `wld_a`, disabled, listing `bnd_a_repo`.
+/// - `grt_a_imp`: the dormant impersonation grant of `wld_a` as `svc_1`
+///   (disabled and requiring reapproval, as the schema requires), listing
+///   `bnd_a_repo`.
+///
+/// Each of the last three would be selectable on its own source if its
+/// status (or its source's) were not checked.
 ///
 /// In `ten_b`: workload `wld_x`, source `src_x`, binding `bnd_x` and the
 /// direct grant `grt_x`.
@@ -80,6 +91,10 @@ const SEED: &str = r#"
          'https://issuer.example.com/.well-known/openid-configuration',
          NULL, NULL, NULL, NULL, NULL, NULL, NULL,
          '["https://identity.example.com"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled'),
+        ('src_off', 'ten_a', 'retired', 'oidc_discovery', 'https://retired.example.com',
+         'https://retired.example.com/.well-known/openid-configuration',
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+         '["https://identity.example.com"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'disabled'),
         ('src_x', 'ten_b', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',
          NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -99,6 +114,8 @@ const SEED: &str = r#"
         ('bnd_b_deploy', 'ten_a', 'b-deploy', 'src_gh', 'generic_production',
          '{"sub": "repo:acme/platform:environment:production", "repository_id": "456789", "environment": "production"}',
          'wld_b', 'enabled'),
+        ('bnd_a_srcoff', 'ten_a', 'a-srcoff', 'src_off', 'generic_production',
+         '{"sub": "repo:acme/platform:environment:production"}', 'wld_a', 'enabled'),
         ('bnd_x', 'ten_b', 'x', 'src_x', 'generic_production',
          '{"sub": "repo:acme/platform:environment:production"}', 'wld_x', 'enabled');
     INSERT INTO service_grant VALUES
@@ -107,6 +124,10 @@ const SEED: &str = r#"
         ('grt_b', 'ten_a', 'b-to-svc1', 'wld_b', 'svc_1', 'delegation', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required'),
         ('grt_a_off', 'ten_a', 'a-off', 'wld_a', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required'),
         ('grt_a_alt', 'ten_a', 'a-alt', 'wld_a', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required'),
+        ('grt_a_srcoff', 'ten_a', 'a-srcoff', 'wld_a', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required'),
+        ('grt_a_dis', 'ten_a', 'a-dis', 'wld_a', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'disabled', 'not_required'),
+        ('grt_a_imp', 'ten_a', 'a-as-svc1', 'wld_a', 'svc_1', 'impersonation', '["read"]', NULL, '{}', 300, NULL,
+         'disabled', 'requires_reapproval'),
         ('grt_x', 'ten_b', 'x', 'wld_x', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
     INSERT INTO service_grant_binding VALUES
         ('grt_a', 'bnd_a_repo', 'ten_a', 'wld_a'),
@@ -117,10 +138,14 @@ const SEED: &str = r#"
         ('grt_b', 'bnd_b_deploy', 'ten_a', 'wld_b'),
         ('grt_a_off', 'bnd_a_off', 'ten_a', 'wld_a'),
         ('grt_a_alt', 'bnd_a_alt', 'ten_a', 'wld_a'),
+        ('grt_a_srcoff', 'bnd_a_srcoff', 'ten_a', 'wld_a'),
+        ('grt_a_dis', 'bnd_a_repo', 'ten_a', 'wld_a'),
+        ('grt_a_imp', 'bnd_a_repo', 'ten_a', 'wld_a'),
         ('grt_x', 'bnd_x', 'ten_b', 'wld_x');
     INSERT INTO service_grant_resource_server VALUES
         ('grt_a', 'ten_a', 'rs_1'), ('grt_a_svc2', 'ten_a', 'rs_1'), ('grt_b', 'ten_a', 'rs_1'),
-        ('grt_a_off', 'ten_a', 'rs_1'), ('grt_a_alt', 'ten_a', 'rs_1');
+        ('grt_a_off', 'ten_a', 'rs_1'), ('grt_a_alt', 'ten_a', 'rs_1'), ('grt_a_srcoff', 'ten_a', 'rs_1'),
+        ('grt_a_dis', 'ten_a', 'rs_1'), ('grt_a_imp', 'ten_a', 'rs_1');
 "#;
 
 async fn seeded() -> (TestDb, PgPool) {
@@ -270,6 +295,7 @@ async fn each_selector_selects_its_own_actor_and_target() {
 
 /// Every miss gives the same `NotSelectable`, with the same text: a wrong
 /// tenant, a mode override, another tenant's source or grant, unknown IDs,
+/// a disabled grant, a disabled source, the dormant impersonation grant,
 /// and a grant whose actor has no enabled binding listed for the source.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -297,6 +323,13 @@ async fn every_miss_is_the_same_not_selectable() {
         ("ten_a", "grt_a_alt", "src_gh", GrantMode::Direct),
         ("ten_a", "grt_b", "src_alt", GrantMode::Delegation),
         ("ten_a", "grt_a_svc2", "src_alt", GrantMode::Delegation),
+        // A disabled grant, and a disabled source, each with an enabled
+        // binding of the grant's actor on the source.
+        ("ten_a", "grt_a_dis", "src_gh", GrantMode::Direct),
+        ("ten_a", "grt_a_srcoff", "src_off", GrantMode::Direct),
+        // The dormant impersonation grant, selected in its own mode: the
+        // schema keeps it disabled, so the status filter covers it.
+        ("ten_a", "grt_a_imp", "src_gh", GrantMode::Impersonation),
     ];
     for (tenant, grant, source, mode) in misses {
         let err = select(&pool, tenant, grant, source, mode)
@@ -457,6 +490,68 @@ async fn selection_rechecks_the_tenant_and_actor_the_foreign_keys_guarantee() {
             "{tenant} {grant} {source}"
         );
     }
+    sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// The statement's `WHERE EXISTS` gate is required, not only the Rust
+/// check that a binding is eligible: it keeps a miss from returning, and so
+/// from decoding, a grant row. With the `0007` range check dropped in a
+/// rolled-back transaction and `valid_until = 'infinity'` stored on two
+/// grants, a hit on one of them is a store failure (the registry cannot
+/// read that timestamp), while every miss that finds such a grant row (a
+/// grant with no eligible binding, a source of another tenant or an
+/// unknown one) is still `NotSelectable`. Without the gate those misses
+/// would decode the grant row and be `Store` too.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_miss_decodes_no_grant_row_even_a_corrupt_one() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql(
+        r#"BEGIN;
+           ALTER TABLE service_grant DROP CONSTRAINT service_grant_valid_until_range_check;
+           UPDATE service_grant SET valid_until = 'infinity', revision = revision + 1
+               WHERE tenant_id = 'ten_a' AND id IN ('grt_a', 'grt_a_off')"#,
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    // Misses first. Each one's grant row matches the tenant, ID and mode,
+    // so only the gate keeps it from being returned. (A mode override
+    // would not show this: the mode filter already drops the grant row.)
+    for (grant, source) in [
+        // No eligible binding: its only binding is disabled.
+        ("grt_a_off", "src_gh"),
+        // A source of another tenant, and an unknown source.
+        ("grt_a", "src_x"),
+        ("grt_a", "src_none"),
+    ] {
+        assert_eq!(
+            select_grant(&mut *conn, "ten_a", grant, source, GrantMode::Direct)
+                .await
+                .unwrap_err(),
+            SelectionError::NotSelectable,
+            "{grant} {source}"
+        );
+    }
+    // A hit on the same corrupt row decodes it: `valid_until` is unreadable,
+    // so the hit is a store failure naming the row, never `NotSelectable`.
+    let hit = select_grant(&mut *conn, "ten_a", "grt_a", "src_gh", GrantMode::Direct)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &hit,
+            SelectionError::Store(RegistryError::UnreadableTimestamp {
+                table: "service_grant",
+                column: "valid_until",
+                id,
+            }) if id == "grt_a"
+        ),
+        "{hit:?}"
+    );
     sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
     drop(conn);
     db.drop([pool]).await;
