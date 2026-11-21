@@ -9,6 +9,9 @@
 //! security policy and the egress allowlist. [`select_grant`] and
 //! [`match_binding`] select a grant and its matching binding for the
 //! workload exchange (ADR-015 item 4 steps 1, 3 and 4; see their module).
+//! [`load_scope_ceilings`] loads the scope ceilings of an exchange and
+//! [`resolve_scopes`] applies them (IR-062, IR-063, IR-083; see their
+//! modules).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -232,11 +235,13 @@
 
 mod assertion;
 mod audience;
+mod ceilings;
 mod error;
 mod grant;
 mod instance;
 mod model;
 mod predicate;
+mod scope;
 mod selection;
 mod tenant;
 mod trust;
@@ -253,6 +258,7 @@ pub use audience::{
     update_audience_tenant_assignment, update_resource_action, update_resource_server,
     update_resource_server_checker,
 };
+pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{InvariantKind, KNOWN_CONSTRAINTS, RegistryError};
 pub use grant::{
     add_service_grant_binding, add_service_grant_resource_server,
@@ -279,6 +285,7 @@ pub use model::{
     TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
 };
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
+pub use scope::{ScopeCeilings, ScopeError, ScopeRequest, resolve_scopes};
 pub use selection::{
     EligibleBinding, Evidence, Selection, SelectionError, match_binding, select_grant,
 };
