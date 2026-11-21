@@ -11,3 +11,4 @@
 //! `rust` job excludes the package and `scenarios-pg` runs only `--test pg`.
 
 pub mod pg;
+pub mod rep;

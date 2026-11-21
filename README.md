@@ -88,9 +88,10 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
   triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
 
 Tests that need PostgreSQL are `#[ignore]`d. To run them, point
-`SKYOAUTH_IT_DATABASE_URL` at a server whose role may create databases (each
-test creates and drops its own, always `UTF8`, so the server's locale must be
-a UTF-8 one or C/POSIX) and include ignored tests:
+`SKYOAUTH_IT_DATABASE_URL` at a server whose role may create databases and
+roles (each test creates and drops its own database, always `UTF8`, so the
+server's locale must be a UTF-8 one or C/POSIX; the privileges each test needs
+are in the table below) and include ignored tests:
 
 ```bash
 export SKYOAUTH_IT_DATABASE_URL=postgres://skyoauth:skyoauth@localhost:5432/skyoauth
@@ -106,7 +107,7 @@ Some tests need more than `CREATEDB`, but none needs a superuser
 | Test role privilege                                         | Needed by                                       |
 | ----------------------------------------------------------- | ----------------------------------------------- |
 | `CREATEDB`                                                  | every database test                             |
-| `CREATEROLE`                                                | the search-path tests, which create login roles |
+| `CREATEROLE`                                                | the tests that create login roles: in `service/tests`, the search-path tests among them; in the `pg` scenarios, A24 (`a24_neg_store_failure_never_consumes`) |
 | `GRANT SET ON PARAMETER session_replication_role TO <role>` | the replica-role tests                          |
 
 ## TypeScript client
@@ -148,8 +149,8 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   service container, reached through `SKYOAUTH_IT_DATABASE_URL`, and uploads
   the JUnit report for the leg `scenarios-pg/x86_64`. Scenario tests are not
   `#[ignore]`d: without the database they fail. To run them locally, set
-  that variable to a role that may create databases and run
-  `cargo test -p skyoauth-scenarios --test pg`.
+  that variable to a role with `CREATEDB` and `CREATEROLE` (no superuser
+  needed) and run `cargo test -p skyoauth-scenarios --test pg`.
 - Service tests (nextest): `cargo nextest run --workspace --exclude
   skyoauth-scenarios --all-features --profile ci --run-ignored all` on x86_64 Linux, with the pinned cargo-nextest and the `ci`
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit

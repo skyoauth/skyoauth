@@ -11,6 +11,8 @@
 //! A53 tests, not a scenario.
 
 mod security {
+    #[path = "a24.rs"]
+    mod a24;
     #[path = "a29.rs"]
     mod a29;
     #[path = "a38.rs"]
