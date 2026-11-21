@@ -2,10 +2,12 @@
 //! design section 7.2; ADR-013 item 8; identity-registry section 5.2;
 //! lifetimes LT-107; T13.5): the issued challenge and its audit event, the
 //! TTL bounds, single use (in the statement and in the database guards),
-//! every consume miss as one value, two concurrent consumes, the full
-//! restoration (enroll, revoke every credential, rotate the key, audit),
-//! that nothing else changes, that a failed restore rolls the consume back,
-//! and that a restore and an issue wait for each other without deadlock.
+//! every miss of a restore as one value, the replacement the plan binds,
+//! two concurrent restores of one challenge, the full restoration (enroll,
+//! revoke every credential, rotate the key, two audit events last), that
+//! nothing else changes, that a failed restore rolls the consume back, that
+//! a restore and an issue wait for each other without deadlock, and that an
+//! operator write that adds access serializes with a restore.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests, not
@@ -28,13 +30,13 @@ use serde_json::{Value, json};
 use skyoauth_service::persistence::{
     self, PgPool,
     registry::{
-        self, AdminRole, AuditActor, AuthorizedOperator, BootstrapRequest, ChainVerdict,
-        ChallengeBinding, ChallengeError, ConsumedChallenge, DEFAULT_CHALLENGE_TTL, InvariantKind,
-        IssueChallenge, JsonObject, MAX_CHALLENGE_TTL, NewAdminCredential, NewAdminIdentity,
-        NewAdminRoleBinding, NewPrincipal, NewTenant, OPERATOR_RESTORATION, OperatorRequest,
-        OperatorScope, PrincipalKind, RecoveryChallenge, RecoveryState, RegistryError,
-        RestoreError, RestoreRequest, Restored, Status, bootstrap_instance,
-        consume_recovery_challenge, get_recovery_state, issue_recovery_challenge, restore_operator,
+        self, AdminRole, AdminRoleBindingChanges, AuditActor, AuthorizedOperator, BootstrapRequest,
+        ChainVerdict, ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL, InvariantKind,
+        IssueChallenge, JsonObject, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL, NewAdminCredential,
+        NewAdminIdentity, NewAdminRoleBinding, NewAuditEvent, NewPrincipal, NewTenant,
+        OPERATOR_RESTORATION, OperatorRequest, OperatorScope, PrincipalKind, RecoveryChallenge,
+        RecoveryState, RegistryError, RestoreError, RestoreRequest, Restored, Status,
+        bootstrap_instance, get_recovery_state, issue_recovery_challenge, restore_operator,
         verify_audit_chain,
     },
 };
@@ -75,17 +77,38 @@ fn micros(time: SystemTime) -> i64 {
     i64::try_from(time.duration_since(UNIX_EPOCH).unwrap().as_micros()).unwrap()
 }
 
-fn plan(instance: &str, epoch: Value) -> JsonObject {
-    match json!({
+/// `bytes` in lowercase hexadecimal, as the plan carries a key.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn object(value: Value) -> JsonObject {
+    match value {
+        Value::Object(map) => map,
+        other => panic!("not an object: {other}"),
+    }
+}
+
+/// The plan of a challenge for `instance` and `epoch` that names the
+/// replacement of `request`.
+fn plan_for(instance: &str, epoch: Value, request: &RestoreRequest<'_>) -> JsonObject {
+    object(json!({
         "instance_id": instance,
         "recovery_key_epoch": epoch,
         "operation": "operator_restoration",
-        "admin_id": "adm_new",
-        "public_identity": "spki-sha256:new",
-    }) {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    }
+        "admin_id": request.admin_id,
+        "credential_id": request.credential_id,
+        "binding_id": request.binding_id,
+        "public_identity": request.public_identity,
+        "trust_anchor_ref": request.trust_anchor_ref,
+        "new_recovery_public_key": hex(request.new_recovery_public_key),
+    }))
+}
+
+/// The plan for `instance` and `epoch` that names [`restore_request`]'s
+/// replacement.
+fn plan(instance: &str, epoch: Value) -> JsonObject {
+    plan_for(instance, epoch, &restore_request(""))
 }
 
 fn good_plan() -> JsonObject {
@@ -114,7 +137,8 @@ fn binding() -> ChallengeBinding<'static> {
     }
 }
 
-/// A restore of the challenge `id` with [`binding`] at `now()`.
+/// A restore of the challenge `id` with [`binding`] at `now()`, naming the
+/// replacement of [`good_plan`].
 fn restore_request(id: &str) -> RestoreRequest<'_> {
     RestoreRequest {
         operation_id: id,
@@ -126,7 +150,25 @@ fn restore_request(id: &str) -> RestoreRequest<'_> {
         trust_anchor_ref: "deployment/operator-ca",
         new_recovery_public_key: &NEW_KEY,
         audit_event_id: "aud_restore",
+        rotation_audit_event_id: "aud_rotate",
         now: now(),
+    }
+}
+
+/// A change to a request.
+type Change = fn(&mut RestoreRequest<'static>);
+
+/// [`restore_request`] with another replacement (`*_other`) and `key`.
+fn other_request<'a>(id: &'a str, key: &'a [u8]) -> RestoreRequest<'a> {
+    RestoreRequest {
+        admin_id: "adm_other",
+        credential_id: "crd_other",
+        binding_id: "rb_other",
+        public_identity: "spki-sha256:other",
+        audit_event_id: "aud_other",
+        rotation_audit_event_id: "aud_other_rotate",
+        new_recovery_public_key: key,
+        ..restore_request(id)
     }
 }
 
@@ -192,21 +234,16 @@ async fn issue(pool: &PgPool, id: &str, audit: &str) -> RecoveryChallenge {
         .unwrap()
 }
 
-/// Consumes in a transaction of its own; commits on `Ok`.
-async fn consume_on(
-    pool: &PgPool,
-    id: &str,
-    binding: &ChallengeBinding<'_>,
-    now: SystemTime,
-) -> Result<ConsumedChallenge, ChallengeError> {
+/// Restores in a transaction of its own; commits on `Ok`.
+async fn restore_on(pool: &PgPool, request: &RestoreRequest<'_>) -> Result<Restored, RestoreError> {
     let mut transaction = pool.begin().await.unwrap();
-    let consumed = consume_recovery_challenge(&mut transaction, id, binding, now).await;
-    if consumed.is_ok() {
+    let restored = restore_operator(&mut transaction, request).await;
+    if restored.is_ok() {
         transaction.commit().await.unwrap();
     } else {
         transaction.rollback().await.unwrap();
     }
-    consumed
+    restored
 }
 
 /// Restores with `restore_request(id)` in `transaction`.
@@ -292,17 +329,18 @@ async fn verify(pool: &PgPool) -> ChainVerdict {
         .unwrap()
 }
 
+fn security_admin(key: &str) -> OperatorRequest<'_> {
+    OperatorRequest {
+        public_identity: key,
+        scope: OperatorScope::Instance,
+        role: AdminRole::SecurityAdmin,
+    }
+}
+
 async fn authorize_security_admin(pool: &PgPool, key: &str) -> Option<AuthorizedOperator> {
-    registry::authorize_operator(
-        pool,
-        &OperatorRequest {
-            public_identity: key,
-            scope: OperatorScope::Instance,
-            role: AdminRole::SecurityAdmin,
-        },
-    )
-    .await
-    .unwrap()
+    registry::authorize_operator(pool, &security_admin(key))
+        .await
+        .unwrap()
 }
 
 /// Inserts an operation row by other means: `kind`, `plan`, with or
@@ -352,18 +390,6 @@ async fn raw_revoke(connection: &mut PgConnection, id: &str, by: &str) {
     .execute(connection)
     .await
     .unwrap();
-}
-
-#[track_caller]
-fn assert_not_consumable<T: Debug>(result: Result<T, ChallengeError>) -> ChallengeError {
-    match result {
-        Err(err @ ChallengeError::NotConsumable) => {
-            assert_eq!(format!("{err:?}"), "NotConsumable");
-            assert_eq!(err.to_string(), "the recovery challenge is not consumable");
-            err
-        }
-        other => panic!("expected NotConsumable: {other:?}"),
-    }
 }
 
 #[track_caller]
@@ -538,21 +564,17 @@ async fn an_issue_appends_its_event_and_then_inserts_the_operation() {
     db.drop([pool]).await;
 }
 
-/// TTLs of 1 ns to 15 min are accepted and stored as `now + ttl`; 0,
-/// 15 min + 1 ns and `Duration::MAX` are encode errors that run no
-/// statement, so the transaction stays usable and holds nothing.
+/// TTLs of 1 s to 15 min are accepted and stored as `now + ttl`; 0, 1 ns,
+/// 1 s - 1 ns, 15 min + 1 ns and `Duration::MAX` are encode errors that
+/// run no statement, so the transaction stays usable and holds nothing.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn the_ttl_is_more_than_zero_and_at_most_fifteen_minutes() {
+async fn the_ttl_is_one_second_to_fifteen_minutes() {
     let (db, pool) = bootstrapped().await;
     let plan = good_plan();
-    for (index, ttl) in [
-        Duration::from_nanos(1),
-        DEFAULT_CHALLENGE_TTL,
-        MAX_CHALLENGE_TTL,
-    ]
-    .into_iter()
-    .enumerate()
+    for (index, ttl) in [MIN_CHALLENGE_TTL, DEFAULT_CHALLENGE_TTL, MAX_CHALLENGE_TTL]
+        .into_iter()
+        .enumerate()
     {
         let id = format!("op_ttl_{index}");
         let audit = format!("aud_ttl_{index}");
@@ -580,6 +602,8 @@ async fn the_ttl_is_more_than_zero_and_at_most_fifteen_minutes() {
     let before = counts(&mut transaction).await;
     for ttl in [
         Duration::ZERO,
+        Duration::from_nanos(1),
+        MIN_CHALLENGE_TTL - Duration::from_nanos(1),
         MAX_CHALLENGE_TTL + Duration::from_nanos(1),
         Duration::MAX,
     ] {
@@ -587,7 +611,7 @@ async fn the_ttl_is_more_than_zero_and_at_most_fifteen_minutes() {
         request.ttl = ttl;
         assert_issue_encode(
             issue_recovery_challenge(&mut transaction, &request).await,
-            "challenge TTL is not more than zero and at most 15 minutes",
+            "challenge TTL is not 1 second to 15 minutes",
         );
         assert_eq!(counts(&mut transaction).await, before, "{ttl:?}");
     }
@@ -596,33 +620,46 @@ async fn the_ttl_is_more_than_zero_and_at_most_fifteen_minutes() {
     db.drop([pool]).await;
 }
 
-/// Another kind, a digest of another length or a plan without a string
-/// `instance_id` and an integer `recovery_key_epoch` are encode errors
-/// before any statement.
+/// Another kind, a digest of another length, a plan without a string
+/// `instance_id` and an integer `recovery_key_epoch`, without the
+/// replacement's strings or without its key in lowercase hexadecimal are
+/// encode errors before any statement.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
     let (db, pool) = bootstrapped().await;
     let good = good_plan();
-    let plans = [
+    let changed = |name: &str, value: Option<Value>| {
+        let mut plan = good_plan();
+        match value {
+            Some(value) => plan.insert(name.into(), value),
+            None => plan.remove(name),
+        };
+        plan
+    };
+    let binding_plans = [
         plan(INSTANCE, json!("1")),
         plan(INSTANCE, json!(1.0)),
         plan(INSTANCE, json!(null)),
-        {
-            let mut plan = good_plan();
-            plan.remove("recovery_key_epoch");
-            plan
-        },
-        {
-            let mut plan = good_plan();
-            plan.remove("instance_id");
-            plan
-        },
-        {
-            let mut plan = good_plan();
-            plan.insert("instance_id".into(), json!(7));
-            plan
-        },
+        changed("recovery_key_epoch", None),
+        changed("instance_id", None),
+        changed("instance_id", Some(json!(7))),
+    ];
+    let replacement_plans = [
+        changed("admin_id", None),
+        changed("credential_id", Some(json!(1))),
+        changed("binding_id", Some(json!(null))),
+        changed("public_identity", Some(json!(["spki-sha256:new"]))),
+        changed("trust_anchor_ref", None),
+    ];
+    let key_plans = [
+        changed("new_recovery_public_key", None),
+        changed("new_recovery_public_key", Some(json!(hex(&NEW_KEY[..31])))),
+        changed(
+            "new_recovery_public_key",
+            Some(json!(hex(&NEW_KEY).to_uppercase().replace('2', "A"))),
+        ),
+        changed("new_recovery_public_key", Some(json!(NEW_KEY.to_vec()))),
     ];
     let short = [1; 31];
     let mut connection = pool.acquire().await.unwrap();
@@ -648,12 +685,31 @@ async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
         issue_recovery_challenge(&mut transaction, &request).await,
         "challenge hash is not 32 to 64 bytes",
     );
-    for plan in &plans {
-        assert_issue_encode(
-            issue_recovery_challenge(&mut transaction, &issue_request("op_bad", "aud_bad", plan))
-                .await,
+    for (plans, message) in [
+        (
+            &binding_plans[..],
             "plan lacks a string instance_id or an integer recovery_key_epoch",
-        );
+        ),
+        (
+            &replacement_plans[..],
+            "plan lacks a string admin_id, credential_id, binding_id, public_identity or \
+             trust_anchor_ref",
+        ),
+        (
+            &key_plans[..],
+            "plan new_recovery_public_key is not 64 lowercase hexadecimal digits",
+        ),
+    ] {
+        for plan in plans {
+            assert_issue_encode(
+                issue_recovery_challenge(
+                    &mut transaction,
+                    &issue_request("op_bad", "aud_bad", plan),
+                )
+                .await,
+                message,
+            );
+        }
     }
     let mut request = issue_request("op_bad", "aud_bad", &good);
     request.now = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
@@ -722,7 +778,7 @@ async fn no_challenge_is_issued_for_another_instance_or_epoch() {
 }
 
 /// `expected_revision` is the recovery state's revision when the challenge
-/// is issued, and a consume must name it.
+/// is issued, and a restore must name it.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_challenge_binds_the_current_recovery_state_revision() {
@@ -735,59 +791,62 @@ async fn a_challenge_binds_the_current_recovery_state_revision() {
     let challenge = issue(&pool, "op_1", "aud_issue_1").await;
     assert_eq!(challenge.expected_revision, 2);
     assert_eq!(pool_operation(&pool, "op_1").await.expected_revision, 2);
-    assert_not_consumable(consume_on(&pool, "op_1", &binding(), now()).await);
-    let mut bound = binding();
-    bound.expected_revision = 2;
-    // A challenge issued at revision 1 is consumable neither at its own
+    let before = pool_snapshot(&pool).await;
+    assert_not_restorable(restore_on(&pool, &restore_request("op_1")).await);
+    // A challenge issued at revision 1 is restorable neither at its own
     // revision, which is no longer the state's, nor at the state's.
     for revision in [1, 2] {
-        let mut stale = binding();
-        stale.expected_revision = revision;
-        assert_not_consumable(consume_on(&pool, "op_0", &stale, now()).await);
+        let mut stale = restore_request("op_0");
+        stale.binding.expected_revision = revision;
+        assert_not_restorable(restore_on(&pool, &stale).await);
     }
-    let consumed = consume_on(&pool, "op_1", &bound, now()).await.unwrap();
-    assert_eq!(consumed.expected_revision, 2);
+    assert_eq!(pool_snapshot(&pool).await, before);
+    let mut bound = restore_request("op_1");
+    bound.binding.expected_revision = 2;
+    let restored = restore_on(&pool, &bound).await.unwrap();
+    assert_eq!(restored.recovery_state_revision, 3);
+    let row = pool_operation(&pool, "op_1").await;
+    assert_eq!(
+        (row.expected_revision, row.consumed_us),
+        (2, Some(micros(now())))
+    );
+    assert_eq!(pool_operation(&pool, "op_0").await.consumed_us, None);
     db.drop([pool]).await;
 }
 
-/// The first consume sets `consumed_at` and the revision; a replay, in the
-/// same transaction or after the commit, is `NotConsumable`.
+/// The restore consumes the challenge: `consumed_at` is `now` and the
+/// revision advances; a replay, in the same transaction or after the
+/// commit, is `NotRestorable` and writes nothing.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_challenge_is_consumed_once() {
     let (db, pool) = issued().await;
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
-    let consumed = consume_recovery_challenge(&mut transaction, "op_1", &binding(), now())
-        .await
-        .unwrap();
-    assert_eq!(
-        consumed,
-        ConsumedChallenge {
-            operation_id: "op_1".into(),
-            instance_id: INSTANCE.into(),
-            recovery_key_epoch: 1,
-            expected_revision: 1,
-            request_digest: DIGEST.to_vec(),
-            immutable_plan: good_plan(),
-            expires_at: expires(),
-            consumed_at: now(),
-            revision: 2,
-        }
-    );
-    assert_not_consumable(
-        consume_recovery_challenge(&mut transaction, "op_1", &binding(), now()).await,
-    );
+    consume_and_restore(&mut transaction, "op_1").await.unwrap();
+    let after = snapshot(&mut transaction).await;
+    let mut replay = restore_request("op_1");
+    replay.audit_event_id = "aud_replay";
+    replay.rotation_audit_event_id = "aud_replay_rotate";
+    assert_not_restorable(restore_operator(&mut transaction, &replay).await);
+    assert_eq!(snapshot(&mut transaction).await, after);
     transaction.commit().await.unwrap();
     drop(connection);
     let row = pool_operation(&pool, "op_1").await;
     assert_eq!(
         (row.consumed_us, row.revision, &row.outcome[..]),
-        (Some(micros(now())), 2, "issued")
+        (Some(micros(now())), 3, "restored")
     );
     let before = pool_snapshot(&pool).await;
     for later in [now(), now() + Duration::from_secs(1)] {
-        assert_not_consumable(consume_on(&pool, "op_1", &binding(), later).await);
+        let mut request = replay;
+        request.now = later;
+        assert_not_restorable(restore_on(&pool, &request).await);
+        // Also bound to the state the restore left.
+        request.binding.recovery_key_epoch = 2;
+        request.binding.expected_revision = 2;
+        request.new_recovery_public_key = &THIRD_KEY;
+        assert_not_restorable(restore_on(&pool, &request).await);
     }
     assert_eq!(pool_snapshot(&pool).await, before);
     db.drop([pool]).await;
@@ -804,54 +863,53 @@ async fn a_challenge_expires_at_its_expiry() {
         expires() + Duration::from_micros(1),
         expires() + Duration::from_secs(3600),
     ] {
-        assert_not_consumable(consume_on(&pool, "op_1", &binding(), late).await);
+        let mut request = restore_request("op_1");
+        request.now = late;
+        assert_not_restorable(restore_on(&pool, &request).await);
     }
     assert_eq!(pool_snapshot(&pool).await, before);
     // A `now` the audit event could not carry is refused before the
     // statement, not compared.
-    match consume_on(
-        &pool,
-        "op_1",
-        &binding(),
-        UNIX_EPOCH + Duration::from_secs(253_402_300_800),
-    )
-    .await
-    {
-        Err(ChallengeError::Store(RegistryError::Other(sqlx::Error::Encode(err)))) => {
-            assert_eq!(
-                err.to_string(),
-                "audit timestamp outside the years 0000 to 9999"
-            )
-        }
-        other => panic!("expected an encode error: {other:?}"),
-    }
+    let mut request = restore_request("op_1");
+    request.now = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+    assert_restore_encode(
+        restore_on(&pool, &request).await,
+        "audit timestamp outside the years 0000 to 9999",
+    );
     let last = expires() - Duration::from_micros(1);
-    let consumed = consume_on(&pool, "op_1", &binding(), last).await.unwrap();
-    assert_eq!(consumed.consumed_at, last);
+    let mut request = restore_request("op_1");
+    request.now = last;
+    let restored = restore_on(&pool, &request).await.unwrap();
+    assert_eq!(restored.audit_event.timestamp, last);
+    assert_eq!(
+        pool_operation(&pool, "op_1").await.consumed_us,
+        Some(micros(last))
+    );
     db.drop([pool]).await;
 }
 
-/// A challenge revoked before its consume is `NotConsumable`.
+/// A challenge revoked before its restore is `NotRestorable`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_revoked_challenge_is_not_consumable() {
+async fn a_revoked_challenge_is_not_restorable() {
     let (db, pool) = issued().await;
     issue(&pool, "op_2", "aud_issue_2").await;
     raw_revoke(&mut pool.acquire().await.unwrap(), "op_1", "op_2").await;
     let before = pool_snapshot(&pool).await;
-    assert_not_consumable(consume_on(&pool, "op_1", &binding(), now()).await);
+    assert_not_restorable(restore_on(&pool, &restore_request("op_1")).await);
     assert_eq!(pool_snapshot(&pool).await, before);
     // The other one still is.
-    consume_on(&pool, "op_2", &binding(), now()).await.unwrap();
+    restore_on(&pool, &restore_request("op_2")).await.unwrap();
     db.drop([pool]).await;
 }
 
-/// Every miss is the same `NotConsumable`, equal by `Debug`, `Display` and
-/// `PartialEq`, and consumes nothing. A row written by other means with
-/// every value right is consumable, so each miss is its one difference.
+/// Every miss of the consume is the same `NotRestorable`, equal by
+/// `Debug`, `Display` and `PartialEq`, and writes nothing. A row written by
+/// other means with every value right is restorable, so each miss is its
+/// one difference.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn every_consume_miss_is_the_same_not_consumable() {
+async fn every_consume_miss_is_the_same_not_restorable() {
     let (db, pool) = issued().await;
     issue(&pool, "op_revoker", "aud_issue_2").await;
     issue(&pool, "op_revoked", "aud_issue_3").await;
@@ -870,10 +928,23 @@ async fn every_consume_miss_is_the_same_not_consumable() {
     .execute(&pool)
     .await
     .unwrap();
-    consume_on(&pool, "op_replayed", &binding(), now())
+    sqlx::query(RAW_CONSUME)
+        .bind("op_replayed")
+        .bind(micros(now()))
+        .execute(&pool)
         .await
         .unwrap();
-    let rows: [(&str, &str, Value, bool, i64); 13] = [
+    let with = |name: &str, value: Value| {
+        let mut plan = good_plan();
+        plan.insert(name.into(), value);
+        json!(plan)
+    };
+    let without = |name: &str| {
+        let mut plan = good_plan();
+        plan.remove(name);
+        json!(plan)
+    };
+    let rows: [(&str, &str, Value, bool, i64); 14] = [
         (
             "raw_good",
             OPERATOR_RESTORATION,
@@ -898,63 +969,63 @@ async fn every_consume_miss_is_the_same_not_consumable() {
         (
             "raw_epoch_string",
             OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!("1"))),
+            with("recovery_key_epoch", json!("1")),
             true,
             1,
         ),
         (
             "raw_epoch_float",
             OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!(1.0))),
+            with("recovery_key_epoch", json!(1.0)),
             true,
             1,
         ),
         (
             "raw_epoch_fraction",
             OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!(1.5))),
+            with("recovery_key_epoch", json!(1.5)),
             true,
             1,
         ),
         (
             "raw_epoch_null",
             OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!(null))),
+            with("recovery_key_epoch", json!(null)),
             true,
             1,
         ),
         (
             "raw_epoch_negative",
             OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!(-1))),
+            with("recovery_key_epoch", json!(-1)),
             true,
             1,
         ),
         (
             "raw_epoch_array",
             OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!([1]))),
+            with("recovery_key_epoch", json!([1])),
             true,
             1,
         ),
         (
             "raw_epoch_missing",
             OPERATOR_RESTORATION,
-            json!({"instance_id": INSTANCE}),
+            without("recovery_key_epoch"),
             true,
             1,
         ),
         (
             "raw_instance_missing",
             OPERATOR_RESTORATION,
-            json!({"recovery_key_epoch": 1}),
+            without("instance_id"),
             true,
             1,
         ),
         (
             "raw_instance_number",
             OPERATOR_RESTORATION,
-            json!({"instance_id": 1, "recovery_key_epoch": 1}),
+            with("instance_id", json!(1)),
             true,
             1,
         ),
@@ -965,10 +1036,39 @@ async fn every_consume_miss_is_the_same_not_consumable() {
             true,
             1,
         ),
+        (
+            "raw_upper_instance",
+            OPERATOR_RESTORATION,
+            json!(plan(&INSTANCE.to_uppercase(), json!(1))),
+            true,
+            1,
+        ),
     ];
     for (id, kind, plan, hash, revision) in rows {
         insert_raw(&pool, id, kind, plan, hash, revision).await;
     }
+    // A tenant's operation with every other value right.
+    registry::create_tenant(
+        &pool,
+        &NewTenant {
+            id: "ten_a".into(),
+            name: "Tenant A".into(),
+            secret_namespace: "ns_a".into(),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, challenge_hash, expires_at, outcome, audit_id) \
+         SELECT 'raw_tenant', 'ten_a', actor_id, kind, request_digest, expected_revision, \
+         immutable_plan, challenge_hash, expires_at, outcome, audit_id \
+         FROM administrative_operation WHERE id = 'raw_good'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let bound = binding();
     let other_digest = ChallengeBinding {
@@ -983,6 +1083,10 @@ async fn every_consume_miss_is_the_same_not_consumable() {
         instance_id: OTHER_INSTANCE,
         ..bound
     };
+    let upper_instance = ChallengeBinding {
+        instance_id: "019A9F3C-5B2E-7C41-9D8E-0123456789AB",
+        ..bound
+    };
     let other_revision = ChallengeBinding {
         expected_revision: 2,
         ..bound
@@ -995,6 +1099,10 @@ async fn every_consume_miss_is_the_same_not_consumable() {
         recovery_key_epoch: 2,
         ..bound
     };
+    let negative_epoch = ChallengeBinding {
+        recovery_key_epoch: -1,
+        ..bound
+    };
     let before = pool_snapshot(&pool).await;
     let mut misses = Vec::new();
     for (id, binding, at) in [
@@ -1003,6 +1111,7 @@ async fn every_consume_miss_is_the_same_not_consumable() {
         ("op_1", other_digest, now()),
         ("op_1", short_digest, now()),
         ("op_1", other_instance, now()),
+        ("op_1", upper_instance, now()),
         ("op_1", other_revision, now()),
         ("op_1", zero_revision, now()),
         ("op_1", other_epoch, now()),
@@ -1012,33 +1121,29 @@ async fn every_consume_miss_is_the_same_not_consumable() {
         ("op_failed", bound, now()),
         ("raw_kind", bound, now()),
         ("raw_no_hash", bound, now()),
+        ("raw_tenant", bound, now()),
         ("raw_epoch_string", bound, now()),
         ("raw_epoch_float", bound, now()),
         ("raw_epoch_fraction", bound, now()),
         ("raw_epoch_null", bound, now()),
         ("raw_epoch_negative", bound, now()),
+        // A plan whose epoch is negative matches a binding with that epoch
+        // only if the recovery state had it, which it cannot.
+        ("raw_epoch_negative", negative_epoch, now()),
         ("raw_epoch_array", bound, now()),
         ("raw_epoch_missing", bound, now()),
         ("raw_instance_missing", bound, now()),
         ("raw_instance_number", bound, now()),
         ("raw_other_instance", bound, now()),
         ("raw_other_instance", other_instance, now()),
+        ("raw_upper_instance", bound, now()),
+        ("raw_upper_instance", upper_instance, now()),
     ] {
-        misses.push((
-            id,
-            assert_not_consumable(consume_on(&pool, id, &binding, at).await),
-        ));
+        let mut request = restore_request(id);
+        request.binding = binding;
+        request.now = at;
+        misses.push((id, assert_not_restorable(restore_on(&pool, &request).await)));
     }
-    // A plan whose epoch is negative matches a binding with that epoch only
-    // if the recovery state had it, which it cannot.
-    let negative = ChallengeBinding {
-        recovery_key_epoch: -1,
-        ..bound
-    };
-    misses.push((
-        "raw_epoch_negative",
-        assert_not_consumable(consume_on(&pool, "raw_epoch_negative", &negative, now()).await),
-    ));
     assert_eq!(pool_snapshot(&pool).await, before);
     let (_, first) = &misses[0];
     for (id, miss) in &misses {
@@ -1046,9 +1151,13 @@ async fn every_consume_miss_is_the_same_not_consumable() {
         assert_eq!(format!("{miss:?}"), format!("{first:?}"), "{id}");
         assert_eq!(miss.to_string(), first.to_string(), "{id}");
     }
-    // The control row and the issued one are consumable.
-    consume_on(&pool, "raw_good", &bound, now()).await.unwrap();
-    consume_on(&pool, "op_1", &bound, now()).await.unwrap();
+    // The issued challenge is restorable, and so is the control row.
+    let mut transaction = pool.begin().await.unwrap();
+    consume_and_restore(&mut transaction, "op_1").await.unwrap();
+    transaction.rollback().await.unwrap();
+    restore_on(&pool, &restore_request("raw_good"))
+        .await
+        .unwrap();
     db.drop([pool]).await;
 }
 
@@ -1067,7 +1176,7 @@ async fn the_database_refuses_a_replay_a_late_consume_and_one_after_revocation()
         "op_revoker",
     )
     .await;
-    consume_on(&pool, "op_1", &binding(), now()).await.unwrap();
+    restore_on(&pool, &restore_request("op_1")).await.unwrap();
     let before = pool_snapshot(&pool).await;
     for (id, at, expected) in [
         ("op_1", now() + Duration::from_secs(1), None),
@@ -1117,20 +1226,21 @@ async fn backend_pid(connection: &mut PgConnection) -> i32 {
         .unwrap()
 }
 
+/// Whether the backend `blocked` waits for a lock held by `holder`.
+async fn is_blocked(pool: &PgPool, blocked: i32, holder: i32) -> bool {
+    sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+        .bind(holder)
+        .bind(blocked)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 /// Waits, without sleeping, until the backend `blocked` waits for a lock
 /// held by `holder`.
 async fn wait_until_blocked(pool: &PgPool, blocked: i32, holder: i32) {
     tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
-                .bind(holder)
-                .bind(blocked)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-            if waiting {
-                return;
-            }
+        while !is_blocked(pool, blocked, holder).await {
             tokio::task::yield_now().await;
         }
     })
@@ -1138,11 +1248,36 @@ async fn wait_until_blocked(pool: &PgPool, blocked: i32, holder: i32) {
     .expect("the second transaction never waited for the first");
 }
 
-/// The second of two consumes waits for the first's row lock; after the
-/// first commits it is `NotConsumable`, after a rollback it consumes.
+/// Waits, without sleeping, until the backend `blocked` of `task` waits
+/// for a lock held by `holder` (`true`), or `task` ends without having
+/// waited (`false`).
+async fn waits_for<T>(
+    pool: &PgPool,
+    blocked: i32,
+    holder: i32,
+    task: &tokio::task::JoinHandle<T>,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if is_blocked(pool, blocked, holder).await {
+                return true;
+            }
+            if task.is_finished() {
+                return false;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the task neither waited nor ended")
+}
+
+/// Two restores of one challenge: the second waits for the first (on the
+/// credentials it locked); after the first commits it is `NotRestorable`,
+/// after a rollback it restores.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn of_two_concurrent_consumes_exactly_one_wins() {
+async fn of_two_concurrent_restores_of_one_challenge_exactly_one_wins() {
     for commit in [true, false] {
         let (db, pool) = issued().await;
         let mut first = pool.acquire().await.unwrap().detach();
@@ -1152,20 +1287,20 @@ async fn of_two_concurrent_consumes_exactly_one_wins() {
             backend_pid(&mut second).await,
         );
         let mut transaction = first.begin().await.unwrap();
-        consume_recovery_challenge(&mut transaction, "op_1", &binding(), now())
-            .await
-            .unwrap();
+        consume_and_restore(&mut transaction, "op_1").await.unwrap();
+        let later = now() + Duration::from_secs(1);
         let waiting = tokio::spawn(async move {
             let mut other = second.begin().await.unwrap();
-            let later = now() + Duration::from_secs(1);
-            let consumed = consume_recovery_challenge(&mut other, "op_1", &binding(), later).await;
-            if consumed.is_ok() {
+            let mut request = restore_request("op_1");
+            request.now = later;
+            let restored = restore_operator(&mut other, &request).await;
+            if restored.is_ok() {
                 other.commit().await.unwrap();
             } else {
                 other.rollback().await.unwrap();
             }
             second.close().await.unwrap();
-            consumed
+            restored
         });
         wait_until_blocked(&pool, second_pid, first_pid).await;
         if commit {
@@ -1176,18 +1311,24 @@ async fn of_two_concurrent_consumes_exactly_one_wins() {
         first.close().await.unwrap();
         let outcome = waiting.await.unwrap();
         let row = pool_operation(&pool, "op_1").await;
-        if commit {
-            assert_not_consumable(outcome);
-            assert_eq!(row.consumed_us, Some(micros(now())));
+        let winner = if commit {
+            assert_not_restorable(outcome);
+            now()
         } else {
-            let consumed = outcome.unwrap();
-            assert_eq!(consumed.consumed_at, now() + Duration::from_secs(1));
-            assert_eq!(
-                row.consumed_us,
-                Some(micros(now() + Duration::from_secs(1)))
-            );
-        }
-        assert_eq!(row.revision, 2);
+            let restored = outcome.unwrap();
+            assert_eq!(restored.audit_event.timestamp, later);
+            later
+        };
+        assert_eq!(
+            (row.consumed_us, row.revision, &row.outcome[..]),
+            (Some(micros(winner)), 3, "restored")
+        );
+        let state = get_recovery_state(&pool).await.unwrap().unwrap();
+        assert_eq!((state.recovery_key_epoch, state.revision), (2, 2));
+        assert_eq!(
+            verify(&pool).await,
+            ChainVerdict::Intact { last_sequence: 4 }
+        );
         db.drop([pool]).await;
     }
 }
@@ -1274,9 +1415,9 @@ async fn more_operators(pool: &PgPool) {
 /// The full restoration: a replacement `security_admin` that authorizes,
 /// every unrevoked credential revoked at `now` (the replaced operator's
 /// included), the revoked one untouched, identities and bindings unchanged,
-/// the key rotated to epoch 2, the operation restored, the event exact and
-/// the chain intact; the old epoch is refused afterwards and the new one
-/// works.
+/// the key rotated to epoch 2, the operation restored, both events exact
+/// and the chain intact; the old epoch is refused afterwards and the new
+/// one works.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_restore_enrolls_a_replacement_revokes_every_credential_and_rotates_the_key() {
@@ -1428,8 +1569,10 @@ async fn a_restore_enrolls_a_replacement_revokes_every_credential_and_rotates_th
             ..operation_before
         }
     );
-    // The event, by the key that signed (epoch 1), last in the chain.
+    // The events, by the key that signed (epoch 1), last in the chain: the
+    // restore, then the rotation.
     let event = &restored.audit_event;
+    let rotation = &restored.rotation_audit_event;
     assert_eq!(
         (
             &event.id[..],
@@ -1458,37 +1601,89 @@ async fn a_restore_enrolls_a_replacement_revokes_every_credential_and_rotates_th
             "success",
         )
     );
+    assert_eq!(
+        (
+            &rotation.id[..],
+            rotation.tenant_id.as_deref(),
+            rotation.sequence,
+            rotation.prev_hash,
+            rotation.timestamp,
+            &rotation.actor,
+            &rotation.action[..],
+            &rotation.object_id[..],
+            rotation.previous_revision,
+            rotation.new_revision,
+            &rotation.outcome[..],
+        ),
+        (
+            "aud_rotate",
+            None,
+            5,
+            Some(event.hash),
+            now(),
+            &AuditActor::Operator("recovery_key:1".into()),
+            "recovery_state.rotate_key",
+            INSTANCE,
+            Some(1),
+            Some(2),
+            "success",
+        )
+    );
     assert_eq!(issue_event.sequence, 2);
     assert_eq!(event.compute_hash().unwrap(), event.hash);
-    let stored: (String, i64) = sqlx::query_as(
-        "SELECT actor, (SELECT max(sequence) FROM audit_event) FROM audit_event \
-         WHERE id = 'aud_restore'",
+    assert_eq!(rotation.compute_hash().unwrap(), rotation.hash);
+    let stored: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT id, actor, sequence FROM audit_event WHERE sequence > 3 ORDER BY sequence",
     )
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
+    let actor = r#"{"id":"recovery_key:1","type":"operator"}"#;
     assert_eq!(
         stored,
-        (r#"{"id":"recovery_key:1","type":"operator"}"#.into(), 4)
+        [
+            ("aud_restore".into(), actor.into(), 4),
+            ("aud_rotate".into(), actor.into(), 5)
+        ]
     );
     assert_eq!(
         verify(&pool).await,
-        ChainVerdict::Intact { last_sequence: 4 }
+        ChainVerdict::Intact { last_sequence: 5 }
     );
 
-    // The retired epoch is refused for a challenge issued before.
-    assert_not_consumable(consume_on(&pool, "op_2", &binding(), now()).await);
-    let mut current = binding();
-    current.recovery_key_epoch = 2;
-    current.expected_revision = 2;
-    assert_not_consumable(consume_on(&pool, "op_2", &current, now()).await);
+    // The retired epoch is refused for a challenge issued before, also
+    // with the new state's binding.
+    let before = pool_snapshot(&pool).await;
+    assert_not_restorable(restore_on(&pool, &other_request("op_2", &THIRD_KEY)).await);
+    assert_not_restorable(restore_on(&pool, &restore_request("op_2")).await);
+    let mut current = other_request("op_2", &THIRD_KEY);
+    current.binding.recovery_key_epoch = 2;
+    current.binding.expected_revision = 2;
+    assert_not_restorable(restore_on(&pool, &current).await);
+    assert_eq!(pool_snapshot(&pool).await, before);
     // A challenge of the new epoch works.
-    let plan = plan(INSTANCE, json!(2));
+    let request = RestoreRequest {
+        operation_id: "op_3",
+        ..current
+    };
+    let plan = plan_for(INSTANCE, json!(2), &request);
     let challenge = issue_on(&pool, &issue_request("op_3", "aud_issue_3", &plan))
         .await
         .unwrap();
     assert_eq!(challenge.expected_revision, 2);
-    consume_on(&pool, "op_3", &current, now()).await.unwrap();
+    let again = restore_on(&pool, &request).await.unwrap();
+    assert_eq!(
+        (
+            again.recovery_key_epoch,
+            &again.audit_event.actor,
+            &again.revoked_credential_ids[..]
+        ),
+        (
+            3,
+            &AuditActor::Operator("recovery_key:2".into()),
+            &["crd_new".to_owned()][..]
+        )
+    );
     db.drop([pool]).await;
 }
 
@@ -1540,7 +1735,7 @@ async fn a_restore_changes_nothing_else() {
         ("admin_identity", 1),
         ("admin_credential", 1),
         ("admin_role_binding", 1),
-        ("audit_event", 1),
+        ("audit_event", 2),
         ("administrative_operation", 0),
         ("recovery_state", 0),
         ("audit_chain_head", 0),
@@ -1560,50 +1755,60 @@ async fn a_restore_changes_nothing_else() {
 /// A restore that fails after its consume, on a statement or in Rust after
 /// the audit head lock, rolls its savepoint back, the consume included: a
 /// caller that commits after the `Err` commits nothing of it, and the
-/// challenge stays consumable.
+/// challenge stays restorable.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_failed_restore_commits_nothing_even_when_the_caller_commits() {
     let (db, pool) = issued().await;
     let before = pool_snapshot(&pool).await;
-    // A statement fails: the event ID is taken (`23505` from the writer).
-    let mut transaction = pool.begin().await.unwrap();
-    let mut request = restore_request("op_1");
-    request.audit_event_id = "aud_issue_1";
-    assert_restore_exists(
-        restore_operator(&mut transaction, &request).await,
-        "audit_event_pkey",
-    );
-    // The transaction is usable and its commit writes nothing.
-    sqlx::query("SELECT 1")
-        .execute(&mut *transaction)
-        .await
-        .unwrap();
-    transaction.commit().await.unwrap();
-    assert_eq!(pool_snapshot(&pool).await, before);
+    // A statement fails: an event ID is taken (`23505` from the writer),
+    // the first event's, the second's, or the second is the first's.
+    for (restore_id, rotation_id) in [
+        ("aud_issue_1", "aud_rotate"),
+        ("aud_restore", "aud_bootstrap"),
+        ("aud_restore", "aud_restore"),
+    ] {
+        let mut transaction = pool.begin().await.unwrap();
+        let mut request = restore_request("op_1");
+        request.audit_event_id = restore_id;
+        request.rotation_audit_event_id = rotation_id;
+        assert_restore_exists(
+            restore_operator(&mut transaction, &request).await,
+            "audit_event_pkey",
+        );
+        // The transaction is usable and its commit writes nothing.
+        sqlx::query("SELECT 1")
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert_eq!(pool_snapshot(&pool).await, before, "{restore_id}");
+    }
 
     // The writer refuses in Rust after the head lock: the next sequence
-    // would be above 2^53 - 1.
+    // would be above 2^53 - 1, for the first event or only for the second.
     let head: Vec<u8> = sqlx::query_scalar("SELECT head_hash FROM audit_chain_head")
         .fetch_one(&pool)
         .await
         .unwrap();
-    sqlx::raw_sql(
-        "ALTER TABLE audit_chain_head DISABLE TRIGGER audit_chain_head_advance; \
-         UPDATE audit_chain_head SET sequence = 9007199254740991; \
-         ALTER TABLE audit_chain_head ENABLE ALWAYS TRIGGER audit_chain_head_advance",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    let before = pool_snapshot(&pool).await;
-    let mut transaction = pool.begin().await.unwrap();
-    match restore_operator(&mut transaction, &restore_request("op_1")).await {
-        Err(RestoreError::Store(RegistryError::Other(sqlx::Error::Encode(_)))) => {}
-        other => panic!("expected the writer's encode error: {other:?}"),
+    for sequence in [9_007_199_254_740_991_i64, 9_007_199_254_740_990] {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER TABLE audit_chain_head DISABLE TRIGGER audit_chain_head_advance; \
+             UPDATE audit_chain_head SET sequence = {sequence}; \
+             ALTER TABLE audit_chain_head ENABLE ALWAYS TRIGGER audit_chain_head_advance"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let before = pool_snapshot(&pool).await;
+        let mut transaction = pool.begin().await.unwrap();
+        match restore_operator(&mut transaction, &restore_request("op_1")).await {
+            Err(RestoreError::Store(RegistryError::Other(sqlx::Error::Encode(_)))) => {}
+            other => panic!("expected the writer's encode error: {other:?}"),
+        }
+        transaction.commit().await.unwrap();
+        assert_eq!(pool_snapshot(&pool).await, before, "{sequence}");
     }
-    transaction.commit().await.unwrap();
-    assert_eq!(pool_snapshot(&pool).await, before);
     let row = pool_operation(&pool, "op_1").await;
     assert_eq!((row.consumed_us, row.revision), (None, 1));
     let credential = registry::get_admin_credential(&pool, "crd_first")
@@ -1647,7 +1852,7 @@ async fn a_failed_restore_commits_nothing_even_when_the_caller_commits() {
     assert_eq!(pool_operation(&pool, "op_1").await.outcome, "restored");
     assert_eq!(
         verify(&pool).await,
-        ChainVerdict::Intact { last_sequence: 3 }
+        ChainVerdict::Intact { last_sequence: 4 }
     );
     db.drop([pool]).await;
 }
@@ -1686,12 +1891,12 @@ async fn a_failed_issue_commits_nothing_even_when_the_caller_commits() {
     db.drop([pool]).await;
 }
 
-/// A consume whose statement fails (here on a lock timeout, while another
-/// transaction holds the row) rolls its savepoint back: the caller's
-/// transaction stays usable and commits nothing of it.
+/// A restore whose consume fails (here on a lock timeout, while another
+/// transaction holds the operation row) rolls its savepoint back: the
+/// caller's transaction stays usable and commits nothing of it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_failed_consume_leaves_the_transaction_usable() {
+async fn a_restore_that_times_out_leaves_the_transaction_usable() {
     let (db, pool) = issued().await;
     let mut holder = pool.begin().await.unwrap();
     sqlx::query("SELECT id FROM administrative_operation WHERE id = 'op_1' FOR UPDATE")
@@ -1704,8 +1909,8 @@ async fn a_failed_consume_leaves_the_transaction_usable() {
         .execute(&mut *transaction)
         .await
         .unwrap();
-    match consume_recovery_challenge(&mut transaction, "op_1", &binding(), now()).await {
-        Err(ChallengeError::Store(RegistryError::Other(err))) => {
+    match restore_operator(&mut transaction, &restore_request("op_1")).await {
+        Err(RestoreError::Store(RegistryError::Other(err))) => {
             let code = err
                 .as_database_error()
                 .unwrap()
@@ -1723,56 +1928,74 @@ async fn a_failed_consume_leaves_the_transaction_usable() {
     transaction.commit().await.unwrap();
     holder.rollback().await.unwrap();
     assert_eq!(pool_snapshot(&pool).await, before);
-    consume_on(&pool, "op_1", &binding(), now()).await.unwrap();
+    restore_on(&pool, &restore_request("op_1")).await.unwrap();
     db.drop([pool]).await;
 }
 
-/// The replacement's IDs, credential identity and the event ID must be
-/// new: each collision is `AlreadyExists` with its constraint (the inserts
-/// return no row, or the writer's `23505`), and the savepoint is rolled
-/// back, the consume included, also when the caller commits.
+/// The replacement's IDs, credential identity and the event IDs must be
+/// new: each collision is the insert's or the writer's `AlreadyExists`
+/// with its constraint, and the savepoint is rolled back, the consume
+/// included, also when the caller commits. Each challenge names the
+/// colliding replacement.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_colliding_replacement_is_already_exists() {
     let (db, pool) = issued().await;
-    let before = pool_snapshot(&pool).await;
-    for (field, value, constraint) in [
-        ("admin", "adm_first", "admin_identity_pkey"),
-        ("credential", "crd_first", "admin_credential_pkey"),
-        ("binding", "rb_first", "admin_role_binding_pkey"),
+    let cases: [(&str, Change, &str); 6] = [
         (
-            "identity",
-            "spki-sha256:first",
+            "op_admin",
+            |request| request.admin_id = "adm_first",
+            "admin_identity_pkey",
+        ),
+        (
+            "op_credential",
+            |request| request.credential_id = "crd_first",
+            "admin_credential_pkey",
+        ),
+        (
+            "op_binding",
+            |request| request.binding_id = "rb_first",
+            "admin_role_binding_pkey",
+        ),
+        (
+            "op_identity",
+            |request| request.public_identity = "spki-sha256:first",
             "admin_credential_public_identity_key",
         ),
-        ("audit", "aud_bootstrap", "audit_event_pkey"),
-    ] {
-        let mut transaction = pool.begin().await.unwrap();
-        let mut request = restore_request("op_1");
-        match field {
-            "admin" => request.admin_id = value,
-            "credential" => request.credential_id = value,
-            "binding" => request.binding_id = value,
-            "identity" => request.public_identity = value,
-            _ => request.audit_event_id = value,
+        (
+            "op_both",
+            |request| {
+                request.credential_id = "crd_first";
+                request.public_identity = "spki-sha256:first";
+            },
+            // Both credential keys taken: the ID is named.
+            "admin_credential_pkey",
+        ),
+        (
+            "op_1",
+            |request| request.audit_event_id = "aud_bootstrap",
+            "audit_event_pkey",
+        ),
+    ];
+    for (index, (id, change, constraint)) in cases.into_iter().enumerate() {
+        let mut request = restore_request(id);
+        change(&mut request);
+        if id != "op_1" {
+            let plan = plan_for(INSTANCE, json!(1), &request);
+            let audit = format!("aud_issue_{id}");
+            issue_on(&pool, &issue_request(id, &audit, &plan))
+                .await
+                .unwrap();
         }
+        let before = pool_snapshot(&pool).await;
+        let mut transaction = pool.begin().await.unwrap();
         assert_restore_exists(
             restore_operator(&mut transaction, &request).await,
             constraint,
         );
         transaction.commit().await.unwrap();
-        assert_eq!(pool_snapshot(&pool).await, before, "{constraint}");
+        assert_eq!(pool_snapshot(&pool).await, before, "{index} {constraint}");
     }
-    // Both credential keys taken: the ID is named.
-    let mut transaction = pool.begin().await.unwrap();
-    let mut request = restore_request("op_1");
-    request.credential_id = "crd_first";
-    request.public_identity = "spki-sha256:first";
-    assert_restore_exists(
-        restore_operator(&mut transaction, &request).await,
-        "admin_credential_pkey",
-    );
-    transaction.rollback().await.unwrap();
     db.drop([pool]).await;
 }
 
@@ -1784,13 +2007,17 @@ async fn a_colliding_replacement_is_already_exists() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_refused_restore_leaves_nothing_written() {
     let (db, pool) = issued().await;
+    let mut same = restore_request("op_same");
+    same.new_recovery_public_key = &KEY;
+    let plan = plan_for(INSTANCE, json!(1), &same);
+    issue_on(&pool, &issue_request("op_same", "aud_issue_same", &plan))
+        .await
+        .unwrap();
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
     let before = snapshot(&mut transaction).await;
 
-    let mut request = restore_request("op_1");
-    request.new_recovery_public_key = &KEY;
-    match restore_operator(&mut transaction, &request).await {
+    match restore_operator(&mut transaction, &same).await {
         Err(err @ RestoreError::RecoveryKeyUnchanged) => {
             assert_eq!(format!("{err:?}"), "RecoveryKeyUnchanged");
             assert_eq!(
@@ -1804,6 +2031,11 @@ async fn a_refused_restore_leaves_nothing_written() {
     // A challenge that is not consumable is refused first (inferred order).
     let mut request = restore_request("op_unknown");
     request.new_recovery_public_key = &KEY;
+    assert_not_restorable(restore_operator(&mut transaction, &request).await);
+    assert_eq!(snapshot(&mut transaction).await, before);
+    // So is a replacement the plan does not name (inferred order).
+    let mut request = same;
+    request.admin_id = "adm_other";
     assert_not_restorable(restore_operator(&mut transaction, &request).await);
     assert_eq!(snapshot(&mut transaction).await, before);
 
@@ -1832,9 +2064,9 @@ async fn a_refused_restore_leaves_nothing_written() {
     );
     assert_eq!(snapshot(&mut transaction).await, before);
 
-    let mut request = restore_request("op_1");
-    request.new_recovery_public_key = &THIRD_KEY;
-    let restored = restore_operator(&mut transaction, &request).await.unwrap();
+    let restored = restore_operator(&mut transaction, &restore_request("op_1"))
+        .await
+        .unwrap();
     assert_eq!(restored.recovery_key_epoch, 2);
     transaction.commit().await.unwrap();
     drop(connection);
@@ -1843,14 +2075,15 @@ async fn a_refused_restore_leaves_nothing_written() {
             .await
             .unwrap()
             .map(|state| state.recovery_public_key),
-        Some(THIRD_KEY.to_vec())
+        Some(NEW_KEY.to_vec())
     );
     db.drop([pool]).await;
 }
 
 /// A restore consumes the challenge with the consume statement against the
-/// recovery state it locked: every consume miss is `NotRestorable`, and
-/// nothing is left written.
+/// recovery state it locked: every miss is `NotRestorable`, also for a
+/// recovery state whose `bootstrap_closed` is false (written by other
+/// means), and nothing is left written.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
@@ -1872,7 +2105,10 @@ async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
     .execute(&pool)
     .await
     .unwrap();
-    consume_on(&pool, "op_consumed", &binding(), now())
+    sqlx::query(RAW_CONSUME)
+        .bind("op_consumed")
+        .bind(micros(now()))
+        .execute(&pool)
         .await
         .unwrap();
     for (id, kind, plan, hash) in [
@@ -1912,7 +2148,12 @@ async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
     let committed = pool_snapshot(&pool).await;
 
     let bound = binding();
-    let cases: [(&str, ChallengeBinding<'_>, SystemTime, Option<&str>); 15] = [
+    // The recovery state left open, by other means; the guards that would
+    // refuse that write are off only inside the test's transaction.
+    let reopen = "ALTER TABLE recovery_state DISABLE TRIGGER USER; \
+                  UPDATE recovery_state SET bootstrap_closed = false; \
+                  ALTER TABLE recovery_state ENABLE TRIGGER USER";
+    let cases: [(&str, ChallengeBinding<'_>, SystemTime, Option<&str>); 16] = [
         ("op_unknown", bound, now(), None),
         ("op_revoked", bound, now(), None),
         ("op_failed", bound, now(), None),
@@ -1951,6 +2192,7 @@ async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
             now(),
             Some("UPDATE recovery_state SET revision = revision + 1"),
         ),
+        ("op_1", bound, now(), Some(reopen)),
         ("raw_kind", bound, now(), None),
         ("raw_no_hash", bound, now(), None),
         ("raw_epoch_string", bound, now(), None),
@@ -1978,7 +2220,7 @@ async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
         let mut connection = pool.acquire().await.unwrap();
         let mut transaction = connection.begin().await.unwrap();
         if let Some(statement) = statement {
-            sqlx::query(statement)
+            sqlx::raw_sql(AssertSqlSafe(statement))
                 .execute(&mut *transaction)
                 .await
                 .unwrap();
@@ -1990,32 +2232,84 @@ async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
         let refused = restore_operator(&mut transaction, &request).await;
         assert!(
             matches!(refused, Err(RestoreError::NotRestorable)),
-            "{id}: {refused:?}"
+            "{id} {statement:?}: {refused:?}"
         );
         assert_eq!(snapshot(&mut transaction).await, before, "{id}");
         transaction.rollback().await.unwrap();
     }
     assert_eq!(pool_snapshot(&pool).await, committed);
 
-    // A second restore of a restored operation.
-    let mut transaction = pool.begin().await.unwrap();
-    consume_and_restore(&mut transaction, "op_1").await.unwrap();
-    transaction.commit().await.unwrap();
+    // The control, with every value right; then a second restore of the
+    // restored operation.
+    restore_on(&pool, &restore_request("op_1")).await.unwrap();
     let restored = pool_snapshot(&pool).await;
     let mut request = restore_request("op_1");
-    request.admin_id = "adm_again";
-    request.credential_id = "crd_again";
-    request.binding_id = "rb_again";
-    request.public_identity = "spki-sha256:again";
     request.audit_event_id = "aud_again";
-    request.new_recovery_public_key = &THIRD_KEY;
+    request.rotation_audit_event_id = "aud_again_rotate";
     request.binding.recovery_key_epoch = 2;
     request.binding.expected_revision = 2;
-    let mut transaction = pool.begin().await.unwrap();
-    assert_not_restorable(restore_operator(&mut transaction, &request).await);
-    transaction.rollback().await.unwrap();
+    assert_not_restorable(restore_on(&pool, &request).await);
     assert_eq!(pool_snapshot(&pool).await, restored);
     db.drop([pool]).await;
+}
+
+/// Each replacement member the plan names must be the request's: a request
+/// that differs in that one member is `NotRestorable`, and the restore and
+/// its consume roll back, also when the caller commits; the request the
+/// plan names then restores.
+async fn a_restore_must_name_the_planned(change: Change) {
+    let (db, pool) = issued().await;
+    let before = pool_snapshot(&pool).await;
+    let mut request = restore_request("op_1");
+    change(&mut request);
+    assert_ne!(request, restore_request("op_1"));
+    let mut transaction = pool.begin().await.unwrap();
+    assert_not_restorable(restore_operator(&mut transaction, &request).await);
+    transaction.commit().await.unwrap();
+    assert_eq!(pool_snapshot(&pool).await, before);
+    let row = pool_operation(&pool, "op_1").await;
+    assert_eq!((row.consumed_us, row.revision), (None, 1));
+    let restored = restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_name_the_planned_admin_id() {
+    a_restore_must_name_the_planned(|request| request.admin_id = "adm_other").await;
+}
+
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_name_the_planned_credential_id() {
+    a_restore_must_name_the_planned(|request| request.credential_id = "crd_other").await;
+}
+
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_name_the_planned_binding_id() {
+    a_restore_must_name_the_planned(|request| request.binding_id = "rb_other").await;
+}
+
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_name_the_planned_public_identity() {
+    a_restore_must_name_the_planned(|request| request.public_identity = "spki-sha256:other").await;
+}
+
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_name_the_planned_trust_anchor_ref() {
+    a_restore_must_name_the_planned(|request| request.trust_anchor_ref = "deployment/other-ca")
+        .await;
+}
+
+/// Another replacement key with the binding unchanged.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_must_name_the_planned_recovery_key() {
+    a_restore_must_name_the_planned(|request| request.new_recovery_public_key = &THIRD_KEY).await;
 }
 
 /// A restore and an issue wait for each other on the recovery state, in
@@ -2084,19 +2378,26 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
     first.close().await.unwrap();
     let restored = waiting.await.unwrap().unwrap();
     assert_eq!(
-        (restored.recovery_key_epoch, restored.audit_event.sequence),
-        (2, 4)
+        (
+            restored.recovery_key_epoch,
+            restored.audit_event.sequence,
+            restored.rotation_audit_event.sequence
+        ),
+        (2, 4, 5)
     );
-    assert_not_consumable(consume_on(&pool, "op_2", &binding(), now()).await);
+    assert_not_restorable(restore_on(&pool, &other_request("op_2", &THIRD_KEY)).await);
     assert_eq!(
         verify(&pool).await,
-        ChainVerdict::Intact { last_sequence: 4 }
+        ChainVerdict::Intact { last_sequence: 5 }
     );
     db.drop([pool]).await;
 
     // Two restores.
     let (db, pool) = issued().await;
-    issue(&pool, "op_2", "aud_issue_2").await;
+    let plan = plan_for(INSTANCE, json!(1), &other_request("op_2", &THIRD_KEY));
+    issue_on(&pool, &issue_request("op_2", "aud_issue_2", &plan))
+        .await
+        .unwrap();
     let mut first = pool.acquire().await.unwrap().detach();
     let mut second = pool.acquire().await.unwrap().detach();
     let (first_pid, second_pid) = (
@@ -2107,14 +2408,7 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
     consume_and_restore(&mut transaction, "op_1").await.unwrap();
     let waiting = tokio::spawn(async move {
         let mut other = second.begin().await.unwrap();
-        let mut request = restore_request("op_2");
-        request.admin_id = "adm_other";
-        request.credential_id = "crd_other";
-        request.binding_id = "rb_other";
-        request.public_identity = "spki-sha256:other";
-        request.audit_event_id = "aud_other";
-        request.new_recovery_public_key = &THIRD_KEY;
-        let restored = restore_operator(&mut other, &request).await;
+        let restored = restore_operator(&mut other, &other_request("op_2", &THIRD_KEY)).await;
         other.rollback().await.unwrap();
         second.close().await.unwrap();
         restored
@@ -2177,18 +2471,90 @@ async fn a_restore_waiting_for_the_recovery_state_holds_no_audit_head() {
     first.close().await.unwrap();
     assert_eq!(challenge.audit_event.sequence, 3);
     let restored = waiting.await.unwrap().unwrap();
-    assert_eq!(restored.audit_event.sequence, 4);
+    assert_eq!(
+        (
+            restored.audit_event.sequence,
+            restored.rotation_audit_event.sequence
+        ),
+        (4, 5)
+    );
     assert_eq!(
         verify(&pool).await,
-        ChainVerdict::Intact { last_sequence: 4 }
+        ChainVerdict::Intact { last_sequence: 5 }
+    );
+    db.drop([pool]).await;
+}
+
+/// A restoration appends its events after its writes, holding no audit
+/// head while it waits for one of them (here for a replacement ID another
+/// transaction is inserting): that transaction can still append an event
+/// and commit, with no deadlock, and the restoration then finds the ID
+/// taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_appends_its_events_after_its_writes() {
+    let (db, pool) = issued().await;
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    let mut transaction = first.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO admin_identity (id, status, created_at) \
+         VALUES ('adm_new', 'enabled', timestamptz 'epoch')",
+    )
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let restoring = tokio::spawn(async move {
+        let mut other = second.begin().await.unwrap();
+        let restored = consume_and_restore(&mut other, "op_1").await;
+        other.rollback().await.unwrap();
+        second.close().await.unwrap();
+        restored
+    });
+    wait_until_blocked(&pool, second_pid, first_pid).await;
+    let event = registry::append_audit_event(
+        &mut transaction,
+        &NewAuditEvent {
+            id: "aud_other_write".into(),
+            tenant_id: None,
+            timestamp: now(),
+            actor: AuditActor::Operator("adm_first".into()),
+            action: "admin_identity.create".into(),
+            object_id: "adm_new".into(),
+            previous_revision: None,
+            new_revision: None,
+            outcome: "success".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(event.sequence, 3);
+    transaction.commit().await.unwrap();
+    first.close().await.unwrap();
+    assert_restore_exists(restoring.await.unwrap(), "admin_identity_pkey");
+    let row = pool_operation(&pool, "op_1").await;
+    assert_eq!((row.consumed_us, row.revision), (None, 1));
+    assert_eq!(
+        authorize_security_admin(&pool, "spki-sha256:first")
+            .await
+            .map(|a| a.credential_id),
+        Some("crd_first".into())
+    );
+    assert_eq!(
+        verify(&pool).await,
+        ChainVerdict::Intact { last_sequence: 3 }
     );
     db.drop([pool]).await;
 }
 
 /// A plan's `instance_id` must be a JSON string, also where its text would
 /// match: with a recovery state for the instance `12345` (written by other
-/// means), a plan naming the number `12345` is neither consumable nor
-/// restorable, and one naming the string is both.
+/// means), a plan naming the number `12345` is not restorable, and one
+/// naming the string is.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_plan_instance_is_a_json_string() {
@@ -2202,39 +2568,35 @@ async fn a_plan_instance_is_a_json_string() {
     .execute(&pool)
     .await
     .unwrap();
-    let string = match json!({"instance_id": "12345", "recovery_key_epoch": 1}) {
-        Value::Object(map) => map,
-        _ => unreachable!(),
-    };
-    issue_on(&pool, &issue_request("op_1", "aud_issue_1", &string))
-        .await
-        .unwrap();
-    insert_raw(
-        &pool,
-        "raw_number",
-        OPERATOR_RESTORATION,
-        json!({"instance_id": 12345, "recovery_key_epoch": 1}),
-        true,
-        1,
-    )
-    .await;
     let bound = ChallengeBinding {
         instance_id: "12345",
         ..binding()
     };
-    assert_not_consumable(consume_on(&pool, "raw_number", &bound, now()).await);
+    let string = plan_for("12345", json!(1), &restore_request(""));
+    issue_on(&pool, &issue_request("op_1", "aud_issue_1", &string))
+        .await
+        .unwrap();
+    let mut number = string.clone();
+    number.insert("instance_id".into(), json!(12345));
+    insert_raw(
+        &pool,
+        "raw_number",
+        OPERATOR_RESTORATION,
+        json!(number),
+        true,
+        1,
+    )
+    .await;
 
-    let mut transaction = pool.begin().await.unwrap();
+    let before = pool_snapshot(&pool).await;
     let mut request = restore_request("raw_number");
     request.binding = bound;
-    assert_not_restorable(restore_operator(&mut transaction, &request).await);
-    transaction.rollback().await.unwrap();
+    assert_not_restorable(restore_on(&pool, &request).await);
+    assert_eq!(pool_snapshot(&pool).await, before);
 
-    let mut transaction = pool.begin().await.unwrap();
     let mut request = restore_request("op_1");
     request.binding = bound;
-    restore_operator(&mut transaction, &request).await.unwrap();
-    transaction.commit().await.unwrap();
+    restore_on(&pool, &request).await.unwrap();
     db.drop([pool]).await;
 }
 
@@ -2267,16 +2629,10 @@ async fn a_restore_locks_the_credentials_before_the_recovery_state() {
         backend_pid(&mut second).await,
     );
     let mut transaction = first.begin().await.unwrap();
-    let authorized = registry::authorize_operator_locked(
-        &mut transaction,
-        &OperatorRequest {
-            public_identity: "spki-sha256:first",
-            scope: OperatorScope::Instance,
-            role: AdminRole::SecurityAdmin,
-        },
-    )
-    .await
-    .unwrap();
+    let authorized =
+        registry::authorize_operator_locked(&mut transaction, &security_admin("spki-sha256:first"))
+            .await
+            .unwrap();
     assert_eq!(
         authorized.map(|a| a.credential_id),
         Some("crd_first".into())
@@ -2306,7 +2662,7 @@ async fn a_restore_locks_the_credentials_before_the_recovery_state() {
     assert_eq!(restored.revoked_credential_ids, ["crd_first"]);
     assert_eq!(
         verify(&pool).await,
-        ChainVerdict::Intact { last_sequence: 4 }
+        ChainVerdict::Intact { last_sequence: 5 }
     );
     db.drop([pool]).await;
 }
@@ -2367,5 +2723,273 @@ async fn a_restore_holds_the_recovery_state_until_it_commits() {
     let restored = restoring.await.unwrap().unwrap();
     assert_eq!(restored.recovery_key_epoch, 2);
     assert_not_issuable(issuing.await.unwrap());
+    db.drop([pool]).await;
+}
+
+/// The tenant `ten_a` and a disabled instance `auditor` binding `rb_off`
+/// of `adm_first`, for the operator writes below.
+async fn write_targets(pool: &PgPool) {
+    registry::create_tenant(
+        pool,
+        &NewTenant {
+            id: "ten_a".into(),
+            name: "Tenant A".into(),
+            secret_namespace: "ns_a".into(),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    registry::create_admin_role_binding(
+        pool,
+        &NewAdminRoleBinding {
+            id: "rb_off".into(),
+            admin_id: "adm_first".into(),
+            role: AdminRole::Auditor,
+            tenant_id: None,
+            status: Status::Disabled,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// The four operator writes that can add access, by index: an enabled
+/// identity `adm_late`, an enabled credential `crd_late`
+/// (`spki-sha256:late`) of `admin`, an enabled tenant `client_admin`
+/// binding `rb_late` of `admin`, and `rb_off` re-enabled.
+async fn operator_write(
+    transaction: &mut Transaction<'_, Postgres>,
+    write: usize,
+    admin: &str,
+) -> Result<(), RegistryError> {
+    match write {
+        0 => registry::create_admin_identity(
+            &mut **transaction,
+            &NewAdminIdentity {
+                id: "adm_late".into(),
+                status: Status::Enabled,
+                created_at: now(),
+            },
+        )
+        .await
+        .map(drop),
+        1 => registry::create_admin_credential(
+            &mut **transaction,
+            &NewAdminCredential {
+                id: "crd_late".into(),
+                admin_id: admin.into(),
+                public_identity: "spki-sha256:late".into(),
+                trust_anchor_ref: "deployment/operator-ca".into(),
+                status: Status::Enabled,
+            },
+        )
+        .await
+        .map(drop),
+        2 => registry::create_admin_role_binding(
+            &mut **transaction,
+            &NewAdminRoleBinding {
+                id: "rb_late".into(),
+                admin_id: admin.into(),
+                role: AdminRole::ClientAdmin,
+                tenant_id: Some("ten_a".into()),
+                status: Status::Enabled,
+            },
+        )
+        .await
+        .map(drop),
+        _ => registry::update_admin_role_binding(
+            &mut **transaction,
+            "rb_off",
+            1,
+            &AdminRoleBindingChanges {
+                status: Status::Enabled,
+            },
+        )
+        .await
+        .map(drop),
+    }
+}
+
+/// An enrollment that holds the recovery state (its credential insert)
+/// when a restoration starts makes the restoration wait for its commit;
+/// the restoration then revokes the enrolled credential with the others,
+/// so it does not stay active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_enrollment_that_commits_while_a_restore_waits_is_revoked() {
+    let (db, pool) = issued().await;
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    let mut transaction = first.begin().await.unwrap();
+    operator_write(&mut transaction, 1, "adm_first")
+        .await
+        .unwrap();
+    let restoring = tokio::spawn(async move {
+        let mut other = second.begin().await.unwrap();
+        let restored = consume_and_restore(&mut other, "op_1").await;
+        if restored.is_ok() {
+            other.commit().await.unwrap();
+        } else {
+            other.rollback().await.unwrap();
+        }
+        second.close().await.unwrap();
+        restored
+    });
+    // The restoration began (its snapshot is older than the enrollment's
+    // commit) and waits for the enrollment.
+    assert!(waits_for(&pool, second_pid, first_pid, &restoring).await);
+    transaction.commit().await.unwrap();
+    first.close().await.unwrap();
+    let restored = restoring.await.unwrap().unwrap();
+    assert_eq!(restored.revoked_credential_ids, ["crd_first", "crd_late"]);
+    let late = registry::get_admin_credential(&pool, "crd_late")
+        .await
+        .unwrap();
+    assert_eq!(
+        (late.status, late.revoked_at),
+        (Status::Disabled, Some(now()))
+    );
+    assert_eq!(
+        authorize_security_admin(&pool, "spki-sha256:late").await,
+        None
+    );
+    db.drop([pool]).await;
+}
+
+/// Each of the four writes that can add operator access waits for a
+/// restoration that holds the recovery state, and the writer's lookup
+/// after the write, in its transaction, sees the revocation and denies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_operator_write_waits_for_a_restore_and_then_sees_the_revocation() {
+    let (db, pool) = issued().await;
+    write_targets(&pool).await;
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    // The restoration holds the recovery state and waits for a replacement
+    // ID another transaction is inserting.
+    let mut transaction = first.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO admin_identity (id, status, created_at) \
+         VALUES ('adm_new', 'enabled', timestamptz 'epoch')",
+    )
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let restoring = tokio::spawn(async move {
+        let mut other = second.begin().await.unwrap();
+        let restored = consume_and_restore(&mut other, "op_1").await;
+        if restored.is_ok() {
+            other.commit().await.unwrap();
+        } else {
+            other.rollback().await.unwrap();
+        }
+        second.close().await.unwrap();
+        restored
+    });
+    wait_until_blocked(&pool, second_pid, first_pid).await;
+    let mut writers = Vec::new();
+    for write in 0..4 {
+        let mut connection = pool.acquire().await.unwrap().detach();
+        let pid = backend_pid(&mut connection).await;
+        let writer = tokio::spawn(async move {
+            let mut writing = connection.begin().await.unwrap();
+            let written = operator_write(&mut writing, write, "adm_first").await;
+            let authorized =
+                registry::authorize_operator(&mut *writing, &security_admin("spki-sha256:first"))
+                    .await
+                    .unwrap();
+            writing.rollback().await.unwrap();
+            connection.close().await.unwrap();
+            (written, authorized)
+        });
+        assert!(
+            waits_for(&pool, pid, second_pid, &writer).await,
+            "write {write} did not wait for the restoration"
+        );
+        writers.push(writer);
+    }
+    transaction.rollback().await.unwrap();
+    first.close().await.unwrap();
+    restoring.await.unwrap().unwrap();
+    for (write, writer) in writers.into_iter().enumerate() {
+        let (written, authorized) = writer.await.unwrap();
+        assert!(written.is_ok(), "{write}: {written:?}");
+        assert_eq!(authorized, None, "{write}");
+    }
+    db.drop([pool]).await;
+}
+
+/// The caller's order (a locked authorization, then the writes) and the
+/// restoration's (credentials, then the recovery state) do not deadlock:
+/// the restoration waits at its credential lock holding no recovery state,
+/// the four writes go through and commit, and the restoration then revokes
+/// the enrolled credential too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_authorized_enrollment_does_not_deadlock_with_a_restore() {
+    let (db, pool) = issued().await;
+    write_targets(&pool).await;
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    let mut transaction = first.begin().await.unwrap();
+    assert!(
+        registry::authorize_operator_locked(&mut transaction, &security_admin("spki-sha256:first"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let restoring = tokio::spawn(async move {
+        let mut other = second.begin().await.unwrap();
+        let restored = consume_and_restore(&mut other, "op_1").await;
+        if restored.is_ok() {
+            other.commit().await.unwrap();
+        } else {
+            other.rollback().await.unwrap();
+        }
+        second.close().await.unwrap();
+        restored
+    });
+    wait_until_blocked(&pool, second_pid, first_pid).await;
+    for write in 0..4 {
+        operator_write(&mut transaction, write, "adm_late")
+            .await
+            .unwrap();
+    }
+    transaction.commit().await.unwrap();
+    first.close().await.unwrap();
+    let restored = restoring.await.unwrap().unwrap();
+    assert_eq!(restored.revoked_credential_ids, ["crd_first", "crd_late"]);
+    assert_eq!(
+        registry::get_admin_credential(&pool, "crd_late")
+            .await
+            .unwrap()
+            .revoked_at,
+        Some(now())
+    );
+    assert_eq!(
+        registry::get_admin_role_binding(&pool, "rb_off")
+            .await
+            .unwrap()
+            .status,
+        Status::Enabled
+    );
+    assert_eq!(
+        verify(&pool).await,
+        ChainVerdict::Intact { last_sequence: 4 }
+    );
     db.drop([pool]).await;
 }

@@ -18,8 +18,8 @@
 //!    and no recovery state, bootstrap adopts the row (see "Adopting a
 //!    policy row"). With no policy row, it inserts one with the request's
 //!    `instance_id` and the column defaults for the rest, with
-//!    `INSERT ... ON CONFLICT DO NOTHING RETURNING`: no conflict target, so
-//!    the `INSERT` privilege suffices. An insert that returns no row found
+//!    `INSERT ... ON CONFLICT DO NOTHING RETURNING`, with no conflict
+//!    target. An insert that returns no row found
 //!    a policy row another transaction committed meanwhile; bootstrap then
 //!    locks the row and reads the recovery state again, as above, and is
 //!    `AlreadyClosed`, adopts the row or is
@@ -30,7 +30,9 @@
 //! 3. Create the operator with [`create_admin_identity`],
 //!    [`create_admin_credential`] and [`create_admin_role_binding`], all
 //!    enabled, the credential unrevoked and the binding `security_admin` of
-//!    the instance (no tenant).
+//!    the instance (no tenant). Each takes the `recovery_state` row of step
+//!    2 `FOR SHARE`, a row bootstrap's own transaction inserted, so it waits
+//!    for no one there (the operator module, "Writes and a restoration").
 //! 4. Append the audit event with [`append_audit_event`], last, as for
 //!    every audited write (see [`append_audit_event`]'s module): an
 //!    instance-scope event (no tenant, so no tenant row is locked), action
@@ -198,8 +200,8 @@
 //! material (its IDs, the operator's credential and the recovery public
 //! key) until it has reconnected and reconciled the durable state, and
 //! then retries the same request: `AlreadyClosed` if the first attempt
-//! committed. The same rule will apply to `restore_operator` (a later
-//! change, PR 3a).
+//! committed. The same rule applies to
+//! [`restore_operator`](super::restore_operator) too.
 //!
 //! [`create_admin_identity`]: super::create_admin_identity
 //! [`create_admin_credential`]: super::create_admin_credential

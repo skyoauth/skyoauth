@@ -21,12 +21,12 @@
 //! policy row, the closed recovery state, the first `security_admin` and
 //! its audit event, in the caller's transaction (design section 7.2; T13.4,
 //! T13.6; see its module for the adopt rule and closure).
-//! [`issue_recovery_challenge`], [`consume_recovery_challenge`] and
-//! [`restore_operator`] are break-glass operator restoration: an expiring
-//! single-use challenge, and a restore that consumes it and, in the same
-//! savepoint, enrolls a replacement `security_admin`, revokes every
-//! operator credential and rotates the recovery key, with their audit
-//! events ([`get_recovery_state`] reads the key
+//! [`issue_recovery_challenge`] and [`restore_operator`] are break-glass
+//! operator restoration: an expiring single-use challenge, and a restore
+//! that consumes it and, in the same savepoint, enrolls the replacement
+//! `security_admin` it names, revokes every operator credential and
+//! rotates the recovery key, with their audit events
+//! ([`get_recovery_state`] reads the key
 //! and its epoch; design section 7.2; T13.5; see its module for the flow and
 //! what stays with the verifier).
 //!
@@ -252,8 +252,8 @@
 //! exception: it runs its writes and appends its own event, last, in a
 //! caller [`Transaction`](sqlx::Transaction), which the caller commits or,
 //! on an error, rolls back. [`issue_recovery_challenge`] (its event before
-//! its operation) and [`restore_operator`] (its event last) are exceptions
-//! of the same kind.
+//! its operation) and [`restore_operator`] (its two events last) are
+//! exceptions of the same kind.
 //!
 //! # Not done here
 //!
@@ -262,7 +262,7 @@
 //! the event in the same transaction; [`bootstrap_instance`],
 //! [`issue_recovery_challenge`] and [`restore_operator`] are the
 //! exceptions), does not verify a recovery signature (the verifier does,
-//! before the consume), does not check rules the database
+//! before the restore), does not check rules the database
 //! does not enforce (an enabled same-tenant assignment behind a reference,
 //! scope and profile vocabulary, leaving a disabled assignment's tenant out
 //! of a checker's effective set; migrations README, "What 0003 adds"; the
@@ -347,10 +347,11 @@ pub use operator::{
 };
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use recovery::{
-    ChallengeBinding, ChallengeError, ConsumedChallenge, DEFAULT_CHALLENGE_TTL, IssueChallenge,
-    MAX_CHALLENGE_TTL, OPERATOR_RESTORATION, PLAN_INSTANCE_ID, PLAN_RECOVERY_KEY_EPOCH,
-    RecoveryChallenge, RecoveryState, RestoreError, RestoreRequest, Restored,
-    consume_recovery_challenge, get_recovery_state, issue_recovery_challenge, restore_operator,
+    ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL, IssueChallenge, MAX_CHALLENGE_TTL,
+    MIN_CHALLENGE_TTL, OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID,
+    PLAN_INSTANCE_ID, PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
+    PLAN_TRUST_ANCHOR_REF, RecoveryChallenge, RecoveryState, RestoreError, RestoreRequest,
+    Restored, get_recovery_state, issue_recovery_challenge, restore_operator,
 };
 pub use selection::{Selection, SelectionError, select_grant};
 pub use tenant::{
