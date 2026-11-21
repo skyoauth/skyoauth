@@ -2,8 +2,10 @@
 //! `load_scope_ceilings`, with `resolve_scopes`; IR-062, IR-063; design
 //! section 5.7; T12.8) against a real PostgreSQL server: the loaded values
 //! are the registry's rows, the target service is a ceiling exactly for a
-//! delegation, every miss is the same `None`, and a ceiling that shrinks
-//! after the grant was written makes its defaults fail.
+//! grant with a target, every miss is the same `None` (including an
+//! audience the target service does not list, IR-083), disabled records are
+//! loaded and reported by `all_enabled`, and a ceiling that shrinks after
+//! the grant was written makes its defaults fail.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests in the shape
@@ -19,10 +21,11 @@ use common::TestDb;
 use skyoauth_service::persistence::{
     self, PgPool,
     registry::{
-        self, CeilingRecord, GrantMode, LoadedCeilings, ScopeError, ScopeRequest,
+        self, CeilingRecord, GrantMode, LoadedCeilings, ScopeError, ScopeRequest, Status,
         load_scope_ceilings, resolve_scopes,
     },
 };
+use sqlx::AssertSqlSafe;
 
 /// Tenants `ten_a` and `ten_b`. Resource servers, by audience:
 ///
@@ -31,12 +34,17 @@ use skyoauth_service::persistence::{
 ///   `read`, `admin`).
 /// - `api-2` (`rs_2`), assigned only to `ten_b`.
 /// - `api-3` (`rs_3`), assigned to `ten_a` but in no grant's set.
+/// - `api-4` (`rs_4`, scopes `read`), assigned to `ten_a` (`ata_4`) and in
+///   the sets of `grt_direct` and `grt_dlg`, but not in `svc_1`'s.
 ///
-/// In `ten_a`: workload `wld_1`, service `svc_1` (`max_scopes` `read`) and
-/// grants of `wld_1` with the audience `api-1`: `grt_direct` (scopes
-/// `read`, `deploy:write`, `admin`; defaults `read`, `deploy:write`) and
-/// `grt_dlg`, a delegation to `svc_1` (scopes `read`, `deploy:write`;
-/// defaults `read`). In `ten_b`: the direct grant `grt_b` with `api-1`.
+/// In `ten_a`: workload `wld_1`, service `svc_1` (`max_scopes` `read`;
+/// audience `api-1` only) and grants of `wld_1` with the audience `api-1`:
+/// `grt_direct` (scopes `read`, `deploy:write`, `admin`; defaults `read`,
+/// `deploy:write`), `grt_dlg`, a delegation to `svc_1` (scopes `read`,
+/// `deploy:write`; defaults `read`), and `grt_imp`, the dormant
+/// impersonation grant as `svc_1` (scopes `read`, `deploy:write`; disabled
+/// and `requires_reapproval`, as the schema requires). In `ten_b`: the
+/// direct grant `grt_b` with `api-1`.
 const SEED: &str = r#"
     INSERT INTO tenant VALUES ('ten_a', 'a', 'ns_a', 'enabled'), ('ten_b', 'b', 'ns_b', 'enabled');
     INSERT INTO principal VALUES
@@ -46,10 +54,12 @@ const SEED: &str = r#"
     INSERT INTO resource_server VALUES
         ('rs_1', 'api-1', 'API 1', '["wif"]', '["read", "deploy:write", "admin"]', '[]', 'enabled'),
         ('rs_2', 'api-2', 'API 2', '["wif"]', '["read"]', '[]', 'enabled'),
-        ('rs_3', 'api-3', 'API 3', '["wif"]', '["read"]', '[]', 'enabled');
+        ('rs_3', 'api-3', 'API 3', '["wif"]', '["read"]', '[]', 'enabled'),
+        ('rs_4', 'api-4', 'API 4', '["wif"]', '["read"]', '[]', 'enabled');
     INSERT INTO audience_tenant_assignment VALUES
         ('ata_1', 'rs_1', 'ten_a', '["wif"]', '["read", "deploy:write"]', '[]', 'enabled'),
         ('ata_3', 'rs_3', 'ten_a', '["wif"]', '["read"]', '[]', 'enabled'),
+        ('ata_4', 'rs_4', 'ten_a', '["wif"]', '["read"]', '[]', 'enabled'),
         ('ata_b1', 'rs_1', 'ten_b', '["wif"]', '["read", "admin"]', '[]', 'enabled'),
         ('ata_b2', 'rs_2', 'ten_b', '["wif"]', '["read"]', '[]', 'enabled');
     INSERT INTO service_identity VALUES ('svc_1', 'ten_a', 'deploy-api', '["read"]', '{}', 'enabled');
@@ -71,13 +81,16 @@ const SEED: &str = r#"
          '["read", "deploy:write"]', '{}', 300, NULL, 'enabled', 'not_required'),
         ('grt_dlg', 'ten_a', 'delegated', 'wld_1', 'svc_1', 'delegation', '["read", "deploy:write"]',
          '["read"]', '{}', 300, NULL, 'enabled', 'not_required'),
+        ('grt_imp', 'ten_a', 'impersonated', 'wld_1', 'svc_1', 'impersonation', '["read", "deploy:write"]',
+         NULL, '{}', 300, NULL, 'disabled', 'requires_reapproval'),
         ('grt_b', 'ten_b', 'direct', 'wld_b', NULL, 'direct', '["read", "admin"]', NULL, '{}', 300, NULL,
          'enabled', 'not_required');
     INSERT INTO service_grant_binding VALUES
         ('grt_direct', 'bnd_1', 'ten_a', 'wld_1'), ('grt_dlg', 'bnd_1', 'ten_a', 'wld_1'),
-        ('grt_b', 'bnd_b', 'ten_b', 'wld_b');
+        ('grt_imp', 'bnd_1', 'ten_a', 'wld_1'), ('grt_b', 'bnd_b', 'ten_b', 'wld_b');
     INSERT INTO service_grant_resource_server VALUES
-        ('grt_direct', 'ten_a', 'rs_1'), ('grt_dlg', 'ten_a', 'rs_1'), ('grt_b', 'ten_b', 'rs_1');
+        ('grt_direct', 'ten_a', 'rs_1'), ('grt_dlg', 'ten_a', 'rs_1'), ('grt_imp', 'ten_a', 'rs_1'),
+        ('grt_b', 'ten_b', 'rs_1'), ('grt_direct', 'ten_a', 'rs_4'), ('grt_dlg', 'ten_a', 'rs_4');
 "#;
 
 async fn seeded() -> (TestDb, PgPool) {
@@ -114,11 +127,12 @@ async fn resolve(
 }
 
 /// The loaded values are the registry's rows; the target service is loaded
-/// exactly for the delegation; another tenant with the same audience gets
-/// its own assignment.
+/// exactly for a grant with a target, the delegation and the dormant
+/// impersonation grant; another tenant with the same audience gets its own
+/// assignment.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn ceilings_are_the_registry_rows_and_the_target_only_for_delegation() {
+async fn ceilings_are_the_registry_rows_and_the_target_only_for_a_target_grant() {
     let (db, pool) = seeded().await;
     let grant = registry::get_service_grant(&pool, "ten_a", "grt_direct")
         .await
@@ -180,6 +194,23 @@ async fn ceilings_are_the_registry_rows_and_the_target_only_for_delegation() {
         delegation.scope_ceilings().target_service,
         Some(strings(&["read"]))
     );
+    assert!(direct.all_enabled() && delegation.all_enabled());
+
+    // The dormant impersonation grant is loaded, disabled, with its target
+    // service as a ceiling too.
+    let impersonation = load(&pool, "ten_a", "grt_imp", "api-1").await;
+    assert_eq!(impersonation.grant_mode, GrantMode::Impersonation);
+    assert_eq!(impersonation.grant.status, Status::Disabled);
+    assert_eq!(impersonation.target_service, delegation.target_service);
+    assert_eq!(
+        impersonation.scope_ceilings().target_service,
+        Some(strings(&["read"]))
+    );
+    assert!(!impersonation.all_enabled());
+    assert_eq!(
+        resolve(&pool, "grt_imp", &explicit(&["deploy:write"])).await,
+        Err(ScopeError::Invalid)
+    );
 
     // ten_b's grant on the same audience gets ten_b's assignment.
     let other = load(&pool, "ten_b", "grt_b", "api-1").await;
@@ -195,12 +226,17 @@ async fn ceilings_are_the_registry_rows_and_the_target_only_for_delegation() {
 }
 
 /// Every miss is the same `None`: another tenant's grant, an unknown grant
-/// or tenant, an unknown audience, one not assigned to the tenant, and one
-/// assigned but not in the grant's set.
+/// or tenant, an unknown audience, one not assigned to the tenant, one
+/// assigned but not in the grant's set, and, for a grant with a target
+/// service, one in the grant's set but not in the service's (IR-083),
+/// including once the service's audience row is removed.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn every_miss_is_the_same_none() {
     let (db, pool) = seeded().await;
+    // api-4 is in the sets of grt_direct and grt_dlg and assigned to ten_a,
+    // so only svc_1's set keeps the delegation from it.
+    load(&pool, "ten_a", "grt_direct", "api-4").await;
     for (tenant, grant, audience) in [
         ("ten_b", "grt_direct", "api-1"),
         ("ten_a", "grt_b", "api-1"),
@@ -213,6 +249,7 @@ async fn every_miss_is_the_same_none() {
         ("ten_a", "grt_direct", "api-3"),
         ("ten_a", "grt_dlg", "api-3"),
         ("ten_b", "grt_b", "api-3"),
+        ("ten_a", "grt_dlg", "api-4"),
         ("", "", ""),
     ] {
         assert_eq!(
@@ -223,14 +260,43 @@ async fn every_miss_is_the_same_none() {
             "{tenant} {grant} {audience}"
         );
     }
+
+    // Once svc_1 no longer lists api-1, neither grant with svc_1 as its
+    // target loads for it; the direct grant still does.
+    load(&pool, "ten_a", "grt_dlg", "api-1").await;
+    load(&pool, "ten_a", "grt_imp", "api-1").await;
+    let service = registry::get_service_identity(&pool, "ten_a", "svc_1")
+        .await
+        .unwrap();
+    registry::remove_service_identity_resource_server(
+        &pool,
+        "ten_a",
+        "svc_1",
+        service.revision,
+        "rs_1",
+    )
+    .await
+    .unwrap();
+    for grant in ["grt_dlg", "grt_imp"] {
+        assert_eq!(
+            load_scope_ceilings(&pool, "ten_a", grant, "api-1")
+                .await
+                .unwrap(),
+            None,
+            "{grant}"
+        );
+    }
+    load(&pool, "ten_a", "grt_direct", "api-1").await;
     db.drop([pool]).await;
 }
 
-/// The `0004` foreign keys keep a grant's audience assigned to its tenant
-/// and its target in its tenant; the statement checks both again. With the
-/// keys dropped in a rolled-back transaction, an audience only another
-/// tenant is assigned, listed by the grant, is still a miss, and a target
-/// of another tenant is not loaded.
+/// The `0004` foreign keys keep a grant's audience assigned to its tenant,
+/// its target in its tenant and a service's audience row in the service's
+/// tenant; the statement checks all three again. With the keys dropped in a
+/// rolled-back transaction, an audience only another tenant is assigned,
+/// listed by the grant, is still a miss, a target of another tenant is not
+/// loaded even with an audience row in the grant's tenant, and a target's
+/// audience row of another tenant does not count.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_statement_rechecks_what_the_foreign_keys_guarantee() {
@@ -248,12 +314,22 @@ async fn the_statement_rechecks_what_the_foreign_keys_guarantee() {
                ('grt_x', 'ten_a', 'cross', 'wld_1', 'svc_x', 'delegation', '["read"]', NULL, '{}', 300, NULL,
                 'enabled', 'not_required');
            INSERT INTO service_grant_binding VALUES ('grt_x', 'bnd_1', 'ten_a', 'wld_1');
-           INSERT INTO service_grant_resource_server VALUES ('grt_x', 'ten_a', 'rs_1')"#,
+           INSERT INTO service_grant_resource_server VALUES ('grt_x', 'ten_a', 'rs_1');
+           ALTER TABLE service_identity_resource_server
+               DROP CONSTRAINT service_identity_resource_server_service_id_fkey,
+               DROP CONSTRAINT service_identity_resource_server_assignment_fkey;
+           INSERT INTO service_identity_resource_server VALUES
+               ('svc_1', 'ten_b', 'rs_4'),
+               ('svc_x', 'ten_a', 'rs_1')"#,
     )
     .execute(&mut *conn)
     .await
     .unwrap();
-    for (grant, audience) in [("grt_direct", "api-2"), ("grt_x", "api-1")] {
+    for (grant, audience) in [
+        ("grt_direct", "api-2"),
+        ("grt_x", "api-1"),
+        ("grt_dlg", "api-4"),
+    ] {
         assert_eq!(
             load_scope_ceilings(&mut *conn, "ten_a", grant, audience)
                 .await
@@ -264,6 +340,50 @@ async fn the_statement_rechecks_what_the_foreign_keys_guarantee() {
     }
     sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
     drop(conn);
+    db.drop([pool]).await;
+}
+
+/// A disabled grant, resource server, assignment or target service is still
+/// loaded, with its status, and `all_enabled` is then false; step 5, not
+/// the loader, denies it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn disabled_records_are_loaded_and_not_all_enabled() {
+    let (db, pool) = seeded().await;
+    for (table, id) in [
+        ("service_grant", "grt_dlg"),
+        ("resource_server", "rs_1"),
+        ("audience_tenant_assignment", "ata_1"),
+        ("service_identity", "svc_1"),
+    ] {
+        // The table and ID are this test's constants.
+        let set = |status: &str| {
+            AssertSqlSafe(format!(
+                "UPDATE {table} SET status = '{status}', revision = revision + 1 \
+                 WHERE id = '{id}'"
+            ))
+        };
+        sqlx::raw_sql(set("disabled")).execute(&pool).await.unwrap();
+        let delegation = load(&pool, "ten_a", "grt_dlg", "api-1").await;
+        let statuses = [
+            &delegation.grant,
+            &delegation.resource_server,
+            &delegation.assignment,
+            delegation.target_service.as_ref().unwrap(),
+        ]
+        .map(|record| (record.id.as_str(), record.status));
+        assert!(statuses.contains(&(id, Status::Disabled)), "{table}");
+        assert!(!delegation.all_enabled(), "{table}");
+        // grt_dlg and svc_1 are not records of the direct grant.
+        let direct = load(&pool, "ten_a", "grt_direct", "api-1").await;
+        assert_eq!(
+            direct.all_enabled(),
+            matches!(table, "service_grant" | "service_identity"),
+            "{table}"
+        );
+        sqlx::raw_sql(set("enabled")).execute(&pool).await.unwrap();
+        assert!(load(&pool, "ten_a", "grt_dlg", "api-1").await.all_enabled());
+    }
     db.drop([pool]).await;
 }
 

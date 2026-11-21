@@ -39,17 +39,19 @@
 //! # Errors
 //!
 //! Every failure is the single [`ScopeError::Invalid`], which the token
-//! endpoint maps to `invalid_scope` (ERR-024). It carries no detail: its
+//! endpoint maps to `invalid_scope` (ERR-024 (3); ADR-015 item 9.4). It carries no detail: its
 //! `Display` and `Debug` text name no scope, no ceiling and which rule
 //! failed, so a response built from it cannot reveal a ceiling's contents
 //! or which ceiling refused.
 //!
 //! # Not done here
 //!
-//! The current status of the grant, resource server, assignment and target
-//! service (design section 5.7 step 5); the mapping of errors to OAuth
-//! codes and their order (ERR-024; M2); the audience checks that give
-//! `invalid_target`; resource constraint ceilings (IR-123); and TTL caps.
+//! The current status of the tenant, grant, resource server, assignment and
+//! target service (design section 5.7 step 5: the status checks of T12.6,
+//! T12.7 and T14.2, wired into the exchange in M2, T21.4 and T21.5); the
+//! mapping of errors to OAuth codes and their order (ERR-024; M2); the
+//! audience checks that give `invalid_target`; resource constraint ceilings
+//! (IR-123); and TTL caps.
 
 use std::fmt;
 
@@ -193,9 +195,24 @@ mod tests {
 
     #[test]
     fn omitted_scope_without_defaults_is_invalid() {
-        assert_invalid(resolve_scopes(&ScopeRequest::Omitted, None, &direct()));
-        // An empty list is not explicit defaults (the schema forbids one).
-        assert_invalid(resolve_scopes(&ScopeRequest::Omitted, Some(&[]), &direct()));
+        // Every ceiling is the same, so a fallback to any one of them, or to
+        // their intersection, would resolve; none may.
+        let same = ScopeCeilings {
+            resource_server: strings(&["read"]),
+            assignment: strings(&["read"]),
+            grant: strings(&["read"]),
+            target_service: Some(strings(&["read"])),
+        };
+        let same_direct = ScopeCeilings {
+            target_service: None,
+            ..same.clone()
+        };
+        for ceilings in [&same, &same_direct] {
+            assert_invalid(resolve_scopes(&ScopeRequest::Omitted, None, ceilings));
+            // An empty list is not explicit defaults (the schema forbids
+            // one).
+            assert_invalid(resolve_scopes(&ScopeRequest::Omitted, Some(&[]), ceilings));
+        }
     }
 
     #[test]

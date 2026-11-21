@@ -1831,24 +1831,30 @@ a profile change that drops one included: the template-fit check of
 ADR-016 item 4 is the only stop on that downgrade, and it is an open
 follow-up (see "What 0008 adds", "Not checked").
 
-Scope ceilings (IR-062, IR-063; ADR-015 items 7 and 9; design §5.7; T12.8;
-A26): `load_scope_ceilings(tenant, grant, audience)` loads, in one
+Scope ceilings (IR-062, IR-063, IR-083; ADR-015 items 7 and 9; design §5.7;
+T12.8; A26): `load_scope_ceilings(tenant, grant, audience)` loads, in one
 statement, the grant's `scopes` and `default_scopes`, the `scopes` of the
 resource server with that exact audience, the tenant's assignment
-`allowed_scopes` for it and, for a grant with a target, the target
-service's `max_scopes`, each with its ID, status and revision. The audience
-must be in the grant's set and assigned to the grant's tenant. A missing
-grant or audience, an audience not assigned or not in the set are all the
-same `None`, mapped to no error code here. Statuses are not checked.
-`resolve_scopes` is pure: an omitted scope uses only the grant's nonempty
-defaults, checked again against every ceiling; an explicit list must be
-nonempty and lie in every ceiling; every token must match the IR-066
-grammar of `skyoauth_scope_list`. Nothing is trimmed or widened, the
-result is deduplicated and sorted byte-wise, and every failure is the
-single `ScopeError::Invalid` (`invalid_scope`, ERR-024), which names no
-scope or ceiling. Error-code mapping and ordering, the `invalid_target`
-audience checks, resource constraint ceilings (IR-123) and TTL caps stay
-with M2.
+`allowed_scopes` for it and, for a grant with a target, the target service's
+`max_scopes`, each with its ID, status and revision. The audience must be in
+the grant's set, assigned to the grant's tenant and, for a grant with a target
+service, in that service's set too (IR-083). A missing grant or audience, an
+audience not assigned, not in the grant's set or not in the target service's
+set are all the same `None`, mapped to no error code here (the caller maps them
+to one `invalid_target`, ERR-024 (3); ADR-015 item 9.4). Statuses are not
+checked: a disabled record is still loaded, and `LoadedCeilings::all_enabled`
+says whether the grant, resource server, assignment and target service are all
+enabled. Step 5 (design §5.7) checks the current status of the records (T12.6,
+T12.7, T14.2), wired into the exchange in M2 (T21.4, T21.5); it also needs the
+tenant's status and revision, which are not loaded. `resolve_scopes` is pure:
+an omitted scope uses only the grant's nonempty defaults, checked again against
+every ceiling; an explicit list must be nonempty and lie in every ceiling;
+every token must match the IR-066 grammar of `skyoauth_scope_list`. Nothing is
+trimmed or widened, the result is deduplicated and sorted byte-wise, and every
+failure is the single `ScopeError::Invalid` (`invalid_scope`, ERR-024 (3);
+ADR-015 item 9.4), which names no scope or ceiling. Error-code mapping and
+ordering, the `invalid_target` audience checks, resource constraint ceilings
+(IR-123) and TTL caps stay with M2.
 
 Grant selection (ADR-015 item 4 steps 1, 3 and 4; design §5.7; T12.3; A25,
 A50): `select_grant(tenant, grant, source, expected mode)` loads, in one

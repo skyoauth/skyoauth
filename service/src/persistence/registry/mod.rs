@@ -9,6 +9,9 @@
 //! security policy and the egress allowlist. [`select_grant`] and
 //! [`match_binding`] select a grant and its matching binding for the
 //! workload exchange (ADR-015 item 4 steps 1, 3 and 4; see their module).
+//! [`load_scope_ceilings`] loads the scope ceilings of an exchange and
+//! [`resolve_scopes`] applies them (IR-062, IR-063, IR-083; see their
+//! modules).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong

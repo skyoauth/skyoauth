@@ -9,23 +9,34 @@
 //! resource server by its exact `audience`. The resource server must be in
 //! the grant's audience set (`service_grant_resource_server`) and assigned
 //! to the grant's tenant (`audience_tenant_assignment`). A grant with a
-//! target service also loads that service identity of the same tenant. The
-//! `0004` foreign keys already keep a listed audience assigned to the
-//! grant's tenant and the target in the grant's tenant; the statement
-//! checks both again rather than rely on them.
+//! target service also loads that service identity of the same tenant, and
+//! the resource server must be in the target service's audience set too
+//! (`service_identity_resource_server`; IR-083: "in the target service's
+//! set for delegation"). The `0004` foreign keys already keep a listed
+//! audience assigned to the grant's tenant, the target in the grant's
+//! tenant and a service's audience row in the service's tenant; the
+//! statement checks all three again rather than rely on them.
 //!
 //! When the grant does not exist in the tenant, or the audience does not
-//! exist, is not assigned to the tenant or is not in the grant's set, the
-//! result is `None`: one value with no detail, so the caller can map all of
-//! them to the same `invalid_target` (ERR-024 item 4). The registry does no
-//! such mapping.
+//! exist, is not assigned to the tenant, is not in the grant's set or, for
+//! a grant with a target service, is not in that service's set, the result
+//! is `None`: one value with no detail, so the caller can map all of them
+//! to the same `invalid_target` (ERR-024 (3); ADR-015 item 9.4). The
+//! registry does no such mapping.
 //!
 //! # Not done here
 //!
-//! - No status is checked. The IDs, statuses and revisions of the grant,
-//!   resource server, assignment and target service are returned so that
-//!   step 5 (design section 5.7) can check them and record the revisions
-//!   (M2; T21.4, T12.6).
+//! - No status is checked: a chain with a disabled grant, resource server,
+//!   assignment or target service is still `Some` (the dormant
+//!   impersonation grant, always disabled, too). Their IDs, statuses and
+//!   revisions are returned so that step 5 (design section 5.7) can check
+//!   them and record the revisions; those status checks belong to T12.6,
+//!   T12.7 and T14.2, wired into the exchange in M2 (T21.4, T21.5).
+//!   [`LoadedCeilings::all_enabled`] says whether every loaded record is
+//!   enabled, so a caller cannot leave one out; it is not all of step 5.
+//! - The tenant's status and revision are not loaded; step 5 needs them
+//!   too (design section 5.7), as well as the grant's `activation_state`
+//!   and `valid_until` and the actor's status, none of which is loaded.
 //! - No OAuth error code or ordering (ERR-024; M2).
 //! - Resource constraint ceilings (IR-123) and TTL caps are not loaded.
 
@@ -39,9 +50,11 @@ use super::{
 /// The statement. `$1` is the tenant, `$2` the grant and `$3` the
 /// audience. It returns at most one row: the grant is found by its key,
 /// its audience row by `(grant, resource server)`, the resource server by
-/// its unique audience, the assignment by `(tenant, resource server)` and
-/// the service by its key. A grant whose target service is missing (which
-/// the `0004` foreign key prevents) gives no row.
+/// its unique audience, the assignment by `(tenant, resource server)`, the
+/// service by its key and its audience row by `(service, resource server)`.
+/// A grant whose target service is missing (which
+/// the `0004` foreign key prevents), or whose target service does not list
+/// the resource server (IR-083), gives no row.
 const LOAD_SCOPE_CEILINGS: &str = "\
     SELECT g.id AS grant_id, g.mode AS grant_mode, g.status AS grant_status, \
            g.revision AS grant_revision, g.scopes AS grant_scopes, \
@@ -61,7 +74,11 @@ const LOAD_SCOPE_CEILINGS: &str = "\
       LEFT JOIN service_identity s \
         ON s.tenant_id = g.tenant_id AND s.id = g.target_service_id \
      WHERE g.tenant_id = $1 AND g.id = $2 AND rs.audience = $3 \
-       AND (g.target_service_id IS NULL OR s.id IS NOT NULL)";
+       AND (g.target_service_id IS NULL \
+            OR (s.id IS NOT NULL \
+                AND EXISTS (SELECT FROM service_identity_resource_server sr \
+                             WHERE sr.tenant_id = g.tenant_id AND sr.service_id = s.id \
+                               AND sr.resource_server_id = rs.id)))";
 
 /// The ID, status, revision and scope list of one ceiling's record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +133,22 @@ impl LoadedCeilings {
     pub fn default_scopes(&self) -> Option<&[String]> {
         self.grant_default_scopes.as_deref()
     }
+
+    /// Whether the grant, the resource server, the assignment and, for a
+    /// grant with a target, the target service were all enabled when
+    /// loaded. The loader returns disabled records too (see the module
+    /// docs); this is the status part of step 5 for the records it loads,
+    /// not all of step 5: the tenant, the actor and the grant's
+    /// `activation_state` and `valid_until` are not loaded.
+    pub fn all_enabled(&self) -> bool {
+        self.grant.status == Status::Enabled
+            && self.resource_server.status == Status::Enabled
+            && self.assignment.status == Status::Enabled
+            && self
+                .target_service
+                .as_ref()
+                .is_none_or(|service| service.status == Status::Enabled)
+    }
 }
 
 fn record(row: &PgRow, prefix: &str) -> Result<CeilingRecord, sqlx::Error> {
@@ -129,8 +162,10 @@ fn record(row: &PgRow, prefix: &str) -> Result<CeilingRecord, sqlx::Error> {
 
 /// Loads the scope ceilings of grant `grant_id` of `tenant_id` for the
 /// resource server of `audience`, in one statement (see the module docs).
-/// `None` when the grant, the audience, its assignment to the tenant or its
-/// place in the grant's audience set is missing.
+/// `None` when the grant, the audience, its assignment to the tenant, its
+/// place in the grant's audience set or, for a grant with a target service,
+/// its place in that service's audience set is missing. Disabled records
+/// are returned; see [`LoadedCeilings::all_enabled`].
 pub async fn load_scope_ceilings<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
@@ -158,4 +193,50 @@ pub async fn load_scope_ceilings<'e>(
         assignment: record(&row, "assignment")?,
         target_service,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enabled(id: &str) -> CeilingRecord {
+        CeilingRecord {
+            id: id.to_owned(),
+            status: Status::Enabled,
+            revision: 1,
+            scopes: vec!["read".to_owned()],
+        }
+    }
+
+    fn loaded(target_service: Option<CeilingRecord>) -> LoadedCeilings {
+        LoadedCeilings {
+            grant: enabled("grt_1"),
+            grant_mode: if target_service.is_some() {
+                GrantMode::Delegation
+            } else {
+                GrantMode::Direct
+            },
+            grant_default_scopes: None,
+            resource_server: enabled("rs_1"),
+            assignment: enabled("ata_1"),
+            target_service,
+        }
+    }
+
+    #[test]
+    fn all_enabled_needs_every_loaded_record_enabled() {
+        assert!(loaded(None).all_enabled());
+        assert!(loaded(Some(enabled("svc_1"))).all_enabled());
+        let disable: [fn(&mut LoadedCeilings) -> &mut CeilingRecord; 4] = [
+            |l| &mut l.grant,
+            |l| &mut l.resource_server,
+            |l| &mut l.assignment,
+            |l| l.target_service.as_mut().unwrap(),
+        ];
+        for (index, record) in disable.into_iter().enumerate() {
+            let mut ceilings = loaded(Some(enabled("svc_1")));
+            record(&mut ceilings).status = Status::Disabled;
+            assert!(!ceilings.all_enabled(), "record {index}");
+        }
+    }
 }
