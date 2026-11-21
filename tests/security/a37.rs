@@ -3,14 +3,13 @@
 //! explicit, removal reviewed as widening (tasks §8; T00.12, T12.2;
 //! ADR-016 items 1 to 4).
 //!
-//! **A37 partial: the required-predicate half only; A37 M1a stays planned
-//! (scope "full row"), since its other half, removal reviewed as widening,
-//! has no code.** These tests are registered on A37's planned M1a stage, so
-//! they are no evidence for it: the reporter lists their results as not
-//! counted. They run through the typed registry API
-//! (`skyoauth_service::persistence::registry`), with binding matching from
-//! `skyoauth_service::policy`, against a real PostgreSQL, one fresh
-//! database per test, except
+//! **A37 partial: only "removal reviewed as widening" is uncovered, and it
+//! has no code, so A37 M1a stays planned (scope "full row").** These tests
+//! are registered on A37's planned M1a stage, so they are no evidence for
+//! it: the reporter lists their results as not counted. They run through
+//! the typed registry API (`skyoauth_service::persistence::registry`), with
+//! binding matching from `skyoauth_service::policy`, against a real
+//! PostgreSQL, one fresh database per test, except
 //! `a37_neg_store_refuses_incomplete_policy`, which writes with plain SQL
 //! past the registry. The fixture is local: one tenant, one workload
 //! principal, a GitHub source and a generic OIDC source.
@@ -20,13 +19,15 @@
 //!   (`a37_pos_complete_policy_stored_per_profile`). A `github_production`
 //!   binding that omits the optional `repository` and `job_workflow_ref`
 //!   is selected for its grant (`registry::select_grant`) and matched
-//!   (`policy::match_binding`) by evidence carrying either of two different values
-//!   for them, or neither, while a required predicate still constrains
-//!   (`a37_pos_optional_predicate_omitted_is_unconstrained`).
+//!   (`policy::match_binding`) by evidence carrying either of two different
+//!   `repository` values, or none; `job_workflow_ref` is absent or equal to
+//!   `workflow_ref` (no reusable workflow), and a required predicate still
+//!   constrains (`a37_pos_optional_predicate_omitted_is_unconstrained`).
 //! - **Negative.** For every profile and every required claim, enabled or
-//!   disabled: a create without it (`a37_neg_required_predicate_missing_refused`)
-//!   or with it empty (`a37_neg_required_predicate_empty_refused`) is
-//!   refused and writes nothing; an update that drops or empties it is
+//!   disabled: a create without it
+//!   (`a37_neg_required_predicate_missing_refused`) or with it empty
+//!   (`a37_neg_required_predicate_empty_refused`) is refused and writes
+//!   nothing; an update that drops or empties it is
 //!   refused and changes nothing
 //!   (`a37_neg_required_predicate_removed_by_update_refused`); a
 //!   `generic_production` binding of only `sub` moved to another profile
@@ -68,18 +69,28 @@
 //! are not written or registered, and A37 M1a cannot be implemented
 //! without them (a stage cannot be split inside one milestone).
 //!
-//! **Known gap, asserted by no test.** A profile change can drop
-//! predicates: moving a `github_production` binding to
-//! `generic_production` with a policy of only `sub` meets the new set and
-//! is accepted, although every GitHub predicate is gone. The stop on that
-//! downgrade is the enrollment check that the template fits the source and
-//! its `assertion_profile` (ADR-016 item 4), which is not built. No test
-//! here pins that acceptance as correct.
+//! **Known gaps, asserted by no test.**
+//!
+//! - A profile change can drop predicates: moving a `github_production`
+//!   binding to `generic_production` with a policy of only `sub` meets the
+//!   new set and is accepted, although every GitHub predicate is gone. Its
+//!   stops would be the widening review (ADR-016 item 2; ADR-008 items 12,
+//!   13) and the enrollment fit check (ADR-016 item 4); neither is built.
+//!   The spec does not settle whether the fit check would reject
+//!   `generic_production` on a GitHub `oidc_discovery` source.
+//! - A token whose `job_workflow_ref` differs from its `workflow_ref`
+//!   matches a binding that does not pin it (ADR-016 item 3; predicate.rs
+//!   `GITHUB_JOB_WORKFLOW_REF`; T22.2).
+//!
+//! No test here pins either acceptance as correct.
 //!
 //! Not covered here either: the defensive matrices of
 //! `service/tests/registry_predicates.rs` (whitespace-only values,
-//! near-miss claim names, non-string JSON values, the catalog of the
-//! checks, the `0007` upgrade precondition), and empty or whitespace-only
+//! non-string JSON values, the catalog of the checks, the `0007` upgrade
+//! precondition); near-miss claim names, which only the Rust-side unit test
+//! `claim_names_match_exactly` in
+//! `service/src/persistence/registry/predicate.rs` covers (no
+//! database-side matrix of them exists); and empty or whitespace-only
 //! values of optional predicates, whose meaning the spec does not settle.
 
 use std::{collections::BTreeMap, fmt::Debug};
@@ -489,21 +500,21 @@ async fn a37_pos_optional_predicate_omitted_is_unconstrained() {
         }
         Evidence::new(claims)
     };
+    // Only `repository` varies. `job_workflow_ref` is absent or equal to
+    // `workflow_ref`, so no reusable workflow runs: a token whose
+    // `job_workflow_ref` differs is the known gap of the module docs, and
+    // no case here has one.
+    let workflow_ref = GITHUB.complete()["workflow_ref"].clone();
     for optional in [
         &[
             (REPOSITORY, "acme/platform"),
-            (
-                JOB_WORKFLOW_REF,
-                "acme/platform/.github/workflows/deploy.yml@refs/heads/main",
-            ),
+            (JOB_WORKFLOW_REF, workflow_ref.as_str()),
         ][..],
         &[
             (REPOSITORY, "acme/renamed"),
-            (
-                JOB_WORKFLOW_REF,
-                "acme/shared/.github/workflows/release.yml@refs/tags/v2",
-            ),
+            (JOB_WORKFLOW_REF, workflow_ref.as_str()),
         ],
+        &[(REPOSITORY, "acme/renamed")],
         &[],
     ] {
         let matched = match_binding(&selection.eligible_bindings, &evidence(optional));

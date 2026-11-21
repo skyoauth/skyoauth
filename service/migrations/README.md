@@ -121,11 +121,13 @@ egress rows are never deleted.
   service writes on its own record the reserved actor
   `{"type": "system", "id": "system"}`, never a principal or an operator
   identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
-  (identity-registry IR-059). The decision fixes only that syntax: IR-059
-  lists examples, and the action names, including those of these two
-  events, are open until the audit writer (OQ-IR-15). These are lead
-  decisions (2026-11-20, OQ-IR-14), provisional until the audit writer
-  ships.
+  (identity-registry IR-059). These are lead decisions (2026-11-20,
+  OQ-IR-14), provisional until the maintainer ratifies the ADRs
+  (T00.8–T00.17, Gate M0). The action names,
+  including `instance_security_policy.mirror` and
+  `instance_security_policy.change_sink` for these two events, are the
+  closed table of the audit writer: OQ-IR-15 is decided provisionally (lead
+  decision 2026-11-21; see "Rust registry surface").
 
 The database does not enforce these rules; the service must:
 
@@ -144,12 +146,25 @@ The database does not enforce these rules; the service must:
   (`0006` rejects a `DELETE` of either);
 - validate `exact_destination` as an exact URL (IR-152);
 - compute event and head hashes (the database only stores them);
-- append audit events in this order: write the domain rows first, then lock
-  the chain head (`SELECT … FOR UPDATE`), take `sequence` = head + 1 and
-  `prev_hash` = head hash from that locked row, insert the event, advance the
-  head and commit. The head lock comes last: a transaction that holds it
-  and then waits for a domain row held by a transaction that waits for the
-  head deadlocks, and one of them fails with `40P01`.
+- append audit events in this order: write the domain rows first, then,
+  for an event with a `tenant_id`, lock its tenant row
+  (`SELECT … FOR KEY SHARE`, the lock the insert's foreign-key check
+  takes), then lock the chain head (`SELECT … FOR UPDATE`), take
+  `sequence` = head + 1 and `prev_hash` = head hash from that locked row,
+  insert the event, advance the head and commit. The head lock comes last:
+  a transaction that holds it and then waits for a domain row held by a
+  transaction that waits for the head deadlocks, and one of them fails with
+  `40P01`. The insert's foreign-key check would be such a wait if the
+  tenant row were not locked before the head. Never lock the event's
+  tenant row `FOR UPDATE`; lock it `FOR NO KEY UPDATE`, as step 1 of "What
+  0005 adds" locks every row an operation references, since the
+  foreign-key checks after the head lock take `FOR KEY SHARE`. A writer
+  that did lock it `FOR UPDATE` before appending still keeps the
+  tenant-then-head order, but one that locks the head first and then a
+  tenant row does not. A write that creates an
+  `administrative_operation` is the exception to "domain rows first": it
+  follows steps 1 to 3 of "What 0005 adds", and its event precedes the
+  operation, since `audit_id` is an immediate (not deferrable) foreign key.
 
 Concurrent appenders queue on the head row, which the insert trigger locks
 too. A writer that took its `sequence` from a head another transaction has
@@ -1317,8 +1332,9 @@ changes no existing column, constraint, trigger or index. Choices marked
   separate recovery procedure (this README defines none). The event's
   `timestamp` is part of its hash: identity-registry IR-056 hashes the
   canonical JSON of the event envelope without only its `hash` and
-  `prev_hash` fields, and OQ-IR-15 lists how `timestamp` is serialized in
-  that envelope among the details still open. An edited timestamp gives
+  `prev_hash` fields, and OQ-IR-15, decided provisionally (lead decision
+  2026-11-21), serializes `timestamp` there as RFC 3339 with six fractional
+  digits. An edited timestamp gives
   another hash than the one the next event's `prev_hash`, or
   `audit_chain_head.head_hash` for the last event, records (see the audit
   writer under "Follow-ups", "Not done in `0002`").
@@ -1660,7 +1676,8 @@ Not done in `0002`:
   ID, tenant and revision (tasks §3 "IDs/names"). Done in `0007`.
 - The audit writer. The service computes the event hash (lead decision,
   2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
-  writer ships). The hash is SHA-256 over the concatenation of:
+  maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). The hash is SHA-256
+  over the concatenation of:
   1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
   2. `prev_hash` as 32 raw bytes, or zero bytes for the first event, whose
      `prev_hash` column is `NULL`;
@@ -1670,13 +1687,15 @@ Not done in `0002`:
   `prev_hash` and `head_hash` store the raw 32-byte digest as `bytea`;
   lowercase hex is only the JSONL and API output form. `audit_event` has no
   column for an event's own hash, so verification recomputes it and compares
-  it with the next event's `prev_hash` or the head's `head_hash`. Still open
-  before the writer ships (identity-registry OQ-IR-15): the text
-  serialization of an object `actor`, the envelope's member names, the
-  timestamp format, the encoding of absent values, and the action names
-  (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
-  startup-mirror and sink-change events.
-  Tests assert chain linkage and verification outcomes, never hash values.
+  it with the next event's `prev_hash` or the head's `head_hash`. The
+  details identity-registry OQ-IR-15 left open are decided provisionally
+  (lead decision 2026-11-21): the text serialization of an object `actor`,
+  the envelope's member names, the timestamp format, the encoding of absent
+  values, and the action names (see IR-056, IR-058 and IR-059). The writer
+  and verifier are in the registry (see "Rust registry surface"); no
+  migration was needed. Conformance scenarios assert chain linkage and
+  verification outcomes, never hash values; unit tests may check known
+  answers.
 
 - Errata for comments and checks in `0002`, which is frozen (its checksum
   covers comments), so they are corrected here and not in the file:
@@ -1688,8 +1707,10 @@ Not done in `0002`:
     keeps it unchanged.
   - Lines 244–246, on the chain genesis: "the genesis representation is not
     specified" is superseded for the first event by IR-056, under which its
-    stored `prev_hash` is `NULL` and enters the hash as zero bytes. The
-    empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
+    stored `prev_hash` is `NULL` and enters the hash as zero bytes, meaning
+    no bytes at all, the empty input (lead decision, 2026-11-21,
+    provisional). The empty head (`sequence` 0, `NULL` `head_hash`) is still
+    inferred.
   - Line 259, on `audit_event.tenant_id`: OQ-IR-14 is decided; the
     instance-scope event rules are IR-057 to IR-059 and "Instance-scope
     events" above.
@@ -1815,6 +1836,49 @@ drain cap, `consumed_at`, and the `single_use` and enabled checks of the
 source stay with the service (see the service rules above). The claim that
 exactly one attempt consumes holds under `READ COMMITTED`; under
 `REPEATABLE READ` or `SERIALIZABLE` a loser may get `Retry`.
+
+Audit events (IR-055 to IR-059; OQ-IR-14; OQ-IR-15, decided provisionally
+by the lead decision 2026-11-21; T10.1; design §7): `append_audit_event`
+appends one event in a caller transaction after the domain rows, in the
+order of "append audit events in this order" above (a write that creates an
+`administrative_operation` inserts it after the event, steps 1 to 3 of
+"What 0005 adds"). For an event with a `tenant_id` it first locks the
+tenant row (`SELECT … FOR KEY SHARE`); an instance-scope event locks no
+tenant row. Then it locks the head (`SELECT … FOR UPDATE`), takes
+`sequence` = head + 1 and `prev_hash` = head hash, runs
+`SET CONSTRAINTS <schema>.audit_event_head_reached DEFERRED` (the schema of
+`audit_event`, quoted, so that a caller that ran
+`SET CONSTRAINTS ALL IMMEDIATE` still appends), computes the IR-056 hash in
+Rust, inserts the event and advances the head: four or five statements, so
+it takes a `Transaction` rather than any executor. Never lock the event's
+tenant row `FOR UPDATE` (see above). Concurrent appenders queue on
+the head lock and all succeed under `READ COMMITTED`. The caller supplies
+the ID, the timestamp (truncated to the microsecond) and every field;
+nothing reads a clock. An action outside the closed table `AUDIT_ACTIONS` or
+without the `<resource>.<verb>` syntax, an empty operator ID, a revision
+above `2^53 - 1` and a timestamp outside the years `0000` to `9999` (inside
+the `0007` range or not) are encode errors (`Other`) before any statement.
+Other bad input fails at a statement: a missing tenant at the tenant lock,
+before the head lock, with the error the insert's foreign key gave
+(`Invariant` naming `audit_event_tenant_id_fkey`; the transaction is not
+aborted); a NUL character at the first statement that binds it (`Other`); a
+revision below 1 at the insert (`Invariant`); and a `sequence` above
+`2^53 - 1` after the head lock (`Other`). The envelope is RFC 8785
+canonical JSON with every member present (`null` when absent), the
+timestamp RFC 3339 with six fractional digits and `Z`, and the actor the
+canonical JSON `{"id":…,"type":…}` that the `actor` column stores byte for
+byte. The first event's `NULL` `prev_hash` adds no bytes to its hash (lead
+decision, 2026-11-21, provisional). `verify_audit_chain` reads the head,
+and whether an event lies past it, in one statement, then the events up to
+the head a page at a time; it recomputes each hash from the stored columns
+and returns the first broken sequence with its reason (`Gap`,
+`PrevHashMismatch`, `HeadMismatch`, or `Unencodable` for a row the writer
+could not have written, a year outside `0000` to `9999` included). An edit
+of event `k` shows at `k + 1`, or at the head for the last event. Deleting
+the tail and rewinding the head, or deleting every event and resetting the
+head, verifies as intact; only the external sink (OQ-TM-12) catches that.
+Other registry writes do not append events; their callers do, in the same
+transaction.
 
 Required binding predicates (T12.2; ADR-016 items 2 to 4; A37):
 `required_claims(profile)` is the one table of the claim names each

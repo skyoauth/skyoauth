@@ -1222,16 +1222,23 @@ layers = ["conformance"]
 envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.3", "T21.4", "T21.7"]
-positive = "grant actor's binding matches despite another actor's overlap"
-negative = "no eligible match; several same-actor matches give a stable ID with no union"
+positive = "grant actor's binding matches despite another actor's overlap: the grant actor's eligible binding is matched while another actor's binding, sorting first, fits the same evidence (M1a); the exchange issues for the grant with that binding (M2)"
+negative = "no eligible match; several same-actor matches give a stable ID with no union: evidence that only another actor's binding fits, and evidence with a differing value, a missing claim or a value differing only in case, match no binding; an ineligible binding is never selected, even when it fits and sorts first; and several same-actor matches give the byte-wise lowest ID (provisional reading of design §5.7 'stable ID ordering'), one binding with its own policy and revision (M1a); the denial on the wire, the selected binding's provenance recorded in the policy revision and audit, and no union of issued permissions (M2)"
 matrix_sha256 = "201e9ea125b2bc4ce6789877a9ceb62204a53a478a449facf0b19a2b90d322b3"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "matching"
+scope = "binding matching: the grant actor's eligible binding matches despite another actor's overlap; an other-actor-only, ineligible or absent match selects none; several same-actor matches select the byte-wise lowest ID, one binding, never a union (registry API)"
 legs = ["scenarios-pg/x86_64"]
-status = "planned"
-tests = []
+status = "implemented"
+implemented_sha256 = "edba735282e910dd64b30b228455ff4885359444377900f9d1cb0da1ca354810"
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_pos_grant_actors_binding_matches_despite_other_actors_overlap",
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_only_other_actors_binding_matches_gives_none",
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_no_eligible_match",
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_ineligible_bindings_never_match",
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_several_same_actor_matches_give_one_stable_id_no_union",
+]
 
 [[scenario.stage]]
 milestone = "M2"
