@@ -802,17 +802,28 @@ create, get and list for `tenant` and `principal`, which have no revision
 yet; and reads of `instance_security_policy` and `egress_allowlist_entry`.
 Every function runs one statement on any executor (pool, connection or
 caller transaction). Writes take caller-supplied IDs (T10.2 generates
-them). An update is a compare-and-set: it sets `revision = expected + 1`
+them). An update is a compare-and-set: it sets `revision = revision + 1`
 where `revision = expected`, as `skyoauth_check_revision()` requires, and
-touches only the columns these migrations leave mutable. Adding or removing
-a checker tenant row advances the checker's revision in the same statement.
-A principal is read by tenant and ID; lists are ordered by ID byte-wise and
-paged after an ID cursor.
+touches only the columns these migrations leave mutable. The expected
+revision is only compared, so even `i64::MAX` gives `StaleRevision` or
+`NotFound`, not an overflow. Adding or removing a checker tenant row
+advances the checker's revision in the same statement. A principal is read
+by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
+cursor.
+
+Of two concurrent updates from one revision exactly one succeeds. Under
+`READ COMMITTED` the second waits for the first's row lock and then gives
+`StaleRevision`. In a caller transaction at `REPEATABLE READ` or
+`SERIALIZABLE` it fails instead with `40001` (`serialization_failure`),
+which maps to `Other`: it means "retry the transaction", so it is
+deliberately not mapped to `StaleRevision`.
 
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
-catalog by a test). Error text carries constraint names only, never a
-value:
+catalog by a test). The `Display` and `Debug` text of an error carries
+constraint names and SQLSTATEs only, never a value. The `source()` of
+`Other` is the raw `sqlx::Error`, which may quote values, so logging must
+not walk the source chain.
 
 | SQLSTATE | Rust error                                      |
 | -------- | ----------------------------------------------- |
@@ -824,9 +835,31 @@ value:
 | `SK001`  | `Guard`                                         |
 | other    | `Other`, also for a constraint not listed       |
 
+PostgreSQL text and `jsonb` cannot hold U+0000: a NUL character in any
+string argument (IDs, names, the page cursor, list elements, strings inside
+`jsonb` values) gives `Other` with `22021` (`text`) or `22P05` (`jsonb`).
+The request layer (T14.1) must reject it.
+
 The registry does not authorize writes (API-147; T14.1, T14.2), write
 audit events (T13.x), check the rules listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
+
+Follow-ups for the registry surface:
+
+- Parent-scoped lookups and lists, needed by the admin API (T14.1, T14.2)
+  and landing with its handlers: by `resource_server_id` for the
+  assignment, checker and action lists; by `(tenant_id, resource_server_id)`
+  for an assignment (IR-080, IR-081); and by
+  `(resource_server_id, action_name)` for an action.
+- `list_principals` for an unknown tenant returns an empty list, not
+  `NotFound`; the handler decides whether an unknown tenant is a 404.
+- `create_principal` with an ID another tenant already uses gives
+  `AlreadyExists { constraint: "principal_pkey" }`, which tells the caller
+  the ID exists elsewhere. That is harmless while IDs are server-generated
+  (T10.2); import paths (T14.8) must not surface it for client-chosen IDs.
+- Replacing a checker's whole tenant set with `k` adds and removes advances
+  its revision by `k`. T14.3 may want a single replace operation that
+  advances it by one.
 
 ### The `0004` tables
 

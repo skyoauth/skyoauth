@@ -279,7 +279,8 @@ async fn tenants_are_created_read_listed_and_keyed() {
     db.drop([pool]).await;
 }
 
-/// Error text never repeats a value from the request.
+/// `Display` and `Debug` never repeat a value from the request (the
+/// `source()` of `Other` may; see the module documentation).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_errors_do_not_repeat_request_values() {
@@ -583,6 +584,102 @@ async fn resource_server_errors_name_their_constraint() {
     db.drop([pool]).await;
 }
 
+/// The expected revision is only compared, never computed with: `i64::MAX`
+/// is a stale revision of an existing row and a missing row is not found,
+/// for every update and checker tenant-set change, and nothing changes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
+    const MAX: i64 = i64::MAX;
+    let (db, pool) = seeded().await;
+    registry::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
+        .await
+        .unwrap();
+    registry::create_audience_tenant_assignment(&pool, &new_assignment("ata_3", "rs_1", "ten_c"))
+        .await
+        .unwrap();
+    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
+        .await
+        .unwrap();
+    registry::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
+        .await
+        .unwrap();
+    registry::create_resource_action(&pool, &new_action("act_1", "rs_1", "projects.get"))
+        .await
+        .unwrap();
+    let assignment_changes = AudienceTenantAssignmentChanges {
+        allowed_profiles: vec![],
+        allowed_scopes: vec![],
+        constraint_versions: vec![],
+        status: Status::Disabled,
+    };
+    let checker_changes = ResourceServerCheckerChanges {
+        public_mtls_identity: "sha256:bb".into(),
+        status: Status::Disabled,
+    };
+    let action_changes = ResourceActionChanges {
+        required_scopes: vec![],
+        accepted_profiles: vec![Profile::HumanCli],
+        required_resource_dimensions: vec![],
+        live_check_required: false,
+        status: Status::Disabled,
+    };
+
+    assert_stale(registry::update_resource_server(&pool, "rs_1", MAX, &server_changes("x")).await);
+    assert_not_found(
+        registry::update_resource_server(&pool, "rs_x", MAX, &server_changes("x")).await,
+    );
+    assert_stale(
+        registry::update_audience_tenant_assignment(&pool, "ata_1", MAX, &assignment_changes).await,
+    );
+    assert_not_found(
+        registry::update_audience_tenant_assignment(&pool, "ata_x", MAX, &assignment_changes).await,
+    );
+    assert_stale(
+        registry::update_resource_server_checker(&pool, "chk_1", MAX, &checker_changes).await,
+    );
+    assert_not_found(
+        registry::update_resource_server_checker(&pool, "chk_x", MAX, &checker_changes).await,
+    );
+    assert_stale(registry::update_resource_action(&pool, "act_1", MAX, &action_changes).await);
+    assert_not_found(registry::update_resource_action(&pool, "act_x", MAX, &action_changes).await);
+    // ten_c could be added and ten_a removed at the checker's revision 2.
+    assert_stale(registry::add_resource_server_checker_tenant(&pool, "chk_1", MAX, "ten_c").await);
+    assert_not_found(
+        registry::add_resource_server_checker_tenant(&pool, "chk_x", MAX, "ten_c").await,
+    );
+    assert_stale(
+        registry::remove_resource_server_checker_tenant(&pool, "chk_1", MAX, "ten_a").await,
+    );
+    assert_not_found(
+        registry::remove_resource_server_checker_tenant(&pool, "chk_x", MAX, "ten_a").await,
+    );
+
+    let server = registry::get_resource_server(&pool, "rs_1").await.unwrap();
+    assert_eq!((server.revision, &server.name[..]), (1, "Server rs_1"));
+    let assignment = registry::get_audience_tenant_assignment(&pool, "ata_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        (assignment.revision, assignment.status),
+        (1, Status::Enabled)
+    );
+    let checker = registry::get_resource_server_checker(&pool, "chk_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            checker.revision,
+            &checker.public_mtls_identity[..],
+            &checker.allowed_tenant_ids[..]
+        ),
+        (2, "sha256:aa", &["ten_a".to_string()][..])
+    );
+    let action = registry::get_resource_action(&pool, "act_1").await.unwrap();
+    assert_eq!((action.revision, action.status), (1, Status::Enabled));
+    db.drop([pool]).await;
+}
+
 /// Waits until the backend `blocked` waits for a lock held by `holder`.
 async fn wait_until_blocked(pool: &PgPool, blocked: i32, holder: i32) {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -635,6 +732,76 @@ async fn a_second_updater_from_the_same_revision_is_stale_after_the_first_commit
     assert_stale(waiting.await.unwrap());
     let current = registry::get_resource_server(&pool, "rs_1").await.unwrap();
     assert_eq!((current.revision, &current.name[..]), (2, "First"));
+    db.drop([pool]).await;
+}
+
+/// The same for checker tenant-set changes: a second add or remove from
+/// the revision the first moves waits for the first's lock on the checker
+/// row and, once the first commits, is stale, although the statement's
+/// snapshot still shows the checker at the expected revision (and, for a
+/// remove, the tenant listed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_second_checker_tenant_change_from_the_same_revision_is_stale_after_the_first_commits() {
+    let (db, pool) = seeded().await;
+    registry::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
+        .await
+        .unwrap();
+    registry::create_audience_tenant_assignment(&pool, &new_assignment("ata_3", "rs_1", "ten_c"))
+        .await
+        .unwrap();
+    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
+        .await
+        .unwrap();
+    let checker = |pool: PgPool| async move {
+        let checker = registry::get_resource_server_checker(&pool, "chk_1")
+            .await
+            .unwrap();
+        (checker.revision, checker.allowed_tenant_ids)
+    };
+    let mut first = pool.acquire().await.unwrap().detach();
+    let mut second = pool.acquire().await.unwrap().detach();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+
+    // Two adds of different tenants from revision 1.
+    let mut tx = first.begin().await.unwrap();
+    assert_eq!(
+        registry::add_resource_server_checker_tenant(&mut *tx, "chk_1", 1, "ten_a")
+            .await
+            .unwrap(),
+        2
+    );
+    let waiting = tokio::spawn(async move {
+        let outcome =
+            registry::add_resource_server_checker_tenant(&mut second, "chk_1", 1, "ten_c").await;
+        (second, outcome)
+    });
+    wait_until_blocked(&pool, second_pid, first_pid).await;
+    assert!(!waiting.is_finished());
+    tx.commit().await.unwrap();
+    let (mut second, outcome) = waiting.await.unwrap();
+    assert_stale(outcome);
+    assert_eq!(checker(pool.clone()).await, (2, vec!["ten_a".to_string()]));
+
+    // Two removes of the listed tenant from revision 2.
+    let mut tx = first.begin().await.unwrap();
+    assert_eq!(
+        registry::remove_resource_server_checker_tenant(&mut *tx, "chk_1", 2, "ten_a")
+            .await
+            .unwrap(),
+        3
+    );
+    let waiting = tokio::spawn(async move {
+        registry::remove_resource_server_checker_tenant(&mut second, "chk_1", 2, "ten_a").await
+    });
+    wait_until_blocked(&pool, second_pid, first_pid).await;
+    assert!(!waiting.is_finished());
+    tx.commit().await.unwrap();
+    assert_stale(waiting.await.unwrap());
+    assert_eq!(checker(pool.clone()).await, (3, vec![]));
     db.drop([pool]).await;
 }
 
@@ -1047,6 +1214,72 @@ async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
         .await
         .unwrap();
     assert_eq!(rows, 1);
+    db.drop([pool]).await;
+}
+
+/// A checker's tenant set comes back in byte order, whatever order the
+/// tenants were added in and whatever the database collation: `ten_B`
+/// (0x42) sorts before `ten_a` (0x61) in `C`, after it in `en_US`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn checker_tenant_sets_are_returned_in_byte_order() {
+    let (db, pool) = seeded().await;
+    // seeded() assigns rs_1 to ten_a.
+    for (tenant, ns, assignment) in [("ten_c", "ns_c", "ata_c"), ("ten_B", "ns_B", "ata_B")] {
+        registry::create_tenant(&pool, &new_tenant(tenant, ns))
+            .await
+            .unwrap();
+        registry::create_audience_tenant_assignment(
+            &pool,
+            &new_assignment(assignment, "rs_1", tenant),
+        )
+        .await
+        .unwrap();
+    }
+    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
+        .await
+        .unwrap();
+    // Neither byte order nor en_US order.
+    for (revision, tenant) in [(1, "ten_c"), (2, "ten_a"), (3, "ten_B")] {
+        assert_eq!(
+            registry::add_resource_server_checker_tenant(&pool, "chk_1", revision, tenant)
+                .await
+                .unwrap(),
+            revision + 1
+        );
+    }
+    let expected = ["ten_B", "ten_a", "ten_c"];
+
+    let read = registry::get_resource_server_checker(&pool, "chk_1")
+        .await
+        .unwrap();
+    assert_eq!(read.allowed_tenant_ids, expected);
+    let listed = registry::list_resource_server_checkers(&pool, Page::first(10))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].allowed_tenant_ids, expected);
+    let changes = ResourceServerCheckerChanges {
+        public_mtls_identity: "sha256:bb".into(),
+        status: Status::Enabled,
+    };
+    let updated = registry::update_resource_server_checker(&pool, "chk_1", 4, &changes)
+        .await
+        .unwrap();
+    assert_eq!(updated.allowed_tenant_ids, expected);
+
+    // The order is the column's: its collation, which the ORDER BY also
+    // names, is "C", so it holds on a cluster whose default is en_US.
+    let collation: String = sqlx::query_scalar(
+        "SELECT c.collname::text FROM pg_attribute a
+         JOIN pg_collation c ON c.oid = a.attcollation
+         WHERE a.attrelid = 'resource_server_checker_tenant'::regclass
+           AND a.attname = 'tenant_id'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(collation, "C");
     db.drop([pool]).await;
 }
 

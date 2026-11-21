@@ -28,7 +28,8 @@
 //                     `leg` holds one layout §1.1 leg string; a leg artifact
 //                     holds nothing else. Only the known artifacts of other
 //                     jobs (NOT_CONFORMANCE: service-nextest-junit-N,
-//                     rust-coverage, typescript-coverage) may lack a `leg`
+//                     rust-coverage, typescript-coverage and this
+//                     reporter's own conformance-report-N) may lack a `leg`
 //                     file; they are ignored. Any other artifact without one,
 //                     and a leg or junit.xml in a subdirectory, is an input
 //                     error.
@@ -429,7 +430,9 @@ export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
 // Artifacts of jobs that are not conformance legs (ci.yml): the only ones
 // that may lack a leg file. Any other artifact without one is an input error.
 // The self-test checks this list against the workflows' upload steps.
-export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/];
+// conformance-report-N is the JSON this reporter writes in the
+// `conformance-report` job.
+export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/, /^conformance-report-[1-9]\d*$/];
 
 // What a path is, without following a symbolic link: dir, file, symlink,
 // other or missing. Other file system errors are thrown.
