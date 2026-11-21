@@ -577,6 +577,19 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
                 .to_string(),
         ),
     ];
+    // The referencing-side indexes of 0007 (schema_registry_shape.rs).
+    for (table, column) in [
+        ("admin_credential", "admin_id"),
+        ("admin_role_binding", "tenant_id"),
+        ("administrative_operation", "tenant_id"),
+        ("administrative_operation", "revocation_operation_id"),
+        ("administrative_operation", "approves_operation_id"),
+        ("administrative_operation", "audit_id"),
+    ] {
+        let name = format!("{table}_{column}_idx");
+        let def = format!("CREATE INDEX {name} ON public.{table} USING btree ({column})");
+        expected.push((name, def));
+    }
     expected.sort();
     assert_eq!(indexes, expected);
 
@@ -872,6 +885,26 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     .into_iter()
     .map(|(name, def)| (name.to_string(), def))
     .collect();
+    // The timestamp range checks of 0007 (schema_registry_shape.rs), as
+    // pg_get_constraintdef prints them under the TimeZone UTC and DateStyle
+    // ISO that sqlx sets for every connection.
+    for (table, column) in [
+        ("admin_identity", "created_at"),
+        ("admin_credential", "revoked_at"),
+        ("administrative_operation", "expires_at"),
+        ("administrative_operation", "consumed_at"),
+        ("administrative_operation", "revoked_at"),
+        ("consumed_assertion", "consumed_at"),
+        ("consumed_assertion", "retain_until"),
+    ] {
+        expected.push((
+            format!("{table}_{column}_range_check"),
+            format!(
+                "CHECK ((({column} >= '4714-11-24 00:00:00+00 BC'::timestamp with time zone) \
+                 AND ({column} <= '294247-01-10 04:00:54.775806+00'::timestamp with time zone)))"
+            ),
+        ));
+    }
     expected.sort();
     assert_eq!(checks, expected);
     db.drop([pool]).await;
