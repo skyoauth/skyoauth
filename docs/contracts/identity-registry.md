@@ -171,6 +171,60 @@ credentials never do. That rule is
   [public-api.md API-120](public-api.md#72-approval-boundaries), which is
   canonical.
 
+Operator authorization in the registry follows these lead picks (lead
+decision, 2026-11-21, provisional until the maintainer ratifies the ADRs,
+T00.8–T00.17 and Gate M0):
+
+- **Reserved actor IDs.** Bootstrap acts for the deployment operator and
+  break-glass recovery for the holder of the offline recovery key, neither
+  of which is an operator identity (design §7.2). Their actor IDs are the
+  reserved `deployment_operator` and `recovery_key:<epoch>`, where
+  `<epoch>` is the key's `recovery_key_epoch` in decimal (the decimal form
+  is inferred), recorded with the audit actor type `operator`; a distinct
+  actor type may come later without a migration. No operator identity may
+  take a reserved ID: creating one with `deployment_operator` or with an ID
+  that begins with `recovery_key:` is rejected, so a real operator cannot
+  act as either. The comparison is exact and byte-wise, and the database
+  does not check it; the registry does (inferred).
+- **Fail-closed scope.** A role assignment satisfies a request only for
+  its own scope: an instance-scoped `auditor` assignment does not satisfy a
+  tenant request, a tenant `auditor` assignment does not satisfy an
+  instance request, and a tenant request needs an assignment of exactly
+  that tenant. With API-120, only an enabled assignment of exactly the
+  requested role counts, held by an enabled operator through an enabled,
+  unrevoked credential. Tenant status is not part of the lookup: ADR-014
+  item 11 lists issuance, live checks, admission and refresh as what a
+  disabled tenant denies and does not name operator writes, so T14 must
+  check the tenant's status where an operator write needs it.
+- **Point in time or locked.** The plain lookup takes no row locks: a
+  revocation, a disable or a binding change can commit between it and the
+  write it authorizes, even in one transaction. A decision that must hold
+  until the write commits uses the locked lookup, in the write's
+  transaction: on a hit it locks the operator identity, the credential and
+  the role assignment `FOR SHARE` by ID, one row and one statement each, in
+  the `0005` lock order of `service/migrations/README.md` (identity,
+  credential, assignment), repeats the lookup and denies unless the repeat
+  gives the same answer. A change to those rows then waits until the
+  write's transaction ends. The lock strength and the deny on any change
+  are inferred.
+- **Explicit time.** In the operator registry slice, time is always an
+  explicit `now` argument, never the database's `now()`. Tenant and
+  principal inserts (`create_tenant` and `create_principal` in
+  `service/src/persistence/registry/tenant.rs`) keep the database default
+  for `created_at`; this divergence is an inferred convention, with no
+  migration to unify it.
+- **Status changes.** Only credential revocation is one-way in the
+  database. The registry has no setter that enables or otherwise updates an
+  operator identity or a credential, and no way to disable a credential
+  without revoking it: public-api §7.1 names enrollment and disable only, so
+  after it is created an identity can only be disabled and a credential only
+  revoked. The database does not forbid re-enabling either, and no guard is
+  added for it. The lead ruling that re-enabling is a plain status change
+  applies to the tables the registry updates, such as role assignments,
+  which are re-enabled rather than assigned twice. Disabling an identity and
+  revoking a credential are unconditional and idempotent, with no expected
+  revision (OQ-IR-16).
+
 The instance security policy is one `InstanceSecurityPolicy` row per instance
 (`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
 `audit_sink_validated_at`, `revision`). (tasks §3)
@@ -298,7 +352,8 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   (inferred type name). Bootstrap and break-glass recovery, which are not
   operator identities, are recorded with the actor type `operator` and the
   reserved IDs `deployment_operator` and `recovery_key:<epoch>` (lead pick,
-  2026-11-21, provisional). The writer's `AuditActor` cannot yet express
+  2026-11-21, provisional until the maintainer ratifies the ADRs,
+  T00.8–T00.17 and Gate M0). The writer's `AuditActor` cannot yet express
   them as actors of their own: it has no variant for them, so they are
   written as operator actors with those IDs. Adding such a variant would
   not change the hash of an existing event, since the actor JSON of
@@ -791,3 +846,14 @@ follow-up. All other items are not resolved by this contract.
     of the sink-change event, of the IR-152 egress entry writes other than
     enabling and of the T13.3 administrative events. The audit writer PR
     names them.
+- **OQ-IR-16 — Revision checks on operator identities and credentials.**
+  public-api API-003 requires an optimistic revision check (an expected
+  revision, or the counters the endpoint defines) on every write of the
+  operator API, but the logical model gives `AdminIdentity` and
+  `AdminCredential` no revision, and `0005` adds none. Disabling an
+  identity and revoking a credential are therefore unconditional and
+  idempotent: a repeated disable changes nothing, and a repeated revocation
+  keeps the first `revoked_at`. This is an explicit provisional exception
+  until T14 (lead decision, 2026-11-21). Not stated: whether the two tables
+  get a `revision` column, whether `/admin/v1/operators` checks another
+  counter instead, or whether API-003 names them as an exception.

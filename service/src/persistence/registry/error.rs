@@ -22,13 +22,46 @@ const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
 /// `principal`, `audit_event` and `audit_chain_head`, the five `0003`
-/// tables, the nine `0004` tables and `consumed_assertion` of `0005`) and
-/// of the three list domains, as migrations `0002` to `0005`, `0007` and
+/// tables, the nine `0004` tables, `consumed_assertion` and the operator
+/// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
+/// `0005`) and of the three list domains, as migrations `0002` to `0005`, `0007` and
 /// `0008` name them, sorted byte-wise. A unique, foreign key or check
 /// violation maps to a typed variant only for a name listed here. The
 /// database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
 pub const KNOWN_CONSTRAINTS: &[&str] = &[
+    // The three operator tables of `0005` (`operator.rs`).
+    "admin_credential_admin_id_fkey",
+    "admin_credential_admin_id_octet_length_check",
+    "admin_credential_id_check",
+    "admin_credential_id_octet_length_check",
+    "admin_credential_pkey",
+    "admin_credential_public_identity_check",
+    "admin_credential_public_identity_key",
+    "admin_credential_public_identity_octet_length_check",
+    "admin_credential_revoked_at_range_check",
+    "admin_credential_revoked_disabled_check",
+    "admin_credential_status_check",
+    "admin_credential_trust_anchor_ref_check",
+    "admin_credential_trust_anchor_ref_no_space_check",
+    "admin_credential_trust_anchor_ref_octet_length_check",
+    "admin_identity_created_at_range_check",
+    "admin_identity_id_check",
+    "admin_identity_id_octet_length_check",
+    "admin_identity_pkey",
+    "admin_identity_status_check",
+    "admin_role_binding_admin_id_fkey",
+    "admin_role_binding_admin_id_octet_length_check",
+    "admin_role_binding_admin_id_role_tenant_id_key",
+    "admin_role_binding_id_check",
+    "admin_role_binding_id_octet_length_check",
+    "admin_role_binding_pkey",
+    "admin_role_binding_revision_check",
+    "admin_role_binding_role_check",
+    "admin_role_binding_scope_check",
+    "admin_role_binding_status_check",
+    "admin_role_binding_tenant_id_fkey",
+    "admin_role_binding_tenant_id_octet_length_check",
     "audience_tenant_assignment_constraint_versions_check",
     "audience_tenant_assignment_id_check",
     "audience_tenant_assignment_id_octet_length_check",
@@ -374,6 +407,12 @@ pub enum RegistryError {
     /// Any other error: a connection or decode failure, an unexpected
     /// SQLSTATE, or a constraint missing from [`KNOWN_CONSTRAINTS`].
     Other(sqlx::Error),
+    /// The ID of a new operator identity is reserved for an actor that is
+    /// not an operator identity (`deployment_operator`, or one beginning
+    /// with `recovery_key:`; see
+    /// [`is_reserved_actor_id`](super::is_reserved_actor_id)). Returned
+    /// before any statement runs; nothing was written.
+    ReservedActorId,
 }
 
 /// The kind of constraint behind [`RegistryError::Invariant`].
@@ -547,6 +586,10 @@ impl fmt::Display for RegistryError {
                 Some(code) => write!(f, "registry database error (SQLSTATE {code})"),
                 None => write!(f, "registry database error"),
             },
+            Self::ReservedActorId => write!(
+                f,
+                "registry ID is reserved for an actor that is not an operator identity"
+            ),
         }
     }
 }
@@ -582,6 +625,7 @@ impl fmt::Debug for RegistryError {
                 .debug_struct("Other")
                 .field("sqlstate", &self.sqlstate())
                 .finish_non_exhaustive(),
+            Self::ReservedActorId => f.write_str("ReservedActorId"),
         }
     }
 }
@@ -954,5 +998,16 @@ mod tests {
             "StaleRevision"
         );
         assert!(RegistryError::Guard.source().is_none());
+    }
+
+    #[test]
+    fn a_reserved_actor_id_displays_without_the_id() {
+        let error = RegistryError::ReservedActorId;
+        assert_eq!(
+            error.to_string(),
+            "registry ID is reserved for an actor that is not an operator identity"
+        );
+        assert_eq!(format!("{error:?}"), "ReservedActorId");
+        assert!(error.source().is_none());
     }
 }
