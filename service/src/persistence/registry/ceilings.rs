@@ -3,7 +3,7 @@
 //! and the target service of a delegation, loaded in one statement (IR-062,
 //! IR-063, IR-083; ADR-015 items 7 and 9; errors-retry ERR-024; design
 //! section 5.7; T12.8; groundwork for T21.5; conformance A26).
-//! [`resolve_scopes`](super::resolve_scopes) applies them.
+//! [`resolve_scopes`](crate::policy::resolve_scopes) applies them.
 //!
 //! [`load_scope_ceilings`] finds the grant by tenant and ID, and the
 //! resource server by its exact `audience`. The resource server must be in
@@ -42,8 +42,10 @@
 
 use sqlx::{PgExecutor, Row, postgres::PgRow};
 
+use crate::policy::ScopeCeilings;
+
 use super::{
-    GrantMode, RegistryError, ScopeCeilings, Status,
+    GrantMode, RegistryError, Status,
     model::{json, optional_json, text},
 };
 
@@ -112,9 +114,9 @@ pub struct LoadedCeilings {
 }
 
 impl LoadedCeilings {
-    /// The ceilings for [`resolve_scopes`](super::resolve_scopes). The
-    /// target service's `max_scopes` is a ceiling exactly when the grant has
-    /// a target (IR-062; inferred for impersonation, which v0.1 never
+    /// The ceilings for [`resolve_scopes`](crate::policy::resolve_scopes).
+    /// The target service's `max_scopes` is a ceiling exactly when the grant
+    /// has a target (IR-062; inferred for impersonation, which v0.1 never
     /// issues).
     pub fn scope_ceilings(&self) -> ScopeCeilings {
         ScopeCeilings {
@@ -129,7 +131,7 @@ impl LoadedCeilings {
     }
 
     /// The grant's `default_scopes`, for
-    /// [`resolve_scopes`](super::resolve_scopes).
+    /// [`resolve_scopes`](crate::policy::resolve_scopes).
     pub fn default_scopes(&self) -> Option<&[String]> {
         self.grant_default_scopes.as_deref()
     }

@@ -5,10 +5,9 @@
 //! 5.7; T12.8; groundwork for T21.5; conformance A26, M1a "policy").
 //!
 //! This module is pure: it reads nothing and writes nothing.
-//! [`load_scope_ceilings`](super::load_scope_ceilings) loads the ceilings
-//! it needs. It lives in the registry, next to that loader, because the
-//! crate has no policy module yet and one module here is the smallest
-//! change (inferred); it does not depend on the database.
+//! `load_scope_ceilings` (in `persistence::registry`) loads the ceilings
+//! it needs. It lives in `policy`, apart from that loader, because it does
+//! not depend on the database (lead ruling, 2026-11-21).
 //!
 //! # Rules
 //!

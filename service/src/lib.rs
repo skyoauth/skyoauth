@@ -4,6 +4,7 @@ use axum::{Json, Router, routing::get};
 use serde::Serialize;
 
 pub mod persistence;
+pub mod policy;
 
 /// Response body of `GET /healthz`.
 #[derive(Debug, Serialize)]
