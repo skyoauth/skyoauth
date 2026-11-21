@@ -22,8 +22,9 @@ const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
 /// `principal`, `audit_event` and `audit_chain_head`, the five `0003`
-/// tables, the nine `0004` tables and `consumed_assertion` of `0005`) and
-/// of the three list domains, as migrations `0002` to `0005`, `0007` and
+/// tables, the nine `0004` tables, `consumed_assertion` and the operator
+/// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
+/// `0005`) and of the three list domains, as migrations `0002` to `0005`, `0007` and
 /// `0008` name them, sorted byte-wise. A unique, foreign key or check
 /// violation maps to a typed variant only for a name listed here. The
 /// database test `registry_constraint_names_match_the_catalog` keeps the
