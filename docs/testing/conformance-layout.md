@@ -373,7 +373,7 @@ Service-consumer fixtures are therefore replayed from `skyoauth-scenarios`, whic
 - proptest/fuzz use fixed seeds with committed regressions. Jitter and backoff take an injected RNG (A12, A56).
 - Servers bind port 0 on loopback. Hermetic jobs need no egress, and every mock issuer is in-process. Cluster/Envoy jobs wait on observed conditions with deadlines, not fixed sleeps.
 - Only the `live-wif-push` and `live-wif-negative` jobs touch the internet for conformance. The nightly real-Zitadel compatibility job also does, but it is not conformance evidence.
-- Scenario tests never assert audit hash values. They assert chain linkage (each event's `sequence` and `prev_hash` continue the chain) and verification outcomes. The hash definition (identity-registry IR-056) is provisional until the audit writer ships.
+- Scenario tests never assert audit hash values. They assert chain linkage (each event's `sequence` and `prev_hash` continue the chain) and verification outcomes. The hash definition (identity-registry IR-056) is provisional until the maintainer ratifies the ADRs.
 
 **Live WIF (A01, A02, A36).** Production bindings permit `push` only (T22.4), so one run cannot show both a live allow and a live deny of the production binding. The live evidence is therefore split into two jobs, and each has a `pos` and a `neg` test, as every leg of an implemented stage must (section 3):
 
