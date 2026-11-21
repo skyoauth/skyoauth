@@ -251,7 +251,17 @@ T00.8–T00.17 and Gate M0):
   row exists before bootstrap, nor that it does not. The startup path does
   not exist yet; a startup that creates the row before bootstrap needs an
   `instance_id` then, which contradicts "generated at first bootstrap"
-  unless startup generates it and bootstrap adopts it.
+  unless startup generates it and bootstrap adopts it. A policy row that
+  bootstrap inserts itself takes the column defaults (`single_actor_mode`
+  and `widening_second_approver` false, no audit sink) until the IR-053
+  startup mirror exists. A policy row another writer commits while
+  bootstrap waits to insert its own is adopted the same way under
+  `READ COMMITTED`, not refused as closed; under `REPEATABLE READ` or
+  `SERIALIZABLE` bootstrap cannot see it and asks for a retry. For the
+  startup path: it must store a lowercase hyphenated UUIDv7, since a
+  stored `instance_id` that no valid request can equal makes bootstrap
+  impossible, failing closed; and a startup insert racing a bootstrap on
+  an empty database is adopted by it, not a false closure.
 - **Recovery key at bootstrap.** The offline recovery public key enrolled
   at bootstrap is the raw 32-byte Ed25519 key of IR-058, and the registry
   refuses any other length before writing; it does not check the bytes
@@ -265,6 +275,11 @@ T00.8–T00.17 and Gate M0):
   configuration, environment or restart is an input, so none can reopen
   it. A `RecoveryState` row whose `bootstrap_closed` is false, which only
   a write by other means can leave, still counts as closed (inferred).
+  When the commit's outcome is unknown, the bootstrap caller keeps all the
+  request's material until it has reconnected and reconciled the durable
+  state, then retries the same request, which is refused as closed if the
+  first attempt committed. The same rule will apply to `restore_operator`
+  (a later change, PR 3a).
 
   These three are provisional lead picks (2026-11-21), recorded with the
   first registry bootstrap (`service/src/persistence/registry/bootstrap.rs`).

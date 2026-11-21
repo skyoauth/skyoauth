@@ -2,10 +2,11 @@
 //! design section 7.2; ADR-013 item 5; identity-registry IR-053, IR-057
 //! and section 5.2; T13.4, T13.6): a full bootstrap on an empty database,
 //! closure after commit and across connections, two concurrent bootstraps,
-//! the adopt rule for a policy row written before bootstrap, a failed audit
-//! append that leaves nothing behind once the caller rolls back, input
-//! rejected before any statement, and collisions of caller-supplied IDs
-//! that stay `AlreadyExists`.
+//! the adopt rule for a policy row written before bootstrap or committed
+//! while bootstrap waits, a failed audit append that leaves nothing behind
+//! once the caller rolls back, or even commits, input rejected before any
+//! statement, and collisions of caller-supplied IDs that stay
+//! `AlreadyExists`.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests, not
@@ -97,7 +98,17 @@ async fn bootstrap(
     connection: &mut PgConnection,
     request: &BootstrapRequest<'_>,
 ) -> Result<BootstrapOutcome, BootstrapError> {
+    bootstrap_at(connection, "READ COMMITTED", request).await
+}
+
+/// [`bootstrap`] at the isolation level `isolation`.
+async fn bootstrap_at(
+    connection: &mut PgConnection,
+    isolation: &str,
+    request: &BootstrapRequest<'_>,
+) -> Result<BootstrapOutcome, BootstrapError> {
     let mut transaction = connection.begin().await.unwrap();
+    set_isolation(&mut transaction, isolation).await;
     let outcome = bootstrap_instance(&mut transaction, request).await;
     match outcome {
         Ok(_) => transaction.commit().await.unwrap(),
@@ -122,6 +133,25 @@ fn assert_closed<T: std::fmt::Debug>(result: Result<T, BootstrapError>) {
             assert_eq!(err.to_string(), "bootstrap is already closed");
         }
         other => panic!("expected AlreadyClosed: {other:?}"),
+    }
+}
+
+/// Sets the isolation level of the transaction, which has run no statement
+/// yet, and takes its snapshot.
+async fn set_isolation(connection: &mut PgConnection, isolation: &str) {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "SET TRANSACTION ISOLATION LEVEL {isolation}; SELECT 1"
+    )))
+    .execute(connection)
+    .await
+    .unwrap();
+}
+
+#[track_caller]
+fn assert_retry<T: std::fmt::Debug>(result: Result<T, BootstrapError>) {
+    match result {
+        Err(BootstrapError::Store(RegistryError::Retry(_))) => {}
+        other => panic!("expected Retry: {other:?}"),
     }
 }
 
@@ -494,10 +524,10 @@ async fn of_two_concurrent_bootstraps_exactly_one_wins() {
 }
 
 /// The second of two bootstraps on an empty database waits on the first's
-/// policy row insert. When the first commits, the second is
-/// `AlreadyClosed`, for the same instance ID (`instance_security_policy_pkey`)
-/// and for another (`instance_security_policy_single_row`). When the first
-/// rolls back, the second bootstraps.
+/// policy row insert. When the first commits, the second's insert inserts
+/// nothing and its repeated check finds the first's recovery state:
+/// `AlreadyClosed`, for the same instance ID and for another. When the
+/// first rolls back, the second bootstraps.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_waiting_second_bootstrap_follows_the_first_commit_or_rollback() {
@@ -609,6 +639,32 @@ async fn bootstrap_adopts_a_policy_row_written_before_it() {
     db.drop([pool]).await;
 }
 
+/// A recovery state row whose `bootstrap_closed` is false, which only a
+/// write by other means can leave, still closes bootstrap: `AlreadyClosed`
+/// for the stored instance ID and for another, and nothing changes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_recovery_state_not_marked_closed_still_closes_bootstrap() {
+    let (db, pool) = migrated().await;
+    seed_policy(&pool, INSTANCE).await;
+    sqlx::query(
+        "INSERT INTO recovery_state \
+         (instance_id, bootstrap_closed, recovery_public_key, recovery_key_epoch) \
+         VALUES ($1, false, $2, 1)",
+    )
+    .bind(INSTANCE)
+    .bind(&KEY[..])
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = state(&pool).await;
+    assert_closed(bootstrap_on(&pool, &request(INSTANCE)).await);
+    assert_closed(bootstrap_on(&pool, &request(OTHER_INSTANCE)).await);
+    assert_eq!(state(&pool).await, before);
+    assert_eq!(pool_counts(&pool).await, [1, 1, 0, 0, 0, 0, 0]);
+    db.drop([pool]).await;
+}
+
 /// With a policy row, the second of two bootstraps waits for the first's
 /// row lock and then finds the first's committed recovery state. It is
 /// `AlreadyClosed` also with another instance ID: closure is read after
@@ -648,32 +704,120 @@ async fn a_second_bootstrap_waits_for_the_policy_lock_then_is_closed() {
 
 /// A bootstrap whose snapshot predates another bootstrap's commit does not
 /// see the recovery state, adopts the policy row (the other bootstrap only
-/// locked it) and then collides with the committed recovery state. Under
-/// `REPEATABLE READ` and under `SERIALIZABLE` that is still
-/// `AlreadyClosed`, through the unique key of the recovery state
-/// (`recovery_state_pkey`, the key both rows share).
+/// locked it) and then collides with the committed recovery state. When
+/// the committed bootstrap ran under `READ COMMITTED`, that is still
+/// `AlreadyClosed` under `REPEATABLE READ` and under `SERIALIZABLE`,
+/// through the unique key of the recovery state (`recovery_state_pkey`,
+/// the key both rows share). When both ran under `SERIALIZABLE`, the late
+/// one fails with `40001` instead: `Retry`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_stale_snapshot_bootstrap_is_still_closed() {
-    for isolation in ["REPEATABLE READ", "SERIALIZABLE"] {
+    for (first, isolation) in [
+        ("READ COMMITTED", "REPEATABLE READ"),
+        ("READ COMMITTED", "SERIALIZABLE"),
+        ("SERIALIZABLE", "SERIALIZABLE"),
+    ] {
         let (db, pool) = migrated().await;
         seed_policy(&pool, INSTANCE).await;
         let mut late = pool.acquire().await.unwrap().detach();
         let mut transaction = late.begin().await.unwrap();
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-            "SET TRANSACTION ISOLATION LEVEL {isolation}; SELECT 1"
-        )))
-        .execute(&mut *transaction)
-        .await
-        .unwrap();
-        bootstrap_on(&pool, &request(INSTANCE)).await.unwrap();
+        set_isolation(&mut transaction, isolation).await;
+        let mut committed = pool.acquire().await.unwrap();
+        bootstrap_at(&mut committed, first, &request(INSTANCE))
+            .await
+            .unwrap();
+        drop(committed);
         let mut request = other_request();
         request.instance_id = INSTANCE;
         let outcome = bootstrap_instance(&mut transaction, &request).await;
         transaction.rollback().await.unwrap();
-        assert_closed(outcome);
+        if first == "SERIALIZABLE" {
+            assert!(
+                matches!(&outcome, Err(BootstrapError::Store(err))
+                    if format!("{err:?}") == r#"Retry { sqlstate: Some("40001"), .. }"#),
+                "{outcome:?}"
+            );
+        } else {
+            assert_closed(outcome);
+        }
         late.close().await.unwrap();
         assert_eq!(pool_counts(&pool).await, [1, 1, 1, 1, 1, 1, 0]);
+        db.drop([pool]).await;
+    }
+}
+
+/// Another writer, such as a startup path, inserts only a policy row and
+/// holds its transaction open while a bootstrap on the empty database
+/// waits on that row's unique entry (seen with `pg_blocking_pids`). Under
+/// `READ COMMITTED`, once the writer commits, the bootstrap's insert inserts
+/// nothing and it adopts the committed row: it bootstraps with the same
+/// instance ID and is `InstanceIdMismatch` with another, never
+/// `AlreadyClosed`. Under `REPEATABLE READ` its snapshot cannot see the
+/// row: `Retry`, after which the whole transaction, retried, adopts it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_policy_row_committed_while_bootstrap_waits_is_adopted() {
+    for (writer_instance, isolation) in [
+        (INSTANCE, "READ COMMITTED"),
+        (OTHER_INSTANCE, "READ COMMITTED"),
+        (INSTANCE, "REPEATABLE READ"),
+    ] {
+        let (db, pool) = migrated().await;
+        let mut writer = pool.acquire().await.unwrap().detach();
+        let mut waiter = pool.acquire().await.unwrap().detach();
+        let (writer_pid, waiter_pid) = (
+            backend_pid(&mut writer).await,
+            backend_pid(&mut waiter).await,
+        );
+        let mut transaction = writer.begin().await.unwrap();
+        sqlx::query("INSERT INTO instance_security_policy (instance_id) VALUES ($1)")
+            .bind(writer_instance)
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move {
+            let outcome = bootstrap_at(&mut waiter, isolation, &request(INSTANCE)).await;
+            (waiter, outcome)
+        });
+        wait_until_blocked(&pool, waiter_pid, writer_pid).await;
+        assert!(!waiting.is_finished());
+        transaction.commit().await.unwrap();
+        let (mut waiter, outcome) = waiting.await.unwrap();
+        let written = registry::get_instance_security_policy(&pool).await.unwrap();
+        assert_eq!(
+            (&written.instance_id[..], written.revision),
+            (writer_instance, 1)
+        );
+        match (writer_instance, isolation) {
+            (INSTANCE, "READ COMMITTED") => {
+                let outcome = outcome.unwrap();
+                assert_eq!(outcome.instance_id, INSTANCE);
+                assert_eq!(outcome.audit_event.object_id, INSTANCE);
+                assert_eq!(pool_counts(&pool).await, [1, 1, 1, 1, 1, 1, 0]);
+            }
+            (OTHER_INSTANCE, _) => {
+                let err = outcome.unwrap_err();
+                assert!(matches!(err, BootstrapError::InstanceIdMismatch), "{err:?}");
+                assert_eq!(pool_counts(&pool).await, [1, 0, 0, 0, 0, 0, 0]);
+            }
+            _ => {
+                assert_retry(outcome);
+                assert_eq!(pool_counts(&pool).await, [1, 0, 0, 0, 0, 0, 0]);
+                // The whole transaction, retried, adopts the row.
+                let outcome = bootstrap_at(&mut waiter, isolation, &request(INSTANCE))
+                    .await
+                    .unwrap();
+                assert_eq!(outcome.instance_id, INSTANCE);
+                assert_eq!(pool_counts(&pool).await, [1, 1, 1, 1, 1, 1, 0]);
+            }
+        }
+        assert_eq!(
+            registry::get_instance_security_policy(&pool).await.unwrap(),
+            written
+        );
+        waiter.close().await.unwrap();
+        writer.close().await.unwrap();
         db.drop([pool]).await;
     }
 }
@@ -733,6 +877,45 @@ async fn a_failed_audit_append_leaves_nothing_after_rollback() {
     assert_eq!(
         verify(&pool).await,
         ChainVerdict::Intact { last_sequence: 2 }
+    );
+    db.drop([pool]).await;
+}
+
+/// Bootstrap rolls back its own savepoint on every error, also one the
+/// audit writer returns in Rust after the head lock (here, a head at
+/// `2^53 - 1` leaves no sequence for the event). A caller that commits
+/// anyway commits none of bootstrap's rows, and the head is unchanged.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_caller_that_commits_after_an_error_commits_nothing() {
+    let (db, pool) = migrated().await;
+    sqlx::raw_sql(
+        "ALTER TABLE audit_chain_head DISABLE TRIGGER audit_chain_head_advance; \
+         UPDATE audit_chain_head SET sequence = 9007199254740991, \
+             head_hash = decode(repeat('cd', 32), 'hex'); \
+         ALTER TABLE audit_chain_head ENABLE ALWAYS TRIGGER audit_chain_head_advance",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let before = state(&pool).await;
+
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    assert_encode(
+        bootstrap_instance(&mut transaction, &request(INSTANCE)).await,
+        "audit integer above 2^53 - 1",
+    );
+    // The transaction is usable and holds none of bootstrap's rows.
+    usable_and_empty(&mut transaction).await;
+    transaction.commit().await.unwrap();
+    drop(connection);
+    assert_eq!(state(&pool).await, before);
+    assert_eq!(pool_counts(&pool).await, [0; 7]);
+    assert!(recovery_state(&pool).await.is_none());
+    assert_eq!(
+        authorize_security_admin(&pool, "spki-sha256:first").await,
+        None
     );
     db.drop([pool]).await;
 }

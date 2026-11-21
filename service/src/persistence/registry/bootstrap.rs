@@ -7,15 +7,23 @@
 //!
 //! # Steps
 //!
-//! In the caller's [`Transaction`], in this order:
+//! In the caller's [`Transaction`], inside a savepoint of bootstrap's own
+//! (see "Errors and rollback"), in this order:
 //!
 //! 1. Lock the policy row, `SELECT instance_id FROM instance_security_policy
 //!    FOR UPDATE`, then, in a separate statement, read whether a
 //!    `recovery_state` row exists. A row there means bootstrap is closed:
-//!    [`BootstrapError::AlreadyClosed`], whatever the request holds. With a
-//!    policy row and no recovery state, bootstrap adopts the row (see
-//!    "Adopting a policy row"). With no policy row, it inserts one with the
-//!    request's `instance_id` and the column defaults for the rest.
+//!    [`BootstrapError::AlreadyClosed`], whatever valid request it is given
+//!    (the checks of "Validation and trust" come first). With a policy row
+//!    and no recovery state, bootstrap adopts the row (see "Adopting a
+//!    policy row"). With no policy row, it inserts one with the request's
+//!    `instance_id` and the column defaults for the rest, with
+//!    `INSERT ... ON CONFLICT DO NOTHING RETURNING`: no conflict target, so
+//!    the `INSERT` privilege suffices. An insert that returns no row found
+//!    a policy row another transaction committed meanwhile; bootstrap then
+//!    locks the row and reads the recovery state again, as above, and is
+//!    `AlreadyClosed`, adopts the row or is
+//!    [`BootstrapError::InstanceIdMismatch`] (see "Closure").
 //! 2. Insert the `recovery_state` row: the effective `instance_id`,
 //!    `bootstrap_closed = true`, the recovery public key and
 //!    `recovery_key_epoch = 1` (the first epoch, `0005`), at revision 1.
@@ -58,34 +66,51 @@
 //! - On an empty database neither finds a policy row to lock, and both
 //!   insert one. The second waits on the first's unique index entry
 //!   (`instance_security_policy_single_row`, or
-//!   `instance_security_policy_pkey` for the same ID); when the first
-//!   commits it fails with `23505`, which is
-//!   [`BootstrapError::AlreadyClosed`]. When the first rolls back, the
-//!   second goes on and bootstraps.
+//!   `instance_security_policy_pkey` for the same ID). When the first
+//!   commits, the second's insert returns no row, and its repeated lock and
+//!   check, statements after the wait, see the first's committed recovery
+//!   state: [`BootstrapError::AlreadyClosed`]. When the first rolls back,
+//!   the second's insert goes on and it bootstraps. A transaction that
+//!   commits only a policy row meanwhile, as a startup path might, is
+//!   adopted like a row found by the first lock: the same `instance_id`
+//!   bootstraps, another is [`BootstrapError::InstanceIdMismatch`].
 //! - With a policy row, the second waits for the first's row lock; when
 //!   the first commits, the recovery state check, a statement after the
 //!   lock, sees its committed row: [`BootstrapError::AlreadyClosed`].
 //! - A `23505` on `recovery_state_single_row` or `recovery_state_pkey` is
 //!   [`BootstrapError::AlreadyClosed`] too.
 //!
-//! Under `REPEATABLE READ` and `SERIALIZABLE`, a bootstrap whose snapshot
-//! predates another's commit misses the recovery state, adopts the policy
-//! row (which the other only locked) and then fails its recovery state
-//! insert with `23505` on `recovery_state_pkey`: `AlreadyClosed` too
-//! (tested on PostgreSQL 16). Any `40001` or `40P01` is
+//! Under `REPEATABLE READ` and `SERIALIZABLE` the repeated lock cannot see
+//! a policy row committed after the transaction's snapshot, so it cannot
+//! tell whether that row closes bootstrap. PostgreSQL fails the insert
+//! itself with `40001` when the conflicting row is not in the snapshot;
+//! should the insert still return no row and the repeated lock find none,
+//! bootstrap returns [`RegistryError::Retry`] in [`BootstrapError::Store`]
+//! (wrapping [`sqlx::Error::RowNotFound`]), never a closure. With a policy
+//! row present, a bootstrap whose snapshot predates another's commit
+//! misses the recovery state, adopts the row (which the other only locked)
+//! and fails its recovery state insert with `23505` on
+//! `recovery_state_pkey`: `AlreadyClosed`. That holds when the committed
+//! bootstrap ran under `READ COMMITTED`; when both ran under
+//! `SERIALIZABLE`, the late one fails with `40001` instead (both tested on
+//! PostgreSQL 17.12, the CI pin). Any `40001` or `40P01` is
 //! [`RegistryError::Retry`] in [`BootstrapError::Store`], and retrying the
-//! whole transaction then gives `AlreadyClosed`. A `23505` on
-//! the policy row maps to `AlreadyClosed` whoever inserted the competing
-//! row; today only bootstrap inserts one, and a retry adopts a row another
-//! writer committed without a recovery state (inferred).
+//! whole transaction then gives `AlreadyClosed`.
 //!
-//! Only those four unique keys of steps 1 and 2 mean "closed". A `23505` of
+//! Only the two unique keys of step 2 mean "closed". The policy insert
+//! raises no `23505` on its own keys (`ON CONFLICT DO NOTHING`), and one
+//! that did would stay [`RegistryError::AlreadyExists`]. A `23505` of
 //! step 3 or 4 is a collision of a caller-supplied value with an existing
 //! row and stays the typed [`RegistryError::AlreadyExists`] in
 //! [`BootstrapError::Store`], naming only the constraint:
 //! `admin_identity_pkey`, `admin_credential_pkey`,
 //! `admin_credential_public_identity_key` (a key already registered,
 //! revoked or not), `admin_role_binding_pkey` or `audit_event_pkey`.
+//!
+//! Bootstrap locks or inserts the `instance_security_policy` row before
+//! its `0005` writes and takes the audit head last, and it locks no tenant
+//! row, so it cannot form a lock cycle with appenders that lock a tenant
+//! and then the head.
 //!
 //! # Adopting a policy row
 //!
@@ -106,8 +131,18 @@
 //! "generated at first bootstrap" unless startup generates it and
 //! bootstrap adopts it, as here. When bootstrap inserts the row, the other
 //! columns take their defaults (`single_actor_mode` and
-//! `widening_second_approver` false, no audit sink): the startup mirror of
-//! IR-053, not bootstrap, writes deployment configuration into the row.
+//! `widening_second_approver` false, no audit sink) until the startup
+//! mirror of IR-053 exists: that mirror, not bootstrap, writes deployment
+//! configuration into the row. For the startup-path change:
+//!
+//! - a stored `instance_id` that is not a lowercase hyphenated UUIDv7 (the
+//!   database checks only its length) equals no request that passes
+//!   validation, so bootstrap is impossible on that database and fails
+//!   closed with [`BootstrapError::InstanceIdMismatch`]; startup must
+//!   write a lowercase UUIDv7;
+//! - a startup insert that races a bootstrap on an empty database and
+//!   commits first is adopted by that bootstrap (or is a mismatch), not a
+//!   false [`BootstrapError::AlreadyClosed`].
 //!
 //! # Validation and trust
 //!
@@ -147,12 +182,24 @@
 //!
 //! # Errors and rollback
 //!
-//! Bootstrap neither commits nor rolls back. On `Err` the caller must roll
-//! the transaction back: steps before the failure may have written rows,
-//! and a failed statement aborts the transaction. That is how a missing
-//! store or a failed audit append fails closed (T13.6): nothing commits
-//! without the audit event, and the next attempt finds bootstrap open. On
-//! `Ok` the caller commits; a commit failure leaves bootstrap open too.
+//! Bootstrap neither commits nor rolls back the caller's transaction. It
+//! runs steps 1 to 4 inside a savepoint of its own and rolls the savepoint
+//! back on every `Err`, including one the audit writer returns in Rust
+//! after the head lock, so a caller that commits after an `Err` commits
+//! none of bootstrap's rows. The caller must still roll the transaction
+//! back on `Err`: a failed savepoint rollback leaves the rows in place.
+//! That is how a missing store or a failed audit append fails closed
+//! (T13.6): nothing commits without the audit event, and the next attempt
+//! finds bootstrap open. On `Ok` the caller commits; a commit failure
+//! leaves bootstrap open too.
+//!
+//! When the commit's outcome is unknown, for example because the
+//! connection failed during `COMMIT`, the caller keeps all the request's
+//! material (its IDs, the operator's credential and the recovery public
+//! key) until it has reconnected and reconciled the durable state, and
+//! then retries the same request: `AlreadyClosed` if the first attempt
+//! committed. The same rule will apply to `restore_operator` (a later
+//! change, PR 3a).
 //!
 //! [`create_admin_identity`]: super::create_admin_identity
 //! [`create_admin_credential`]: super::create_admin_credential
@@ -163,7 +210,7 @@
 
 use std::{fmt, time::SystemTime};
 
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Connection, Postgres, Row, Transaction};
 
 use super::{
     AdminRole, AuditActor, AuditEvent, DEPLOYMENT_OPERATOR_ACTOR, NewAdminCredential,
@@ -194,14 +241,10 @@ const SUCCESS: &str = "success";
 /// `unique_violation`.
 const UNIQUE_VIOLATION: &str = "23505";
 
-/// The unique keys of steps 1 and 2 whose `23505` means another bootstrap
-/// got there first: [`BootstrapError::AlreadyClosed`].
-const CLOSING_KEYS: &[&str] = &[
-    "instance_security_policy_pkey",
-    "instance_security_policy_single_row",
-    "recovery_state_pkey",
-    "recovery_state_single_row",
-];
+/// The unique keys of step 2 whose `23505` means another bootstrap got
+/// there first: [`BootstrapError::AlreadyClosed`]. Not the policy row's
+/// keys: a policy row may be another writer's, which bootstrap adopts.
+const CLOSING_KEYS: &[&str] = &["recovery_state_pkey", "recovery_state_single_row"];
 
 /// Locks the policy row, if there is one.
 const LOCK_POLICY: &str = "SELECT instance_id FROM instance_security_policy FOR UPDATE";
@@ -211,8 +254,10 @@ const LOCK_POLICY: &str = "SELECT instance_id FROM instance_security_policy FOR 
 /// committed.
 const RECOVERY_STATE_EXISTS: &str = "SELECT EXISTS (SELECT FROM recovery_state) AS closed";
 
-const INSERT_POLICY: &str =
-    "INSERT INTO instance_security_policy (instance_id) VALUES ($1) RETURNING instance_id";
+/// Inserts the policy row, or nothing when a committed row conflicts on
+/// any unique key. No conflict target, so it needs only `INSERT`.
+const INSERT_POLICY: &str = "INSERT INTO instance_security_policy (instance_id) VALUES ($1) \
+     ON CONFLICT DO NOTHING RETURNING instance_id";
 
 const INSERT_RECOVERY_STATE: &str = "INSERT INTO recovery_state \
      (instance_id, bootstrap_closed, recovery_public_key, recovery_key_epoch) \
@@ -307,7 +352,7 @@ impl From<sqlx::Error> for BootstrapError {
     }
 }
 
-/// The error of a step 1 or 2 insert: [`BootstrapError::AlreadyClosed`]
+/// The error of the step 2 insert: [`BootstrapError::AlreadyClosed`]
 /// for a `23505` on one of [`CLOSING_KEYS`], otherwise the registry
 /// error.
 fn closed_or_store(err: sqlx::Error) -> BootstrapError {
@@ -378,16 +423,12 @@ fn validate(request: &BootstrapRequest<'_>) -> Result<(), BootstrapError> {
     Ok(())
 }
 
-/// Bootstraps the instance in `transaction` (see the module docs for the
-/// steps, the adopt rule and the errors). Never commits or rolls back: the
-/// caller commits on `Ok` and rolls back on `Err`.
-pub async fn bootstrap_instance(
+/// Locks the policy row, if there is one, and then reads whether bootstrap
+/// is closed: [`BootstrapError::AlreadyClosed`], or the stored
+/// `instance_id`.
+async fn lock_open_policy(
     transaction: &mut Transaction<'_, Postgres>,
-    request: &BootstrapRequest<'_>,
-) -> Result<BootstrapOutcome, BootstrapError> {
-    validate(request)?;
-
-    // Step 1: lock or insert the policy row, after checking closure.
+) -> Result<Option<String>, BootstrapError> {
     let stored: Option<String> = sqlx::query_scalar(LOCK_POLICY)
         .fetch_optional(&mut **transaction)
         .await?;
@@ -397,15 +438,71 @@ pub async fn bootstrap_instance(
     if closed {
         return Err(BootstrapError::AlreadyClosed);
     }
-    let instance_id = match stored {
-        Some(stored) if stored == request.instance_id => stored,
-        Some(_) => return Err(BootstrapError::InstanceIdMismatch),
-        None => sqlx::query_scalar(INSERT_POLICY)
-            .bind(request.instance_id)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(closed_or_store)?,
+    Ok(stored)
+}
+
+/// Step 1: the effective `instance_id`, from the policy row bootstrap
+/// adopts or inserts.
+async fn claim_policy(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &BootstrapRequest<'_>,
+) -> Result<String, BootstrapError> {
+    let stored = match lock_open_policy(transaction).await? {
+        Some(stored) => stored,
+        None => {
+            let inserted: Option<String> = sqlx::query_scalar(INSERT_POLICY)
+                .bind(request.instance_id)
+                .fetch_optional(&mut **transaction)
+                .await?;
+            if let Some(inserted) = inserted {
+                return Ok(inserted);
+            }
+            // Another transaction committed a policy row. Under `READ
+            // COMMITTED` these statements see it; an older snapshot that
+            // misses it cannot tell whether bootstrap is closed: retry.
+            lock_open_policy(transaction).await?.ok_or_else(|| {
+                BootstrapError::Store(RegistryError::Retry(sqlx::Error::RowNotFound))
+            })?
+        }
     };
+    if stored == request.instance_id {
+        Ok(stored)
+    } else {
+        Err(BootstrapError::InstanceIdMismatch)
+    }
+}
+
+/// Bootstraps the instance in `transaction` (see the module docs for the
+/// steps, the adopt rule and the errors). Never commits or rolls back the
+/// caller's transaction, only its own savepoint: the caller commits on
+/// `Ok` and rolls back on `Err`.
+pub async fn bootstrap_instance(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &BootstrapRequest<'_>,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    validate(request)?;
+    let mut savepoint = transaction.begin().await?;
+    match bootstrap_steps(&mut savepoint, request).await {
+        Ok(outcome) => {
+            savepoint.commit().await?;
+            Ok(outcome)
+        }
+        Err(err) => {
+            // The caller rolls back on every `Err` anyway; the step's error
+            // says more than a failed savepoint rollback would.
+            let _ = savepoint.rollback().await;
+            Err(err)
+        }
+    }
+}
+
+/// Steps 1 to 4, in the savepoint of [`bootstrap_instance`].
+async fn bootstrap_steps(
+    transaction: &mut Transaction<'_, Postgres>,
+    request: &BootstrapRequest<'_>,
+) -> Result<BootstrapOutcome, BootstrapError> {
+    // Step 1: lock, adopt or insert the policy row, after checking closure.
+    let instance_id = claim_policy(transaction, request).await?;
 
     // Step 2: the recovery state closes bootstrap.
     let recovery = sqlx::query(INSERT_RECOVERY_STATE)
@@ -699,15 +796,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_policy_and_recovery_keys_close_bootstrap() {
+    fn only_the_recovery_state_keys_close_bootstrap() {
         assert_eq!(
             CLOSING_KEYS,
-            [
-                "instance_security_policy_pkey",
-                "instance_security_policy_single_row",
-                "recovery_state_pkey",
-                "recovery_state_single_row",
-            ]
+            ["recovery_state_pkey", "recovery_state_single_row"]
         );
         assert!(matches!(
             closed_or_store(sqlx::Error::PoolClosed),
@@ -718,6 +810,10 @@ mod tests {
     #[test]
     fn the_statements_close_bootstrap_at_the_first_epoch() {
         assert!(INSERT_RECOVERY_STATE.contains("VALUES ($1, true, $2, $3)"));
+        // No conflict target: any unique key, and only `INSERT` needed.
+        assert!(
+            INSERT_POLICY.ends_with("VALUES ($1) ON CONFLICT DO NOTHING RETURNING instance_id")
+        );
         assert_eq!(FIRST_RECOVERY_KEY_EPOCH, 1);
         assert_eq!(BOOTSTRAP_ACTION, "recovery_state.create");
         assert!(super::super::is_audit_action(BOOTSTRAP_ACTION));
