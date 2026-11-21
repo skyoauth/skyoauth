@@ -26,14 +26,22 @@
 //! - Writes take caller-supplied IDs and `secret_namespace`; generating them
 //!   is T10.2. Rows are created at revision 1 (the database's default).
 //! - An update replaces every mutable column of the row with the caller's
-//!   values (read, modify, then write back) and is a compare-and-set on the
+//!   values (read, modify, then write back); [`update_tenant`] and
+//!   [`update_principal`] instead take a patch of the columns to change
+//!   (lead ruling, 2026-11-21). Every update is a compare-and-set on the
 //!   revision: the caller passes the expected revision, and the statement
 //!   sets `revision = revision + 1` where `revision = expected`, so the row
 //!   moves to `expected + 1` as the `0002` guard `skyoauth_check_revision()`
 //!   requires. The expected revision is only compared, never computed with,
 //!   so any `i64`, `i64::MAX` included, is a valid argument. A row at
 //!   another revision gives [`RegistryError::StaleRevision`] and changes
-//!   nothing; a missing row gives [`RegistryError::NotFound`].
+//!   nothing; a missing row gives [`RegistryError::NotFound`]. Only a row
+//!   already at revision `i64::MAX` cannot advance: an update or list-set
+//!   change of it with expected revision `i64::MAX` gives
+//!   [`RegistryError::Other`] with SQLSTATE `22003`
+//!   (`numeric_value_out_of_range`) from `revision + 1`, on every table.
+//!   That is unreachable in practice, since revisions start at 1 and
+//!   advance by 1.
 //! - Under `READ COMMITTED`, PostgreSQL's default, of two concurrent updates
 //!   from the same revision exactly one succeeds: the second waits for the
 //!   first's row lock, then finds the revision moved and gives
@@ -49,15 +57,17 @@
 //!   `kind`; in `0004` every `tenant_id`, a source's `kind`, `cluster_id`
 //!   and `jwks_keyset_id`, a binding's source and principal, a grant's
 //!   actor, target and mode, and every column of a list row) are set only
-//!   on create; no update touches them. A keyset version's columns are
-//!   also untouched, but only because no update exists yet: the schema
-//!   lets its `status` change, and the `revision` column plus
-//!   `update_trust_keyset_version` come with the shape migration (`0007`;
-//!   migrations README, "The `0004` tables").
-//! - `tenant` and `principal` have no revision column yet (migrations
-//!   README, "Not done in `0002`"), so this module offers no update for them:
-//!   an update without an expected revision would break API-003 (inferred;
-//!   an open question for the coding session).
+//!   on create; no update touches them. A tenant's `secret_namespace` and
+//!   `created_at` and a principal's `created_at` are immutable too; a
+//!   tenant's and a principal's `name` and `status` are mutable (lead
+//!   ruling, 2026-11-21). Of a keyset version only `status` changes, with
+//!   [`update_trust_keyset_version`].
+//! - [`update_tenant`] and [`update_principal`] take a patch: only the
+//!   columns set in it change. An empty patch is an encode error,
+//!   [`RegistryError::Other`], before any statement runs, so it neither
+//!   reaches the database nor advances the revision (lead ruling,
+//!   2026-11-21). A patch that sets a column to its current value still
+//!   advances the revision (inferred).
 //! - A checker's tenant set (`allowed_tenant_ids`) changes one row at a time
 //!   with [`add_resource_server_checker_tenant`] and
 //!   [`remove_resource_server_checker_tenant`]. Each is a compare-and-set on
@@ -72,14 +82,15 @@
 //!   ([`add_service_grant_resource_server`],
 //!   [`remove_service_grant_resource_server`]). A service identity and a
 //!   grant are created with their initial sets in the same statement.
-//! - A trust keyset version has no revision column and is immutable but for
-//!   its `status` (`0004`), so this module only creates and reads versions,
-//!   as it does tenants. The shape migration (`0007`, after the delete and
-//!   truncate guards of `0006`; migrations README, "Follow-ups") adds a
-//!   `revision` column to `trust_keyset_version`, and the registry then gets
-//!   `update_trust_keyset_version` (enable or disable) as a compare-and-set
-//!   on the version's own revision, like the other tables, with no tie to
-//!   the keyset's revision (lead decision, 2026-11-21).
+//! - A trust keyset version is immutable but for its `status` (`0004`).
+//!   [`update_trust_keyset_version`] enables or disables it as a
+//!   compare-and-set on the version's own revision (added by `0007`), like
+//!   the other tables, with no tie to the keyset's revision (lead decision,
+//!   2026-11-21).
+//! - Disabling and re-enabling a tenant, a principal or a keyset version is
+//!   a plain status change here. Whether re-enabling needs an approval, and
+//!   any other widening rule, belongs to the service layer (provisional
+//!   lead pick, 2026-11-21).
 //!
 //! # A grant keeps one binding
 //!
@@ -119,9 +130,45 @@
 //!
 //! Timestamps are [`SystemTime`](std::time::SystemTime)s. PostgreSQL keeps
 //! microseconds, so a written time is truncated toward the past to a whole
-//! microsecond (inferred), and a time outside the range of 64-bit
-//! microseconds since the Unix epoch is [`RegistryError::Other`] before any
-//! statement runs.
+//! microsecond (inferred), and a time outside the range the `0007` checks
+//! hold, from `-210_866_803_200_000_000` (`4714-11-24 00:00:00+00 BC`) to
+//! `i64::MAX - 1` microseconds from the Unix epoch, is
+//! [`RegistryError::Other`] before any statement runs.
+//!
+//! The `0007` range checks keep every stored time inside that range. A row
+//! written while a check was dropped (or left in place by a `NOT VALID`
+//! re-add), or read from a schema not yet migrated to `0007`, can still
+//! hold `infinity`, `-infinity` or a later finite time. A read of such a
+//! row, by a get, a list or an update's returned row, is
+//! [`RegistryError::UnreadableTimestamp`] naming the table, the column and
+//! the row's ID, instead of failing the whole statement with `0A000` or
+//! `22003` (lead ruling, 2026-11-21). A list stops at the first such row
+//! (inferred).
+//!
+//! An update that leaves such a column untouched ([`update_tenant`],
+//! [`update_principal`] and [`update_trust_keyset_version`], none of which
+//! writes a timestamp) behaves in one of two ways:
+//!
+//! - With a range check in force but `NOT VALID`, PostgreSQL checks the
+//!   whole new row, so the update fails with `23514` naming the range check
+//!   ([`RegistryError::Invariant`]) and changes nothing.
+//! - With the check dropped, the update applies its write and then returns
+//!   [`RegistryError::UnreadableTimestamp`] for the row it read back. On a
+//!   pool or a bare connection the write is committed; inside a caller
+//!   transaction the caller can roll it back.
+//!
+//! A grant's `valid_until` is different:
+//!
+//! - [`update_service_grant`] replaces `valid_until`, so it repairs such a
+//!   row: with the check in force (even `NOT VALID`) a revision-checked
+//!   update that sets a finite `valid_until` (or none) succeeds and returns
+//!   the readable row.
+//! - A grant list-set change ([`add_service_grant_binding`],
+//!   [`remove_service_grant_binding`], [`add_service_grant_resource_server`]
+//!   and [`remove_service_grant_resource_server`]) writes only the grant's
+//!   revision, so with the check in force it still fails with `23514`. With
+//!   the check dropped it applies and returns only the new revision: it
+//!   does not read the timestamp column.
 //!
 //! # Errors
 //!
@@ -138,6 +185,7 @@
 //! | `23514`  | `check_violation` (table or list domain)   | `Invariant { kind: Check, constraint: Some(_) }`      |
 //! | `23502`  | `not_null_violation`                       | `Invariant { kind: NotNull, constraint: None }`       |
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
+//! | —        | a stored time outside the readable range   | `UnreadableTimestamp { table, column, id }`           |
 //! | `40001`  | `serialization_failure`                    | `Retry(sqlx::Error)`                                  |
 //! | `40P01`  | `deadlock_detected`                        | `Retry(sqlx::Error)`                                  |
 //! | other    | anything else, or an unlisted constraint   | `Other(sqlx::Error)`                                  |
@@ -148,12 +196,14 @@
 //! `StaleRevision`.
 //!
 //! The `Display` and `Debug` text of a [`RegistryError`] never includes a
-//! value from the request or the row: the variants carry only constraint
-//! names, and `Display` and `Debug` of `Retry` and `Other` print only the
-//! SQLSTATE. The [`source`](std::error::Error::source) of `Retry` and
-//! `Other` is the raw [`sqlx::Error`], whose message and detail may quote
-//! request or row values (for example the key of a unique violation), so
-//! logging must not walk the source chain of a `RegistryError`.
+//! value from the request or the row: the variants carry only constraint,
+//! table and column names, `Display` and `Debug` of `Retry` and `Other`
+//! print only the SQLSTATE, and those of `UnreadableTimestamp` leave out
+//! its row ID (inferred). The [`source`](std::error::Error::source) of
+//! `Retry` and `Other` is the raw [`sqlx::Error`], whose message and detail
+//! may quote request or row values (for example the key of a unique
+//! violation), so logging must not walk the source chain of a
+//! `RegistryError`.
 //!
 //! PostgreSQL text and `jsonb` cannot hold U+0000. A NUL character in any
 //! string argument (an ID, a name, a page cursor, an element of a `text[]`
@@ -217,19 +267,20 @@ pub use model::{
     JsonObject, NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding, NewResourceAction,
     NewResourceServer, NewResourceServerChecker, NewServiceGrant, NewServiceIdentity, NewTenant,
     NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Principal, PrincipalBinding,
-    PrincipalBindingChanges, PrincipalKind, Profile, ReplayMode, ResourceAction,
+    PrincipalBindingChanges, PrincipalKind, PrincipalPatch, Profile, ReplayMode, ResourceAction,
     ResourceActionChanges, ResourceServer, ResourceServerChanges, ResourceServerChecker,
     ResourceServerCheckerChanges, ServiceGrant, ServiceGrantChanges, ServiceIdentity,
-    ServiceIdentityChanges, Status, Tenant, TrustKeyset, TrustKeysetChanges, TrustKeysetVersion,
-    TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
+    ServiceIdentityChanges, Status, Tenant, TenantPatch, TrustKeyset, TrustKeysetChanges,
+    TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
 };
 pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
+    update_principal, update_tenant,
 };
 pub use trust::{
     create_trust_keyset, create_trust_keyset_version, create_trust_source, get_trust_keyset,
     get_trust_keyset_version, get_trust_source, list_trust_keyset_versions, list_trust_keysets,
-    list_trust_sources, update_trust_keyset, update_trust_source,
+    list_trust_sources, update_trust_keyset, update_trust_keyset_version, update_trust_source,
 };
 
 use sqlx::{FromRow, Row, postgres::PgRow};
@@ -273,6 +324,43 @@ impl<'a> Page<'a> {
         self.limit
     }
 }
+
+/// `$column`, a `timestamptz`, as signed microseconds from the Unix epoch,
+/// named `<column>_us`. A time outside the range `0007` checks (`infinity`,
+/// `-infinity` or a finite time after `i64::MAX - 1` microseconds) is
+/// [`UNREADABLE_MICROSECONDS`] instead of failing the statement with
+/// `0A000` or `22003`, so the row's reader can name the row (lead ruling,
+/// 2026-11-21; the marker is inferred). The bounds are those of the `0007`
+/// range checks, with an explicit offset; `NULL` stays `NULL`.
+macro_rules! micros {
+    ($column:literal) => {
+        concat!(
+            "CASE WHEN NOT (",
+            $column,
+            " >= timestamptz '4714-11-24 00:00:00+00 BC' AND ",
+            $column,
+            // The marker, i64::MAX: no stored value can produce it, since
+            // the 0007 range checks cap stored values at i64::MAX - 1.
+            " <= timestamptz '294247-01-10 04:00:54.775806+00') THEN 9223372036854775807 \
+             ELSE (extract(epoch FROM ",
+            $column,
+            ") * 1000000)::bigint END AS ",
+            $column,
+            "_us"
+        )
+    };
+}
+use micros;
+
+/// The value [`micros!`] gives for a time outside the readable range:
+/// `i64::MAX`, one past the latest readable microsecond.
+///
+/// It cannot collide with a stored time: the `0007` range checks cap stored
+/// values at `i64::MAX - 1` microseconds, and [`micros!`] gives the marker
+/// for anything later before it extracts a value. The registry test
+/// `times_at_the_range_check_bounds_read_back_exactly` reads rows at both
+/// bounds back as themselves.
+const UNREADABLE_MICROSECONDS: i64 = i64::MAX;
 
 /// The columns of a compare-and-set update of `$table`: `$set` assigns the
 /// mutable columns from `$3` on, `$1` is the ID and `$2` the expected
@@ -397,6 +485,17 @@ mod tests {
         let page = Page::after("ten_b", u32::MAX);
         assert_eq!(page.after_id(), Some("ten_b"));
         assert_eq!(page.limit(), MAX_PAGE_SIZE);
+    }
+
+    #[test]
+    fn micros_marks_times_outside_the_range_checks() {
+        assert_eq!(
+            micros!("t"),
+            "CASE WHEN NOT (t >= timestamptz '4714-11-24 00:00:00+00 BC' \
+             AND t <= timestamptz '294247-01-10 04:00:54.775806+00') \
+             THEN 9223372036854775807 ELSE (extract(epoch FROM t) * 1000000)::bigint END AS t_us"
+        );
+        assert_eq!(UNREADABLE_MICROSECONDS, i64::MAX);
     }
 
     #[test]
