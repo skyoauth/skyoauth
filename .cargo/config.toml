@@ -10,4 +10,10 @@
 # measures, do the same; plain `cargo coverage` skips those tests and
 # reports lower coverage. Keep `--` out of this alias: cargo appends the
 # caller's arguments after it, so they would go to the test binaries.
-coverage = "llvm-cov --workspace --all-features --ignore-filename-regex main\\.rs --fail-under-lines 85"
+#
+# The conformance scenario package `skyoauth-scenarios` (`tests/`) is
+# excluded: the gate measures the workspace's own tests, and scenario
+# coverage is informational (docs/testing/conformance-layout.md §1.2, §5
+# Q9). Its targets need their environment and are not `#[ignore]`d, so
+# without the exclusion a run without a database would fail them.
+coverage = "llvm-cov --workspace --exclude skyoauth-scenarios --all-features --ignore-filename-regex main\\.rs --fail-under-lines 85"
