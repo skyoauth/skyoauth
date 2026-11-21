@@ -205,7 +205,10 @@ T00.8–T00.17 and Gate M0):
   the `0005` lock order of `service/migrations/README.md` (identity,
   credential, assignment), repeats the lookup and denies unless the repeat
   gives the same answer. A change to those rows then waits until the
-  write's transaction ends. The lock strength and the deny on any change
+  write's transaction ends, for locks taken in that transaction itself:
+  locks taken inside a savepoint are released when that savepoint is
+  rolled back. A miss on the first lookup locks nothing; a miss on the
+  repeat keeps the locks until the transaction ends. The lock strength and the deny on any change
   are inferred.
 - **Explicit time.** In the operator registry slice, time is always an
   explicit `now` argument, never the database's `now()`. Tenant and
@@ -223,7 +226,8 @@ T00.8–T00.17 and Gate M0):
   applies to the tables the registry updates, such as role assignments,
   which are re-enabled rather than assigned twice. Disabling an identity and
   revoking a credential are unconditional and idempotent, with no expected
-  revision (OQ-IR-16).
+  revision (OQ-IR-16). Both are lead decisions (2026-11-21), provisional
+  until the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0).
 - **Bootstrap event.** Bootstrap (T13.4) is one atomic transaction with one
   audit event, `recovery_state.create`, whose `object_id` is the
   `instance_id` (IR-057), actor the reserved `deployment_operator` and
@@ -897,7 +901,8 @@ follow-up. All other items are not resolved by this contract.
   `AdminCredential` no revision, and `0005` adds none. Disabling an
   identity and revoking a credential are therefore unconditional and
   idempotent: a repeated disable changes nothing, and a repeated revocation
-  keeps the first `revoked_at`. This is an explicit provisional exception
-  until T14 (lead decision, 2026-11-21). Not stated: whether the two tables
+  keeps the first `revoked_at`. This is an explicit exception (lead
+  decision, 2026-11-21), provisional until the maintainer ratifies the ADRs
+  (T00.8–T00.17, Gate M0). Not stated: whether the two tables
   get a `revision` column, whether `/admin/v1/operators` checks another
   counter instead, or whether API-003 names them as an exception.

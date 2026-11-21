@@ -2126,6 +2126,107 @@ async fn the_locked_lookup_waits_for_a_writer_in_lock_order_without_deadlock() {
     db.drop([pool]).await;
 }
 
+/// The credential comes before the binding as well: a writer that holds
+/// the credential `FOR NO KEY UPDATE` and then takes the binding (the
+/// README's identity, credential, binding order, without the identity) does
+/// not deadlock with the locked lookup. The lookup's identity lock is
+/// granted, its credential lock waits holding only the identity, and the
+/// writer's binding lock does not wait (`lock_timeout`). A lookup that
+/// locked the binding before the credential would hold it while it waits,
+/// and the writer's binding lock would close a cycle (`40P01`, or the
+/// writer's `55P03`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_locked_lookup_locks_the_credential_before_the_binding() {
+    let (db, pool) = one_operator_per_change().await;
+    let mut writer = pool.acquire().await.unwrap().detach();
+    let mut locker = pool.acquire().await.unwrap().detach();
+    let (writer_pid, locker_pid) = (
+        backend_pid(&mut writer).await,
+        backend_pid(&mut locker).await,
+    );
+    let mut writing = writer.begin().await.unwrap();
+    for sql in [
+        "SET LOCAL lock_timeout = '5s'",
+        "SELECT FROM admin_credential WHERE id = 'crd_adm_0' FOR NO KEY UPDATE",
+    ] {
+        sqlx::query(sql).execute(&mut *writing).await.unwrap();
+    }
+    let task = tokio::spawn(async move {
+        let mut tx = locker.begin().await.unwrap();
+        let result =
+            authorize_operator_locked(&mut tx, &request("key_0", AdminRole::TrustAdmin, TEN_A))
+                .await;
+        tx.commit().await.unwrap();
+        (locker, result)
+    });
+    wait_until_blocked(&pool, locker_pid, writer_pid, &task).await;
+    let binding =
+        sqlx::query("SELECT FROM admin_role_binding WHERE id = 'rb_adm_0' FOR NO KEY UPDATE")
+            .execute(&mut *writing)
+            .await;
+    assert!(binding.is_ok(), "the writer's binding lock: {binding:?}");
+    writing.commit().await.unwrap();
+    let (locker, result) = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .expect("the locked lookup never finished")
+        .unwrap();
+    assert_eq!(result.unwrap(), Some(hit("adm_0", AdminRole::TrustAdmin)));
+    locker.close().await.unwrap();
+    writer.close().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// The locks are `FOR SHARE`: two open transactions that both hold a
+/// locked authorization of the same operator do not wait for each other,
+/// and a new credential of that operator (whose foreign-key check takes
+/// `FOR KEY SHARE` on the identity) does not wait for either. Every
+/// transaction has a short `lock_timeout`, so a stronger lock (`FOR NO KEY
+/// UPDATE` or `FOR UPDATE`) fails with `55P03` instead of hanging.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn locked_authorizations_of_one_operator_do_not_wait_for_each_other() {
+    let (db, pool) = one_operator_per_change().await;
+    let request = request("key_0", AdminRole::TrustAdmin, TEN_A);
+    let expected = Some(hit("adm_0", AdminRole::TrustAdmin));
+    let mut transactions = Vec::new();
+    for name in ["first", "second"] {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '1s'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let result = authorize_operator_locked(&mut tx, &request).await;
+        assert_eq!(
+            result.map_err(|err| sqlstate(&err)),
+            Ok(expected.clone()),
+            "{name}"
+        );
+        transactions.push(tx);
+    }
+    let mut inserting = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *inserting)
+        .await
+        .unwrap();
+    let created = registry::create_admin_credential(
+        &mut *inserting,
+        &credential("crd_adm_0_2", "adm_0", "key_0_2", E),
+    )
+    .await;
+    assert_eq!(
+        created
+            .map(|created| created.id)
+            .map_err(|err| sqlstate(&err)),
+        Ok("crd_adm_0_2".to_owned())
+    );
+    inserting.commit().await.unwrap();
+    for tx in transactions {
+        tx.commit().await.unwrap();
+    }
+    db.drop([pool]).await;
+}
+
 /// The repeated read must give the same hit, not just a hit: with the
 /// binding delete guard dropped (as the table owner can), a binding
 /// deleted and replaced by another of the same operator, role and scope

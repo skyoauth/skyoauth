@@ -154,17 +154,21 @@
 //! [`authorize_operator_locked`] runs in the caller's transaction (it takes
 //! a [`Transaction`], as the audit append does, so that its statements run
 //! on one connection in one open transaction; inferred). It runs the same
-//! lookup; on a miss it returns `None` and locks nothing. On a hit it locks
+//! lookup; on a miss of this first lookup it returns `None` and locks
+//! nothing. On a hit it locks
 //! the three returned rows by ID, one statement and one row each, in the
 //! `0005` lock order of `service/migrations/README.md`: the
 //! `admin_identity` row, then the `admin_credential` row, then the
 //! `admin_role_binding` row. It then repeats the lookup and returns its
 //! result only if it equals the first one; any difference, a miss
 //! included, is `None` (inferred: a change between the two lookups is
-//! denied rather than followed). The locks are held until the caller's
-//! transaction ends, so a revocation, an identity disable or a binding
-//! update of those rows waits for that commit or rollback, and the
-//! decision holds until the authorized write commits.
+//! denied rather than followed); a `None` from the repeat keeps the locks
+//! already taken. The locks are held until the caller's transaction ends,
+//! so a revocation, an identity disable or a binding update of those rows
+//! waits for that commit or rollback, and the decision holds until the
+//! authorized write commits. This holds for locks taken in the caller's
+//! transaction itself: when `transaction` is a savepoint, rolling that
+//! savepoint back releases the locks taken in it.
 //!
 //! - The lock strength is `FOR SHARE` (inferred: the README prescribes
 //!   `FOR NO KEY UPDATE` for rows a write updates or an operation
@@ -665,8 +669,10 @@ pub async fn authorize_operator<'e>(
 /// a hit, locks the identity, credential and binding rows `FOR SHARE` by ID,
 /// in that order, repeats the lookup and returns the hit only if the repeat
 /// gives the same one; otherwise `None` (see the module documentation,
-/// "Locked lookup"). A miss locks nothing. Reads no clock and writes
-/// nothing.
+/// "Locked lookup"). A miss of the first lookup locks nothing; a `None`
+/// from the repeat keeps the locks until the transaction ends. Locks taken
+/// in a savepoint are released if that savepoint is rolled back. Reads no
+/// clock and writes nothing.
 pub async fn authorize_operator_locked(
     transaction: &mut Transaction<'_, Postgres>,
     request: &OperatorRequest<'_>,

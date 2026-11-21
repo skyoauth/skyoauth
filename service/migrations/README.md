@@ -1818,7 +1818,8 @@ string argument (IDs, names, the page cursor, list elements, strings inside
 The request layer (T14.1) must reject it.
 
 The registry does not authorize writes (API-147; T14.1, T14.2), write
-audit events (T13.x; bootstrap, below, is the exception), check the rules listed under "The database does not
+audit events (T13.x; bootstrap, below, is the exception), check the rules
+listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
 
 Consumed assertions (T10.9; ADR-016 items 6 and 7): `consume_assertion`
@@ -1965,8 +1966,9 @@ and the lookups `authorize_operator` and `authorize_operator_locked`. Rows
 are read by their own ID. Identities and credentials have no revision
 (identity-registry OQ-IR-16). Time is always the caller's: `created_at`
 and the `now` of a revocation are arguments, never the database's `now()`
-(lead pick, 2026-11-21; provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). A revocation sets `revoked_at` and `status = 'disabled'`
-in one statement; revoking a revoked credential keeps the first
+(lead pick, 2026-11-21; provisional until the maintainer ratifies the ADRs,
+T00.8–T00.17, Gate M0). A revocation sets `revoked_at` and
+`status = 'disabled'` in one statement; revoking a revoked credential keeps the first
 `revoked_at` (inferred). Revocation is one-way in the database:
 `admin_credential_set_once` refuses to clear or change `revoked_at`
 (`Guard`), `admin_credential_revoked_disabled_check` refuses an enabled
@@ -1981,8 +1983,10 @@ and disable only): after creation an identity can only be disabled and a
 credential only revoked. The database does not forbid re-enabling either:
 no guard keeps an identity's status, or an unrevoked credential's, from
 going back to `enabled` by other means. The lead ruling that re-enabling is
-a plain status change (2026-11-21; provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate M0) applies to the tables the registry
-updates: a role binding is re-enabled by an update, as `0005` intends. `create_admin_identity` rejects the reserved actor IDs
+a plain status change (2026-11-21; provisional until the maintainer ratifies
+the ADRs, T00.8–T00.17, Gate M0) applies to the tables the registry
+updates: a role binding is re-enabled by an update, as `0005` intends.
+`create_admin_identity` rejects the reserved actor IDs
 `deployment_operator` and every ID beginning with `recovery_key:`
 (`DEPLOYMENT_OPERATOR_ACTOR`, `recovery_key_actor(epoch)`) with
 `ReservedActorId` before any statement, byte-wise, so no operator can act
@@ -1994,7 +1998,8 @@ requires the three enabled and the credential unrevoked. No role implies
 another (API-120). Scope fails closed: an instance request needs a binding
 with no tenant and a tenant request a binding of exactly that tenant, so an
 instance `auditor` does not satisfy a tenant request nor a tenant `auditor`
-an instance one (lead pick, 2026-11-21; provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). Every comparison is an
+an instance one (lead pick, 2026-11-21; provisional until the maintainer
+ratifies the ADRs, T00.8–T00.17, Gate M0). Every comparison is an
 equality on a `COLLATE "C"` column, byte-wise under any database
 collation, and at most one row can match. Every miss is the same
 `Ok(None)`; inputs are not validated first, as for `select_grant`, so an
@@ -2010,9 +2015,12 @@ transaction (it takes a `Transaction`) it runs the same lookup and, on a
 hit, locks the identity, credential and binding rows by ID `FOR SHARE`, one
 statement each, in the order of "What 0005 adds" (identity, credential,
 binding); it then repeats the lookup and returns the hit only if the repeat
-gives the same one, else `None`. A miss locks nothing. A revocation, an
-identity disable or a binding update of the locked rows waits for the
-caller's commit or rollback. `FOR SHARE` and the deny on any change are
+gives the same one, else `None`. A miss on the first lookup locks nothing;
+a miss on the repeat keeps the locks already taken until the transaction
+ends. A revocation, an identity disable or a binding update of the locked
+rows waits for the caller's commit or rollback. This holds for locks taken
+in the caller's transaction itself: locks taken inside a savepoint are
+released when that savepoint is rolled back. `FOR SHARE` and the deny on any change are
 inferred: the lock order prescribes `FOR NO KEY UPDATE` only for rows a
 write updates or an operation references. Every locker takes these rows in
 the same table order, the lookup one row per table, and the single-row
@@ -2066,7 +2074,8 @@ fails its `recovery_state` insert and is `AlreadyClosed` too, and a
 the operator rows or the event stays `AlreadyExists` naming the constraint,
 so a revoked credential's key cannot be enrolled again. `AlreadyClosed` and
 `InstanceIdMismatch` carry no value. Only the `recovery_state` row closes
-bootstrap, also one whose `bootstrap_closed` is false (inferred); no configuration, environment variable or clock is read, so a
+bootstrap, also one whose `bootstrap_closed` is false (inferred); no
+configuration, environment variable or clock is read, so a
 restart or an empty configuration cannot reopen it. The constraint names of
 `instance_security_policy` and `recovery_state` are in
 `KNOWN_CONSTRAINTS`, and `service/tests/registry_bootstrap.rs` tests the
