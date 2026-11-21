@@ -1,6 +1,6 @@
-//! Grant selection and binding matching (`persistence::registry`,
-//! `select_grant` and `match_binding`; ADR-015 item 4 steps 1, 3 and 4;
-//! design section 5.7; T12.3). The database tests select grants of one
+//! Grant selection and binding matching
+//! (`persistence::registry::select_grant` and `policy::match_binding`;
+//! ADR-015 item 4 steps 1, 3 and 4; design section 5.7; T12.3). The database tests select grants of one
 //! tenant that share an audience but differ in actor, target and mode, check
 //! that every miss is the same `NotSelectable`, and match evidence that
 //! bindings of two actors both fit. The tests without a database check the
@@ -22,10 +22,11 @@ use common::TestDb;
 use skyoauth_service::persistence::{
     self, PgPool,
     registry::{
-        self, BindingProfile, EligibleBinding, Evidence, GrantMode, PrincipalBindingChanges,
-        RegistryError, Selection, SelectionError, Status, match_binding, select_grant,
+        self, BindingProfile, GrantMode, PrincipalBindingChanges, RegistryError, Selection,
+        SelectionError, Status, select_grant,
     },
 };
+use skyoauth_service::policy::{EligibleBinding, Evidence, match_binding};
 
 /// The `sub` every binding of the seed names.
 const SUB: &str = "repo:acme/platform:environment:production";
