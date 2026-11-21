@@ -21,9 +21,9 @@ const DEADLOCK_DETECTED: &str = "40P01";
 const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
-/// `principal`, the five `0003` tables and the nine `0004` tables) and of
-/// the three list domains, as migrations `0002` to `0004` and `0007` name
-/// them, sorted byte-wise. A unique, foreign key
+/// `principal`, the five `0003` tables, the nine `0004` tables and
+/// `consumed_assertion` of `0005`) and of the three list domains, as
+/// migrations `0002` to `0005` and `0007` name them, sorted byte-wise. A unique, foreign key
 /// or check violation maps to a typed variant only for a name listed here.
 /// The database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -39,6 +39,16 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_tenant_id_fkey",
     "audience_tenant_assignment_tenant_id_octet_length_check",
     "audience_tenant_assignment_tenant_id_resource_server_id_key",
+    "consumed_assertion_consumed_at_range_check",
+    "consumed_assertion_digest_key_version_check",
+    "consumed_assertion_digest_key_version_octet_length_check",
+    "consumed_assertion_pkey",
+    "consumed_assertion_replay_key_digest_octet_length_check",
+    "consumed_assertion_retain_until_range_check",
+    "consumed_assertion_retention_check",
+    "consumed_assertion_tenant_id_octet_length_check",
+    "consumed_assertion_trust_source_id_fkey",
+    "consumed_assertion_trust_source_id_octet_length_check",
     "principal_binding_claim_match_policy_check",
     "principal_binding_id_check",
     "principal_binding_id_octet_length_check",
@@ -268,9 +278,11 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 
 /// The error of a registry function.
 ///
-/// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`],
-/// never a value from the request or the row, and `Display` and `Debug`
-/// print nothing else. The database's own message for a retryable or an
+/// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`] and
+/// table and column names, never a value from the request or the row, and
+/// `Display` and `Debug` print nothing else. The one exception is the row ID
+/// of [`RegistryError::UnreadableTimestamp`], which `Display` and `Debug`
+/// leave out (inferred). The database's own message for a retryable or an
 /// unmapped error is reachable only through [`std::error::Error::source`]
 /// of [`RegistryError::Retry`] and [`RegistryError::Other`]: that source is
 /// the raw [`sqlx::Error`], whose message and detail may quote request or
@@ -308,6 +320,24 @@ pub enum RegistryError {
     /// so inside a transaction it fails at the caller's commit, not at the
     /// statement: map the commit's error with `RegistryError::from`.
     Guard,
+    /// A stored `timestamptz` is outside the range the registry reads
+    /// (`infinity`, `-infinity`, or a finite time after `i64::MAX - 1`
+    /// microseconds from the Unix epoch), so the row cannot be returned. The
+    /// `0007` range checks keep such a time out; a row written while a check
+    /// was dropped (or left in place by a `NOT VALID` re-add), or read from
+    /// a schema not yet migrated to `0007`, can still hold one. It is not an
+    /// [`Self::Invariant`]: no write was rejected (lead ruling, 2026-11-21).
+    UnreadableTimestamp {
+        /// The table, for example `tenant`.
+        table: &'static str,
+        /// The column, for example `created_at`.
+        column: &'static str,
+        /// The ID of the row (`instance_id` for the instance security
+        /// policy), so an operator can repair it (migrations README, "What
+        /// 0007 adds"). `Display` and `Debug` leave it out (inferred: the
+        /// no-values convention covers row values, and an ID is one).
+        id: String,
+    },
     /// The database aborted the transaction with `40001`
     /// (`serialization_failure`) or `40P01` (`deadlock_detected`): retry
     /// the whole transaction. A `40001` is never [`Self::StaleRevision`]:
@@ -342,6 +372,40 @@ impl InvariantKind {
         }
     }
 }
+
+/// The decode error a row's `FromRow` returns for a time outside the readable
+/// range, carried to [`RegistryError::from`] as the source of a
+/// [`sqlx::Error::ColumnDecode`], which turns it into
+/// [`RegistryError::UnreadableTimestamp`].
+pub(super) struct UnreadableTimestamp {
+    pub(super) table: &'static str,
+    pub(super) column: &'static str,
+    pub(super) id: String,
+}
+
+/// Like `Display`, `Debug` leaves out the row ID, as
+/// [`RegistryError::UnreadableTimestamp`] does: the `Debug` of a
+/// [`sqlx::Error::ColumnDecode`] that carries this error prints it.
+impl fmt::Debug for UnreadableTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnreadableTimestamp")
+            .field("table", &self.table)
+            .field("column", &self.column)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Display for UnreadableTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{} is outside the readable timestamp range",
+            self.table, self.column
+        )
+    }
+}
+
+impl StdError for UnreadableTimestamp {}
 
 /// The constraint name as listed in [`KNOWN_CONSTRAINTS`].
 fn known_constraint(name: &str) -> Option<&'static str> {
@@ -386,6 +450,15 @@ fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
 
 impl From<sqlx::Error> for RegistryError {
     fn from(error: sqlx::Error) -> Self {
+        if let sqlx::Error::ColumnDecode { source, .. } = &error
+            && let Some(unreadable) = source.downcast_ref::<UnreadableTimestamp>()
+        {
+            return Self::UnreadableTimestamp {
+                table: unreadable.table,
+                column: unreadable.column,
+                id: unreadable.id.clone(),
+            };
+        }
         if error.as_database_error().is_some_and(is_retry) {
             return Self::Retry(error);
         }
@@ -431,6 +504,10 @@ impl fmt::Display for RegistryError {
                 constraint: None,
             } => write!(f, "registry write violates a {} constraint", kind.as_str()),
             Self::Guard => write!(f, "registry write rejected by a schema guard (SK001)"),
+            Self::UnreadableTimestamp { table, column, .. } => write!(
+                f,
+                "registry row has a {table}.{column} outside the readable timestamp range"
+            ),
             Self::Retry(_) => match self.sqlstate() {
                 Some(code) => write!(
                     f,
@@ -467,6 +544,11 @@ impl fmt::Debug for RegistryError {
                 .field("constraint", constraint)
                 .finish(),
             Self::Guard => f.write_str("Guard"),
+            Self::UnreadableTimestamp { table, column, .. } => f
+                .debug_struct("UnreadableTimestamp")
+                .field("table", table)
+                .field("column", column)
+                .finish_non_exhaustive(),
             Self::Retry(_) => f
                 .debug_struct("Retry")
                 .field("sqlstate", &self.sqlstate())
@@ -771,6 +853,64 @@ mod tests {
         assert!(matches!(error, RegistryError::Other(_)));
         assert_eq!(error.to_string(), "registry database error");
         assert_eq!(format!("{error:?}"), "Other { sqlstate: None, .. }");
+    }
+
+    #[test]
+    fn an_unreadable_timestamp_names_table_and_column_but_not_the_row() {
+        let error = RegistryError::from(sqlx::Error::ColumnDecode {
+            index: "created_at_us".into(),
+            source: Box::new(UnreadableTimestamp {
+                table: "tenant",
+                column: "created_at",
+                id: "user-value-id".into(),
+            }),
+        });
+        match &error {
+            RegistryError::UnreadableTimestamp { table, column, id } => {
+                assert_eq!(
+                    (*table, *column, &id[..]),
+                    ("tenant", "created_at", "user-value-id")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            error.to_string(),
+            "registry row has a tenant.created_at outside the readable timestamp range"
+        );
+        assert_eq!(
+            format!("{error:?}"),
+            r#"UnreadableTimestamp { table: "tenant", column: "created_at", .. }"#
+        );
+        assert_redacted(&error);
+        assert!(error.source().is_none());
+        // Any other decode error stays `Other`.
+        let error = RegistryError::from(sqlx::Error::ColumnDecode {
+            index: "created_at_us".into(),
+            source: "timestamp out of range".into(),
+        });
+        assert!(matches!(error, RegistryError::Other(_)), "{error:?}");
+    }
+
+    #[test]
+    fn the_decode_error_carrier_prints_no_row_id() {
+        let carrier = UnreadableTimestamp {
+            table: "tenant",
+            column: "created_at",
+            id: "user-value-id".into(),
+        };
+        assert_eq!(
+            format!("{carrier:?}"),
+            r#"UnreadableTimestamp { table: "tenant", column: "created_at", .. }"#
+        );
+        // Nor does the decode error that carries it.
+        let error = sqlx::Error::ColumnDecode {
+            index: "created_at_us".into(),
+            source: Box::new(carrier),
+        };
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains("user-value"), "{text}");
+        }
     }
 
     #[test]

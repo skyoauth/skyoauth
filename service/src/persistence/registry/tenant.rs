@@ -1,22 +1,37 @@
-//! Tenants and principals (`0002`). Neither has a revision column yet, so
-//! both are create-only here.
+//! Tenants and principals (`0002`), with the revisions `0007` adds.
 
 use sqlx::PgExecutor;
 
-use super::{NewPrincipal, NewTenant, Page, Principal, RegistryError, Tenant, list_page};
+use super::{
+    NewPrincipal, NewTenant, Page, Principal, PrincipalPatch, RegistryError, Status, Tenant,
+    TenantPatch, compare_and_set, list_page, micros, tenant_compare_and_set, updated,
+};
 
 macro_rules! tenant_columns {
     () => {
-        "id, name, secret_namespace, status, \
-         (extract(epoch FROM created_at) * 1000000)::bigint AS created_at_us"
+        concat!(
+            "id, name, secret_namespace, status, ",
+            micros!("created_at"),
+            ", revision"
+        )
     };
 }
 
 macro_rules! principal_columns {
     () => {
-        "id, tenant_id, kind, name, status, \
-         (extract(epoch FROM created_at) * 1000000)::bigint AS created_at_us"
+        concat!(
+            "id, tenant_id, kind, name, status, ",
+            micros!("created_at"),
+            ", revision"
+        )
     };
+}
+
+/// The error of an update with an empty patch: an encode error, mapped to
+/// [`RegistryError::Other`] like an out-of-range time, returned before any
+/// statement runs (lead ruling, 2026-11-21).
+fn empty_patch() -> RegistryError {
+    sqlx::Error::Encode("empty patch".into()).into()
 }
 
 /// Creates a tenant with the caller's ID and secret namespace.
@@ -65,6 +80,43 @@ pub async fn list_tenants<'e>(
         .await?)
 }
 
+/// Changes the columns set in `patch` of the tenant `id` at
+/// `expected_revision` and advances its revision by one. `id`,
+/// `secret_namespace` and `created_at` keep their values.
+///
+/// A name need not be unique: `0002` has no unique constraint on it. An
+/// empty patch is an encode error, [`RegistryError::Other`], before any
+/// statement runs. Re-enabling a disabled tenant is a plain status change
+/// here; whether it needs an approval, and any other widening rule, belongs
+/// to the service layer (provisional lead pick, 2026-11-21).
+///
+/// A row holding a time outside the `0007` range checks fails the update
+/// with `23514` while the checks are in force; with them dropped, the write
+/// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
+/// the module documentation, "Timestamps").
+pub async fn update_tenant<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    patch: &TenantPatch,
+) -> Result<Tenant, RegistryError> {
+    if patch.is_empty() {
+        return Err(empty_patch());
+    }
+    let row = sqlx::query(compare_and_set!(
+        "tenant",
+        "name = coalesce($3, name), status = coalesce($4, status)",
+        tenant_columns!()
+    ))
+    .bind(id)
+    .bind(expected_revision)
+    .bind(patch.name.as_deref())
+    .bind(patch.status.map(Status::as_str))
+    .fetch_one(executor)
+    .await?;
+    updated(&row)
+}
+
 /// Creates a principal in its tenant.
 pub async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
@@ -101,6 +153,49 @@ pub async fn get_principal<'e>(
     .fetch_optional(executor)
     .await?
     .ok_or(RegistryError::NotFound)
+}
+
+/// Changes the columns set in `patch` of the principal `id` of `tenant_id`
+/// at `expected_revision` and advances its revision by one. `id`,
+/// `tenant_id`, `kind` and `created_at` keep their values. A principal of
+/// another tenant is [`RegistryError::NotFound`], whatever its revision.
+///
+/// The update is kind-agnostic: the rule that only workload and service
+/// principals change through this path belongs to the service handler
+/// (lead ruling, 2026-11-21). A name need not be unique: `0002` has no
+/// unique constraint on it. An empty patch is an encode error,
+/// [`RegistryError::Other`], before any statement runs. Re-enabling a
+/// disabled principal is a plain status change here; whether it needs an
+/// approval, and any other widening rule, belongs to the service layer
+/// (provisional lead pick, 2026-11-21).
+///
+/// A row holding a time outside the `0007` range checks fails the update
+/// with `23514` while the checks are in force; with them dropped, the write
+/// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
+/// the module documentation, "Timestamps").
+pub async fn update_principal<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    patch: &PrincipalPatch,
+) -> Result<Principal, RegistryError> {
+    if patch.is_empty() {
+        return Err(empty_patch());
+    }
+    let row = sqlx::query(tenant_compare_and_set!(
+        "principal",
+        "name = coalesce($4, name), status = coalesce($5, status)",
+        principal_columns!()
+    ))
+    .bind(id)
+    .bind(expected_revision)
+    .bind(tenant_id)
+    .bind(patch.name.as_deref())
+    .bind(patch.status.map(Status::as_str))
+    .fetch_one(executor)
+    .await?;
+    updated(&row)
 }
 
 /// Lists the principals of `tenant_id` by ID.

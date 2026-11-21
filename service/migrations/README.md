@@ -1371,9 +1371,9 @@ changes no existing column, constraint, trigger or index. Choices marked
 The registry's `KNOWN_CONSTRAINTS` lists the new checks of the tables it
 writes (`tenant_revision_check`, `principal_revision_check`,
 `trust_keyset_version_revision_check` and the range checks of `tenant`,
-`principal`, `trust_keyset_version` and `service_grant`). The registry does
-not yet read the new revisions or update tenants, principals or versions;
-that is a registry follow-up.
+`principal`, `trust_keyset_version` and `service_grant`). The registry reads
+the new revisions and updates tenants, principals and versions as
+compare-and-sets on them (see "Rust registry surface").
 
 ## Limits
 
@@ -1466,15 +1466,22 @@ Open for all registry tables:
   built.
 - A `revision` column on `tenant`, `principal` and
   `trust_keyset_version`: done in `0007` (lead decision, 2026-11-21; see
-  "What 0007 adds"). The registry's compare-and-set updates of them,
-  `update_trust_keyset_version` included, are a registry follow-up (see
-  "The `0004` tables" below).
+  "What 0007 adds"), with the registry's compare-and-set updates of them,
+  `update_tenant`, `update_principal` and `update_trust_keyset_version`
+  (see "Rust registry surface").
 - Indexes on the referencing side of the foreign keys: done in `0007` for
   every foreign key whose columns led no index, with five exceptions that
   the primary key already serves ("What 0007 adds").
 - Timestamp ranges: done in `0007`, a named check on every `timestamptz`
   column of `0001` to `0005`, with the upgrade precondition query ("What
   0007 adds").
+- Open spec question: name uniqueness (IR-021). IR-021 says a `name` is
+  unique within its entity type and tenant, but the schema has no unique
+  constraint on `tenant.name` or `principal.name`. The open question is a
+  unique `(tenant_id, name)` for principals and a rule for tenant names.
+  The lead decides the spec text; no migration is added until then. The
+  registry test `tenant_and_principal_names_need_not_be_unique` pins the
+  current schema and fails once such a constraint exists.
 - Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
@@ -1550,7 +1557,8 @@ Not done in `0003`:
 Not done in `0004`:
 
 - The single-use replay table (T10.9) and the policy revision.
-- A name-unique key on `principal` (IR-021), which `0002` does not have.
+- A name-unique key on `principal` (IR-021), which `0002` does not have:
+  an open spec question (see Follow-ups).
 - Rejecting duplicate list elements, as for `0003`.
 - An upper bound on `review_timeout_ms`: a service rule.
 - Rejecting the private-key member names of post-quantum JWK types in a
@@ -1569,17 +1577,30 @@ Not done in `0005`:
 
 `skyoauth_service::persistence::registry` is the typed Rust entry point to
 the registry tables of `0002` and `0003`: create, get, list and
-revision-checked update for `resource_server`, `audience_tenant_assignment`,
-`resource_server_checker` (with its tenant rows) and `resource_action`;
-create, get and list for `tenant` and `principal`, whose revision (added
-by `0007`) the registry does not read or update yet; and reads of `instance_security_policy` and `egress_allowlist_entry`.
+revision-checked update for `tenant`, `principal`, `resource_server`,
+`audience_tenant_assignment`, `resource_server_checker` (with its tenant
+rows) and `resource_action`; and reads of `instance_security_policy` and
+`egress_allowlist_entry`. The revisions of `tenant` and `principal` are the
+ones `0007` adds. Their updates, `update_tenant` and `update_principal`,
+take a patch (`TenantPatch`, `PrincipalPatch`) and change only the columns
+set in it, `name` and `status` (lead ruling, 2026-11-21); the other updates
+replace every mutable column. An empty patch is an encode error (`Other`)
+before any statement runs, so it neither reaches the database nor advances
+the revision. Names need not be unique: `0002` has no unique constraint on
+`tenant.name` or `principal.name`. `update_principal` is kind-agnostic; the
+rule that only workload and service principals change through it belongs
+to the service handler. Disabling and re-enabling are plain status changes;
+any approval or widening rule for re-enabling belongs to the service layer
+(provisional lead pick, 2026-11-21).
 Every function runs one statement on any executor (pool, connection or
 caller transaction). Writes take caller-supplied IDs (T10.2 generates
 them). An update is a compare-and-set: it sets `revision = revision + 1`
 where `revision = expected`, as `skyoauth_check_revision()` requires, and
 touches only the columns these migrations leave mutable. The expected
 revision is only compared, so even `i64::MAX` gives `StaleRevision` or
-`NotFound`, not an overflow. Adding or removing a checker tenant row
+`NotFound`, not an overflow; only a row already at revision `i64::MAX`
+gives `Other` with `22003` from `revision + 1`, which is unreachable in
+practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
 cursor.
@@ -1596,7 +1617,7 @@ never mapped to `StaleRevision`. A deadlock (`40P01`,
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
 catalog by a test). The `Display` and `Debug` text of an error carries
-constraint names and SQLSTATEs only, never a value. The `source()` of
+constraint, table and column names and SQLSTATEs only, never a value. The `source()` of
 `Retry` and `Other` is the raw `sqlx::Error`, which may quote values, so
 logging must not walk the source chain.
 
@@ -1608,6 +1629,7 @@ logging must not walk the source chain.
 | `23514`  | `Invariant { kind: Check, constraint }`         |
 | `23502`  | `Invariant { kind: NotNull, constraint: None }` |
 | `SK001`  | `Guard`                                         |
+| —        | `UnreadableTimestamp { table, column, id }`     |
 | `40001`  | `Retry` (retry the whole transaction)           |
 | `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
@@ -1620,6 +1642,26 @@ The request layer (T14.1) must reject it.
 The registry does not authorize writes (API-147; T14.1, T14.2), write
 audit events (T13.x), check the rules listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
+
+Consumed assertions (T10.9; ADR-016 items 6 and 7): `consume_assertion`
+inserts one row with `ON CONFLICT DO NOTHING` and returns `Consumed`, or
+`Replay` when the key exists, leaving that row unchanged. The clause names
+no conflict target, which would need `SELECT` (see "Privileges" above);
+the primary key is the only unique index, and a unique index added later
+would also read as `Replay`, still a deny. `consume_assertion_set` writes
+the rows of one proof under several digest-key versions all or none: a
+plain multi-row `INSERT`, whose `23505` on `consumed_assertion_pkey` is
+`Replay` with nothing written; inside a caller transaction that error
+aborts the transaction, which the caller rolls back. It inserts its rows
+sorted by the primary key, bytewise, so two sets that share keys lock them
+in the same order and do not deadlock. An empty set, one of more than
+`MAX_ASSERTION_SET` (8, inferred) rows, or one with a key twice, is
+rejected before the statement. A replay is not an error; every error, a
+store failure included, is a deny. The digest, `retain_until` with its
+drain cap, `consumed_at`, and the `single_use` and enabled checks of the
+source stay with the service (see the service rules above). The claim that
+exactly one attempt consumes holds under `READ COMMITTED`; under
+`REPEATABLE READ` or `SERIALIZABLE` a loser may get `Retry`.
 
 Follow-ups for the registry surface:
 
@@ -1643,10 +1685,11 @@ Follow-ups for the registry surface:
 The same module covers the nine `0004` tables, with the same conventions:
 create, get, list and revision-checked update for `trust_keyset`,
 `trust_source`, `principal_binding`, `service_identity` and
-`service_grant`; create, get and a per-keyset list for
-`trust_keyset_version`, whose `status` has no update yet: `0007` adds the
-version's own revision, and `update_trust_keyset_version` is a registry
-follow-up. Every one is tenant-owned: reads,
+`service_grant`; create, get, a per-keyset list and
+`update_trust_keyset_version` for `trust_keyset_version`. That update sets
+the version's `status`, its one mutable column, as a compare-and-set on the
+version's own revision (added by `0007`), with no tie to the keyset's
+revision (lead decision, 2026-11-21). Every one is tenant-owned: reads,
 updates and list-set changes take the tenant and ID, so another tenant's ID
 is `NotFound`, and lists hold one tenant's rows. A trust source is stored
 flat, and the database's `trust_source_*_kind_check`s decide which fields a
@@ -1671,31 +1714,42 @@ are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
 surface.
 
 Timestamps: the registry reads a timestamp as
-`(extract(epoch FROM <column>) * 1000000)::bigint`, signed 64-bit
-microseconds from the Unix epoch, and `since_epoch` writes only times from
-PostgreSQL's earliest `timestamptz` (4713 BC,
+`(extract(epoch FROM <column>) * 1000000)::bigint`, microseconds from the
+Unix epoch in a signed 64-bit integer. `since_epoch` writes only a part of
+that range: from PostgreSQL's earliest `timestamptz` (4713 BC,
 `-210_866_803_200_000_000` microseconds) to `i64::MAX - 1` microseconds
-(`294247-01-10 04:00:54.775806+00`), rejecting any other with `Other` (an
-encode error, "timestamp out of range") before any statement runs.
+(`294247-01-10 04:00:54.775806+00`), both inclusive, rejecting any other
+time with `Other` (an encode error, "timestamp out of range") before any
+statement runs.
 `i64::MAX` itself is excluded because PostgreSQL 16's
 `extract(epoch ...)` rounds exactly that time to
 `9_223_372_036_854_775_800`. Since `0007` the tables hold the same range:
 each `timestamptz` column has a named `<table>_<column>_range_check` that
 rejects `'infinity'`, `'-infinity'` and every finite time past the upper
-bound with `23514` (see "What 0007 adds"). Before `0007` such a row could
-be stored by hand or restored, and a get or list over it failed with
-`0A000` (`feature_not_supported`) for an infinity, or `22003`
-(`numeric_value_out_of_range`) past the bound, both mapped to `Other`;
-the upgrade precondition finds such rows. The range checks of the tables
-the registry writes are in `KNOWN_CONSTRAINTS`.
-
-Follow-up for timestamps (lead decision, 2026-11-21):
-
-- A typed per-row `RegistryError` variant for a row the projection cannot
-  represent, in the next registry PR, instead of `Other`.
-
-Follow-up (lead decision, 2026-11-21): `0007` adds a `revision` column to
-`trust_keyset_version`. The registry then gets
-`update_trust_keyset_version`, which enables or disables a version as a
-compare-and-set on the version's own revision: the same per-row
-compare-and-set as the other tables, with no tie to the keyset's revision.
+bound with `23514` (see "What 0007 adds"). Such a row can still exist if
+it was written while a check was dropped (or left in place by a
+`NOT VALID` re-add), or be read from a schema not yet migrated to `0007`;
+the upgrade precondition finds them. The plain projection would fail the whole
+statement on it, with `0A000` (`feature_not_supported`) for an infinity or
+`22003` (`numeric_value_out_of_range`) past the bound. So the registry
+selects a time outside the checked range as `i64::MAX`, one past the
+latest readable microsecond (inferred), and a get, a list or an update's
+returned row maps it to `UnreadableTimestamp { table, column, id }`, a
+variant of its own, not an `Invariant` kind (lead ruling, 2026-11-21). A
+list stops at the first such row in its order. `Display` and `Debug` name
+the table and column but leave out the row ID (inferred: the ID is a row
+value). The marker cannot collide with a stored time, since the range
+checks cap stored values at `i64::MAX - 1` microseconds; a test reads rows
+at both bounds back exactly. An update that leaves such a column
+untouched (`update_tenant`, `update_principal`,
+`update_trust_keyset_version`) fails with `23514` naming the range check
+when a range check is in force but `NOT VALID`, since PostgreSQL checks
+the whole new row; with the check dropped, the update applies its write
+and then returns `UnreadableTimestamp`, so outside a caller transaction
+the write is committed. `update_service_grant` replaces `valid_until`, so
+with the check in force (even `NOT VALID`) a revision-checked update that
+sets a finite `valid_until` (or none) succeeds and repairs the row. A
+grant list-set change writes only the revision, so with the check in force
+it still fails with `23514`; with the check dropped it applies and returns
+only the new revision, since it does not read the timestamp column. The range checks of the tables the registry writes are in
+`KNOWN_CONSTRAINTS`.
