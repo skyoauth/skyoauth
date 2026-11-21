@@ -591,16 +591,24 @@ layers = ["conformance"]
 envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.3", "T12.8", "T21.4", "T21.7"]
-positive = "selector picks the authorized actor/target"
-negative = "mode override, wrong tenant; subject/target override (M2)"
+positive = "each grant ID selects its own grant, actor, target and eligible bindings among same-audience grants (M1a); the generated selector picks the authorized actor/target at the exchange, after proof verification at the selected source (M2)"
+negative = "mode override, wrong tenant: a mode override, a wrong or crossed tenant and a grant name select nothing, with one error (M1a); the same denied at the exchange with the wire invalid_grant, and subject/target override (M2)"
 matrix_sha256 = "702f79d7b2cc709c2b2ebba85fcf14485bce61fdf887e2d819abe90f13a579af"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "selection"
+scope = "grant selection: each grant ID selects its own grant, actor, target and eligible bindings among same-audience grants; a mode override, a wrong or crossed tenant and a grant name select nothing, with one error (registry API)"
 legs = ["scenarios-pg/x86_64"]
-status = "planned"
-tests = []
+status = "implemented"
+implemented_sha256 = "9572aa6eb5c34ecb9dff031ec51eeaa4e09cb80d2f85ea404617406a1fbd2cce"
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a25::a25_pos_each_grant_id_selects_its_own_actor_and_target",
+  "nextest:skyoauth-scenarios/pg/security::a25::a25_pos_selection_then_match_names_the_grant_actor",
+  "nextest:skyoauth-scenarios/pg/security::a25::a25_neg_mode_override_selects_nothing",
+  "nextest:skyoauth-scenarios/pg/security::a25::a25_neg_wrong_tenant_selects_nothing",
+  "nextest:skyoauth-scenarios/pg/security::a25::a25_neg_miss_reveals_no_cause",
+  "nextest:skyoauth-scenarios/pg/security::a25::a25_neg_grant_name_is_not_a_selector",
+]
 
 [[scenario.stage]]
 milestone = "M2"
