@@ -196,6 +196,10 @@ fn sqlstate(err: &sqlx::Error) -> String {
 /// SK001 is the guard triggers' state; 23502 is `not_null_violation`, 23503
 /// `foreign_key_violation`, 23505 `unique_violation` and 23514
 /// `check_violation`.
+///
+/// A `23503` case that deletes a referenced row of a table whose deletes
+/// `0006` guards first disables that table's user triggers; the line's
+/// implicit transaction rolls that back with the failed delete.
 async fn assert_rejected(conn: &mut PgConnection, cases: &'static str) {
     for case in cases.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let (code, sql) = case.split_once(' ').unwrap();
@@ -358,6 +362,29 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
             "skyoauth_reject_mutation",
         ),
     ];
+    // The 0006 delete and truncate guards (schema_registry_guards.rs).
+    let reject = "skyoauth_reject_mutation";
+    for table in TABLES {
+        expected.push(guard(table, "no_truncate", reject));
+    }
+    for table in [
+        "admin_identity",
+        "admin_role_binding",
+        "recovery_state",
+        "administrative_operation",
+    ] {
+        expected.push(guard(table, "no_delete", reject));
+    }
+    expected.push(guard(
+        "admin_credential",
+        "no_delete_revoked",
+        "skyoauth_reject_delete_of_revoked",
+    ));
+    expected.push(guard(
+        "consumed_assertion",
+        "delete_after_retention",
+        "skyoauth_reject_delete_before_retention",
+    ));
     expected.sort();
     assert_eq!(triggers, expected);
 
@@ -374,10 +401,15 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     .unwrap();
     events.sort();
     assert_eq!(events.len(), expected.len());
-    // tgtype bits: 1 row, 2 before, 4 insert, 16 update.
+    // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update, 32
+    // truncate.
     for (name, tgtype, columns) in &events {
         let want = if name.ends_with("_revision") {
             1 | 2 | 4 | 16
+        } else if name.ends_with("_no_truncate") {
+            2 | 32
+        } else if name.contains("_delete") {
+            1 | 2 | 8
         } else {
             1 | 2 | 16
         };
@@ -541,6 +573,13 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
             "consumed_assertion_pkey",
             "consumed_assertion",
             "(tenant_id, trust_source_id, replay_key_digest)",
+        ),
+        // The pruning index of 0006 (schema_registry_guards.rs).
+        (
+            "consumed_assertion_retain_until_idx".to_string(),
+            "CREATE INDEX consumed_assertion_retain_until_idx ON public.consumed_assertion \
+             USING btree (retain_until)"
+                .to_string(),
         ),
     ];
     expected.sort();
@@ -1502,7 +1541,7 @@ async fn operator_credentials_are_registered_once_and_revoked_for_good() {
         23514 INSERT INTO admin_identity VALUES ('adm_3', 'active')
         SK001 UPDATE admin_identity SET id = 'adm_9' WHERE id = 'adm_1'
         SK001 UPDATE admin_identity SET created_at = '2020-01-01Z' WHERE id = 'adm_1'
-        23503 DELETE FROM admin_identity WHERE id = 'adm_1'
+        23503 ALTER TABLE admin_identity DISABLE TRIGGER USER; DELETE FROM admin_identity WHERE id = 'adm_1'
         23503 INSERT INTO admin_credential VALUES ('crd_3', 'adm_9', 'sha256:cc', 'ops-ca', 'enabled', NULL)
         23505 INSERT INTO admin_credential VALUES ('crd_1', 'adm_1', 'sha256:cc', 'ops-ca', 'enabled', NULL)
         23505 INSERT INTO admin_credential VALUES ('crd_3', 'adm_2', 'sha256:aa', 'ops-ca', 'enabled', NULL)
@@ -1585,7 +1624,7 @@ async fn role_bindings_scope_each_role_explicitly() {
         SK001 UPDATE admin_role_binding SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'rb_3'
         SK001 UPDATE admin_role_binding SET status = 'disabled' WHERE id = 'rb_3'
         SK001 UPDATE admin_role_binding SET status = 'disabled', revision = revision + 2 WHERE id = 'rb_3'
-        23503 DELETE FROM tenant WHERE id = 'ten_a'
+        23503 ALTER TABLE tenant DISABLE TRIGGER USER; DELETE FROM tenant WHERE id = 'ten_a'
     ").await;
     // One operator holds several roles only by explicit assignment, each
     // tenant role per tenant.
@@ -1755,7 +1794,7 @@ async fn administrative_operation_keeps_its_plan_and_references() {
         SK001 UPDATE administrative_operation SET audit_id = 'evt_2', revision = revision + 1 WHERE id = 'op_3'
         SK001 UPDATE administrative_operation SET outcome = 'applied' WHERE id = 'op_3'
         SK001 UPDATE administrative_operation SET outcome = 'applied', revision = revision + 2 WHERE id = 'op_3'
-        23503 DELETE FROM administrative_operation WHERE id = 'op_1'
+        23503 ALTER TABLE administrative_operation DISABLE TRIGGER USER; DELETE FROM administrative_operation WHERE id = 'op_1'
         SK001 DELETE FROM audit_event WHERE id = 'evt_1'
         23514 UPDATE administrative_operation SET revoked_at = '2026-11-20Z', revocation_operation_id = 'op_3', revision = revision + 1 WHERE id = 'op_3'
     "#).await;
@@ -1883,7 +1922,7 @@ async fn consumed_assertions_are_insert_only_and_scoped_to_their_source() {
         SK001 UPDATE consumed_assertion SET digest_key_version = 'dk_2'
         SK001 UPDATE consumed_assertion SET replay_key_digest = sha256('jti_2')
         SK001 INSERT INTO consumed_assertion VALUES ('ten_a', 'src_a', sha256('jti_1'), 'dk_1', '2026-11-20Z', '2026-11-20 00:10Z') ON CONFLICT (tenant_id, trust_source_id, replay_key_digest) DO UPDATE SET retain_until = excluded.retain_until
-        23503 DELETE FROM trust_source WHERE id = 'src_a'
+        23503 ALTER TABLE trust_source DISABLE TRIGGER USER; DELETE FROM trust_source WHERE id = 'src_a'
     ").await;
     // A replay under ON CONFLICT DO NOTHING inserts nothing; the same digest
     // under another source, or another digest, is a separate proof.
@@ -1904,8 +1943,8 @@ async fn consumed_assertions_are_insert_only_and_scoped_to_their_source() {
              ('ten_a', 'src_a', sha256('jti_2'), 'dk_2', '2026-11-20Z', '2026-11-20 00:10Z')",
     )
     .await;
-    // Pruning after retain_until is a DELETE; the database does not check
-    // the time (README.md).
+    // Pruning after retain_until is a DELETE; 0006 lets it through only for
+    // rows whose retain_until has passed (schema_registry_guards.rs).
     run(
         &pool,
         "DELETE FROM consumed_assertion WHERE retain_until < '2026-11-20 00:20Z' AND tenant_id = 'ten_b'",
@@ -2511,8 +2550,16 @@ async fn references_hold_back_deletes_and_are_never_deferred() {
             "consumed_assertion_trust_source_id_fkey",
         ),
     ];
+    // 0006 guards deletes of these tables, so each case disables the
+    // table's user triggers in its own transaction to reach the foreign key.
     for (sql, constraint) in deletes {
-        fk_violation(&mut conn, sql, constraint).await;
+        let table = sql.split(' ').nth(2).unwrap();
+        fk_violation(
+            &mut conn,
+            &format!("BEGIN; ALTER TABLE {table} DISABLE TRIGGER USER; {sql}"),
+            constraint,
+        )
+        .await;
     }
     // The instance policy row and audit events are append-only (0002), so
     // the delete side of their references cannot be reached.
@@ -2532,7 +2579,7 @@ async fn references_hold_back_deletes_and_are_never_deferred() {
         ),
         (
             format!(
-                "DELETE FROM recovery_state; {}",
+                "ALTER TABLE recovery_state DISABLE TRIGGER USER; DELETE FROM recovery_state; {}",
                 insert("recovery_state", RECOVERY, &[("instance_id", "'inst_x9'")])
             ),
             "recovery_state_instance_id_fkey",

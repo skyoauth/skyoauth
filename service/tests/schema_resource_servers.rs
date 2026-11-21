@@ -62,6 +62,10 @@ fn sqlstate(err: &sqlx::Error) -> String {
 /// SK001 is the guard triggers' state; 23502 is `not_null_violation`, 23503
 /// `foreign_key_violation`, 23505 `unique_violation` and 23514
 /// `check_violation` (also raised by a domain's CHECK).
+///
+/// A `23503` case that deletes a referenced row of a table whose deletes
+/// `0006` guards first disables that table's user triggers; the line's
+/// implicit transaction rolls that back with the failed delete.
 async fn assert_rejected(conn: &mut PgConnection, cases: &'static str) {
     for case in cases.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let (code, sql) = case.split_once(' ').unwrap();
@@ -140,6 +144,19 @@ async fn resource_server_catalog_pins_collation_triggers_and_search_path() {
             "resource_server_checker_tenant_immutable".into(),
             "A".into(),
             true,
+        )])
+        // The 0006 delete and truncate guards call the frozen
+        // skyoauth_reject_mutation(), which resolves no names and pins no
+        // path (schema_registry_guards.rs).
+        .chain(TABLES.iter().flat_map(|t| {
+            ["no_delete", "no_truncate"]
+                .map(|g| (t.to_string(), format!("{t}_{g}"), "A".into(), false))
+        }))
+        .chain([(
+            "resource_server_checker_tenant".into(),
+            "resource_server_checker_tenant_no_truncate".into(),
+            "A".into(),
+            false,
         )])
         .collect();
     expected.sort();
@@ -727,9 +744,9 @@ async fn assignment_backs_same_tenant_audience_references() {
         "
         23503 INSERT INTO owned VALUES ('ten_b', 'rs_1')
         23503 INSERT INTO owned VALUES ('ten_a', 'rs_2')
-        23503 DELETE FROM audience_tenant_assignment WHERE id = 'ata_1'
-        23503 DELETE FROM resource_server WHERE id = 'rs_1'
-        23503 DELETE FROM tenant WHERE id = 'ten_a'
+        23503 ALTER TABLE audience_tenant_assignment DISABLE TRIGGER USER; DELETE FROM audience_tenant_assignment WHERE id = 'ata_1'
+        23503 ALTER TABLE resource_server DISABLE TRIGGER USER; DELETE FROM resource_server WHERE id = 'rs_1'
+        23503 ALTER TABLE tenant DISABLE TRIGGER USER; DELETE FROM tenant WHERE id = 'ten_a'
     ",
     )
     .await;
@@ -839,8 +856,8 @@ async fn checker_tenants_are_assigned_to_the_checkers_resource_server() {
         SK001 UPDATE resource_server_checker_tenant SET tenant_id = 'ten_a' WHERE checker_id = 'chk_2'
         SK001 UPDATE resource_server_checker_tenant SET checker_id = 'chk_2' WHERE tenant_id = 'ten_a'
         SK001 UPDATE resource_server_checker_tenant SET resource_server_id = 'rs_2' WHERE checker_id = 'chk_1'
-        23503 DELETE FROM audience_tenant_assignment WHERE id = 'ata_3'
-        23503 DELETE FROM resource_server_checker WHERE id = 'chk_2'
+        23503 ALTER TABLE audience_tenant_assignment DISABLE TRIGGER USER; DELETE FROM audience_tenant_assignment WHERE id = 'ata_3'
+        23503 ALTER TABLE resource_server_checker DISABLE TRIGGER USER; DELETE FROM resource_server_checker WHERE id = 'chk_2'
     ").await;
     // Removing a tenant from the set deletes its row.
     run(
