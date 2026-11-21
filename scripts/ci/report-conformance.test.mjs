@@ -1948,6 +1948,22 @@ describe('the conformance-report CI job', () => {
     assert.deepEqual(JSON.parse(dispatch.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'workflow_dispatch', headBranch: 'main' });
   });
 
+  // README "Input" describes run.json as the six fields the conformance-report
+  // job writes and its gh run view example asks for, and says which four the
+  // reporter validates and which two it ignores.
+  test('README "Input": run.json has the six fields the job writes; the reporter validates four and ignores event and headBranch', () => {
+    const FIELDS = ['databaseId', 'headSha', 'attempt', 'workflowName', 'event', 'headBranch'];
+    assert.deepEqual(Object.keys(JSON.parse(stubbed(0).runJson)), FIELDS, 'the fields report-conformance-ci.sh writes');
+    const readme = repoText(join('tests', 'conformance', 'README.md'));
+    const from = readme.indexOf('\n### Input\n');
+    assert.ok(from >= 0, 'README has an Input section');
+    const input = readme.slice(from, readme.indexOf('\n### ', from + 1));
+    const views = [...input.matchAll(/gh run view \S+ --json ([A-Za-z,]+)/g)].map((m) => m[1].split(','));
+    assert.ok(views.length >= 2, 'the prose and the script name gh run view --json');
+    for (const v of views) assert.deepEqual(v, FIELDS, `gh run view --json ${v}`);
+    assert.match(input, /The reporter validates four of them, which bind the run to the commit: `databaseId` must be the directory name, `headSha` must equal `--commit`, `attempt` must be a positive integer [^.]*, and `workflowName` must be a non-empty string\. It ignores the other two, `event` and `headBranch`, and any other field/);
+  });
+
   // The regression on GitHub Actions (PR 52, head cf35ed7): the runner's
   // variables leaked into the script, so GITHUB_RUN_ID replaced the
   // fixture's and an unset variable was not unset. Reproduced here by
