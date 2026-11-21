@@ -326,8 +326,14 @@ ADRs (T00.8–T00.17, Gate M0):
   second consume and a consume after a revocation even from a statement
   without those predicates. Every miss is the same refusal, naming no
   reason. The registry does not verify the recovery signature: the caller
-  verifies it against the current recovery public key first. The
-  restoration runs the consume inside the same savepoint as its writes
+  verifies it against the current recovery public key first, over the
+  operation's stored challenge or over one recomputed from exactly the
+  values it passes to `restore_operator`, never over a hash taken from the
+  response or from the operator. The consume checks only that
+  `challenge_hash` is set; it does not compare it with the request, and no
+  registry getter returns the operation row (lead ruling, provisional; a
+  follow-up adds `challenge_hash` to `ChallengeBinding` and compares it in
+  the consume). The restoration runs the consume inside the same savepoint as its writes
   (inferred), so a failed restoration leaves the challenge unconsumed.
 - **Restoration.** One transaction enrolls the replacement instance
   `security_admin` (identity, credential and role assignment, under IDs that
@@ -349,8 +355,10 @@ ADRs (T00.8–T00.17, Gate M0):
   waited, and a caller whose write waited for the restoration sees the
   revocation when it looks its operator up again before committing
   (inferred lock and order). Both hold only at the `READ COMMITTED`
-  isolation level, and a restoration runs only there: at any other level
-  it is refused with an error of its own (`UnsupportedIsolation`, not
+  isolation level, and a restoration runs only there: at any other level,
+  `READ UNCOMMITTED` included (which PostgreSQL runs as `READ COMMITTED`
+  but reports by its own name), `REPEATABLE READ` and `SERIALIZABLE`, it
+  is refused with an error of its own (`UnsupportedIsolation`, not
   retryable as is), before its first lock, writing nothing and leaving the
   challenge unconsumed (lead ruling). At `REPEATABLE READ` or
   `SERIALIZABLE` a restoration would read a snapshot older than an
@@ -378,10 +386,17 @@ ADRs (T00.8–T00.17, Gate M0):
   the retry is refused as well and the verifier issues a new challenge.
 - **Challenge TTL and time.** A challenge lives 5 minutes by default and at
   most 15 (OQ-LT-17, LT-107), and at least 1 second (lead ruling). The
-  caller takes `now` immediately before the call and bounds its lock waits
+  verifier takes `now` from its own clock immediately before the call,
+  never from the response or from the operator, and bounds its lock waits
   with `lock_timeout` and `statement_timeout`, which bound how long after
-  the expiry a restoration that waited can consume (inferred). The issue
-  event is `administrative_operation.create`, with the operation's ID as
+  the expiry a restoration that waited can consume (inferred). The
+  registry reads no clock and compares the expiry with that `now` only: a
+  `now` earlier than the issue is accepted, and a refusal for expiry
+  writes nothing and is not final, since a later call with an earlier
+  `now` can still consume (lead ruling, provisional). LT-107's expiry
+  therefore rests on the verifier's clock, which A64's hermetic leg tests
+  with injected clocks and A32's local-verifier leg tests end to end. The
+  issue event is `administrative_operation.create`, with the operation's ID as
   `object_id` and `new_revision` 1 (inferred name, proposed with the
   recovery registry); later T13.3 operations will use the same name, and a
   consumer tells them apart by the operation's `kind`.
