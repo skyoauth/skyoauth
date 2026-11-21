@@ -728,7 +728,8 @@ async fn upgrade_precondition_lists_the_bindings_that_would_fail_the_upgrade() {
     .await;
     assert_eq!(precondition(&pool).await, []);
 
-    persistence::migrate(&pool).await.unwrap();
+    // Up to 0008 only, so later migrations do not change what is checked.
+    MIGRATOR.run_to(8, &pool).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await

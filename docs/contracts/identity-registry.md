@@ -149,6 +149,13 @@ Grant modes (design §5.6):
 | `delegation`  | Required                                                                                      | `delegation`          |
 | Impersonation | Stored only with `status: disabled` and `activation_state: requires_reapproval`; never issued | Not issued            |
 
+A stored impersonation grant never changes after the transaction that
+creates it: no update of the grant, and no change of its allowed bindings or
+audiences (lead decision, 2026-11-21, provisional until the maintainer
+ratifies the ADRs, T00.8–T00.17; design §5.6; T10.11). Since migration
+`0009` the database enforces this, and since `0006` such a grant is never
+deleted (`service/migrations/README.md`, "What 0009 adds").
+
 ### 5.2 Operator identities and roles
 
 Operators are independent `adm_*` identities with registered mTLS public
@@ -184,8 +191,9 @@ T00.8–T00.17 and Gate M0):
   actor type may come later without a migration. No operator identity may
   take a reserved ID: creating one with `deployment_operator` or with an ID
   that begins with `recovery_key:` is rejected, so a real operator cannot
-  act as either. The comparison is exact and byte-wise, and the database
-  does not check it; the registry does (inferred).
+  act as either. The comparison is exact and byte-wise. The registry checks
+  it before writing, and since migration `0009` the database refuses such
+  an identity too (`admin_identity_id_not_reserved_check`, inferred).
 - **Fail-closed scope.** A role assignment satisfies a request only for
   its own scope: an instance-scoped `auditor` assignment does not satisfy a
   tenant request, a tenant `auditor` assignment does not satisfy an

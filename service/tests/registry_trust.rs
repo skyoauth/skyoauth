@@ -1647,12 +1647,12 @@ async fn grants_are_created_with_their_bindings_and_audiences() {
         registry::update_service_grant(&pool, "ten_a", "grt_2", 2, &widened).await,
         "service_grant_default_scopes_check",
     );
+    // The dormant grant is frozen (0009): enabling it is a guard error,
+    // before the 0004 check it would also fail.
     let mut woken = grant_changes(&grant_of(&pool, "grt_3").await);
     woken.status = Status::Enabled;
-    assert_check(
-        registry::update_service_grant(&pool, "ten_a", "grt_3", 1, &woken).await,
-        "service_grant_impersonation_disabled_check",
-    );
+    let refused = registry::update_service_grant(&pool, "ten_a", "grt_3", 1, &woken).await;
+    assert!(matches!(refused, Err(RegistryError::Guard)), "{refused:?}");
     db.drop([pool]).await;
 }
 

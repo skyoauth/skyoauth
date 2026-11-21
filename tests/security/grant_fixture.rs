@@ -4,12 +4,14 @@
 //! through the typed registry API (`skyoauth_service::persistence::registry`).
 //! Not a scenario: it holds no test.
 //!
-//! The refusal cases are listed once, in [`CREATE_REFUSALS`] and
-//! [`UPDATE_REFUSALS`], with the `0004` check that reports each. A write
-//! that breaks both checks is reported by
-//! `service_grant_activation_mode_check`: PostgreSQL tests a table's
-//! `CHECK` constraints in alphabetical order by name (documented under
-//! `CREATE TABLE` since 9.5) and reports the first one that fails.
+//! The refusal cases are listed once, in [`CREATE_REFUSALS`], with the
+//! `0004` check that reports each, and [`UPDATE_REFUSALS`]. A create that
+//! breaks both checks is reported by `service_grant_activation_mode_check`:
+//! PostgreSQL tests a table's `CHECK` constraints in alphabetical order by
+//! name (documented under `CREATE TABLE` since 9.5) and reports the first
+//! one that fails. Every update of a stored impersonation grant is refused
+//! by the `0009` guard `service_grant_impersonation_frozen` (`Guard`),
+//! which fires before the checks.
 
 use std::{
     fmt::Debug,
@@ -71,26 +73,16 @@ pub(super) const CREATE_REFUSALS: [(Status, ActivationState, &str); 3] = [
     ),
 ];
 
-/// Updates of a dormant impersonation grant refused, in the same form.
-pub(super) const UPDATE_REFUSALS: [(Status, ActivationState, &str); 3] = [
+/// Updates of a dormant impersonation grant refused: (status, activation
+/// state). Each is refused by the `0009` guard as `Guard`, before the
+/// `0004` checks it would also fail.
+pub(super) const UPDATE_REFUSALS: [(Status, ActivationState); 3] = [
     // Enabling, reapproval marker kept.
-    (
-        Status::Enabled,
-        ActivationState::RequiresReapproval,
-        IMPERSONATION_DISABLED,
-    ),
+    (Status::Enabled, ActivationState::RequiresReapproval),
     // Clearing the reapproval marker, still disabled.
-    (
-        Status::Disabled,
-        ActivationState::NotRequired,
-        ACTIVATION_MODE,
-    ),
-    // Both: the first failing check by name is reported.
-    (
-        Status::Enabled,
-        ActivationState::NotRequired,
-        ACTIVATION_MODE,
-    ),
+    (Status::Disabled, ActivationState::NotRequired),
+    // Both.
+    (Status::Enabled, ActivationState::NotRequired),
 ];
 
 fn strings(values: &[&str]) -> Vec<String> {
@@ -354,26 +346,26 @@ pub(super) async fn assert_create_refused(pool: &PgPool, new: &NewServiceGrant, 
     assert_eq!(listed(pool, &new.id).await, None);
 }
 
-/// Updating `grant` at its revision to `status` and `activation_state` is
-/// refused by `constraint`, and the stored record, revision included, is
-/// still exactly `grant`.
+/// Updating the impersonation grant `grant` at its revision to `status`
+/// and `activation_state` is refused by the `0009` guard (`Guard`), and the
+/// stored record, revision included, is still exactly `grant`.
 pub(super) async fn assert_update_refused(
     pool: &PgPool,
     grant: &ServiceGrant,
     status: Status,
     activation_state: ActivationState,
-    constraint: &str,
 ) {
-    assert_check(
-        registry::update_service_grant(
-            pool,
-            TENANT,
-            &grant.id,
-            grant.revision,
-            &changes(grant, status, activation_state),
-        )
-        .await,
-        constraint,
+    let result = registry::update_service_grant(
+        pool,
+        TENANT,
+        &grant.id,
+        grant.revision,
+        &changes(grant, status, activation_state),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(RegistryError::Guard)),
+        "expected Guard: {result:?}"
     );
     assert_unchanged(pool, grant).await;
 }

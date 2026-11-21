@@ -267,9 +267,11 @@
 //! scope and profile vocabulary, leaving a disabled assignment's tenant out
 //! of a checker's effective set; migrations README, "What 0003 adds"; the
 //! egress check of a source's URLs, secret reference resolution, template
-//! predicates, JWK checks, the other scope ceilings and keeping an
-//! impersonation grant dormant; "What 0004 adds"), does not generate IDs
-//! (T10.2) and does not run migrations.
+//! predicates, JWK checks and the other scope ceilings; "What 0004 adds"),
+//! does not generate IDs (T10.2) and does not run migrations. An
+//! impersonation grant is kept dormant by the database since `0009`: an
+//! update of one, or a change of its list rows after its creating
+//! transaction, is [`RegistryError::Guard`].
 
 mod assertion;
 mod audience;

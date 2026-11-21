@@ -26,8 +26,8 @@ const GUARD: &str = "SK001";
 /// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
 /// `0005`, `instance_security_policy` and `recovery_state`, which
 /// bootstrap writes, and `administrative_operation`, which the recovery
-/// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007` and
-/// `0008` name them, sorted byte-wise. A unique, foreign key or check
+/// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
+/// `0008` and `0009` name them, sorted byte-wise. A unique, foreign key or check
 /// violation maps to a typed variant only for a name listed here. The
 /// database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -49,6 +49,7 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "admin_credential_trust_anchor_ref_octet_length_check",
     "admin_identity_created_at_range_check",
     "admin_identity_id_check",
+    "admin_identity_id_not_reserved_check",
     "admin_identity_id_octet_length_check",
     "admin_identity_pkey",
     "admin_identity_status_check",
