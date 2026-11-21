@@ -2095,6 +2095,12 @@ describe('the conformance-report CI job', () => {
       ['a leg of two lines', pg({ leg: `${PG}\n${PG}\n` }), /leg is not one line holding a leg string/],
       ['a leg with a carriage return', pg({ leg: `${PG}\r\n` }), /leg is not one line holding a leg string/],
       ['a leg with a space', pg({ leg: ' scenarios-pg/x86_64\n' }), /leg is not one line holding a leg string/],
+      // A shell variable cannot hold a NUL: dash and bash drop it from the
+      // command substitution, leaving a valid leg string, so only the byte
+      // count (the file's size against the variable's length) rejects it.
+      ['a leg with a NUL byte', pg({ leg: `${PG}\0\n` }), /attempt-1\/leg is not one line holding a leg string/],
+      ['a leg with a NUL byte inside', pg({ leg: 'scenarios-pg/x86\x0064\n' }), /attempt-1\/leg is not one line holding a leg string/],
+      ['a leg starting with a NUL byte', pg({ leg: `\0${PG}\n` }), /attempt-1\/leg is not one line holding a leg string/],
       ['an oversized leg', pg({ leg: `${'a'.repeat(300)}\n` }), /leg holds 301 bytes, more than one leg string/],
       ['a leg of another artifact name', pg({ leg: 'typescript/node22\n' }), /attempt-1\/leg names leg typescript\/node22, whose artifact is junit-typescript-node22-attempt-N/],
       ['a name that is not a leg artifact name', pg({ leg: LEG }, 'junit-scenarios-pg-x86_64'), /'junit-scenarios-pg-x86_64' is not a leg artifact name junit-<leg id>-attempt-N/],
