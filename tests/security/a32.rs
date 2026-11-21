@@ -12,10 +12,10 @@
 //! [`authorize_operator`], [`get_instance_security_policy`] and
 //! [`verify_audit_chain`]) against a real PostgreSQL, one fresh database
 //! per test (per round in the replica tests), and write nothing past the
-//! registry. The only SQL of their own is one
-//! read-only helper, [`counts`] (see its docs). The replica harness
-//! (`skyoauth_scenarios::rep`: [`Replicas::race`] behind a barrier,
-//! [`rep::wait_until_blocked`]) stands in for the row's "barriers". The
+//! registry. The only SQL of their own is one read-only helper,
+//! [`counts`] (see its docs). The concurrent tests use the replica harness
+//! (REP, `skyoauth_scenarios::rep`): [`Replicas::race`], whose replicas a
+//! barrier releases together, and [`rep::wait_until_blocked`]. The
 //! fixture is local: every bootstrap request is valid and has IDs, keys and
 //! an instance ID of its own ([`ids`]), and each bootstrap runs in a
 //! transaction of its own that commits on `Ok` and rolls back on every
@@ -23,14 +23,13 @@
 //!
 //! - **Positive.** One bootstrap on an empty database: the IDs of its
 //!   outcome are the rows the getters read back, the instance
-//!   `security_admin` it enrolls authorizes with exactly those IDs, the
-//!   audit chain is intact at sequence 1, and the recovery public key (as
-//!   plain text, hex or base64) and the instance ID, presented as an mTLS
-//!   key, authorize no role: the recovery key is not an operator key
-//!   (`a32_pos_one_bootstrap_enrolls_one_operator_and_closes`).
+//!   `security_admin` it enrolls authorizes with exactly those IDs, and the
+//!   audit chain is intact at sequence 1. As a cheap extra check, the
+//!   recovery public key (as plain text, hex or base64) and the instance
+//!   ID, presented as an operator credential's `public_identity`, authorize
+//!   no role (`a32_pos_one_bootstrap_enrolls_one_operator_and_closes`).
 //! - **Negative.** Of 8 replicas that bootstrap at once with requests that
-//!   share nothing, exactly one succeeds and 7 are the same
-//!   `AlreadyClosed`; the losers' rows do not exist, the winner's are the
+//!   share nothing, exactly one succeeds and 7 are `AlreadyClosed`; the losers' rows do not exist, the winner's are the
 //!   only ones and the chain is intact at 1, in 3 fresh databases, whichever
 //!   replica wins (`a32_neg_concurrent_bootstraps_across_replicas_have_one_winner`).
 //!   Four replicas seen blocked behind a holder's uncommitted bootstrap
@@ -42,15 +41,28 @@
 //!   then with its identity disabled, its credential revoked and its
 //!   binding disabled, one lever after another, the same request, a request
 //!   with new IDs and requests that reuse the existing admin ID, credential
-//!   key or audit event ID are each the same `AlreadyClosed` and write
-//!   nothing, also on a fresh pool; and the revoked key cannot be
-//!   registered for another operator
+//!   key or audit event ID are each `AlreadyClosed` and write nothing,
+//!   also on a fresh pool; and the revoked key cannot be registered for
+//!   another operator, by the inferred `0005` rule below
 //!   (`a32_neg_a_closed_bootstrap_is_never_reopened`).
 //!
 //! `AlreadyClosed` before a collision is the registry's documented
 //! behaviour (#78, `registry::bootstrap` "Steps" and "Closure": the closure
 //! check comes before any write), not a requirement of the spec, which
-//! asks only that a closed bootstrap stays closed. Invalid requests (a
+//! asks only that a closed bootstrap stays closed. Likewise, that a revoked
+//! key cannot be registered again is the `0005` schema rule
+//! `admin_credential_public_identity_key`, which `0005` marks inferred
+//! (the delete guard that keeps the row is a follow-up in
+//! `service/migrations/README.md`): registry behaviour, not the spec's. The registry tests cover it too
+//! (`re_registering_a_revoked_key_in_a_transaction_is_refused_and_rolled_back`
+//! in `service/tests/registry_operator.rs`,
+//! `collisions_of_caller_ids_stay_already_exists` in
+//! `service/tests/registry_bootstrap.rs`). The helpers pin two more of the
+//! registry's current picks, not the spec's, and leave a third alone: no
+//! `administrative_operation` row and `recovery_key_epoch = 1` (both
+//! inferred in `registry::bootstrap`) are asserted, while `AlreadyClosed` is
+//! matched by variant only, not by its `Display` text, "bootstrap is
+//! already closed", which the spec does not define. Invalid requests (a
 //! reserved admin ID, an instance ID that is not a lowercase UUIDv7, a
 //! recovery key that is not 32 bytes, an empty or over-long key or anchor,
 //! a `now` out of range) are refused before any statement, whatever the
@@ -63,9 +75,10 @@
 //! yet, with the owner of each part:
 //!
 //! - The deployment-local bootstrap command and its Unix socket, owned by
-//!   the service UID with mode 0600 (T13.4, OQ-TM-9): the "local verifier"
-//!   harness component of the row. Nothing here goes through a command or a
-//!   socket.
+//!   the service UID with mode 0600 (T13.4, OQ-TM-9), and the service-local
+//!   bootstrap/recovery verifier behind them (design §7.2, ADR-013 item 7;
+//!   T13.3 builds it): the "local verifier" harness component of the row.
+//!   Nothing here goes through a command, a socket or the verifier.
 //! - The restart and configuration-omission half of "durably closes" (T13.4)
 //!   beyond a fresh pool: no service starts or restarts here, and no
 //!   configuration is read; a new pool on the same database is all that is
@@ -73,9 +86,10 @@
 //! - The OP harness component, `skyoauth-operator` (T13.10), as the client
 //!   whose key the bootstrap enrolls and that presents it afterwards.
 //! - Signed recovery restores and replayed recovery (T13.5): the recovery
-//!   verifier, its challenge and the operator restoration do not exist. They
-//!   are the coding session's later change, with A48 and A64 for the
-//!   operator tools and the offline signing, not these tests.
+//!   verifier, its challenge and the operator restoration do not exist.
+//!   Operator restoration is `restore_operator`, a later change (PR 3a, as
+//!   `registry::bootstrap` and identity-registry say), with A48 and A64 for
+//!   the operator tools and the offline signing, not these tests.
 //! - The forged IdP admin negative on the wire: an upstream admin-role
 //!   claim or session from the OIDC harness component (the mock human IdP)
 //!   must not reach an operator through the OP harness component, as for
@@ -91,8 +105,12 @@
 //! bootstrap whose snapshot predates another's commit (`REPEATABLE READ`,
 //! `SERIALIZABLE`); a policy row committed while bootstrap waits; a failed
 //! audit append and a caller that commits after an `Err`; the audit append
-//! as the last step; the bounds of `now`; and collisions of caller IDs
-//! before bootstrap.
+//! as the last step; the bounds of `now`; collisions of caller IDs before
+//! bootstrap; and the two paths that need a row written by other means: a
+//! bootstrap that waits for an existing policy row's lock
+//! (`a_second_bootstrap_waits_for_the_policy_lock_then_is_closed`) and a
+//! `recovery_state` row not marked closed
+//! (`a_recovery_state_not_marked_closed_still_closes_bootstrap`).
 //!
 //! [`bootstrap_instance`]: registry::bootstrap_instance
 //! [`authorize_operator`]: registry::authorize_operator
@@ -220,14 +238,12 @@ async fn bootstrap_on(
     bootstrap(&mut pool.acquire().await.unwrap(), request).await
 }
 
-/// `result` is `AlreadyClosed`; returns its `Debug` text, which carries no
-/// detail ([`CLOSED`]), so that callers can compare every refusal's.
+/// `result` is `AlreadyClosed`, matched by variant; returns its `Debug`
+/// text ([`CLOSED`]) for the callers' tallies of refusals.
 #[track_caller]
 fn closed_text(result: &Result<BootstrapOutcome, BootstrapError>, what: &str) -> String {
     match result {
-        Err(err @ BootstrapError::AlreadyClosed) => {
-            assert_eq!(err.to_string(), "bootstrap is already closed", "{what}");
-        }
+        Err(BootstrapError::AlreadyClosed) => {}
         other => panic!("{what}: expected AlreadyClosed: {other:?}"),
     }
     let text = format!("{result:?}");
@@ -577,7 +593,7 @@ async fn a32_pos_one_bootstrap_enrolls_one_operator_and_closes() {
 /// 8 replicas, each a session of its own, released together by the
 /// harness's barrier, each with a request that shares nothing with the
 /// others' (instance ID included). In each of 3 fresh databases exactly
-/// one bootstraps; the 7 others are the same `AlreadyClosed`, and the
+/// one bootstraps; the 7 others are `AlreadyClosed`, and the
 /// database holds the winner's rows only. Which replica wins is not
 /// asserted.
 #[tokio::test(flavor = "multi_thread")]
@@ -621,11 +637,11 @@ async fn a32_neg_concurrent_bootstraps_across_replicas_have_one_winner() {
 }
 
 /// A holder session bootstraps in an open transaction; 4 replicas start
-/// their own bootstraps, which shares nothing with the holder's or each
-/// other's, and the harness sees all 4 blocked behind the holder
+/// their own bootstraps, each sharing nothing with the holder's or the
+/// others', and the harness sees all 4 blocked behind the holder
 /// (`pg_blocking_pids`, transitively) before it ends. None finishes before
-/// the holder ends. After the holder's commit all 4 are the same
-/// `AlreadyClosed` and the state is the holder's; after its rollback
+/// the holder ends. After the holder's commit all 4 are `AlreadyClosed`
+/// and the state is the holder's; after its rollback
 /// exactly one of the 4 bootstraps, the other 3 are `AlreadyClosed`, and
 /// the state is that one's. Each in a fresh database.
 #[tokio::test(flavor = "multi_thread")]
@@ -777,7 +793,7 @@ fn attempts(first: &Ids, step: usize) -> Vec<(&'static str, Ids)> {
     ]
 }
 
-/// Runs every attempt of [`attempts`] and checks that each is the same
+/// Runs every attempt of [`attempts`] and checks that each is
 /// `AlreadyClosed` and that nothing changed: `first`'s counts, its
 /// operator as `expected`, the policy row and the chain.
 async fn assert_stays_closed(pool: &PgPool, first: &Ids, expected: &Operator, step: usize) {
@@ -809,12 +825,15 @@ async fn assert_stays_closed(pool: &PgPool, first: &Ids, expected: &Operator, st
 /// After a bootstrap, with its operator as enrolled and then after each
 /// lever (identity disabled, credential revoked, binding disabled, pulled
 /// one after another, so the instance ends without an authorized
-/// `security_admin`), every valid request is the same `AlreadyClosed` and
+/// `security_admin`), every valid request is `AlreadyClosed` and
 /// writes nothing, those that reuse an existing ID or key included: the
 /// closure check comes first, so a collision never surfaces as
 /// `AlreadyExists` (the registry's documented behaviour, #78; see the
 /// module docs). On a fresh pool it is still closed. The revoked key
-/// cannot be registered as another operator's credential.
+/// cannot be registered as another operator's credential: the `0005` rule
+/// `admin_credential_public_identity_key`, inferred there (registry
+/// behaviour, not the spec's; the registry tests cover it too, see the
+/// module docs).
 ///
 /// No failure-then-retry case is folded in: a first attempt that fails
 /// (an audit event ID or an operator ID taken before bootstrap) and leaves
@@ -858,7 +877,8 @@ async fn a32_neg_a_closed_bootstrap_is_never_reopened() {
     let pool = db.pool().await;
     assert_stays_closed(&pool, &first, &operator, 4).await;
 
-    // The revoked key cannot be registered for another operator.
+    // The revoked key cannot be registered for another operator: the
+    // inferred `0005` rule (see the module docs), not a spec requirement.
     let mut tx = pool.begin().await.unwrap();
     registry::create_admin_identity(
         &mut *tx,
