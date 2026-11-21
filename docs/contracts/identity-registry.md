@@ -249,8 +249,30 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   The database stores the raw 32-byte digest (`bytea`); lowercase hex is only
   its output form in the JSONL stream and the API. Conformance scenarios MUST NOT assert
   hash values, only chain linkage and verification outcomes. Provisional until
-  the audit writer ships; the details still open are OQ-IR-15. (lead
-  decision, 2026-11-20, OQ-IR-14)
+  the audit writer ships. (lead decision, 2026-11-20, OQ-IR-14)
+
+  The details OQ-IR-15 left open are decided as follows (lead decision,
+  2026-11-21, provisional until the audit writer ships):
+  - The envelope is a JSON object with one member per `AuditEvent` field of
+    tasks §3 but `prev_hash`: `id`, `tenant_id`, `sequence`, `timestamp`,
+    `actor`, `action`, `object_id`, `previous_revision`, `new_revision` and
+    `outcome`, serialized as RFC 8785 canonical JSON in UTF-8. Every member
+    is always present: an absent value is an explicit JSON `null`, so an
+    absent and a present value hash differently.
+  - `timestamp` is RFC 3339 in UTC with `Z` and exactly six fractional
+    digits, the stored microseconds. A year outside `0000` to `9999`, which
+    RFC 3339 cannot write but the stored range allows, is written as a sign
+    and six digits, as ECMAScript does (inferred).
+  - `actor` is the IR-058 object.
+  - Item 2's "zero bytes" for the first event is read as no bytes at all, not
+    32 zero-valued bytes (inferred: the literal reading).
+  - `sequence` and the revisions are JSON integers. RFC 8785 writes numbers
+    as IEEE 754 doubles, exact only up to `2^53 - 1`, so the writer rejects a
+    larger value (inferred).
+  - No column stores an event's own hash: verification recomputes it from the
+    stored columns and compares it with the next event's `prev_hash` and, for
+    the last event, `audit_chain_head.head_hash`.
+
 - **IR-057** `instance_id` is a UUIDv7 in lowercase hyphenated form. It is
   generated once, at first bootstrap, and stored immutably on the
   `InstanceSecurityPolicy` row. Instance-scope audit events use it as
@@ -260,7 +282,14 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   administrator acting (such as the startup event of IR-053), record the
   fixed reserved actor `{"type": "system", "id": "system"}`. The system actor
   is never a principal or an operator identity. Provisional until the audit
-  writer ships. (lead decision, 2026-11-20, OQ-IR-14)
+  writer ships. (lead decision, 2026-11-20, OQ-IR-14) The `actor` text column
+  stores the canonical (RFC 8785) JSON text of the same `{type, id}` object
+  the IR-056 envelope carries, so column and envelope agree byte for byte;
+  the system actor is stored as `{"id":"system","type":"system"}`. (lead
+  decision, 2026-11-21, provisional until the audit writer ships, OQ-IR-15)
+  An operator identity acting is `{"type": "operator", "id": <its ID>}`
+  (inferred type name); the actor of bootstrap and break-glass recovery,
+  which are not operator identities, is not decided.
 - **IR-059** `AuditEvent.action` is a dotted lowercase `<resource>.<verb>`
   name, such as `tenant.create`. `<resource>` is the audited entity's name
   in lowercase snake case: `Tenant` gives `tenant`,
@@ -280,8 +309,23 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   | `instance_security_policy.update` | The online IR-052 `widening_second_approver` toggle |
   | `egress_allowlist_entry.enable`   | `EgressAllowlistEntry` enabled or re-enabled        |
 
-  The startup mirror of IR-053 and the sink-change event also write the
-  `InstanceSecurityPolicy` row, but their action names are open (OQ-IR-15).
+  The action names form one closed table, `AUDIT_ACTIONS` in
+  `service/src/persistence/registry/event_actions.rs`, and the audit writer
+  rejects a name with another syntax or not in the table (lead decision,
+  2026-11-21, provisional until the audit writer ships, OQ-IR-15). Beyond the
+  three names above, every name in it is inferred: the startup mirror of
+  IR-053 is `instance_security_policy.mirror` and the sink-change event
+  `instance_security_policy.change_sink` (both write the
+  `InstanceSecurityPolicy` row); first bootstrap writes
+  `instance_security_policy.create` and `recovery_state.create`; a recovery
+  key rotation is `recovery_state.rotate_key` and the break-glass operator
+  restoration `admin_identity.restore`; the IR-152 egress entry writes are
+  `egress_allowlist_entry.create`, `.enable` and `.disable`; and the T13.3
+  administrative events of M1a are `create`, `update`, `enable` and `disable`
+  (and `delete` for a binding or grant) of the operator and workload registry
+  entities, plus `administrative_operation.approve` (IR-054). `<verb>` is
+  lowercase snake case too (inferred). Human, gateway, key and provider
+  actions are added with their writers.
 
 ## 6. Scopes
 
@@ -703,7 +747,12 @@ follow-up. All other items are not resolved by this contract.
   which reserved system actor records events that the service writes on its
   own; and the namespace and syntax of `AuditEvent.action`.
 - **OQ-IR-15 — Audit hash details left open by the IR-056 to IR-059
-  decision.**
+  decision.** **Decided provisionally** (lead decision, 2026-11-21,
+  provisional until the audit writer ships): no own-hash column; the
+  `actor` column stores the canonical JSON of the IR-058 object (IR-058);
+  the envelope members, the timestamp format and explicit `null` for absent
+  values (IR-056); and the closed action table (IR-059). The original
+  question:
   - **No own-hash column.** `audit_event` has no column for an event's own
     hash. The hash is visible only as the next event's `prev_hash` or as
     `audit_chain_head.head_hash`, so verification recomputes it from the

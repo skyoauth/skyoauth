@@ -121,11 +121,12 @@ egress rows are never deleted.
   service writes on its own record the reserved actor
   `{"type": "system", "id": "system"}`, never a principal or an operator
   identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
-  (identity-registry IR-059). The decision fixes only that syntax: IR-059
-  lists examples, and the action names, including those of these two
-  events, are open until the audit writer (OQ-IR-15). These are lead
-  decisions (2026-11-20, OQ-IR-14), provisional until the audit writer
-  ships.
+  (identity-registry IR-059). These are lead decisions (2026-11-20,
+  OQ-IR-14), provisional until the audit writer ships. The action names,
+  including `instance_security_policy.mirror` and
+  `instance_security_policy.change_sink` for these two events, are the
+  closed table of the audit writer: OQ-IR-15 is decided provisionally (lead
+  decision 2026-11-21; see "Rust registry surface").
 
 The database does not enforce these rules; the service must:
 
@@ -1317,8 +1318,9 @@ changes no existing column, constraint, trigger or index. Choices marked
   separate recovery procedure (this README defines none). The event's
   `timestamp` is part of its hash: identity-registry IR-056 hashes the
   canonical JSON of the event envelope without only its `hash` and
-  `prev_hash` fields, and OQ-IR-15 lists how `timestamp` is serialized in
-  that envelope among the details still open. An edited timestamp gives
+  `prev_hash` fields, and OQ-IR-15, decided provisionally (lead decision
+  2026-11-21), serializes `timestamp` there as RFC 3339 with six fractional
+  digits. An edited timestamp gives
   another hash than the one the next event's `prev_hash`, or
   `audit_chain_head.head_hash` for the last event, records (see the audit
   writer under "Follow-ups", "Not done in `0002`").
@@ -1670,13 +1672,15 @@ Not done in `0002`:
   `prev_hash` and `head_hash` store the raw 32-byte digest as `bytea`;
   lowercase hex is only the JSONL and API output form. `audit_event` has no
   column for an event's own hash, so verification recomputes it and compares
-  it with the next event's `prev_hash` or the head's `head_hash`. Still open
-  before the writer ships (identity-registry OQ-IR-15): the text
-  serialization of an object `actor`, the envelope's member names, the
-  timestamp format, the encoding of absent values, and the action names
-  (IR-059 fixes only the `<resource>.<verb>` syntax), including those of the
-  startup-mirror and sink-change events.
-  Tests assert chain linkage and verification outcomes, never hash values.
+  it with the next event's `prev_hash` or the head's `head_hash`. The
+  details identity-registry OQ-IR-15 left open are decided provisionally
+  (lead decision 2026-11-21): the text serialization of an object `actor`,
+  the envelope's member names, the timestamp format, the encoding of absent
+  values, and the action names (see IR-056, IR-058 and IR-059). The writer
+  and verifier are in the registry (see "Rust registry surface"); no
+  migration was needed. Conformance scenarios assert chain linkage and
+  verification outcomes, never hash values; unit tests may check known
+  answers.
 
 - Errata for comments and checks in `0002`, which is frozen (its checksum
   covers comments), so they are corrected here and not in the file:
@@ -1688,8 +1692,8 @@ Not done in `0002`:
     keeps it unchanged.
   - Lines 244–246, on the chain genesis: "the genesis representation is not
     specified" is superseded for the first event by IR-056, under which its
-    stored `prev_hash` is `NULL` and enters the hash as zero bytes. The
-    empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
+    stored `prev_hash` is `NULL` and enters the hash as zero bytes, read as
+    no bytes at all (inferred; the audit writer does so). The empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
   - Line 259, on `audit_event.tenant_id`: OQ-IR-14 is decided; the
     instance-scope event rules are IR-057 to IR-059 and "Instance-scope
     events" above.
@@ -1815,6 +1819,32 @@ drain cap, `consumed_at`, and the `single_use` and enabled checks of the
 source stay with the service (see the service rules above). The claim that
 exactly one attempt consumes holds under `READ COMMITTED`; under
 `REPEATABLE READ` or `SERIALIZABLE` a loser may get `Retry`.
+
+Audit events (IR-055 to IR-059; OQ-IR-14; OQ-IR-15, decided provisionally
+by the lead decision 2026-11-21; T10.1; design §7): `append_audit_event`
+appends one event as the last step of a caller transaction, in the order of
+"append audit events in this order" above: it locks the head
+(`SELECT … FOR UPDATE`), takes `sequence` = head + 1 and `prev_hash` = head
+hash, computes the IR-056 hash in Rust, inserts the event and advances the
+head, three statements, so it takes a `Transaction` rather than any
+executor. Concurrent appenders queue on the head lock and all succeed under
+`READ COMMITTED`. The caller supplies the ID, the timestamp (truncated to
+the microsecond) and every field; nothing reads a clock. An action outside
+the closed table `AUDIT_ACTIONS` or without the `<resource>.<verb>` syntax,
+an empty operator ID, a revision above `2^53 - 1` and a timestamp outside
+the `0007` range are encode errors (`Other`) before any statement. The
+envelope is RFC 8785 canonical JSON with every member present (`null` when
+absent), the timestamp RFC 3339 with six fractional digits and `Z`, and the
+actor the canonical JSON `{"id":…,"type":…}` that the `actor` column stores
+byte for byte. The first event's `NULL` `prev_hash` adds no bytes to its
+hash (inferred). `verify_audit_chain` reads the head, and whether an event
+lies past it, in one statement, then the events up to the head a page at a
+time; it recomputes each hash from the stored columns and returns the first
+broken sequence with its reason (`Gap`, `PrevHashMismatch`, `HeadMismatch`,
+or `Unencodable` for a row the writer could not have written). An edit of
+event `k` shows at `k + 1`, or at the head for the last event. Other
+registry writes do not append events; their callers do, in the same
+transaction.
 
 Required binding predicates (T12.2; ADR-016 items 2 to 4; A37):
 `required_claims(profile)` is the one table of the claim names each

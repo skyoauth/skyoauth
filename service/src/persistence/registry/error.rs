@@ -21,13 +21,13 @@ const DEADLOCK_DETECTED: &str = "40P01";
 const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
-/// `principal`, the five `0003` tables, the nine `0004` tables and
-/// `consumed_assertion` of `0005`) and of the three list domains, as
-/// migrations `0002` to `0005`, `0007` and `0008` name them, sorted
-/// byte-wise. A unique, foreign key or check violation maps to a typed
-/// variant only for a name listed here. The database test
-/// `registry_constraint_names_match_the_catalog` keeps the list equal to the
-/// catalog.
+/// `principal`, `audit_event` and `audit_chain_head`, the five `0003`
+/// tables, the nine `0004` tables and `consumed_assertion` of `0005`) and
+/// of the three list domains, as migrations `0002` to `0005`, `0007` and
+/// `0008` name them, sorted byte-wise. A unique, foreign key or check
+/// violation maps to a typed variant only for a name listed here. The
+/// database test `registry_constraint_names_match_the_catalog` keeps the
+/// list equal to the catalog.
 pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_constraint_versions_check",
     "audience_tenant_assignment_id_check",
@@ -40,6 +40,27 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "audience_tenant_assignment_tenant_id_fkey",
     "audience_tenant_assignment_tenant_id_octet_length_check",
     "audience_tenant_assignment_tenant_id_resource_server_id_key",
+    "audit_chain_head_check",
+    "audit_chain_head_head_hash_check",
+    "audit_chain_head_pkey",
+    "audit_chain_head_sequence_check",
+    "audit_chain_head_singleton_check",
+    "audit_event_action_check",
+    "audit_event_actor_check",
+    "audit_event_check",
+    "audit_event_id_check",
+    "audit_event_id_octet_length_check",
+    "audit_event_new_revision_check",
+    "audit_event_object_id_check",
+    "audit_event_outcome_check",
+    "audit_event_pkey",
+    "audit_event_prev_hash_check",
+    "audit_event_previous_revision_check",
+    "audit_event_sequence_check",
+    "audit_event_sequence_key",
+    "audit_event_tenant_id_fkey",
+    "audit_event_tenant_id_octet_length_check",
+    "audit_event_timestamp_range_check",
     "consumed_assertion_consumed_at_range_check",
     "consumed_assertion_digest_key_version_check",
     "consumed_assertion_digest_key_version_octet_length_check",
