@@ -29,14 +29,22 @@
 //!   (`a43_pos_tenant_references_its_own_assigned_audiences`).
 //! - **Negative, references.** Through each of the four writes that name an
 //!   audience (`create_service_identity`, `add_service_identity_resource_server`,
-//!   `create_service_grant`, `add_service_grant_resource_server`), tenant B
-//!   naming tenant A's audience is refused with the same typed error as
-//!   naming a registered audience that no tenant is assigned, an ID that no
-//!   resource server has, A's audience string spelled as an ID and A's
-//!   assignment ID: `Invariant { ForeignKey, <write's assignment key> }`,
-//!   compared by variant, kind and constraint, never by message text; named
-//!   next to the intruder's own audience in a grant's create, it still fails
-//!   the whole statement. Each refusal writes nothing, in both directions
+//!   `create_service_grant`, `add_service_grant_resource_server`), a
+//!   reference that tenant B may not make is refused with one typed error,
+//!   `Invariant { ForeignKey, <write's assignment key> }`, compared by
+//!   variant, kind and constraint, never by message text, in each of the
+//!   three registry states a name can be in: (1) a resource server assigned
+//!   to another tenant only (A's audience); (2) a resource server assigned
+//!   to no tenant (`rs_free`); (3) no resource server with that ID. State (3)
+//!   is what an unknown ID, every audience string (A's, B's own, the shared
+//!   one and the unassigned one) and every assignment ID (A's and B's own,
+//!   of their own and of the shared audience) reduce to when used where a
+//!   resource server ID is expected. The strings and assignment IDs of
+//!   audiences assigned to B are among them, so a write that resolved an
+//!   audience string or an assignment ID to its resource server would
+//!   accept them: they are what catches it. Named next to B's own audience
+//!   in a grant's create, a refused name still fails the whole statement.
+//!   Each refusal writes nothing, in both directions
 //!   (`a43_neg_reference_outside_own_assignment_is_one_refusal`).
 //! - **Negative, competing registrations.** A second resource server with
 //!   an audience already registered is refused (`resource_server_audience_key`),
@@ -55,6 +63,11 @@
 //!   distinct audience, stored and read back byte for byte, and each is then
 //!   unique in its own right; the original stays the only resource server
 //!   with its exact bytes (`a43_neg_audience_variants_are_distinct_or_refused`).
+//!   All of it is registry behaviour, not the spec's. Known gap: accepting
+//!   the no-break space, the zero-width space and the NFD spelling. Its
+//!   owner is audience syntax and Unicode normalization (OQ-IR-9, open; a
+//!   service rule per migrations README "What 0003 adds"; T14.1), and a
+//!   service-layer fix will not turn this test red (see "Known gaps").
 //! - **Negative, concurrency.** Of 8 replicas (REP, `skyoauth_scenarios::rep`)
 //!   that register one audience at once under 8 resource server IDs,
 //!   exactly one succeeds and 7 get `AlreadyExists` with
@@ -98,11 +111,15 @@
 //!
 //! Known gaps, asserted with that label: the NFD spelling of an NFC
 //! audience, a no-break space and a zero-width space are accepted as new
-//! audiences. Unicode normalization is left to the service above the
-//! registry (`service/migrations/README.md`, "What 0003 adds"), and the
-//! character rule refuses ASCII whitespace and C0/C1 controls only. A test
-//! that fails here because the registry starts to normalize or refuse them
-//! means the gap closed and these docs need the update.
+//! audiences. Audience syntax and Unicode normalization are open (OQ-IR-9)
+//! and a service rule per `service/migrations/README.md`, "What 0003 adds"
+//! (T14.1), and the registry's character rule refuses ASCII whitespace and
+//! C0/C1 controls only. A service-layer fix will not turn this test red:
+//! the test calls the registry directly, below any service check, and keeps
+//! passing when the service validates or normalizes audiences. Only a
+//! change in the registry itself (its schema or its functions normalizing
+//! or refusing these values) fails it, and then the assertions and these
+//! docs need the update.
 //!
 //! # Not expressible in the registry, so not tested
 //!
@@ -114,28 +131,46 @@
 //!   references outside an enabled assignment). So a write naming an
 //!   audience whose assignment is disabled succeeds through the registry,
 //!   and "a disabled assignment stops further writes" has no registry test;
-//!   no test here asserts the acceptance either. An assignment cannot be
-//!   removed (`0006` rejects its `DELETE`), and the registry has no
-//!   superseded assignment.
+//!   no test here asserts the acceptance either: it is an open gap, untested
+//!   either way. An assignment cannot be removed (`0006` rejects its
+//!   `DELETE`), and the registry has no superseded assignment. The lead
+//!   recommends (a recommendation, not a decision) enforcing the check with
+//!   a database trigger rather than a check-then-insert above the registry:
+//!   the composite foreign key takes a `KEY SHARE` lock, which does not
+//!   conflict with the status `UPDATE`, so a check-then-insert races with a
+//!   concurrent disable. A trigger reverses the migrations README rule "The
+//!   database does not enforce these rules; the service must", so it is a
+//!   spec decision that goes to the user.
 //! - **Who may assign.** The registry authorizes nobody (`registry` "Not
-//!   done here"): creating a resource server or an assignment is an
-//!   instance write that only `security_admin` may make (IR-070, API-147),
-//!   and that a scoped tenant admin cannot assign itself an audience is
-//!   T13.2's scoped tenant-admin authority, not a registry rule. An
-//!   assignment's tenant and resource server and a resource server's
-//!   audience cannot be changed by any registry update (their change types
-//!   have no such field), so re-pointing one has no API to test; the
-//!   immutability guards behind them are the service tests'.
-//! - **Clients, origins and human policies** (IR-080, T14.5, T14.6) are M1b
-//!   records with no tables yet; their references are not tested.
+//!   done here": API-147 and the endpoint roles are T14.1 and T14.2):
+//!   creating a resource server or an assignment is an instance write that
+//!   only `security_admin` may make (IR-070, API-147). That scoped tenant
+//!   admins cannot self-assign or shadow another audience is T14.1's own
+//!   tenant-admin clause, enforced by T13.2's scoped roles at the T13.8
+//!   endpoints (API-147), not a registry rule. An assignment's tenant and
+//!   resource server and a resource server's audience cannot be changed by
+//!   any registry update (their change types have no such field), so
+//!   re-pointing one has no API to test; the immutability guards behind
+//!   them are the service tests'.
 //!
 //! **Missing, so not a claim.** A43 M1a needs its row end to end at write;
-//! these tests reach only the registry. With the owner of each part:
+//! these tests reach only the registry. Still needed, with the owner of
+//! each part:
 //!
 //! - The enabled-assignment check at write, the other half of T14.2 above:
-//!   service layer, not built.
-//! - Scoped tenant-admin authority (T13.2): a tenant admin cannot
-//!   self-assign or shadow an audience through the operator API.
+//!   not built, and where it lives is open (the lead's recommendation
+//!   above).
+//! - Audience syntax and Unicode normalization (OQ-IR-9, open; a service
+//!   rule per migrations README "What 0003 adds"; T14.1).
+//! - The tenant-admin negative at the endpoint: T14.1 (its tenant-admin
+//!   clause), enforced by T13.2's scoped roles at the T13.8 endpoints
+//!   (API-147). A43's harness is PG and RB, with no operator endpoint, so
+//!   that negative cannot be finished in A43 as its row stands. It is
+//!   unowned until the maintainer rules between widening A43's harness (a
+//!   tasks-row change) and crediting it to A22 M1a.
+//!
+//! Not A43 M1a's, with their owners:
+//!
 //! - Issuance and the backend: an exchange for another tenant's audience,
 //!   the exact-audience lookup at issuance (`load_scope_ceilings`),
 //!   one registered audience per credential and the backends' canonical
@@ -144,8 +179,13 @@
 //!   reference ConnectRPC backend behind Envoy with its tenant and RBAC
 //!   check, which is not built.
 //! - The recheck of the assignment at every live authorization (IR-081,
-//!   T14.2), and anything else that needs the in-process service (UC) and
-//!   its live-check endpoint.
+//!   T14.2) has no A43 stage: it is A31's M2 stage (owners T14.3, T26.5),
+//!   through the in-process service (UC).
+//! - Clients, origins and human policies (IR-080) are M1b records with no
+//!   tables yet: a reference from one to another tenant's audience is a
+//!   crossing for A29's M1b stage, "human registry references" (T10.8's
+//!   closed list), and their assignment-status check is T14.5's and
+//!   T14.6's.
 //!
 //! # Overlap
 //!
@@ -153,9 +193,10 @@
 //! identity or a grant naming the other tenant's audience is refused on
 //! create and on add, by `Invariant { ForeignKey, <assignment key> }`, in
 //! both directions, and writes nothing. A43 does not repeat that as a claim
-//! of its own: it compares that refusal with the refusals for an audience
-//! that no tenant is assigned, an ID that names no resource server, the
-//! audience string and the assignment ID (one typed refusal for all), uses
+//! of its own: it compares that refusal with the refusals in the other two
+//! registry states, an audience that no tenant is assigned and an ID that
+//! names no resource server, including the audience strings and assignment
+//! IDs that reduce to it (one typed refusal for all), uses
 //! a shared audience in the positive, and adds the instance-level half that
 //! A29 does not touch: audience uniqueness, exactness and concurrency, and
 //! competing assignments.
@@ -766,16 +807,28 @@ async fn a43_neg_reference_outside_own_assignment_is_one_refusal() {
     };
     for (owner, intruder) in DIRECTIONS {
         let t = intruder.tenant;
-        // What the intruder names: the owner's audience (assigned to the
-        // owner only), a registered audience assigned to no tenant, an ID
-        // that names no resource server, the owner's audience string
-        // spelled as an ID, and the owner's assignment ID.
+        // What the intruder names, by the three registry states a name can
+        // be in. (1) A resource server assigned to another tenant only: the
+        // owner's. (2) A resource server assigned to no tenant. (3) No
+        // resource server has that ID: an unknown ID, and every audience
+        // string or assignment ID used where a resource server ID is
+        // expected, including the intruder's own audience string, the
+        // shared audience's string and the intruder's own assignment IDs,
+        // whose resource servers are assigned to the intruder. A write that
+        // resolved an audience string or an assignment ID to its resource
+        // server would accept those, so they are what catches it.
         let targets = [
             owner.audience(),
             FREE.to_string(),
             MISSING.to_string(),
             owner.audience_string(),
+            FREE_AUDIENCE.to_string(),
+            intruder.audience_string(),
+            SHARED_AUDIENCE.to_string(),
             owner.assignment(),
+            owner.shared_assignment(),
+            intruder.assignment(),
+            intruder.shared_assignment(),
         ];
         let grant_id = intruder.id("grt_cross");
         for target in &targets {
