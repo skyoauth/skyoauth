@@ -2117,6 +2117,50 @@ describe('the conformance-report CI job', () => {
     }
   });
 
+  // An artifact can name its entries anything. The script shows a name it
+  // found in the download directory only as A-Za-z0-9._-, every other byte
+  // as `?` (one per byte), so the name cannot end the annotation's line and
+  // start a workflow command of its own, carry a terminal escape sequence,
+  // or hold a backslash escape that dash's echo would turn into one.
+  test('leg downloads: a name found in the download directory is shown sanitised, never as raw bytes or a workflow command', () => {
+    const LEG = `${PG}\n`;
+    const PREFIX = '::error title=Conformance report::report-conformance-ci: ';
+    for (const [what, entry, shown] of [
+      ['a newline and a workflow command', 'x\n::error::forged', 'x???error??forged'],
+      ['a carriage return and a workflow command', 'x\r::warning::forged', 'x???warning??forged'],
+      ['an escape sequence', '\x1b[31mred\x1b[0m', '??31mred??0m'],
+      ['a backslash escape (dash echo)', 'a\\033[2Jb\\n::error::c', 'a?033?2Jb?n??error??c'],
+      ['non-ASCII', 'café .xml', 'caf?????.xml'],
+    ]) {
+      // In a job's download, beside the leg file, and at the top of
+      // DOWNLOAD_DIR, where no DOWNLOADS line names it.
+      for (const [where, downloads, env, message] of [
+        ['in the download', pgDownload({ leg: LEG, [entry]: 'x' }), {}, `${PG_ARTIFACT} holds '${shown}'; a leg artifact holds only the files leg and junit.xml, at its top`],
+        ['beside the downloads', [...pgDownload(), { job: entry, name: PG_ARTIFACT, files: { leg: LEG } }], { DOWNLOADS: `scenarios-pg=${PG_ARTIFACT}\n` }, `holds '${shown}', which no line of DOWNLOADS names`],
+      ]) {
+        const at = `${what} ${where}`;
+        const r = stubbed(0, env, downloads);
+        assert.equal(r.status, 2, `${at}: ${r.out}${r.err}`);
+        assert.equal(r.args, null, `${at}: the reporter did not run`);
+        assert.equal(r.runJson, null, `${at}: no run.json`);
+        assert.doesNotMatch(r.out + r.err, /[^\n\x20-\x7e]/, `${at}: only printable ASCII and line ends: ${JSON.stringify(r.out + r.err)}`);
+        const lines = r.out.split('\n').filter(Boolean);
+        assert.equal(lines.length, 1, `${at}: one line, the script's own error: ${JSON.stringify(r.out)}`);
+        assert.ok(lines[0].startsWith(PREFIX), `${at}: ${lines[0]}`);
+        assert.ok(lines[0].endsWith(message), `${at}: ${JSON.stringify(lines[0])} ends with ${JSON.stringify(message)}`);
+        assert.ok(!lines[0].slice(PREFIX.length).includes('::'), `${at}: no workflow command after the script's own`);
+      }
+    }
+    // Every message is printed as it is, never through dash's echo, which
+    // would turn the backslash escapes of a bad DOWNLOADS line into an
+    // escape sequence and a line end.
+    const line = 'scenarios-pg=junit-x\\033[2J\\n::error::y-attempt-1';
+    const r = stubbed(0, { DOWNLOADS: `${line}\n` }, []);
+    assert.equal(r.status, 2, r.out + r.err);
+    assert.doesNotMatch(r.out + r.err, /[^\n\x20-\x7e]/, JSON.stringify(r.out + r.err));
+    assert.deepEqual(r.out.split('\n').filter(Boolean), [`${PREFIX}DOWNLOADS line '${line}': 'junit-x\\033[2J\\n::error::y-attempt-1' is not a leg artifact name junit-<leg id>-attempt-N`]);
+  });
+
   // End to end, as the job runs: a committed checkout of the judged commit
   // holding the specs, the registry and the reporter scripts, the leg
   // artifact as a download by name leaves it (DOWNLOAD_DIR/scenarios-pg/

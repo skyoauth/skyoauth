@@ -72,9 +72,18 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 
+# printf, not echo: dash's echo would turn a backslash escape in a message
+# into the byte it names.
 usage() {
-    echo "::error title=Conformance report::report-conformance-ci: $1"
+    printf '::error title=Conformance report::report-conformance-ci: %s\n' "$1"
     exit 2
+}
+# A file or directory name found in the download directory, as a message
+# may show it: A-Za-z0-9._- as they are, every other byte as `?`, so that a
+# name an artifact chose cannot end the line and start a workflow command
+# of its own, or carry a control character.
+shown() {
+    printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '?'
 }
 positive() {
     case $2 in
@@ -157,10 +166,10 @@ while IFS= read -r line; do
         base=${entry##*/}
         case $base in
             leg | junit.xml) ;;
-            *) usage "$name holds '$base'; a leg artifact holds only the files leg and junit.xml, at its top" ;;
+            *) usage "$name holds '$(shown "$base")'; a leg artifact holds only the files leg and junit.xml, at its top" ;;
         esac
         if [ -L "$entry" ] || [ ! -f "$entry" ]; then
-            usage "$name/$base is not a regular file"
+            usage "$name/$(shown "$base") is not a regular file"
         fi
     done
     [ -f "$stage/leg" ] || usage "$name has no leg file"
@@ -191,7 +200,7 @@ EOF
 # Nothing else was downloaded: every job's directory is gone.
 if [ -d "$download_dir" ]; then
     for entry in "$download_dir"/* "$download_dir"/.[!.]* "$download_dir"/..?*; do
-        if [ -e "$entry" ] || [ -L "$entry" ]; then usage "$download_dir holds '${entry##*/}', which no line of DOWNLOADS names"; fi
+        if [ -e "$entry" ] || [ -L "$entry" ]; then usage "$download_dir holds '$(shown "${entry##*/}")', which no line of DOWNLOADS names"; fi
     done
 fi
 
