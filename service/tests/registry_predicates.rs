@@ -20,8 +20,9 @@ use common::TestDb;
 use skyoauth_service::persistence::{
     self, MIGRATOR, MigrateError, PgPool,
     registry::{
-        self, BindingProfile, InvariantKind, NewPrincipalBinding, PrincipalBindingChanges,
-        RegistryError, Status, required_claims,
+        self, BindingProfile, GITHUB_JOB_WORKFLOW_REF, InvariantKind, NewPrincipalBinding,
+        PrincipalBindingChanges, RegistryError, Status, required_claims,
+        validate_claim_match_policy,
     },
 };
 use sqlx::{AssertSqlSafe, Executor, Postgres};
@@ -240,7 +241,7 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
         assert_eq!(created.claim_match_policy, complete(profile));
         let mut with_optional = complete(profile);
         with_optional.insert(
-            "job_workflow_ref".into(),
+            GITHUB_JOB_WORKFLOW_REF.into(),
             "acme/shared/.github/workflows/deploy.yml@refs/tags/v1".into(),
         );
         with_optional.insert("actor".into(), String::new());
@@ -312,6 +313,103 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
         (moved.profile, moved.claim_match_policy, moved.revision),
         (BindingProfile::GithubProduction, github, 4)
     );
+    db.drop([pool]).await;
+}
+
+/// A whitespace-only value is a non-empty string: the registry and the
+/// database both accept it, for every profile and claim, and store it
+/// unchanged; it matches only a token carrying exactly that value (design
+/// section 5.3), which is matching's rule, not checked here.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_whitespace_only_value_is_accepted_by_the_registry_and_the_database() {
+    let (db, pool) = seeded().await;
+    let mut n = 0;
+    for profile in PROFILES {
+        for claim in required_claims(profile) {
+            for value in [" ", "\t", " \n "] {
+                let mut policy = complete(profile);
+                policy.insert((*claim).to_string(), value.to_string());
+                assert!(validate_claim_match_policy(profile, &policy).is_ok());
+                n += 1;
+                let id = format!("bnd_r{n}");
+                let created =
+                    registry::create_principal_binding(&pool, &new_binding(&id, profile, policy))
+                        .await
+                        .unwrap();
+                assert_eq!(created.claim_match_policy[*claim], value);
+                // The same policy by raw SQL, past the registry.
+                let json = serde_json::to_string(value).unwrap();
+                let id = format!("bnd_s{n}");
+                run(
+                    &pool,
+                    &format!(
+                        "INSERT INTO principal_binding VALUES ('{id}', 'ten_a', '{id}', 'src_1',
+                         '{profile}', '{}', 'wld_1', 'enabled')",
+                        policy_sql(profile, claim, Some(&json)),
+                    ),
+                )
+                .await;
+                let stored: String = sqlx::query_scalar(
+                    "SELECT claim_match_policy ->> $2 FROM principal_binding WHERE id = $1",
+                )
+                .bind(&id)
+                .bind(*claim)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(stored, value);
+            }
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// A profile change that drops predicates is a removal, a widening, that
+/// neither the registry nor the database stops: a `github_production`
+/// binding moved to `generic_production` with a policy of only `sub` meets
+/// the new set. The check that the template fits the source is the only
+/// stop on that downgrade, and it is not built (migrations README, "What
+/// 0008 adds", "Not checked").
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_profile_change_that_drops_predicates_passes_both_checks() {
+    let (db, pool) = seeded().await;
+    let github = BindingProfile::GithubProduction;
+    let generic = BindingProfile::GenericProduction;
+    registry::create_principal_binding(&pool, &new_binding("bnd_r", github, complete(github)))
+        .await
+        .unwrap();
+    let downgraded = registry::update_principal_binding(
+        &pool,
+        "ten_a",
+        "bnd_r",
+        1,
+        &PrincipalBindingChanges {
+            name: "binding-bnd_r".into(),
+            profile: generic,
+            claim_match_policy: complete(generic),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (downgraded.profile, downgraded.claim_match_policy),
+        (generic, complete(generic))
+    );
+    run(
+        &pool,
+        &format!(
+            "INSERT INTO principal_binding VALUES ('bnd_s', 'ten_a', 'bnd_s', 'src_1',
+             'github_production', '{}', 'wld_1', 'enabled');
+             UPDATE principal_binding SET profile = 'generic_production',
+                    claim_match_policy = '{{\"sub\": \"value-0\"}}', revision = revision + 1
+              WHERE id = 'bnd_s'",
+            policy_sql(github, "", None),
+        ),
+    )
+    .await;
     db.drop([pool]).await;
 }
 

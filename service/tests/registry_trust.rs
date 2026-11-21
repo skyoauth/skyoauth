@@ -1317,8 +1317,10 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
         );
     }
     // No predicate at all lacks the profile's first required one, refused
-    // before the statement (registry_predicates.rs has the rest); the
-    // 0004 check of a non-empty object is reached by raw SQL below.
+    // before the statement (registry_predicates.rs has the rest). The 0004
+    // check is reached only by raw SQL, an empty object ('{}') and a
+    // non-string value ('{"a": 1}'), in
+    // trust_guards_and_unreachable_constraints_map_from_raw_statements.
     let mut no_predicate = new_binding("ten_a", "bnd_9", "src_gh", "wld_1");
     no_predicate.claim_match_policy = BTreeMap::new();
     match create(no_predicate).await {
@@ -2753,6 +2755,14 @@ async fn trust_guards_and_unreachable_constraints_map_from_raw_statements() {
             "UPDATE principal_binding SET profile = 'other', revision = revision + 1 WHERE id = 'bnd_1'",
             InvariantKind::Check,
             "principal_binding_profile_check",
+        ),
+        // bnd_1 is a github_production binding, so these also fail the
+        // 0008 check of its profile; PostgreSQL evaluates a table's checks
+        // in name order, and the 0004 check's name sorts first.
+        (
+            "UPDATE principal_binding SET claim_match_policy = '{}', revision = revision + 1 WHERE id = 'bnd_1'",
+            InvariantKind::Check,
+            "principal_binding_claim_match_policy_check",
         ),
         (
             "UPDATE principal_binding SET claim_match_policy = '{\"a\": 1}', revision = revision + 1 WHERE id = 'bnd_1'",

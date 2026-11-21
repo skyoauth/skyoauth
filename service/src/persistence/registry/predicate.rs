@@ -5,17 +5,28 @@
 //! a change here.
 //!
 //! A required predicate is present when its claim name is a key of the
-//! binding's `claim_match_policy` and its value is not empty. Predicates
-//! outside the required set are optional: omitted, they are unconstrained
-//! (ADR-016 item 1). The values of `claim_match_policy` are strings in the
-//! registry's types, and `0004` rejects a stored value that is not one.
+//! binding's `claim_match_policy` and its value is not empty. A
+//! whitespace-only value is not empty: it is accepted, and matches only a
+//! token carrying exactly that value (exact match, design section 5.3).
+//! Predicates outside the required set are optional: omitted, they are
+//! unconstrained (ADR-016 item 1); [`GITHUB_JOB_WORKFLOW_REF`] is one. The
+//! values of `claim_match_policy` are strings in the registry's types, and
+//! `0004` rejects a stored value that is not one.
 //!
 //! [`create_principal_binding`](super::create_principal_binding) and
 //! [`update_principal_binding`](super::update_principal_binding) call
 //! [`validate_claim_match_policy`] before their statement. Removing an
 //! optional predicate widens the binding and needs review (ADR-016 item 2;
-//! ADR-008), which stays with the service: the registry cannot tell a
-//! reviewed update from another.
+//! ADR-008 items 12 and 13), which stays with the service: the registry
+//! cannot tell a reviewed update from another.
+//!
+//! A profile change that drops a predicate is such a removal too: moving a
+//! binding from `github_production` to `generic_production` with a policy
+//! of only `sub` meets the new set, and this check passes it, although every
+//! GitHub predicate is gone. The check that the template fits the source
+//! and its `assertion_profile` (ADR-016 item 4) is the only stop on that
+//! downgrade, and it is not built: no task in the task list names it, so it
+//! is an open follow-up, closest to T12.2.
 
 use std::collections::BTreeMap;
 
@@ -35,9 +46,21 @@ const GITHUB_PRODUCTION: [&str; 6] = [
     "workflow_ref",
 ];
 
+/// The reusable-workflow identity of a GitHub job, which ADR-016 item 3
+/// requires "when used" (inferred: the claim name, and that it is
+/// optional). It is not in [`required_claims`]: a policy does not show
+/// whether the job uses a reusable workflow. When the token's
+/// `job_workflow_ref` differs from its `workflow_ref`, the job runs one, and
+/// matching (T22.2) should match it only to a binding that pins this
+/// predicate (inferred); that check is not built here.
+pub const GITHUB_JOB_WORKFLOW_REF: &str = "job_workflow_ref";
+
 /// `kubernetes_production`: namespace, service-account name and
 /// service-account UID (ADR-016 item 4). The flat claim names are
-/// (inferred): no source names the keys.
+/// (inferred): no source names the keys. They are the normalized evidence
+/// keys the Kubernetes adapters (T23.3, T23.6) must produce from the
+/// service-account identity they verify; changing one needs a new
+/// migration and rewriting every `kubernetes_production` binding.
 const KUBERNETES_PRODUCTION: [&str; 3] = [
     "kubernetes.io/serviceaccount/namespace",
     "kubernetes.io/serviceaccount/service-account.name",
@@ -131,6 +154,24 @@ mod tests {
             ]
         );
         assert_eq!(required_claims(BindingProfile::GenericProduction), ["sub"]);
+        // The reusable-workflow identity is optional in every profile.
+        assert_eq!(GITHUB_JOB_WORKFLOW_REF, "job_workflow_ref");
+        for profile in PROFILES {
+            assert!(!required_claims(profile).contains(&GITHUB_JOB_WORKFLOW_REF));
+        }
+    }
+
+    #[test]
+    fn a_whitespace_only_value_is_not_empty() {
+        for profile in PROFILES {
+            for value in [" ", "\t", " \n "] {
+                let policy = required_claims(profile)
+                    .iter()
+                    .map(|claim| ((*claim).to_string(), value.to_string()))
+                    .collect();
+                assert!(validate_claim_match_policy(profile, &policy).is_ok());
+            }
+        }
     }
 
     #[test]
@@ -141,7 +182,7 @@ mod tests {
             // Optional predicates, among them the reusable-workflow one and
             // the required claims of the other profiles.
             policy.insert(
-                "job_workflow_ref".into(),
+                GITHUB_JOB_WORKFLOW_REF.into(),
                 "org/repo/.github/workflows/w.yml@v1".into(),
             );
             policy.insert("actor".into(), String::new());

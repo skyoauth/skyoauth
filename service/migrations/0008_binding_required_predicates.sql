@@ -6,36 +6,42 @@
 -- "What 0008 adds" has the upgrade precondition.
 --
 -- A required predicate is present when its claim name is a key of
--- claim_match_policy and its value is a non-empty JSON string. Optional
--- predicates, the keys outside the required set, stay as before: omitted is
--- unconstrained (ADR-016 item 1). The sets:
+-- claim_match_policy and its value is a non-empty JSON string. A
+-- whitespace-only value is a non-empty string: it is accepted, and matches
+-- only a token carrying exactly that value (exact match, design section
+-- 5.3). Optional predicates, the keys outside the required set, stay as
+-- before: omitted is unconstrained (ADR-016 item 1). The sets:
 --
 -- - github_production: repository_owner_id, repository_id, event_name, ref,
 --   environment and workflow_ref, the ADR-016 item 3 set as the keys of the
 --   design section 5.7 example. The reusable-workflow identity that item 3
---   requires "when used" (job_workflow_ref, inferred) is not checked here:
---   whether a binding uses one is not visible in the row.
+--   requires "when used" (job_workflow_ref, inferred) is optional and not
+--   checked here: whether a binding uses one is not visible in the row.
 -- - kubernetes_production: namespace, service-account name and
 --   service-account UID, as the flat claim names
 --   kubernetes.io/serviceaccount/namespace,
 --   kubernetes.io/serviceaccount/service-account.name and
 --   kubernetes.io/serviceaccount/service-account.uid (inferred: no source
---   names the keys).
+--   names the keys). They are the normalized evidence keys the Kubernetes
+--   adapters must produce (T23.3, T23.6); changing one needs a new
+--   migration and rewriting every kubernetes_production binding.
 -- - generic_production: sub.
 --
--- The registry checks the same sets before its statement
--- (service/src/persistence/registry/predicate.rs). A set is fixed by the
--- check below: changing one needs a new migration that replaces the check,
--- and the registry table changes with it.
+-- The registry checks the same sets before its statement, in the
+-- registry's predicate module. A set is fixed by the check below: changing
+-- one needs a new migration that replaces the check, and the registry
+-- table changes with it.
 --
 -- One named check per profile (inferred), so a rejection names the profile
 -- whose set is not met, and each check reads alone in the catalog, with no
 -- shared function, as the range checks of 0007. Each check holds for every
--- row of another profile. The checks use only immutable built-ins: ?&
--- (every key present), -> with jsonb_typeof, and ->>. The key set is never
--- NULL (claim_match_policy and profile are NOT NULL, and ?& of a present
--- object is true or false), so a missing key makes the check false, not
--- NULL. The empty-string comparison is under COLLATE "C", byte-wise.
+-- row of another profile. The checks use only immutable built-ins: ? and
+-- ?& (key presence), -> with jsonb_typeof, and ->>. The key test is never
+-- NULL (claim_match_policy and profile are NOT NULL, and ? or ?& of a
+-- present value is true or false), so a missing key makes the check false,
+-- not NULL. The empty-string comparison is under COLLATE "C", byte-wise.
+-- That claim_match_policy is an object at all is the 0004 check
+-- (principal_binding_claim_match_policy_check), not these.
 --
 -- The checks apply to every row, a disabled binding included (inferred): an
 -- update replaces the whole row, so re-enabling one could not keep an

@@ -1503,14 +1503,6 @@ async fn binding_maps_a_same_tenant_source_to_a_workload() {
         SK001 INSERT INTO principal_binding VALUES ('bnd_x', 'ten_a', 'x', 'src_gh', 'generic_production', '{"sub": "a"}', 'wld_1', 'enabled', 3)
         23514 UPDATE principal_binding SET profile = 'github_staging', revision = revision + 1 WHERE id = 'bnd_1'
         23502 UPDATE principal_binding SET profile = NULL, revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '[]', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '[{"sub": "a"}]', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '"sub"', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": "a", "repository_id": 456789}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": ["a", "b"]}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": null}', revision = revision + 1 WHERE id = 'bnd_1'
-        23514 UPDATE principal_binding SET claim_match_policy = '{"sub": {"eq": "a"}}', revision = revision + 1 WHERE id = 'bnd_1'
         23514 UPDATE principal_binding SET status = 'active', revision = revision + 1 WHERE id = 'bnd_1'
         SK001 UPDATE principal_binding SET id = 'bnd_9', revision = revision + 1 WHERE id = 'bnd_3'
         SK001 UPDATE principal_binding SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'bnd_3'
@@ -1519,6 +1511,61 @@ async fn binding_maps_a_same_tenant_source_to_a_workload() {
         SK001 UPDATE principal_binding SET status = 'disabled' WHERE id = 'bnd_3'
         23503 ALTER TABLE principal DISABLE TRIGGER USER; DELETE FROM principal WHERE id = 'wld_2'
     "#).await;
+    // The 0004 shape of claim_match_policy: an object of string values,
+    // not empty. bnd_1 is a github_production binding, so each of these
+    // would also fail the 0008 check of its profile; the three 0008 checks
+    // are dropped in a rolled-back transaction, so only the 0004 check can
+    // refuse them, and the case asserts its name.
+    let mut conn = pool.acquire().await.unwrap();
+    run(
+        &mut *conn,
+        "BEGIN;
+         ALTER TABLE principal_binding
+             DROP CONSTRAINT principal_binding_github_production_predicates_check,
+             DROP CONSTRAINT principal_binding_kubernetes_production_predicates_check,
+             DROP CONSTRAINT principal_binding_generic_production_predicates_check",
+    )
+    .await;
+    for policy in [
+        "{}",
+        "[]",
+        r#"[{"sub": "a"}]"#,
+        r#""sub""#,
+        r#"{"sub": "a", "repository_id": 456789}"#,
+        r#"{"sub": ["a", "b"]}"#,
+        r#"{"sub": null}"#,
+        r#"{"sub": {"eq": "a"}}"#,
+    ] {
+        let sql = format!(
+            "UPDATE principal_binding SET claim_match_policy = '{policy}', revision = revision + 1
+              WHERE id = 'bnd_1'"
+        );
+        run(&mut *conn, "SAVEPOINT attempt").await;
+        let err = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
+            .execute(&mut *conn)
+            .await
+            .expect_err(&sql);
+        run(&mut *conn, "ROLLBACK TO SAVEPOINT attempt").await;
+        let db_err = err.as_database_error().unwrap();
+        assert_eq!(
+            (db_err.code().as_deref(), db_err.constraint()),
+            (
+                Some("23514"),
+                Some("principal_binding_claim_match_policy_check")
+            ),
+            "{sql}"
+        );
+    }
+    // Without the 0008 checks an object of string values passes, whatever
+    // its keys.
+    run(
+        &mut *conn,
+        r#"UPDATE principal_binding SET claim_match_policy = '{"sub": "a"}', revision = revision + 1
+           WHERE id = 'bnd_1';
+           ROLLBACK"#,
+    )
+    .await;
+    drop(conn);
     // A disabled binding stays referenced by its grants (OQ-ADR022-1).
     run(
         &pool,
