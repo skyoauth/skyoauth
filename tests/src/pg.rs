@@ -2,9 +2,15 @@
 //! template database per test).
 //!
 //! The tests need `SKYOAUTH_IT_DATABASE_URL`, a URL for a role that may
-//! create databases (`CREATEDB`). Without it [`TestDb::create`] panics: a
-//! scenario test never passes vacuously (layout §1.2, "Loud failure"), and
-//! scenario tests are never `#[ignore]`d.
+//! create databases (`CREATEDB`) and, for the tests that call
+//! [`TestDb::create_login_role`] (A24), roles (`CREATEROLE`); none needs a
+//! superuser. The pools of [`TestDb::pool`] and
+//! [`TestDb::pool_with_max_connections`], the replicas' included, connect as
+//! that role, so a test may terminate their backends
+//! ([`crate::rep::terminate`]) without `pg_signal_backend`. Without the
+//! variable [`TestDb::create`] panics: a scenario test never passes
+//! vacuously (layout §1.2, "Loud failure"), and scenario tests are never
+//! `#[ignore]`d.
 //!
 //! Every migration of `skyoauth-service` is applied once to a template
 //! database, and each test gets a fresh copy of it (`CREATE DATABASE …
@@ -24,12 +30,14 @@
 //! another session is connected to it.
 //!
 //! Duplication: the per-test database, its cleanup on drop and the UTF8
-//! encoding rule are adapted from `service/tests/common/mod.rs`, which is a
+//! encoding rule (and [`TestDb::create_login_role`]) are adapted from
+//! `service/tests/common/mod.rs`, which is a
 //! test module of the service package and cannot be imported from here.
 //! Keep the two in step until a shared test-support crate is justified.
 
 use std::{
-    hash::{DefaultHasher, Hash, Hasher},
+    collections::hash_map::RandomState,
+    hash::{BuildHasher, DefaultHasher, Hash, Hasher},
     str::FromStr,
     sync::atomic::{AtomicU32, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,6 +58,8 @@ pub struct TestDb {
     admin_url: String,
     name: String,
     config: DatabaseConfig,
+    /// Login roles created for this test; dropped after the database.
+    roles: Vec<String>,
     /// Set by [`TestDb::drop`]; otherwise `Drop` cleans up.
     dropped: bool,
 }
@@ -68,7 +78,7 @@ impl TestDb {
             .unwrap_or_else(|| {
                 panic!(
                     "{IT_DATABASE_URL_VAR} must be set to run the `pg` scenario tests \
-                     (a postgres:// URL for a role that may create databases)"
+                     (a postgres:// URL for a role with CREATEDB, and CREATEROLE for the tests that create roles)"
                 )
             });
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -106,9 +116,10 @@ impl TestDb {
         .await;
         let _ = admin.close().await;
         Self {
-            config: config_for(&admin_url, &name),
+            config: config_for(&admin_url, &name, 4),
             admin_url,
             name,
+            roles: Vec::new(),
             dropped: false,
         }
     }
@@ -118,23 +129,74 @@ impl TestDb {
         persistence::connect(&self.config).await.unwrap()
     }
 
-    /// Closes `pools` and drops the database.
+    /// A new pool for this test's database with at most `max_connections`
+    /// connections (1 to 100); [`TestDb::pool`] has 4. The replica harness
+    /// ([`crate::rep`]) gives each replica a pool of 1.
+    pub async fn pool_with_max_connections(&self, max_connections: u32) -> PgPool {
+        let config = config_for(&self.admin_url, &self.name, max_connections);
+        persistence::connect(&config).await.unwrap()
+    }
+
+    /// Creates a login role with no attributes (not a superuser, owns
+    /// nothing), runs `GRANT {grant} TO {role}` in this test's database for
+    /// each of `grants` (test-written SQL such as `"SELECT, UPDATE ON
+    /// consumed_assertion"`, never input), and returns the role's name and
+    /// a pool of `max_connections` connecting as it. Beyond `grants` it has
+    /// only the privileges of `PUBLIC`. It is dropped after the database.
+    ///
+    /// # Panics
+    ///
+    /// When the role of `SKYOAUTH_IT_DATABASE_URL` may not create roles
+    /// (`CREATEROLE`) or grant these privileges.
+    pub async fn create_login_role(
+        &mut self,
+        grants: &[&str],
+        max_connections: u32,
+    ) -> (String, PgPool) {
+        // Roles are cluster-wide, so the name derives from the database's:
+        // digits and underscores; the password is hex digits.
+        let role = format!("{}_role{}", self.name, self.roles.len());
+        let password = format!("{:016x}", RandomState::new().hash_one(&role));
+        let connect = PgConnectOptions::from_str(&self.admin_url)
+            .unwrap()
+            .database(&self.name);
+        let mut admin = PgConnection::connect_with(&connect).await.unwrap();
+        let create = format!("CREATE ROLE {role} LOGIN PASSWORD '{password}'");
+        execute(&mut admin, create).await;
+        self.roles.push(role.clone());
+        for grant in grants {
+            execute(&mut admin, format!("GRANT {grant} TO {role}")).await;
+        }
+        let _ = admin.close().await;
+        let connect = connect.username(&role).password(&password);
+        let config = DatabaseConfig::new(connect, None, max_connections, Duration::from_secs(10));
+        (role, persistence::connect(&config.unwrap()).await.unwrap())
+    }
+
+    /// Closes `pools` and drops the database, then the login roles.
     pub async fn drop(mut self, pools: impl IntoIterator<Item = PgPool>) {
         for pool in pools {
             pool.close().await;
         }
         let mut admin = PgConnection::connect(&self.admin_url).await.unwrap();
-        execute(&mut admin, self.drop_statement()).await;
+        for statement in self.cleanup_statements() {
+            execute(&mut admin, statement).await;
+        }
         self.dropped = true;
     }
 
-    fn drop_statement(&self) -> String {
-        format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name)
+    /// One statement each: `DROP DATABASE` cannot run in the implicit
+    /// transaction of a multi-statement query. The roles go last: a role
+    /// with privileges in a database cannot be dropped before it.
+    fn cleanup_statements(&self) -> Vec<String> {
+        let database = format!("DROP DATABASE IF EXISTS {} WITH (FORCE)", self.name);
+        let roles = (self.roles.iter()).map(|role| format!("DROP ROLE IF EXISTS {role}"));
+        std::iter::once(database).chain(roles).collect()
     }
 }
 
-/// A test that panics before [`TestDb::drop`] would leave its database
-/// behind; this removes it on a separate thread with its own runtime, since
+/// A test that panics before [`TestDb::drop`] would leave its database and
+/// roles behind; this removes them on a separate thread with its own runtime, since
 /// the test's runtime may be unwinding. Errors are ignored: the test has
 /// already failed.
 impl Drop for TestDb {
@@ -143,7 +205,7 @@ impl Drop for TestDb {
             return;
         }
         let admin_url = self.admin_url.clone();
-        let statement = self.drop_statement();
+        let statements = self.cleanup_statements();
         let cleanup = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -151,9 +213,11 @@ impl Drop for TestDb {
                 .ok()?;
             runtime.block_on(async {
                 let mut admin = PgConnection::connect(&admin_url).await.ok()?;
-                let _ = sqlx::raw_sql(AssertSqlSafe(statement))
-                    .execute(&mut admin)
-                    .await;
+                for statement in statements {
+                    let _ = sqlx::raw_sql(AssertSqlSafe(statement))
+                        .execute(&mut admin)
+                        .await;
+                }
                 Some(())
             })
         });
@@ -219,7 +283,7 @@ async fn ensure_template(admin: &mut PgConnection, admin_url: &str, template: &s
         format!("CREATE DATABASE {building} TEMPLATE template0 ENCODING 'UTF8'"),
     )
     .await;
-    let pool = persistence::connect(&config_for(admin_url, &building))
+    let pool = persistence::connect(&config_for(admin_url, &building, 4))
         .await
         .unwrap();
     persistence::migrate(&pool).await.unwrap();
@@ -231,15 +295,16 @@ async fn ensure_template(admin: &mut PgConnection, admin_url: &str, template: &s
     .await;
 }
 
-fn config_for(admin_url: &str, database: &str) -> DatabaseConfig {
+fn config_for(admin_url: &str, database: &str, max_connections: u32) -> DatabaseConfig {
     let connect = PgConnectOptions::from_str(admin_url)
         .unwrap()
         .database(database);
-    DatabaseConfig::new(connect, None, 4, Duration::from_secs(10)).unwrap()
+    DatabaseConfig::new(connect, None, max_connections, Duration::from_secs(10)).unwrap()
 }
 
 /// Runs one statement built from generated names only (digits, hex and
-/// underscores), never from input.
+/// underscores) or test-written SQL ([`TestDb::create_login_role`]), never
+/// from input.
 async fn execute(conn: &mut PgConnection, statement: String) {
     if let Err(err) = sqlx::raw_sql(AssertSqlSafe(statement.clone()))
         .execute(&mut *conn)
