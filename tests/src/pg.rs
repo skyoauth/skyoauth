@@ -2,9 +2,15 @@
 //! template database per test).
 //!
 //! The tests need `SKYOAUTH_IT_DATABASE_URL`, a URL for a role that may
-//! create databases (`CREATEDB`). Without it [`TestDb::create`] panics: a
-//! scenario test never passes vacuously (layout §1.2, "Loud failure"), and
-//! scenario tests are never `#[ignore]`d.
+//! create databases (`CREATEDB`) and, for the tests that call
+//! [`TestDb::create_login_role`] (A24), roles (`CREATEROLE`); none needs a
+//! superuser. The pools of [`TestDb::pool`] and
+//! [`TestDb::pool_with_max_connections`], the replicas' included, connect as
+//! that role, so a test may terminate their backends
+//! ([`crate::rep::terminate`]) without `pg_signal_backend`. Without the
+//! variable [`TestDb::create`] panics: a scenario test never passes
+//! vacuously (layout §1.2, "Loud failure"), and scenario tests are never
+//! `#[ignore]`d.
 //!
 //! Every migration of `skyoauth-service` is applied once to a template
 //! database, and each test gets a fresh copy of it (`CREATE DATABASE …
@@ -72,7 +78,7 @@ impl TestDb {
             .unwrap_or_else(|| {
                 panic!(
                     "{IT_DATABASE_URL_VAR} must be set to run the `pg` scenario tests \
-                     (a postgres:// URL for a role that may create databases)"
+                     (a postgres:// URL for a role with CREATEDB, and CREATEROLE for the tests that create roles)"
                 )
             });
         static COUNTER: AtomicU32 = AtomicU32::new(0);

@@ -31,9 +31,11 @@
 //!   one winner and no deadlock (`a24_neg_replay_after_consumption`). A
 //!   store failure never consumes: a closed pool, a `statement_timeout`
 //!   while blocked behind a holder, a holder whose backend is killed while
-//!   others wait, a `REPEATABLE READ` serialization failure, a role without
-//!   `INSERT`, and an invalid row (empty retention window, digest length)
-//!   are errors that write nothing (`a24_neg_store_failure_never_consumes`).
+//!   others wait, a waiter whose backend is killed while it waits (the
+//!   others still consume once), a `REPEATABLE READ` serialization failure,
+//!   a role without `INSERT`, and an invalid row (empty retention window,
+//!   digest length) are errors that write nothing
+//!   (`a24_neg_store_failure_never_consumes`).
 //!   A consume naming another tenant's source, in both directions, or an
 //!   unknown tenant or source, is refused by
 //!   `consumed_assertion_trust_source_id_fkey` and writes nothing
@@ -44,10 +46,11 @@
 //! `single_use` sources has two independent replay records: the same digest
 //! under the other source is another proof
 //! (`a24_neg_replay_after_consumption`). So "exactly one" holds per source,
-//! not per issuer. In the service the digest also covers the source ID
-//! (migrations README: a keyed digest of `(tenant, source_id,
-//! exact_issuer, verified_jti)`), so one assertion presented through both
-//! sources yields two different digests in any case.
+//! not per issuer. In the service the digest also covers the source ID (a
+//! keyed digest of `(tenant, source_id, exact_issuer, verified_jti)`:
+//! ADR-016 item 6 and the `consumed_assertion` comment in
+//! `0005_operator.sql`), so one assertion presented through both sources
+//! yields two different digests in any case.
 //!
 //! **Not tested: a lost commit acknowledgement.** A crash after the
 //! consuming insert commits and before the caller sees the commit burns the
@@ -660,6 +663,48 @@ async fn a24_neg_store_failure_never_consumes() {
     );
     assert_eq!(versions(&pool, A, 0x31).await, Vec::<String>::new());
 
+    // A killed waiter: a fresh holder consumes key 0x38 in an open
+    // transaction, the same 3 replicas wait behind it, and replica 0's
+    // backend is terminated while it waits. Its call is an error and writes
+    // nothing; the other two are still blocked, and after the holder rolls
+    // back exactly one of them consumes. The replicas' connections survived
+    // the previous case, so `pids` still names them; replica 0's connection
+    // dies here and is not used again.
+    let (fresh_pool, mut fresh_conn, fresh_pid) = holder(&db).await;
+    let mut tx = Connection::begin(&mut *fresh_conn).await.unwrap();
+    assert_eq!(
+        registry::consume_assertion(&mut *tx, &proof(A, 0x38, "dk_holder"))
+            .await
+            .unwrap(),
+        Consumption::Consumed
+    );
+    let kill_waiter = async {
+        rep::wait_until_blocked(&pool, &pids, fresh_pid).await;
+        rep::terminate(&pool, pids[0]).await;
+        rep::wait_until_blocked(&pool, &pids[1..], fresh_pid).await;
+        tx.rollback().await.unwrap();
+    };
+    let (mut outcomes, ()) = tokio::join!(
+        waiters.race(|replica, mut conn| async move {
+            let new = proof(A, 0x38, &format!("dk_w{replica}"));
+            registry::consume_assertion(&mut *conn, &new).await
+        }),
+        kill_waiter
+    );
+    let killed = outcomes.remove(0);
+    assert!(
+        matches!(killed, Err(RegistryError::Other(_))),
+        "the killed waiter: {killed:?}"
+    );
+    let survivors = consumed_by(outcomes);
+    assert_eq!(survivors.len(), 1, "{survivors:?}");
+    // `survivors` indexes replicas 1 and 2 from 0.
+    assert_eq!(
+        versions(&pool, A, 0x38).await,
+        [format!("dk_w{}", survivors[0] + 1)]
+    );
+    drop(fresh_conn);
+
     // REPEATABLE READ, with the late transaction's snapshot taken (by a
     // read) before another replica commits the key. A single consume of key
     // 0x40 is then a serialization failure, Retry (40001), never Consumed.
@@ -816,10 +861,10 @@ async fn a24_neg_store_failure_never_consumes() {
     }
     assert_eq!(rows(&pool).await, before);
 
-    // In all: the holder's 0x20, the one waiter's 0x30, the early 0x40 and
-    // 0x41, and the writer's three rows.
-    assert_eq!(before.len(), 7);
-    let pools = [pool, closed, holder_pool, writer, no_insert]
+    // In all: the holder's 0x20, the one waiter's 0x30 and 0x38, the early
+    // 0x40 and 0x41, and the writer's three rows.
+    assert_eq!(before.len(), 8);
+    let pools = [pool, closed, holder_pool, fresh_pool, writer, no_insert]
         .into_iter()
         .chain(timed.into_pools())
         .chain(waiters.into_pools())
