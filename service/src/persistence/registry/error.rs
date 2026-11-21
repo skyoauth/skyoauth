@@ -269,7 +269,7 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 /// row values, so logging must not walk the source chain.
 pub enum RegistryError {
     /// No row has the given ID (in the given tenant, for a tenant-owned
-    /// table), or a checker does not list the tenant to remove.
+    /// table), or a list set does not contain the item to remove.
     NotFound,
     /// The row exists, but its revision is not the expected one: another
     /// write came first. Nothing was changed.

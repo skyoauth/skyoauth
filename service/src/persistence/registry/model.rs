@@ -216,11 +216,30 @@ fn optional_json<T: DeserializeOwned>(row: &PgRow, column: &str) -> Result<Optio
         .map(|json| json.0))
 }
 
+/// PostgreSQL's earliest `timestamptz`, 4713 BC in the Julian calendar
+/// (`4714-11-24 00:00:00+00 BC` in PostgreSQL's proleptic Gregorian
+/// output), in microseconds from the Unix epoch. One microsecond earlier
+/// fails inside the statement with `22008` (`datetime_field_overflow`).
+const EARLIEST_MICROSECONDS: i64 = -210_866_803_200_000_000;
+
+/// The latest time the registry writes, in microseconds from the Unix
+/// epoch: `i64::MAX - 1`, `294247-01-10 04:00:54.775806+00`. PostgreSQL's
+/// own latest `timestamptz`, `294276-12-31 23:59:59.999999+00`, is
+/// `9_224_318_015_999_999_999` microseconds, beyond `i64::MAX`, so it is
+/// not the bound. `i64::MAX` itself is excluded: PostgreSQL 16 computes
+/// `extract(epoch FROM ...)` of exactly that time through a rounding
+/// division, so it would read back as `9_223_372_036_854_775_800`.
+const LATEST_MICROSECONDS: i64 = i64::MAX - 1;
+
 /// The microseconds from the Unix epoch to `time`, truncated toward the
 /// past (inferred), as an interval a statement adds to
 /// `timestamptz 'epoch'`, so the crate needs no date-time dependency and
-/// the conversion stays in integers. A time beyond 64-bit microseconds is
-/// an encode error, mapped to [`RegistryError::Other`](super::RegistryError::Other).
+/// the conversion stays in integers.
+///
+/// A time before [`EARLIEST_MICROSECONDS`] or after
+/// [`LATEST_MICROSECONDS`] is an encode error, mapped to
+/// [`RegistryError::Other`](super::RegistryError::Other), before any
+/// statement runs, so every time the registry writes reads back exactly.
 pub(super) fn since_epoch(time: SystemTime) -> Result<PgInterval, sqlx::Error> {
     let microseconds = match time.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_micros()).ok(),
@@ -233,6 +252,7 @@ pub(super) fn since_epoch(time: SystemTime) -> Result<PgInterval, sqlx::Error> {
         }
     };
     microseconds
+        .filter(|microseconds| (EARLIEST_MICROSECONDS..=LATEST_MICROSECONDS).contains(microseconds))
         .map(|microseconds| PgInterval {
             months: 0,
             days: 0,
@@ -1145,26 +1165,55 @@ mod tests {
         );
     }
 
+    #[track_caller]
+    fn assert_out_of_range(time: SystemTime) {
+        let err = since_epoch(time).unwrap_err();
+        assert!(matches!(err, sqlx::Error::Encode(_)), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            "error occurred while encoding a value: timestamp out of range"
+        );
+        assert!(matches!(
+            super::super::RegistryError::from(err),
+            super::super::RegistryError::Other(_)
+        ));
+    }
+
     #[test]
-    fn times_beyond_64_bit_microseconds_are_encode_errors() {
+    fn times_before_the_earliest_timestamptz_are_encode_errors() {
+        let earliest = Duration::from_micros(210_866_803_200_000_000);
+        assert_eq!(micros(UNIX_EPOCH - earliest), EARLIEST_MICROSECONDS);
+        assert_eq!(
+            micros(UNIX_EPOCH - earliest + Duration::from_micros(1)),
+            EARLIEST_MICROSECONDS + 1
+        );
+        // A partial microsecond before the floor truncates past it.
+        assert_out_of_range(UNIX_EPOCH - earliest - Duration::from_nanos(1));
+        assert_out_of_range(UNIX_EPOCH - earliest - Duration::from_micros(1));
+        assert_out_of_range(UNIX_EPOCH - earliest * 2);
         let max = Duration::from_micros(u64::try_from(i64::MAX).unwrap());
-        // The largest representable distance still converts.
-        if let Some(time) = UNIX_EPOCH.checked_add(max) {
-            assert_eq!(micros(time), i64::MAX);
+        for beyond in [max, max + Duration::from_micros(1)] {
+            if let Some(time) = UNIX_EPOCH.checked_sub(beyond) {
+                assert_out_of_range(time);
+            }
         }
-        if let Some(time) = UNIX_EPOCH.checked_add(max + Duration::from_micros(1)) {
-            let err = since_epoch(time).unwrap_err();
-            assert!(matches!(err, sqlx::Error::Encode(_)), "{err:?}");
-            assert!(matches!(
-                super::super::RegistryError::from(err),
-                super::super::RegistryError::Other(_)
-            ));
+    }
+
+    #[test]
+    fn times_after_the_latest_readable_microsecond_are_encode_errors() {
+        let max = Duration::from_micros(u64::try_from(i64::MAX).unwrap());
+        // SystemTime may not reach i64::MAX microseconds on every platform.
+        if let Some(time) = UNIX_EPOCH.checked_add(max - Duration::from_micros(1)) {
+            assert_eq!(micros(time), LATEST_MICROSECONDS);
+            assert_eq!(
+                micros(time + Duration::from_nanos(999)),
+                LATEST_MICROSECONDS
+            );
         }
-        if let Some(time) = UNIX_EPOCH.checked_sub(max + Duration::from_micros(1)) {
-            assert!(since_epoch(time).is_err());
-        }
-        if let Some(time) = UNIX_EPOCH.checked_sub(max) {
-            assert_eq!(micros(time), -i64::MAX);
+        for beyond in [max, max + Duration::from_micros(1)] {
+            if let Some(time) = UNIX_EPOCH.checked_add(beyond) {
+                assert_out_of_range(time);
+            }
         }
     }
 }

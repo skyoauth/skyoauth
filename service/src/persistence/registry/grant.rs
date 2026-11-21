@@ -66,14 +66,15 @@ macro_rules! grant_columns {
 
 /// Adds the row `$4` to a list set of the `$owner` row `$1` of tenant `$3`
 /// at revision `$2`, advancing the owner's revision in the same statement.
-/// The row copies `tenant_id` and the `$carried` owner columns. The result
-/// is read by [`list_change`].
+/// The row copies `tenant_id` and the `$carried` owner columns. The owner's
+/// revision moves to `revision + 1`, not `$2 + 1`, for the reason given at
+/// `compare_and_set!`. The result is read by [`list_change`].
 macro_rules! list_add {
     ($owner:literal, $list:literal, $owner_column:literal, $item:literal, $carried:literal) => {
         concat!(
             "WITH bumped AS (UPDATE ",
             $owner,
-            " SET revision = $2 + 1 WHERE id = $1 AND tenant_id = $3 AND revision = $2 \
+            " SET revision = revision + 1 WHERE id = $1 AND tenant_id = $3 AND revision = $2 \
              RETURNING id, tenant_id",
             $carried,
             ", revision), added AS (INSERT INTO ",
@@ -97,14 +98,14 @@ macro_rules! list_add {
 /// Removes the row `$4` from a list set of the `$owner` row `$1` of tenant
 /// `$3` at revision `$2`, advancing the owner's revision in the same
 /// statement. The owner row is locked before the list row is deleted, so
-/// two changes from one revision serialize on it. The result is read by
-/// [`list_change`].
+/// two changes from one revision serialize on it. The owner's revision
+/// moves as in [`list_add!`]. The result is read by [`list_change`].
 macro_rules! list_remove {
     ($owner:literal, $list:literal, $owner_column:literal, $item:literal) => {
         concat!(
             "WITH bumped AS (UPDATE ",
             $owner,
-            " SET revision = $2 + 1 WHERE id = $1 AND tenant_id = $3 AND revision = $2 \
+            " SET revision = revision + 1 WHERE id = $1 AND tenant_id = $3 AND revision = $2 \
              AND EXISTS (SELECT FROM ",
             $list,
             " WHERE ",
@@ -639,7 +640,7 @@ mod tests {
                 "binding_id",
                 ", actor_principal_id"
             ),
-            "WITH bumped AS (UPDATE service_grant SET revision = $2 + 1 \
+            "WITH bumped AS (UPDATE service_grant SET revision = revision + 1 \
              WHERE id = $1 AND tenant_id = $3 AND revision = $2 \
              RETURNING id, tenant_id, actor_principal_id, revision), \
              added AS (INSERT INTO service_grant_binding \
@@ -660,7 +661,7 @@ mod tests {
                 "service_id",
                 "resource_server_id"
             ),
-            "WITH bumped AS (UPDATE service_identity SET revision = $2 + 1 \
+            "WITH bumped AS (UPDATE service_identity SET revision = revision + 1 \
              WHERE id = $1 AND tenant_id = $3 AND revision = $2 \
              AND EXISTS (SELECT FROM service_identity_resource_server \
              WHERE service_id = $1 AND resource_server_id = $4) RETURNING id, revision), \

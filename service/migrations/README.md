@@ -898,6 +898,73 @@ fails it with `40001`, which maps to `Retry`. The `0004` constraint names
 are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
 surface.
 
+Timestamps have a narrower range in the registry than in the tables. The
+`timestamptz` columns of `0002` to `0004` (and of `0005`) accept
+`'infinity'`, `'-infinity'` and finite values up to
+`294276-12-31 23:59:59.999999+00`, but the registry reads a timestamp as
+`(extract(epoch FROM <column>) * 1000000)::bigint`, signed 64-bit
+microseconds from the Unix epoch. A get or list over a row that holds an
+infinity fails with `0A000` (`feature_not_supported`), and over a finite
+value past `294247-01-10 04:00:54.775806+00` (`i64::MAX - 1` microseconds)
+with `22003` (`numeric_value_out_of_range`), except that the first few
+microseconds past it read back rounded down; both errors map to `Other`.
+One such row, for example a restored one, fails the whole page of a list.
+Writes cannot create such a row: `since_epoch` rejects a time before
+PostgreSQL's earliest `timestamptz` (4713 BC,
+`-210_866_803_200_000_000` microseconds) or after `i64::MAX - 1`
+microseconds with `Other` (an encode error, "timestamp out of range")
+before any statement runs. `i64::MAX` itself is excluded because
+PostgreSQL 16's `extract(epoch ...)` rounds exactly that time to
+`9_223_372_036_854_775_800`.
+
+Follow-ups for timestamps (lead decision, 2026-11-21):
+
+- The registry-guards migration adds a named `CHECK` on every `timestamptz`
+  column of `0002` to `0005` that requires a finite value within the signed
+  64-bit epoch-microsecond range (at most `i64::MAX - 1` microseconds, the
+  latest the registry reads back exactly), with a catalog test, and an upgrade
+  precondition: before it runs, this query must return only zero counts
+  (shown for the `0002` to `0004` columns; the `0005` columns are added the
+  same way):
+
+  ```sql
+  SELECT 'tenant.created_at' AS column_name, count(*) FROM tenant
+   WHERE NOT isfinite(created_at)
+      OR created_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'principal.created_at', count(*) FROM principal
+   WHERE NOT isfinite(created_at)
+      OR created_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'instance_security_policy.audit_sink_validated_at', count(*)
+    FROM instance_security_policy
+   WHERE NOT isfinite(audit_sink_validated_at)
+      OR audit_sink_validated_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'audit_event.timestamp', count(*) FROM audit_event
+   WHERE NOT isfinite("timestamp")
+      OR "timestamp" > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'trust_keyset_version.effective_at', count(*) FROM trust_keyset_version
+   WHERE NOT isfinite(effective_at)
+      OR effective_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'trust_keyset_version.expires_at', count(*) FROM trust_keyset_version
+   WHERE NOT isfinite(expires_at)
+      OR expires_at > timestamptz '294247-01-10 04:00:54.775806+00'
+  UNION ALL
+  SELECT 'service_grant.valid_until', count(*) FROM service_grant
+   WHERE NOT isfinite(valid_until)
+      OR valid_until > timestamptz '294247-01-10 04:00:54.775806+00';
+  ```
+
+  Every finite `timestamptz` is at or after the epoch-microsecond lower
+  bound, so only infinities and the upper bound need the test; a `NULL`
+  passes.
+
+- A typed per-row `RegistryError` variant for a row the projection cannot
+  represent, in the next registry PR, instead of `Other`.
+
 Follow-up (lead decision, 2026-11-21): the registry-guards migration (the
 delete and truncate guards under "Follow-ups") adds a `revision` column to
 `trust_keyset_version`. The registry then gets

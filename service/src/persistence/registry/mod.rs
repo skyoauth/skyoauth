@@ -300,7 +300,7 @@ macro_rules! tenant_compare_and_set {
             $table,
             " SET ",
             $set,
-            ", revision = $2 + 1 WHERE id = $1 AND revision = $2 AND tenant_id = $3 RETURNING ",
+            ", revision = revision + 1 WHERE id = $1 AND revision = $2 AND tenant_id = $3 RETURNING ",
             $columns,
             ") SELECT updated.*, EXISTS (SELECT FROM ",
             $table,
@@ -407,7 +407,7 @@ mod tests {
         let sql = tenant_compare_and_set!("t", "a = $4", "id, a, revision");
         assert_eq!(
             sql,
-            "WITH updated AS (UPDATE t SET a = $4, revision = $2 + 1 \
+            "WITH updated AS (UPDATE t SET a = $4, revision = revision + 1 \
              WHERE id = $1 AND revision = $2 AND tenant_id = $3 RETURNING id, a, revision) \
              SELECT updated.*, EXISTS (SELECT FROM t WHERE id = $1 AND tenant_id = $3) AS found \
              FROM (SELECT) AS one LEFT JOIN updated ON true"

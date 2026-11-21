@@ -2488,6 +2488,181 @@ async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
     db.drop([pool]).await;
 }
 
+/// Every row of the `0004` tables as text, so a test can show that a
+/// failed call changed nothing.
+async fn rows_0004(pool: &PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT concat_ws(E'\\n', \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM trust_keyset t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM trust_keyset_version t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM trust_source t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM principal_binding t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM service_identity t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) \
+          FROM service_identity_resource_server t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM service_grant t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) FROM service_grant_binding t), \
+         (SELECT string_agg(t::text, E'\\n' ORDER BY t::text) \
+          FROM service_grant_resource_server t))",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The expected revision is only compared, never computed with: `i64::MAX`
+/// gives `StaleRevision` for an existing row and `NotFound` for a missing
+/// row or another tenant's, from every `0004` update and list-set change,
+/// not an overflow (`22003`) that would abort a caller transaction.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
+    const MAX: i64 = i64::MAX;
+    let (db, pool) = seeded().await;
+    // A second binding of wld_1's grant actor, so it could be added.
+    registry::create_principal_binding(&pool, &new_binding("ten_a", "bnd_4", "src_gh", "wld_1"))
+        .await
+        .unwrap();
+    let before = rows_0004(&pool).await;
+    let keyset_changes = TrustKeysetChanges {
+        name: "renamed".into(),
+        status: Status::Disabled,
+    };
+    let mut source_changes = source_changes(
+        &registry::get_trust_source(&pool, "ten_a", "src_gh")
+            .await
+            .unwrap(),
+    );
+    source_changes.name = "renamed".into();
+    let binding_changes = PrincipalBindingChanges {
+        name: "renamed".into(),
+        profile: BindingProfile::GithubProduction,
+        claim_match_policy: claims(&[("repository_id", "1")]),
+        status: Status::Disabled,
+    };
+    let service_changes = ServiceIdentityChanges {
+        name: "renamed".into(),
+        max_scopes: strings(&["read"]),
+        max_resource_constraints: object(json!({"version": 2})),
+        status: Status::Disabled,
+    };
+    let mut grant_changes = grant_changes(&grant_of(&pool, "grt_1").await);
+    grant_changes.name = "renamed".into();
+
+    // Each function at i64::MAX: the ten_a row is stale; a missing ID and
+    // the ten_b row are not found in ten_a.
+    macro_rules! at_max {
+        ($function:ident, $id:literal, $other_tenant_id:literal, $argument:expr) => {
+            assert_stale(registry::$function(&pool, "ten_a", $id, MAX, $argument).await);
+            assert_not_found(registry::$function(&pool, "ten_a", "x_1", MAX, $argument).await);
+            assert_not_found(
+                registry::$function(&pool, "ten_a", $other_tenant_id, MAX, $argument).await,
+            );
+        };
+    }
+    at_max!(update_trust_keyset, "ks_1", "ks_b", &keyset_changes);
+    at_max!(update_trust_source, "src_gh", "src_b", &source_changes);
+    at_max!(update_principal_binding, "bnd_1", "bnd_b", &binding_changes);
+    at_max!(update_service_identity, "svc_1", "svc_b", &service_changes);
+    at_max!(update_service_grant, "grt_1", "grt_b", &grant_changes);
+    // Each item could be added, or is listed and could be removed, at the
+    // owner's revision 1.
+    at_max!(
+        add_service_identity_resource_server,
+        "svc_1",
+        "svc_b",
+        "rs_3"
+    );
+    at_max!(
+        remove_service_identity_resource_server,
+        "svc_1",
+        "svc_b",
+        "rs_1"
+    );
+    at_max!(add_service_grant_binding, "grt_1", "grt_b", "bnd_4");
+    at_max!(remove_service_grant_binding, "grt_1", "grt_b", "bnd_1");
+    at_max!(add_service_grant_resource_server, "grt_1", "grt_b", "rs_3");
+    at_max!(
+        remove_service_grant_resource_server,
+        "grt_1",
+        "grt_b",
+        "rs_1"
+    );
+
+    assert_eq!(rows_0004(&pool).await, before);
+    // The same calls at the current revision succeed, so the rows and
+    // items above were live targets.
+    assert_eq!(
+        registry::add_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_4")
+            .await
+            .unwrap(),
+        2
+    );
+    db.drop([pool]).await;
+}
+
+/// A time the registry cannot write so that it reads back exactly is an
+/// encode error before any statement runs; the times at the bounds round
+/// trip.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn times_at_the_writable_bounds_round_trip_and_beyond_them_write_nothing() {
+    const EARLIEST: i64 = -210_866_803_200_000_000;
+    const LATEST: i64 = i64::MAX - 1;
+    let (db, pool) = seeded().await;
+    let mut bounds = new_version("ten_a", "kv_1", "ks_1");
+    bounds.effective_at = at(EARLIEST);
+    bounds.expires_at = Some(at(LATEST));
+    let created = registry::create_trust_keyset_version(&pool, &bounds)
+        .await
+        .unwrap();
+    assert_eq!(
+        (created.effective_at, created.expires_at),
+        (at(EARLIEST), Some(at(LATEST)))
+    );
+    assert_eq!(
+        registry::get_trust_keyset_version(&pool, "ten_a", "kv_1")
+            .await
+            .unwrap(),
+        created
+    );
+    let before = rows_0004(&pool).await;
+
+    #[track_caller]
+    fn assert_out_of_range<T: Debug>(result: Result<T, RegistryError>) {
+        match result {
+            Err(RegistryError::Other(sqlx::Error::Encode(err))) => {
+                assert_eq!(err.to_string(), "timestamp out of range");
+            }
+            other => panic!("expected an encode error: {other:?}"),
+        }
+    }
+    let mut early = new_version("ten_a", "kv_2", "ks_1");
+    early.effective_at = at(EARLIEST - 1);
+    assert_out_of_range(registry::create_trust_keyset_version(&pool, &early).await);
+    let mut late = new_version("ten_a", "kv_2", "ks_1");
+    late.expires_at = Some(at(i64::MAX));
+    assert_out_of_range(registry::create_trust_keyset_version(&pool, &late).await);
+    let mut grant = direct_grant("ten_a", "grt_2", "wld_1", &["bnd_1"]);
+    grant.valid_until = Some(at(EARLIEST - 1));
+    assert_out_of_range(registry::create_service_grant(&pool, &grant).await);
+    let mut changes = grant_changes(&grant_of(&pool, "grt_1").await);
+    changes.valid_until = Some(at(i64::MAX));
+    assert_out_of_range(registry::update_service_grant(&pool, "ten_a", "grt_1", 1, &changes).await);
+    assert_eq!(rows_0004(&pool).await, before);
+
+    // A grant's valid_until at either bound round trips too.
+    for (expected, valid_until) in [(1, EARLIEST), (2, LATEST)] {
+        changes.valid_until = Some(at(valid_until));
+        let updated = registry::update_service_grant(&pool, "ten_a", "grt_1", expected, &changes)
+            .await
+            .unwrap();
+        assert_eq!(updated.valid_until, Some(at(valid_until)));
+        assert_eq!(grant_of(&pool, "grt_1").await, updated);
+    }
+    db.drop([pool]).await;
+}
+
 /// The guards no registry function reaches (updates never touch an
 /// immutable column) and the named constraints the typed inputs cannot
 /// violate map from raw statements.
