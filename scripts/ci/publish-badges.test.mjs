@@ -21,7 +21,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { accessSync, chmodSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
+import { accessSync, chmodSync, closeSync, constants, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -983,6 +983,92 @@ describe('the CI job (publish-badges-ci.sh)', () => {
     assert.equal(r.status, 0, r.stdout + r.stderr);
     for (const name of ['rust-coverage', 'rust-tests', 'typescript-coverage', 'typescript-tests']) {
       assert.equal(badge(remote, `main/${name}.svg`).color, RED, name);
+    }
+  });
+});
+
+// The Rust coverage badge shows the figure of the `rust-coverage` job, and
+// the Rust tests badge counts the tests of `service-nextest`, PostgreSQL
+// ones included. The coverage job must measure those PostgreSQL tests too:
+// its permissions, SKYOAUTH_IT_DATABASE_URL, postgres service and check step
+// are copies of service-nextest's, and its coverage step passes
+// `-- --include-ignored` to the test binaries. That argument cannot live in
+// the `coverage` alias: cargo appends the step's options after the alias,
+// so with a `--` in the alias they would reach the test binaries.
+describe('the rust-coverage job measures the PostgreSQL tests', () => {
+  const REPO = join(dirname(SCRIPT), '..', '..');
+  const CI = readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
+  const CONFIG = readFileSync(join(REPO, '.cargo', 'config.toml'), 'utf8');
+  // A job's body: the lines after `  <job>:` indented by four or more.
+  const jobOf = (ci, job) => ci.match(new RegExp(`^  ${job}:\\n((?:(?: {4}.*)?\\n)*)`, 'm'))?.[1] ?? '';
+  // A job-level key with its nested lines.
+  const keyOf = (body, key) => body.match(new RegExp(`^ {4}${key}:\\n(?:(?: {6}.*)?\\n)*`, 'm'))?.[0] ?? '';
+  // A step by name, with the lines indented below its `- name:`.
+  const stepOf = (body, name) => body.match(new RegExp(`^ {6}- name: ${name}\\n(?: {8}.*\\n)*`, 'm'))?.[0] ?? '';
+  const dbUrlOf = (body) => keyOf(body, 'env').match(/^ {6}SKYOAUTH_IT_DATABASE_URL: .*$/m)?.[0] ?? '';
+
+  const problems = (ci, config) => {
+    const out = [];
+    const cov = jobOf(ci, 'rust-coverage');
+    const nx = jobOf(ci, 'service-nextest');
+    if (!cov || !nx) return ['rust-coverage or service-nextest job not found'];
+    if (keyOf(cov, 'permissions') !== '    permissions:\n      contents: read\n') out.push('permissions are not exactly contents: read');
+    if (!dbUrlOf(nx)) out.push('service-nextest sets no SKYOAUTH_IT_DATABASE_URL');
+    else if (dbUrlOf(cov) !== dbUrlOf(nx)) out.push('SKYOAUTH_IT_DATABASE_URL differs from service-nextest');
+    const services = keyOf(cov, 'services');
+    if (!/^ {6}postgres:\n/m.test(services) || services !== keyOf(nx, 'services')) out.push('services differ from service-nextest');
+    const CHECK = 'Check PostgreSQL is reachable';
+    const COVER = 'Check coverage threshold';
+    const check = stepOf(cov, CHECK);
+    if (!check || check !== stepOf(nx, CHECK)) out.push(`step "${CHECK}" differs from service-nextest`);
+    else if (cov.indexOf(check) > cov.indexOf(stepOf(cov, COVER))) out.push(`step "${CHECK}" runs after the coverage step`);
+    const cmd = stepOf(cov, COVER).match(/^ +(cargo coverage .*?)(?: 2>&1)?(?: \\)?$/m)?.[1];
+    if (!cmd) out.push(`step "${COVER}" runs no cargo coverage`);
+    else {
+      const args = cmd.split(/\s+/);
+      const sep = args.indexOf('--');
+      if (sep < 0 || args.lastIndexOf('--') !== sep || args.slice(sep + 1).join(' ') !== '--include-ignored') out.push(`step "${COVER}" does not end in "-- --include-ignored": ${cmd}`);
+    }
+    const alias = config.match(/^coverage = "(.*)"$/m)?.[1].replace(/\\\\/g, '\\');
+    if (!alias) out.push('no coverage alias in .cargo/config.toml');
+    else {
+      if (alias.split(/\s+/).includes('--')) out.push('the coverage alias contains "--"');
+      const regex = alias.match(/--ignore-filename-regex (\S+)/)?.[1];
+      const env = keyOf(cov, 'env').match(/^ {6}COVERAGE_IGNORE_REGEX: '(.*)'$/m)?.[1];
+      if (!regex || regex !== env) out.push(`COVERAGE_IGNORE_REGEX ${env} is not the alias's --ignore-filename-regex ${regex}`);
+    }
+    return out;
+  };
+
+  // Applies `f` to the rust-coverage job's body only. Replacements are
+  // functions so that `$` in the shell steps is not a replacement pattern.
+  const inCoverageJob = (f) => {
+    const body = jobOf(CI, 'rust-coverage');
+    return CI.replace(body, () => f(body));
+  };
+
+  test('ci.yml and the coverage alias agree', () => {
+    assert.deepEqual(problems(CI, CONFIG), []);
+  });
+
+  test('each way of dropping the database or the ignored tests is caught', () => {
+    const cases = [
+      [inCoverageJob((b) => b.replace(keyOf(b, 'services'), () => '')), CONFIG, /services differ/],
+      [inCoverageJob((b) => b.replace(/^ {6}SKYOAUTH_IT_DATABASE_URL: .*\n/m, '')), CONFIG, /SKYOAUTH_IT_DATABASE_URL differs/],
+      [inCoverageJob((b) => b.replace('localhost:5432', 'localhost:5433')), CONFIG, /SKYOAUTH_IT_DATABASE_URL differs/],
+      [inCoverageJob((b) => b.replace('--health-retries 12', '--health-retries 1')), CONFIG, /services differ/],
+      [inCoverageJob((b) => b.replace(stepOf(b, 'Check PostgreSQL is reachable'), () => '')), CONFIG, /Check PostgreSQL is reachable" differs/],
+      [inCoverageJob((b) => b.replace(' -- --include-ignored', '')), CONFIG, /does not end in "-- --include-ignored"/],
+      [inCoverageJob((b) => b.replace(' -- --include-ignored', ' -- --ignored')), CONFIG, /does not end in "-- --include-ignored"/],
+      [inCoverageJob((b) => b.replace(' -- --include-ignored', ' -- --include-ignored --exact')), CONFIG, /does not end in "-- --include-ignored"/],
+      [inCoverageJob((b) => b.replace('      contents: read\n', '      contents: write\n')), CONFIG, /permissions/],
+      [inCoverageJob((b) => b.replace(keyOf(b, 'permissions'), () => '')), CONFIG, /permissions/],
+      [CI, CONFIG.replace('--fail-under-lines 85"', '--fail-under-lines 85 -- --include-ignored"'), /alias contains "--"/],
+      [CI, CONFIG.replace('main\\\\.rs', 'main\\\\.rs|bin/'), /COVERAGE_IGNORE_REGEX/],
+    ];
+    for (const [ci, config, want] of cases) {
+      assert.notEqual(ci + config, CI + CONFIG, `mutant did not apply: ${want}`);
+      assert.match(problems(ci, config).join('\n'), want);
     }
   });
 });

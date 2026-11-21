@@ -3,4 +3,11 @@
 # threshold. CI runs the same alias. Requires `cargo-llvm-cov` and the
 # `llvm-tools-preview` rustup component. `main.rs` is the process entry
 # point (socket binding and signal handling) and is excluded.
+#
+# CI (job `rust-coverage` in .github/workflows/ci.yml) also runs the
+# `#[ignore]`d PostgreSQL tests: it sets SKYOAUTH_IT_DATABASE_URL and runs
+# `cargo coverage <its options> -- --include-ignored`. To measure what CI
+# measures, do the same; plain `cargo coverage` skips those tests and
+# reports lower coverage. Keep `--` out of this alias: cargo appends the
+# caller's arguments after it, so they would go to the test binaries.
 coverage = "llvm-cov --workspace --all-features --ignore-filename-regex main\\.rs --fail-under-lines 85"
