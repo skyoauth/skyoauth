@@ -123,10 +123,11 @@ const su = (id, from, to) => (t) => editEntry(t, 'subcase', id, from, to);
 const failing = (rel, edit) => check(fixture({ [rel]: edit }));
 
 // A24's M1a stage, implemented: stamp and tests. The hash is derived from the
-// tasks §8 row, and the stage's scope and the entry's negative from the
+// tasks §8 row, and the stage's scope and the entry's texts from the
 // registry, so an amended row or a re-scoped stage needs no change here.
 const A24_HASH = sha256(repoText(TASKS).split('\n').find((l) => l.startsWith('| A24 |')));
 const A24_SCOPE = scenarioValue(rawRepoText(SCENARIOS), 'A24', 'scope', 'M1a');
+const A24_POSITIVE = scenarioValue(rawRepoText(SCENARIOS), 'A24', 'positive');
 const A24_NEGATIVE = scenarioValue(rawRepoText(SCENARIOS), 'A24', 'negative');
 const A24_NEG = 'nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y';
 const A24_TESTS = `tests = ["nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x", "${A24_NEG}"]`;
@@ -433,7 +434,7 @@ describe('rule fields', () => {
     ['harness with |', 'harness = ["REP",', 'harness = ["R|P",', /A24: harness must be a non-empty list of table text/],
     ['harness empty string', 'harness = ["REP",', 'harness = ["",', /A24: harness must be a non-empty list of table text/],
     ['owners empty', 'owners = ["T10.9", "T21.6", "T21.8", "T52.7"]', 'owners = []', /A24: owners must be a non-empty list of task IDs/],
-    ['positive empty', 'positive = "exactly one issuance across N replicas and grants"', 'positive = ""', /A24: positive must be non-empty table text/],
+    ['positive empty', `positive = "${A24_POSITIVE}"`, 'positive = ""', /A24: positive must be non-empty table text/],
     ['negative with a line break', `negative = "${A24_NEGATIVE}"`, 'negative = "missing jti\\nreplay"', /A24: negative must be non-empty table text/],
     ['note empty', 'kind = "scenario"\n', 'kind = "scenario"\nnote = ""\n', /A24: note must be non-empty table text when present/],
     ['no stage tables', /\n\[\[scenario\.stage\]\][^]*$/, '\nstage = ["x"]\n', /A24: needs at least one stage/],
@@ -452,7 +453,7 @@ describe('rule fields', () => {
 
   test('a valid note is kept', () => {
     const res = failing(SCENARIOS, sc('A24', 'kind = "scenario"\n', 'kind = "scenario"\nnote = "Some note:"\n'));
-    expectOnly(res, 'table', /row A24 differs .*Expected: \| A24 \|.*\| Some note: \+ exactly one/);
+    expectOnly(res, 'table', new RegExp(`row A24 differs .*Expected: \\| A24 \\|.*\\| Some note: \\+ ${reLiteral(A24_POSITIVE)}; − `));
   });
 
   test('subcase kind', () => {

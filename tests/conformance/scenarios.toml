@@ -560,7 +560,7 @@ layers = ["security"]
 envs = ["pg"]
 harness = ["REP", "PG", "barriers"]
 owners = ["T10.9", "T21.6", "T21.8", "T52.7"]
-positive = "exactly one issuance across N replicas and grants"
+positive = "one consumption across replica pools (M1a); exactly one issuance across N replicas and grants (M2)"
 negative = "replay and store failure denied at the consume primitive: a consumed proof replayed sequentially, concurrently, past its retain_until or as one member of a set, a closed pool, a statement timeout, a killed holder, a serialization failure, a missing INSERT privilege, an invalid row and another tenant's source never consume, once per source (M1a); missing jti, replay and store failure denied at issuance across grants, the wire error (OQ-ERR-7), a retry that needs a fresh assertion (M2); digest-key rotation (A35)"
 matrix_sha256 = "b4df384e7893902f52bfcb5eb9415561d902b68c07ba0ca12972bb8c6e026443"
 
