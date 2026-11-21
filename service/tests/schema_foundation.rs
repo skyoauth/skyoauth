@@ -355,8 +355,13 @@ async fn tenant_secret_namespace_is_unique_non_null_and_immutable() {
     ",
     )
     .await;
-    // Name and status stay writable.
-    run(&pool, "UPDATE tenant SET name = 'x', status = 'disabled'").await;
+    // Name and status stay writable, each update advancing the revision
+    // (0007).
+    run(
+        &pool,
+        "UPDATE tenant SET name = 'x', status = 'disabled', revision = revision + 1",
+    )
+    .await;
     db.drop([pool]).await;
 }
 
@@ -397,7 +402,7 @@ async fn principal_belongs_to_one_tenant_and_backs_composite_references() {
     .await;
     run(
         &pool,
-        "UPDATE principal SET name = 'x', status = 'disabled'",
+        "UPDATE principal SET name = 'x', status = 'disabled', revision = revision + 1",
     )
     .await;
     db.drop([pool]).await;
@@ -1036,7 +1041,7 @@ async fn update_guards_ignore_a_temporary_jsonb_type() {
     .await;
     run(
         &mut writer,
-        "UPDATE tenant SET name = 'x' WHERE id = 'ten_a'",
+        "UPDATE tenant SET name = 'x', revision = revision + 1 WHERE id = 'ten_a'",
     )
     .await;
     writer.close().await.unwrap();
@@ -1102,7 +1107,7 @@ async fn update_guards_ignore_operators_on_the_callers_search_path() {
     ").await;
     run(
         &mut writer,
-        "UPDATE tenant SET name = 'x' WHERE id = 'ten_a'",
+        "UPDATE tenant SET name = 'x', revision = revision + 1 WHERE id = 'ten_a'",
     )
     .await;
     writer.close().await.unwrap();

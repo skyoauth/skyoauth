@@ -1116,6 +1116,205 @@ Under `session_replication_role = replica` foreign keys do not fire (see
 "Limits"), so there a disabled binding or grant that a list row still
 references can be deleted; the guards check only the status.
 
+## What 0007 adds
+
+`0007_registry_shape.sql` changes the shape of the registry tables of
+`0001` to `0005` (lead decisions, 2026-11-21). It adds no function and
+changes no existing column, constraint, trigger or index. Choices marked
+"(inferred)" are its own.
+
+- **Revisions.** `tenant`, `principal` and `trust_keyset_version` get
+  `revision bigint NOT NULL DEFAULT 1` with a named
+  `<table>_revision_check` (`revision >= 1`) and a `<table>_revision`
+  trigger on `skyoauth_check_revision()`, `ENABLE ALWAYS`, as on every other
+  revisioned table: a row is inserted at revision 1 and every `UPDATE`
+  advances it by exactly 1, or fails with `SK001` (tasks §3 "IDs/names":
+  updates require ID, tenant and revision). Existing rows get
+  revision 1. The immutable-column guards are unchanged: an `UPDATE` of an
+  immutable column still fails on that guard first, since `<table>_immutable`
+  fires before `<table>_revision`. A version's `status` stays its one
+  mutable column and changes with the version's own revision, not the
+  keyset's, for a registry `update_trust_keyset_version` that is a
+  compare-and-set on it (lead decision, 2026-11-21). An audit event's
+  `previous_revision` and `new_revision` can now carry these revisions too.
+- **Timestamp ranges.** Every `timestamptz` column of `0001` to `0005` has a
+  named check `<table>_<column>_range_check` that holds a finite time
+  between `-210866803200000000` and `i64::MAX - 1` microseconds from the
+  Unix epoch: `4714-11-24 00:00:00+00 BC`, PostgreSQL's earliest
+  `timestamptz`, and `294247-01-10 04:00:54.775806+00`, the latest time the
+  registry reads back exactly (see "The `0004` tables"). The lower bound only
+  rejects `-infinity`; the upper one rejects `infinity` and every later
+  finite time. `NULL` passes, as for every check. The literals carry an
+  explicit `+00`, so the bounds do not depend on the session's `TimeZone`.
+  A value outside fails with `23514` naming the check. The 15 columns:
+  `schema_info.created_at` (`0001`, through `ALTER TABLE`, so the file stays
+  unchanged); `tenant.created_at`, `principal.created_at`,
+  `instance_security_policy.audit_sink_validated_at` and
+  `audit_event.timestamp`; `trust_keyset_version.effective_at` and
+  `expires_at` and `service_grant.valid_until`;
+  `admin_identity.created_at`, `admin_credential.revoked_at`,
+  `administrative_operation.expires_at`, `consumed_at` and `revoked_at`,
+  and `consumed_assertion.consumed_at` and `retain_until`. Each check repeats
+  the two literals (inferred: no shared function, so each reads alone in the
+  catalog). A catalog test fails for a later `timestamptz` column without
+  such a check.
+- **Referencing-side indexes.** Every foreign key whose columns did not lead
+  an index of the referencing table gets a plain btree index on them, in
+  the key's column order, named `<table>_<columns>_idx`:
+
+  | Index                                                             | Foreign key                                             |
+  | ----------------------------------------------------------------- | ------------------------------------------------------- |
+  | `audience_tenant_assignment_resource_server_id_idx`               | `audience_tenant_assignment_resource_server_id_fkey`    |
+  | `resource_server_checker_resource_server_id_idx`                  | `resource_server_checker_resource_server_id_fkey`       |
+  | `resource_server_checker_tenant_tenant_id_resource_server_id_idx` | `resource_server_checker_tenant_assignment_fkey`        |
+  | `trust_keyset_version_tenant_id_keyset_id_idx`                    | `trust_keyset_version_keyset_id_fkey`                   |
+  | `trust_source_tenant_id_jwks_keyset_id_idx`                       | `trust_source_jwks_keyset_id_fkey`                      |
+  | `principal_binding_tenant_id_trust_source_id_idx`                 | `principal_binding_trust_source_id_fkey`                |
+  | `principal_binding_tenant_id_workload_principal_idx`              | `principal_binding_workload_principal_id_fkey`          |
+  | `service_identity_resource_server_tenant_id_server_id_idx`        | `service_identity_resource_server_assignment_fkey`      |
+  | `service_grant_tenant_id_target_service_id_idx`                   | `service_grant_target_service_id_fkey`                  |
+  | `service_grant_tenant_id_actor_principal_idx`                     | `service_grant_actor_principal_id_fkey`                 |
+  | `service_grant_binding_tenant_id_binding_id_actor_principal_idx`  | `service_grant_binding_binding_id_fkey`                 |
+  | `service_grant_resource_server_tenant_id_resource_server_id_idx`  | `service_grant_resource_server_assignment_fkey`         |
+  | `admin_credential_admin_id_idx`                                   | `admin_credential_admin_id_fkey`                        |
+  | `admin_role_binding_tenant_id_idx`                                | `admin_role_binding_tenant_id_fkey`                     |
+  | `administrative_operation_tenant_id_idx`                          | `administrative_operation_tenant_id_fkey`               |
+  | `administrative_operation_revocation_operation_id_idx`            | `administrative_operation_revocation_operation_id_fkey` |
+  | `administrative_operation_approves_operation_id_idx`              | `administrative_operation_approves_operation_id_fkey`   |
+  | `administrative_operation_audit_id_idx`                           | `administrative_operation_audit_id_fkey`                |
+
+  Where the name would pass the 63-byte limit, `resource_server_id` becomes
+  `server_id`, as in `0003` and `0004`, and (inferred) a principal
+  reference's columns, `<x>_principal_id` with `<x>_principal_kind` where
+  the key has it, become `<x>_principal`. The indexes are not partial
+  (inferred). Five foreign keys get none (inferred): the leading column of
+  their table's primary key is one of their columns and identifies the
+  referenced row on its own, so the primary-key index already narrows the
+  check to that row's few referencing rows. They are
+  `resource_server_checker_tenant_checker_fkey` (`checker_id`),
+  `service_identity_resource_server_service_id_fkey` (`service_id`),
+  `service_grant_binding_grant_id_fkey` and
+  `service_grant_resource_server_grant_id_fkey` (`grant_id`), and
+  `service_identity_id_fkey` (`id`, the primary key itself). A catalog test
+  fails for a later foreign key that has neither. The indexes serve
+  parent-scoped lookups and the foreign-key check of a `DELETE` or key
+  `UPDATE` of the referenced row. Since `0006` most referenced rows are
+  never deleted and their keys are immutable, so that check now runs for a
+  deleted binding or grant, and when the table owner repairs rows with the
+  guards disabled.
+
+- **Collation.** `0007` changes no column's collation, so the `no_space`
+  follow-up of `0002` and `0003` stays as it is (see "Follow-ups").
+- **Locks on existing tables.** Checked with `pg_locks` in a transaction
+  that applies `0007` to a `0006` database (PostgreSQL 16). The
+  `ALTER TABLE` statements (`ADD COLUMN`, `ADD CONSTRAINT … CHECK`) take
+  `ACCESS EXCLUSIVE` on the 11 tables with a `timestamptz` column
+  (`schema_info`, `tenant`, `principal`, `instance_security_policy`,
+  `audit_event`, `trust_keyset_version`, `service_grant`, `admin_identity`,
+  `admin_credential`, `administrative_operation` and `consumed_assertion`)
+  and scan each once to validate its checks; the new column has a constant
+  default, so no table is rewritten (its `relfilenode` stays the same).
+  `CREATE TRIGGER` and `ENABLE ALWAYS` take `SHARE ROW EXCLUSIVE` on
+  `tenant`, `principal` and `trust_keyset_version`. Each `CREATE INDEX`
+  takes `SHARE` on its table, reads the whole table, and holds
+  `ACCESS EXCLUSIVE` on the new index; 13 tables get one or more.
+  `ACCESS EXCLUSIVE` conflicts with every other lock, plain reads included,
+  and `SHARE` with every write (PostgreSQL documentation, "Table-Level
+  Locks"). `0007` runs in one transaction, so it holds all of them until it
+  commits: from the first `ALTER TABLE` until the commit nothing reads the
+  11 tables, and nothing writes the 13 indexed ones. Stop the service and
+  run the upgrade in a maintenance window; its length grows with the size
+  of `audit_event`, `consumed_assertion` and the indexed tables. No index is
+  built `CONCURRENTLY`, which cannot run in a transaction (inferred: the
+  registry tables are small).
+- **Upgrade precondition.** A row outside a new check makes `0007` fail with
+  `23514` and roll back, leaving the database at `0006`. Before the
+  upgrade, this query must return only zero counts:
+
+  ```sql
+  SELECT 'schema_info.created_at' AS column_name, count(*) FROM schema_info
+   WHERE NOT (created_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND created_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'tenant.created_at', count(*) FROM tenant
+   WHERE NOT (created_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND created_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'principal.created_at', count(*) FROM principal
+   WHERE NOT (created_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND created_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'instance_security_policy.audit_sink_validated_at', count(*) FROM instance_security_policy
+   WHERE NOT (audit_sink_validated_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND audit_sink_validated_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'audit_event.timestamp', count(*) FROM audit_event
+   WHERE NOT ("timestamp" >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND "timestamp" <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'trust_keyset_version.effective_at', count(*) FROM trust_keyset_version
+   WHERE NOT (effective_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND effective_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'trust_keyset_version.expires_at', count(*) FROM trust_keyset_version
+   WHERE NOT (expires_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND expires_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'service_grant.valid_until', count(*) FROM service_grant
+   WHERE NOT (valid_until >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND valid_until <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'admin_identity.created_at', count(*) FROM admin_identity
+   WHERE NOT (created_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND created_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'admin_credential.revoked_at', count(*) FROM admin_credential
+   WHERE NOT (revoked_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND revoked_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'administrative_operation.expires_at', count(*) FROM administrative_operation
+   WHERE NOT (expires_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND expires_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'administrative_operation.consumed_at', count(*) FROM administrative_operation
+   WHERE NOT (consumed_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND consumed_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'administrative_operation.revoked_at', count(*) FROM administrative_operation
+   WHERE NOT (revoked_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND revoked_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'consumed_assertion.consumed_at', count(*) FROM consumed_assertion
+   WHERE NOT (consumed_at >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND consumed_at <= timestamptz '294247-01-10 04:00:54.775806+00')
+  UNION ALL
+  SELECT 'consumed_assertion.retain_until', count(*) FROM consumed_assertion
+   WHERE NOT (retain_until >= timestamptz '4714-11-24 00:00:00+00 BC'
+          AND retain_until <= timestamptz '294247-01-10 04:00:54.775806+00');
+  ```
+
+  The predicate is the negation of the check, so it counts exactly the rows
+  the check rejects; a `NULL` is not counted. The registry never writes
+  such a row (see "The `0004` tables"); a restored or hand-written one can
+  exist. Most of these columns are immutable and the tables reject a
+  `DELETE` (`0006`), so the table owner repairs a counted row in one
+  transaction with the table's user triggers disabled
+  (`ALTER TABLE … DISABLE TRIGGER USER`, then `ENABLE ALWAYS TRIGGER` for
+  each guard again before the commit), and records the repair in the audit
+  trail. `service/tests/schema_registry_shape.rs` runs this query from this
+  file.
+
+- **Frozen comments.** The comments of `0002` (lines 269–271: tenants and
+  principals carry no revision) and `0004` (lines 91–94: versions have no
+  revision) describe the schema before `0007`; the files stay unchanged.
+
+The registry's `KNOWN_CONSTRAINTS` lists the new checks of the tables it
+writes (`tenant_revision_check`, `principal_revision_check`,
+`trust_keyset_version_revision_check` and the range checks of `tenant`,
+`principal`, `trust_keyset_version` and `service_grant`). The registry does
+not yet read the new revisions or update tenants, principals or versions;
+that is a registry follow-up.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -1205,23 +1404,17 @@ Open for all registry tables:
   `retain_until` that a job needs. The job, a service job that runs
   `DELETE FROM consumed_assertion WHERE retain_until < now()`, is not
   built.
-- A `revision` column on `trust_keyset_version`, for a registry
-  `update_trust_keyset_version` (enable or disable) that is a
-  compare-and-set on the version's own revision, not the keyset's (lead
-  decision, 2026-11-21; see "The `0004` tables" below). It comes with the
-  shape migration (`0007`).
-- Indexes on the referencing side of several `0004` foreign keys:
-  `principal_binding (tenant_id, trust_source_id)`,
-  `trust_keyset_version (tenant_id, keyset_id)`,
-  `service_grant_binding.binding_id`,
-  `service_grant (tenant_id, target_service_id)` and the assignment foreign
-  keys of the two audience list tables. Without them a delete or key update
-  of the referenced row scans the referencing table. They go in the shape
-  migration (`0007`). The same holds for `0005`:
-  `admin_credential.admin_id`, `admin_role_binding.tenant_id` and
-  `administrative_operation`'s `tenant_id`, `revocation_operation_id`,
-  `approves_operation_id` and `audit_id` have no index. (`0006` adds the
-  pruning index `consumed_assertion_retain_until_idx`.)
+- A `revision` column on `tenant`, `principal` and
+  `trust_keyset_version`: done in `0007` (lead decision, 2026-11-21; see
+  "What 0007 adds"). The registry's compare-and-set updates of them,
+  `update_trust_keyset_version` included, are a registry follow-up (see
+  "The `0004` tables" below).
+- Indexes on the referencing side of the foreign keys: done in `0007` for
+  every foreign key whose columns led no index, with five exceptions that
+  the primary key already serves ("What 0007 adds").
+- Timestamp ranges: done in `0007`, a named check on every `timestamptz`
+  column of `0001` to `0005`, with the upgrade precondition query ("What
+  0007 adds").
 - Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
@@ -1244,7 +1437,7 @@ Not done in `0002`:
 - An `audit_event` detail column, for example the affected source IDs that
   the audit event of an egress entry write lists (IR-152, OQ-IR-12).
 - A `revision` on `tenant` and `principal`: updates require
-  ID, tenant and revision (tasks §3 "IDs/names").
+  ID, tenant and revision (tasks §3 "IDs/names"). Done in `0007`.
 - The audit writer. The service computes the event hash (lead decision,
   2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
   writer ships). The hash is SHA-256 over the concatenation of:
@@ -1318,8 +1511,8 @@ Not done in `0005`:
 the registry tables of `0002` and `0003`: create, get, list and
 revision-checked update for `resource_server`, `audience_tenant_assignment`,
 `resource_server_checker` (with its tenant rows) and `resource_action`;
-create, get and list for `tenant` and `principal`, which have no revision
-yet; and reads of `instance_security_policy` and `egress_allowlist_entry`.
+create, get and list for `tenant` and `principal`, whose revision (added
+by `0007`) the registry does not read or update yet; and reads of `instance_security_policy` and `egress_allowlist_entry`.
 Every function runs one statement on any executor (pool, connection or
 caller transaction). Writes take caller-supplied IDs (T10.2 generates
 them). An update is a compare-and-set: it sets `revision = revision + 1`
@@ -1391,8 +1584,9 @@ The same module covers the nine `0004` tables, with the same conventions:
 create, get, list and revision-checked update for `trust_keyset`,
 `trust_source`, `principal_binding`, `service_identity` and
 `service_grant`; create, get and a per-keyset list for
-`trust_keyset_version`, which has no revision, so its `status` has no
-update yet (inferred, as for `tenant`). Every one is tenant-owned: reads,
+`trust_keyset_version`, whose `status` has no update yet: `0007` adds the
+version's own revision, and `update_trust_keyset_version` is a registry
+follow-up. Every one is tenant-owned: reads,
 updates and list-set changes take the tenant and ID, so another tenant's ID
 is `NotFound`, and lists hold one tenant's rows. A trust source is stored
 flat, and the database's `trust_source_*_kind_check`s decide which fields a
@@ -1416,75 +1610,31 @@ fails it with `40001`, which maps to `Retry`. The `0004` constraint names
 are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
 surface.
 
-Timestamps have a narrower range in the registry than in the tables. The
-`timestamptz` columns of `0002` to `0004` (and of `0005`) accept
-`'infinity'`, `'-infinity'` and finite values up to
-`294276-12-31 23:59:59.999999+00`, but the registry reads a timestamp as
+Timestamps: the registry reads a timestamp as
 `(extract(epoch FROM <column>) * 1000000)::bigint`, signed 64-bit
-microseconds from the Unix epoch. A get or list over a row that holds an
-infinity fails with `0A000` (`feature_not_supported`), and over a finite
-value past `294247-01-10 04:00:54.775806+00` (`i64::MAX - 1` microseconds)
-with `22003` (`numeric_value_out_of_range`), except that the first few
-microseconds past it read back rounded down; both errors map to `Other`.
-One such row, for example a restored one, fails the whole page of a list.
-Writes cannot create such a row: `since_epoch` rejects a time before
+microseconds from the Unix epoch, and `since_epoch` writes only times from
 PostgreSQL's earliest `timestamptz` (4713 BC,
-`-210_866_803_200_000_000` microseconds) or after `i64::MAX - 1`
-microseconds with `Other` (an encode error, "timestamp out of range")
-before any statement runs. `i64::MAX` itself is excluded because
-PostgreSQL 16's `extract(epoch ...)` rounds exactly that time to
-`9_223_372_036_854_775_800`.
+`-210_866_803_200_000_000` microseconds) to `i64::MAX - 1` microseconds
+(`294247-01-10 04:00:54.775806+00`), rejecting any other with `Other` (an
+encode error, "timestamp out of range") before any statement runs.
+`i64::MAX` itself is excluded because PostgreSQL 16's
+`extract(epoch ...)` rounds exactly that time to
+`9_223_372_036_854_775_800`. Since `0007` the tables hold the same range:
+each `timestamptz` column has a named `<table>_<column>_range_check` that
+rejects `'infinity'`, `'-infinity'` and every finite time past the upper
+bound with `23514` (see "What 0007 adds"). Before `0007` such a row could
+be stored by hand or restored, and a get or list over it failed with
+`0A000` (`feature_not_supported`) for an infinity, or `22003`
+(`numeric_value_out_of_range`) past the bound, both mapped to `Other`;
+the upgrade precondition finds such rows. The range checks of the tables
+the registry writes are in `KNOWN_CONSTRAINTS`.
 
-Follow-ups for timestamps (lead decision, 2026-11-21):
-
-- The shape migration (`0007`) adds a named `CHECK` on every `timestamptz`
-  column of `0002` to `0005` that requires a finite value within the signed
-  64-bit epoch-microsecond range (at most `i64::MAX - 1` microseconds, the
-  latest the registry reads back exactly), with a catalog test, and an upgrade
-  precondition: before it runs, this query must return only zero counts
-  (shown for the `0002` to `0004` columns; the `0005` columns are added the
-  same way):
-
-  ```sql
-  SELECT 'tenant.created_at' AS column_name, count(*) FROM tenant
-   WHERE NOT isfinite(created_at)
-      OR created_at > timestamptz '294247-01-10 04:00:54.775806+00'
-  UNION ALL
-  SELECT 'principal.created_at', count(*) FROM principal
-   WHERE NOT isfinite(created_at)
-      OR created_at > timestamptz '294247-01-10 04:00:54.775806+00'
-  UNION ALL
-  SELECT 'instance_security_policy.audit_sink_validated_at', count(*)
-    FROM instance_security_policy
-   WHERE NOT isfinite(audit_sink_validated_at)
-      OR audit_sink_validated_at > timestamptz '294247-01-10 04:00:54.775806+00'
-  UNION ALL
-  SELECT 'audit_event.timestamp', count(*) FROM audit_event
-   WHERE NOT isfinite("timestamp")
-      OR "timestamp" > timestamptz '294247-01-10 04:00:54.775806+00'
-  UNION ALL
-  SELECT 'trust_keyset_version.effective_at', count(*) FROM trust_keyset_version
-   WHERE NOT isfinite(effective_at)
-      OR effective_at > timestamptz '294247-01-10 04:00:54.775806+00'
-  UNION ALL
-  SELECT 'trust_keyset_version.expires_at', count(*) FROM trust_keyset_version
-   WHERE NOT isfinite(expires_at)
-      OR expires_at > timestamptz '294247-01-10 04:00:54.775806+00'
-  UNION ALL
-  SELECT 'service_grant.valid_until', count(*) FROM service_grant
-   WHERE NOT isfinite(valid_until)
-      OR valid_until > timestamptz '294247-01-10 04:00:54.775806+00';
-  ```
-
-  Every finite `timestamptz` is at or after the epoch-microsecond lower
-  bound, so only infinities and the upper bound need the test; a `NULL`
-  passes.
+Follow-up for timestamps (lead decision, 2026-11-21):
 
 - A typed per-row `RegistryError` variant for a row the projection cannot
   represent, in the next registry PR, instead of `Other`.
 
-Follow-up (lead decision, 2026-11-21): the shape migration (`0007`, after
-the delete and truncate guards of `0006`) adds a `revision` column to
+Follow-up (lead decision, 2026-11-21): `0007` adds a `revision` column to
 `trust_keyset_version`. The registry then gets
 `update_trust_keyset_version`, which enables or disables a version as a
 compare-and-set on the version's own revision: the same per-row

@@ -247,6 +247,8 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
         .chain([
             guard("principal_binding", "delete_disabled_only", false),
             guard("service_grant", "delete_disabled_only", false),
+            // The version revision of 0007 (schema_registry_shape.rs).
+            guard("trust_keyset_version", "revision", false),
         ])
         .collect();
     expected.sort();
@@ -707,6 +709,15 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
             Some(at_most("tenant_id", 255)),
         ),
         ("trust_keyset_version_validity_check", None),
+        // The revision and timestamp range checks of 0007
+        // (schema_registry_shape.rs checks the range definitions).
+        (
+            "trust_keyset_version_revision_check",
+            Some(revision.clone()),
+        ),
+        ("trust_keyset_version_effective_at_range_check", None),
+        ("trust_keyset_version_expires_at_range_check", None),
+        ("service_grant_valid_until_range_check", None),
         ("trust_source_algorithms_check", None),
         ("trust_source_algorithms_kind_check", None),
         ("trust_source_assertion_profile_check", None),
@@ -1200,18 +1211,19 @@ async fn keyset_names_are_tenant_local_and_versions_change_only_status() {
         SK001 UPDATE trust_keyset_version SET expires_at = '2027-01-01Z'
         SK001 UPDATE trust_keyset_version SET provenance = '{"uploaded_by": "adm_2"}'
     "#).await;
-    // Overlapping versions, and a renamed, disabled keyset; a version has no
-    // revision, so its status changes on its own.
+    // Overlapping versions, and a renamed, disabled keyset; a version's
+    // status changes with its own revision (0007), not the keyset's.
     run(
         &pool,
         r#"INSERT INTO trust_keyset_version VALUES
                ('kv_2', 'ten_a', 'ks_1', '{"keys": [{"kty": "EC"}]}', 'sha256:01', '2026-01-01Z', '2026-01-01 00:00:01Z', 'enabled', '{}');
-           UPDATE trust_keyset_version SET status = 'disabled' WHERE id = 'kv_1';
-           UPDATE trust_keyset_version SET status = 'enabled' WHERE id = 'kv_1';
+           UPDATE trust_keyset_version SET status = 'disabled', revision = revision + 1 WHERE id = 'kv_1';
+           UPDATE trust_keyset_version SET status = 'enabled', revision = revision + 1 WHERE id = 'kv_1';
            UPDATE trust_keyset SET name = 'renamed', status = 'disabled', revision = revision + 1 WHERE id = 'ks_1'"#,
     )
     .await;
     assert_eq!(revision(&pool, "trust_keyset").await, [2, 1]);
+    assert_eq!(revision(&pool, "trust_keyset_version").await, [3, 1]);
     // Referenced keysets hold back deletes.
     rejects(
         &pool,

@@ -22,8 +22,8 @@ const GUARD: &str = "SK001";
 
 /// Every constraint of the tables the registry writes (`tenant`,
 /// `principal`, the five `0003` tables and the nine `0004` tables) and of
-/// the three list domains, as migrations `0002` to `0004` name them, sorted
-/// byte-wise. A unique, foreign key
+/// the three list domains, as migrations `0002` to `0004` and `0007` name
+/// them, sorted byte-wise. A unique, foreign key
 /// or check violation maps to a typed variant only for a name listed here.
 /// The database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -59,11 +59,13 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "principal_binding_workload_principal_id_fkey",
     "principal_binding_workload_principal_id_octet_length_check",
     "principal_binding_workload_principal_kind_check",
+    "principal_created_at_range_check",
     "principal_id_check",
     "principal_id_octet_length_check",
     "principal_kind_check",
     "principal_name_check",
     "principal_pkey",
+    "principal_revision_check",
     "principal_status_check",
     "principal_tenant_id_fkey",
     "principal_tenant_id_id_key",
@@ -147,6 +149,7 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "service_grant_tenant_id_id_key",
     "service_grant_tenant_id_name_key",
     "service_grant_tenant_id_octet_length_check",
+    "service_grant_valid_until_range_check",
     "service_identity_id_check",
     "service_identity_id_fkey",
     "service_identity_id_octet_length_check",
@@ -171,10 +174,12 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "skyoauth_profile_list_check",
     "skyoauth_scope_list_check",
     "skyoauth_string_list_check",
+    "tenant_created_at_range_check",
     "tenant_id_check",
     "tenant_id_octet_length_check",
     "tenant_name_check",
     "tenant_pkey",
+    "tenant_revision_check",
     "tenant_secret_namespace_check",
     "tenant_secret_namespace_key",
     "tenant_secret_namespace_octet_length_check",
@@ -191,6 +196,8 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_keyset_tenant_id_id_key",
     "trust_keyset_tenant_id_name_key",
     "trust_keyset_tenant_id_octet_length_check",
+    "trust_keyset_version_effective_at_range_check",
+    "trust_keyset_version_expires_at_range_check",
     "trust_keyset_version_fingerprint_check",
     "trust_keyset_version_fingerprint_no_space_check",
     "trust_keyset_version_fingerprint_octet_length_check",
@@ -201,6 +208,7 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_keyset_version_pkey",
     "trust_keyset_version_provenance_check",
     "trust_keyset_version_public_jwks_check",
+    "trust_keyset_version_revision_check",
     "trust_keyset_version_status_check",
     "trust_keyset_version_tenant_id_fkey",
     "trust_keyset_version_tenant_id_id_key",
