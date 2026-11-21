@@ -16,6 +16,8 @@ use sqlx::{
     types::Json,
 };
 
+use super::{UNREADABLE_MICROSECONDS, error::UnreadableTimestamp};
+
 /// A `jsonb` column the schema requires to be an object.
 pub type JsonObject = Map<String, Value>;
 
@@ -268,13 +270,46 @@ pub(super) fn optional_since_epoch(
     time.map(since_epoch).transpose()
 }
 
-/// Reads a timestamp that the query selected as microseconds since the Unix
-/// epoch (`(extract(epoch FROM <column>) * 1000000)::bigint`), so the crate
-/// needs no date-time dependency (inferred).
-fn timestamp(row: &PgRow, column: &str) -> Result<Option<SystemTime>, sqlx::Error> {
-    let Some(micros) = row.try_get::<Option<i64>, _>(column)? else {
+/// Where a row came from, for [`UnreadableTimestamp`]: its table and the
+/// column holding its ID.
+#[derive(Clone, Copy)]
+struct Origin {
+    table: &'static str,
+    id_column: &'static str,
+}
+
+impl Origin {
+    const fn new(table: &'static str) -> Self {
+        Self {
+            table,
+            id_column: "id",
+        }
+    }
+}
+
+/// Reads the timestamp `column`, which the query selected with
+/// [`micros!`](super::micros) as `<column>_us`, microseconds since the Unix
+/// epoch, so the crate needs no date-time dependency (inferred). A time
+/// outside the readable range is an [`UnreadableTimestamp`] naming the row.
+fn timestamp(
+    row: &PgRow,
+    origin: Origin,
+    column: &'static str,
+) -> Result<Option<SystemTime>, sqlx::Error> {
+    let index = format!("{column}_us");
+    let Some(micros) = row.try_get::<Option<i64>, _>(&index[..])? else {
         return Ok(None);
     };
+    if micros == UNREADABLE_MICROSECONDS {
+        return Err(sqlx::Error::ColumnDecode {
+            index,
+            source: Box::new(UnreadableTimestamp {
+                table: origin.table,
+                column,
+                id: row.try_get(origin.id_column)?,
+            }),
+        });
+    }
     let offset = Duration::from_micros(micros.unsigned_abs());
     let time = if micros >= 0 {
         UNIX_EPOCH.checked_add(offset)
@@ -282,39 +317,48 @@ fn timestamp(row: &PgRow, column: &str) -> Result<Option<SystemTime>, sqlx::Erro
         UNIX_EPOCH.checked_sub(offset)
     };
     time.map(Some).ok_or_else(|| sqlx::Error::ColumnDecode {
-        index: column.into(),
+        index,
         source: "timestamp out of range".into(),
     })
 }
 
 /// Reads a `NOT NULL` timestamp selected as [`timestamp`] expects.
-fn required_timestamp(row: &PgRow, column: &str) -> Result<SystemTime, sqlx::Error> {
-    timestamp(row, column)?.ok_or_else(|| sqlx::Error::ColumnDecode {
-        index: column.into(),
+fn required_timestamp(
+    row: &PgRow,
+    origin: Origin,
+    column: &'static str,
+) -> Result<SystemTime, sqlx::Error> {
+    timestamp(row, origin, column)?.ok_or_else(|| sqlx::Error::ColumnDecode {
+        index: format!("{column}_us"),
         source: "unexpected NULL".into(),
     })
 }
 
-/// A tenant (identity-registry IR-030..IR-034). It has no revision column
-/// yet (migrations README, "Not done in `0002`").
+/// A tenant (identity-registry IR-030..IR-034).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tenant {
     pub id: String,
+    /// Mutable and not unique (`0002` has no unique constraint on it).
     pub name: String,
     /// Unique, immutable and server-generated (IR-034).
     pub secret_namespace: String,
     pub status: Status,
+    /// Immutable.
     pub created_at: SystemTime,
+    /// Added by `0007`.
+    pub revision: i64,
 }
 
 impl FromRow<'_, PgRow> for Tenant {
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        const ORIGIN: Origin = Origin::new("tenant");
         Ok(Self {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             secret_namespace: row.try_get("secret_namespace")?,
             status: text(row, "status")?,
-            created_at: required_timestamp(row, "created_at_us")?,
+            created_at: required_timestamp(row, ORIGIN, "created_at")?,
+            revision: row.try_get("revision")?,
         })
     }
 }
@@ -329,27 +373,49 @@ pub struct NewTenant {
     pub status: Status,
 }
 
-/// A principal of a tenant (identity-registry section 5.1). It has no
-/// revision column yet.
+/// The columns [`update_tenant`](super::update_tenant) changes: each one
+/// that is set (lead ruling, 2026-11-21). At least one must be set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TenantPatch {
+    pub name: Option<String>,
+    pub status: Option<Status>,
+}
+
+impl TenantPatch {
+    /// Whether no column is set.
+    pub(super) fn is_empty(&self) -> bool {
+        self.name.is_none() && self.status.is_none()
+    }
+}
+
+/// A principal of a tenant (identity-registry section 5.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
     pub id: String,
+    /// Immutable.
     pub tenant_id: String,
+    /// Immutable.
     pub kind: PrincipalKind,
+    /// Mutable and not unique (`0002` has no unique constraint on it).
     pub name: String,
     pub status: Status,
+    /// Immutable.
     pub created_at: SystemTime,
+    /// Added by `0007`.
+    pub revision: i64,
 }
 
 impl FromRow<'_, PgRow> for Principal {
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        const ORIGIN: Origin = Origin::new("principal");
         Ok(Self {
             id: row.try_get("id")?,
             tenant_id: row.try_get("tenant_id")?,
             kind: text(row, "kind")?,
             name: row.try_get("name")?,
             status: text(row, "status")?,
-            created_at: required_timestamp(row, "created_at_us")?,
+            created_at: required_timestamp(row, ORIGIN, "created_at")?,
+            revision: row.try_get("revision")?,
         })
     }
 }
@@ -362,6 +428,21 @@ pub struct NewPrincipal {
     pub kind: PrincipalKind,
     pub name: String,
     pub status: Status,
+}
+
+/// The columns [`update_principal`](super::update_principal) changes: each
+/// one that is set (lead ruling, 2026-11-21). At least one must be set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrincipalPatch {
+    pub name: Option<String>,
+    pub status: Option<Status>,
+}
+
+impl PrincipalPatch {
+    /// Whether no column is set.
+    pub(super) fn is_empty(&self) -> bool {
+        self.name.is_none() && self.status.is_none()
+    }
 }
 
 /// A resource server (IR-070, IR-071).
@@ -590,7 +671,14 @@ impl FromRow<'_, PgRow> for InstanceSecurityPolicy {
             widening_second_approver: row.try_get("widening_second_approver")?,
             single_actor_mode: row.try_get("single_actor_mode")?,
             audit_sink_config_digest: row.try_get("audit_sink_config_digest")?,
-            audit_sink_validated_at: timestamp(row, "audit_sink_validated_at_us")?,
+            audit_sink_validated_at: timestamp(
+                row,
+                Origin {
+                    table: "instance_security_policy",
+                    id_column: "instance_id",
+                },
+                "audit_sink_validated_at",
+            )?,
             revision: row.try_get("revision")?,
         })
     }
@@ -659,8 +747,8 @@ pub struct TrustKeysetChanges {
     pub status: Status,
 }
 
-/// An immutable, public-only key version of a keyset (ADR-005 item 5;
-/// T11.3). It has no revision.
+/// A public-only key version of a keyset (ADR-005 item 5; T11.3),
+/// immutable but for `status`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrustKeysetVersion {
     pub id: String,
@@ -673,22 +761,28 @@ pub struct TrustKeysetVersion {
     pub effective_at: SystemTime,
     /// After `effective_at` when set.
     pub expires_at: Option<SystemTime>,
+    /// The one mutable column.
     pub status: Status,
     pub provenance: JsonObject,
+    /// The version's own revision, added by `0007`, not tied to the
+    /// keyset's.
+    pub revision: i64,
 }
 
 impl FromRow<'_, PgRow> for TrustKeysetVersion {
     fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        const ORIGIN: Origin = Origin::new("trust_keyset_version");
         Ok(Self {
             id: row.try_get("id")?,
             tenant_id: row.try_get("tenant_id")?,
             keyset_id: row.try_get("keyset_id")?,
             public_jwks: json(row, "public_jwks")?,
             fingerprint: row.try_get("fingerprint")?,
-            effective_at: required_timestamp(row, "effective_at_us")?,
-            expires_at: timestamp(row, "expires_at_us")?,
+            effective_at: required_timestamp(row, ORIGIN, "effective_at")?,
+            expires_at: timestamp(row, ORIGIN, "expires_at")?,
             status: text(row, "status")?,
             provenance: json(row, "provenance")?,
+            revision: row.try_get("revision")?,
         })
     }
 }
@@ -986,7 +1080,7 @@ impl FromRow<'_, PgRow> for ServiceGrant {
             default_scopes: optional_json(row, "default_scopes")?,
             resource_constraints: json(row, "resource_constraints")?,
             max_ttl: row.try_get("max_ttl")?,
-            valid_until: timestamp(row, "valid_until_us")?,
+            valid_until: timestamp(row, Origin::new("service_grant"), "valid_until")?,
             status: text(row, "status")?,
             activation_state: text(row, "activation_state")?,
             allowed_binding_ids: row.try_get("allowed_binding_ids")?,

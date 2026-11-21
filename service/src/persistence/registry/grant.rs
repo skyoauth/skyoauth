@@ -8,8 +8,8 @@ use sqlx::{PgExecutor, types::Json};
 use super::{
     NewPrincipalBinding, NewServiceGrant, NewServiceIdentity, Page, PrincipalBinding,
     PrincipalBindingChanges, RegistryError, ServiceGrant, ServiceGrantChanges, ServiceIdentity,
-    ServiceIdentityChanges, list_change, model::optional_since_epoch, tenant_compare_and_set,
-    tenant_list_page, updated,
+    ServiceIdentityChanges, list_change, micros, model::optional_since_epoch,
+    tenant_compare_and_set, tenant_list_page, updated,
 };
 
 macro_rules! binding_columns {
@@ -41,10 +41,12 @@ macro_rules! service_columns {
 
 macro_rules! grant_base_columns {
     () => {
-        "id, tenant_id, name, actor_principal_id, target_service_id, mode, scopes, \
-         default_scopes, resource_constraints, max_ttl, \
-         (extract(epoch FROM valid_until) * 1000000)::bigint AS valid_until_us, status, \
-         activation_state, revision"
+        concat!(
+            "id, tenant_id, name, actor_principal_id, target_service_id, mode, scopes, \
+             default_scopes, resource_constraints, max_ttl, ",
+            micros!("valid_until"),
+            ", status, activation_state, revision"
+        )
     };
 }
 

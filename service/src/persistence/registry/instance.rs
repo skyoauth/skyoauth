@@ -6,7 +6,7 @@
 
 use sqlx::PgExecutor;
 
-use super::{EgressAllowlistEntry, InstanceSecurityPolicy, Page, RegistryError, list_page};
+use super::{EgressAllowlistEntry, InstanceSecurityPolicy, Page, RegistryError, list_page, micros};
 
 macro_rules! egress_columns {
     () => {
@@ -19,12 +19,12 @@ macro_rules! egress_columns {
 pub async fn get_instance_security_policy<'e>(
     executor: impl PgExecutor<'e>,
 ) -> Result<InstanceSecurityPolicy, RegistryError> {
-    sqlx::query_as(
+    sqlx::query_as(concat!(
         "SELECT instance_id, widening_second_approver, single_actor_mode, \
-         audit_sink_config_digest, \
-         (extract(epoch FROM audit_sink_validated_at) * 1000000)::bigint \
-         AS audit_sink_validated_at_us, revision FROM instance_security_policy",
-    )
+         audit_sink_config_digest, ",
+        micros!("audit_sink_validated_at"),
+        ", revision FROM instance_security_policy"
+    ))
     .fetch_optional(executor)
     .await?
     .ok_or(RegistryError::NotFound)
