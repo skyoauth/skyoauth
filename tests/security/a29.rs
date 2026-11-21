@@ -55,6 +55,12 @@
 //! its tenant-scoped revision update matched in the `add_*` list changes,
 //! which find nothing for another tenant's owner
 //! (`a29_neg_writes_to_other_tenants_records_find_nothing`).
+//!
+//! The list covers `0004` only. One tenant-owned crossing of a later
+//! migration is covered outside A29: `consumed_assertion_trust_source_id_fkey`
+//! (`0005`), a consumed proof naming another tenant's source, is refused in
+//! both directions by `a24_neg_consume_names_other_tenants_source` (A24,
+//! `tests/security/a24.rs`), not here.
 
 use std::{
     collections::BTreeMap,

@@ -22,7 +22,7 @@ import { parse as parseStrict, TomlDate } from 'smol-toml';
 import { checkGatePr, checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, NO_GRAFTS, plain, q, run, SCHEMAS, USAGE, WAIVERS } from './check-conformance-registry.mjs';
 import { GIT_LOCATION as DOCS_GIT_LOCATION, NO_GRAFTS as DOCS_NO_GRAFTS } from './docs-check.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
-import { assertGitImmune, GIT_ENV, normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
+import { assertGitImmune, GIT_ENV, normaliseRegistry, reLiteral, scenarioValue, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -123,11 +123,14 @@ const su = (id, from, to) => (t) => editEntry(t, 'subcase', id, from, to);
 const failing = (rel, edit) => check(fixture({ [rel]: edit }));
 
 // A24's M1a stage, implemented: stamp and tests. The hash is derived from the
-// tasks §8 row, so an amended row needs no change here.
+// tasks §8 row, and the stage's scope and the entry's negative from the
+// registry, so an amended row or a re-scoped stage needs no change here.
 const A24_HASH = sha256(repoText(TASKS).split('\n').find((l) => l.startsWith('| A24 |')));
+const A24_SCOPE = scenarioValue(rawRepoText(SCENARIOS), 'A24', 'scope', 'M1a');
+const A24_NEGATIVE = scenarioValue(rawRepoText(SCENARIOS), 'A24', 'negative');
 const A24_NEG = 'nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y';
 const A24_TESTS = `tests = ["nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x", "${A24_NEG}"]`;
-const implementedA24 = (t, { stamp = stageStamp('A24', 'M1a', 'consume primitive', A24_HASH), tests = A24_TESTS } = {}) =>
+const implementedA24 = (t, { stamp = stageStamp('A24', 'M1a', A24_SCOPE, A24_HASH), tests = A24_TESTS } = {}) =>
   editStage(t, 'scenario', 'A24', 'M1a', 'status = "planned"\ntests = []', `status = "implemented"\n${stamp === null ? '' : `implemented_sha256 = "${stamp}"\n`}${tests}`);
 
 // A required A58 sub-ID, with the matrix_sha256 of its first owner T32.3.
@@ -431,7 +434,7 @@ describe('rule fields', () => {
     ['harness empty string', 'harness = ["REP",', 'harness = ["",', /A24: harness must be a non-empty list of table text/],
     ['owners empty', 'owners = ["T10.9", "T21.6", "T21.8", "T52.7"]', 'owners = []', /A24: owners must be a non-empty list of task IDs/],
     ['positive empty', 'positive = "exactly one issuance across N replicas and grants"', 'positive = ""', /A24: positive must be non-empty table text/],
-    ['negative with a line break', 'negative = "missing jti, replay, store failure"', 'negative = "missing jti\\nreplay"', /A24: negative must be non-empty table text/],
+    ['negative with a line break', `negative = "${A24_NEGATIVE}"`, 'negative = "missing jti\\nreplay"', /A24: negative must be non-empty table text/],
     ['note empty', 'kind = "scenario"\n', 'kind = "scenario"\nnote = ""\n', /A24: note must be non-empty table text when present/],
     ['no stage tables', /\n\[\[scenario\.stage\]\][^]*$/, '\nstage = ["x"]\n', /A24: needs at least one stage/],
   ];
@@ -616,13 +619,13 @@ describe('rule stages', () => {
     { only: false },
   );
   stageCase('the same milestone twice', st('A24', 'M2', 'milestone = "M2"', 'milestone = "M1a"'), /A24 M1a: stage milestones must increase/, { only: false });
-  stageCase('"full row" in a multi-stage entry', st('A24', 'M1a', 'scope = "consume primitive"', 'scope = "full row"'), /A24 M1a: scope "full row" is the scope of a single-stage entry, and only of one$/, {
+  stageCase('"full row" in a multi-stage entry', st('A24', 'M1a', `scope = "${A24_SCOPE}"`, 'scope = "full row"'), /A24 M1a: scope "full row" is the scope of a single-stage entry, and only of one$/, {
     only: false,
     line: (t) => stageLine(t, 'scenario', 'A24', 'M1a'),
   });
   stageCase('a single-stage entry that is not "full row"', (t) => editStage(t, 'scenario', 'A01', 'M2', 'scope = "full row"', 'scope = "part"'), /A01 M2: scope "full row" is the scope of a single-stage entry/, { only: false });
-  stageCase('empty scope', st('A24', 'M1a', 'scope = "consume primitive"', 'scope = ""'), /A24 M1a: scope must be non-empty table text$/, { only: false });
-  stageCase('scope with |', st('A24', 'M1a', 'scope = "consume primitive"', 'scope = "consume | primitive"'), /A24 M1a: scope must be non-empty table text$/, { only: false });
+  stageCase('empty scope', st('A24', 'M1a', `scope = "${A24_SCOPE}"`, 'scope = ""'), /A24 M1a: scope must be non-empty table text$/, { only: false });
+  stageCase('scope with |', st('A24', 'M1a', `scope = "${A24_SCOPE}"`, 'scope = "consume | primitive"'), /A24 M1a: scope must be non-empty table text$/, { only: false });
   stageCase('unknown status', st('A24', 'M1a', 'status = "planned"', 'status = "done"'), /A24 M1a: status must be one of planned, implemented$/);
   test('legs not a list', () => {
     const res = failing(SCENARIOS, st('A24', 'M1a', 'legs = ["scenarios-pg/x86_64"]', 'legs = "scenarios-pg/x86_64"'));
@@ -647,7 +650,7 @@ describe('rule stages', () => {
 
   stageCase('an implemented stage without tests', (t) => implementedA24(t, { tests: 'tests = []' }), /A24 M1a: an implemented stage must list its tests$/);
   stageCase('an implemented stage without a stamp', (t) => implementedA24(t, { stamp: null }), /A24 M1a: implemented_sha256 is missing, but the stage's \(id, milestone, scope, matrix_sha256\) stamps to [0-9a-f]{64}; a changed scope/);
-  stageCase('an implemented stage whose scope changed', (t) => st('A24', 'M1a', 'scope = "consume primitive"', 'scope = "consume primitive v2"')(implementedA24(t)), /A24 M1a: implemented_sha256 is [0-9a-f]{64}, but .* stamps to/, { only: false });
+  stageCase('an implemented stage whose scope changed', (t) => st('A24', 'M1a', `scope = "${A24_SCOPE}"`, `scope = "${A24_SCOPE} v2"`)(implementedA24(t)), /A24 M1a: implemented_sha256 is [0-9a-f]{64}, but .* stamps to/, { only: false });
   stageCase('an implemented stage moved to another milestone', (t) => st('A24', 'M1a', 'milestone = "M1a"', 'milestone = "M1b"')(implementedA24(t)), /A24 M1b: implemented_sha256 is [0-9a-f]{64}, but/, { only: false });
 
   test('an implemented stage whose tasks §8 row changed', () => {
@@ -830,7 +833,7 @@ describe('rule table', () => {
   });
 
   test('an edited registry column', () => {
-    const res = failing(SCENARIOS, sc('A24', 'negative = "missing jti, replay, store failure"', 'negative = "missing jti, replay"'));
+    const res = failing(SCENARIOS, sc('A24', `negative = "${A24_NEGATIVE}"`, 'negative = "missing jti, replay"'));
     expectOnly(res, 'table', /row A24 differs .*Expected: .*− missing jti, replay \|$/);
   });
 
@@ -870,7 +873,7 @@ describe('rule table', () => {
 
   test('moving a stage changes the expected counts', () => {
     const res = failing(SCENARIOS, st('A24', 'M2', 'milestone = "M2"', 'milestone = "M3"'));
-    expectError(res, 'table', /row A24 differs .*Expected: .*M1a: consume primitive · M3: exchange/);
+    expectError(res, 'table', new RegExp(`row A24 differs .*Expected: .*M1a: ${reLiteral(A24_SCOPE)} · M3: exchange`));
     expectError(res, 'table', /counts sentences differ .*Counts by final stage: M1a 3 · M1b 3 · M2 20 · M3 14 /);
   });
 
@@ -2492,7 +2495,7 @@ describe('values of the wrong type', () => {
     ['stage status (gated)', SCENARIOS, (t) => gateM1a(st('A24', 'M1a', 'status = "planned"', 'status = {}')(t)), 'gates', /A24 M1a: gates_passed lists M1a, but this stage is \{\}, not implemented$/],
     ['stage milestone', SCENARIOS, st('A24', 'M1a', 'milestone = "M1a"', 'milestone = {}'), 'stages', /A24 \{\}: unknown milestone/],
     ['stage implemented_sha256', SCENARIOS, st('A24', 'M1a', 'status = "planned"\ntests = []', 'status = "implemented"\nimplemented_sha256 = {}\ntests = ["x"]'), 'stages', /A24 M1a: implemented_sha256 is \{\}, but the stage's/],
-    ['stage scope', SCENARIOS, st('A24', 'M1a', 'scope = "consume primitive"', 'scope = { a = 1 }'), 'stages', /A24 M1a: scope must be non-empty table text$/],
+    ['stage scope', SCENARIOS, st('A24', 'M1a', `scope = "${A24_SCOPE}"`, 'scope = { a = 1 }'), 'stages', /A24 M1a: scope must be non-empty table text$/],
     ['stage legs element', SCENARIOS, st('A24', 'M1a', 'legs = ["scenarios-pg/x86_64"]', 'legs = [{}]'), 'stages', /A24 M1a: legs must be a non-empty list of leg strings$/],
     ['scenario matrix_sha256', SCENARIOS, sc('A24', `matrix_sha256 = "${A24_HASH}"`, 'matrix_sha256 = {}'), 'hash', /A24: matrix_sha256 is \{\}, but docs\/skyoauth-tasks\.md:/],
     ['subcase id', SUBCASES, su('A33.90', 'id = "A33.90"', 'id = {}'), 'ids', /subcases\.toml: error \[ids\] \{\}: a sub-ID looks like A58\.07$/],
@@ -2531,8 +2534,8 @@ describe('values of the wrong type', () => {
   // An implemented stage is stamped from its milestone and scope whatever their
   // type: stageStamp() formats each with show(), as a stamp of the value's JSON.
   for (const [name, from, to, m, scope, re] of [
-    ['milestone', 'milestone = "M1a"', 'milestone = {}', {}, 'consume primitive', /A24 \{\}: unknown milestone/],
-    ['scope', 'scope = "consume primitive"', 'scope = { a = 1 }', 'M1a', { a: 1 }, /A24 M1a: scope must be non-empty table text$/],
+    ['milestone', 'milestone = "M1a"', 'milestone = {}', {}, A24_SCOPE, /A24 \{\}: unknown milestone/],
+    ['scope', `scope = "${A24_SCOPE}"`, 'scope = { a = 1 }', 'M1a', { a: 1 }, /A24 M1a: scope must be non-empty table text$/],
   ]) {
     test(`an implemented stage with a table as ${name}`, () => {
       const t = st('A24', 'M1a', from, to)(implementedA24(repoText(SCENARIOS)));

@@ -35,7 +35,7 @@ import {
   SUBCASES,
   TASKS,
 } from './gen-conformance-registry.mjs';
-import { normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
+import { normaliseRegistry, reLiteral, scenarioValue, valueSwaps } from './registry-fixtures.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'gen-conformance-registry.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -82,6 +82,8 @@ const specLine = (text, id) => text.split('\n').find((l) => l.startsWith(`| ${id
 // row needs no change in this test.
 const rowHash = (rel, id) => sha256(specLine(readFileSync(join(REPO, rel), 'utf8'), id));
 const A24_HASH = rowHash(TASKS, 'A24');
+// A24's committed M1a scope, read from the registry for the same reason.
+const A24_SCOPE = scenarioValue(readFileSync(join(REPO, SCENARIOS), 'utf8'), 'A24', 'scope', 'M1a');
 
 describe('committed registry', () => {
   test('--check passes on the repository', () => {
@@ -397,7 +399,7 @@ describe('spec errors stop generation', () => {
     failsBothModes(a26('milestone = "M1a"', 'milestone = "M3"'), /A26 M2: stage M2 comes after M3; stage milestones must increase/);
     failsBothModes(a26('scope = "policy"', 'scope = "full row"'), /A26 M1a: scope "full row" is the scope of a single-stage entry, and only of one/);
     failsBothModes(a26('scope = "policy"', 'scope = "po|icy"'), /A26 M1a: scope must be table text/);
-    const one = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'scope = "consume primitive"', 'scope = "full row"') : t));
+    const one = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', `scope = "${A24_SCOPE}"`, 'scope = "full row"') : t));
     failsBothModes(one, /A24 M1a: scope "full row" is the scope of a single-stage entry/);
     const single = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A23', 'scope = "full row"', 'scope = "exchange"') : t));
     failsBothModes(single, /A23 M2: scope "full row" is the scope of a single-stage entry, and only of one/);
@@ -465,13 +467,13 @@ describe('duplicate keys in the committed files are rejected', () => {
     let dupLine;
     const root = fixture((rel, t) => {
       if (rel !== SCENARIOS) return t;
-      const stage = '[[scenario.stage]]\nmilestone = "M1a"\nscope = "consume primitive"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\ntests = []\n\n';
+      const stage = `[[scenario.stage]]\nmilestone = "M1a"\nscope = "${A24_SCOPE}"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\ntests = []\n\n`;
       const block = entryBlock(t, 'scenario', 'A24');
       const out = replaceOnce(t, block, block.replace(stage, stage + stage));
       dupLine = lineOf(out, stage, 1);
       return out;
     });
-    const first = lineOf(read(root, SCENARIOS), '[[scenario.stage]]\nmilestone = "M1a"\nscope = "consume primitive"');
+    const first = lineOf(read(root, SCENARIOS), `[[scenario.stage]]\nmilestone = "M1a"\nscope = "${A24_SCOPE}"`);
     failsBothModes(root, new RegExp(`scenarios\\.toml:${dupLine}: duplicate stage A24 M1a \\(first at line ${first}\\)`));
   });
 
@@ -893,7 +895,7 @@ describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
   });
 });
 
-const STAMP_A24 = (scope = 'consume primitive', matrix = A24_HASH) => stageStamp('A24', 'M1a', scope, matrix);
+const STAMP_A24 = (scope = A24_SCOPE, matrix = A24_HASH) => stageStamp('A24', 'M1a', scope, matrix);
 const A24_TESTS = 'tests = [\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x",\n  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_y",\n]';
 // scenarios.toml with A24's M1a stage implemented, stamped with `stamp`.
 const implementedA24 = (t, stamp = STAMP_A24()) =>
@@ -923,11 +925,11 @@ describe('hand-authored fields are kept', () => {
   });
 
   test('a stage that moves milestone keeps its tests', () => {
-    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', 'milestone = "M1a"\nscope = "consume primitive"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\ntests = []', `milestone = "M1b"\nscope = "consume primitive"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\n${A24_TESTS}`) : t));
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', `milestone = "M1a"\nscope = "${A24_SCOPE}"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\ntests = []`, `milestone = "M1b"\nscope = "${A24_SCOPE}"\nlegs = ["scenarios-pg/x86_64"]\nstatus = "planned"\n${A24_TESTS}`) : t));
     assert.equal(cli('--root', root).status, 0);
     const a24 = parseToml(read(root, SCENARIOS)).scenario.find((e) => e.id === 'A24');
     assert.deepEqual([a24.stage[0].milestone, a24.stage[0].tests.length], ['M1b', 2]);
-    assert.match(specLine(read(root, LAYOUT), 'A24'), /\| M1b: consume primitive · M2: exchange \|/);
+    assert.match(specLine(read(root, LAYOUT), 'A24'), new RegExp(`\\| M1b: ${reLiteral(A24_SCOPE)} · M2: exchange \\|`));
     assert.match(read(root, LAYOUT), /Counts by first stage: M1a 18 · M1b 7 /);
   });
 });
@@ -944,8 +946,8 @@ describe('an implemented stage is tied to what was implemented', () => {
   });
 
   test('a changed scope of an implemented stage', () => {
-    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(implementedA24(t), 'scenario', 'A24', 'scope = "consume primitive"', 'scope = "consume primitive and replay"') : t));
-    unchanged(root, new RegExp(`A24 M1a: implemented_sha256 is ${STAMP_A24()}, but .* stamps to ${STAMP_A24('consume primitive and replay')}\\. The stage changed`));
+    const root = fixture((rel, t) => (rel === SCENARIOS ? editStage(implementedA24(t), 'scenario', 'A24', `scope = "${A24_SCOPE}"`, `scope = "${A24_SCOPE} and replay"`) : t));
+    unchanged(root, new RegExp(`A24 M1a: implemented_sha256 is ${STAMP_A24()}, but .* stamps to ${STAMP_A24(`${A24_SCOPE} and replay`)}\\. The stage changed`));
   });
 
   test('an implemented stage that moves milestone', () => {
@@ -964,7 +966,7 @@ describe('an implemented stage is tied to what was implemented', () => {
 
   test('a re-stamped stage is accepted', () => {
     const root = fixture((rel, t) => {
-      if (rel === SCENARIOS) return editStage(implementedA24(t, STAMP_A24('consume primitive and replay')), 'scenario', 'A24', 'scope = "consume primitive"', 'scope = "consume primitive and replay"');
+      if (rel === SCENARIOS) return editStage(implementedA24(t, STAMP_A24(`${A24_SCOPE} and replay`)), 'scenario', 'A24', `scope = "${A24_SCOPE}"`, `scope = "${A24_SCOPE} and replay"`);
       return t;
     });
     assert.equal(cli('--root', root).status, 0);
