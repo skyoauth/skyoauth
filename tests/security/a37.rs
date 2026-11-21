@@ -8,8 +8,9 @@
 //! has no code.** These tests are registered on A37's planned M1a stage, so
 //! they are no evidence for it: the reporter lists their results as not
 //! counted. They run through the typed registry API
-//! (`skyoauth_service::persistence::registry`) against a real PostgreSQL,
-//! one fresh database per test, except
+//! (`skyoauth_service::persistence::registry`), with binding matching from
+//! `skyoauth_service::policy`, against a real PostgreSQL, one fresh
+//! database per test, except
 //! `a37_neg_store_refuses_incomplete_policy`, which writes with plain SQL
 //! past the registry. The fixture is local: one tenant, one workload
 //! principal, a GitHub source and a generic OIDC source.
@@ -18,8 +19,8 @@
 //!   required set is stored and read back unchanged
 //!   (`a37_pos_complete_policy_stored_per_profile`). A `github_production`
 //!   binding that omits the optional `repository` and `job_workflow_ref`
-//!   is selected for its grant (`select_grant`) and matched
-//!   (`match_binding`) by evidence carrying either of two different values
+//!   is selected for its grant (`registry::select_grant`) and matched
+//!   (`policy::match_binding`) by evidence carrying either of two different values
 //!   for them, or neither, while a required predicate still constrains
 //!   (`a37_pos_optional_predicate_omitted_is_unconstrained`).
 //! - **Negative.** For every profile and every required claim, enabled or
@@ -84,15 +85,17 @@
 use std::{collections::BTreeMap, fmt::Debug};
 
 use skyoauth_scenarios::pg::TestDb;
-use skyoauth_service::persistence::{
-    PgPool,
-    registry::{
-        self, ActivationState, AssertionProfile, BindingProfile, Evidence, GrantMode,
-        InvariantKind, JsonObject, MAX_PAGE_SIZE, NewPrincipal, NewPrincipalBinding,
-        NewServiceGrant, NewTenant, NewTrustSource, Page, PrincipalBinding,
-        PrincipalBindingChanges, PrincipalKind, RegistryError, ReplayMode, Status, TrustSourceKind,
-        match_binding, select_grant,
+use skyoauth_service::{
+    persistence::{
+        PgPool,
+        registry::{
+            self, ActivationState, AssertionProfile, BindingProfile, GrantMode, InvariantKind,
+            JsonObject, MAX_PAGE_SIZE, NewPrincipal, NewPrincipalBinding, NewServiceGrant,
+            NewTenant, NewTrustSource, Page, PrincipalBinding, PrincipalBindingChanges,
+            PrincipalKind, RegistryError, ReplayMode, Status, TrustSourceKind, select_grant,
+        },
     },
+    policy::{Evidence, match_binding},
 };
 
 const TENANT: &str = "ten_a";

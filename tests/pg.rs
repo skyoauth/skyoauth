@@ -8,13 +8,16 @@
 //! `security::a29::a29_neg_binding_on_other_tenants_source`, and its
 //! registry test ID is `nextest:skyoauth-scenarios/pg/<that name>`
 //! (layout §3). `security::grant_fixture` is a helper module of the A38 and
-//! A53 tests, not a scenario. The A37 and A53 tests are partial: they are
-//! registered on their scenario's planned M1a stage and count for nothing
-//! (see each module's docs).
+//! A53 tests, and `security::selection_fixture` one of the A25 (and later
+//! A50) tests; neither is a scenario. The A37 and A53 tests are partial:
+//! they are registered on their scenario's planned M1a stage and count for
+//! nothing (see each module's docs).
 
 mod security {
     #[path = "a24.rs"]
     mod a24;
+    #[path = "a25.rs"]
+    mod a25;
     #[path = "a29.rs"]
     mod a29;
     #[path = "a37.rs"]
@@ -25,4 +28,6 @@ mod security {
     mod a53;
     #[path = "grant_fixture.rs"]
     mod grant_fixture;
+    #[path = "selection_fixture.rs"]
+    mod selection_fixture;
 }

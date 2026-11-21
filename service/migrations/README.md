@@ -1846,7 +1846,8 @@ checked: a disabled record is still loaded, and `LoadedCeilings::all_enabled`
 says whether the grant, resource server, assignment and target service are all
 enabled. Step 5 (design §5.7) checks the current status of the records (T12.6,
 T12.7, T14.2), wired into the exchange in M2 (T21.4, T21.5); it also needs the
-tenant's status and revision, which are not loaded. `resolve_scopes` is pure:
+tenant's status and revision, which are not loaded. `resolve_scopes` (in
+`skyoauth_service::policy`) is pure:
 an omitted scope uses only the grant's nonempty defaults, checked again against
 every ceiling; an explicit list must be nonempty and lie in every ceiling;
 every token must match the IR-066 grammar of `skyoauth_scope_list`. Nothing is
@@ -1874,7 +1875,8 @@ or source, and a grant with no eligible binding are all the same
 decoding, a grant row; the Rust non-empty check is defense in depth. A
 statement failure, or a decode failure of a corrupt row (only possible on a
 hit), is `SelectionError::Store` with its `RegistryError`. No claim is made
-that every miss takes the same time. `match_binding` picks, of the eligible
+that every miss takes the same time. `match_binding` (in
+`skyoauth_service::policy`) picks, of the eligible
 bindings whose every predicate the verified `Evidence` carries with exactly
 the same string, the one with the byte-wise lowest ID, with its revision for
 provenance; there is no union and no fallback. Selection does not verify the
