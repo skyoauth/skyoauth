@@ -158,8 +158,9 @@ function junit(cases) {
 }
 const allPass = (tests) => junit(tests.map((t) => [t, 'passed']));
 
-// Writes a run's run.json as `gh run view RUN --json
-// databaseId,headSha,attempt,workflowName` does; `over` replaces fields.
+// Writes a run's run.json: the four fields the reporter validates of the six
+// `gh run view RUN --json databaseId,headSha,attempt,workflowName,event,headBranch`
+// writes (it ignores event and headBranch); `over` replaces fields.
 const runJson = (d, run, over = {}) => write(join(d, String(run), 'run.json'), JSON.stringify({ attempt: 1, databaseId: Number(run), headSha: SHA, workflowName: 'CI', ...over }));
 
 // Writes artifacts. `spec` is a list of { run, leg, attempt, junit, name }:
@@ -1447,7 +1448,7 @@ describe('input errors', () => {
     assert.equal(r.code, 2);
     const NOT = "; the run's artifacts are not used";
     assert.deepEqual(r.json.input_errors, [
-      `1/run.json: missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName), so the run cannot be bound to the commit${NOT}`,
+      `1/run.json: missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName,event,headBranch), so the run cannot be bound to the commit${NOT}`,
       `11/run.json: not JSON (${r.json.input_errors[1].replace(/^11\/run\.json: not JSON \((.*)\); the run.*$/, '$1')})${NOT}`,
       `12/run.json: not a JSON object${NOT}`,
       `13/run.json: a directory, not a regular file${NOT}`,
@@ -2125,7 +2126,7 @@ describe('the conformance-report CI job', () => {
       ['attempt 0', pg({ leg: LEG }, 'junit-scenarios-pg-x86_64-attempt-0'), /is not a leg artifact name/],
       ['an upper-case name', pg({ leg: LEG }, 'junit-Scenarios-pg-x86_64-attempt-1'), /is not a leg artifact name/],
       ['no = in a line', null, /DOWNLOADS line 'scenarios-pg' is not <job>=<artifact name>/, { DOWNLOADS: 'scenarios-pg\n' }],
-      ['a bad job id', null, /'\.\.\/x' is not a job id/, { DOWNLOADS: `../x=${PG_ARTIFACT}\n` }],
+      ['a bad job id', null, /DOWNLOADS line '\.\.\?x\?junit-scenarios-pg-x86_64-attempt-1': '\.\.\?x' is not a job id/, { DOWNLOADS: `../x=${PG_ARTIFACT}\n` }],
       ['a job twice', [...pgDownload(), { job: 'scenarios-pg', name: '' }], /DOWNLOADS names job scenarios-pg twice/],
       ['no line', null, /DOWNLOADS names no leg job/, { DOWNLOADS: '\n' }],
       ['DOWNLOAD_DIR a symbolic link', null, /\/d is a symbolic link$/m, { DOWNLOAD_DIR: linkTo(tmp('report-ci-elsewhere-')), DOWNLOADS: 'scenarios-pg=\n' }],
@@ -2208,14 +2209,21 @@ describe('the conformance-report CI job', () => {
         assert.ok(!lines[0].slice(PREFIX.length).includes('::'), `${at}: no workflow command after the script's own`);
       }
     }
-    // Every message is printed as it is, never through dash's echo, which
-    // would turn the backslash escapes of a bad DOWNLOADS line into an
-    // escape sequence and a line end.
-    const line = 'scenarios-pg=junit-x\\033[2J\\n::error::y-attempt-1';
-    const r = stubbed(0, { DOWNLOADS: `${line}\n` }, []);
-    assert.equal(r.status, 2, r.out + r.err);
-    assert.doesNotMatch(r.out + r.err, /[^\n\x20-\x7e]/, JSON.stringify(r.out + r.err));
-    assert.deepEqual(r.out.split('\n').filter(Boolean), [`${PREFIX}DOWNLOADS line '${line}': 'junit-x\\033[2J\\n::error::y-attempt-1' is not a leg artifact name junit-<leg id>-attempt-N`]);
+    // A DOWNLOADS line, job id or artifact name that fails its check is
+    // shown sanitised too: those messages print it before it is validated.
+    // (Never through dash's echo either, which would turn a backslash
+    // escape into an escape sequence or a line end.)
+    for (const [what, line, message] of [
+      ['a line without =', 'scenarios-pg\x1b[2J', "DOWNLOADS line 'scenarios-pg??2J' is not <job>=<artifact name>"],
+      ['a bad job id', `x\r::error::y=${PG_ARTIFACT}`, `DOWNLOADS line 'x???error??y?${PG_ARTIFACT}': 'x???error??y' is not a job id (a-z, 0-9 and -)`],
+      ['a bad artifact name', 'scenarios-pg=junit-x\x1b[2J\\033[2J\\n::error::y\u00e9-attempt-1', "DOWNLOADS line 'scenarios-pg?junit-x??2J?033?2J?n??error??y??-attempt-1': 'junit-x??2J?033?2J?n??error??y??-attempt-1' is not a leg artifact name junit-<leg id>-attempt-N"],
+    ]) {
+      const r = stubbed(0, { DOWNLOADS: `${line}\n` }, []);
+      assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
+      assert.equal(r.args, null, `${what}: the reporter did not run`);
+      assert.doesNotMatch(r.out + r.err, /[^\n\x20-\x7e]/, `${what}: ${JSON.stringify(r.out + r.err)}`);
+      assert.deepEqual(r.out.split('\n').filter(Boolean), [`${PREFIX}${message}`], what);
+    }
   });
 
   // End to end, as the job runs: a committed checkout of the judged commit

@@ -79,10 +79,10 @@ usage() {
     printf '::error title=Conformance report::report-conformance-ci: %s\n' "$1"
     exit 2
 }
-# A file or directory name found in the download directory, as a message
-# may show it: A-Za-z0-9._- as they are, every other byte as `?`, so that a
-# name an artifact chose cannot end the line and start a workflow command
-# of its own, or carry a control character.
+# A file or directory name found in the download directory, or a DOWNLOADS
+# value that failed its check, as a message may show it: A-Za-z0-9._- as
+# they are, every other byte as `?`, so that it cannot end the line and
+# start a workflow command of its own, or carry a control character.
 shown() {
     printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '?'
 }
@@ -130,16 +130,18 @@ mkdir "$run_dir" || usage "cannot create $run_dir"
 if [ -L "$download_dir" ]; then usage "$download_dir is a symbolic link"; fi
 
 # One line per leg job: check the named download and move its files into
-# the run directory under that name.
+# the run directory under that name. $line, $job and $name are workflow-
+# authored (ci.yml writes DOWNLOADS) and printed as is only once checked
+# below; a message rejecting one prints it through shown().
 jobs=' '
 listed=
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     job=${line%%=*}
     name=${line#*=}
-    [ "$job" != "$line" ] || usage "DOWNLOADS line '$line' is not <job>=<artifact name>"
+    [ "$job" != "$line" ] || usage "DOWNLOADS line '$(shown "$line")' is not <job>=<artifact name>"
     case $job in
-        '' | *[!a-z0-9-]*) usage "DOWNLOADS line '$line': '$job' is not a job id (a-z, 0-9 and -)" ;;
+        '' | *[!a-z0-9-]*) usage "DOWNLOADS line '$(shown "$line")': '$(shown "$job")' is not a job id (a-z, 0-9 and -)" ;;
     esac
     case $jobs in
         *" $job "*) usage "DOWNLOADS names job $job twice" ;;
@@ -156,7 +158,7 @@ while IFS= read -r line; do
         continue
     fi
     if ! printf '%s\n' "$name" | LC_ALL=C grep -Eqx 'junit-[a-z0-9_-]+-attempt-[1-9][0-9]*'; then
-        usage "DOWNLOADS line '$line': '$name' is not a leg artifact name junit-<leg id>-attempt-N"
+        usage "DOWNLOADS line '$(shown "$line")': '$(shown "$name")' is not a leg artifact name junit-<leg id>-attempt-N"
     fi
     if [ -L "$stage" ] || [ ! -d "$stage" ]; then
         usage "$stage: the download of $name is not a directory"

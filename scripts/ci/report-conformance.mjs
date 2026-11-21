@@ -20,11 +20,14 @@
 //                       DIR/<run_id>/run.json
 //                       DIR/<run_id>/<artifact name ending in attempt-N>/junit.xml
 //                       DIR/<run_id>/<artifact name ending in attempt-N>/leg
-//                     run.json is `gh run view RUN_ID --json
-//                     databaseId,headSha,attempt,workflowName`: headSha must
-//                     be --commit, databaseId the directory name, and no
-//                     artifact may be from a later attempt; otherwise the
-//                     run is an input error and is not used.
+//                     run.json is `gh run view RUN_ID --json databaseId,
+//                     headSha,attempt,workflowName,event,headBranch`, of
+//                     which only the first four are validated: headSha
+//                     must be --commit, databaseId the directory name,
+//                     attempt a positive integer no artifact exceeds, and
+//                     workflowName a non-empty string; otherwise the run is
+//                     an input error and is not used. event and headBranch
+//                     are ignored.
 //                     `leg` holds one layout §1.1 leg string; a leg artifact
 //                     holds nothing else. Only the known artifacts of other
 //                     jobs (NOT_CONFORMANCE: service-nextest-junit-N,
@@ -502,18 +505,21 @@ function readArtifact(dir, run, artifact, catalogue) {
 }
 
 // Every run directory holds run.json, the run's metadata as
-//   gh run view RUN_ID --json databaseId,headSha,attempt,workflowName
-// writes it. It binds the artifacts to the judged commit: headSha must be
-// --commit, databaseId the directory name, and no artifact may come from an
-// attempt after `attempt` (the run's latest). Returns { attempt,
-// workflowName } or { error }; a run with an error is not read at all.
+//   gh run view RUN_ID --json databaseId,headSha,attempt,workflowName,event,headBranch
+// writes it (the conformance-report job writes the same six fields). Only
+// the first four are validated; they bind the artifacts to the judged
+// commit: headSha must be --commit, databaseId the directory name, attempt
+// a positive integer that no artifact's attempt exceeds (it is the run's
+// latest), and workflowName a non-empty string. event, headBranch and any
+// other field are ignored. Returns { attempt, workflowName } or { error };
+// a run with an error is not read at all.
 const RUN_JSON = 'run.json';
 const MAX_RUN_JSON = 64 * 1024;
 function readRunJson(runDir, run, commit) {
   const rel = `${run}/${RUN_JSON}`;
   const bad = (msg) => ({ error: `${rel}: ${msg}; the run's artifacts are not used` });
   const k = kindOf(join(runDir, RUN_JSON));
-  if (k === 'missing') return bad('missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName), so the run cannot be bound to the commit');
+  if (k === 'missing') return bad('missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName,event,headBranch), so the run cannot be bound to the commit');
   if (k !== 'file') return bad(`${KIND[k]}, not a regular file`);
   if (lstatSync(join(runDir, RUN_JSON)).size > MAX_RUN_JSON) return bad(`more than ${MAX_RUN_JSON} bytes`);
   let m;
