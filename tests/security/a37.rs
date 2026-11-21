@@ -51,12 +51,11 @@
 //! it is optional in the registry, and its claim name, are **inferred**.
 //!
 //! **The refusal.** The registry refuses before its statement with
-//! `RegistryError::Other(sqlx::Error::Encode(message))`, whose message
-//! names the claim and the profile. The tests assert that shape and those
-//! names, and that the error displays, but not its `Display` text, which
-//! today is the generic "registry database error" although no statement
-//! ran: a typed variant for this refusal is to be requested of the
-//! registry, and these assertions change with it.
+//! `RegistryError::RequiredPredicate { claim, problem }`: the claim name
+//! and `PredicateProblem::Missing` or `PredicateProblem::Empty`. The tests
+//! assert that variant, its fields, and that its `Display` text names the
+//! claim and the problem as whole words; the profile is not in the error
+//! (the caller passed it).
 //!
 //! **Not covered: removal reviewed as widening.** ADR-016 item 2 makes
 //! deleting a predicate privilege widening that needs review, approved as
@@ -371,9 +370,10 @@ async fn assert_unchanged(pool: &PgPool, binding: &PrincipalBinding) {
 }
 
 /// The registry's refusal of a policy that lacks a required predicate of
-/// `profile`: `Other(Encode)`, whose message names one of `claims`, the
-/// profile and the `problem` ("missing" or "empty"), each as a whole word.
-/// The `Display` text is not pinned (see the module docs, "The refusal").
+/// `profile`: `RequiredPredicate`, whose `claim` is one of `claims` and
+/// whose `problem` displays as `problem` ("missing" or "empty"), and whose
+/// `Display` text names both as whole words (see the module docs, "The
+/// refusal").
 #[track_caller]
 fn assert_refused<T: Debug>(
     result: Result<T, RegistryError>,
@@ -382,22 +382,25 @@ fn assert_refused<T: Debug>(
     problem: &str,
 ) {
     let err = match result {
-        Err(err @ RegistryError::Other(sqlx::Error::Encode(_))) => err,
+        Err(err @ RegistryError::RequiredPredicate { .. }) => err,
         other => panic!("expected the refusal of {claims:?} of {profile}: {other:?}"),
     };
-    let RegistryError::Other(sqlx::Error::Encode(message)) = &err else {
+    let RegistryError::RequiredPredicate {
+        claim,
+        problem: found,
+    } = err
+    else {
         unreachable!()
     };
-    let words = format!(" {message} ");
-    let names = |word: &str| words.contains(&format!(" {word} "));
     assert!(
-        claims.iter().any(|claim| names(claim)),
-        "{message:?} names none of {claims:?}"
+        claims.contains(&claim),
+        "{profile}: {claim} is none of {claims:?}"
     );
-    assert!(names(profile), "{message:?} does not name {profile}");
-    assert!(names(problem), "{message:?} does not say {problem}");
-    // Whatever it says today; a typed variant is to replace it.
-    assert!(!err.to_string().is_empty());
+    assert_eq!(found.to_string(), problem, "{profile}: {claim}");
+    let words = format!(" {err} ");
+    let names = |word: &str| words.contains(&format!(" {word} "));
+    assert!(names(claim), "{err} does not name {claim}");
+    assert!(names(problem), "{err} does not say {problem}");
 }
 
 /// A refusal of the `0008` check named `check`.

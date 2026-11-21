@@ -1954,7 +1954,9 @@ never mapped to `StaleRevision`. A deadlock (`40P01`,
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
 catalog by a test). The `Display` and `Debug` text of an error carries
-constraint, table and column names and SQLSTATEs only, never a value. The `source()` of
+constraint, table, column and required claim names and SQLSTATEs only,
+never a value. `RegistryError` is `#[non_exhaustive]`, so a `match` outside
+the crate needs a wildcard arm. The `source()` of
 `Retry` and `Other` is the raw `sqlx::Error`, which may quote values, so
 logging must not walk the source chain.
 
@@ -1968,6 +1970,7 @@ logging must not walk the source chain.
 | `SK001`  | `Guard`                                         |
 | —        | `UnreadableTimestamp { table, column, id }`     |
 | —        | `ReservedActorId` (before any statement)        |
+| —        | `RequiredPredicate { claim, problem }` (before) |
 | `40001`  | `Retry` (retry the whole transaction)           |
 | `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
@@ -2051,8 +2054,9 @@ binding profile requires, the sets of "What 0008 adds", and
 `validate_claim_match_policy` checks that a policy has each with a
 non-empty value. `create_principal_binding` and `update_principal_binding`
 call it before their statement, so a missing or empty required predicate is
-an encode error, `Other`, as for an empty patch; the message names the
-claim and the profile, never a value. An update is checked whether or not
+`RequiredPredicate { claim, problem }`: the first unmet claim name of the
+table, and `PredicateProblem::Missing` or `PredicateProblem::Empty`, never
+a value. An update is checked whether or not
 the binding exists. A whitespace-only value is not empty and passes, as in
 the database. Optional predicates, `GITHUB_JOB_WORKFLOW_REF` among them,
 are not checked, and reviewing the removal of one stays with the service,

@@ -157,7 +157,8 @@ async fn change_list<'e>(
 /// Creates a binding at revision 1. Its source and its workload principal
 /// must be of the same tenant, and the principal a workload. Its
 /// `claim_match_policy` must have every predicate its profile requires
-/// ([`validate_claim_match_policy`], checked before the statement).
+/// ([`validate_claim_match_policy`], checked before the statement; an unmet
+/// one is [`RegistryError::RequiredPredicate`]).
 pub async fn create_principal_binding<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipalBinding,
@@ -219,7 +220,8 @@ pub async fn list_principal_bindings<'e>(
 /// `expected_revision` and advances its revision by one. The new
 /// `claim_match_policy` must have every predicate the new profile requires
 /// ([`validate_claim_match_policy`], checked before the statement, so a
-/// rejected policy is that error whether or not the binding exists).
+/// rejected policy is [`RegistryError::RequiredPredicate`] whether or not
+/// the binding exists).
 /// Removing an optional predicate widens the binding; reviewing that stays
 /// with the service (ADR-016 item 2).
 pub async fn update_principal_binding<'e>(

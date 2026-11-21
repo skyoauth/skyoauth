@@ -32,8 +32,8 @@ use skyoauth_service::persistence::{
         self, ActivationState, AssertionProfile, BindingProfile, GrantMode, InvariantKind,
         JsonObject, NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding,
         NewResourceServer, NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustKeyset,
-        NewTrustKeysetVersion, NewTrustSource, Page, PrincipalBindingChanges, PrincipalKind,
-        Profile, RegistryError, ReplayMode, ServiceGrant, ServiceGrantChanges,
+        NewTrustKeysetVersion, NewTrustSource, Page, PredicateProblem, PrincipalBindingChanges,
+        PrincipalKind, Profile, RegistryError, ReplayMode, ServiceGrant, ServiceGrantChanges,
         ServiceIdentityChanges, Status, TrustKeysetChanges, TrustSource, TrustSourceChanges,
         TrustSourceKind,
     },
@@ -1324,11 +1324,13 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
     let mut no_predicate = new_binding("ten_a", "bnd_9", "src_gh", "wld_1");
     no_predicate.claim_match_policy = BTreeMap::new();
     match create(no_predicate).await {
-        Err(RegistryError::Other(sqlx::Error::Encode(err))) => assert_eq!(
-            err.to_string(),
-            "the required predicate repository_owner_id of github_production is missing"
-        ),
-        other => panic!("expected the encode error: {other:?}"),
+        Err(RegistryError::RequiredPredicate { claim, problem }) => {
+            assert_eq!(
+                (claim, problem),
+                ("repository_owner_id", PredicateProblem::Missing)
+            );
+        }
+        other => panic!("expected the required-predicate refusal: {other:?}"),
     }
     for (binding, name) in [
         (
