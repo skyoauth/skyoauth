@@ -888,8 +888,13 @@ The database does not enforce these rules; the service must:
   `authorize_operator_locked` makes its decision hold until the write
   commits (see "Rust registry surface");
 - cap the challenge lifetime at 15 minutes (LT-107): the table has no
-  creation time to measure it from;
-- refuse a retired recovery key; the table keeps only the current one;
+  creation time to measure it from. The registry's
+  `issue_recovery_challenge` does (see "Rust registry surface");
+- refuse a retired recovery key; the table keeps only the current one. The
+  registry's restoration consumes only a challenge bound to the current
+  epoch and refuses a new key equal to the current one; it does not
+  refuse a new key equal to an older retired key, which the table no
+  longer holds (a follow-up, below);
 - record a consumed proof only for a `single_use` source, and set
   `retain_until` to at least the proof's `exp` plus skew (lifetimes §9);
 - prune `consumed_assertion` with a job that runs the `DELETE` after
@@ -2027,7 +2032,9 @@ the same table order, the lookup one row per table, and the single-row
 writers lock only the row they change, so the lookup does not deadlock with
 them; a caller that afterwards locks other operator rows, or updates a row
 it holds `FOR SHARE`, is outside that order and can fail with `40P01`, a
-deny, so T13.3 must order those locks. Neither lookup reads tenant status:
+deny, so T13.3 must order those locks. The creates and the binding update
+also take the `recovery_state` row `FOR SHARE`, which serializes them with
+a break-glass restoration (see "Recovery" below). Neither lookup reads tenant status:
 ADR-014 item 11 lists issuance, live checks, admission and refresh as what
 a disabled tenant denies, not operator writes, and T14 must check it. No
 migration is added. The operator constraint
@@ -2044,8 +2051,8 @@ still rolls back, which is how a missing store or a failed audit append
 fails closed. When the commit's outcome is unknown, the caller keeps all
 the request's material until it has reconnected and reconciled the durable
 state, then retries the same request, which is `AlreadyClosed` if the first
-attempt committed; the same rule will apply to `restore_operator` (a later
-change, PR 3a). Before any statement it refuses a reserved `admin_id`
+attempt committed; the same rule applies to `restore_operator` too.
+Before any statement it refuses a reserved `admin_id`
 (`ReservedActorId`, the check of `create_admin_identity`), an
 `instance_id` that is not a lowercase hyphenated UUIDv7 with version `7`
 and the RFC 9562 variant (IR-057), a recovery public key that is not
@@ -2062,8 +2069,8 @@ statement after the lock, refuses with `AlreadyClosed` when a
 keeping its stored `instance_id` (a request with another one is
 `InstanceIdMismatch`, naming neither, and writes nothing), or inserts the
 row with the request's `instance_id` and the column defaults, with
-`INSERT … ON CONFLICT DO NOTHING RETURNING` (no conflict target, so
-`INSERT` privilege suffices); when that inserts nothing because another
+`INSERT … ON CONFLICT DO NOTHING RETURNING` (no conflict target); when
+that inserts nothing because another
 transaction committed a policy row meanwhile, it locks and checks again
 and is `AlreadyClosed`, adopts that row or is `InstanceIdMismatch` under
 `READ COMMITTED`, and is `Retry` under `REPEATABLE READ` or `SERIALIZABLE`,
@@ -2098,6 +2105,105 @@ restart or an empty configuration cannot reopen it. The constraint names of
 `KNOWN_CONSTRAINTS`, and `service/tests/registry_bootstrap.rs` tests the
 surface.
 
+Recovery (T13.5; design §7.2; ADR-013 item 8; identity-registry §5.2;
+LT-107): `recovery.rs` issues break-glass challenges and restores an
+operator with one, each in the caller's transaction, which it neither
+commits nor rolls back; every time is the caller's `now`, never the
+database clock. Its rulings, a lead's or inferred, are provisional until
+the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0); identity-registry
+§5.2 says which is which. Inputs are checked before any statement (encode
+errors, `Other`). Each function then runs its statements inside a
+savepoint of its own and rolls the savepoint back on every `Err`, also one
+the audit writer returns in Rust after the head lock, so a caller that
+commits after an `Err` commits none of its rows; the caller still rolls
+back on `Err`. Inserts are plain, and a taken key is the insert's `23505`,
+`AlreadyExists` naming the constraint. `get_recovery_state` reads the one
+`recovery_state` row, if any. `issue_recovery_challenge` takes the closed
+kind `operator_restoration`, a request digest and a challenge hash of 32
+to 64 bytes, a plan object with a string `instance_id`, an integer
+`recovery_key_epoch`, the replacement's strings `admin_id`,
+`credential_id`, `binding_id`, `public_identity` and `trust_anchor_ref`
+and its `new_recovery_public_key` as 64 lowercase hexadecimal digits, and
+a TTL of `MIN_CHALLENGE_TTL` (1 second) to `MAX_CHALLENGE_TTL` (15
+minutes; `DEFAULT_CHALLENGE_TTL` is 5; OQ-LT-17). It reads
+`recovery_state` `FOR SHARE` and refuses with `NotIssuable` when there is
+none, when its `bootstrap_closed` is false, or when the plan names another
+instance or epoch; then it appends the event
+`administrative_operation.create` (actor `deployment_operator`, `object_id`
+the operation's ID, new revision 1), first, since `audit_id` references it,
+and inserts the operation (a taken ID is `AlreadyExists` on
+`administrative_operation_pkey`), `expected_revision` the `recovery_state`
+revision, `expires_at` `now` plus the TTL and outcome `issued`. Later
+T13.3 operation inserts will write the same action name; a consumer joins
+the event's `object_id` to the operation and reads its `kind`.
+`restore_operator` refuses a reserved `admin_id` and a key that is not 32
+bytes before any statement, locks the unrevoked `admin_credential` rows
+`FOR NO KEY UPDATE` in ID order and then `recovery_state`, and consumes the
+challenge against the locked state with one `UPDATE` that sets
+`consumed_at` to `now` only when every predicate holds: no tenant, the
+kind, a challenge hash, not consumed, not revoked, outcome `issued`,
+`now < expires_at`, the request digest, the expected revision, and a plan
+whose `instance_id` (a JSON string, compared `COLLATE "C"`) and
+`recovery_key_epoch` (a JSON number) are the binding's, with a closed
+`recovery_state` row of that instance, epoch and revision. The consume is
+no function of its own and writes no event; the `0005` set-once,
+consume-after-revoke and `consumed_before_expiry_check` guards back it. It
+then compares the plan's replacement with the request, member by member.
+Any miss so far, or no state, is the unit `NotRestorable`, and the
+savepoint rollback undoes the consume. It refuses a new key equal to the
+current one (`RecoveryKeyUnchanged`), revokes every unrevoked credential in
+one statement, creates the replacement operator, credential and instance
+`security_admin` binding with `create_admin_identity`,
+`create_admin_credential` and `create_admin_role_binding`, rotates the key
+to the next epoch, sets the outcome `restored`, and appends
+`admin_identity.restore` (`object_id` the new operator, no revisions) and
+then `recovery_state.rotate_key` (`object_id` the `instance_id`, the
+`recovery_state` revisions before and after), both last and both with the
+actor `recovery_key:<old epoch>`. The registry does not verify the
+recovery signature: the caller verifies it first. Its locks follow the
+`0005` order (credentials, recovery state, operation) with the audit head
+last. An issue waits for a restoration's `recovery_state` lock and sees the
+new epoch; a restoration waits for an issue's share lock. The operator
+writes that can add enabled access (`create_admin_identity`,
+`create_admin_credential`, `create_admin_role_binding` and
+`update_admin_role_binding`) take the `recovery_state` row `FOR SHARE` in
+their statement, the creates before their insert and the binding update
+after its row, in this table order: a restoration waits for such a write
+and its revocation then sees what the write enrolled, and a write that
+waited for a restoration is followed by the caller's lookup, which sees the
+revocation (inferred). Both hold under `READ COMMITTED` only, and a
+restoration runs only there: it reads `transaction_isolation` inside its
+savepoint before its first lock and refuses any other level with the
+non-retryable `RestoreError::UnsupportedIsolation`, writing nothing and
+leaving the challenge unconsumed (lead ruling). Under `REPEATABLE READ` or
+`SERIALIZABLE` its revocation would read a snapshot older than a write it
+waited for and leave that write's credential active. A caller locks its
+operator rows (`authorize_operator_locked`) before such a write, the order
+the restoration follows too (credentials, then the recovery state); a
+restoration that waits at its credential lock holds no recovery state, so
+the caller's write goes through. One cycle remains and fails closed: a
+credential a write committed between the restoration's credential lock
+and its recovery state lock is not locked by it, and a caller that
+authorizes on that credential and then writes waits for the restoration
+while the restoration's revocation waits for that caller. PostgreSQL fails
+one of them with `40P01` (`RegistryError::Retry`): a restoration that is
+the victim leaves nothing and its challenge unconsumed, and its caller
+retries; a writer that is the victim denies (accepted, lead ruling). A
+restoration that waited for locks still compares
+the expiry with its `now`; the caller takes `now` immediately before the
+call and sets `lock_timeout` and `statement_timeout`, which bound the
+overshoot (inferred). When a commit's outcome is unknown, the
+uncertain-commit rule of bootstrap applies to `restore_operator` too: the caller
+keeps the request's material (IDs, signed challenge and binding, the
+replacement's credential, the new recovery key), reconnects, reconciles the
+durable state (operation `restored` and the new epoch, or the challenge
+unconsumed) and retries the same request: a restoration that committed is
+then `NotRestorable`, one that did not restores, and one whose challenge
+expired meanwhile is `NotRestorable` too, so the verifier issues a new
+challenge. The `administrative_operation` constraint names are in
+`KNOWN_CONSTRAINTS`, and `service/tests/registry_recovery.rs` tests the
+surface. No migration is added.
+
 Follow-ups for the registry surface:
 
 - The startup path (IR-053) must write a lowercase hyphenated UUIDv7 as
@@ -2123,6 +2229,16 @@ Follow-ups for the registry surface:
 - Replacing a checker's whole tenant set with `k` adds and removes advances
   its revision by `k`. T14.3 may want a single replace operation that
   advances it by one.
+- A restoration refuses a new recovery key equal to the current one, but
+  not one equal to an older retired key: `recovery_state` keeps only the
+  current key. Refusing reuse needs the retired keys (or their digests)
+  kept somewhere; no code yet.
+- A restoration can deadlock (`40P01`, fail-closed, retried) with a caller
+  that authorizes on a credential enrolled between the restoration's
+  credential lock and its `recovery_state` lock and then writes. Closing
+  it means taking the `recovery_state` lock before the authorization, in
+  the caller and in the restoration (the recovery state before the
+  operator rows), which changes the `0005` lock order above; no code yet.
 
 ### The `0004` tables
 

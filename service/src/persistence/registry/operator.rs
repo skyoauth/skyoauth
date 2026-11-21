@@ -187,7 +187,9 @@
 //!   takes them in the same table order, identity, credential, binding, and
 //!   this lookup holds at most one row of each table. A revocation, an
 //!   identity disable and a binding update lock only the one row they
-//!   change, and a writer that follows the README's step 1 locks its rows
+//!   change among these tables (a binding update then also takes the
+//!   `recovery_state` row, which no lookup locks; see "Writes and a
+//!   restoration"), and a writer that follows the README's step 1 locks its rows
 //!   in that same order, so no cycle of waits forms.
 //! - Caveat for the caller: once the lookup holds its locks, the caller's
 //!   own later locks of operator rows come after them, outside the README
@@ -196,6 +198,73 @@
 //!   can deadlock with a transaction that does the same the other way
 //!   round; PostgreSQL then fails one of them with `40P01`, an `Err` and so
 //!   a deny. T13.3 decides how its writes order these locks.
+//!
+//! # Writes and a restoration
+//!
+//! A break-glass restoration
+//! ([`restore_operator`](super::restore_operator)) revokes every unrevoked
+//! credential and must not leave behind operator access that a concurrent
+//! write adds. So the four writes that can add enabled operator access,
+//! [`create_admin_identity`], [`create_admin_credential`],
+//! [`create_admin_role_binding`] and [`update_admin_role_binding`] (the
+//! status change that re-enables a binding), lock the `recovery_state` row
+//! `FOR SHARE` in their one statement (there is no setter that enables an
+//! identity or a credential; see "One-way state"). The lock conflicts with
+//! the restoration's `FOR NO KEY UPDATE` of that row and with nothing
+//! else of the registry: an issue of a recovery challenge takes it
+//! `FOR SHARE` too. Before bootstrap there is no row and nothing is locked;
+//! bootstrap's own writes find the row it inserted. The choice of lock and
+//! its order are inferred, provisional until the maintainer ratifies the
+//! ADRs (T00.8 to T00.17, Gate M0).
+//!
+//! - The three creates take the lock first, before they insert (a
+//!   materialized `WITH` the insert selects from). The inserted row is new,
+//!   so no other transaction holds it; locking first keeps a create from
+//!   holding a key the restoration is about to insert (its replacement's
+//!   IDs) while it waits for the row the restoration holds.
+//! - The binding update takes the lock in its `RETURNING`, after it has
+//!   locked and updated the binding row, in the `0005` table order of the
+//!   migrations README (binding, then the recovery state), and only when it
+//!   updated a row.
+//!
+//! The restoration locks every unrevoked credential `FOR NO KEY UPDATE`,
+//! then the `recovery_state` row, and revokes in a later statement. It runs
+//! only under `READ COMMITTED` and refuses other levels
+//! ([`RestoreError::UnsupportedIsolation`](super::RestoreError::UnsupportedIsolation)):
+//! under `REPEATABLE READ` or `SERIALIZABLE` its revocation would read a
+//! snapshot older than a write it waited for. A write that holds the row
+//! `FOR SHARE` makes the restoration wait for its commit, and the
+//! revocation, under `READ COMMITTED`, then sees the row it wrote: a
+//! credential enrolled that way is revoked with the others. A write that
+//! starts while the restoration holds the row waits for it to commit, then
+//! writes. So a caller re-authorizes after its write, in the same
+//! transaction: under `READ COMMITTED` that lookup sees the revocation and
+//! denies, and the caller rolls back. A write under `REPEATABLE READ` or
+//! `SERIALIZABLE` that waited for a restoration that committed fails with
+//! `40001` ([`RegistryError::Retry`]) instead, since the restoration changed
+//! the row it waited for.
+//!
+//! The order for a caller is the README's: [`authorize_operator_locked`]
+//! (identity, credential, binding `FOR SHARE`) first, then the write
+//! (`recovery_state` `FOR SHARE`). The restoration takes credentials before
+//! the recovery state too: a restoration waiting at its credential lock for
+//! a credential the caller holds holds no `recovery_state` lock yet, and the
+//! caller's write goes through. That does not rule out every cycle. A
+//! credential that a write committed after the restoration's credential lock
+//! and before its `recovery_state` lock is not among the credentials it
+//! locked; a caller that authorizes on that credential and then writes
+//! waits for the restoration's `recovery_state` lock while the
+//! restoration's revocation waits for the caller's `FOR SHARE` on the
+//! credential. PostgreSQL fails one of them with `40P01`
+//! ([`RegistryError::Retry`]), either one, and the failure is closed: a
+//! restoration that is the victim leaves nothing and its challenge
+//! unconsumed, and its caller retries; a writer that is the victim denies.
+//! Closing the cycle needs a lock before the authorization, a change of the
+//! `0005` order (a follow-up of the migrations README). A caller that writes
+//! first and then takes a locked lookup holds the recovery state while it
+//! waits for a credential, outside the documented order: against a
+//! restoration that holds the credentials and waits for the recovery state
+//! it fails with `40P01` ([`RegistryError::Retry`]), a deny.
 //!
 //! # Time
 //!
@@ -212,7 +281,7 @@ use std::time::SystemTime;
 use sqlx::{FromRow, PgExecutor, Postgres, Row, Transaction, postgres::PgRow};
 
 use super::{
-    AdminRole, RegistryError, Status, compare_and_set, micros,
+    AdminRole, RegistryError, Status, micros,
     model::{Origin, required_timestamp, since_epoch, text, timestamp},
     updated,
 };
@@ -450,6 +519,37 @@ const LOCK_IDENTITY: &str = "SELECT FROM admin_identity WHERE id = $1 FOR SHARE"
 const LOCK_CREDENTIAL: &str = "SELECT FROM admin_credential WHERE id = $1 FOR SHARE";
 const LOCK_BINDING: &str = "SELECT FROM admin_role_binding WHERE id = $1 FOR SHARE";
 
+/// The start of the four writes that can add operator access (see the
+/// module documentation, "Writes and a restoration"): the `recovery_state`
+/// row `FOR SHARE`, no row before bootstrap.
+macro_rules! share_recovery_state {
+    () => {
+        "WITH recovery AS MATERIALIZED (SELECT FROM recovery_state FOR SHARE) "
+    };
+}
+
+/// The `FROM` of an insert after [`share_recovery_state!`]: one row, once
+/// the lock is held, so the lock comes before the insert.
+macro_rules! after_recovery_state {
+    () => {
+        "FROM (SELECT count(*) FROM recovery) AS locked"
+    };
+}
+
+/// [`update_admin_role_binding`]: the registry's `compare_and_set!` whose `RETURNING`
+/// takes the `recovery_state` lock, after the binding row is locked and
+/// only when it is updated (the `0005` table order: binding, then the
+/// recovery state).
+const UPDATE_BINDING: &str = concat!(
+    share_recovery_state!(),
+    ", updated AS (UPDATE admin_role_binding SET status = $3, revision = revision + 1 \
+     WHERE id = $1 AND revision = $2 RETURNING ",
+    binding_columns!(),
+    ", (SELECT count(*) FROM recovery) AS locked) \
+     SELECT updated.*, EXISTS (SELECT FROM admin_role_binding WHERE id = $1) AS found \
+     FROM (SELECT) AS one LEFT JOIN updated ON true"
+);
+
 /// The error of [`create_admin_identity`] for a reserved ID.
 fn reserved(id: &str) -> Result<(), RegistryError> {
     if is_reserved_actor_id(id) {
@@ -462,7 +562,9 @@ fn reserved(id: &str) -> Result<(), RegistryError> {
 /// Creates an operator identity with the caller's ID and `created_at`.
 /// A reserved ID ([`is_reserved_actor_id`]) is
 /// [`RegistryError::ReservedActorId`] and a time outside the `0007` range
-/// [`RegistryError::Other`], both before any statement runs.
+/// [`RegistryError::Other`], both before any statement runs. Locks the
+/// `recovery_state` row `FOR SHARE` before it inserts (see the module
+/// documentation, "Writes and a restoration").
 pub async fn create_admin_identity<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAdminIdentity,
@@ -470,8 +572,11 @@ pub async fn create_admin_identity<'e>(
     reserved(&new.id)?;
     let created_at = since_epoch(new.created_at)?;
     Ok(sqlx::query_as(concat!(
+        share_recovery_state!(),
         "INSERT INTO admin_identity (id, status, created_at) \
-         VALUES ($1, $2, timestamptz 'epoch' + $3::interval) RETURNING ",
+         SELECT $1, $2, timestamptz 'epoch' + $3::interval ",
+        after_recovery_state!(),
+        " RETURNING ",
         identity_columns!()
     ))
     .bind(&new.id)
@@ -517,14 +622,19 @@ pub async fn disable_admin_identity<'e>(
 /// Registers a credential of an existing operator, unrevoked. A
 /// `public_identity` already registered, revoked or not, is
 /// [`RegistryError::AlreadyExists`] with
-/// `admin_credential_public_identity_key`.
+/// `admin_credential_public_identity_key`. Locks the `recovery_state` row
+/// `FOR SHARE` before it inserts (see the module documentation, "Writes and
+/// a restoration").
 pub async fn create_admin_credential<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAdminCredential,
 ) -> Result<AdminCredential, RegistryError> {
     Ok(sqlx::query_as(concat!(
+        share_recovery_state!(),
         "INSERT INTO admin_credential (id, admin_id, public_identity, trust_anchor_ref, status) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING ",
+         SELECT $1, $2, $3, $4, $5 ",
+        after_recovery_state!(),
+        " RETURNING ",
         credential_columns!()
     ))
     .bind(&new.id)
@@ -582,14 +692,19 @@ pub async fn revoke_admin_credential<'e>(
 /// (`admin_role_binding_scope_check`); a second binding of the same
 /// operator, role and scope, disabled or not, is
 /// [`RegistryError::AlreadyExists`] with
-/// `admin_role_binding_admin_id_role_tenant_id_key`.
+/// `admin_role_binding_admin_id_role_tenant_id_key`. Locks the
+/// `recovery_state` row `FOR SHARE` before it inserts (see the module
+/// documentation, "Writes and a restoration").
 pub async fn create_admin_role_binding<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAdminRoleBinding,
 ) -> Result<AdminRoleBinding, RegistryError> {
     Ok(sqlx::query_as(concat!(
+        share_recovery_state!(),
         "INSERT INTO admin_role_binding (id, admin_id, role, tenant_id, status) \
-         VALUES ($1, $2, $3, $4, $5) RETURNING ",
+         SELECT $1, $2, $3, $4, $5 ",
+        after_recovery_state!(),
+        " RETURNING ",
         binding_columns!()
     ))
     .bind(&new.id)
@@ -620,23 +735,21 @@ pub async fn get_admin_role_binding<'e>(
 /// Replaces the status of the role binding `id` at `expected_revision` and
 /// advances its revision by one. Its operator, role and tenant keep their
 /// values. Re-enabling a disabled binding is a plain status change here;
-/// whether it needs an approval belongs to the service layer.
+/// whether it needs an approval belongs to the service layer. Locks the
+/// `recovery_state` row `FOR SHARE` after the binding row, when it updates
+/// one (see the module documentation, "Writes and a restoration").
 pub async fn update_admin_role_binding<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,
     changes: &AdminRoleBindingChanges,
 ) -> Result<AdminRoleBinding, RegistryError> {
-    let row = sqlx::query(compare_and_set!(
-        "admin_role_binding",
-        "status = $3",
-        binding_columns!()
-    ))
-    .bind(id)
-    .bind(expected_revision)
-    .bind(changes.status.as_str())
-    .fetch_one(executor)
-    .await?;
+    let row = sqlx::query(UPDATE_BINDING)
+        .bind(id)
+        .bind(expected_revision)
+        .bind(changes.status.as_str())
+        .fetch_one(executor)
+        .await?;
     updated(&row)
 }
 
