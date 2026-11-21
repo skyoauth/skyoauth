@@ -4,8 +4,8 @@
 use sqlx::{PgExecutor, types::Json};
 
 use super::{
-    NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, RegistryError, TrustKeyset,
-    TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges,
+    NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, RegistryError, Status,
+    TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges, micros,
     model::{optional_since_epoch, since_epoch},
     tenant_compare_and_set, tenant_list_page, updated,
 };
@@ -18,10 +18,13 @@ macro_rules! keyset_columns {
 
 macro_rules! version_columns {
     () => {
-        "id, tenant_id, keyset_id, public_jwks, fingerprint, \
-         (extract(epoch FROM effective_at) * 1000000)::bigint AS effective_at_us, \
-         (extract(epoch FROM expires_at) * 1000000)::bigint AS expires_at_us, \
-         status, provenance"
+        concat!(
+            "id, tenant_id, keyset_id, public_jwks, fingerprint, ",
+            micros!("effective_at"),
+            ", ",
+            micros!("expires_at"),
+            ", status, provenance, revision"
+        )
     };
 }
 
@@ -110,8 +113,9 @@ pub async fn update_trust_keyset<'e>(
     updated(&row)
 }
 
-/// Creates a version of a same-tenant keyset. Versions are immutable but
-/// for `status` and have no revision, so there is no update (inferred).
+/// Creates a version of a same-tenant keyset at revision 1. Versions are
+/// immutable but for `status`, which [`update_trust_keyset_version`]
+/// changes.
 pub async fn create_trust_keyset_version<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTrustKeysetVersion,
@@ -176,6 +180,36 @@ pub async fn list_trust_keyset_versions<'e>(
     .bind(i64::from(page.limit()))
     .fetch_all(executor)
     .await?)
+}
+
+/// Sets the `status` of the keyset version `id` of `tenant_id` at
+/// `expected_revision` and advances the version's own revision by one, with
+/// no tie to the keyset's revision (lead decision, 2026-11-21). Every other
+/// column keeps its value. A version of another tenant is
+/// [`RegistryError::NotFound`], whatever its revision.
+///
+/// Re-enabling a disabled version is a plain status change here; whether it
+/// needs an approval, and any other widening rule, belongs to the service
+/// layer (provisional lead pick, 2026-11-21).
+pub async fn update_trust_keyset_version<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    status: Status,
+) -> Result<TrustKeysetVersion, RegistryError> {
+    let row = sqlx::query(tenant_compare_and_set!(
+        "trust_keyset_version",
+        "status = $4",
+        version_columns!()
+    ))
+    .bind(id)
+    .bind(expected_revision)
+    .bind(tenant_id)
+    .bind(status.as_str())
+    .fetch_one(executor)
+    .await?;
+    updated(&row)
 }
 
 /// Creates a trust source at revision 1. The database checks that the

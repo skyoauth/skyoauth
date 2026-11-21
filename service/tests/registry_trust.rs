@@ -5,8 +5,8 @@
 //! Each entity's create, read, list and update; not-found, stale-revision
 //! and tenant-isolation outcomes; the mapping of its named constraint
 //! errors; the per-kind source rules; the binding-set check of a grant
-//! through the registry, at commit and under concurrency; and races of
-//! updates from one revision.
+//! through the registry, at commit and under concurrency; races of updates
+//! from one revision; and stored times outside the `0007` range checks.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! test creates and drops its own database. They claim no conformance
@@ -2789,5 +2789,161 @@ async fn trust_errors_do_not_repeat_request_values() {
     for text in [err.to_string(), format!("{err:?}")] {
         assert!(!text.contains("not-to-leak"), "{text}");
     }
+    db.drop([pool]).await;
+}
+
+/// A stored time outside the range the `0007` checks hold (only possible
+/// with a check dropped, here inside a rolled-back transaction) is
+/// `UnreadableTimestamp` naming the table, the column and the row on every
+/// read path, instead of the `0A000` (infinity) or `22003` (a later finite
+/// time) the plain projection fails with.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn times_outside_the_range_checks_are_unreadable_timestamps_naming_the_row() {
+    let (db, pool) = seeded().await;
+    // What the plain projection gives for such times.
+    for (sql, code) in [
+        (
+            "SELECT (extract(epoch FROM timestamptz 'infinity') * 1000000)::bigint",
+            "0A000",
+        ),
+        (
+            "SELECT (extract(epoch FROM timestamptz '-infinity') * 1000000)::bigint",
+            "0A000",
+        ),
+        (
+            "SELECT (extract(epoch FROM timestamptz '294270-01-01 00:00:00+00') * 1000000)::bigint",
+            "22003",
+        ),
+    ] {
+        let err = sqlx::raw_sql(sql).execute(&pool).await.expect_err(sql);
+        let actual = err.as_database_error().and_then(|err| err.code());
+        assert_eq!(actual.as_deref(), Some(code), "{sql}");
+    }
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE tenant DROP CONSTRAINT tenant_created_at_range_check;
+         ALTER TABLE principal DROP CONSTRAINT principal_created_at_range_check;
+         ALTER TABLE trust_keyset_version
+             DROP CONSTRAINT trust_keyset_version_effective_at_range_check,
+             DROP CONSTRAINT trust_keyset_version_expires_at_range_check;
+         ALTER TABLE service_grant DROP CONSTRAINT service_grant_valid_until_range_check;
+         ALTER TABLE instance_security_policy
+             DROP CONSTRAINT instance_security_policy_audit_sink_validated_at_range_check;
+         INSERT INTO tenant (id, name, secret_namespace, status, created_at) VALUES
+             ('ten_far', 'far', 'ns_far', 'enabled', '294270-01-01 00:00:00+00'),
+             ('ten_inf', 'inf', 'ns_inf', 'enabled', 'infinity');
+         INSERT INTO principal (id, tenant_id, kind, name, status, created_at) VALUES
+             ('wld_far', 'ten_b', 'workload', 'far', 'enabled', '294247-01-10 04:00:54.775807+00');
+         INSERT INTO trust_keyset_version
+             (id, tenant_id, keyset_id, public_jwks, fingerprint, effective_at, expires_at,
+              status, provenance) VALUES
+             ('kv_early', 'ten_a', 'ks_1',
+              '{\"keys\": [{\"kty\": \"EC\", \"crv\": \"P-256\", \"x\": \"AA\", \"y\": \"AA\"}]}',
+              'sha256:01', '-infinity', NULL, 'enabled', '{}'),
+             ('kv_late', 'ten_a', 'ks_1',
+              '{\"keys\": [{\"kty\": \"EC\", \"crv\": \"P-256\", \"x\": \"AA\", \"y\": \"AA\"}]}',
+              'sha256:01', '2026-01-01 00:00:00+00', 'infinity', 'enabled', '{}');
+         UPDATE service_grant SET valid_until = 'infinity', revision = revision + 1
+          WHERE id = 'grt_1';
+         INSERT INTO instance_security_policy (instance_id, single_actor_mode,
+             audit_sink_config_digest, audit_sink_validated_at)
+             VALUES ('inst_1', true, '\\x01', '-infinity');",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+
+    #[track_caller]
+    fn assert_unreadable<T: Debug>(result: Result<T, RegistryError>, expected: (&str, &str, &str)) {
+        match &result {
+            Err(err @ RegistryError::UnreadableTimestamp { table, column, id }) => {
+                assert_eq!((*table, *column, &id[..]), expected);
+                for text in [err.to_string(), format!("{err:?}")] {
+                    assert!(!text.contains(expected.2), "{text}");
+                    assert!(text.contains(expected.0), "{text}");
+                }
+            }
+            other => panic!("expected UnreadableTimestamp {expected:?}: {other:?}"),
+        }
+    }
+    assert_unreadable(
+        registry::get_tenant(&mut *tx, "ten_inf").await,
+        ("tenant", "created_at", "ten_inf"),
+    );
+    assert_unreadable(
+        registry::get_tenant(&mut *tx, "ten_far").await,
+        ("tenant", "created_at", "ten_far"),
+    );
+    // A list stops at the first unreadable row in its order.
+    assert_unreadable(
+        registry::list_tenants(&mut *tx, Page::first(10)).await,
+        ("tenant", "created_at", "ten_far"),
+    );
+    assert_eq!(
+        registry::list_tenants(&mut *tx, Page::first(2))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    // One microsecond past the latest readable time.
+    assert_unreadable(
+        registry::get_principal(&mut *tx, "ten_b", "wld_far").await,
+        ("principal", "created_at", "wld_far"),
+    );
+    assert_unreadable(
+        registry::list_principals(&mut *tx, "ten_b", Page::first(10)).await,
+        ("principal", "created_at", "wld_far"),
+    );
+    assert_unreadable(
+        registry::get_trust_keyset_version(&mut *tx, "ten_a", "kv_early").await,
+        ("trust_keyset_version", "effective_at", "kv_early"),
+    );
+    assert_unreadable(
+        registry::get_trust_keyset_version(&mut *tx, "ten_a", "kv_late").await,
+        ("trust_keyset_version", "expires_at", "kv_late"),
+    );
+    assert_unreadable(
+        registry::list_trust_keyset_versions(&mut *tx, "ten_a", "ks_1", Page::first(10)).await,
+        ("trust_keyset_version", "effective_at", "kv_early"),
+    );
+    assert_unreadable(
+        registry::get_service_grant(&mut *tx, "ten_a", "grt_1").await,
+        ("service_grant", "valid_until", "grt_1"),
+    );
+    assert_unreadable(
+        registry::list_service_grants(&mut *tx, "ten_a", Page::first(10)).await,
+        ("service_grant", "valid_until", "grt_1"),
+    );
+    assert_unreadable(
+        registry::get_instance_security_policy(&mut *tx).await,
+        (
+            "instance_security_policy",
+            "audit_sink_validated_at",
+            "inst_1",
+        ),
+    );
+    // The row an update returns is read the same way.
+    assert_unreadable(
+        registry::update_trust_keyset_version(&mut *tx, "ten_a", "kv_late", 1, Status::Disabled)
+            .await,
+        ("trust_keyset_version", "expires_at", "kv_late"),
+    );
+    tx.rollback().await.unwrap();
+
+    // The checks are back and the rows gone.
+    assert!(matches!(
+        registry::get_tenant(&pool, "ten_inf").await,
+        Err(RegistryError::NotFound)
+    ));
+    assert_eq!(
+        registry::get_service_grant(&pool, "ten_a", "grt_1")
+            .await
+            .unwrap()
+            .valid_until,
+        None
+    );
     db.drop([pool]).await;
 }

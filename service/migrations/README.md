@@ -1320,9 +1320,9 @@ changes no existing column, constraint, trigger or index. Choices marked
 The registry's `KNOWN_CONSTRAINTS` lists the new checks of the tables it
 writes (`tenant_revision_check`, `principal_revision_check`,
 `trust_keyset_version_revision_check` and the range checks of `tenant`,
-`principal`, `trust_keyset_version` and `service_grant`). The registry does
-not yet read the new revisions or update tenants, principals or versions;
-that is a registry follow-up.
+`principal`, `trust_keyset_version` and `service_grant`). The registry reads
+the new revisions and updates tenants, principals and versions as
+compare-and-sets on them (see "Rust registry surface").
 
 ## Limits
 
@@ -1415,9 +1415,9 @@ Open for all registry tables:
   built.
 - A `revision` column on `tenant`, `principal` and
   `trust_keyset_version`: done in `0007` (lead decision, 2026-11-21; see
-  "What 0007 adds"). The registry's compare-and-set updates of them,
-  `update_trust_keyset_version` included, are a registry follow-up (see
-  "The `0004` tables" below).
+  "What 0007 adds"), with the registry's compare-and-set updates of them,
+  `update_tenant`, `update_principal` and `update_trust_keyset_version`
+  (see "Rust registry surface").
 - Indexes on the referencing side of the foreign keys: done in `0007` for
   every foreign key whose columns led no index, with five exceptions that
   the primary key already serves ("What 0007 adds").
@@ -1518,10 +1518,21 @@ Not done in `0005`:
 
 `skyoauth_service::persistence::registry` is the typed Rust entry point to
 the registry tables of `0002` and `0003`: create, get, list and
-revision-checked update for `resource_server`, `audience_tenant_assignment`,
-`resource_server_checker` (with its tenant rows) and `resource_action`;
-create, get and list for `tenant` and `principal`, whose revision (added
-by `0007`) the registry does not read or update yet; and reads of `instance_security_policy` and `egress_allowlist_entry`.
+revision-checked update for `tenant`, `principal`, `resource_server`,
+`audience_tenant_assignment`, `resource_server_checker` (with its tenant
+rows) and `resource_action`; and reads of `instance_security_policy` and
+`egress_allowlist_entry`. The revisions of `tenant` and `principal` are the
+ones `0007` adds. Their updates, `update_tenant` and `update_principal`,
+take a patch (`TenantPatch`, `PrincipalPatch`) and change only the columns
+set in it, `name` and `status` (lead ruling, 2026-11-21); the other updates
+replace every mutable column. An empty patch is an encode error (`Other`)
+before any statement runs, so it neither reaches the database nor advances
+the revision. Names need not be unique: `0002` has no unique constraint on
+`tenant.name` or `principal.name`. `update_principal` is kind-agnostic; the
+rule that only workload and service principals change through it belongs
+to the service handler. Disabling and re-enabling are plain status changes;
+any approval or widening rule for re-enabling belongs to the service layer
+(provisional lead pick, 2026-11-21).
 Every function runs one statement on any executor (pool, connection or
 caller transaction). Writes take caller-supplied IDs (T10.2 generates
 them). An update is a compare-and-set: it sets `revision = revision + 1`
@@ -1545,7 +1556,7 @@ never mapped to `StaleRevision`. A deadlock (`40P01`,
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
 catalog by a test). The `Display` and `Debug` text of an error carries
-constraint names and SQLSTATEs only, never a value. The `source()` of
+constraint, table and column names and SQLSTATEs only, never a value. The `source()` of
 `Retry` and `Other` is the raw `sqlx::Error`, which may quote values, so
 logging must not walk the source chain.
 
@@ -1557,6 +1568,7 @@ logging must not walk the source chain.
 | `23514`  | `Invariant { kind: Check, constraint }`         |
 | `23502`  | `Invariant { kind: NotNull, constraint: None }` |
 | `SK001`  | `Guard`                                         |
+| —        | `UnreadableTimestamp { table, column, id }`     |
 | `40001`  | `Retry` (retry the whole transaction)           |
 | `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
@@ -1592,10 +1604,11 @@ Follow-ups for the registry surface:
 The same module covers the nine `0004` tables, with the same conventions:
 create, get, list and revision-checked update for `trust_keyset`,
 `trust_source`, `principal_binding`, `service_identity` and
-`service_grant`; create, get and a per-keyset list for
-`trust_keyset_version`, whose `status` has no update yet: `0007` adds the
-version's own revision, and `update_trust_keyset_version` is a registry
-follow-up. Every one is tenant-owned: reads,
+`service_grant`; create, get, a per-keyset list and
+`update_trust_keyset_version` for `trust_keyset_version`. That update sets
+the version's `status`, its one mutable column, as a compare-and-set on the
+version's own revision (added by `0007`), with no tie to the keyset's
+revision (lead decision, 2026-11-21). Every one is tenant-owned: reads,
 updates and list-set changes take the tenant and ID, so another tenant's ID
 is `NotFound`, and lists hold one tenant's rows. A trust source is stored
 flat, and the database's `trust_source_*_kind_check`s decide which fields a
@@ -1631,20 +1644,16 @@ encode error, "timestamp out of range") before any statement runs.
 `9_223_372_036_854_775_800`. Since `0007` the tables hold the same range:
 each `timestamptz` column has a named `<table>_<column>_range_check` that
 rejects `'infinity'`, `'-infinity'` and every finite time past the upper
-bound with `23514` (see "What 0007 adds"). Before `0007` such a row could
-be stored by hand or restored, and a get or list over it failed with
-`0A000` (`feature_not_supported`) for an infinity, or `22003`
-(`numeric_value_out_of_range`) past the bound, both mapped to `Other`;
-the upgrade precondition finds such rows. The range checks of the tables
-the registry writes are in `KNOWN_CONSTRAINTS`.
-
-Follow-up for timestamps (lead decision, 2026-11-21):
-
-- A typed per-row `RegistryError` variant for a row the projection cannot
-  represent, in the next registry PR, instead of `Other`.
-
-Follow-up (lead decision, 2026-11-21): `0007` adds a `revision` column to
-`trust_keyset_version`. The registry then gets
-`update_trust_keyset_version`, which enables or disables a version as a
-compare-and-set on the version's own revision: the same per-row
-compare-and-set as the other tables, with no tie to the keyset's revision.
+bound with `23514` (see "What 0007 adds"). Such a row can still exist if
+it was restored from before `0007` or written with a check dropped; the
+upgrade precondition finds them. The plain projection would fail the whole
+statement on it, with `0A000` (`feature_not_supported`) for an infinity or
+`22003` (`numeric_value_out_of_range`) past the bound. So the registry
+selects a time outside the checked range as `i64::MAX`, one past the
+latest readable microsecond (inferred), and a get, a list or an update's
+returned row maps it to `UnreadableTimestamp { table, column, id }`, a
+variant of its own, not an `Invariant` kind (lead ruling, 2026-11-21). A
+list stops at the first such row in its order. `Display` and `Debug` name
+the table and column but leave out the row ID (inferred: the ID is a row
+value). The range checks of the tables the registry writes are in
+`KNOWN_CONSTRAINTS`.
