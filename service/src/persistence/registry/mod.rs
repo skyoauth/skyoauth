@@ -224,11 +224,12 @@
 //! # Audit events
 //!
 //! [`append_audit_event`] appends one event to the instance's audit hash
-//! chain as the last step of a caller [`Transaction`](sqlx::Transaction),
-//! and [`verify_audit_chain`] recomputes and checks the whole chain
-//! (IR-055 to IR-059; see their module). They are the exceptions to "one
-//! statement on any executor": an append is three statements that commit
-//! with the audited write. The registry's other writes still do not append
+//! chain in a caller [`Transaction`](sqlx::Transaction), after the domain
+//! rows (a write that creates an `administrative_operation` inserts the
+//! operation after the event; see their module), and [`verify_audit_chain`]
+//! recomputes and checks the whole chain (IR-055 to IR-059). They are the
+//! exceptions to "one statement on any executor": an append is four or five
+//! statements that commit with the audited write. The registry's other writes still do not append
 //! events; the caller does, in the same transaction. Action names are the
 //! closed table [`AUDIT_ACTIONS`].
 //!

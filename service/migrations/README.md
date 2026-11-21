@@ -122,7 +122,8 @@ egress rows are never deleted.
   `{"type": "system", "id": "system"}`, never a principal or an operator
   identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
   (identity-registry IR-059). These are lead decisions (2026-11-20,
-  OQ-IR-14), provisional until the audit writer ships. The action names,
+  OQ-IR-14), provisional until the maintainer ratifies the ADRs
+  (T00.8–T00.17, Gate M0). The action names,
   including `instance_security_policy.mirror` and
   `instance_security_policy.change_sink` for these two events, are the
   closed table of the audit writer: OQ-IR-15 is decided provisionally (lead
@@ -145,12 +146,25 @@ The database does not enforce these rules; the service must:
   (`0006` rejects a `DELETE` of either);
 - validate `exact_destination` as an exact URL (IR-152);
 - compute event and head hashes (the database only stores them);
-- append audit events in this order: write the domain rows first, then lock
-  the chain head (`SELECT … FOR UPDATE`), take `sequence` = head + 1 and
-  `prev_hash` = head hash from that locked row, insert the event, advance the
-  head and commit. The head lock comes last: a transaction that holds it
-  and then waits for a domain row held by a transaction that waits for the
-  head deadlocks, and one of them fails with `40P01`.
+- append audit events in this order: write the domain rows first, then,
+  for an event with a `tenant_id`, lock its tenant row
+  (`SELECT … FOR KEY SHARE`, the lock the insert's foreign-key check
+  takes), then lock the chain head (`SELECT … FOR UPDATE`), take
+  `sequence` = head + 1 and `prev_hash` = head hash from that locked row,
+  insert the event, advance the head and commit. The head lock comes last:
+  a transaction that holds it and then waits for a domain row held by a
+  transaction that waits for the head deadlocks, and one of them fails with
+  `40P01`. The insert's foreign-key check would be such a wait if the
+  tenant row were not locked before the head. Never lock the event's
+  tenant row `FOR UPDATE`; lock it `FOR NO KEY UPDATE`, as step 1 of "What
+  0005 adds" locks every row an operation references, since the
+  foreign-key checks after the head lock take `FOR KEY SHARE`. A writer
+  that did lock it `FOR UPDATE` before appending still keeps the
+  tenant-then-head order, but one that locks the head first and then a
+  tenant row does not. A write that creates an
+  `administrative_operation` is the exception to "domain rows first": it
+  follows steps 1 to 3 of "What 0005 adds", and its event precedes the
+  operation, since `audit_id` is an immediate (not deferrable) foreign key.
 
 Concurrent appenders queue on the head row, which the insert trigger locks
 too. A writer that took its `sequence` from a head another transaction has
@@ -1662,7 +1676,8 @@ Not done in `0002`:
   ID, tenant and revision (tasks §3 "IDs/names"). Done in `0007`.
 - The audit writer. The service computes the event hash (lead decision,
   2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
-  writer ships). The hash is SHA-256 over the concatenation of:
+  maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). The hash is SHA-256
+  over the concatenation of:
   1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
   2. `prev_hash` as 32 raw bytes, or zero bytes for the first event, whose
      `prev_hash` column is `NULL`;
@@ -1692,8 +1707,10 @@ Not done in `0002`:
     keeps it unchanged.
   - Lines 244–246, on the chain genesis: "the genesis representation is not
     specified" is superseded for the first event by IR-056, under which its
-    stored `prev_hash` is `NULL` and enters the hash as zero bytes, read as
-    no bytes at all (inferred; the audit writer does so). The empty head (`sequence` 0, `NULL` `head_hash`) is still inferred.
+    stored `prev_hash` is `NULL` and enters the hash as zero bytes, meaning
+    no bytes at all, the empty input (lead decision, 2026-11-21,
+    provisional). The empty head (`sequence` 0, `NULL` `head_hash`) is still
+    inferred.
   - Line 259, on `audit_event.tenant_id`: OQ-IR-14 is decided; the
     instance-scope event rules are IR-057 to IR-059 and "Instance-scope
     events" above.
@@ -1822,28 +1839,45 @@ exactly one attempt consumes holds under `READ COMMITTED`; under
 
 Audit events (IR-055 to IR-059; OQ-IR-14; OQ-IR-15, decided provisionally
 by the lead decision 2026-11-21; T10.1; design §7): `append_audit_event`
-appends one event as the last step of a caller transaction, in the order of
-"append audit events in this order" above: it locks the head
-(`SELECT … FOR UPDATE`), takes `sequence` = head + 1 and `prev_hash` = head
-hash, computes the IR-056 hash in Rust, inserts the event and advances the
-head, three statements, so it takes a `Transaction` rather than any
-executor. Concurrent appenders queue on the head lock and all succeed under
-`READ COMMITTED`. The caller supplies the ID, the timestamp (truncated to
-the microsecond) and every field; nothing reads a clock. An action outside
-the closed table `AUDIT_ACTIONS` or without the `<resource>.<verb>` syntax,
-an empty operator ID, a revision above `2^53 - 1` and a timestamp outside
-the `0007` range are encode errors (`Other`) before any statement. The
-envelope is RFC 8785 canonical JSON with every member present (`null` when
-absent), the timestamp RFC 3339 with six fractional digits and `Z`, and the
-actor the canonical JSON `{"id":…,"type":…}` that the `actor` column stores
-byte for byte. The first event's `NULL` `prev_hash` adds no bytes to its
-hash (inferred). `verify_audit_chain` reads the head, and whether an event
-lies past it, in one statement, then the events up to the head a page at a
-time; it recomputes each hash from the stored columns and returns the first
-broken sequence with its reason (`Gap`, `PrevHashMismatch`, `HeadMismatch`,
-or `Unencodable` for a row the writer could not have written). An edit of
-event `k` shows at `k + 1`, or at the head for the last event. Other
-registry writes do not append events; their callers do, in the same
+appends one event in a caller transaction after the domain rows, in the
+order of "append audit events in this order" above (a write that creates an
+`administrative_operation` inserts it after the event, steps 1 to 3 of
+"What 0005 adds"). For an event with a `tenant_id` it first locks the
+tenant row (`SELECT … FOR KEY SHARE`); an instance-scope event locks no
+tenant row. Then it locks the head (`SELECT … FOR UPDATE`), takes
+`sequence` = head + 1 and `prev_hash` = head hash, runs
+`SET CONSTRAINTS <schema>.audit_event_head_reached DEFERRED` (the schema of
+`audit_event`, quoted, so that a caller that ran
+`SET CONSTRAINTS ALL IMMEDIATE` still appends), computes the IR-056 hash in
+Rust, inserts the event and advances the head: four or five statements, so
+it takes a `Transaction` rather than any executor. Never lock the event's
+tenant row `FOR UPDATE` (see above). Concurrent appenders queue on
+the head lock and all succeed under `READ COMMITTED`. The caller supplies
+the ID, the timestamp (truncated to the microsecond) and every field;
+nothing reads a clock. An action outside the closed table `AUDIT_ACTIONS` or
+without the `<resource>.<verb>` syntax, an empty operator ID, a revision
+above `2^53 - 1` and a timestamp outside the years `0000` to `9999` (inside
+the `0007` range or not) are encode errors (`Other`) before any statement.
+Other bad input fails at a statement: a missing tenant at the tenant lock,
+before the head lock, with the error the insert's foreign key gave
+(`Invariant` naming `audit_event_tenant_id_fkey`; the transaction is not
+aborted); a NUL character at the first statement that binds it (`Other`); a
+revision below 1 at the insert (`Invariant`); and a `sequence` above
+`2^53 - 1` after the head lock (`Other`). The envelope is RFC 8785
+canonical JSON with every member present (`null` when absent), the
+timestamp RFC 3339 with six fractional digits and `Z`, and the actor the
+canonical JSON `{"id":…,"type":…}` that the `actor` column stores byte for
+byte. The first event's `NULL` `prev_hash` adds no bytes to its hash (lead
+decision, 2026-11-21, provisional). `verify_audit_chain` reads the head,
+and whether an event lies past it, in one statement, then the events up to
+the head a page at a time; it recomputes each hash from the stored columns
+and returns the first broken sequence with its reason (`Gap`,
+`PrevHashMismatch`, `HeadMismatch`, or `Unencodable` for a row the writer
+could not have written, a year outside `0000` to `9999` included). An edit
+of event `k` shows at `k + 1`, or at the head for the last event. Deleting
+the tail and rewinding the head, or deleting every event and resetting the
+head, verifies as intact; only the external sink (OQ-TM-12) catches that.
+Other registry writes do not append events; their callers do, in the same
 transaction.
 
 Required binding predicates (T12.2; ADR-016 items 2 to 4; A37):

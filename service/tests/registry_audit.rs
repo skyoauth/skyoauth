@@ -5,8 +5,11 @@
 //! independently (with Python's `hashlib` and `json`), and that every absent
 //! value hashes apart from a present one. The database tests append events
 //! in chains, concurrently and in rolled-back transactions, reject bad input
-//! before any statement, and edit stored rows in rolled-back transactions
-//! with the guard triggers off to show that verification finds each edit.
+//! before any statement, check the lock order (a tenant-scope event's
+//! tenant row before the head, no tenant lock for an instance-scope event)
+//! and that the deferred head check stays deferred, and edit stored rows in
+//! rolled-back transactions with the guard triggers off to show that
+//! verification finds each edit.
 //!
 //! Unit tests may assert hash values; conformance scenarios must not
 //! (IR-056).
@@ -38,6 +41,10 @@ const T0: u64 = 1_795_253_400_000_000;
 /// The `0007` range bounds, in microseconds from the Unix epoch.
 const EARLIEST: u64 = 210_866_803_200_000_000;
 const LATEST: u64 = i64::MAX as u64 - 1;
+/// The envelope bounds, `0000-01-01T00:00:00.000000Z` (before the epoch)
+/// and `9999-12-31T23:59:59.999999Z`, in microseconds from the Unix epoch.
+const YEAR_0000: u64 = 62_167_219_200_000_000;
+const YEAR_9999_END: u64 = 253_402_300_799_999_999;
 
 fn at(microseconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_micros(microseconds)
@@ -180,8 +187,9 @@ fn absent_and_present_values_hash_differently() {
     }
 }
 
-/// Six fractional digits and `Z`, truncated to the microsecond; the `0007`
-/// bounds as expanded years; beyond them an encode error.
+/// Six fractional digits and `Z`, truncated to the microsecond, in the
+/// years `0000` to `9999`; beyond them, the `0007` bounds included, an
+/// encode error.
 #[test]
 fn timestamps_are_written_with_microseconds_and_z() {
     let timestamp = |time: SystemTime| {
@@ -206,18 +214,31 @@ fn timestamps_are_written_with_microseconds_and_z() {
         "1969-12-31T23:59:59.999999Z"
     );
     assert_eq!(
-        timestamp(UNIX_EPOCH - Duration::from_micros(EARLIEST)).unwrap(),
-        "-004713-11-24T00:00:00.000000Z"
+        timestamp(UNIX_EPOCH - Duration::from_micros(YEAR_0000)).unwrap(),
+        "0000-01-01T00:00:00.000000Z"
     );
     assert_eq!(
-        timestamp(at(LATEST)).unwrap(),
-        "+294247-01-10T04:00:54.775806Z"
+        timestamp(at(YEAR_9999_END)).unwrap(),
+        "9999-12-31T23:59:59.999999Z"
+    );
+    // Truncated toward the past onto the bound.
+    assert_eq!(
+        timestamp(at(YEAR_9999_END) + Duration::from_nanos(999)).unwrap(),
+        "9999-12-31T23:59:59.999999Z"
     );
     for beyond in [
+        UNIX_EPOCH - Duration::from_micros(YEAR_0000 + 1),
+        UNIX_EPOCH - Duration::from_micros(YEAR_0000) - Duration::from_nanos(1),
+        at(YEAR_9999_END + 1),
+        UNIX_EPOCH - Duration::from_micros(EARLIEST),
+        at(LATEST),
         UNIX_EPOCH - Duration::from_micros(EARLIEST + 1),
         at(LATEST + 1),
     ] {
-        assert!(matches!(timestamp(beyond), Err(RegistryError::Other(_))));
+        assert!(
+            matches!(timestamp(beyond), Err(RegistryError::Other(_))),
+            "{beyond:?}"
+        );
     }
     let mut big = kat_first();
     big.new_revision = Some(1 << 53);
@@ -354,23 +375,30 @@ async fn events_chain_from_the_first_and_the_head_follows() {
     db.drop([pool]).await;
 }
 
-/// Events at both `0007` bounds are written, read back exactly and verify.
+/// Events at both envelope bounds, the first and last microsecond of the
+/// years `0000` to `9999`, are written, read back exactly and verify.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn events_at_the_range_check_bounds_round_trip() {
+async fn events_at_the_year_bounds_round_trip() {
     let (db, pool) = migrated().await;
     let mut early = new_event("aud_early", Some("ten_a"), 0);
-    early.timestamp = UNIX_EPOCH - Duration::from_micros(EARLIEST);
+    early.timestamp = UNIX_EPOCH - Duration::from_micros(YEAR_0000);
     let early_stored = append(&pool, &early).await;
     assert_eq!(early_stored.timestamp, early.timestamp);
-    let late = new_event("aud_late", Some("ten_a"), LATEST);
+    assert!(
+        early_stored
+            .envelope()
+            .unwrap()
+            .contains(r#""timestamp":"0000-01-01T00:00:00.000000Z""#)
+    );
+    let late = new_event("aud_late", Some("ten_a"), YEAR_9999_END);
     let late_stored = append(&pool, &late).await;
-    assert_eq!(late_stored.timestamp, at(LATEST));
+    assert_eq!(late_stored.timestamp, at(YEAR_9999_END));
     assert!(
         late_stored
             .envelope()
             .unwrap()
-            .contains(r#""timestamp":"+294247-01-10T04:00:54.775806Z""#)
+            .contains(r#""timestamp":"9999-12-31T23:59:59.999999Z""#)
     );
     let texts: Vec<String> = sqlx::query_scalar(
         "SELECT to_char(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US BC')
@@ -381,9 +409,10 @@ async fn events_at_the_range_check_bounds_round_trip() {
     .unwrap();
     assert_eq!(
         texts,
+        // PostgreSQL has no year 0: 0000 is 1 BC.
         [
-            "4714-11-24 00:00:00.000000 BC",
-            "294247-01-10 04:00:54.775806 AD"
+            "0001-01-01 00:00:00.000000 BC",
+            "9999-12-31 23:59:59.999999 AD"
         ]
     );
     assert_eq!(
@@ -426,6 +455,18 @@ async fn bad_input_is_rejected_before_any_statement() {
     bad.push((event.clone(), "timestamp out of range"));
     event.timestamp = UNIX_EPOCH - Duration::from_micros(EARLIEST + 1);
     bad.push((event, "timestamp out of range"));
+    // Inside the 0007 range, outside the years 0000 to 9999.
+    let years = "audit timestamp outside the years 0000 to 9999";
+    for timestamp in [
+        at(YEAR_9999_END + 1),
+        UNIX_EPOCH - Duration::from_micros(YEAR_0000 + 1),
+        at(LATEST),
+        UNIX_EPOCH - Duration::from_micros(EARLIEST),
+    ] {
+        let mut event = new_event("aud_x", Some("ten_a"), 0);
+        event.timestamp = timestamp;
+        bad.push((event, years));
+    }
 
     let mut transaction = pool.begin().await.unwrap();
     for (event, reason) in &bad {
@@ -466,7 +507,8 @@ async fn bad_input_is_rejected_before_any_statement() {
 
 /// A rolled-back append leaves the chain as it was, and the next append
 /// takes the same sequence. A missing tenant and a duplicate ID map by
-/// constraint name.
+/// constraint name; a missing tenant is found by the tenant lock, before
+/// the head lock, and leaves the transaction usable.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_rolled_back_or_refused_append_leaves_the_chain_unchanged() {
@@ -498,6 +540,17 @@ async fn a_rolled_back_or_refused_append_leaves_the_chain_unchanged() {
         ),
         "{err:?}"
     );
+    let mut other = pool.begin().await.unwrap();
+    sqlx::query("SELECT FROM audit_chain_head FOR UPDATE NOWAIT")
+        .execute(&mut *other)
+        .await
+        .unwrap();
+    other.rollback().await.unwrap();
+    let one: i32 = sqlx::query_scalar("SELECT 1")
+        .fetch_one(&mut *transaction)
+        .await
+        .unwrap();
+    assert_eq!(one, 1);
     transaction.rollback().await.unwrap();
     let mut transaction = pool.begin().await.unwrap();
     let err = append_audit_event(&mut transaction, &new_event("aud_1", Some("ten_a"), T0))
@@ -583,6 +636,202 @@ async fn a_second_appender_waits_for_the_head_and_extends_it() {
     let two = waiting.await.unwrap().unwrap();
     assert_eq!((one.sequence, two.sequence), (1, 2));
     assert_eq!(two.prev_hash, Some(one.hash));
+    assert_eq!(head(&pool).await, (2, Some(two.hash.to_vec())));
+    assert_eq!(
+        verify(&pool).await,
+        ChainVerdict::Intact { last_sequence: 2 }
+    );
+    db.drop([pool]).await;
+}
+
+/// Whether the backend `pid` holds or waits for any lock on `table`.
+async fn locks_on(pool: &PgPool, pid: i32, table: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_locks WHERE pid = $1 AND relation = $2::regclass)",
+    )
+    .bind(pid)
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// A transaction that holds a tenant row `FOR UPDATE` and then appends an
+/// event for that tenant does not deadlock with a concurrent append for the
+/// same tenant. The concurrent appender locks the tenant row before the
+/// head, so it waits there holding no lock on the head; the holder then
+/// takes the head, appends and commits, and the other appender follows.
+/// Locking the tenant only by the insert's foreign-key check, after the
+/// head, deadlocks (`40P01`): the other appender would hold the head while
+/// it waits for the tenant row, and the holder would wait for the head.
+/// The order is fixed with `pg_blocking_pids`, not by timing: the holder
+/// appends only once the other appender waits for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_tenant_row_held_for_update_does_not_deadlock_an_append() {
+    let (db, pool) = migrated().await;
+    let mut holder = pool.acquire().await.unwrap().detach();
+    let mut other = pool.acquire().await.unwrap().detach();
+    let (holder_pid, other_pid) = (
+        backend_pid(&mut holder).await,
+        backend_pid(&mut other).await,
+    );
+    let mut transaction = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM tenant WHERE id = 'ten_a' FOR UPDATE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let waiting = tokio::spawn(async move {
+        let mut transaction = other.begin().await.unwrap();
+        let outcome =
+            append_audit_event(&mut transaction, &new_event("aud_2", Some("ten_a"), T0)).await;
+        if outcome.is_ok() {
+            transaction.commit().await.unwrap();
+        }
+        outcome
+    });
+    wait_until_blocked(&pool, other_pid, holder_pid).await;
+    assert!(!locks_on(&pool, other_pid, "audit_chain_head").await);
+    let one = tokio::time::timeout(
+        Duration::from_secs(30),
+        append_audit_event(&mut transaction, &new_event("aud_1", Some("ten_a"), T0)),
+    )
+    .await
+    .expect("the holder's append never finished")
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let two = tokio::time::timeout(Duration::from_secs(30), waiting)
+        .await
+        .expect("the other append never finished")
+        .unwrap()
+        .unwrap();
+    assert_eq!((one.sequence, two.sequence), (1, 2));
+    assert_eq!(two.prev_hash, Some(one.hash));
+    assert_eq!(
+        verify(&pool).await,
+        ChainVerdict::Intact { last_sequence: 2 }
+    );
+    db.drop([pool]).await;
+}
+
+/// The tenant lock is `FOR KEY SHARE`, the lock of the insert's
+/// foreign-key check: an append for a tenant whose row another transaction
+/// holds `FOR NO KEY UPDATE`, as a domain write of the row does, does not
+/// wait for it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_append_does_not_wait_for_a_tenant_row_held_for_no_key_update() {
+    let (db, pool) = migrated().await;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT FROM tenant WHERE id = 'ten_a' FOR NO KEY UPDATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '5s'")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let first = append_audit_event(&mut transaction, &new_event("aud_1", Some("ten_a"), T0))
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    holder.rollback().await.unwrap();
+    assert_eq!(head(&pool).await, (1, Some(first.hash.to_vec())));
+    db.drop([pool]).await;
+}
+
+/// An instance-scope event takes no tenant lock: it appends while another
+/// transaction holds every tenant row `FOR UPDATE`, and afterwards its
+/// transaction holds no lock on `tenant` (the tenant lock statement would
+/// leave a table lock even when it locks no row), where a tenant-scope
+/// event waits for its tenant row until its lock timeout.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_instance_scope_append_takes_no_tenant_lock() {
+    let (db, pool) = migrated().await;
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("SELECT FROM tenant FOR UPDATE")
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '10s'")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let pid = backend_pid(&mut transaction).await;
+    let mut startup = new_event("aud_1", None, T0);
+    startup.actor = AuditActor::System;
+    startup.action = "instance_security_policy.mirror".into();
+    let first = append_audit_event(&mut transaction, &startup)
+        .await
+        .unwrap();
+    assert!(!locks_on(&pool, pid, "tenant").await);
+    transaction.commit().await.unwrap();
+
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '200ms'")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let err = append_audit_event(&mut transaction, &new_event("aud_2", Some("ten_a"), T0))
+        .await
+        .unwrap_err();
+    let RegistryError::Other(source) = &err else {
+        panic!("{err:?}");
+    };
+    // lock_not_available.
+    assert_eq!(
+        source
+            .as_database_error()
+            .and_then(|err| err.code())
+            .as_deref(),
+        Some("55P03"),
+        "{source:?}"
+    );
+    transaction.rollback().await.unwrap();
+    holder.rollback().await.unwrap();
+    assert_eq!(head(&pool).await, (1, Some(first.hash.to_vec())));
+    db.drop([pool]).await;
+}
+
+/// The append keeps the deferred head check deferred: a transaction that
+/// ran `SET CONSTRAINTS ALL IMMEDIATE` still appends, tenant-scope and
+/// instance-scope events alike, and commits. The append names the
+/// constraint with its schema, so a constraint trigger of the same name in
+/// a schema earlier on the `search_path` does not take its place.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_append_after_set_constraints_all_immediate_succeeds() {
+    let (db, pool) = migrated().await;
+    sqlx::raw_sql(
+        "CREATE SCHEMA decoy;
+         CREATE TABLE decoy.decoy (sequence bigint);
+         CREATE CONSTRAINT TRIGGER audit_event_head_reached AFTER INSERT ON decoy.decoy
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION public.skyoauth_audit_event_head_reached()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    sqlx::raw_sql("SET LOCAL search_path = decoy, public; SET CONSTRAINTS ALL IMMEDIATE")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let one = append_audit_event(&mut transaction, &new_event("aud_1", Some("ten_a"), T0))
+        .await
+        .unwrap();
+    let mut startup = new_event("aud_2", None, T0);
+    startup.actor = AuditActor::System;
+    startup.action = "instance_security_policy.mirror".into();
+    let two = append_audit_event(&mut transaction, &startup)
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!((one.sequence, two.sequence), (1, 2));
     assert_eq!(head(&pool).await, (2, Some(two.hash.to_vec())));
     assert_eq!(
         verify(&pool).await,
@@ -755,6 +1004,29 @@ async fn verification_finds_each_edit() {
                 "{EDIT} UPDATE audit_event SET new_revision = 9007199254740992 WHERE sequence = 2"
             ),
             broken(2, ChainBreak::Unencodable),
+        ),
+        // Years the 0007 range allows but RFC 3339 cannot write, and the
+        // last microsecond of 9999, which it can.
+        (
+            format!(
+                "{EDIT} UPDATE audit_event SET timestamp = '10000-01-01 00:00:00+00' \
+                 WHERE sequence = 2"
+            ),
+            broken(2, ChainBreak::Unencodable),
+        ),
+        (
+            format!(
+                "{EDIT} UPDATE audit_event SET timestamp = '0002-12-31 23:59:59.999999+00 BC' \
+                 WHERE sequence = 2"
+            ),
+            broken(2, ChainBreak::Unencodable),
+        ),
+        (
+            format!(
+                "{EDIT} UPDATE audit_event SET timestamp = '9999-12-31 23:59:59.999999+00' \
+                 WHERE sequence = 2"
+            ),
+            broken(3, ChainBreak::PrevHashMismatch),
         ),
         // Missing events.
         (

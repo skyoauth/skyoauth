@@ -1,10 +1,11 @@
 //! The closed table of audit event actions (identity-registry IR-059,
 //! OQ-IR-15).
 //!
-//! [`AUDIT_ACTIONS`] is the one place the action names live. The three
-//! names of IR-059's table are taken from it; every other name is
-//! (inferred), named by this table as OQ-IR-15 asks the audit writer to do
-//! (lead decision, 2026-11-21, provisional until the audit writer ships):
+//! [`AUDIT_ACTIONS`] is the closed set of action names and the one place
+//! they live (lead decision, 2026-11-21, provisional until the maintainer
+//! ratifies the ADRs, T00.8 to T00.17, Gate M0; OQ-IR-15). IR-059's
+//! three-row table gives examples, all of them in the set; every other name
+//! is (inferred), named here as OQ-IR-15 asks the audit writer to do:
 //!
 //! - The startup event that mirrors `single_actor_mode` (IR-053) is
 //!   `instance_security_policy.mirror`, and the sink-change event (IR-053)
@@ -24,11 +25,12 @@
 //!   (`administrative_operation.approve`), and the workload registry tables
 //!   of `0002` to `0004`.
 //!
-//! Verbs: `create` for an insert, `enable` and `disable` for a write that
-//! changes only `status` (as IR-059's `egress_allowlist_entry.enable`),
-//! `update` for any other write of the row (a list-set change included,
-//! since it advances the owner's revision), and `delete` where `0006`
-//! allows one (a disabled binding or grant). Human, gateway, key and
+//! Each table has the verbs its writes allow: `create` for an insert,
+//! `enable` and `disable` for a write that changes only `status` (as
+//! IR-059's `egress_allowlist_entry.enable`), `update` for any other write
+//! of the row (a list-set change included, since it advances the owner's
+//! revision), and `delete` where `0006` allows one (a disabled binding or
+//! grant). Human, gateway, key and
 //! provider-switch actions (M1b and later) are not listed yet; each lands
 //! with its writer.
 //!

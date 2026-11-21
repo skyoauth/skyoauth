@@ -6,36 +6,76 @@
 //!
 //! [`append_audit_event`] is the last step of the audited transaction: the
 //! caller writes the domain rows first, then appends the event, then
-//! commits. It locks the chain head (`SELECT … FOR UPDATE`), takes
-//! `sequence` = head + 1 and `prev_hash` = head hash from that locked row,
-//! computes the event hash in Rust, inserts the event and advances the head
-//! to it. The head lock comes last so that a transaction never holds it
-//! while it waits for a domain row (migrations README). Concurrent
-//! appenders queue on the head lock and each gets the committed head, so
-//! under `READ COMMITTED` every one of them succeeds. Under
-//! `REPEATABLE READ` or `SERIALIZABLE` a writer whose snapshot predates
-//! another's committed append fails with `40001`
-//! ([`RegistryError::Retry`]): retry the whole transaction.
+//! commits. The exception is a write that creates an
+//! `administrative_operation`, which follows steps 1 to 3 of the migrations
+//! README for it: lock the rows it references or updates
+//! `FOR NO KEY UPDATE`, append the event, insert the operation, then make
+//! the other updates. The event precedes the operation because
+//! `administrative_operation.audit_id` is an immediate (not deferrable)
+//! foreign key to it.
 //!
-//! It takes a [`Transaction`] (inferred): an append is three statements
-//! that must commit together with the audited write, and the type makes an
-//! open transaction a precondition. The `0002` triggers would also refuse
-//! an append outside one: the deferred `audit_event_head_reached` check
-//! fails an insert that commits before the head reaches it.
+//! The append locks the event's `tenant` row first, for a tenant-scope
+//! event, with `SELECT … FOR KEY SHARE`, the lock the insert's foreign-key
+//! check takes; then the chain head (`SELECT … FOR UPDATE`). An
+//! instance-scope event locks no tenant row. It takes `sequence` = head + 1
+//! and `prev_hash` = head hash from the locked head, computes the event
+//! hash in Rust, inserts the event and advances the head to it. The head
+//! lock is the append's last lock so that a transaction never holds it
+//! while it waits for another row (migrations README): with the tenant
+//! locked only by the insert, an appender holding the head would wait for a
+//! transaction that holds the tenant row `FOR UPDATE` and then waits for
+//! the head, and one of them would fail with `40P01`. Never lock the
+//! event's tenant row `FOR UPDATE`; lock it `FOR NO KEY UPDATE` (README
+//! step 1: the foreign-key check of an `administrative_operation` insert,
+//! after the head lock, takes `FOR KEY SHARE` on its tenant too). A caller
+//! that locked a tenant row `FOR UPDATE` before appending is still
+//! consistent with the tenant-then-head order; one that locks the head
+//! first and then a tenant row is not. Concurrent appenders queue on the
+//! head lock and each gets the committed head, so under `READ COMMITTED`
+//! every one of them succeeds. Under `REPEATABLE READ` or `SERIALIZABLE` a
+//! writer whose snapshot predates another's committed append fails with
+//! `40001` ([`RegistryError::Retry`]): retry the whole transaction.
+//!
+//! It takes a [`Transaction`] (inferred): an append is four statements, five
+//! for a tenant-scope event, that must commit together with the audited
+//! write, and the type makes an open transaction a precondition. The `0002`
+//! triggers would also refuse an append outside one: the deferred
+//! `audit_event_head_reached` check fails an insert that commits before the
+//! head reaches it. That constraint must stay deferred until the head is
+//! advanced, so before the insert the append runs
+//! `SET CONSTRAINTS <schema>.audit_event_head_reached DEFERRED`, with the
+//! schema of `audit_event` as the transaction's `search_path` resolves it
+//! (read by the head lock statement and quoted by PostgreSQL): a caller
+//! that ran `SET CONSTRAINTS ALL IMMEDIATE` still appends, and the
+//! constraint stays deferred, its initial mode, for the rest of the
+//! transaction. The name is schema-qualified because an unqualified one
+//! sets only the first schema on the `search_path` with a constraint of
+//! that name (inferred).
 //!
 //! Before any statement it rejects, as an encode error
 //! ([`RegistryError::Other`]):
 //!
 //! - an action that does not have the `<resource>.<verb>` syntax of IR-059
 //!   or is not in [`AUDIT_ACTIONS`](super::AUDIT_ACTIONS), a closed list
-//!   (lead decision, 2026-11-21, provisional until the audit writer ships);
+//!   (lead decision, 2026-11-21, provisional until the maintainer ratifies
+//!   the ADRs, T00.8 to T00.17, Gate M0);
 //! - an operator actor with an empty ID (inferred);
 //! - a revision above `2^53 - 1` (see "Envelope");
-//! - a timestamp outside the range the `0007` check
+//! - a timestamp outside the years `0000` to `9999` (see "Envelope"), a
+//!   narrower range than the one the `0007` check
 //!   `audit_event_timestamp_range_check` holds, as every registry time
 //!   (module docs, "Timestamps"). A time is truncated toward the past to a
 //!   whole microsecond, the precision PostgreSQL stores, before it is
 //!   hashed, so the stored row hashes as the written one.
+//!
+//! Other bad input fails at a statement. A missing tenant fails at the
+//! tenant lock, before the head lock, with the error the insert's foreign
+//! key gave: [`RegistryError::Invariant`] naming
+//! `audit_event_tenant_id_fkey` (inferred: the same value; the transaction
+//! is not aborted). A NUL character fails the first statement that binds it
+//! (`22021`, [`RegistryError::Other`]), a revision below 1 fails the insert
+//! (`23514`, [`RegistryError::Invariant`]), and a `sequence` above
+//! `2^53 - 1` is an encode error after the head lock.
 //!
 //! The ID, the timestamp and every other field come from the caller
 //! (registry module docs: T10.2 generates IDs); no clock is read here.
@@ -45,8 +85,8 @@
 //! The hash is IR-056's: SHA-256 over the ASCII bytes `skyoauth.audit.v1`
 //! and one zero byte; then `prev_hash` as 32 raw bytes, "or zero bytes for
 //! the first event of a chain, whose stored `prev_hash` is null" (IR-056),
-//! read as no bytes at all, not 32 zero-valued bytes (inferred: the literal
-//! reading, against "32 raw bytes"); then the envelope below. It is not
+//! read as no bytes at all, the empty input, not 32 zero-valued bytes (lead
+//! decision, 2026-11-21, provisional); then the envelope below. It is not
 //! stored: the next event's `prev_hash` and the head's `head_hash` record it,
 //! and verification recomputes it (OQ-IR-15, no own-hash column).
 //!
@@ -57,17 +97,19 @@
 //! `prev_hash`): `id`, `tenant_id`, `sequence`, `timestamp`, `actor`,
 //! `action`, `object_id`, `previous_revision`, `new_revision` and `outcome`,
 //! serialized as RFC 8785 (JCS) canonical JSON in UTF-8. Lead decision,
-//! 2026-11-21, provisional until the audit writer ships (OQ-IR-15):
+//! 2026-11-21, provisional until the maintainer ratifies the ADRs (T00.8 to
+//! T00.17, Gate M0; OQ-IR-15):
 //!
 //! - Every member is always present; an absent value (`tenant_id`,
 //!   `previous_revision`, `new_revision`) is an explicit JSON `null`, so an
 //!   absent and a present value hash differently.
 //! - `timestamp` is RFC 3339 in UTC with `Z` and exactly six fractional
 //!   digits, the stored microseconds, for example
-//!   `2026-11-21T09:30:00.000000Z`. A year outside `0000` to `9999`, which
-//!   RFC 3339 cannot write but the `0007` range allows, is written as the
-//!   ECMAScript expanded year, a sign and six digits (`+294247`, `-004713`;
-//!   inferred).
+//!   `2026-11-21T09:30:00.000000Z`, from `0000-01-01T00:00:00.000000Z` to
+//!   `9999-12-31T23:59:59.999999Z`. Another year, which RFC 3339 cannot
+//!   write but the `0007` range allows, has no envelope: the writer rejects
+//!   it and the verifier reports a stored row with one as
+//!   [`ChainBreak::Unencodable`] (lead decision, 2026-11-21, provisional).
 //! - `actor` is IR-058's `{type, id}` object; JCS sorts `id` before `type`.
 //!   The `actor` column stores the canonical JSON text of the same object,
 //!   so the column and the envelope agree byte for byte. The system actor is
@@ -102,10 +144,10 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use sqlx::{FromRow, PgConnection, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{AssertSqlSafe, FromRow, PgConnection, Postgres, Row, Transaction, postgres::PgRow};
 
 use super::{
-    RegistryError,
+    InvariantKind, RegistryError,
     event_actions::{is_audit_action, is_audit_action_syntax},
     micros,
     model::since_epoch,
@@ -117,6 +159,24 @@ pub const AUDIT_HASH_PREFIX: &[u8] = b"skyoauth.audit.v1\0";
 
 /// The largest integer JCS writes exactly, `2^53 - 1`.
 pub const MAX_ENVELOPE_INTEGER: i64 = (1 << 53) - 1;
+
+/// `0000-01-01T00:00:00.000000Z` in microseconds from the Unix epoch: the
+/// earliest time an envelope writes.
+const EARLIEST_ENVELOPE_MICROSECONDS: i64 = -62_167_219_200_000_000;
+
+/// `9999-12-31T23:59:59.999999Z` in microseconds from the Unix epoch: the
+/// latest time an envelope writes.
+const LATEST_ENVELOPE_MICROSECONDS: i64 = 253_402_300_799_999_999;
+
+/// The encode error for a time outside the years `0000` to `9999`.
+const YEAR_OUT_OF_RANGE: &str = "audit timestamp outside the years 0000 to 9999";
+
+/// Whether `microseconds` from the Unix epoch lies in the years `0000` to
+/// `9999`, the ones RFC 3339 writes (see the module docs, "Envelope"). The
+/// range lies inside the one [`since_epoch`] writes.
+fn in_envelope_years(microseconds: i64) -> bool {
+    (EARLIEST_ENVELOPE_MICROSECONDS..=LATEST_ENVELOPE_MICROSECONDS).contains(&microseconds)
+}
 
 /// Events read per statement by [`verify_audit_chain`] (inferred).
 const VERIFY_PAGE: i64 = 500;
@@ -140,7 +200,10 @@ fn time_of_microseconds(microseconds: i64) -> Option<SystemTime> {
 }
 
 /// The actor of an audit event (IR-058; lead decision, 2026-11-21,
-/// provisional until the audit writer ships).
+/// provisional until the maintainer ratifies the ADRs, T00.8 to T00.17,
+/// Gate M0). There is no variant for bootstrap or break-glass recovery yet;
+/// their reserved IDs are written as [`Operator`](Self::Operator) actors
+/// (identity-registry IR-058).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditActor {
     /// The reserved system actor `{"type": "system", "id": "system"}`, for
@@ -248,7 +311,8 @@ pub struct AuditEvent {
 impl AuditEvent {
     /// The RFC 8785 canonical JSON of the event's envelope (see the module
     /// docs). An encode error ([`RegistryError::Other`]) for a sequence or
-    /// revision above `2^53 - 1` or a timestamp outside the `0007` range.
+    /// revision above `2^53 - 1` or a timestamp outside the years `0000` to
+    /// `9999`.
     pub fn envelope(&self) -> Result<String, RegistryError> {
         Ok(self.fields().envelope()?)
     }
@@ -307,13 +371,12 @@ impl Fields<'_> {
     fn envelope(&self) -> Result<String, sqlx::Error> {
         let microseconds = match self.timestamp {
             Timestamp::Time(time) => microseconds_since_epoch(time)?,
-            Timestamp::Microseconds(microseconds) => {
-                // The range since_epoch writes, so a row reads as written.
-                time_of_microseconds(microseconds)
-                    .ok_or_else(|| encode_error("audit timestamp out of range"))?;
-                microseconds
-            }
+            Timestamp::Microseconds(microseconds) => microseconds,
         };
+        // Inside the range since_epoch writes, so a row reads as written.
+        if !in_envelope_years(microseconds) {
+            return Err(encode_error(YEAR_OUT_OF_RANGE));
+        }
         let mut out = String::with_capacity(256);
         out.push_str("{\"action\":");
         push_string(&mut out, self.action);
@@ -377,8 +440,8 @@ fn push_string(out: &mut String, value: &str) {
 }
 
 /// `microseconds` from the Unix epoch as RFC 3339 in UTC with six
-/// fractional digits and `Z`; a year outside `0000..=9999` as a sign and six
-/// digits (inferred, the ECMAScript expanded year).
+/// fractional digits and `Z`. The caller keeps it in the years `0000` to
+/// `9999` ([`in_envelope_years`]).
 fn rfc3339_microseconds(microseconds: i64) -> String {
     const PER_DAY: i64 = 86_400_000_000;
     let days = microseconds.div_euclid(PER_DAY);
@@ -398,16 +461,9 @@ fn rfc3339_microseconds(microseconds: i64) -> String {
         shifted_month - 9
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
-    let year = if (0..=9_999).contains(&year) {
-        format!("{year:04}")
-    } else if year > 0 {
-        format!("+{year:06}")
-    } else {
-        format!("-{:06}", -year)
-    };
     let seconds = of_day / 1_000_000;
     format!(
-        "{year}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:06}Z",
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:06}Z",
         seconds / 3_600,
         seconds / 60 % 60,
         seconds % 60,
@@ -437,7 +493,21 @@ macro_rules! event_columns {
     };
 }
 
-const LOCK_HEAD: &str = "SELECT sequence, head_hash FROM audit_chain_head FOR UPDATE";
+/// Locks a tenant-scope event's tenant row before the head, as strongly as
+/// the insert's foreign-key check does (see the module docs).
+const LOCK_TENANT: &str = "SELECT 1 FROM tenant WHERE id = $1 FOR KEY SHARE";
+
+/// Locks the head and reads the schema of `audit_event`, as the
+/// `search_path` resolves it, quoted as an identifier.
+const LOCK_HEAD: &str = "SELECT h.sequence, h.head_hash, \
+     (SELECT pg_catalog.quote_ident(n.nspname) FROM pg_catalog.pg_class c \
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+      WHERE c.oid = 'audit_event'::pg_catalog.regclass) AS event_schema \
+     FROM audit_chain_head h FOR UPDATE";
+
+/// The deferred `0002` constraint trigger the append keeps deferred, after
+/// the quoted schema and a dot.
+const HEAD_REACHED: &str = "audit_event_head_reached";
 
 const INSERT_EVENT: &str = concat!(
     "INSERT INTO audit_event (id, tenant_id, sequence, prev_hash, timestamp, actor, action, \
@@ -453,8 +523,9 @@ fn digest(bytes: Vec<u8>) -> Option<[u8; 32]> {
     bytes.try_into().ok()
 }
 
-/// Appends `event` to the chain as the last step of `transaction` (see the
-/// module docs) and returns the stored event with its hash.
+/// Appends `event` to the chain in `transaction`, after the domain rows (see
+/// the module docs for the order and the `administrative_operation`
+/// exception), and returns the stored event with its hash.
 pub async fn append_audit_event(
     transaction: &mut Transaction<'_, Postgres>,
     event: &NewAuditEvent,
@@ -469,6 +540,9 @@ pub async fn append_audit_event(
         return Err(encode_error("audit actor ID is empty").into());
     }
     let interval = since_epoch(event.timestamp)?;
+    if !in_envelope_years(interval.microseconds) {
+        return Err(encode_error(YEAR_OUT_OF_RANGE).into());
+    }
     let mut fields = Fields {
         id: &event.id,
         tenant_id: event.tenant_id.as_deref(),
@@ -484,7 +558,27 @@ pub async fn append_audit_event(
     };
     fields.envelope()?;
 
+    if let Some(tenant_id) = &event.tenant_id {
+        let tenant = sqlx::query(LOCK_TENANT)
+            .bind(tenant_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+        if tenant.is_none() {
+            // What the insert's foreign-key check would have given.
+            return Err(RegistryError::Invariant {
+                kind: InvariantKind::ForeignKey,
+                constraint: Some("audit_event_tenant_id_fkey"),
+            });
+        }
+    }
     let head = sqlx::query(LOCK_HEAD).fetch_one(&mut **transaction).await?;
+    let schema: String = head.try_get("event_schema")?;
+    // The schema is an identifier PostgreSQL quoted.
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "SET CONSTRAINTS {schema}.{HEAD_REACHED} DEFERRED"
+    )))
+    .execute(&mut **transaction)
+    .await?;
     let head_sequence: i64 = head.try_get("sequence")?;
     let prev_hash = match head.try_get::<Option<Vec<u8>>, _>("head_hash")? {
         None => None,
@@ -574,10 +668,10 @@ impl FromRow<'_, PgRow> for StoredEvent {
 impl StoredEvent {
     /// The hash the writer computed for this row, or `None` when the writer
     /// could not have written it: an actor that is not canonical, a time
-    /// outside the readable range, or an integer above `2^53 - 1`.
+    /// outside the years `0000` to `9999`, or an integer above `2^53 - 1`.
     fn recompute(&self) -> Option<[u8; 32]> {
         // The marker micros! gives for a time outside the readable range is
-        // outside the range since_epoch writes, so envelope() rejects it.
+        // outside those years, so envelope() rejects it.
         let prev_hash = match &self.prev_hash {
             None => None,
             Some(bytes) => Some(digest(bytes.clone())?),
@@ -617,8 +711,8 @@ pub enum ChainBreak {
     HeadMismatch,
     /// The writer could not have written this event, so it has no hash: an
     /// actor that is not the canonical JSON of a known actor, a time outside
-    /// the readable range, a hash column that is not 32 bytes, or an integer
-    /// above `2^53 - 1`.
+    /// the years `0000` to `9999` (which the `0007` range check allows), a
+    /// hash column that is not 32 bytes, or an integer above `2^53 - 1`.
     Unencodable,
 }
 
@@ -644,6 +738,10 @@ const READ_EVENTS: &str = concat!(
 
 /// Verifies the whole chain (see the module docs). A store failure is an
 /// error; a broken chain is a [`ChainVerdict::Broken`].
+///
+/// Deleting the tail and rewinding the head, or deleting every event and
+/// resetting the head, verifies as [`ChainVerdict::Intact`]: only the
+/// external sink (OQ-TM-12) catches that.
 pub async fn verify_audit_chain(
     connection: &mut PgConnection,
 ) -> Result<ChainVerdict, RegistryError> {
@@ -741,15 +839,56 @@ mod tests {
             (-1, "1969-12-31T23:59:59.999999Z"),
             (951_782_400_000_000, "2000-02-29T00:00:00.000000Z"),
             (1_795_253_400_123_456, "2026-11-21T09:30:00.123456Z"),
-            (253_402_300_799_999_999, "9999-12-31T23:59:59.999999Z"),
-            (253_402_300_800_000_000, "+010000-01-01T00:00:00.000000Z"),
+            (-62_135_596_800_000_000, "0001-01-01T00:00:00.000000Z"),
+            (-62_135_596_800_000_001, "0000-12-31T23:59:59.999999Z"),
+            (-62_162_035_200_000_000, "0000-03-01T00:00:00.000000Z"),
+            (-62_162_035_200_000_001, "0000-02-29T23:59:59.999999Z"),
+            // The bounds.
             (-62_167_219_200_000_000, "0000-01-01T00:00:00.000000Z"),
-            (-62_167_219_200_000_001, "-000001-12-31T23:59:59.999999Z"),
-            // The 0007 bounds.
-            (-210_866_803_200_000_000, "-004713-11-24T00:00:00.000000Z"),
-            (i64::MAX - 1, "+294247-01-10T04:00:54.775806Z"),
+            (253_402_300_799_999_999, "9999-12-31T23:59:59.999999Z"),
         ] {
+            assert!(in_envelope_years(microseconds), "{microseconds}");
             assert_eq!(rfc3339_microseconds(microseconds), text, "{microseconds}");
+        }
+    }
+
+    #[test]
+    fn only_the_years_0000_to_9999_are_written() {
+        for (microseconds, inside) in [
+            (-62_167_219_200_000_001, false),
+            (-62_167_219_200_000_000, true),
+            (253_402_300_799_999_999, true),
+            (253_402_300_800_000_000, false),
+            // The 0007 bounds, and the marker of an unreadable time.
+            (-210_866_803_200_000_000, false),
+            (i64::MAX - 1, false),
+            (i64::MAX, false),
+            (i64::MIN, false),
+        ] {
+            assert_eq!(in_envelope_years(microseconds), inside, "{microseconds}");
+            let actor = AuditActor::System;
+            let fields = Fields {
+                id: "aud_1",
+                tenant_id: None,
+                sequence: 1,
+                timestamp: Timestamp::Microseconds(microseconds),
+                actor: &actor,
+                action: "tenant.create",
+                object_id: "ten_a",
+                previous_revision: None,
+                new_revision: None,
+                outcome: "success",
+            };
+            match fields.envelope() {
+                Ok(envelope) => assert!(inside, "{envelope}"),
+                Err(err) => {
+                    assert!(!inside, "{microseconds}");
+                    assert_eq!(
+                        err.to_string(),
+                        format!("{}", encode_error(YEAR_OUT_OF_RANGE))
+                    );
+                }
+            }
         }
     }
 
