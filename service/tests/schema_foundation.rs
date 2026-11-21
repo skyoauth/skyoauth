@@ -349,9 +349,9 @@ async fn tenant_secret_namespace_is_unique_non_null_and_immutable() {
         23514 INSERT INTO tenant VALUES ('', 'c', 'ns_c', 'enabled')
         23514 INSERT INTO tenant VALUES ('ten_c', '', 'ns_c', 'enabled')
         23514 INSERT INTO tenant VALUES ('ten_c', 'c', 'ns_c', 'active')
-        SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'
-        SK001 UPDATE tenant SET id = 'ten_z' WHERE id = 'ten_a'
-        SK001 UPDATE tenant SET created_at = now() - interval '1 day'
+        SK001 UPDATE tenant SET secret_namespace = 'ns_z', revision = revision + 1 WHERE id = 'ten_a'
+        SK001 UPDATE tenant SET id = 'ten_z', revision = revision + 1 WHERE id = 'ten_a'
+        SK001 UPDATE tenant SET created_at = now() - interval '1 day', revision = revision + 1
     ",
     )
     .await;
@@ -393,10 +393,10 @@ async fn principal_belongs_to_one_tenant_and_backs_composite_references() {
         23514 INSERT INTO principal VALUES ('wld_2', 'ten_a', 'workload', '', 'enabled')
         23514 INSERT INTO principal VALUES ('wld_2', 'ten_a', 'workload', 'w', 'active')
         23503 INSERT INTO owned VALUES ('ten_b', 'wld_1')
-        SK001 UPDATE principal SET tenant_id = 'ten_b' WHERE id = 'svc_1'
-        SK001 UPDATE principal SET kind = 'workload' WHERE id = 'svc_1'
-        SK001 UPDATE principal SET id = 'svc_2' WHERE id = 'svc_1'
-        SK001 UPDATE principal SET created_at = now() - interval '1 day'
+        SK001 UPDATE principal SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'svc_1'
+        SK001 UPDATE principal SET kind = 'workload', revision = revision + 1 WHERE id = 'svc_1'
+        SK001 UPDATE principal SET id = 'svc_2', revision = revision + 1 WHERE id = 'svc_1'
+        SK001 UPDATE principal SET created_at = now() - interval '1 day', revision = revision + 1
     ",
     )
     .await;
@@ -1036,7 +1036,7 @@ async fn update_guards_ignore_a_temporary_jsonb_type() {
     run(&mut writer, "CREATE TEMP TABLE jsonb (x int)").await;
     assert_rejected(
         &mut writer,
-        "SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'",
+        "SK001 UPDATE tenant SET secret_namespace = 'ns_z', revision = revision + 1 WHERE id = 'ten_a'",
     )
     .await;
     run(
@@ -1099,7 +1099,7 @@ async fn update_guards_ignore_operators_on_the_callers_search_path() {
         .unwrap();
     assert!(shadowed);
     assert_rejected(&mut writer, r"
-        SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'
+        SK001 UPDATE tenant SET secret_namespace = 'ns_z', revision = revision + 1 WHERE id = 'ten_a'
         SK001 UPDATE egress_allowlist_entry SET purpose = 'token_review', revision = revision + 1
         SK001 UPDATE instance_security_policy SET widening_second_approver = true, revision = 7
         SK001 UPDATE egress_allowlist_entry SET status = 'disabled', revision = 7
@@ -1296,7 +1296,7 @@ async fn assert_guards_hold(pool: &PgPool, setup: &'static str) {
         SK001 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_9', 9, '\x09', now(), 'adm_1', 'x', 'ten_a', 'success')
         SK001 UPDATE audit_chain_head SET sequence = 5, head_hash = '\x05'
         SK001 DELETE FROM audit_chain_head
-        SK001 UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'
+        SK001 UPDATE tenant SET secret_namespace = 'ns_z', revision = revision + 1 WHERE id = 'ten_a'
         SK001 UPDATE instance_security_policy SET single_actor_mode = true
         SK001 UPDATE instance_security_policy SET audit_sink_config_digest = '\x02', revision = revision + 1
         SK001 DELETE FROM instance_security_policy

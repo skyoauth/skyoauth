@@ -3,13 +3,15 @@
 -- every timestamptz column, and an index on the referencing side of the
 -- foreign keys that had none (lead decisions, 2026-11-21; README.md "What
 -- 0007 adds"). The conventions of 0002 to 0006 apply. "(inferred)" marks a
--- choice the specifications and lead decisions do not dictate. The earlier
--- migrations stay unchanged; their comments that call these follow-ups
--- open are fulfilled here.
+-- choice the specifications and lead decisions do not dictate. README.md
+-- "Follow-ups" listed these items. The earlier migrations stay unchanged;
+-- the comments of 0002 and 0004 on revisions describe the schema before
+-- 0007.
 --
--- Each table gets one ALTER TABLE statement, so a table is scanned once to
--- validate its new checks. The migration runs in one transaction and holds
--- every lock until it commits (README.md has the measured levels).
+-- Each table's new column and checks are added by one ALTER TABLE
+-- statement, so a table is scanned once to validate its new checks. The
+-- migration runs in one transaction and holds every lock until it commits
+-- (README.md has the measured levels).
 
 -- Revisions, as in 0002 to 0005: a bigint that starts at 1 and advances by
 -- exactly 1 on every UPDATE (skyoauth_check_revision() of 0002). Existing
@@ -31,7 +33,9 @@
 -- so the bounds do not depend on the session's TimeZone. Each check is
 -- named <table>_<column>_range_check and repeats the two literals
 -- (inferred: no shared function, so each check reads alone in the
--- catalog).
+-- catalog). An audit_event row outside the range is an integrity
+-- incident, never edited in place: the event hash covers its timestamp
+-- (identity-registry IR-056, OQ-IR-15; README.md "What 0007 adds").
 
 ALTER TABLE schema_info
     ADD CONSTRAINT schema_info_created_at_range_check
@@ -133,7 +137,7 @@ ALTER TABLE consumed_assertion
 -- resource_server_id becomes server_id, and (inferred) a principal
 -- reference's columns, <x>_principal_id with <x>_principal_kind where the
 -- key has it, become <x>_principal. The indexes are not partial (inferred:
--- a NULL reference is rare enough not to matter).
+-- the tables are small, so a partial index would save little).
 --
 -- Five foreign keys get no index (inferred): the leading column of their
 -- table's primary key is one of their columns and identifies the

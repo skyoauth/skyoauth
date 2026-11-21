@@ -2675,7 +2675,7 @@ async fn trust_guards_and_unreachable_constraints_map_from_raw_statements() {
         .unwrap();
     for sql in [
         "UPDATE trust_keyset SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'ks_1'",
-        "UPDATE trust_keyset_version SET fingerprint = 'sha256:02' WHERE id = 'kv_1'",
+        "UPDATE trust_keyset_version SET fingerprint = 'sha256:02', revision = revision + 1 WHERE id = 'kv_1'",
         "UPDATE trust_source SET kind = 'oidc_discovery', revision = revision + 1 WHERE id = 'src_up'",
         "UPDATE trust_source SET cluster_id = 'cluster_2', revision = revision + 1 WHERE id = 'src_k8s'",
         "UPDATE principal_binding SET workload_principal_id = 'wld_2', revision = revision + 1 WHERE id = 'bnd_1'",
