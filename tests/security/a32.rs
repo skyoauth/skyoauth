@@ -1215,6 +1215,7 @@ impl Recovery {
             operation_id: &self.operation_id,
             binding: ChallengeBinding {
                 request_digest: &self.request_digest,
+                challenge_hash: &self.challenge_hash,
                 instance_id: &self.instance_id,
                 expected_revision: self.expected_revision,
                 recovery_key_epoch: self.recovery_key_epoch,
