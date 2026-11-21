@@ -234,3 +234,10 @@ New questions raised by this ADR:
 - A17 — rollback after independent policy and audience changes leaves them
   untouched.
 - Task tests: T10.8, T13.6, T52.7 (import parser fuzzing).
+
+## Errata
+
+- 2026-11-21: item 3 allows hard delete of a disabled, unreferenced grant,
+  except an impersonation grant, which is never hard-deleted (disabled only):
+  deleting and recreating a dormant impersonation grant under
+  caller-supplied IDs would revive it. Registry guard: migration `0006`.
