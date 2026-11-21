@@ -667,11 +667,16 @@ jobs:
       # one of the stage's legs, each of those jobs with a pos and a neg
       # test; and every listed scenario-named test (a<NN>_…) is in some
       # stage's tests. Listing needs the build (the test run above made it)
-      # but no database. The list covers every package whose tests a stage
-      # lists, so a PR that registers a test of another package adds it here
-      # with -p; until then that test fails the check. It runs whatever the
-      # tests did, after the leg artifact is uploaded. smol-toml comes from
-      # the scripts/ci lockfile, installed without lifecycle scripts.
+      # but no database. A test of a package missing from the list fails the
+      # check, so the list names, with -p, every package that TEST_JOBS in
+      # scripts/ci/report-conformance.mjs names, from the PR that adds that
+      # package to the workspace (the reporter self-test checks this). One
+      # list covers them all until a per-job mode exists (layout §6 "Still
+      # open", item 8). The check runs the static part too, so a static
+      # failure also fails this job; it runs whatever the tests did, after
+      # the leg artifact is uploaded (if: always()), so the leg keeps its
+      # artifact. smol-toml comes from the scripts/ci lockfile, installed
+      # without lifecycle scripts.
       - uses: actions/setup-node@v7
         if: success() || failure()
         with:

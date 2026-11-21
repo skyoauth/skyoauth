@@ -20,7 +20,10 @@
 //             the entry's full milestone; "full row" is the scope of a
 //             single-stage entry only. An implemented stage lists tests and
 //             carries the implemented_sha256 stamp of its (id, milestone,
-//             scope, matrix_sha256); a planned stage carries none.
+//             scope, matrix_sha256); a planned stage carries none. No
+//             stage lists a test twice, and no test ID holds a control
+//             character, a line break or whitespace other than single inner
+//             spaces (a nextest ID holds no space at all).
 //   legs      Every leg is a §1.1 leg string, its env is one of the entry's
 //             envs, its job exists at the stage's milestone (JOB_FROM), and
 //             every env has a leg in some stage.
@@ -59,11 +62,14 @@
 // code job runs it, since the list needs a build; scenarios-pg in ci.yml).
 // --nextest-list takes the JSON of `cargo nextest list --message-format json`
 // (CI); --libtest-list the text of `cargo test -p PKG --test TARGET -- --list`
-// (a local fallback, which cannot show #[ignore], so that is not checked, with
-// a note). Both may be repeated. On every implemented stage:
+// (a local fallback that reads only the plain list, which does not mark
+// #[ignore]d tests, so that is not checked, with a note). Both may be
+// repeated. On every implemented stage:
 //   resolve   Each test ID names a test of the list: its package and target
 //             (nextest binary) are listed, the test is in that binary's list,
-//             and it is neither #[ignore]d nor filtered out. vitest and
+//             and it is neither #[ignore]d nor filtered out; a binary that
+//             nextest skipped (status skipped or skipped-default-filter)
+//             lists no test, so its tests fail. vitest and
 //             Playwright IDs, and the legs of jobs that report with those
 //             runners or with no decided runner, are not resolvable yet
 //             (layout §6 "Still open", item 5): an error, not a skip.
@@ -74,8 +80,14 @@
 // And on the list:
 //   orphans   Each listed test whose last path segment matches a\d\d_ is in
 //             some stage's tests (any stage, planned ones included).
-//   list      Each list is well-formed and lists at least one test; no nextest
-//             binary is listed twice.
+//   list      Each list is well-formed (a mismatching filter-match has a
+//             string reason) and lists at least one test or a skipped
+//             binary; no nextest binary is listed twice.
+//
+// The test-ID, resolution and list messages quote each test ID, binary and
+// package name as a JSON string, and formatError escapes any control
+// character or line separator left in any message, so an error is one line
+// and a name cannot start a workflow command (::error::) in the CI log.
 //
 //   node scripts/ci/check-conformance-registry.mjs [--root DIR] --gate-pr
 //
@@ -142,9 +154,16 @@ import {
   TASKS,
   taskLines,
 } from './gen-conformance-registry.mjs';
-// report-conformance.mjs imports this module too. The cycle is safe because
-// neither module uses the other's bindings before both have been evaluated:
-// only functions called from run() or the tests read them.
+// An import cycle, on purpose: report-conformance.mjs imports this module
+// too, and TEST_JOBS (through testInfo) stays in the reporter so that the two
+// cannot disagree on which job produces a test. The cycle is harmless because
+// neither module uses the other's bindings at load time: their top levels
+// only define functions and constants, and the bindings are read only inside
+// functions (run(), checkResolution(), the reporter's judge()), which run
+// after both modules have been evaluated, whichever one is loaded first.
+// Keep it that way: no top-level statement of either module may read an
+// import from the other (check-conformance-registry.test.mjs loads each
+// module first in a fresh process to pin this).
 import { jobOf, runnerOf, testId, testInfo } from './report-conformance.mjs';
 
 export const WAIVERS = 'tests/conformance/waivers.toml';
@@ -168,9 +187,22 @@ export class Report {
   }
 }
 
+// A string from a test list or a registry file, quoted for a message: JSON
+// string syntax, which escapes line breaks and C0 controls, plus \u escapes
+// for DEL, the C1 controls (NEL among them) and U+2028/2029. So no value can
+// start a new output line, which a CI log could read as a workflow command
+// such as ::error.
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+const escapeUnsafe = (s) => s.replace(UNSAFE_CHARS, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+export const q = (v) => escapeUnsafe(JSON.stringify(String(v)));
+// Any JSON value, quoted the same way (`missing` when there is none).
+const qv = (v) => (v === undefined ? 'missing' : escapeUnsafe(JSON.stringify(v)));
+
+// One line per error: a backstop that escapes any control character or line
+// separator that reached a message unquoted.
 export function formatError(d) {
   const loc = d.file ? (d.line ? `${d.file}:${d.line}: ` : `${d.file}: `) : '';
-  return `${loc}error [${d.rule}] ${d.msg}`;
+  return escapeUnsafe(`${loc}error [${d.rule}] ${d.msg}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +278,10 @@ const isText = (v) => typeof v === 'string' && v !== '';
 const isCell = (v) => isText(v) && !/[|\n]/.test(v);
 const isList = (v, ok) => Array.isArray(v) && v.length > 0 && v.every(ok);
 const isCount = (v) => Number.isSafeInteger(v) && v > 0;
+// A test ID holds no control character and no whitespace but the plain space,
+// and that only inside it: the vitest and Playwright titles (provisional,
+// layout §6 "Still open", item 5) hold spaces, a nextest ID none.
+const isTestId = (v) => !/[\u0000-\u001f\u007f-\u009f]|[^\S ]|^ | $|  /.test(v) && !(v.startsWith('nextest:') && v.includes(' '));
 
 const COLUMNS = ['layers', 'envs', 'harness', 'owners', 'positive', 'negative'];
 const KEYS = {
@@ -294,6 +330,11 @@ function checkStages(e, stageErr) {
     if (!isList(s.legs, isText)) se('legs must be a non-empty list of leg strings');
     else if (new Set(s.legs).size !== s.legs.length) se('legs lists a leg twice');
     if (!Array.isArray(s.tests) || !s.tests.every(isText)) se('tests must be a list of test IDs');
+    else {
+      for (const t of s.tests) if (!isTestId(t)) se(`test ID ${q(t)} holds a control character, a line break or whitespace other than single inner spaces (none at all in a nextest ID)`);
+      const twice = s.tests.find((t, i) => s.tests.indexOf(t) !== i);
+      if (twice !== undefined) se(`tests lists a test twice: ${q(twice)}`);
+    }
     if (s.status === 'implemented') {
       if (!(s.tests?.length > 0)) se('an implemented stage must list its tests');
       const want = stageStamp(e.id, s.milestone, s.scope, e.matrix_sha256);
@@ -493,6 +534,9 @@ export function checkWaivers(doc, at, stagesByTest, root, requireHistory, hist, 
 // libtest list), filter is null or the reason nextest's filter left it out.
 export class ListError extends Error {}
 
+// The status of a binary in the nextest list: only a listed one lists tests.
+const SUITE_STATUSES = ['listed', 'skipped', 'skipped-default-filter'];
+
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 // The JSON of `cargo nextest list --message-format json`. Throws ListError.
@@ -506,20 +550,25 @@ export function parseNextestList(text) {
   if (!isObject(doc) || !isObject(doc['rust-suites'])) throw new ListError('not the JSON of cargo nextest list --message-format json: no "rust-suites" object');
   const binaries = new Map();
   for (const [key, s] of Object.entries(doc['rust-suites'])) {
-    const where = `rust-suites ${JSON.stringify(key)}`;
+    const where = `rust-suites ${q(key)}`;
     if (!isObject(s)) throw new ListError(`${where} is not an object`);
     const pkg = s['package-name'];
-    if (s['binary-id'] !== key) throw new ListError(`${where}: binary-id is ${JSON.stringify(s['binary-id'])}, not its key`);
-    if (!isText(pkg) || !(key === pkg || key.startsWith(`${pkg}::`))) throw new ListError(`${where}: package-name ${JSON.stringify(pkg)} does not name the package of the binary`);
-    if (s.status !== 'listed' && s.status !== 'skipped') throw new ListError(`${where}: status must be "listed" or "skipped", not ${JSON.stringify(s.status)}`);
+    if (s['binary-id'] !== key) throw new ListError(`${where}: binary-id is ${qv(s['binary-id'])}, not its key`);
+    if (!isText(pkg) || !(key === pkg || key.startsWith(`${pkg}::`))) throw new ListError(`${where}: package-name ${qv(pkg)} does not name the package of the binary`);
+    // nextest 0.9.151 writes "skipped-default-filter" for a binary that a
+    // profile's default-filter leaves out entirely; it lists no tests, like
+    // "skipped", so a stage test in it does not resolve.
+    if (!SUITE_STATUSES.includes(s.status)) throw new ListError(`${where}: status must be one of ${SUITE_STATUSES.map((x) => `"${x}"`).join(', ')}, not ${qv(s.status)}`);
     if (!isObject(s.testcases)) throw new ListError(`${where}: testcases is not an object`);
     const tests = new Map();
     for (const [name, c] of Object.entries(s.testcases)) {
       const fm = c?.['filter-match'];
       if (!isObject(c) || typeof c.ignored !== 'boolean' || !isObject(fm) || (fm.status !== 'matches' && fm.status !== 'mismatch')) {
-        throw new ListError(`${where}: test ${JSON.stringify(name)} needs a boolean "ignored" and a "filter-match" with status "matches" or "mismatch"`);
+        throw new ListError(`${where}: test ${q(name)} needs a boolean "ignored" and a "filter-match" with status "matches" or "mismatch"`);
       }
-      tests.set(name, { ignored: c.ignored, filter: fm.status === 'matches' ? null : String(fm.reason ?? 'unknown reason') });
+      // A mismatch names its reason ("ignored", "default-filter", ...).
+      if (fm.status === 'mismatch' && !isText(fm.reason)) throw new ListError(`${where}: test ${q(name)}: a "filter-match" with status "mismatch" needs a non-empty string "reason"`);
+      tests.set(name, { ignored: c.ignored, filter: fm.status === 'matches' ? null : fm.reason });
     }
     binaries.set(key, { pkg, status: s.status, tests });
   }
@@ -536,7 +585,7 @@ export function parseLibtestList(text, pkg, target) {
     const line = raw.replace(/\r$/, '');
     if (line === '' || /^\d+ tests?, \d+ benchmarks?$/.test(line) || /: benchmark$/.test(line)) return;
     const m = /^(\S(?:.*\S)?): test$/.exec(line);
-    if (!m) throw new ListError(`line ${i + 1} is not "<test name>: test": ${JSON.stringify(line.slice(0, 200))}`);
+    if (!m) throw new ListError(`line ${i + 1} is not "<test name>: test": ${q(line.slice(0, 200))}`);
     tests.set(m[1], { ignored: null, filter: null });
   });
   return new Map([[`${pkg}::${target}`, { pkg, status: 'listed', tests }]]);
@@ -557,17 +606,19 @@ function readLists(specs, report) {
       got = spec.kind === 'nextest' ? parseNextestList(spec.text) : parseLibtestList(spec.text, spec.pkg, spec.target);
     } catch (ex) {
       if (!(ex instanceof ListError)) throw ex;
-      report.error(spec.file, null, 'list', `${spec.kind === 'nextest' ? 'nextest' : 'libtest'} list: ${ex.message}`);
+      report.error(spec.file, null, 'list', `${spec.kind === 'nextest' ? 'nextest' : 'libtest'} list: ${escapeUnsafe(ex.message)}`);
       continue;
     }
+    // A list whose binaries were all skipped is not empty: the stage tests in
+    // them fail to resolve, each with the binary's status.
     const count = [...got.values()].reduce((n, b) => n + b.tests.size, 0);
-    if (!count) {
+    if (!count && ![...got.values()].some((b) => b.status !== 'listed')) {
       report.error(spec.file, null, 'list', 'the test list lists no tests: was it built from the right packages and targets?');
       continue;
     }
     ok++;
     for (const [id, b] of got) {
-      if (binaries.has(id)) report.error(spec.file, null, 'list', `binary ${id} is also in ${binaries.get(id).source}; give each binary in one list only`);
+      if (binaries.has(id)) report.error(spec.file, null, 'list', `binary ${q(id)} is also in ${binaries.get(id).source}; give each binary in one list only`);
       else binaries.set(id, { ...b, source: spec.file });
     }
     if (spec.kind === 'libtest') notes.push(`resolution: the libtest list ${spec.file} cannot show #[ignore], so its tests are not checked for it (CI uses --nextest-list)`);
@@ -586,16 +637,16 @@ function checkResolution(binaries, implemented, registered, report) {
     const id = info.target === '' ? info.pkg : `${info.pkg}::${info.target}`;
     const b = binaries.get(id);
     if (!b) {
-      if (!packages.includes(info.pkg)) return `its package ${info.pkg} is not in the test list (which lists ${packages.join(', ')}); list it in the job that produces the test`;
+      if (!packages.includes(info.pkg)) return `its package ${q(info.pkg)} is not in the test list (which lists ${packages.map(q).join(', ')}); list it in the job that produces the test`;
       const targets = [...binaries.keys()].filter((k) => binaries.get(k).pkg === info.pkg).map((k) => (k === info.pkg ? '(lib)' : k.slice(info.pkg.length + 2)));
-      return `its target ${info.target === '' ? '(lib)' : info.target} of ${info.pkg} is not in the test list (listed targets of ${info.pkg}: ${targets.join(', ')})`;
+      return `its target ${info.target === '' ? '(lib)' : q(info.target)} of ${q(info.pkg)} is not in the test list (listed targets of ${q(info.pkg)}: ${targets.map((x) => (x === '(lib)' ? x : q(x))).join(', ')})`;
     }
-    if (b.status !== 'listed') return `its binary ${id} was not listed (status ${b.status})`;
+    if (b.status !== 'listed') return `its binary ${q(id)} was not listed (status ${b.status})`;
     const name = info.id.slice(`nextest:${info.pkg}/${info.target === '' ? '' : `${info.target}/`}`.length);
     const t = b.tests.get(name);
-    if (!t) return `it is not in the test list of ${id} (${b.source})`;
+    if (!t) return `it is not in the test list of ${q(id)} (${b.source})`;
     if (t.ignored === true) return `it is #[ignore]d (${b.source}), so its job never runs it`;
-    if (t.filter !== null) return `it is filtered out of the list of ${id} (${t.filter}), so its job does not run it`;
+    if (t.filter !== null) return `it is filtered out of the list of ${q(id)} (${q(t.filter)}), so its job does not run it`;
     return null;
   };
   for (const { e, s, err } of implemented) {
@@ -609,20 +660,20 @@ function checkResolution(binaries, implemented, registered, report) {
     for (const t of s.tests) {
       const info = testInfo(t);
       if (!info) {
-        err('resolve', `${JSON.stringify(t)} is not a test ID such as nextest:<package>/<target>/<path>`);
+        err('resolve', `${q(t)} is not a test ID such as nextest:<package>/<target>/<path>`);
         continue;
       }
-      if (info.entry !== e.id) err('pos-neg', `${t} is not a pos/neg scenario test of ${e.id}`);
+      if (info.entry !== e.id) err('pos-neg', `${q(t)} is not a pos/neg scenario test of ${e.id}`);
       else valid.push(info);
       if (!info.jobs.some((j) => jobs.includes(j))) {
-        err('same-job', `${t} is produced by ${info.jobs.length ? `job ${info.jobs.join(', ')}` : 'no job'} (TEST_JOBS), not by the job of a leg of this stage (${jobs.join(', ')})`);
+        err('same-job', `${q(t)} is produced by ${info.jobs.length ? `job ${info.jobs.join(', ')}` : 'no job'} (TEST_JOBS), not by the job of a leg of this stage (${jobs.join(', ')})`);
       }
       if (info.runner !== 'nextest') {
-        err('resolve', `${t}: ${info.runner} test IDs are provisional (layout §6 "Still open", item 5); the tests-exist check cannot resolve them yet`);
+        err('resolve', `${q(t)}: ${info.runner} test IDs are provisional (layout §6 "Still open", item 5); the tests-exist check cannot resolve them yet`);
         continue;
       }
       const why = lookup(info);
-      if (why) err('resolve', `${t}: ${why}`);
+      if (why) err('resolve', `${q(t)}: ${why}`);
     }
     for (const job of jobs) {
       for (const pol of ['pos', 'neg']) {
@@ -635,7 +686,7 @@ function checkResolution(binaries, implemented, registered, report) {
     for (const name of b.tests.keys()) {
       listed++;
       const id = testId('nextest', bin, name);
-      if (testInfo(id)?.like && !registered.has(id)) report.error(b.source, null, 'orphans', `${id} is a listed scenario-named test (a\\d\\d_) that no stage lists in its tests`);
+      if (testInfo(id)?.like && !registered.has(id)) report.error(b.source, null, 'orphans', `${q(id)} is a listed scenario-named test (a\\d\\d_) that no stage lists in its tests`);
     }
   }
   return listed;

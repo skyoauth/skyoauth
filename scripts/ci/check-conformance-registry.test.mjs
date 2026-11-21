@@ -15,11 +15,11 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSy
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { parse as parseStrict, TomlDate } from 'smol-toml';
 
-import { checkGatePr, checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, NO_GRAFTS, plain, run, SCHEMAS, USAGE, WAIVERS } from './check-conformance-registry.mjs';
+import { checkGatePr, checkRegistry, FIXTURES, formatError, GIT_LOCATION, history, locate, NO_GRAFTS, plain, q, run, SCHEMAS, USAGE, WAIVERS } from './check-conformance-registry.mjs';
 import { GIT_LOCATION as DOCS_GIT_LOCATION, NO_GRAFTS as DOCS_NO_GRAFTS } from './docs-check.mjs';
 import { DESIGN, FEATURES, JOB_FROM, LAYOUT, LocalDate, parseConditional, parseToml, run as generateRun, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { assertGitImmune, GIT_ENV, normaliseRegistry, valueSwaps } from './registry-fixtures.mjs';
@@ -1419,11 +1419,128 @@ describe('rule waivers', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Test IDs in stages (static part, rule stages): no duplicates, and nothing
+// that could break an output line.
+
+describe('rule stages: test IDs', () => {
+  const A24_POS = 'nextest:skyoauth-scenarios/pg/security::a24::a24_pos_x';
+  // A24's M1a stage implemented with `tests` given as TOML text.
+  const withTests = (toml) => (t) => implementedA24(t, { tests: `tests = [${toml}]` });
+
+  test('a test listed twice in one stage', () => {
+    expectOnly(failing(SCENARIOS, withTests(`"${A24_POS}", "${A24_NEG}", "${A24_POS}"`)), 'stages', /error \[stages\] A24 M1a: tests lists a test twice: "nextest:skyoauth-scenarios\/pg\/security::a24::a24_pos_x"$/);
+  });
+
+  test('a test listed twice in a planned stage, too', () => {
+    expectOnly(failing(SCENARIOS, st('A24', 'M2', 'tests = []', `tests = ["${A24_NEG}", "${A24_NEG}"]`)), 'stages', /A24 M2: tests lists a test twice/);
+  });
+
+  test('a test ID with a line break in a planned stage, too', () => {
+    expectOnly(failing(SCENARIOS, st('A24', 'M2', 'tests = []', `tests = ["${A24_NEG}\\n::error::x"]`)), 'stages', /A24 M2: test ID "nextest:skyoauth-scenarios\/pg\/security::a24::a24_neg_\w+\\n::error::x" holds a control character/);
+  });
+
+  test('the same test in two stages is not a duplicate', () => {
+    expectOk(check(fixture({ [SCENARIOS]: (t) => st('A24', 'M2', 'tests = []', `tests = ["${A24_NEG}"]`)(implementedA24(t)) })));
+  });
+
+  // [label, TOML string body, escaped form in the message]
+  const BAD = [
+    ['a line feed with a workflow command', 'nextest:skyoauth-scenarios/pg/a24_pos_x\\n::error::x', '"nextest:skyoauth-scenarios/pg/a24_pos_x\\n::error::x"'],
+    ['a carriage return', 'nextest:skyoauth-scenarios/pg/a24_pos_x\\r::error::x', '"nextest:skyoauth-scenarios/pg/a24_pos_x\\r::error::x"'],
+    ['a tab', 'nextest:skyoauth-scenarios/pg/a24_pos_x\\tz', '"nextest:skyoauth-scenarios/pg/a24_pos_x\\tz"'],
+    ['NEL (U+0085)', 'nextest:skyoauth-scenarios/pg/a24_pos_x\\u0085::error::x', '"nextest:skyoauth-scenarios/pg/a24_pos_x\\u0085::error::x"'],
+    ['U+2028', 'nextest:skyoauth-scenarios/pg/a24_pos_x\\u2028::error::x', '"nextest:skyoauth-scenarios/pg/a24_pos_x\\u2028::error::x"'],
+    ['a no-break space', 'nextest:skyoauth-scenarios/pg/a24_pos_x\\u00a0z', '"nextest:skyoauth-scenarios/pg/a24_pos_x\u00a0z"'],
+    ['a space in a nextest ID', 'nextest:skyoauth-scenarios/pg/a24_pos_x z', '"nextest:skyoauth-scenarios/pg/a24_pos_x z"'],
+    ['a leading space', ' vitest:a.test.ts/A24 pos: x', '" vitest:a.test.ts/A24 pos: x"'],
+    ['a trailing space', 'vitest:a.test.ts/A24 pos: x ', '"vitest:a.test.ts/A24 pos: x "'],
+    ['two spaces in a row', 'vitest:a.test.ts/A24 pos:  x', '"vitest:a.test.ts/A24 pos:  x"'],
+  ];
+  for (const [what, body, shown] of BAD) {
+    test(`a test ID with ${what}`, () => {
+      const res = failing(SCENARIOS, withTests(`"${A24_POS}", "${A24_NEG}", "${body}"`));
+      expectOnly(res, 'stages', /holds a control character, a line break or whitespace other than single inner spaces/);
+      assert.ok(formatError(res.errors[0]).includes(`A24 M1a: test ID ${shown} holds`), formatError(res.errors[0]));
+      assert.equal(formatError(res.errors[0]).split(/[\n\r\u0085\u2028\u2029]/).length, 1, 'one line');
+    });
+  }
+
+  test('vitest and Playwright titles keep their single inner spaces', () => {
+    expectOk(check(fixture({ [SCENARIOS]: withTests(`"${A24_POS}", "${A24_NEG}", "vitest:test/a.test.ts/A24 pos: same origin", "playwright:test/browser/a.spec.ts/x › A24 neg: foreign origin"`) })));
+  });
+
+  test('the newline injection does not reach the output as a line of its own', () => {
+    const root = fixture({ [SCENARIOS]: withTests(`"${A24_POS}", "${A24_NEG}", "nextest:skyoauth-scenarios/pg/a24_neg_z\\n::error::injected"`) });
+    const r = spawnSync(process.execPath, [SCRIPT, '--root', root], { encoding: 'utf8' });
+    assert.equal(r.status, 1, r.stderr);
+    const lines = `${r.stdout}${r.stderr}`.split('\n');
+    assert.ok(!lines.some((l) => l.startsWith('::')), `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /test ID "nextest:skyoauth-scenarios\/pg\/a24_neg_z\\n::error::injected" holds/);
+  });
+
+  test('formatError escapes any control character or line separator that reaches a message', () => {
+    assert.equal(formatError({ file: 'f', line: 1, rule: 'r', msg: 'a\n::error::x\r\u0085\u2028\u2029\u0007' }), 'f:1: error [r] a\\u000a::error::x\\u000d\\u0085\\u2028\\u2029\\u0007');
+    assert.equal(q('a\n"b"\u0085'), '"a\\n\\"b\\"\\u0085"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The import cycle with report-conformance.mjs (TEST_JOBS stays there): each
+// module, loaded first in a fresh process, loads, and so does the other.
+
+describe('the import cycle with report-conformance.mjs', () => {
+  const REPORT = join(dirname(SCRIPT), 'report-conformance.mjs');
+  for (const [first, second] of [
+    [SCRIPT, REPORT],
+    [REPORT, SCRIPT],
+  ]) {
+    test(`${first === SCRIPT ? 'check-conformance-registry.mjs' : 'report-conformance.mjs'} loaded first`, () => {
+      const src = [
+        `import * as a from ${JSON.stringify(pathToFileURL(first).href)};`,
+        `import * as b from ${JSON.stringify(pathToFileURL(second).href)};`,
+        `const [c, r] = ${first === SCRIPT ? '[a, b]' : '[b, a]'};`,
+        'const out = {',
+        '  check: ["checkRegistry", "checkGatePr", "run", "formatError", "parseNextestList", "parseLibtestList"].map((k) => [k, typeof c[k]]),',
+        '  usage: typeof c.USAGE,',
+        '  report: ["testInfo", "testId", "jobOf", "runnerOf", "judge", "run"].map((k) => [k, typeof r[k]]),',
+        '  jobs: Array.isArray(r.TEST_JOBS) && r.TEST_JOBS.length,',
+        // The bindings the check reads from the reporter work across the cycle.
+        '  info: c.parseNextestList(JSON.stringify({ "rust-suites": {} })).size,',
+        '  pg: r.testInfo("nextest:skyoauth-scenarios/pg/security::a29::a29_pos_x").jobs,',
+        '};',
+        'console.log(JSON.stringify(out));',
+      ].join('\n');
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', src], { encoding: 'utf8', cwd: tmpdir() });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.stderr, '');
+      const out = JSON.parse(r.stdout);
+      for (const [k, t] of [...out.check, ...out.report]) assert.equal(t, 'function', k);
+      assert.equal(out.usage, 'string');
+      assert.ok(out.jobs > 0);
+      assert.equal(out.info, 0);
+      assert.deepEqual(out.pg, ['scenarios-pg']);
+    });
+  }
+
+  for (const script of ['check-conformance-registry.mjs', 'report-conformance.mjs']) {
+    test(`${script} as the entry point`, () => {
+      const r = spawnSync(process.execPath, [join(dirname(SCRIPT), script), '--no-such-option'], { encoding: 'utf8', cwd: tmpdir() });
+      assert.equal(r.status, 2, r.stderr);
+      assert.match(r.stderr, /^usage: /);
+      assert.doesNotMatch(r.stderr, /internal error|ReferenceError|before initialization/);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Resolution part (layout §3): --nextest-list and --libtest-list. The golden
 // lists in scripts/ci/fixtures are real `cargo nextest list -p
 // skyoauth-scenarios --profile ci --message-format json` and `cargo test -p
 // skyoauth-scenarios --test pg -- --list` output of the A29 M1a tests, with
-// the build paths replaced and the build metadata trimmed. The registry side
+// the build paths replaced and the build metadata trimmed, made with
+// cargo-nextest 0.9.151 (the version ci.yml pins) and cargo 1.100.0;
+// regenerate them when the cargo-nextest pin is bumped
+// (tests/conformance/README.md, "The resolution part"). The registry side
 // implements A29 M1a on the normalised fixtures with exactly the tests of the
 // golden list, so the cases do not depend on how far the real registry has
 // got.
@@ -1499,38 +1616,57 @@ describe('resolution part', () => {
     const name = 'security::a29::a29_neg_grant_audience_of_other_tenant';
     const root = fixture({ [SCENARIOS]: a29() });
     const res = check(root, { lists: [{ kind: 'nextest', file: LIST, text: list((d) => delete d['rust-suites'][PG].testcases[name]) }] });
-    expectOnly(res, 'resolve', new RegExp(`^tests/conformance/scenarios\\.toml:${stageLine(read(root, SCENARIOS), 'scenario', 'A29', 'M1a')}: error \\[resolve\\] A29 M1a: nextest:skyoauth-scenarios/pg/${name}: it is not in the test list of skyoauth-scenarios::pg \\(list\\.json\\)$`));
+    expectOnly(res, 'resolve', new RegExp(`^tests/conformance/scenarios\\.toml:${stageLine(read(root, SCENARIOS), 'scenario', 'A29', 'M1a')}: error \\[resolve\\] A29 M1a: "nextest:skyoauth-scenarios/pg/${name}": it is not in the test list of "skyoauth-scenarios::pg" \\(list\\.json\\)$`));
   });
 
   test('a renamed test: the registered ID does not resolve and the listed one is an orphan', () => {
     const old = ID('security::a29::a29_neg_binding_on_other_tenants_source');
     const res = resolve(a29(A29_IDS.map((t) => (t === old ? `${old}_renamed` : t))), list());
-    expectErrors(res, ['resolve', 'orphans'], ['resolve', /a29_neg_binding_on_other_tenants_source_renamed: it is not in the test list/], ['orphans', /^list\.json: error \[orphans\] nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_binding_on_other_tenants_source is a listed scenario-named test/]);
+    expectErrors(res, ['resolve', 'orphans'], ['resolve', /a29_neg_binding_on_other_tenants_source_renamed": it is not in the test list/], ['orphans', /^list\.json: error \[orphans\] "nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_binding_on_other_tenants_source" is a listed scenario-named test/]);
     assert.equal(res.errors.length, 2, dump(res));
   });
 
   test('an #[ignore]d test, as nextest lists it', () => {
     const name = 'security::a29::a29_neg_keyset_version_on_other_tenants_keyset';
     const res = resolve(a29(), list((d) => (d['rust-suites'][PG].testcases[name] = { kind: 'test', ignored: true, 'filter-match': { status: 'mismatch', reason: 'ignored' } })));
-    expectOnly(res, 'resolve', new RegExp(`${name}: it is #\\[ignore\\]d \\(list\\.json\\), so its job never runs it$`));
+    expectOnly(res, 'resolve', new RegExp(`${name}": it is #\\[ignore\\]d \\(list\\.json\\), so its job never runs it$`));
   });
 
   test('an #[ignore]d test listed with --run-ignored all still fails', () => {
     const name = POS[0].split('/').pop();
     const res = resolve(a29(), list((d) => (d['rust-suites'][PG].testcases[name].ignored = true)));
-    expectOnly(res, 'resolve', /a29_pos_\w+: it is #\[ignore\]d/);
+    expectOnly(res, 'resolve', /a29_pos_\w+": it is #\[ignore\]d/);
   });
 
   test('a test that a filter (such as a profile default-filter) leaves out', () => {
     const name = NEG[0].split('/').pop();
     const res = resolve(a29(), list((d) => (d['rust-suites'][PG].testcases[name]['filter-match'] = { status: 'mismatch', reason: 'default-filter' })));
-    expectOnly(res, 'resolve', /it is filtered out of the list of skyoauth-scenarios::pg \(default-filter\), so its job does not run it$/);
+    expectOnly(res, 'resolve', /it is filtered out of the list of "skyoauth-scenarios::pg" \("default-filter"\), so its job does not run it$/);
   });
 
   test('a binary that nextest skipped', () => {
     const res = resolve(a29(), list((d) => (d['rust-suites'][PG].status = 'skipped')));
     assert.equal(res.errors.length, 13, dump(res));
-    expectError(res, 'resolve', /its binary skyoauth-scenarios::pg was not listed \(status skipped\)$/);
+    expectError(res, 'resolve', /its binary "skyoauth-scenarios::pg" was not listed \(status skipped\)$/);
+  });
+
+  // nextest 0.9.151 writes this status for a binary that a profile's
+  // default-filter leaves out (a real `cargo nextest list` run with
+  // default-filter = "not binary(pg)" gave exactly this suite: no testcases).
+  test('a binary that a default-filter skips (status skipped-default-filter) is a skipped binary, not a malformed list', () => {
+    const res = resolve(
+      a29(),
+      list((d) => {
+        d['rust-suites'][PG].status = 'skipped-default-filter';
+        d['rust-suites'][PG].testcases = {};
+      }),
+    );
+    assert.equal(res.errors.length, 13, dump(res));
+    for (const e of res.errors) assert.match(formatError(e), /error \[resolve\] A29 M1a: "[^"]+": its binary "skyoauth-scenarios::pg" was not listed \(status skipped-default-filter\)$/);
+  });
+
+  test('a skipped binary that no stage references is fine', () => {
+    expectOk(resolve(a29(), list((d) => (d['rust-suites']['skyoauth-scenarios::hermetic'] = suite('skyoauth-scenarios::hermetic', [], { status: 'skipped-default-filter' })))));
   });
 
   test('no neg test for the stage\'s job', () => {
@@ -1572,41 +1708,41 @@ describe('resolution part', () => {
 
   test('an orphan: a listed scenario-named test that no stage lists', () => {
     const res = resolve(a29(), list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, ['security::a29::a29_neg_extra_case']).testcases)));
-    expectOnly(res, 'orphans', /^list\.json: error \[orphans\] nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_extra_case is a listed scenario-named test \(a\\d\\d_\) that no stage lists in its tests$/);
+    expectOnly(res, 'orphans', /^list\.json: error \[orphans\] "nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_extra_case" is a listed scenario-named test \(a\\d\\d_\) that no stage lists in its tests$/);
   });
 
   test('orphans: the last path segment decides, in any binary; a planned stage\'s test is registered', () => {
     const names = ['a24_pos_top_level', 'm::a61_neg_query_reordered_mismatch', 'helper_not_a_scenario', 'm::xa29_pos_prefixed', 'a29_pos::inner_not_last', 'm::a1_pos_one_digit'];
     const planned = st('A24', 'M2', 'tests = []', `tests = ["${ID('a24_pos_top_level', 'skyoauth-scenarios')}"]`);
     const res = resolve(edits(a29(), planned), list((d) => (d['rust-suites']['skyoauth-scenarios'] = suite('skyoauth-scenarios', names))));
-    expectOnly(res, 'orphans', /^list\.json: error \[orphans\] nextest:skyoauth-scenarios\/m::a61_neg_query_reordered_mismatch is a listed/);
+    expectOnly(res, 'orphans', /^list\.json: error \[orphans\] "nextest:skyoauth-scenarios\/m::a61_neg_query_reordered_mismatch" is a listed/);
   });
 
   test('a test whose package is not in the list', () => {
     const bad = A29_IDS[0].replace('skyoauth-scenarios/', 'skyoauth-scenarioz/');
     const res = resolve(a29([bad, ...A29_IDS.slice(1)]), list((d) => delete d['rust-suites'][PG].testcases[NAMES[0]]));
-    expectErrors(res, ['resolve', 'same-job'], ['resolve', /nextest:skyoauth-scenarioz\/pg\/\S+: its package skyoauth-scenarioz is not in the test list \(which lists skyoauth-scenarios\); list it in the job that produces the test$/], ['same-job', /skyoauth-scenarioz\/pg\/\S+ is produced by no job \(TEST_JOBS\), not by the job of a leg of this stage \(scenarios-pg\)$/]);
+    expectErrors(res, ['resolve', 'same-job'], ['resolve', /"nextest:skyoauth-scenarioz\/pg\/\S+": its package "skyoauth-scenarioz" is not in the test list \(which lists "skyoauth-scenarios"\); list it in the job that produces the test$/], ['same-job', /skyoauth-scenarioz\/pg\/\S+" is produced by no job \(TEST_JOBS\), not by the job of a leg of this stage \(scenarios-pg\)$/]);
     assert.equal(res.errors.length, 2, dump(res));
   });
 
   test('a test whose target is not in the list, and the lib form of a target test', () => {
     const name = NAMES[0];
     const res = resolve(a29([ID(name, 'skyoauth-scenarios/pgx'), ...A29_IDS.slice(1)]), list((d) => delete d['rust-suites'][PG].testcases[name]));
-    expectErrors(res, ['resolve', 'same-job'], ['resolve', /: its target pgx of skyoauth-scenarios is not in the test list \(listed targets of skyoauth-scenarios: \(lib\), pg\)$/], ['same-job', /produced by no job/]);
+    expectErrors(res, ['resolve', 'same-job'], ['resolve', /: its target "pgx" of "skyoauth-scenarios" is not in the test list \(listed targets of "skyoauth-scenarios": \(lib\), "pg"\)$/], ['same-job', /produced by no job/]);
     const lib = resolve(a29([ID(name, 'skyoauth-scenarios'), ...A29_IDS.slice(1)]), list((d) => delete d['rust-suites'][PG].testcases[name]));
-    expectErrors(lib, ['resolve', 'same-job'], ['resolve', /: it is not in the test list of skyoauth-scenarios \(list\.json\)$/], ['same-job', /produced by no job/]);
+    expectErrors(lib, ['resolve', 'same-job'], ['resolve', /: it is not in the test list of "skyoauth-scenarios" \(list\.json\)$/], ['same-job', /produced by no job/]);
   });
 
   test('a test produced by a job that is not among the stage\'s legs (same-job)', () => {
     const name = 'security::a29::a29_pos_hermetic_only';
     const res = resolve(a29([...A29_IDS, ID(name, 'skyoauth-scenarios/hermetic')]), list((d) => (d['rust-suites']['skyoauth-scenarios::hermetic'] = suite('skyoauth-scenarios::hermetic', [name]))));
-    expectOnly(res, 'same-job', /A29 M1a: nextest:skyoauth-scenarios\/hermetic\/security::a29::a29_pos_hermetic_only is produced by job scenarios-hermetic \(TEST_JOBS\), not by the job of a leg of this stage \(scenarios-pg\)$/);
+    expectOnly(res, 'same-job', /A29 M1a: "nextest:skyoauth-scenarios\/hermetic\/security::a29::a29_pos_hermetic_only" is produced by job scenarios-hermetic \(TEST_JOBS\), not by the job of a leg of this stage \(scenarios-pg\)$/);
   });
 
   test('a test of another entry in the stage', () => {
     const other = ID('security::a24::a24_pos_x');
     const res = resolve(a29([...A29_IDS, other]), list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, ['security::a24::a24_pos_x']).testcases)));
-    expectOnly(res, 'pos-neg', /A29 M1a: nextest:skyoauth-scenarios\/pg\/security::a24::a24_pos_x is not a pos\/neg scenario test of A29$/);
+    expectOnly(res, 'pos-neg', /A29 M1a: "nextest:skyoauth-scenarios\/pg\/security::a24::a24_pos_x" is not a pos\/neg scenario test of A29$/);
   });
 
   test('a test ID that is not one', () => {
@@ -1617,7 +1753,7 @@ describe('resolution part', () => {
   test('vitest and Playwright IDs are not checked yet: an implemented stage that uses them fails closed', () => {
     const tests = ['vitest:test/csrf.test.ts/A40 pos: same origin', 'vitest:test/csrf.test.ts/A40 neg: foreign origin', 'playwright:test/browser/csrf.spec.ts/A40 pos: same origin', 'playwright:test/browser/csrf.spec.ts/A40 neg: foreign origin'];
     const res = resolve(edits(a29(), implement('A40', 'M3', tests)), list());
-    expectErrors(res, ['resolve'], ['resolve', /A40 M3: job typescript reports vitest tests, whose test IDs are provisional \(layout §6 "Still open", item 5\): the tests-exist check cannot resolve them yet$/], ['resolve', /A40 M3: job typescript-browser reports playwright tests/], ['resolve', /A40 M3: vitest:test\/csrf\.test\.ts\/A40 neg: foreign origin: vitest test IDs are provisional/], ['resolve', /A40 M3: playwright:\S+ pos: same origin: playwright test IDs are provisional/]);
+    expectErrors(res, ['resolve'], ['resolve', /A40 M3: job typescript reports vitest tests, whose test IDs are provisional \(layout §6 "Still open", item 5\): the tests-exist check cannot resolve them yet$/], ['resolve', /A40 M3: job typescript-browser reports playwright tests/], ['resolve', /A40 M3: "vitest:test\/csrf\.test\.ts\/A40 neg: foreign origin": vitest test IDs are provisional/], ['resolve', /A40 M3: "playwright:\S+ pos: same origin": playwright test IDs are provisional/]);
     assert.equal(res.errors.length, 6, dump(res));
     // The ID-level rules still hold for them: same job, pos and neg per job.
     assert.ok(!res.errors.some((e) => e.rule === 'same-job' || e.rule === 'pos-neg'), dump(res));
@@ -1640,7 +1776,7 @@ describe('resolution part', () => {
     assert.match(ok.summary, /resolution: 15 tests of 2 implemented stages against 15 listed tests$/);
     const root = fixture({ [SCENARIOS]: a29(), [SUBCASES]: sub([ID(names[0])]) });
     const res = check(root, { lists });
-    expectErrors(res, ['pos-neg', 'orphans'], ['pos-neg', new RegExp(`^tests/conformance/subcases\\.toml:${stageLine(read(root, SUBCASES), 'subcase', 'A58.01', 'M1b')}: error \\[pos-neg\\] A58\\.01 M1b: job scenarios-pg produces no neg test of this stage$`)], ['orphans', /a58_01_neg_stale is a listed/]);
+    expectErrors(res, ['pos-neg', 'orphans'], ['pos-neg', new RegExp(`^tests/conformance/subcases\\.toml:${stageLine(read(root, SUBCASES), 'subcase', 'A58.01', 'M1b')}: error \\[pos-neg\\] A58\\.01 M1b: job scenarios-pg produces no neg test of this stage$`)], ['orphans', /a58_01_neg_stale" is a listed/]);
   });
 
   test('planned stages are not resolved', () => {
@@ -1655,12 +1791,18 @@ describe('resolution part', () => {
     ['a suite that is not an object', list((d) => (d['rust-suites'][PG] = 1)), /rust-suites "skyoauth-scenarios::pg" is not an object$/],
     ['a binary-id that is not its key', list((d) => (d['rust-suites'][PG]['binary-id'] = 'skyoauth-scenarios::other')), /binary-id is "skyoauth-scenarios::other", not its key$/],
     ['a package-name that is not the binary\'s', list((d) => (d['rust-suites'][PG]['package-name'] = 'skyoauth')), /package-name "skyoauth" does not name the package of the binary$/],
-    ['an unknown status', list((d) => (d['rust-suites'][PG].status = 'built')), /status must be "listed" or "skipped", not "built"$/],
+    ['an unknown status', list((d) => (d['rust-suites'][PG].status = 'built')), /status must be one of "listed", "skipped", "skipped-default-filter", not "built"$/],
     ['no testcases', list((d) => delete d['rust-suites'][PG].testcases), /testcases is not an object$/],
     ['a testcase without ignored', list((d) => delete d['rust-suites'][PG].testcases[NAMES[0]].ignored), /needs a boolean "ignored" and a "filter-match"/],
     ['a testcase with a string ignored', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]].ignored = 'false')), /needs a boolean "ignored"/],
     ['a testcase without filter-match', list((d) => delete d['rust-suites'][PG].testcases[NAMES[0]]['filter-match']), /needs a boolean "ignored" and a "filter-match"/],
     ['an unknown filter-match status', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]]['filter-match'].status = 'yes')), /with status "matches" or "mismatch"$/],
+    ['a mismatch without a reason', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]]['filter-match'] = { status: 'mismatch' })), /a "filter-match" with status "mismatch" needs a non-empty string "reason"$/],
+    ['a mismatch with an empty reason', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]]['filter-match'] = { status: 'mismatch', reason: '' })), /needs a non-empty string "reason"$/],
+    ['a mismatch with a number reason', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]]['filter-match'] = { status: 'mismatch', reason: 1 })), /needs a non-empty string "reason"$/],
+    // String() of this object throws a TypeError: it must be a list error.
+    ['a mismatch with an object reason', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]]['filter-match'] = { status: 'mismatch', reason: { toString: null } })), /needs a non-empty string "reason"$/],
+    ['an unknown suite status', list((d) => (d['rust-suites'][PG].status = { toString: null })), /status must be one of "listed", "skipped", "skipped-default-filter", not \{"toString":null\}$/],
   ];
   for (const [what, text, re] of MALFORMED) {
     test(`a malformed list: ${what}`, () => {
@@ -1688,9 +1830,9 @@ describe('resolution part', () => {
   test('several lists: each binary in one of them only', () => {
     const hermetic = list((d) => (d['rust-suites'] = { 'skyoauth-scenarios::hermetic': suite('skyoauth-scenarios::hermetic', ['security::a29::a29_pos_two']) }));
     // The second list's orphan shows that both lists are read.
-    expectOnly(resolve(a29(), list(), hermetic), 'orphans', /^list1\.json: error \[orphans\] nextest:skyoauth-scenarios\/hermetic\/security::a29::a29_pos_two /);
+    expectOnly(resolve(a29(), list(), hermetic), 'orphans', /^list1\.json: error \[orphans\] "nextest:skyoauth-scenarios\/hermetic\/security::a29::a29_pos_two" /);
     const twice = resolve(a29(), list(), list());
-    expectErrors(twice, ['list'], ['list', /^list1\.json: error \[list\] binary skyoauth-scenarios is also in list\.json; give each binary in one list only$/], ['list', /binary skyoauth-scenarios::pg is also in list\.json/]);
+    expectErrors(twice, ['list'], ['list', /^list1\.json: error \[list\] binary "skyoauth-scenarios" is also in list\.json; give each binary in one list only$/], ['list', /binary "skyoauth-scenarios::pg" is also in list\.json/]);
     assert.equal(twice.errors.length, 2, dump(twice));
   });
 
@@ -1713,7 +1855,7 @@ describe('resolution part', () => {
     test('a missing test and an orphan', () => {
       const text = GOLDEN_TEXT.replace(`${NAMES[0]}: test\n`, '').replace('\n\n', '\nsecurity::a29::a29_neg_new: test\n\n');
       const res = libtest(text);
-      expectErrors(res, ['resolve', 'orphans'], ['resolve', new RegExp(`${NAMES[0]}: it is not in the test list of skyoauth-scenarios::pg \\(pg\\.txt\\)$`)], ['orphans', /^pg\.txt: error \[orphans\] nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_new /]);
+      expectErrors(res, ['resolve', 'orphans'], ['resolve', new RegExp(`${NAMES[0]}": it is not in the test list of "skyoauth-scenarios::pg" \\(pg\\.txt\\)$`)], ['orphans', /^pg\.txt: error \[orphans\] "nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_new" /]);
       assert.equal(res.errors.length, 2, dump(res));
     });
 
@@ -1743,7 +1885,7 @@ describe('resolution part', () => {
       const missing = file('l.json', list((d) => delete d['rust-suites'][PG].testcases[NAMES[0]]));
       const bad = cli('--root', root, '--nextest-list', missing);
       assert.equal(bad.status, 1);
-      assert.equal(bad.stderr, `tests/conformance/scenarios.toml:${stageLine(read(root, SCENARIOS), 'scenario', 'A29', 'M1a')}: error [resolve] A29 M1a: ${A29_IDS[0]}: it is not in the test list of skyoauth-scenarios::pg (${missing})\ncheck-conformance-registry: 1 error(s)\n`);
+      assert.equal(bad.stderr, `tests/conformance/scenarios.toml:${stageLine(read(root, SCENARIOS), 'scenario', 'A29', 'M1a')}: error [resolve] A29 M1a: "${A29_IDS[0]}": it is not in the test list of "skyoauth-scenarios::pg" (${missing})\ncheck-conformance-registry: 1 error(s)\n`);
     });
 
     test('--nextest-list with a malformed list exits 1', () => {
@@ -1763,7 +1905,32 @@ describe('resolution part', () => {
       const hermetic = file('h.txt', 'security::a29::a29_pos_h: test\n');
       const r = cli('--root', fixture({ [SCENARIOS]: a29() }), '--nextest-list', GOLDEN, '--libtest-list', `skyoauth-scenarios/hermetic=${hermetic}`);
       assert.equal(r.status, 1);
-      assert.match(r.stderr, /error \[orphans\] nextest:skyoauth-scenarios\/hermetic\/security::a29::a29_pos_h /);
+      assert.match(r.stderr, /error \[orphans\] "nextest:skyoauth-scenarios\/hermetic\/security::a29::a29_pos_h" /);
+    });
+
+    test('a malformed filter-match reason is a list error (exit 1), not an internal error (exit 2)', () => {
+      const f = file('l.json', list((d) => (d['rust-suites'][PG].testcases[NAMES[0]]['filter-match'] = { status: 'mismatch', reason: { toString: null } })));
+      const r = cli('--root', fixture({ [SCENARIOS]: a29() }), '--nextest-list', f);
+      assert.equal(r.status, 1, r.stderr);
+      assert.doesNotMatch(r.stderr, /internal error|TypeError/);
+      assert.match(r.stderr, /error \[list\] nextest list: rust-suites "skyoauth-scenarios::pg": test "[^"]+": a "filter-match" with status "mismatch" needs a non-empty string "reason"\n/);
+    });
+
+    test('names from the list cannot inject output lines', () => {
+      // The last :: segment is a scenario name, so both are orphans and their
+      // whole IDs reach the messages.
+      const evil = 'security::a29::a29_neg_x\n::error::a29_neg_injected';
+      const f = file('l.json', list((d) => {
+        Object.assign(d['rust-suites'][PG].testcases, suite(PG, [evil]).testcases);
+        d['rust-suites']['skyoauth-scenarios::bad\n::error::bin'] = suite('skyoauth-scenarios::bad\n::error::bin', ['a24_pos_y\u2028::error::a24_pos_z']);
+      }));
+      const r = cli('--root', fixture({ [SCENARIOS]: a29() }), '--nextest-list', f);
+      assert.equal(r.status, 1, r.stderr);
+      const lines = `${r.stdout}${r.stderr}`.split('\n');
+      assert.ok(!lines.some((l) => l.startsWith('::')), r.stderr);
+      assert.ok(!/[\r\u0085\u2028\u2029]/.test(r.stderr), r.stderr);
+      assert.match(r.stderr, /error \[orphans\] "nextest:skyoauth-scenarios\/pg\/security::a29::a29_neg_x\\n::error::a29_neg_injected" is a listed/);
+      assert.match(r.stderr, /error \[orphans\] "nextest:skyoauth-scenarios\/bad\\n::error::bin\/a24_pos_y\\u2028::error::a24_pos_z" is a listed/);
     });
 
     test('a list that cannot be read exits 2', () => {
