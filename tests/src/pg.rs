@@ -7,12 +7,18 @@
 //! scenario tests are never `#[ignore]`d.
 //!
 //! Every migration of `skyoauth-service` is applied once to a template
-//! database, named after a digest of the embedded migrations, and each test
-//! gets a fresh copy of it (`CREATE DATABASE … TEMPLATE …`), which is
-//! faster than migrating an empty database per test. The template is built
-//! under a temporary name and renamed when complete, so a crash mid-build
-//! never leaves a half-migrated template behind; it stays in the cluster for
-//! later runs with the same migrations. Concurrent test processes (nextest
+//! database, and each test gets a fresh copy of it (`CREATE DATABASE …
+//! TEMPLATE …`), which is faster than migrating an empty database per test.
+//! The template is named after a digest of the embedded migrations and a
+//! digest of the connecting role (`current_user`): a role without
+//! superuser may copy only a database it owns, so each role builds and
+//! copies its own template. The template is built under a temporary name
+//! and renamed when complete, so a crash mid-build never leaves a
+//! half-migrated template behind. It stays in the cluster for later runs
+//! with the same migrations and role; a changed migration set, another
+//! role or another Rust release (which may change the digest) builds a new
+//! one, and the old ones accumulate until dropped by hand
+//! (`DROP DATABASE skyoauth_scn_tpl_…`). Concurrent test processes (nextest
 //! runs each test in its own process) serialize the build and the copies on
 //! a session-level advisory lock, because a database cannot be copied while
 //! another session is connected to it.
@@ -76,8 +82,12 @@ impl TestDb {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let template = template_name();
         let mut admin = PgConnection::connect(&admin_url).await.unwrap();
+        let role: String = sqlx::query_scalar("SELECT current_user::text")
+            .fetch_one(&mut admin)
+            .await
+            .unwrap();
+        let template = template_name(&role);
         execute(
             &mut admin,
             format!("SELECT pg_advisory_lock({TEMPLATE_LOCK_KEY})"),
@@ -151,16 +161,27 @@ impl Drop for TestDb {
     }
 }
 
-/// The template's name: a digest of every embedded migration's version and
-/// checksum, so a changed or added migration gets a new template. The
-/// digest only has to agree between the processes of one build.
-fn template_name() -> String {
-    let mut hasher = DefaultHasher::new();
+/// The template's name for `role`: `skyoauth_scn_tpl_<migrations>_<role>`,
+/// two hex digests. The first covers every embedded migration's version and
+/// checksum, so a changed or added migration gets a new template; the
+/// second covers the role name, so the name stays a plain identifier (lower
+/// hex and underscores, 42 bytes, well under PostgreSQL's 63-byte limit
+/// even with the `_b<pid>` build suffix) whatever characters the role name
+/// holds. The digests only have to agree between the processes of one
+/// build.
+fn template_name(role: &str) -> String {
+    let mut migrations = DefaultHasher::new();
     for migration in MIGRATOR.iter() {
-        migration.version.hash(&mut hasher);
-        migration.checksum.hash(&mut hasher);
+        migration.version.hash(&mut migrations);
+        migration.checksum.hash(&mut migrations);
     }
-    format!("skyoauth_scn_tpl_{:016x}", hasher.finish())
+    let mut owner = DefaultHasher::new();
+    role.hash(&mut owner);
+    format!(
+        "skyoauth_scn_tpl_{:016x}_{:08x}",
+        migrations.finish(),
+        owner.finish() & 0xffff_ffff
+    )
 }
 
 /// Builds the template unless it exists. The caller holds the advisory lock.

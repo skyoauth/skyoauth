@@ -9,8 +9,21 @@
 //! - **Positive.** Two tenants register sources with the same exact issuer
 //!   (the GitHub Actions issuer, an uploaded-JWKS issuer and a Kubernetes
 //!   issuer) and every tenant-local object under the same names; all
-//!   coexist, each tenant reads and lists only its own, and a name is
-//!   unique within one tenant only.
+//!   coexist. For trust sources, each tenant reads and lists only its own:
+//!   the other tenant's same-issuer sources are not found and not listed.
+//!   The other record kinds are read here only through their own tenant;
+//!   their per-tenant reads and lists are covered by the service tests
+//!   (`service/tests/registry_trust.rs`,
+//!   `trust_and_grant_reads_are_scoped_to_their_tenant`: lists of keysets,
+//!   sources, bindings, service identities and grants hold one tenant's
+//!   rows, their gets from the other tenant are not found, and another
+//!   tenant's keyset lists no versions;
+//!   `keyset_versions_are_created_read_and_listed_per_keyset`: a keyset
+//!   version get from another tenant is not found; and
+//!   `service/tests/registry.rs`, `principal_reads_are_scoped_to_their_tenant`
+//!   for principals). The keyset, source, binding, service identity and
+//!   grant names are unique within one tenant only: a duplicate in the same
+//!   tenant is refused by the table's `<table>_tenant_id_name_key`.
 //! - **Negative.** Each write-time reference from one tenant's record to
 //!   another tenant's record or audience is refused by its composite
 //!   foreign key, reported as `Invariant { ForeignKey, <constraint> }`, and
@@ -21,11 +34,27 @@
 //! another tenant's grant at exchange); checker tenant sets (instance
 //! records, A31/A45); records of later milestones (clients, origins, human
 //! policies); authorization and the service rules the database does not
-//! enforce (an enabled assignment, scope ceilings; T14.1, T14.2).
+//! enforce (an enabled assignment, scope ceilings; T14.1, T14.2). Principal
+//! and tenant names have no uniqueness rule: `0002` has no name key on
+//! `principal` (IR-021; `service/migrations/README.md`, "Not done in
+//! `0004`") nor on `tenant`, so the shared principal names (`"ci"`, …) and
+//! tenant names of `a29_pos_tenants_reuse_object_names` prove nothing about
+//! them; a same-tenant duplicate assertion for principals belongs with that
+//! key when a migration adds it.
 //!
 //! The crossings are a closed list, one per composite foreign key of
 //! `0004` that a tenant-owned write can name across tenants, so each is
-//! enumerated in both directions instead of sampled.
+//! enumerated in both directions instead of sampled. Three list-to-parent
+//! keys have no foreign-key negative, because no write can name a parent of
+//! another tenant through them: `service_identity_resource_server_service_id_fkey`,
+//! `service_grant_binding_grant_id_fkey` and
+//! `service_grant_resource_server_grant_id_fkey`. The registry inserts a
+//! list row in the same statement as its owner and copies `tenant_id` (and
+//! the grant's actor) from that owner row: from the row being created in
+//! `create_service_identity` and `create_service_grant`, and from the row
+//! its tenant-scoped revision update matched in the `add_*` list changes,
+//! which find nothing for another tenant's owner
+//! (`a29_neg_writes_to_other_tenants_records_find_nothing`).
 
 use std::{
     collections::BTreeMap,

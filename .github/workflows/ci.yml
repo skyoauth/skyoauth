@@ -618,24 +618,25 @@ jobs:
       - name: Run scenario tests
         run: cargo nextest run --locked -p skyoauth-scenarios --test pg --profile ci
 
+      # Runs only after a passing test run. A missing or unreadable report,
+      # or one with no test, is an error: the leg would have no evidence.
       - name: Report scenario count
         run: |
           junit=target/nextest/ci/junit.xml
-          count=0
-          if [ -f "$junit" ]; then
-            count="$(sed -n 's/.*<testsuites[^>]* tests="\([0-9]*\)".*/\1/p' "$junit" | head -n 1)"
-            if [ -z "$count" ]; then
-              echo "::error::Cannot read the test count from $junit"
-              exit 1
-            fi
+          if [ ! -f "$junit" ]; then
+            echo "::error::no JUnit report found at $junit"
+            exit 1
+          fi
+          count="$(sed -n 's/.*<testsuites[^>]* tests="\([0-9]*\)".*/\1/p' "$junit" | head -n 1)"
+          if [ -z "$count" ]; then
+            echo "::error::cannot read the test count from $junit"
+            exit 1
           fi
           if [ "$count" -eq 0 ]; then
-            msg="No scenario test ran on $SKYOAUTH_CONFORMANCE_LEG; its stages are not run, not passed."
-            echo "::warning title=No scenario tests::$msg"
-          else
-            msg="$count scenario tests ran on $SKYOAUTH_CONFORMANCE_LEG."
+            echo "::error::no scenario test ran on $SKYOAUTH_CONFORMANCE_LEG"
+            exit 1
           fi
-          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          echo "$count scenario tests ran on $SKYOAUTH_CONFORMANCE_LEG." >> "$GITHUB_STEP_SUMMARY"
 
       # The artifact carries the leg string in `leg` next to the JUnit file,
       # and its name carries the attempt (§3: every attempt is kept). An
