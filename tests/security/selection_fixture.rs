@@ -1,4 +1,4 @@
-//! Shared fixture of the grant-selection scenarios A25 (and later A50): two
+//! Shared fixture of the grant-selection scenarios A25 and A50: two
 //! tenants with the same object graph, created through the typed registry
 //! API (`skyoauth_service::persistence::registry`), the grants, sources and
 //! bindings the scenarios select and match, and evidence that every binding
@@ -44,6 +44,38 @@
 //! built; once it is, it may refuse a `generic_production` template on a
 //! GitHub source, so a scenario that adds bindings here should keep this
 //! pairing.
+//!
+//! **The A50 additions.** [`two_tenants_with_matching`] seeds the same two
+//! tenants plus, per tenant, the records of A50 only, so A25's database and
+//! its expected eligible bindings stay as above. All are
+//! `generic_production` bindings on the partner CI's issuer, a
+//! repository-wide policy being `sub` and `repository_id`
+//! ([`repo_wide_policy`]), a deployment policy adding `environment`
+//! ([`deployment_policy`]) and a branch policy adding `ref` instead
+//! ([`branch_policy`]):
+//!
+//! - a second source on that issuer, `src_gen2` ([`SECOND_GENERIC`]);
+//! - bindings of `wld_a`: on `src_gen`, the branch binding `bnd_m1` and
+//!   the deployment binding `bnd_m2`, both enabled, equally specific (three
+//!   predicates each, neither a subset of the other) and with neutral names
+//!   that differ only in byte order (A50 tests the ID order, not
+//!   specificity), and three deployment bindings that sort lowest and are never eligible
+//!   on `src_gen`: `bnd_0_gen_off` (disabled, listed), `bnd_0_gen_free`
+//!   (enabled, listed by no grant) and `bnd_0_gen2` (on `src_gen2`,
+//!   listed, so eligible there and only there);
+//! - bindings of `wld_b` on `src_gen`: the repository-wide `bnd_0_repo` of
+//!   the same repository, which sorts before the eligible bindings of
+//!   `wld_a` there (`bnd_m1`, `bnd_m2`), and the repository-wide
+//!   `bnd_b_other` of another repository;
+//! - three direct grants ([`MATCHING_GRANTS`]): `grt_a_match` of `wld_a`
+//!   (listing `bnd_m2`, `bnd_0_gen_off` and `bnd_0_gen2`),
+//!   `grt_a_multi` of `wld_a` (listing `bnd_m1` and `bnd_m2`) and
+//!   `grt_b_match` of `wld_b` (listing `bnd_0_repo` and `bnd_b_other`).
+//!
+//! [`deployment_evidence`] fits every one of these bindings but
+//! `bnd_b_other`; [`other_repository_evidence`] fits `bnd_b_other` only.
+//! [`deployment_claims`] are the claims of [`deployment_evidence`].
+//! `generic_production` bindings stay on non-GitHub sources, as above.
 
 use std::collections::BTreeMap;
 
@@ -442,6 +474,232 @@ pub(super) async fn two_tenants() -> (TestDb, PgPool) {
     let pool = db.pool().await;
     for side in [A, B] {
         seed(&pool, side).await;
+    }
+    (db, pool)
+}
+
+/// The `sub` of every A50 binding.
+const MATCHING_SUB: &str = "pipeline:example/release";
+/// The repository of every A50 binding but `bnd_b_other`.
+pub(super) const REPOSITORY_ID: &str = "987654";
+/// The repository of `bnd_b_other`.
+pub(super) const OTHER_REPOSITORY_ID: &str = "246810";
+
+/// The ID base of `src_gen2`, the second source on the partner CI's issuer
+/// (A50 only).
+pub(super) const SECOND_GENERIC: &str = "src_gen2";
+
+/// A repository-wide policy: the pipeline's `sub` and the repository.
+pub(super) fn repo_wide_policy(repository_id: &str) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("sub".to_string(), MATCHING_SUB.to_string()),
+        ("repository_id".to_string(), repository_id.to_string()),
+    ])
+}
+
+/// The `ref` of [`branch_policy`] and of the evidence.
+const MATCHING_REF: &str = "refs/heads/main";
+
+/// A deployment policy: the repository-wide policy of [`REPOSITORY_ID`]
+/// and the `production` environment.
+pub(super) fn deployment_policy() -> BTreeMap<String, String> {
+    let mut policy = repo_wide_policy(REPOSITORY_ID);
+    policy.insert("environment".into(), "production".into());
+    policy
+}
+
+/// A branch policy: the repository-wide policy of [`REPOSITORY_ID`] and the
+/// `main` branch. It has as many predicates as [`deployment_policy`], and
+/// neither is a subset of the other.
+pub(super) fn branch_policy() -> BTreeMap<String, String> {
+    let mut policy = repo_wide_policy(REPOSITORY_ID);
+    policy.insert("ref".into(), MATCHING_REF.into());
+    policy
+}
+
+/// Verified claims of a `production` deployment of [`REPOSITORY_ID`] from
+/// its `main` branch: every predicate of [`deployment_policy`] and
+/// [`branch_policy`], plus a claim no binding names. They fit every A50
+/// binding but `bnd_b_other`.
+pub(super) fn deployment_claims() -> BTreeMap<String, String> {
+    let mut claims = deployment_policy();
+    claims.extend(branch_policy());
+    claims.insert("pipeline_run".into(), "4711".into());
+    claims
+}
+
+/// [`deployment_claims`] as evidence.
+pub(super) fn deployment_evidence() -> Evidence {
+    Evidence::new(deployment_claims())
+}
+
+/// [`deployment_evidence`] of [`OTHER_REPOSITORY_ID`]: it fits
+/// `bnd_b_other` (of `wld_b`) and no other binding.
+pub(super) fn other_repository_evidence() -> Evidence {
+    let mut claims = deployment_claims();
+    claims.insert("repository_id".into(), OTHER_REPOSITORY_ID.into());
+    Evidence::new(claims)
+}
+
+/// The policy of an A50 binding.
+#[derive(Clone, Copy)]
+enum MatchingPolicy {
+    /// [`repo_wide_policy`] of this repository.
+    RepoWide(&'static str),
+    /// [`deployment_policy`].
+    Deployment,
+    /// [`branch_policy`].
+    Branch,
+}
+
+impl MatchingPolicy {
+    fn claims(self) -> BTreeMap<String, String> {
+        match self {
+            Self::RepoWide(repository_id) => repo_wide_policy(repository_id),
+            Self::Deployment => deployment_policy(),
+            Self::Branch => branch_policy(),
+        }
+    }
+}
+
+/// The A50 bindings of a tenant: (ID base, actor, source ID base, status,
+/// policy).
+const MATCHING_BINDINGS: [(&str, &str, &str, Status, MatchingPolicy); 7] = [
+    (
+        "bnd_m2",
+        "wld_a",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::Deployment,
+    ),
+    (
+        "bnd_m1",
+        "wld_a",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::Branch,
+    ),
+    (
+        "bnd_0_gen_off",
+        "wld_a",
+        "src_gen",
+        Status::Disabled,
+        MatchingPolicy::Deployment,
+    ),
+    (
+        "bnd_0_gen_free",
+        "wld_a",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::Deployment,
+    ),
+    (
+        "bnd_0_gen2",
+        "wld_a",
+        SECOND_GENERIC,
+        Status::Enabled,
+        MatchingPolicy::Deployment,
+    ),
+    (
+        "bnd_0_repo",
+        "wld_b",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::RepoWide(REPOSITORY_ID),
+    ),
+    (
+        "bnd_b_other",
+        "wld_b",
+        "src_gen",
+        Status::Enabled,
+        MatchingPolicy::RepoWide(OTHER_REPOSITORY_ID),
+    ),
+];
+
+/// One of the A50 grants of a tenant: a direct grant of the tenant's
+/// audience. `id`, `actor` and `listed` are ID bases ([`Side::id`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MatchingGrant {
+    pub(super) id: &'static str,
+    name: &'static str,
+    pub(super) actor: &'static str,
+    /// The bindings the grant lists, its `allowed_binding_ids`.
+    pub(super) listed: &'static [&'static str],
+}
+
+/// `grt_a_match`: the deployment binding of `wld_a`, and its disabled and
+/// other-source bindings.
+pub(super) const GRANT_A_MATCH: MatchingGrant = MatchingGrant {
+    id: "grt_a_match",
+    name: "a-match",
+    actor: "wld_a",
+    listed: &["bnd_m2", "bnd_0_gen_off", "bnd_0_gen2"],
+};
+/// `grt_a_multi`: two bindings of `wld_a` that the same evidence can fit.
+pub(super) const GRANT_A_MULTI: MatchingGrant = MatchingGrant {
+    id: "grt_a_multi",
+    name: "a-multi",
+    actor: "wld_a",
+    listed: &["bnd_m1", "bnd_m2"],
+};
+/// `grt_b_match`: the two repository-wide bindings of `wld_b`.
+pub(super) const GRANT_B_MATCH: MatchingGrant = MatchingGrant {
+    id: "grt_b_match",
+    name: "b-match",
+    actor: "wld_b",
+    listed: &["bnd_0_repo", "bnd_b_other"],
+};
+pub(super) const MATCHING_GRANTS: [MatchingGrant; 3] =
+    [GRANT_A_MATCH, GRANT_A_MULTI, GRANT_B_MATCH];
+
+/// Creates the A50 records of `side` (module docs, "The A50 additions").
+async fn seed_matching(pool: &PgPool, side: Side) {
+    registry::create_trust_source(
+        pool,
+        &NewTrustSource {
+            id: side.id(SECOND_GENERIC),
+            name: "partner-ci-2".into(),
+            ..source(side, Source::Generic)
+        },
+    )
+    .await
+    .unwrap();
+    for (base, actor, on, status, policy) in MATCHING_BINDINGS {
+        let claim_match_policy = policy.claims();
+        registry::create_principal_binding(
+            pool,
+            &NewPrincipalBinding {
+                trust_source_id: side.id(on),
+                claim_match_policy,
+                ..binding(side, base, actor, Source::Generic, status)
+            },
+        )
+        .await
+        .unwrap();
+    }
+    for g in MATCHING_GRANTS {
+        registry::create_service_grant(
+            pool,
+            &NewServiceGrant {
+                id: side.id(g.id),
+                name: g.name.into(),
+                actor_principal_id: side.id(g.actor),
+                allowed_binding_ids: g.listed.iter().map(|base| side.id(base)).collect(),
+                // The direct grant's target, mode, scopes and audience.
+                ..grant(side, GRANTS[0])
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// [`two_tenants`] with the A50 records of each tenant (module docs, "The
+/// A50 additions").
+pub(super) async fn two_tenants_with_matching() -> (TestDb, PgPool) {
+    let (db, pool) = two_tenants().await;
+    for side in [A, B] {
+        seed_matching(&pool, side).await;
     }
     (db, pool)
 }
