@@ -1720,6 +1720,53 @@ const legUploads = (text, wf = 'ci.yml') =>
       .map((u) => ({ wf, job, ...u, body, leg: /^ {6}SKYOAUTH_CONFORMANCE_LEG: *(\S+)$/m.exec(body)?.[1] ?? null })),
   );
 
+// The resolution part of the registry check runs in the scenarios-pg leg
+// job (layout §3, tests/conformance/README.md "The resolution part"). It
+// must never cost the leg its artifact, and its nextest list must cover every
+// workspace package that TEST_JOBS names, since the check fails a stage test
+// whose package is not listed (no per-job mode exists yet).
+describe('the resolution check in scenarios-pg', () => {
+  const body = () => workflowJobs(ciText()).get('scenarios-pg');
+  const CHECK = /node scripts\/ci\/check-conformance-registry\.mjs --nextest-list /;
+
+  test('it runs after the leg artifact upload, which runs whatever happened before it, and runs whatever the tests did', () => {
+    const steps = stepsOf(body());
+    const upload = steps.findIndex((x) => /uses: actions\/upload-artifact@/.test(x));
+    const check = steps.findIndex((x) => CHECK.test(x));
+    const tests = steps.findIndex((x) => /cargo nextest run /.test(x));
+    assert.ok(tests >= 0 && upload > tests && check > upload, `steps: tests ${tests}, upload ${upload}, check ${check}`);
+    assert.match(steps[upload], /^ {8}if: always\(\)$/m, 'the upload runs whatever the steps before it did');
+    // Everything after the upload belongs to the check: setup-node, npm ci and
+    // the check itself, each run whatever the tests did, none of them able to
+    // hide a failure.
+    const rest = steps.slice(upload + 1);
+    assert.deepEqual(
+      rest.map((x) => (/uses: actions\/setup-node@/.test(x) ? 'node' : /npm ci --ignore-scripts/.test(x) ? 'npm' : CHECK.test(x) ? 'check' : x)),
+      ['node', 'npm', 'check'],
+    );
+    for (const x of rest) {
+      assert.match(x, /^ {8}if: success\(\) \|\| failure\(\)$/m, x);
+      assert.doesNotMatch(x, /continue-on-error/);
+    }
+    assert.ok(needsOf(workflowJobs(ciText()).get('ci-passed')).includes('scenarios-pg'), 'ci-passed needs scenarios-pg, so the check gates the merge');
+  });
+
+  test('its list covers every workspace package that TEST_JOBS names, and the check reads that list', () => {
+    const [step] = stepsOf(body()).filter((x) => CHECK.test(x));
+    const run = blockOf(step, 'run', 8);
+    assert.equal(run.length, 2, step);
+    const m = /^cargo nextest list --locked((?: -p [a-z0-9_-]+)+) --profile ci --message-format json > "(\$RUNNER_TEMP\/[a-z.-]+)"$/.exec(run[0]);
+    assert.ok(m, run[0]);
+    assert.equal(run[1], `node scripts/ci/check-conformance-registry.mjs --nextest-list "${m[2]}"`);
+    const listed = m[1].trim().split(/\s*-p\s+/).filter(Boolean).sort();
+    const members = JSON.parse(`[${/^members = \[(.*)\]$/m.exec(repoText('Cargo.toml'))[1]}]`);
+    const workspace = members.map((d) => /^name = "([^"]+)"$/m.exec(repoText(join(d, 'Cargo.toml')))[1]);
+    const named = [...new Set(TEST_JOBS.filter(([runner, pkg]) => runner === 'nextest' && pkg !== null).map(([, pkg]) => pkg))];
+    assert.deepEqual(listed, named.filter((p) => workspace.includes(p)).sort(), 'list exactly the TEST_JOBS packages that exist (-p each)');
+    assert.ok(listed.includes('skyoauth-scenarios'));
+  });
+});
+
 describe('the conformance-report CI job', () => {
   const catalogue = parseEnvironments(repoText(LAYOUT), []).catalogue;
 
