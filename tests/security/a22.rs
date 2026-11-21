@@ -12,9 +12,10 @@
 //! a real PostgreSQL, one fresh database per test, with no SQL of their own.
 //! The fixture is local: tenants `ten_a` and `ten_b`, and operators
 //! enrolled through the registry, each with one identity, one credential
-//! and one role binding, all enabled. Every test runs in both tenants; the
-//! first positive and the scope and other-registries negatives also in the
-//! instance scope.
+//! and one role binding, all enabled except the credentials of the
+//! `cdis_*` operators, which are created `disabled`. Every test runs in
+//! both tenants; the first positive and the scope and other-registries
+//! negatives also in the instance scope.
 //!
 //! - **Positive.** An operator whose registered, unrevoked credential,
 //!   enabled identity and enabled binding are created through the registry
@@ -44,28 +45,34 @@
 //!   in for another (`a22_neg_scope_and_role_never_inherit`). The IDs and
 //!   names of other registries' rows, used as the key, never authorize
 //!   (`a22_neg_other_registries_identities_never_authorize`; see its docs).
-//!   A store that cannot be reached is an `Err`, never a hit or a miss
-//!   (`a22_neg_store_unavailable_is_an_error_not_a_grant`).
+//!   A closed pool gives an `Err` (`PoolClosed`), never a hit or a miss
+//!   (`a22_neg_store_unavailable_is_an_error_not_a_grant`); the pool is
+//!   closed on the client side, and no server outage is simulated.
 //!
-//! No test here re-enables a binding, or asserts anything about doing so:
-//! whether a re-enable needs an approval belongs to the service layer
-//! (`update_admin_role_binding`).
+//! No test here re-enables anything, or asserts anything about doing so:
+//! the registry's `update_admin_role_binding` changes status both ways;
+//! whether a re-enable needs an approval belongs to the service layer.
 //!
-//! **Missing, so not a claim.** A22 M1a needs the operator's path end to
-//! end, and none of these is built:
+//! **Missing, so not a claim.** A22 M1a needs its row end to end, and
+//! these tests reach only the registry lookup in the middle of it. Not
+//! built yet:
 //!
-//! - The mTLS handshake and the deployment trust anchor
-//!   (`trust_anchor_ref`): the lookup takes `public_identity` as the caller
-//!   canonicalized it after a handshake that no test here performs. That is
-//!   the operator client's side, T13.10 (`skyoauth-operator`), which does
-//!   not exist yet.
-//! - The OP harness leg (T13.6): an operator endpoint that receives a forged
-//!   upstream admin-role claim and refuses it; a compromised-IdP session;
-//!   replayed recovery; concurrent bootstrap; a missing audit sink; and the
-//!   rest of T13.6. No operator endpoint exists yet.
-//! - The OIDC leg (the row's mock human IdP): an upstream admin-role claim
-//!   or a human session presented where operator authority is needed, which
-//!   must never confer it.
+//! - The positive end to end: an operator endpoint of the in-process
+//!   service (UC) authorizes a request that the OP harness component,
+//!   `skyoauth-operator` (T13.10), sends with a registered mTLS key. Its
+//!   server side verifies the presented certificate chain against the
+//!   deployment trust anchor (`trust_anchor_ref`) and canonicalizes the
+//!   presented key into `public_identity` (T13.1, T13.3); the lookup takes
+//!   `public_identity` as given and checks no handshake, chain or trust
+//!   anchor. Its client side is `skyoauth-operator`, which presents the key.
+//!   Neither the operator endpoint nor `skyoauth-operator` exists.
+//! - The negative at that endpoint: an upstream admin-role claim or a human
+//!   session from the OIDC harness component (the mock human IdP) confers
+//!   no operator authority.
+//!
+//! Bootstrap and recovery (one bootstrap and signed recovery; concurrent or
+//! reopened bootstrap, replayed recovery) are A32's row (T13.4, T13.5,
+//! T13.6), not A22's.
 //!
 //! The M3 stage, "linking" (an explicit verified link positive and the
 //! email-only link negative; T30.4, T52.3), is not owned here. A22 has no
@@ -782,9 +789,10 @@ async fn a22_pos_locked_lookup_equals_the_plain_lookup_and_the_same_none_for_eve
     db.drop([pool]).await;
 }
 
-/// A pool that can no longer reach the store gives an `Err` for a request
-/// that the store would authorize, not a hit and not a miss; the caller
-/// denies it (module docs of `registry::operator`). The plain lookup only:
+/// A closed pool gives an `Err` (`PoolClosed`) for a request that the
+/// store would authorize, not a hit and not a miss; the caller denies it
+/// (module docs of `registry::operator`). The pool is closed on the client
+/// side; no server outage is simulated. The plain lookup only:
 /// the locked one needs an open transaction, which a closed pool cannot
 /// begin.
 #[tokio::test]
