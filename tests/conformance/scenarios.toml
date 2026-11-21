@@ -526,7 +526,14 @@ milestone = "M1a"
 scope = "operator"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
-tests = []
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_pos_locked_lookup_equals_the_plain_lookup_and_the_same_none_for_every_lever",
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_pos_registered_credential_with_active_role_authorizes",
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_each_lever_flips_a_hit_to_the_same_none",
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_other_registries_identities_never_authorize",
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_scope_and_role_never_inherit",
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_store_unavailable_is_an_error_not_a_grant",
+]
 
 [[scenario.stage]]
 milestone = "M3"

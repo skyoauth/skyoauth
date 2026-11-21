@@ -21,6 +21,12 @@
 //! vacuously (layout §1.2, "Loud failure"), and scenario tests are never
 //! `#[ignore]`d.
 //!
+//! No test of this package sets `session_replication_role`, so a role that
+//! is not a superuser needs no `GRANT SET ON PARAMETER
+//! session_replication_role TO <role>` here; the replica-role tests of
+//! `service/tests` need it, and fail with SQLSTATE 42501 without it
+//! (README.md).
+//!
 //! Timing. Retrying a refused `DROP DATABASE` has no event to wait on, so
 //! [`drop_database`] polls every [`DROP_POLL_INTERVAL`] until
 //! [`DROP_DEADLINE`], like [`crate::rep::wait_until_blocked`]: a bounded
