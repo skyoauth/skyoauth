@@ -592,6 +592,393 @@ needs `UPDATE` and `SELECT` on `service_grant` and `SELECT` on
 compare-and-set on the grant, done for every list change, remains the
 first line.
 
+## What 0005 adds
+
+`0005_operator.sql` is the fourth slice of the M1a domain schema (T10.1):
+`admin_identity`, `admin_credential`, `admin_role_binding`,
+`recovery_state`, `administrative_operation` and `consumed_assertion`, named
+as in the logical model (tasks §3). It also adds the single-use replay table
+that "Not done in `0004`" lists (T10.9). It reuses
+`skyoauth_reject_immutable_change(…)`, `skyoauth_check_revision()` and
+`skyoauth_reject_mutation()` and adds three guard functions,
+`skyoauth_reject_change_once_set(…)`,
+`skyoauth_check_recovery_key_rotation()` and
+`skyoauth_reject_consume_after_revoke()`. None reads a table, so each pins
+`search_path` to `pg_catalog, pg_temp`. Every trigger is `ENABLE ALWAYS`
+and raises `SK001` for a row it rejects.
+
+- **Authority.** Operators, their credentials and the recovery state are
+  instance authority: instance security_admin enrolls operators and scoped
+  roles and manages recovery policy (design §7.2), and operators are not
+  principals (identity-registry §5.2). These tables have no tenant owner. A
+  role binding and an administrative operation may name one tenant
+  (`tenant_id`, `NULL` for the instance). They reference `tenant` with a
+  plain foreign key, as an audience assignment does in `0003`; `tenant` has a
+  single-column key, so the "composite" key of the brief is that plain key
+  (inferred). `consumed_assertion` is tenant-owned: its composite
+  `(tenant_id, trust_source_id)` key keeps a proof on a source of its own
+  tenant (IR-031).
+- **Keys and bounds** follow `0003` and `0004`. Every ID and reference column
+  is at most 255 bytes, and the exact strings `public_identity`,
+  `trust_anchor_ref` and `kind` are at most 2048 bytes. Each bound is a named
+  check, so an over-long value fails with `23514`, never with `54000`, also
+  when it names a missing row. `trust_anchor_ref` and `kind` also reject
+  whitespace and control characters (the `COLLATE "C"` form of `0004`).
+  `public_identity` is not checked for them: it is the canonical public-key
+  identity of the credential, for example the SHA-256 digest of its
+  SubjectPublicKeyInfo, in an encoding the service fixes; subject DNs are
+  not stored. The digests
+  `request_digest`, `challenge_hash` and `replay_key_digest` are `bytea` of
+  32 to 64 bytes, and the recovery public key is 1 to 8192 bytes. Every ID,
+  key, reference and enumeration is `COLLATE "C"`; only `outcome` keeps the
+  database collation, as `audit_event.outcome` does.
+- **`0002` key bounds.** `0005` makes `audit_event` and
+  `instance_security_policy` foreign-key targets, and every key column of
+  the schema is bounded (lead decision, 2026-11-20), so `0005` adds the
+  forward-only 255-byte bounds `audit_event_id_octet_length_check`,
+  `audit_event_tenant_id_octet_length_check`,
+  `instance_security_policy_instance_id_octet_length_check` and
+  `egress_allowlist_entry_id_octet_length_check` to the frozen `0002`
+  tables, as `0004` did for `principal`. An over-long value fails with
+  `23514`. The test `every_key_column_of_the_schema_has_a_named_bound`
+  checks every unique and foreign-key column of every table. Up to `0004`
+  the database accepts longer values, and `0005` validates the new checks
+  against existing rows. Upgrade precondition: before `0005` is applied to a
+  populated database,
+  `select (select count(*) from audit_event where octet_length(id) > 255 or octet_length(tenant_id) > 255) + (select count(*) from instance_security_policy where octet_length(instance_id) > 255) + (select count(*) from egress_allowlist_entry where octet_length(id) > 255)`
+  must return 0.
+- **Locks on existing tables.** `0005` runs in one transaction, so it holds
+  its locks until it commits. Adding the bound checks takes
+  `ACCESS EXCLUSIVE` on `audit_event`, `instance_security_policy` and
+  `egress_allowlist_entry` and scans each of them to validate the existing
+  rows. The new foreign keys take `SHARE ROW EXCLUSIVE` on the tables they
+  reference: `tenant`, `trust_source`, `audit_event` and
+  `instance_security_policy`. Checked with `pg_locks` in a transaction that
+  applies `0005` to a `0004` database (PostgreSQL 16); an over-long existing
+  `egress_allowlist_entry.id` there makes the migration fail with `23514`.
+  On a populated database, every read and write of the three
+  `ACCESS EXCLUSIVE` tables, and every write of `tenant` and
+  `trust_source`, waits until the migration commits, a brief stall that
+  grows with the size of the three scanned tables. Run the upgrade in a
+  maintenance window.
+- **Roles** (identity-registry §5.2; public-api API-120; ADR-013
+  OQ-ADR013-3). `role` is `security_admin`, `trust_admin`, `client_admin`,
+  `provider_admin` or `auditor`. `tenant_id` is `NULL` for `security_admin`,
+  the instance role, and set for the three tenant roles `trust_admin`,
+  `client_admin` and `provider_admin`. `auditor` is either: with a tenant it
+  reads that tenant, and with a `NULL` tenant it is the instance auditor,
+  the only grant of instance audit reads. No role implies another; each is
+  one row. `UNIQUE NULLS NOT DISTINCT (admin_id, role, tenant_id)` allows one
+  binding per operator, role and scope, disabled rows included, and makes
+  this hold for `security_admin` too. `NULLS NOT DISTINCT` needs
+  PostgreSQL 15.
+- **Recovery state.** The table holds one row
+  (`recovery_state_single_row ON ((true))`), so a concurrent second
+  bootstrap fails with `23505` (T13.6). Its `instance_id` references the
+  `instance_security_policy` row. `bootstrap_closed` goes from `false` to
+  `true` only (T13.4). `recovery_key_epoch` never decreases, and it
+  increases exactly when `recovery_public_key` changes (OQ-TM-8). The step
+  size is free.
+- **Administrative operations** (tasks §3; ADR-008 item 12; IR-054;
+  public-api OQ-API-13). The request digest, plan, kind and actor are
+  immutable, as are the ID, tenant, expected revision, challenge, expiry,
+  approved operation and audit event. `outcome`, `revision` and the one-way
+  fields change. `consumed_at` is set once and never changed or cleared.
+  `revoked_at` and `revocation_operation_id` are recorded together, once.
+  An operation may be both consumed and revoked: security_admin may revoke a
+  `route_bundle_approval` after beginning an attempt consumed it (tasks §3
+  "Route preparation, approval and recovery"), and the set-once guard keeps
+  each field one-way. The other order is refused for an `UPDATE` only: an
+  `UPDATE`, `ON CONFLICT … DO UPDATE` included, that sets `consumed_at` on
+  a row already revoked and not consumed fails with `SK001` (lead decision,
+  2026-11-21). An `INSERT` is not checked, and the database never compares
+  the two timestamps (see the service rules below). An operation of kind `approve` names the operation it
+  approves; other kinds may name one too, for example a
+  `route_bundle_approval` naming its preparation. No operation approves or
+  revokes itself. A
+  recovery challenge has an expiry, and nothing is consumed at or after its
+  expiry (LT-107). `actor_id` is not a foreign key, because bootstrap and
+  break-glass recovery act for actors that are not operator identities.
+  `audit_id` references the audit event that records the operation, so that
+  event is inserted first (see the ordering note below).
+- **Consumed assertions** (T10.9; ADR-016 items 6 and 7). The primary key
+  `(tenant_id, trust_source_id, replay_key_digest)` makes consumption atomic
+  across replicas. A replay fails with `23505` on `consumed_assertion_pkey`,
+  or inserts nothing under `ON CONFLICT DO NOTHING`. A consumed proof has a
+  row under the current digest-key version and, while a retiring version
+  drains, one under that version too (see the service rules below). Rows
+  are insert-only: an `UPDATE`, including an `ON CONFLICT … DO UPDATE`,
+  fails with `SK001`. `retain_until` is after `consumed_at`. The only
+  intended removal is a `DELETE` after `retain_until`, a service or job rule
+  until the delete-guard migration (see Follow-ups).
+- **Not NULL.** Every column is `NOT NULL` except the fields the model marks
+  optional: `admin_credential.revoked_at`, `admin_role_binding.tenant_id`,
+  and `administrative_operation`'s `tenant_id`, `challenge_hash`,
+  `expires_at`, `consumed_at`, `revoked_at`, `revocation_operation_id` and
+  `approves_operation_id`. The `CHECK`s above tie
+  `admin_credential.revoked_at` to `status`, `admin_role_binding.tenant_id`
+  to the role, `revoked_at` and `revocation_operation_id` to each other,
+  `challenge_hash` to `expires_at`, and `consumed_at` to `expires_at` when
+  both are set; `approves_operation_id` is required only for kind
+  `approve`. `administrative_operation.tenant_id` is tied to nothing: the
+  service sets it to the `tenant_id` of its audit event (see the service
+  rules below). Only `admin_identity.created_at` (`now()`)
+  and `revision` (1) have defaults.
+- **One-way and immutable state** (`SK001`). The set-once guard rejects a
+  change to a named column once that column is not `NULL` and not `false`.
+  Like `skyoauth_reject_immutable_change(…)`, it raises `P0001` for an
+  argument that names no column. It covers `admin_credential.revoked_at`,
+  `recovery_state.bootstrap_closed` and the operation's `consumed_at`,
+  `revoked_at` and `revocation_operation_id`. The immutable columns are the
+  IDs (tasks §3 "IDs/names"), the operation's plan, digest, kind and actor
+  (tasks §3 "Route preparation, approval and recovery"), and (inferred) an
+  identity's `created_at`, every credential column but `status` and
+  `revoked_at`, every role-binding column but `status` and `revision`,
+  `recovery_state.instance_id`, and the operation's other fields listed
+  above. `admin_role_binding`, `recovery_state` and
+  `administrative_operation` carry a `revision` checked by
+  `skyoauth_check_revision()`. `admin_identity` and `admin_credential` have
+  none, because the model gives them none. The consume-after-revoke guard
+  rejects an `UPDATE` that sets `consumed_at` on an operation whose
+  `revoked_at` is already set and whose `consumed_at` is not; an `UPDATE`
+  that leaves `consumed_at` unset still passes. The guards, each a
+  `BEFORE … FOR EACH ROW` trigger:
+
+  | Trigger                                            | Fires on           | Function                                 |
+  | -------------------------------------------------- | ------------------ | ---------------------------------------- |
+  | `admin_identity_immutable`                         | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `admin_credential_immutable`                       | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `admin_credential_set_once`                        | `UPDATE`           | `skyoauth_reject_change_once_set(…)`     |
+  | `admin_role_binding_immutable`                     | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `admin_role_binding_revision`                      | `INSERT`, `UPDATE` | `skyoauth_check_revision()`              |
+  | `recovery_state_immutable`                         | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `recovery_state_set_once`                          | `UPDATE`           | `skyoauth_reject_change_once_set(…)`     |
+  | `recovery_state_key_rotation`                      | `UPDATE`           | `skyoauth_check_recovery_key_rotation()` |
+  | `recovery_state_revision`                          | `INSERT`, `UPDATE` | `skyoauth_check_revision()`              |
+  | `administrative_operation_immutable`               | `UPDATE`           | `skyoauth_reject_immutable_change(…)`    |
+  | `administrative_operation_set_once`                | `UPDATE`           | `skyoauth_reject_change_once_set(…)`     |
+  | `administrative_operation_no_consume_after_revoke` | `UPDATE`           | `skyoauth_reject_consume_after_revoke()` |
+  | `administrative_operation_revision`                | `INSERT`, `UPDATE` | `skyoauth_check_revision()`              |
+  | `consumed_assertion_no_update`                     | `UPDATE`           | `skyoauth_reject_mutation()`             |
+
+- **References.** Every foreign key takes no action on delete or update, is
+  not deferrable and is named:
+
+  | Constraint                                              | Columns                                            |
+  | ------------------------------------------------------- | -------------------------------------------------- |
+  | `admin_credential_admin_id_fkey`                        | `admin_id` → `admin_identity`                      |
+  | `admin_role_binding_admin_id_fkey`                      | `admin_id` → `admin_identity`                      |
+  | `admin_role_binding_tenant_id_fkey`                     | `tenant_id` → `tenant`                             |
+  | `recovery_state_instance_id_fkey`                       | `instance_id` → `instance_security_policy`         |
+  | `administrative_operation_tenant_id_fkey`               | `tenant_id` → `tenant`                             |
+  | `administrative_operation_revocation_operation_id_fkey` | `revocation_operation_id` → the revoking operation |
+  | `administrative_operation_approves_operation_id_fkey`   | `approves_operation_id` → the approved operation   |
+  | `administrative_operation_audit_id_fkey`                | `audit_id` → `audit_event`                         |
+  | `consumed_assertion_trust_source_id_fkey`               | `(tenant_id, trust_source_id)` → the source        |
+
+- **Named checks.** Each table has `<table>_<column>_octet_length_check` on
+  every ID, reference, exact string and digest. Two names abbreviate to fit
+  the 63-byte identifier limit: `administrative_operation_revocation_id_octet_length_check`
+  (`revocation_operation_id`) and
+  `administrative_operation_approves_id_octet_length_check`
+  (`approves_operation_id`). The others:
+
+  | Constraint                                              | Rule                                                                                             |
+  | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+  | `admin_credential_trust_anchor_ref_no_space_check`      | `trust_anchor_ref` has no whitespace or controls                                                 |
+  | `admin_credential_revoked_disabled_check`               | a revoked credential is `disabled`                                                               |
+  | `admin_role_binding_scope_check`                        | `tenant_id` is `NULL` for `security_admin`, set for the three tenant roles, either for `auditor` |
+  | `recovery_state_recovery_public_key_octet_length_check` | the key is 1 to 8192 bytes                                                                       |
+  | `administrative_operation_kind_no_space_check`          | `kind` has no whitespace or controls                                                             |
+  | `administrative_operation_approve_kind_check`           | an `approve` names the operation it approves                                                     |
+  | `administrative_operation_approves_self_check`          | no operation approves itself                                                                     |
+  | `administrative_operation_revokes_self_check`           | no operation revokes itself                                                                      |
+  | `administrative_operation_revocation_check`             | `revoked_at` and `revocation_operation_id` set together                                          |
+  | `administrative_operation_challenge_expiry_check`       | a challenge has an expiry                                                                        |
+  | `administrative_operation_consumed_before_expiry_check` | `consumed_at` before `expires_at`                                                                |
+  | `consumed_assertion_retention_check`                    | `retain_until` after `consumed_at`                                                               |
+
+  The other single-column checks keep the names PostgreSQL generates; the
+  catalog test in `service/tests/schema_operator.rs` pins the full set, the
+  nullable columns, the keys and the triggers.
+
+- **Privileges.** The guards read no table, so they need no grant. Foreign
+  key checks run as the table owner. Consuming a proof therefore needs only
+  `INSERT` on `consumed_assertion`, with a plain `INSERT` or
+  `ON CONFLICT DO NOTHING` without a conflict target. Naming the target
+  (`ON CONFLICT (tenant_id, trust_source_id, replay_key_digest)`) needs
+  `SELECT` too and otherwise fails with `42501`. Pruning needs `DELETE`.
+  The test `proof_consumption_needs_only_insert` checks each case.
+
+Choices marked "(inferred)" in `0005`, which no source dictates:
+
+- `status` is `enabled` or `disabled` on the three operator tables;
+- revocation of a credential means permanent `disabled`;
+  `public_identity` is unique across all credentials, revoked ones
+  included, and is not checked for whitespace; `trust_anchor_ref` is an
+  exact reference;
+- one role binding per operator, role and scope, `NULL` tenant included,
+  so an operator has at most one instance `auditor` binding;
+- `recovery_state.instance_id` references the policy row;
+  `bootstrap_closed` has no default and may be inserted `true`; the recovery
+  key is 1 to 8192 bytes, the epoch is at least 1, and the epoch changes exactly
+  when the key does, by any increase;
+- digests are 32 to 64 bytes;
+- `kind` is an open, bounded name; `expected_revision` is 0 for a create;
+  `immutable_plan` is a JSON object (`'{}'` accepted); `outcome` is
+  non-empty free text;
+- `actor_id` is not a foreign key; `audit_id` names the creating event and
+  is not unique;
+- an `approve` must name an approved operation and other kinds may; no
+  operation approves or revokes itself; an operation may be both consumed
+  and revoked;
+- the immutable columns beyond the plan, digest, kind, actor and IDs listed
+  above;
+- `digest_key_version` is an opaque ID; `retain_until` is after
+  `consumed_at`; `consumed_assertion` has no separate tenant foreign key,
+  since the source key implies the tenant (as for the `0004` list tables).
+
+The database does not enforce these rules; the service must:
+
+- require a second, different security_admin for gated writes and refuse
+  self-approval (IR-054); check that an approval names a pending,
+  unexpired, unrevoked operation of an approvable kind and that the
+  echoed digest matches; the foreign keys prove only that the approved and
+  revoking operations exist, in any tenant or none. That an approver is not
+  the actor, and that an approval or revocation of a tenant operation stays
+  in its tenant, stay service rules (accepted in review of `0005`);
+- give an operation the `tenant_id` of the audit event that records it; the
+  database checks neither against the other;
+- give every pending gated write, `route_bundle_approval` and recovery
+  challenge an `expires_at`; the database requires one only with a `challenge_hash`;
+- keep secrets out of `immutable_plan`: it is kept for the life of the row
+  and read back by auditors, and secrets never appear in configuration
+  exports or logs (design §7);
+- insert the first `recovery_state` row with `recovery_key_epoch` 1; the
+  database checks only that the epoch is at least 1;
+- never record an operation as consumed after it was revoked, by an
+  `INSERT` that carries both `consumed_at` and `revoked_at` or by one
+  `UPDATE` that sets both on a row that has neither: the consume-after-revoke
+  guard checks only an `UPDATE` of a row already revoked, and the database
+  does not compare the two timestamps;
+- authorize each write by an enabled binding of an enabled operator with an
+  enabled, unrevoked credential; the database does not join the statuses;
+- cap the challenge lifetime at 15 minutes (LT-107): the table has no
+  creation time to measure it from;
+- refuse a retired recovery key; the table keeps only the current one;
+- record a consumed proof only for a `single_use` source, and set
+  `retain_until` to at least the proof's `exp` plus skew (lifetimes §9);
+- prune `consumed_assertion` only after `retain_until`, until the
+  delete-guard migration checks it (see Follow-ups);
+- generate every ID and the `replay_key_digest` (a keyed digest; ADR-016
+  item 6);
+- keep replay detection across digest-key rotation with a drain deadline
+  (lead decision, 2026-11-21; tasks §3 "One-time state"; ADR-016 items 6
+  and 7; T21.8). This protocol must land before any T21.8 code. The primary
+  key compares digests, and the same proof has a different digest under
+  each key version, so a row written under one version does not conflict
+  with a replay digested under another. The protocol:
+  - at the cutover (`cutover_at`) a new version becomes current, and each
+    retiring version gets a fixed drain deadline
+    `drain_until = cutover_at + max_proof_ttl + skew`;
+  - a consumption writes, in one transaction, a row under the current
+    version with the proof's full `retain_until`, and, only while
+    `consumed_at < drain_until`, a row under each retiring version with
+    `retain_until = least(proof_retain_until, drain_until)`. A conflict on
+    any of them is a replay and rolls back all of them. The capped
+    `retain_until` is still after `consumed_at`, since both
+    `proof_retain_until` and `drain_until` are, so
+    `consumed_assertion_retention_check` holds;
+  - after `drain_until` nothing is written under a retiring version.
+
+  Invariant: every proof is replay-protected for its whole validity under
+  at least one retained key. A proof consumed before the cutover has its
+  row under the old version, written with its full `retain_until`, for its
+  whole retention; a replay during the drain conflicts with that row, and
+  the proof expires by `drain_until`, since it was issued before
+  `cutover_at`. A proof consumed during the drain also has a row under the
+  new version with its full `retain_until`, so capping its old-version row
+  at `drain_until` loses nothing: from `drain_until` on, a proof is checked
+  and consumed under the new version alone. The default is this write-side
+  drain with capped rows. The follow-up, once every replica writes the new
+  version, switches a retired version to `SELECT` checks: the service looks
+  for an existing row under it and no longer writes there. That needs
+  `SELECT` on `consumed_assertion` for the runtime role, which consumption
+  otherwise does not need (see "Privileges" above);
+
+- order the locks of a write that creates an operation, so that it cannot
+  deadlock with another such write:
+  1. first lock every existing row that the new operation references or
+     that the write updates, with `FOR NO KEY UPDATE`, never `FOR UPDATE`.
+     The foreign-key checks of the operation insert take `FOR KEY SHARE` on
+     the referenced rows, which conflicts with `FOR UPDATE` and not with
+     `FOR NO KEY UPDATE`. Lock the rows in one fixed order: the tables of
+     `0005` in the order of this section (`admin_identity`,
+     `admin_credential`, `admin_role_binding`, `recovery_state`,
+     `administrative_operation`, `consumed_assertion`), then the `0002` to
+     `0004` tables by name, ascending bytewise, leaving out
+     `audit_chain_head`, which step 2 locks; within a table, by primary
+     key, ascending bytewise. Where possible, lock a table's rows with one
+     statement,
+     `SELECT … FROM <table> WHERE … ORDER BY <primary key> COLLATE "C" FOR NO KEY UPDATE`
+     (a `bytea` key column takes no `COLLATE`; it already compares
+     bytewise);
+  2. then lock the audit head, insert the audit event and insert the
+     operation;
+  3. then do the remaining updates. A revocation's `UPDATE` of the revoked
+     row comes here, after the head lock, because it names the revoking
+     operation, which exists only after step 2. It does not wait here: the
+     revoker already waited in step 1 for the locks of the rows it needs,
+     before it took the audit head.
+
+  PostgreSQL locks the rows of such a statement as they are returned. The
+  test `writers_locking_rows_in_key_order_wait_instead_of_deadlocking`
+  asserts that the plan of its statement has `LockRows` on top, with a
+  `Sort` or an index scan of the primary key directly below it, so the rows
+  are locked in key order. Caveats: only the locking statement's own
+  `ORDER BY` orders its locks, not one in an outer query around a locking
+  subquery; and under `READ COMMITTED` a row whose sort key changed while
+  the statement waited for its lock keeps its old place in the lock order
+  and is returned out of order (PostgreSQL documentation, "The Locking
+  Clause" of `SELECT`), which the immutable IDs rule out here. Rows locked
+  by separate statements are locked in the order of those statements. A
+  waiting writer proceeds only under `READ COMMITTED`: under
+  `REPEATABLE READ` or `SERIALIZABLE`, once the first writer commits an
+  update of a row the second one waits for, the second fails with `40001`
+  (`serialization_failure`; checked by hand on PostgreSQL 16 at both
+  levels), and its whole transaction must be rerun. The registry reports
+  `40001` as a retry-the-whole-transaction error, never as a stale
+  revision.
+
+  The two-connection tests
+  `for_update_on_a_referenced_row_deadlocks_with_the_audit_head` and
+  `a_row_updated_after_the_audit_head_must_be_locked_first` reproduce the
+  `40P01` deadlock that each step 1 rule avoids. In the prescribed order the
+  first test's insert does not wait at all, and in the second the revoker
+  waits in step 1 for the revoked row's lock, before it takes the head, and
+  then finishes.
+  `writers_locking_rows_in_key_order_wait_instead_of_deadlocking` shows
+  two writers that update the same two role bindings in opposite orders
+  deadlock when each locks a row as it updates it, and that with the
+  ordered statement the second writer waits for the first while holding
+  neither row and then proceeds, with no `40P01`. Against the "domain rows
+  first" order of `0002`, a write that creates an operation still locks its
+  domain rows first, but makes its writes after the head lock: the event,
+  the operation and the remaining updates of step 3. `audit_id` stays an
+  immediate, not deferrable foreign key, so the event is inserted first.
+  Writes that create no operation (consume, outcome) update their rows
+  before the head, in the `0002` order.
+
+- `0005` makes two `0002` tables foreign-key targets, so a bare `TRUNCATE`
+  of them now fails with `0A000` (a table referenced in a foreign key) before
+  the `0002` truncate guard can raise `SK001`:
+  `TRUNCATE audit_event` needs `administrative_operation` in the same
+  statement, and `TRUNCATE instance_security_policy` needs `recovery_state`.
+  The `0002` guard tests list those tables and check that the `SK001`
+  message names `audit_event` or `instance_security_policy`, and
+  `bare_truncate_of_a_referenced_foundation_table_fails_before_its_guard`
+  checks the `0A000`; the guard itself is unchanged.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -701,11 +1088,44 @@ Open for all registry tables:
   `TRUNCATE service_grant_binding` and `TRUNCATE principal_binding CASCADE`
   leave grants with no binding, so the pending guard must cover these
   tables, including a `TRUNCATE … CASCADE` that reaches them from another
-  table. The same migration adds a `revision` column to
+  table.
+  The six `0005` tables are part of the same pending migration, and for
+  them it is a prerequisite before any code of T13.4 (bootstrap), T13.5
+  (recovery) or T21.6 (single-use consumption) lands. Until it lands, a
+  `DELETE` or `TRUNCATE` undoes their one-time state: deleting the
+  `recovery_state` row lets a new row start with `bootstrap_closed` `false`,
+  which reopens bootstrap, and with a lower key epoch; deleting
+  `administrative_operation` rows, which only approvals and revocations
+  reference, forgets their consumption and revocation; and deleting
+  `consumed_assertion` rows before `retain_until` lets a replayed proof be
+  consumed again. Deleting a revoked `admin_credential` row frees its
+  `public_identity`, so the revoked key can be registered again. Foreign
+  keys refuse only a `TRUNCATE` that leaves out the referencing tables, and
+  `TRUNCATE … CASCADE` includes them, so `TRUNCATE admin_identity CASCADE`
+  empties `admin_identity`, `admin_credential` and `admin_role_binding`
+  together. The guards for these tables:
+  - `admin_identity` and `admin_role_binding`: no `DELETE` and no
+    `TRUNCATE`; their rows are only disabled. Deleting a role binding and
+    creating it again restarts its revision at 1, so the new binding could
+    match a snapshot of the old one, and `TRUNCATE admin_identity CASCADE`
+    empties identities, credentials and bindings together;
+  - `admin_credential`: no `DELETE` of a revoked row, and no `TRUNCATE`;
+  - `recovery_state`: no `DELETE` and no `TRUNCATE`;
+  - `administrative_operation`: no `DELETE` and no `TRUNCATE`;
+  - `consumed_assertion`: a `DELETE` only of rows whose
+    `retain_until < now()`, checked in the database, and no `TRUNCATE`.
+    Pruning, a job that runs that `DELETE`, lands with it, together with
+    the index on `retain_until` listed below.
+
+  Each guard also covers a `TRUNCATE … CASCADE` that reaches its table
+  from another table.
+
+  The same migration adds a `revision` column to
   `trust_keyset_version`, for a registry `update_trust_keyset_version`
   (enable or disable) that is a compare-and-set on the version's own
   revision, not the keyset's (lead decision, 2026-11-21; see "The `0004`
   tables" below).
+
 - Indexes on the referencing side of several `0004` foreign keys:
   `principal_binding (tenant_id, trust_source_id)`,
   `trust_keyset_version (tenant_id, keyset_id)`,
@@ -713,7 +1133,11 @@ Open for all registry tables:
   `service_grant (tenant_id, target_service_id)` and the assignment foreign
   keys of the two audience list tables. Without them a delete or key update
   of the referenced row scans the referencing table. They go in the same
-  forward-only migration as the delete and truncate guards.
+  forward-only migration as the delete and truncate guards. The same holds
+  for `0005`: `admin_credential.admin_id`, `admin_role_binding.tenant_id`
+  and `administrative_operation`'s `tenant_id`, `revocation_operation_id`,
+  `approves_operation_id` and `audit_id` have no index, and
+  `consumed_assertion` needs one on `retain_until` for pruning.
 - Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
@@ -795,6 +1219,14 @@ Not done in `0004`:
 - Rejecting the private-key member names of post-quantum JWK types in a
   keyset version (T11.3); the check covers the RFC 7518 and RFC 8037
   members only.
+
+Not done in `0005`:
+
+- The delete and truncate guards of the `0005` tables and the
+  `consumed_assertion` pruning, a prerequisite of T13.4, T13.5 and T21.6
+  (see Follow-ups).
+- A unique `audit_id`.
+- The policy revision (tasks §3 "Policy revisions").
 
 ## Rust registry surface
 

@@ -60,6 +60,20 @@ async fn rejects(pool: &PgPool, cases: &'static str) {
     assert_rejected(&mut pool.acquire().await.unwrap(), cases).await;
 }
 
+/// As one [`assert_rejected`] case, and also checks the error message, so a
+/// statement that names several tables shows which one rejected it.
+async fn assert_rejected_with_message(
+    conn: &mut PgConnection,
+    code: &str,
+    sql: &'static str,
+    message: &str,
+) {
+    let err = sqlx::raw_sql(sql).execute(&mut *conn).await.expect_err(sql);
+    assert_eq!(sqlstate(&err), code, "{sql}: {err}");
+    let text = err.as_database_error().unwrap().message().to_string();
+    assert_eq!(text, message, "{sql}");
+}
+
 async fn count(pool: &PgPool, sql: &'static str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
@@ -461,8 +475,16 @@ async fn instance_security_policy_revision_advances_by_one_and_row_is_kept() {
         SK001 UPDATE instance_security_policy SET revision = 1
         SK001 UPDATE instance_security_policy SET instance_id = 'x', revision = revision + 1
         SK001 DELETE FROM instance_security_policy
-        SK001 TRUNCATE instance_security_policy
     ",
+    )
+    .await;
+    // 0005 makes the policy row a foreign-key target, so the truncate names
+    // the referencing recovery_state; the policy's own guard rejects it.
+    assert_rejected_with_message(
+        &mut pool.acquire().await.unwrap(),
+        "SK001",
+        "TRUNCATE instance_security_policy, recovery_state",
+        "TRUNCATE on append-only table instance_security_policy is not allowed",
     )
     .await;
     let row: (bool, i64) =
@@ -1205,6 +1227,43 @@ async fn foundation_migrates_and_chains_in_a_schema_named_with_dollar_quotes() {
     db.drop([admin, pool]).await;
 }
 
+/// Once 0005 is applied, audit_event and instance_security_policy are
+/// foreign-key targets: a bare TRUNCATE of either fails with 0A000
+/// (`feature_not_supported`, a table referenced in a foreign key) before the
+/// truncate guard runs, also under `session_replication_role = replica`.
+/// The guard tests above therefore name the referencing tables too.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn bare_truncate_of_a_referenced_foundation_table_fails_before_its_guard() {
+    let (db, pool) = migrated().await;
+    run(&pool, POLICY).await;
+    let mut conn = pool.acquire().await.unwrap();
+    for setup in [
+        "SET session_replication_role = origin",
+        "SET session_replication_role = replica",
+    ] {
+        run(&mut *conn, setup).await;
+        for (sql, message) in [
+            (
+                "TRUNCATE audit_event",
+                "cannot truncate a table referenced in a foreign key constraint",
+            ),
+            (
+                "TRUNCATE instance_security_policy",
+                "cannot truncate a table referenced in a foreign key constraint",
+            ),
+        ] {
+            assert_rejected_with_message(&mut conn, "0A000", sql, message).await;
+        }
+    }
+    conn.close().await.unwrap();
+    assert_eq!(
+        count(&pool, "SELECT count(*) FROM instance_security_policy").await,
+        1
+    );
+    db.drop([pool]).await;
+}
+
 /// Runs, on one connection after `setup`, writes that the foundation guards
 /// must reject with SK001.
 async fn assert_guards_hold(pool: &PgPool, setup: &'static str) {
@@ -1229,7 +1288,6 @@ async fn assert_guards_hold(pool: &PgPool, setup: &'static str) {
     assert_rejected(&mut conn, r"
         SK001 UPDATE audit_event SET outcome = 'denied'
         SK001 DELETE FROM audit_event
-        SK001 TRUNCATE audit_event
         SK001 INSERT INTO audit_event (id, sequence, prev_hash, timestamp, actor, action, object_id, outcome) VALUES ('evt_9', 9, '\x09', now(), 'adm_1', 'x', 'ten_a', 'success')
         SK001 UPDATE audit_chain_head SET sequence = 5, head_hash = '\x05'
         SK001 DELETE FROM audit_chain_head
@@ -1240,6 +1298,15 @@ async fn assert_guards_hold(pool: &PgPool, setup: &'static str) {
         SK001 UPDATE egress_allowlist_entry SET purpose = 'token_review', revision = 2
         SK001 DELETE FROM egress_allowlist_entry
     ").await;
+    // 0005 makes audit events foreign-key targets, so the truncate names the
+    // referencing administrative_operation; the event guard rejects it.
+    assert_rejected_with_message(
+        &mut conn,
+        "SK001",
+        "TRUNCATE audit_event, administrative_operation",
+        "TRUNCATE on append-only table audit_event is not allowed",
+    )
+    .await;
     conn.close().await.unwrap();
     assert_eq!(count(pool, "SELECT count(*) FROM audit_event").await, 1);
 }
