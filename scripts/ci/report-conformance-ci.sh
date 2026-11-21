@@ -49,12 +49,13 @@
 # hold exactly the regular file `leg` and, when the tests ran, the regular
 # file `junit.xml`, with nothing else: a directory, a symbolic link, a
 # run.json or any other entry is an input error, as is a `leg` that is not
-# one line naming a leg string whose leg id is the one in the name. Checked
-# without following links; the two files are then moved (not copied) to
-# ARTIFACTS/GITHUB_RUN_ID/<artifact name>/, and only then is run.json
-# written. A leg job that uploaded nothing (an empty name) gets a warning
-# and its legs are not run. The workflow runs this script only when every
-# download succeeded.
+# one line naming a leg string whose leg id is the one in the name and
+# whose job (the leg string up to its `/`) is the job of that DOWNLOADS
+# line. Checked without following links; the two files are then moved (not
+# copied) to ARTIFACTS/GITHUB_RUN_ID/<artifact name>/, and only then is
+# run.json written. A leg job that uploaded nothing (an empty name) gets a
+# warning and its legs are not run. The workflow runs this script only when
+# every download succeeded.
 #
 # Exit status: informational, so only a reporter error fails the job.
 #   reporter 0  no implemented stage has a failed pair (stages that are not
@@ -72,9 +73,18 @@ set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
 
+# printf, not echo: dash's echo would turn a backslash escape in a message
+# into the byte it names.
 usage() {
-    echo "::error title=Conformance report::report-conformance-ci: $1"
+    printf '::error title=Conformance report::report-conformance-ci: %s\n' "$1"
     exit 2
+}
+# A file or directory name found in the download directory, or a DOWNLOADS
+# value that failed its check, as a message may show it: A-Za-z0-9._- as
+# they are, every other byte as `?`, so that it cannot end the line and
+# start a workflow command of its own, or carry a control character.
+shown() {
+    printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._-' '?'
 }
 positive() {
     case $2 in
@@ -120,16 +130,18 @@ mkdir "$run_dir" || usage "cannot create $run_dir"
 if [ -L "$download_dir" ]; then usage "$download_dir is a symbolic link"; fi
 
 # One line per leg job: check the named download and move its files into
-# the run directory under that name.
+# the run directory under that name. $line, $job and $name are workflow-
+# authored (ci.yml writes DOWNLOADS) and printed as is only once checked
+# below; a message rejecting one prints it through shown().
 jobs=' '
 listed=
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     job=${line%%=*}
     name=${line#*=}
-    [ "$job" != "$line" ] || usage "DOWNLOADS line '$line' is not <job>=<artifact name>"
+    [ "$job" != "$line" ] || usage "DOWNLOADS line '$(shown "$line")' is not <job>=<artifact name>"
     case $job in
-        '' | *[!a-z0-9-]*) usage "DOWNLOADS line '$line': '$job' is not a job id (a-z, 0-9 and -)" ;;
+        '' | *[!a-z0-9-]*) usage "DOWNLOADS line '$(shown "$line")': '$(shown "$job")' is not a job id (a-z, 0-9 and -)" ;;
     esac
     case $jobs in
         *" $job "*) usage "DOWNLOADS names job $job twice" ;;
@@ -146,7 +158,7 @@ while IFS= read -r line; do
         continue
     fi
     if ! printf '%s\n' "$name" | LC_ALL=C grep -Eqx 'junit-[a-z0-9_-]+-attempt-[1-9][0-9]*'; then
-        usage "DOWNLOADS line '$line': '$name' is not a leg artifact name junit-<leg id>-attempt-N"
+        usage "DOWNLOADS line '$(shown "$line")': '$(shown "$name")' is not a leg artifact name junit-<leg id>-attempt-N"
     fi
     if [ -L "$stage" ] || [ ! -d "$stage" ]; then
         usage "$stage: the download of $name is not a directory"
@@ -157,10 +169,10 @@ while IFS= read -r line; do
         base=${entry##*/}
         case $base in
             leg | junit.xml) ;;
-            *) usage "$name holds '$base'; a leg artifact holds only the files leg and junit.xml, at its top" ;;
+            *) usage "$name holds '$(shown "$base")'; a leg artifact holds only the files leg and junit.xml, at its top" ;;
         esac
         if [ -L "$entry" ] || [ ! -f "$entry" ]; then
-            usage "$name/$base is not a regular file"
+            usage "$name/$(shown "$base") is not a regular file"
         fi
     done
     [ -f "$stage/leg" ] || usage "$name has no leg file"
@@ -176,6 +188,10 @@ while IFS= read -r line; do
     case $attempt in
         '' | *[!0-9]*) usage "$name/leg names leg $leg, whose artifact is junit-$id-attempt-N" ;;
     esac
+    # The leg is one of this job's legs: a line naming another job's
+    # artifact would report that job's results as this job's download.
+    leg_job=${leg%%/*}
+    [ "$leg_job" = "$job" ] || usage "$name/leg names leg $leg of job $leg_job, but DOWNLOADS names $name for job $job"
     mkdir "$run_dir/$name" || usage "cannot create $run_dir/$name"
     mv -- "$stage/leg" "$run_dir/$name/leg" || usage "cannot move $name/leg"
     if [ -e "$stage/junit.xml" ]; then
@@ -191,7 +207,7 @@ EOF
 # Nothing else was downloaded: every job's directory is gone.
 if [ -d "$download_dir" ]; then
     for entry in "$download_dir"/* "$download_dir"/.[!.]* "$download_dir"/..?*; do
-        if [ -e "$entry" ] || [ -L "$entry" ]; then usage "$download_dir holds '${entry##*/}', which no line of DOWNLOADS names"; fi
+        if [ -e "$entry" ] || [ -L "$entry" ]; then usage "$download_dir holds '$(shown "${entry##*/}")', which no line of DOWNLOADS names"; fi
     done
 fi
 

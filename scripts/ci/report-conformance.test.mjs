@@ -20,7 +20,7 @@ import { parse as parseStrict } from 'smol-toml';
 
 import { DESIGN, LAYOUT, parseEnvironments, SCENARIOS, sha256, stageStamp, SUBCASES, TASKS } from './gen-conformance-registry.mjs';
 import { assertGitImmune, GIT_ENV, normaliseRegistry } from './registry-fixtures.mjs';
-import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, TEST_JOBS, testId, testInfo, text, worst } from './report-conformance.mjs';
+import { checkoutHead, clean, code, exitStatus, InputError, JOB_RUNNER, jobOf, judge, MAX_BYTES, MAX_DEPTH, MAX_LIST, MAX_TEXT, NOT_CONFORMANCE, parseXml, readJUnit, renderMarkdown, run, runnerOf, TEST_JOBS, testId, testInfo, text, worst } from './report-conformance.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'report-conformance.mjs');
 const REPO = join(dirname(SCRIPT), '..', '..');
@@ -158,8 +158,9 @@ function junit(cases) {
 }
 const allPass = (tests) => junit(tests.map((t) => [t, 'passed']));
 
-// Writes a run's run.json as `gh run view RUN --json
-// databaseId,headSha,attempt,workflowName` does; `over` replaces fields.
+// Writes a run's run.json: the four fields the reporter validates of the six
+// `gh run view RUN --json databaseId,headSha,attempt,workflowName,event,headBranch`
+// writes (it ignores event and headBranch); `over` replaces fields.
 const runJson = (d, run, over = {}) => write(join(d, String(run), 'run.json'), JSON.stringify({ attempt: 1, databaseId: Number(run), headSha: SHA, workflowName: 'CI', ...over }));
 
 // Writes artifacts. `spec` is a list of { run, leg, attempt, junit, name }:
@@ -1447,7 +1448,7 @@ describe('input errors', () => {
     assert.equal(r.code, 2);
     const NOT = "; the run's artifacts are not used";
     assert.deepEqual(r.json.input_errors, [
-      `1/run.json: missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName), so the run cannot be bound to the commit${NOT}`,
+      `1/run.json: missing (gh run view RUN_ID --json databaseId,headSha,attempt,workflowName,event,headBranch), so the run cannot be bound to the commit${NOT}`,
       `11/run.json: not JSON (${r.json.input_errors[1].replace(/^11\/run\.json: not JSON \((.*)\); the run.*$/, '$1')})${NOT}`,
       `12/run.json: not a JSON object${NOT}`,
       `13/run.json: a directory, not a regular file${NOT}`,
@@ -1732,6 +1733,10 @@ describe('the conformance-report CI job', () => {
       assert.ok(u.leg, `${u.at}: job ${u.job} uploads a leg artifact but sets no literal SKYOAUTH_CONFORMANCE_LEG`);
       assert.ok(catalogue.has(u.leg), `${u.at}: ${u.leg} is not a layout §1.1 leg string`);
       assert.equal(u.name, `junit-${legId(u.leg)}-attempt-\${{ github.run_attempt }}`, `${u.at}: the artifact name`);
+      // A ci.yml leg belongs to the job that uploads it, the job of its
+      // DOWNLOADS line (`<job>=<artifact name>`, next test), as
+      // report-conformance-ci.sh checks.
+      if (u.wf === 'ci.yml') assert.equal(jobOf(u.leg), u.job, `${u.at}: leg ${u.leg} is a leg of job ${jobOf(u.leg)}, not of ${u.job}, which uploads it and names it on its DOWNLOADS line`);
       // Both files at the top of the artifact: one directory holds them. (A
       // `path: |` block starts with an empty entry.)
       const paths = u.paths.filter(Boolean);
@@ -1944,6 +1949,22 @@ describe('the conformance-report CI job', () => {
     assert.deepEqual(JSON.parse(dispatch.runJson), { databaseId: 100, headSha: SHA, attempt: 1, workflowName: 'CI', event: 'workflow_dispatch', headBranch: 'main' });
   });
 
+  // README "Input" describes run.json as the six fields the conformance-report
+  // job writes and its gh run view example asks for, and says which four the
+  // reporter validates and which two it ignores.
+  test('README "Input": run.json has the six fields the job writes; the reporter validates four and ignores event and headBranch', () => {
+    const FIELDS = ['databaseId', 'headSha', 'attempt', 'workflowName', 'event', 'headBranch'];
+    assert.deepEqual(Object.keys(JSON.parse(stubbed(0).runJson)), FIELDS, 'the fields report-conformance-ci.sh writes');
+    const readme = repoText(join('tests', 'conformance', 'README.md'));
+    const from = readme.indexOf('\n### Input\n');
+    assert.ok(from >= 0, 'README has an Input section');
+    const input = readme.slice(from, readme.indexOf('\n### ', from + 1));
+    const views = [...input.matchAll(/gh run view \S+ --json ([A-Za-z,]+)/g)].map((m) => m[1].split(','));
+    assert.ok(views.length >= 2, 'the prose and the script name gh run view --json');
+    for (const v of views) assert.deepEqual(v, FIELDS, `gh run view --json ${v}`);
+    assert.match(input, /The reporter validates four of them, which bind the run to the commit: `databaseId` must be the directory name, `headSha` must equal `--commit`, `attempt` must be a positive integer [^.]*, and `workflowName` must be a non-empty string\. It ignores the other two, `event` and `headBranch`, and any other field/);
+  });
+
   // The regression on GitHub Actions (PR 52, head cf35ed7): the runner's
   // variables leaked into the script, so GITHUB_RUN_ID replaced the
   // fixture's and an unset variable was not unset. Reproduced here by
@@ -2091,6 +2112,12 @@ describe('the conformance-report CI job', () => {
       ['a leg of two lines', pg({ leg: `${PG}\n${PG}\n` }), /leg is not one line holding a leg string/],
       ['a leg with a carriage return', pg({ leg: `${PG}\r\n` }), /leg is not one line holding a leg string/],
       ['a leg with a space', pg({ leg: ' scenarios-pg/x86_64\n' }), /leg is not one line holding a leg string/],
+      // A shell variable cannot hold a NUL: dash and bash drop it from the
+      // command substitution, leaving a valid leg string, so only the byte
+      // count (the file's size against the variable's length) rejects it.
+      ['a leg with a NUL byte', pg({ leg: `${PG}\0\n` }), /attempt-1\/leg is not one line holding a leg string/],
+      ['a leg with a NUL byte inside', pg({ leg: 'scenarios-pg/x86\x0064\n' }), /attempt-1\/leg is not one line holding a leg string/],
+      ['a leg starting with a NUL byte', pg({ leg: `\0${PG}\n` }), /attempt-1\/leg is not one line holding a leg string/],
       ['an oversized leg', pg({ leg: `${'a'.repeat(300)}\n` }), /leg holds 301 bytes, more than one leg string/],
       ['a leg of another artifact name', pg({ leg: 'typescript/node22\n' }), /attempt-1\/leg names leg typescript\/node22, whose artifact is junit-typescript-node22-attempt-N/],
       ['a name that is not a leg artifact name', pg({ leg: LEG }, 'junit-scenarios-pg-x86_64'), /'junit-scenarios-pg-x86_64' is not a leg artifact name junit-<leg id>-attempt-N/],
@@ -2099,7 +2126,7 @@ describe('the conformance-report CI job', () => {
       ['attempt 0', pg({ leg: LEG }, 'junit-scenarios-pg-x86_64-attempt-0'), /is not a leg artifact name/],
       ['an upper-case name', pg({ leg: LEG }, 'junit-Scenarios-pg-x86_64-attempt-1'), /is not a leg artifact name/],
       ['no = in a line', null, /DOWNLOADS line 'scenarios-pg' is not <job>=<artifact name>/, { DOWNLOADS: 'scenarios-pg\n' }],
-      ['a bad job id', null, /'\.\.\/x' is not a job id/, { DOWNLOADS: `../x=${PG_ARTIFACT}\n` }],
+      ['a bad job id', null, /DOWNLOADS line '\.\.\?x\?junit-scenarios-pg-x86_64-attempt-1': '\.\.\?x' is not a job id/, { DOWNLOADS: `../x=${PG_ARTIFACT}\n` }],
       ['a job twice', [...pgDownload(), { job: 'scenarios-pg', name: '' }], /DOWNLOADS names job scenarios-pg twice/],
       ['no line', null, /DOWNLOADS names no leg job/, { DOWNLOADS: '\n' }],
       ['DOWNLOAD_DIR a symbolic link', null, /\/d is a symbolic link$/m, { DOWNLOAD_DIR: linkTo(tmp('report-ci-elsewhere-')), DOWNLOADS: 'scenarios-pg=\n' }],
@@ -2114,6 +2141,88 @@ describe('the conformance-report CI job', () => {
       assert.equal(r.args, null, `${what}: the reporter did not run`);
       assert.equal(r.runJson, null, `${what}: run.json is written only after every download was checked and moved`);
       for (const f of r.tree ?? []) assert.ok(f === '100/' || f.startsWith(`100/${PG_ARTIFACT}`), `${what}: ${f} was created`);
+    }
+  });
+
+  // A leg job's line names its own leg's artifact; a line that names
+  // another job's artifact would put that job's results under this job's
+  // download, so the leg file's job (the leg string up to its `/`) must be
+  // the line's job.
+  test('leg downloads: the leg file names a leg of the job on its DOWNLOADS line, or it is an error before run.json and the reporter', () => {
+    const J = '<testsuites/>\n';
+    const TS = 'junit-typescript-node22-attempt-1';
+    const TS_FILES = { leg: 'typescript/node22\n', 'junit.xml': J };
+    const PG_FILES_IN = { leg: `${PG}\n`, 'junit.xml': J };
+    const ok = stubbed(0, {}, [{ job: 'scenarios-pg', name: PG_ARTIFACT, files: PG_FILES_IN }, { job: 'typescript', name: TS, files: TS_FILES }]);
+    assert.equal(ok.status, 0, ok.out + ok.err);
+    assert.ok(ok.args, 'the reporter ran');
+    assert.ok(ok.runJson, 'run.json was written');
+    assert.deepEqual(ok.left, []);
+    const mismatch = (name, leg, legJob, job) => new RegExp(`^::error title=Conformance report::report-conformance-ci: ${name}/leg names leg ${leg} of job ${legJob}, but DOWNLOADS names ${name} for job ${job}$`, 'm');
+    for (const [what, downloads, err] of [
+      ['scenarios-pg naming the typescript artifact', [{ job: 'scenarios-pg', name: TS, files: TS_FILES }], mismatch(TS, 'typescript/node22', 'typescript', 'scenarios-pg')],
+      ['typescript naming the scenarios-pg artifact', [{ job: 'typescript', name: PG_ARTIFACT, files: PG_FILES_IN }], mismatch(PG_ARTIFACT, PG, 'scenarios-pg', 'typescript')],
+      ['two jobs naming each other\'s artifact', [{ job: 'scenarios-pg', name: TS, files: TS_FILES }, { job: 'typescript', name: PG_ARTIFACT, files: PG_FILES_IN }], mismatch(TS, 'typescript/node22', 'typescript', 'scenarios-pg')],
+      ['a job the leg\'s job starts with', [{ job: 'scenarios', name: PG_ARTIFACT, files: PG_FILES_IN }], mismatch(PG_ARTIFACT, PG, 'scenarios-pg', 'scenarios')],
+      ['a job that starts with the leg\'s job', [{ job: 'scenarios-pg2', name: PG_ARTIFACT, files: PG_FILES_IN }], mismatch(PG_ARTIFACT, PG, 'scenarios-pg', 'scenarios-pg2')],
+    ]) {
+      const r = stubbed(0, {}, downloads);
+      assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
+      assert.match(r.out, err, what);
+      assert.equal(r.args, null, `${what}: the reporter did not run`);
+      assert.equal(r.runJson, null, `${what}: no run.json`);
+      assert.deepEqual(r.tree, ['100/'], `${what}: nothing was moved`);
+    }
+  });
+
+  // An artifact can name its entries anything. The script shows a name it
+  // found in the download directory only as A-Za-z0-9._-, every other byte
+  // as `?` (one per byte), so the name cannot end the annotation's line and
+  // start a workflow command of its own, carry a terminal escape sequence,
+  // or hold a backslash escape that dash's echo would turn into one.
+  test('leg downloads: a name found in the download directory is shown sanitised, never as raw bytes or a workflow command', () => {
+    const LEG = `${PG}\n`;
+    const PREFIX = '::error title=Conformance report::report-conformance-ci: ';
+    for (const [what, entry, shown] of [
+      ['a newline and a workflow command', 'x\n::error::forged', 'x???error??forged'],
+      ['a carriage return and a workflow command', 'x\r::warning::forged', 'x???warning??forged'],
+      ['an escape sequence', '\x1b[31mred\x1b[0m', '??31mred??0m'],
+      ['a backslash escape (dash echo)', 'a\\033[2Jb\\n::error::c', 'a?033?2Jb?n??error??c'],
+      ['non-ASCII', 'café .xml', 'caf?????.xml'],
+    ]) {
+      // In a job's download, beside the leg file, and at the top of
+      // DOWNLOAD_DIR, where no DOWNLOADS line names it.
+      for (const [where, downloads, env, message] of [
+        ['in the download', pgDownload({ leg: LEG, [entry]: 'x' }), {}, `${PG_ARTIFACT} holds '${shown}'; a leg artifact holds only the files leg and junit.xml, at its top`],
+        ['beside the downloads', [...pgDownload(), { job: entry, name: PG_ARTIFACT, files: { leg: LEG } }], { DOWNLOADS: `scenarios-pg=${PG_ARTIFACT}\n` }, `holds '${shown}', which no line of DOWNLOADS names`],
+      ]) {
+        const at = `${what} ${where}`;
+        const r = stubbed(0, env, downloads);
+        assert.equal(r.status, 2, `${at}: ${r.out}${r.err}`);
+        assert.equal(r.args, null, `${at}: the reporter did not run`);
+        assert.equal(r.runJson, null, `${at}: no run.json`);
+        assert.doesNotMatch(r.out + r.err, /[^\n\x20-\x7e]/, `${at}: only printable ASCII and line ends: ${JSON.stringify(r.out + r.err)}`);
+        const lines = r.out.split('\n').filter(Boolean);
+        assert.equal(lines.length, 1, `${at}: one line, the script's own error: ${JSON.stringify(r.out)}`);
+        assert.ok(lines[0].startsWith(PREFIX), `${at}: ${lines[0]}`);
+        assert.ok(lines[0].endsWith(message), `${at}: ${JSON.stringify(lines[0])} ends with ${JSON.stringify(message)}`);
+        assert.ok(!lines[0].slice(PREFIX.length).includes('::'), `${at}: no workflow command after the script's own`);
+      }
+    }
+    // A DOWNLOADS line, job id or artifact name that fails its check is
+    // shown sanitised too: those messages print it before it is validated.
+    // (Never through dash's echo either, which would turn a backslash
+    // escape into an escape sequence or a line end.)
+    for (const [what, line, message] of [
+      ['a line without =', 'scenarios-pg\x1b[2J', "DOWNLOADS line 'scenarios-pg??2J' is not <job>=<artifact name>"],
+      ['a bad job id', `x\r::error::y=${PG_ARTIFACT}`, `DOWNLOADS line 'x???error??y?${PG_ARTIFACT}': 'x???error??y' is not a job id (a-z, 0-9 and -)`],
+      ['a bad artifact name', 'scenarios-pg=junit-x\x1b[2J\\033[2J\\n::error::y\u00e9-attempt-1', "DOWNLOADS line 'scenarios-pg?junit-x??2J?033?2J?n??error??y??-attempt-1': 'junit-x??2J?033?2J?n??error??y??-attempt-1' is not a leg artifact name junit-<leg id>-attempt-N"],
+    ]) {
+      const r = stubbed(0, { DOWNLOADS: `${line}\n` }, []);
+      assert.equal(r.status, 2, `${what}: ${r.out}${r.err}`);
+      assert.equal(r.args, null, `${what}: the reporter did not run`);
+      assert.doesNotMatch(r.out + r.err, /[^\n\x20-\x7e]/, `${what}: ${JSON.stringify(r.out + r.err)}`);
+      assert.deepEqual(r.out.split('\n').filter(Boolean), [`${PREFIX}${message}`], what);
     }
   });
 
