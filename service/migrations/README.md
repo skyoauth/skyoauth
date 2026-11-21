@@ -1831,6 +1831,25 @@ a profile change that drops one included: the template-fit check of
 ADR-016 item 4 is the only stop on that downgrade, and it is an open
 follow-up (see "What 0008 adds", "Not checked").
 
+Grant selection (ADR-015 item 4 steps 1, 3 and 4; design §5.7; T12.3; A25,
+A50): `select_grant(tenant, grant, source, expected mode)` loads, in one
+statement, the grant of that tenant and mode, the source of that tenant
+and the grant's eligible bindings: listed in `service_grant_binding`, of
+the grant's tenant and actor, on that source and enabled, sorted by ID
+byte-wise. It checks the tenant and actor again although the `0004`
+foreign keys guarantee them. A wrong tenant or mode, an unknown or
+other-tenant grant or source, and a grant with no eligible binding are all
+the same `SelectionError::NotSelectable`, with no detail (ERR-020); a
+statement failure is `SelectionError::Store` with its `RegistryError`. No
+claim is made that every miss takes the same time. `match_binding` picks,
+of the eligible bindings whose every predicate the verified `Evidence`
+carries with exactly the same string, the one with the byte-wise lowest
+ID, with its revision for provenance; there is no union and no fallback.
+Selection does not verify the proof (step 2) and does not do step 5: the
+current status of the records, the audience assignment, the ceilings and
+the policy revision snapshot stay with M2 (T21.4, T21.5, T12.6). An ID is
+not proof of the actor.
+
 Follow-ups for the registry surface:
 
 - Parent-scoped lookups and lists, needed by the admin API (T14.1, T14.2)

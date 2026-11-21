@@ -6,7 +6,9 @@
 //! identities with their audience rows, and service grants with their
 //! binding and audience rows; the consumed single-use proofs
 //! (`consumed_assertion`, insert only); and, read-only, the instance
-//! security policy and the egress allowlist.
+//! security policy and the egress allowlist. [`select_grant`] and
+//! [`match_binding`] select a grant and its matching binding for the
+//! workload exchange (ADR-015 item 4 steps 1, 3 and 4; see their module).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -235,6 +237,7 @@ mod grant;
 mod instance;
 mod model;
 mod predicate;
+mod selection;
 mod tenant;
 mod trust;
 
@@ -276,6 +279,9 @@ pub use model::{
     TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
 };
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
+pub use selection::{
+    EligibleBinding, Evidence, Selection, SelectionError, match_binding, select_grant,
+};
 pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
     update_principal, update_tenant,

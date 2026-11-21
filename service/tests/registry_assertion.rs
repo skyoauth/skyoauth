@@ -809,8 +809,8 @@ async fn empty_oversized_and_duplicate_sets_fail_before_any_statement() {
 /// functions, and nothing is written.
 ///
 /// The conformance scenario for this refusal (stage A24) and its entry in
-/// the A29 closed list are future work of the test session; neither exists
-/// yet, and this registry test is not that scenario.
+/// the A29 closed list belong to the test session, in `tests/security`;
+/// this registry test is not that scenario.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn consume_naming_another_tenants_source_is_refused() {
