@@ -165,11 +165,15 @@ jobs:
       - name: Lint
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+      # The conformance scenario package is linted and documented above
+      # and below but not tested here: its targets need their environment
+      # (a database for `pg`) and run in their own `scenarios-*` job
+      # (docs/testing/conformance-layout.md §1.2).
       - name: Run tests
-        run: cargo test --locked --workspace --all-targets --all-features
+        run: cargo test --locked --workspace --exclude skyoauth-scenarios --all-targets --all-features
 
       - name: Run doctests
-        run: cargo test --locked --workspace --doc --all-features
+        run: cargo test --locked --workspace --exclude skyoauth-scenarios --doc --all-features
 
       - name: Build docs
         run: cargo doc --locked --workspace --no-deps --all-features
@@ -356,7 +360,9 @@ jobs:
   # reach the same pinned PostgreSQL service container as `scenarios-pg`
   # and `rust-coverage` through SKYOAUTH_IT_DATABASE_URL; the official
   # image's user is a superuser, so tests can create a database each (the
-  # check step proves it). No test filter: every workspace test runs here.
+  # check step proves it). No test filter: every workspace test runs here
+  # except the conformance scenario package, whose tests run in the
+  # `scenarios-*` jobs (docs/testing/conformance-layout.md §1.2).
   service-nextest:
     name: Service tests (nextest)
     needs: changes
@@ -462,7 +468,7 @@ jobs:
           echo "The role can create, connect to and drop a database ($db)"
 
       - name: Run tests
-        run: cargo nextest run --locked --workspace --all-features --profile ci --run-ignored all
+        run: cargo nextest run --locked --workspace --exclude skyoauth-scenarios --all-features --profile ci --run-ignored all
 
       - name: Upload JUnit report
         if: always()
@@ -493,18 +499,12 @@ jobs:
   # `scenarios-pg/x86_64` (docs/testing/conformance-layout.md §1.1). Tests
   # reach the database through SKYOAUTH_IT_DATABASE_URL (§1.2); the
   # official image's user is a superuser, so tests can create template
-  # databases. Only tests named by the Rust convention of §3 run here:
-  # `a<NN>_<pos|neg>_…` or `a<NN>_<SS>_<pos|neg>_…`, matched on the last
-  # path segment of a module-qualified name. The nextest `ci` profile has
-  # retries = 0 and writes JUnit to target/nextest/ci/junit.xml.
-  #
-  # Empty selection: no scenario test exists yet, so the run passes
-  # `--no-tests=warn` instead of nextest's default `fail`, and the next step
-  # turns an empty run into a warning annotation. A green job with that
-  # warning means no scenario ran; the reporter records those stages as
-  # `not run`, never `passed`. When the first `skyoauth-scenarios` test
-  # lands (§1.2), narrow the run to `-p skyoauth-scenarios --test pg` and
-  # drop `--no-tests=warn`, so an empty selection fails from then on.
+  # databases. The job runs the `pg` target of the scenario package
+  # `skyoauth-scenarios` (`tests/`, §1.2), whose tests are named by the
+  # Rust convention of §3 (`a<NN>_<pos|neg>_…`, module-qualified) and are
+  # never `#[ignore]`d: they fail without the database. The nextest `ci`
+  # profile has retries = 0 and writes JUnit to target/nextest/ci/junit.xml.
+  # An empty selection fails the run (nextest's default `--no-tests=fail`).
   scenarios-pg:
     name: Scenarios (PostgreSQL, x86_64)
     needs: changes
@@ -616,10 +616,7 @@ jobs:
           echo "The role can create, connect to and drop a database ($db)"
 
       - name: Run scenario tests
-        run: >-
-          cargo nextest run --locked --workspace --all-features --profile ci
-          --no-tests=warn
-          -E 'test(/(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_/)'
+        run: cargo nextest run --locked -p skyoauth-scenarios --test pg --profile ci
 
       - name: Report scenario count
         run: |

@@ -25,7 +25,7 @@ The central outcomes are **secretless GitHub Actions → protected cluster API W
 PR #2 landed in `main` at `8f81df23efd4c4a0cfe522f711a9ca56f294aab1`, establishing `service/`, a Cargo workspace, `clients/typescript/` and CI. Retain these homes. The following is a target layout; most auth modules are planned, not present. Add members with their implementations, not empty scaffolding that implies authentication support.
 
 ~~~text
-Cargo.toml            Existing service member; add operator, clients/rust, cli with code
+Cargo.toml            Existing service and tests members; add operator, clients/rust, cli with code
 service/              Existing skyoauth-service (Axum/Tokio)
   src/main.rs         Process/listener wiring; M1a local bootstrap/recovery verifier
   src/lib.rs          Service composition
@@ -64,8 +64,11 @@ deploy/
   examples/envoy/     M2 bearer and M3 session route/security policies
   examples/k3s/       Projected tokens and per-cluster TokenReview RBAC
   examples/github/    No-static-secret caller with generated source/grant IDs
-tests/
-  conformance/        Versioned wire/profile and migration fixtures
+tests/                Existing skyoauth-scenarios member (unpublished conformance scenario tests)
+  Cargo.toml          One [[test]] target per execution environment, added with its first test
+  src/                Shared scenario helpers (PostgreSQL template-DB isolation)
+  pg.rs               Target pg; hermetic.rs, envoy_k3s.rs and live.rs when they get tests
+  conformance/        Versioned wire/profile and migration fixtures; scenario registry
   security/           JWT/OIDC/CSRF/admin/tenant/audience/replay/gateway tests
   integration/        PostgreSQL, mock OIDC, two clusters, Envoy and ConnectRPC
 scripts/ci/           Existing docs-only detection; expand checks with new code
