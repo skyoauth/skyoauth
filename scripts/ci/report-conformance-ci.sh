@@ -49,12 +49,13 @@
 # hold exactly the regular file `leg` and, when the tests ran, the regular
 # file `junit.xml`, with nothing else: a directory, a symbolic link, a
 # run.json or any other entry is an input error, as is a `leg` that is not
-# one line naming a leg string whose leg id is the one in the name. Checked
-# without following links; the two files are then moved (not copied) to
-# ARTIFACTS/GITHUB_RUN_ID/<artifact name>/, and only then is run.json
-# written. A leg job that uploaded nothing (an empty name) gets a warning
-# and its legs are not run. The workflow runs this script only when every
-# download succeeded.
+# one line naming a leg string whose leg id is the one in the name and
+# whose job (the leg string up to its `/`) is the job of that DOWNLOADS
+# line. Checked without following links; the two files are then moved (not
+# copied) to ARTIFACTS/GITHUB_RUN_ID/<artifact name>/, and only then is
+# run.json written. A leg job that uploaded nothing (an empty name) gets a
+# warning and its legs are not run. The workflow runs this script only when
+# every download succeeded.
 #
 # Exit status: informational, so only a reporter error fails the job.
 #   reporter 0  no implemented stage has a failed pair (stages that are not
@@ -185,6 +186,10 @@ while IFS= read -r line; do
     case $attempt in
         '' | *[!0-9]*) usage "$name/leg names leg $leg, whose artifact is junit-$id-attempt-N" ;;
     esac
+    # The leg is one of this job's legs: a line naming another job's
+    # artifact would report that job's results as this job's download.
+    leg_job=${leg%%/*}
+    [ "$leg_job" = "$job" ] || usage "$name/leg names leg $leg of job $leg_job, but DOWNLOADS names $name for job $job"
     mkdir "$run_dir/$name" || usage "cannot create $run_dir/$name"
     mv -- "$stage/leg" "$run_dir/$name/leg" || usage "cannot move $name/leg"
     if [ -e "$stage/junit.xml" ]; then
