@@ -14,11 +14,14 @@
 //! [`verify_audit_chain`]) against a real PostgreSQL, one fresh database
 //! per test (per round in the replica tests), and write nothing past the
 //! registry. The only SQL of their own is one read-only helper, [`counts`]
-//! (see its docs), and the `SET SESSION CHARACTERISTICS` that gives the
-//! replicas of `a32_neg_a_restore_outside_read_committed_writes_nothing`
-//! their isolation level ([`OTHER_ISOLATION`]). The concurrent tests use
-//! the replica harness (REP, `skyoauth_scenarios::rep`): [`Replicas::race`],
-//! whose replicas a barrier releases together, and
+//! (see its docs), and two `SET SESSION CHARACTERISTICS AS TRANSACTION
+//! ISOLATION LEVEL` statements in
+//! `a32_neg_a_restore_outside_read_committed_writes_nothing`: one gives
+//! each replica its isolation level ([`OTHER_ISOLATION`]), and the second
+//! switches the last replica back to `READ COMMITTED` before its restore.
+//! The concurrent tests use the replica harness (REP,
+//! `skyoauth_scenarios::rep`): [`Replicas::race`], whose replicas a barrier
+//! releases together, and
 //! [`rep::wait_until_blocked`]. The fixture is local: every bootstrap
 //! request is valid and has IDs, keys and an instance ID of its own
 //! ([`ids`]), and each bootstrap runs in a transaction of its own that
@@ -98,13 +101,17 @@
 //!   after its rollback
 //!   (`a32_neg_blocked_restores_follow_the_holder_commit_or_rollback`).
 //!
-//! The recovery tests pin these picks of the registry, recorded as lead
-//! rulings or inferred in identity-registry section 5.2 and in
+//! A challenge bound to its instance, its operation and arguments digest
+//! and the expected revision, expiring and single use, is the spec's
+//! (tasks T13.5, design §7.2, threat model "Recovery response"; LT-107).
+//! The recovery tests also pin these picks of the registry, recorded as
+//! lead rulings or inferred in identity-registry section 5.2 and in
 //! `registry::recovery` and provisional until the ADRs are ratified:
 //! registry behaviour, not the spec's. The plan's members (the new key as
-//! 64 lowercase hexadecimal digits) and their byte-wise comparison; the
-//! binding of a challenge to its instance, epoch, request digest and the
-//! recovery state's revision; the refusal of every level but
+//! 64 lowercase hexadecimal digits); the byte-wise comparison of the
+//! replacement and of the instance; the binding to the recovery key epoch;
+//! that the expected revision is the recovery state's (inferred); the
+//! refusal of every level but
 //! `READ COMMITTED`, by name, so `READ UNCOMMITTED` too; the TTL minimum of
 //! 1 second; the issue event `administrative_operation.create` by
 //! `deployment_operator`, with the operation as its object and
@@ -117,12 +124,26 @@
 //! maximum (5 and 15 minutes; LT-107, OQ-LT-17) and the actions
 //! `admin_identity.restore` and `recovery_state.rotate_key` (IR-059) are
 //! the spec's. The events' `outcome` (`success`, inferred) is not asserted.
+//!
 //! The expiry is compared with the caller's `now` only (the registry reads
-//! no clock): the expiry test restores a challenge a microsecond before
-//! `expires_at` after a restore at `expires_at` was refused, and a `now`
-//! earlier than the issue is accepted as well (not asserted); that `now` is
-//! the wall clock, taken just before the call, is the local verifier's
-//! (T13.3) and the hermetic leg's with injected clocks (A48, A64).
+//! no clock), so a refusal for expiry writes nothing and is not final:
+//! registry behaviour, not the spec's. The expiry test restores a
+//! challenge a microsecond before `expires_at` after a restore at
+//! `expires_at` was refused, and a `now` earlier than the issue time is
+//! accepted as well (not asserted). LT-107's "the challenge expires" holds
+//! only when `now` is taken from the local verifier's own clock (T13.3) and
+//! is tested with A64's injected clocks on its hermetic leg, not here.
+//!
+//! Two obligations therefore rest on the local verifier (T13.3), not on the
+//! registry; they are gaps of these tests, and the lead's rulings behind
+//! them are provisional. First, the restore does not carry or compare the
+//! challenge's `challenge_hash` (the consume only checks that it is set),
+//! so the verifier must check the signature over the operation's stored
+//! challenge, or over one recomputed from exactly the values it passes to
+//! [`restore_operator`], never over a hash taken from the response; no
+//! registry getter returns the operation row. Second, `now` must come from
+//! the verifier's own clock immediately before the call, never from the
+//! response or the operator.
 //! Neither [`issue_recovery_challenge`] nor [`restore_operator`] takes an
 //! operator identity (the issue is recorded by `deployment_operator`, the
 //! restore by the recovery key), so "a revoked or disabled operator cannot
@@ -175,9 +196,11 @@
 //!   whose key the bootstrap enrolls and that presents it afterwards, and
 //!   that presents the replacement's key after a restoration.
 //! - The signed offline recovery tooling: the portable workstation that
-//!   signs the challenge with the offline recovery key, its SoftHSM2 and
-//!   offline legs, injected clocks and the three operating systems. Those
-//!   are the integration rows A48 and A64, not these tests.
+//!   signs the challenge with the offline recovery key, with its SoftHSM2,
+//!   hermetic and recovery-offline legs, injected clocks and the three
+//!   operating systems, which belong to A64. A48 owns the full chain with
+//!   no SQL through the OP client and the local verifier. Both are
+//!   integration rows, not these tests.
 //! - The forged IdP admin negative on the wire: an upstream admin-role
 //!   claim or session from the OIDC harness component (the mock human IdP)
 //!   must not reach an operator through the OP harness component, as for
@@ -214,17 +237,19 @@
 //! the operator writes, and the deadlock that fails closed; and that a
 //! restore changes no other table. Through the public API every consume
 //! is a restore that also advances the epoch and the revision, so a replay
-//! here is refused by its binding to the retired state before the
-//! single-use predicates of the consume are reached; and a challenge can
-//! only be issued for the current instance, epoch and revision, so the
-//! consume's comparison of the stored plan instance and expected revision
-//! with the binding repeats its comparison of the binding with the
-//! recovery state. A consume that no longer sets `consumed_at`, no longer
-//! requires it unset and the outcome `issued`, or no longer compares the
-//! plan's instance or the stored expected revision is therefore caught only
-//! by the service tests, whose rows are written by other means; so is a
-//! restore that no longer locks the credentials first, which needs a
-//! concurrent operator write.
+//! here is refused by its binding to the retired state whether or not the
+//! single-use predicates of the consume hold. And a challenge can only be
+//! issued for the current instance, epoch and revision, so the consume
+//! compares each of them twice, the stored plan instance, plan epoch and
+//! expected revision with the binding and the binding with the recovery
+//! state, and through the public API the two copies are always equal. A
+//! consume that no longer sets `consumed_at`; no longer requires it unset
+//! and the outcome `issued`; no longer compares the plan's instance, the
+//! plan's epoch or the stored expected revision with the binding; or no
+//! longer compares the binding with the recovery state's instance, epoch or
+//! revision is therefore caught only by the service tests, whose rows are
+//! written by other means. So is a restore that no longer locks the
+//! credentials first, which needs a concurrent operator write.
 //!
 //! Overlap with `service/tests/registry_recovery.rs`, which calls the same
 //! public functions: each recovery test here repeats some of its checks and
@@ -1549,7 +1574,8 @@ async fn assert_bootstrap_stays_closed(pool: &PgPool, first: &Ids, step: usize) 
 /// with a second credential, and once with that operator locked out (its
 /// identity disabled, its first credential revoked, its binding disabled,
 /// so no key authorizes a `security_admin`): restoration does not depend
-/// on an operator. In both, the challenge is issued as the event after
+/// on an operator. No signature is made or checked: the registry verifies
+/// none (T13.3). In both, the challenge is issued as the event after
 /// bootstrap and changes no authority; the restore enrolls exactly the
 /// replacement the plan names, which authorizes; every operator credential
 /// still unrevoked is revoked at the restore's `now` (one revoked before
@@ -1977,8 +2003,27 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
 /// changes nothing; the restore a microsecond before it restores, at the
 /// next epoch, recorded by the key of the epoch before. The chain ends
 /// intact at 10, at epoch 4, with only the last replacement authorized.
+/// The three TTLs are checked first: 5 and 15 minutes are LT-107 and
+/// OQ-LT-17, the 1-second minimum a lead ruling (provisional).
+///
+/// That the restore a microsecond before `expires_at` succeeds after the
+/// refusal at `expires_at` is registry behaviour, not the spec's: the
+/// refusal wrote nothing and is not final, because only the caller's `now`
+/// is compared, and a `now` before the issue time is accepted too. LT-107's
+/// "the challenge expires" holds only with `now` taken from the local
+/// verifier's own clock (T13.3), which A64's hermetic leg tests with
+/// injected clocks (see the module docs).
 #[tokio::test]
 async fn a32_neg_an_expired_challenge_is_refused() {
+    // 5 and 15 minutes: LT-107, OQ-LT-17; 1 s: lead ruling, provisional.
+    assert_eq!(
+        (MIN_CHALLENGE_TTL, DEFAULT_CHALLENGE_TTL, MAX_CHALLENGE_TTL),
+        (
+            Duration::from_secs(1),
+            Duration::from_secs(5 * 60),
+            Duration::from_secs(15 * 60)
+        )
+    );
     let (db, pool) = fixture().await;
     let first = ids(0);
     bootstrapped(&pool, &first).await;
