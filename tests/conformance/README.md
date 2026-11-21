@@ -1,15 +1,15 @@
 # Conformance registry
 
-This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**: the scenario tests themselves live in the `skyoauth-scenarios` package (`tests/Cargo.toml`, layout §1.2), under the layer directories beside this one (`tests/security/` today). There are no fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job). [`report-conformance.mjs`](#the-reporter) joins the registry with the JUnit results of one commit.
+This directory holds the conformance scenario registry of [the conformance layout](../../docs/testing/conformance-layout.md) §3. It contains **data only**: the scenario tests themselves live in the `skyoauth-scenarios` package (`tests/Cargo.toml`, layout §1.2), under the layer directories beside this one (`tests/security/` today). There are no fixtures, schemas or waivers here yet. The static part of `check-conformance-registry` checks it in CI on every change, docs-only changes included (the `Conformance registry` job); its [resolution part](#the-resolution-part), which needs a built test list, runs in the `scenarios-pg` job. [`report-conformance.mjs`](#the-reporter) joins the registry with the JUnit results of one commit.
 
 | File | What it holds |
 | --- | --- |
-| `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`, except A29's M1a stage, the first `implemented` one (`scenarios-pg/x86_64`). **The source of the layout §2 scenario table.** |
+| `scenarios.toml` | `gates_passed` (empty: no milestone gate has passed), the 64 scenarios A01–A64 (`kind = "scenario"`) and the 10 contracts C01–C10 (`kind = "contract"`). Every scenario stage is `planned` with `tests = []`, except two `implemented` stages on `scenarios-pg/x86_64`, A29's M1a (the first) and A38's M1a, and A53's M1a stage, which stays `planned` but lists the tests of its create and PATCH refusal half (`tests/security/a53.rs`), so they are registered but count for nothing. **The source of the layout §2 scenario table.** |
 | `subcases.toml` | Sub-IDs as `[[subcase]]` entries (`kind = "subcase"`, with `parent`). Today it holds the four conditional sub-IDs that layout §2 names; each carries `conditional_on` and `table_text`. |
 | `waivers.toml` | Optional; absent today. Flake waivers (format below). |
 | `fixtures/`, `schema/` | Absent today. Layout §1.3. |
 | [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Rewrites the derived fields of both files and renders the layout §2 table from them; `--check` verifies. Node 20 or later, no dependencies. |
-| [`scripts/ci/check-conformance-registry.mjs`](../../scripts/ci/check-conformance-registry.mjs) | The static registry check (layout §3). Needs `smol-toml` from [`scripts/ci/package.json`](../../scripts/ci/package.json). |
+| [`scripts/ci/check-conformance-registry.mjs`](../../scripts/ci/check-conformance-registry.mjs) | The registry check (layout §3): the static part, and with a test list the resolution part. Needs `smol-toml` from [`scripts/ci/package.json`](../../scripts/ci/package.json). |
 | [`scripts/ci/report-conformance.mjs`](../../scripts/ci/report-conformance.mjs) | The result reporter (layout §3 "Result join", [below](#the-reporter)). Uses the registry check and `smol-toml`. |
 | `scripts/ci/*.test.mjs` | Self-tests of the three scripts (`node:test`). |
 
@@ -23,11 +23,13 @@ node --test scripts/ci/gen-conformance-registry.test.mjs
 (cd scripts/ci && npm ci --ignore-scripts)              # once: installs the pinned smol-toml
 node scripts/ci/check-conformance-registry.mjs          # add --require-history to fail without git history
 node scripts/ci/check-conformance-registry.mjs --gate-pr   # on a gate PR's head: see "Gate PRs" below
+cargo nextest list --locked -p skyoauth-scenarios --profile ci --message-format json > nextest-list.json
+node scripts/ci/check-conformance-registry.mjs --nextest-list nextest-list.json   # the resolution part, as in scenarios-pg
 node --test scripts/ci/check-conformance-registry.test.mjs
 node --test scripts/ci/report-conformance.test.mjs
 ```
 
-CI runs the checks and the three self-tests above in the `conformance-registry` job, which `CI passed` requires to pass (a skip does not count). The job checks out the full history, because the waiver rule needs `origin/main`.
+CI runs the checks and the three self-tests above in the `conformance-registry` job, which `CI passed` requires to pass (a skip does not count); the `--nextest-list` run is in the `scenarios-pg` job instead ([The resolution part](#the-resolution-part)). The job checks out the full history, because the waiver rule needs `origin/main`.
 
 ## Source of truth
 
@@ -107,7 +109,7 @@ Conditional sub-IDs are numbered .90–.99. Required sub-IDs use .01–.89, insi
 | `order` | Scenario, contract and subcase IDs increase in file order. |
 | `hash` | Every `matrix_sha256` matches its source line. |
 | `owners` | Every owner is a task in tasks.md. |
-| `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. |
+| `stages` | Milestones are known and increase, so the last stage holds the entry's full milestone; `full row` is the scope of a single-stage entry only; the implemented-stage rules above. No stage lists a test twice, and no test ID holds a control character, a line break or whitespace other than single spaces inside it (a nextest ID holds no space at all; the provisional vitest and Playwright titles need them). |
 | `legs` | Every leg is a layout §1.1 leg string, its env is one of the entry's `envs`, its job exists at the stage's milestone, no leg repeats in a stage, and every env has a leg. |
 | `gates` | Every stage of a scenario or required subcase whose milestone is in `gates_passed` is `implemented`. Conditional subcases are excluded until a release manifest lists their feature as shipped (layout §3 **Release**); none exists yet. The rest of layout §3 **Gates** is `--gate-pr` ([below](#gate-prs)) and the reporter (every such stage **passed** on the gate PR's merge-base). |
 | `table` | The layout §2 table and counts sentences equal the ones rendered from the registry. |
@@ -120,6 +122,28 @@ The check adds `toml`, `gates`, `fixtures` and `waivers`, names the rule of each
 - a `|` or line break in a subcase's `harness`, `positive` or `negative`, and an empty test ID (`tests = [""]`) in any stage: both generator modes exit 0 and keep the value;
 - a `|` in a conditional sub-ID's `table_text`: the write mode renders it into the §2 row, and `--check` passes after that. A `|` with a space on each side fails both modes only because the rendered row then no longer names the sub-ID; a line break there is a generator error;
 - a subcase `kind` that is missing or not `"subcase"`, and an unknown subcase field (`note` included): the write mode rewrites the entry with `kind = "subcase"` and without the field, and `--check` reports only that the field "differs from the specs".
+
+### The resolution part
+
+`node scripts/ci/check-conformance-registry.mjs --nextest-list FILE` runs the whole check above and also the resolution part of layout §3, against `FILE`, the JSON that `cargo nextest list --message-format json` writes. Listing needs a build but no database: the scenario tests fail without `SKYOAUTH_IT_DATABASE_URL` only when they run. The `scenarios-pg` job runs it after its tests, whatever they did, on `cargo nextest list --locked -p skyoauth-scenarios --profile ci --message-format json` (the `ci` profile, so a profile filter would show), without `--require-history`. Its steps come after the leg artifact upload, which runs `if: always()`, so a failing check, static errors included, turns the job red but never costs the leg its artifact.
+
+The check never skips a test because its package is missing from the list: such a stage test fails (`resolve`). So the list covers every package that `TEST_JOBS` names, from the PR that adds that package to the workspace: that PR adds `-p <package>` to the step (today only `skyoauth-scenarios` exists; `skyoauth-client` and `skyoauth-operator` do not yet). The reporter self-test checks that the step lists exactly the `TEST_JOBS` packages that are workspace members. This works while every such package builds and lists on the `scenarios-pg` runner; packages whose tests are listed per OS need a per-job mode ([Not here yet](#not-here-yet), layout §6 "Still open", item 8).
+
+Locally, without cargo-nextest, `--libtest-list PKG/TARGET=FILE` takes the output of `cargo test -p PKG --test TARGET -- --list` for one target instead. That output lists every test, ignored ones included, without marking which are `#[ignore]`d, and the fallback reads only it, so with it the ignore rule is not checked, and a note says so; CI always uses `--nextest-list`. To see the ignored tests of a target by hand, run `cargo test -p PKG --test TARGET -- --list --ignored`, which lists only them: a registered test in that output fails in CI. Both options may be repeated and combined, as long as each nextest binary is in one list only. A list file that cannot be read is a usage error (exit 2); `--gate-pr` takes no list.
+
+These rules cover every `implemented` stage, of scenarios and subcases; a `planned` stage may list tests that do not exist yet:
+
+| Rule | Checks |
+| --- | --- |
+| `resolve` | Each test ID resolves against the list: the package and target of `nextest:<package>/<target>/<path>` are a listed nextest binary (`<package>::<target>`; the lib form `nextest:<package>/<path>` is the binary `<package>`), `<path>` is one of its tests, and the test is neither `#[ignore]`d (`"ignored": true`) nor left out by a filter (`"filter-match"` other than `matches`, such as a profile's `default-filter`). The vitest and Playwright ID forms are provisional (layout §6 "Still open", item 5), so they are **not checked yet**, and the check fails closed: a vitest or Playwright ID in an implemented stage is an error, and so is a leg of a job that reports with those runners (`typescript`, `typescript-browser`) or has no decided runner (`bundle-check`, `migration-rehearsal`). |
+| `same-job` | Each test is produced by the job of one of the stage's legs (layout §3 "Which job produces a test", `TEST_JOBS` in the reporter). A test of a package or target that no job produces, such as `skyoauth-service`, fails. |
+| `pos-neg` | Each test is a `pos` or `neg` test of the stage's own entry, and every job among the stage's legs produces at least one `pos` and one `neg` of them. |
+| `orphans` | Every listed test whose last `::` segment starts with `a<NN>_` is in some stage's `tests` (planned stages included). |
+| `list` | Each list is well-formed (the JSON's `rust-suites`, with `binary-id`, `package-name`, a `status` of `listed`, `skipped` or `skipped-default-filter` and, per test, a boolean `ignored` and a `filter-match` status, `matches`, or `mismatch` with a string `reason`; or `<name>: test` lines) and lists at least one test or a skipped binary; no binary is in two lists. A malformed or empty list is an error (exit 1). A binary that nextest skipped, such as one a profile's `default-filter` leaves out (`skipped-default-filter`), lists no tests, so a stage test in it fails `resolve`. |
+
+The messages of the test-ID, resolution and list rules quote each test ID, binary and package name as a JSON string (with `\u` escapes for the C1 controls and U+2028/2029 too), and every error, of any rule, is printed on one line with any control character or line separator left in it escaped, so no name can start a line that a CI log reads as a workflow command such as `::error`.
+
+`scripts/ci/fixtures/` holds real lists of the A29 M1a tests for the self-test: `nextest-list-scenarios.json`, from `cargo nextest list --locked -p skyoauth-scenarios --profile ci --message-format json` with the build paths replaced and the build metadata trimmed, and `libtest-list-scenarios-pg.txt`, from `cargo test --locked -p skyoauth-scenarios --test pg -- --list`. They were made with **cargo-nextest 0.9.151** (the version `ci.yml` pins) and **cargo 1.100.0**, without `SKYOAUTH_IT_DATABASE_URL`. A PR that bumps the cargo-nextest pin regenerates them with the new version, so that a change in its list format shows in the self-test; so does a change to the A29 M1a tests.
 
 ### Waivers
 
@@ -277,7 +301,9 @@ Only **passed** counts; `CI passed` is never read and is not a conformance signa
 
 ## Not here yet
 
-- Fixtures, fixture schemas, `waivers.toml` and the resolution part of `check-conformance-registry` (that every registered test exists in its package and target, and that its target lists it, for example from `cargo nextest list`).
+- Fixtures, fixture schemas and `waivers.toml`.
+- A per-job mode of the resolution part (layout §6 "Still open", item 8). Today one list, from `scenarios-pg`, must cover every package that `TEST_JOBS` names. Lists of the same binary per OS (the `operator` and `clients-rust-native` legs on ubuntu, macos and windows, the `recovery-offline` chain) need each job to check its own list against only the stages and tests of its own jobs, without ignoring the tests of other packages silently.
+- The resolution part for vitest and Playwright tests (`vitest list --json`, `playwright test --list --reporter=json`) and their orphan patterns: their test IDs are provisional (layout §6 "Still open", item 5), so an implemented stage that uses them fails the check until they are decided.
 - A workflow job that downloads the artifacts of every run for a commit, runs the reporter and posts or uploads its result (`conformance-report` covers only its own run, informationally); the gate job that runs `--gate-pr` and the reporter for the gate PR's merge-base ([Gate PRs](#gate-prs), layout §6 "Still open", item 7); the release check.
 - A release-manifest PR check: `--gate-pr` does not read the release manifest, which does not exist yet. A release-manifest PR, a PR that adds a shipped feature to it, must be one commit on its merge-base with the stages of the conditional sub-IDs it makes count implemented and passed there (layout §3 **Release**); its allowed diff is undecided until the release job exists, and nothing checks any of this yet.
 - The artifact manifest check (layout §6 "Still open", item 6): comparing the downloaded runs, attempts and artifacts with what the Actions API lists, so that a missing download is an input error.

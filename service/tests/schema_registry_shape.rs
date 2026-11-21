@@ -401,13 +401,19 @@ fn range_check(column: &str) -> String {
     )
 }
 
-/// The upgrade precondition query of the migrations README ("What 0007
-/// adds"), so the test runs the text operators copy.
-fn precondition_query() -> String {
+/// The `index`th SQL block of the upgrade precondition in the migrations
+/// README ("What 0007 adds"): 0 is the precondition query, 1 the check that
+/// a repair left every user trigger enabled. The test runs the text
+/// operators copy.
+fn precondition_sql(index: usize) -> String {
     let readme = include_str!("../migrations/README.md");
-    let section = &readme[readme
+    let mut section = &readme[readme
         .find("- **Upgrade precondition.**")
         .expect("README has the upgrade precondition")..];
+    section = &section[..section.find("\n- **").expect("the precondition item ends")];
+    for _ in 0..index {
+        section = &section[section.find("  ```\n").unwrap() + "  ```\n".len()..];
+    }
     let start = section.find("```sql\n").unwrap() + "```sql\n".len();
     let end = start + section[start..].find("  ```").unwrap();
     section[start..end]
@@ -417,9 +423,9 @@ fn precondition_query() -> String {
         .join("\n")
 }
 
-async fn precondition(pool: &PgPool) -> Vec<(String, i64)> {
-    let mut counts: Vec<(String, i64)> = sqlx::query_as(AssertSqlSafe(precondition_query()))
-        .fetch_all(pool)
+async fn precondition<'c>(executor: impl Executor<'c, Database = Postgres>) -> Vec<(String, i64)> {
+    let mut counts: Vec<(String, i64)> = sqlx::query_as(AssertSqlSafe(precondition_sql(0)))
+        .fetch_all(executor)
         .await
         .unwrap();
     counts.sort();
@@ -685,8 +691,7 @@ async fn revision_columns_and_triggers_match_the_other_revisioned_tables() {
 }
 
 /// A tenant, a principal and a version start at revision 1 and each UPDATE
-/// advances it by exactly 1, in both replication modes; the immutable
-/// columns stay immutable, also with an advancing revision, and a version's
+/// advances it by exactly 1, in both replication modes, and a version's
 /// status stays writable.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -731,19 +736,6 @@ async fn revisions_start_at_one_and_advance_by_one() {
                 "UPDATE trust_keyset_version SET status = 'disabled' WHERE id = 'kv_1'",
                 "an update of trust_keyset_version must advance revision 1 by 1, not to 1",
             ),
-            (
-                "UPDATE tenant SET secret_namespace = 'ns_z', revision = revision + 1 WHERE id = 'ten_a'",
-                "column tenant.secret_namespace is immutable",
-            ),
-            (
-                "UPDATE principal SET kind = 'service', revision = revision + 1 WHERE id = 'wld_1'",
-                "column principal.kind is immutable",
-            ),
-            (
-                "UPDATE trust_keyset_version SET fingerprint = 'sha256:02', revision = revision + 1
-                 WHERE id = 'kv_1'",
-                "column trust_keyset_version.fingerprint is immutable",
-            ),
         ] {
             rejected(&mut conn, sql, "SK001", Some(message)).await;
         }
@@ -787,17 +779,97 @@ async fn revisions_start_at_one_and_advance_by_one() {
     db.drop([pool]).await;
 }
 
+/// Every immutable column of a tenant, a principal and a version fails on
+/// the table's immutable-column guard, in both replication modes, even when
+/// the UPDATE advances the revision as the revision trigger requires: the
+/// `SK001` carries the guard's message, so it does not come from the
+/// revision trigger. The columns are the guards' lists of `0002` and `0004`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn immutable_columns_fail_on_their_guard_with_an_advancing_revision() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    // (table, row, column, a new value).
+    let cases: [(&str, &str, &str, &str); 15] = [
+        ("tenant", "ten_a", "id", "'ten_z'"),
+        ("tenant", "ten_a", "secret_namespace", "'ns_z'"),
+        (
+            "tenant",
+            "ten_a",
+            "created_at",
+            "created_at - interval '1 day'",
+        ),
+        ("principal", "wld_1", "id", "'wld_z'"),
+        ("principal", "wld_1", "tenant_id", "'ten_b'"),
+        ("principal", "wld_1", "kind", "'service'"),
+        (
+            "principal",
+            "wld_1",
+            "created_at",
+            "created_at - interval '1 day'",
+        ),
+        ("trust_keyset_version", "kv_1", "id", "'kv_z'"),
+        ("trust_keyset_version", "kv_1", "tenant_id", "'ten_b'"),
+        ("trust_keyset_version", "kv_1", "keyset_id", "'ks_z'"),
+        (
+            "trust_keyset_version",
+            "kv_1",
+            "public_jwks",
+            r#"'{"keys": [{"kty": "RSA"}]}'"#,
+        ),
+        ("trust_keyset_version", "kv_1", "fingerprint", "'sha256:02'"),
+        (
+            "trust_keyset_version",
+            "kv_1",
+            "effective_at",
+            "'2026-02-01Z'",
+        ),
+        (
+            "trust_keyset_version",
+            "kv_1",
+            "expires_at",
+            "'2027-01-01Z'",
+        ),
+        (
+            "trust_keyset_version",
+            "kv_1",
+            "provenance",
+            r#"'{"uploaded_by": "adm_2"}'"#,
+        ),
+    ];
+    for mode in MODES {
+        run(&mut *conn, mode).await;
+        for (table, id, column, value) in cases {
+            rejected(
+                &mut conn,
+                &format!(
+                    "UPDATE {table} SET {column} = {value}, revision = revision + 1 WHERE id = '{id}'"
+                ),
+                "SK001",
+                Some(&format!("column {table}.{column} is immutable")),
+            )
+            .await;
+        }
+    }
+    drop(conn);
+    db.drop([pool]).await;
+}
+
 /// Every foreign key's columns lead an index of the referencing table,
 /// except the listed ones, whose table's primary key leads with one of
-/// their columns; a later foreign key with neither fails here. The `0007`
-/// indexes have the expected names and definitions.
+/// their columns, and the column it references has a unique index of its
+/// own, so that column alone identifies the referenced row; a later foreign
+/// key with neither fails here. The `0007` indexes have the expected names
+/// and definitions.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn every_foreign_key_is_served_by_an_index() {
     let (db, pool) = seeded().await;
     // (foreign key, its columns, whether an index leads with exactly those
-    // columns in any order, the first column of the table's primary key).
-    let mut keys: Vec<(String, Vec<String>, bool, String)> = sqlx::query_as(
+    // columns in any order, the first column of the table's primary key,
+    // and whether the referenced column paired with that first column, if
+    // the key has it, has a single-column unique index).
+    let mut keys: Vec<(String, Vec<String>, bool, String, bool)> = sqlx::query_as(
         "SELECT k.conname::text,
                 (SELECT array_agg(a.attname::text ORDER BY u.ord)
                  FROM unnest(k.conkey) WITH ORDINALITY u(attnum, ord)
@@ -810,7 +882,14 @@ async fn every_foreign_key_is_served_by_an_index() {
                             = (SELECT array_agg(x ORDER BY x) FROM unnest(k.conkey) x)),
                 (SELECT a.attname::text FROM pg_index p
                  JOIN pg_attribute a ON a.attrelid = p.indrelid AND a.attnum = p.indkey[0]
-                 WHERE p.indrelid = k.conrelid AND p.indisprimary)
+                 WHERE p.indrelid = k.conrelid AND p.indisprimary),
+                EXISTS (SELECT 1 FROM pg_index p
+                        JOIN unnest(k.conkey, k.confkey) u(conkey, confkey)
+                          ON u.conkey = p.indkey[0]
+                        JOIN pg_index r
+                          ON r.indrelid = k.confrelid AND r.indisunique AND r.indpred IS NULL
+                         AND r.indnkeyatts = 1 AND r.indkey[0] = u.confkey
+                        WHERE p.indrelid = k.conrelid AND p.indisprimary)
          FROM pg_constraint k
          WHERE k.contype = 'f' AND k.connamespace = to_regnamespace(quote_ident(current_schema()))",
     )
@@ -820,12 +899,16 @@ async fn every_foreign_key_is_served_by_an_index() {
     keys.sort();
     let unindexed: Vec<&str> = keys
         .iter()
-        .filter(|(_, _, indexed, _)| !indexed)
-        .map(|(name, _, _, _)| name.as_str())
+        .filter(|(_, _, indexed, _, _)| !indexed)
+        .map(|(name, _, _, _, _)| name.as_str())
         .collect();
     assert_eq!(unindexed, UNINDEXED_FOREIGN_KEYS);
-    for (name, columns, _, primary) in keys.iter().filter(|(_, _, indexed, _)| !indexed) {
-        assert!(columns.contains(primary), "{name}: {columns:?} {primary}");
+    for (name, columns, _, primary, unique) in keys.iter().filter(|(_, _, indexed, _, _)| !indexed)
+    {
+        assert!(
+            columns.contains(primary) && *unique,
+            "{name}: {columns:?} {primary} {unique}"
+        );
     }
 
     let mut indexes: Vec<(String, String)> = sqlx::query_as(
@@ -853,9 +936,10 @@ async fn every_foreign_key_is_served_by_an_index() {
 }
 
 /// The README precondition query counts the rows outside the range on a
-/// `0006` database; with such a row `0007` fails with `23514` and leaves the
-/// database at `0006`; once the table owner repairs the rows, the query
-/// counts none and `0007` applies, giving existing rows revision 1.
+/// `0006` database, an `audit_event` row included; with such a row `0007`
+/// fails with `23514` and leaves the database at `0006`; once the table
+/// owner repairs the rows with the README's steps, the query counts none
+/// and `0007` applies, giving existing rows revision 1.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
@@ -871,7 +955,35 @@ async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
         zero.sort();
         zero
     };
+    let counting = |columns: &[&str]| {
+        let mut counted = zero.clone();
+        for (column, count) in &mut counted {
+            if columns.contains(&column.as_str()) {
+                *count = 1;
+            }
+        }
+        counted
+    };
     assert_eq!(precondition(&pool).await, zero);
+
+    // An audit event outside the range is counted too. It is not repaired
+    // in place (README: an integrity incident), so it is rolled back here.
+    {
+        let mut conn = pool.acquire().await.unwrap();
+        run(
+            &mut *conn,
+            r"BEGIN;
+             INSERT INTO audit_event VALUES
+                 ('evt_inf', NULL, 2, '\x01', 'infinity', 'adm_1', 'tenant.update', 'ten_a', 2, 3, 'success');
+             UPDATE audit_chain_head SET sequence = 2, head_hash = '\x02'",
+        )
+        .await;
+        assert_eq!(
+            precondition(&mut *conn).await,
+            counting(&["audit_event.timestamp"])
+        );
+        run(&mut *conn, "ROLLBACK").await;
+    }
 
     // Rows the registry never writes, but a restore or a hand-written
     // statement can.
@@ -881,6 +993,7 @@ async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
          INSERT INTO trust_keyset_version VALUES
              ('kv_far', 'ten_a', 'ks_1', '{\"keys\": [{\"kty\": \"EC\"}]}', 'f', '2026-01-01Z',
               '294247-01-10 04:00:54.775807+00', 'enabled', '{}');
+         UPDATE service_grant SET valid_until = 'infinity', revision = revision + 1 WHERE id = 'grt_1';
          INSERT INTO consumed_assertion VALUES
              ('ten_a', 'src_gh', sha256('jti_inf'), 'dk_1', now(), 'infinity');
          BEGIN;
@@ -890,20 +1003,16 @@ async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
          COMMIT",
     )
     .await;
-    let mut counted = zero.clone();
-    for (column, count) in &mut counted {
-        if [
+    assert_eq!(
+        precondition(&pool).await,
+        counting(&[
             "schema_info.created_at",
             "tenant.created_at",
             "trust_keyset_version.expires_at",
+            "service_grant.valid_until",
             "consumed_assertion.retain_until",
-        ]
-        .contains(&column.as_str())
-        {
-            *count = 1;
-        }
-    }
-    assert_eq!(precondition(&pool).await, counted);
+        ])
+    );
 
     let err = persistence::migrate(&pool).await.unwrap_err();
     let cause = match &err {
@@ -921,9 +1030,13 @@ async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
     .unwrap();
     assert_eq!((version, revision), (6, None));
 
-    // The owner's repair: each table's user triggers off for one
-    // transaction, every one of them back on ALWAYS before the commit.
-    let mut repair = String::from("BEGIN;");
+    // The owner's repair, as the README lists it: in one transaction, for
+    // each table, list its user triggers, disable them, update the row (and
+    // advance a revision the table has), and enable every listed trigger
+    // ALWAYS again; before the commit no user trigger is in another state.
+    let triggers_enabled = precondition_sql(1);
+    let mut conn = pool.acquire().await.unwrap();
+    run(&mut *conn, "BEGIN").await;
     for (table, update) in [
         ("schema_info", "UPDATE schema_info SET created_at = now()"),
         (
@@ -935,6 +1048,11 @@ async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
             "UPDATE trust_keyset_version SET expires_at = '2027-01-01Z' WHERE id = 'kv_far'",
         ),
         (
+            "service_grant",
+            "UPDATE service_grant SET valid_until = '2027-01-01Z', revision = revision + 1
+             WHERE id = 'grt_1'",
+        ),
+        (
             "consumed_assertion",
             "UPDATE consumed_assertion SET retain_until = now() + interval '1 hour'
              WHERE replay_key_digest = sha256('jti_inf')",
@@ -944,30 +1062,43 @@ async fn upgrade_precondition_finds_the_rows_that_would_fail_the_upgrade() {
             "SELECT tgname::text FROM pg_trigger WHERE tgrelid = $1::regclass AND NOT tgisinternal",
         )
         .bind(table)
-        .fetch_all(&pool)
+        .fetch_all(&mut *conn)
         .await
         .unwrap();
-        repair.push_str(&format!(
-            " ALTER TABLE {table} DISABLE TRIGGER USER; {update};"
-        ));
+        run(
+            &mut *conn,
+            &format!("ALTER TABLE {table} DISABLE TRIGGER USER; {update}"),
+        )
+        .await;
+        // The check sees every trigger the repair has turned off.
+        let disabled: i64 = sqlx::query_scalar(AssertSqlSafe(triggers_enabled.clone()))
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(disabled, i64::try_from(triggers.len()).unwrap(), "{table}");
         for trigger in triggers {
-            repair.push_str(&format!(
-                " ALTER TABLE {table} ENABLE ALWAYS TRIGGER {trigger};"
-            ));
+            run(
+                &mut *conn,
+                &format!("ALTER TABLE {table} ENABLE ALWAYS TRIGGER {trigger}"),
+            )
+            .await;
         }
     }
-    repair.push_str(" COMMIT");
-    run(&pool, &repair).await;
-    let not_always: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
-         WHERE NOT t.tgisinternal AND t.tgenabled <> 'A'
-           AND c.relnamespace = to_regnamespace(quote_ident(current_schema()))",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let not_always: i64 = sqlx::query_scalar(AssertSqlSafe(triggers_enabled))
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
     assert_eq!(not_always, 0);
+    run(&mut *conn, "COMMIT").await;
+    drop(conn);
     assert_eq!(precondition(&pool).await, zero);
+    // The repair advanced the grant's revision past the one that set the
+    // bad value.
+    let grant: i64 = sqlx::query_scalar("SELECT revision FROM service_grant WHERE id = 'grt_1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(grant, 3);
 
     persistence::migrate(&pool).await.unwrap();
     let revisions: Vec<(String, i64)> = sqlx::query_as(

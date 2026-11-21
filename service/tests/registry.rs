@@ -1532,7 +1532,7 @@ async fn guard_not_null_and_unknown_errors_map_from_raw_statements() {
     )
     .await;
     for sql in [
-        "UPDATE tenant SET secret_namespace = 'ns_z' WHERE id = 'ten_a'",
+        "UPDATE tenant SET secret_namespace = 'ns_z', revision = revision + 1 WHERE id = 'ten_a'",
         "UPDATE resource_server SET audience = 'other', revision = revision + 1 WHERE id = 'rs_1'",
         "UPDATE resource_server SET revision = revision + 2 WHERE id = 'rs_1'",
         "UPDATE audience_tenant_assignment SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'ata_1'",

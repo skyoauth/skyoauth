@@ -1196,10 +1196,11 @@ changes no existing column, constraint, trigger or index. Choices marked
   `server_id`, as in `0003` and `0004`, and (inferred) a principal
   reference's columns, `<x>_principal_id` with `<x>_principal_kind` where
   the key has it, become `<x>_principal`. The indexes are not partial
-  (inferred). Five foreign keys get none (inferred): the leading column of
-  their table's primary key is one of their columns and identifies the
-  referenced row on its own, so the primary-key index already narrows the
-  check to that row's few referencing rows. They are
+  (inferred: the tables are small, so a partial index would save little).
+  Five foreign keys get none (inferred): the leading column of their
+  table's primary key is one of their columns and identifies the referenced
+  row on its own, so the primary-key index already narrows the check to
+  that row's few referencing rows. They are
   `resource_server_checker_tenant_checker_fkey` (`checker_id`),
   `service_identity_resource_server_service_id_fkey` (`service_id`),
   `service_grant_binding_grant_id_fkey` and
@@ -1215,7 +1216,8 @@ changes no existing column, constraint, trigger or index. Choices marked
 - **Collation.** `0007` changes no column's collation, so the `no_space`
   follow-up of `0002` and `0003` stays as it is (see "Follow-ups").
 - **Locks on existing tables.** Checked with `pg_locks` in a transaction
-  that applies `0007` to a `0006` database (PostgreSQL 16). The
+  that applies `0007` to a `0006` database, on PostgreSQL 16 and 17.12
+  (the 17.12 run, from the lead's review, gave the same results). The
   `ALTER TABLE` statements (`ADD COLUMN`, `ADD CONSTRAINT … CHECK`) take
   `ACCESS EXCLUSIVE` on the 11 tables with a `timestamptz` column
   (`schema_info`, `tenant`, `principal`, `instance_security_policy`,
@@ -1305,13 +1307,62 @@ changes no existing column, constraint, trigger or index. Choices marked
   The predicate is the negation of the check, so it counts exactly the rows
   the check rejects; a `NULL` is not counted. The registry never writes
   such a row (see "The `0004` tables"); a restored or hand-written one can
-  exist. Most of these columns are immutable and the tables reject a
-  `DELETE` (`0006`), so the table owner repairs a counted row in one
-  transaction with the table's user triggers disabled
-  (`ALTER TABLE … DISABLE TRIGGER USER`, then `ENABLE ALWAYS TRIGGER` for
-  each guard again before the commit), and records the repair in the audit
-  trail. `service/tests/schema_registry_shape.rs` runs this query from this
+  exist. `service/tests/schema_registry_shape.rs` runs this query from this
   file.
+
+  A counted `audit_event` row is an integrity incident, not a row to
+  repair: never edit it in place, but restore a verified backup or follow a
+  separate recovery procedure (this README defines none). The event's
+  `timestamp` is part of its hash: identity-registry IR-056 hashes the
+  canonical JSON of the event envelope without only its `hash` and
+  `prev_hash` fields, and OQ-IR-15 lists how `timestamp` is serialized in
+  that envelope among the details still open. An edited timestamp gives
+  another hash than the one the next event's `prev_hash`, or
+  `audit_chain_head.head_hash` for the last event, records (see the audit
+  writer under "Follow-ups", "Not done in `0002`").
+
+  A counted row of any other table can be repaired in place. Most of these
+  columns are immutable and the tables reject a `DELETE` (`0006`), so the
+  table owner repairs the rows in one transaction, with the user triggers
+  of each repaired table off only for its repair:
+  1. List the table's user triggers:
+     `SELECT tgname FROM pg_trigger WHERE tgrelid = '<table>'::regclass AND NOT tgisinternal;`
+  2. Run `ALTER TABLE <table> DISABLE TRIGGER USER;`. This turns off every
+     listed trigger, not only the guards: also the revision trigger, the
+     `*_set_once` triggers, `administrative_operation_no_consume_after_revoke`,
+     `instance_security_policy_sink_validation` and the deferred constraint
+     trigger `service_grant_has_binding`. A constraint trigger that is
+     disabled when a row changes queues no check for that change, even once
+     it is enabled again before the commit (checked on PostgreSQL 16), so
+     nothing checks the repaired rows against those rules: the repair
+     changes only the counted column and, where the table has one, the
+     revision.
+  3. `UPDATE` each counted row to a time inside the range. On a table with
+     a `revision` column (of these tables before `0007`:
+     `instance_security_policy`, `service_grant` and
+     `administrative_operation`), also set
+     `revision = revision + 1` (inferred: a compare-and-set writer that
+     read the row before the repair then fails instead of overwriting it).
+     While enabled, the revision trigger accepts nothing else; while
+     disabled it checks nothing, so the repair advances the revision
+     itself. `tenant`, `principal` and `trust_keyset_version` have no
+     revision before `0007`, which gives every row revision 1.
+  4. Run `ALTER TABLE <table> ENABLE ALWAYS TRIGGER <name>;` for every
+     trigger listed in step 1.
+
+  Before the `COMMIT`, this query must return 0:
+
+  ```sql
+  SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled <> 'A';
+  ```
+
+  Every user trigger of `0001` to `0007`, the constraint triggers included,
+  is `ENABLE ALWAYS` (`A`), so any other state is one the repair left
+  behind. (inferred: in a database that also holds other triggers, for
+  example of another schema or an extension, restrict the query to the
+  registry's tables.) Then commit, and record the repair in the audit
+  trail. `service/tests/schema_registry_shape.rs` runs these steps and this
+  query.
 
 - **Frozen comments.** The comments of `0002` (lines 269–271: tenants and
   principals carry no revision) and `0004` (lines 91–94: versions have no
