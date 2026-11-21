@@ -74,7 +74,7 @@
 //! reopened bootstrap, replayed recovery) are A32's row (T13.4, T13.5,
 //! T13.6), not A22's.
 //!
-//! The M3 stage, "linking" (an explicit verified link positive and the
+//! A22's M3 stage, "linking" (an explicit verified link positive and the
 //! email-only link negative; T30.4, T52.3), is not owned here. A22 has no
 //! M4 stage.
 //!
