@@ -901,7 +901,15 @@ milestone = "M1a"
 scope = "full row"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
-tests = []
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_pos_complete_policy_stored_per_profile",
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_pos_optional_predicate_omitted_is_unconstrained",
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_neg_profile_change_needs_new_required_set",
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_neg_required_predicate_empty_refused",
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_neg_required_predicate_missing_refused",
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_neg_required_predicate_removed_by_update_refused",
+  "nextest:skyoauth-scenarios/pg/security::a37::a37_neg_store_refuses_incomplete_policy",
+]
 
 [[scenario]]
 id = "A38"
