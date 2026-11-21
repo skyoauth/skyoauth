@@ -63,7 +63,6 @@
 //! `tests/security/a24.rs`), not here.
 
 use std::{
-    collections::BTreeMap,
     fmt::Debug,
     time::{Duration, UNIX_EPOCH},
 };
@@ -266,10 +265,7 @@ fn binding(
         name: name.into(),
         trust_source_id: source,
         profile: BindingProfile::GithubProduction,
-        claim_match_policy: BTreeMap::from([
-            ("repository".to_string(), "example/release".to_string()),
-            ("event_name".to_string(), "push".to_string()),
-        ]),
+        claim_match_policy: super::grant_fixture::github_policy(),
         workload_principal_id: workload,
         status: Status::Enabled,
     }
@@ -1027,10 +1023,12 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
                 &PrincipalBindingChanges {
                     name: "taken-over".into(),
                     profile: bound.profile,
-                    claim_match_policy: BTreeMap::from([(
-                        "repository".to_string(),
-                        "intruder/any".to_string(),
-                    )]),
+                    claim_match_policy: {
+                        // Complete, so the statement is reached and finds nothing.
+                        let mut policy = super::grant_fixture::github_policy();
+                        policy.insert("repository".to_string(), "intruder/any".to_string());
+                        policy
+                    },
                     status: Status::Disabled,
                 },
             )
