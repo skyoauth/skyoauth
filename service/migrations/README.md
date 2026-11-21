@@ -868,7 +868,9 @@ The database does not enforce these rules; the service must:
   guard checks only an `UPDATE` of a row already revoked, and the database
   does not compare the two timestamps;
 - authorize each write by an enabled binding of an enabled operator with an
-  enabled, unrevoked credential; the database does not join the statuses;
+  enabled, unrevoked credential; the database does not join the statuses.
+  The registry's `authorize_operator` is that lookup (see "Rust registry
+  surface");
 - cap the challenge lifetime at 15 minutes (LT-107): the table has no
   creation time to measure it from;
 - refuse a retired recovery key; the table keeps only the current one;
@@ -1783,6 +1785,7 @@ logging must not walk the source chain.
 | `23502`  | `Invariant { kind: NotNull, constraint: None }` |
 | `SK001`  | `Guard`                                         |
 | —        | `UnreadableTimestamp { table, column, id }`     |
+| —        | `ReservedActorId` (before any statement)        |
 | `40001`  | `Retry` (retry the whole transaction)           |
 | `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
@@ -1886,6 +1889,49 @@ revision snapshot (T12.6), wired into the exchange in M2 (T21.4, T21.5). An ID
 is not proof of the actor. How the exchange gets the tenant (IR-033, API-015:
 from the selected source and grant) is an open design question for the T21
 caller.
+
+Operators (`0005`; design §7.2; identity-registry §5.2; ADR-013 items 1
+and 2; T13.1, T13.2): `create_admin_identity`, `get_admin_identity` and
+`disable_admin_identity`; `create_admin_credential`,
+`get_admin_credential` and `revoke_admin_credential`; and
+`create_admin_role_binding`, `get_admin_role_binding` and the
+revision-checked `update_admin_role_binding`, which changes only `status`.
+Rows are read by their own ID. Identities and credentials have no
+revision. Time is always the caller's: `created_at` and the `now` of a
+revocation are arguments, never the database's `now()` (provisional lead
+pick, 2026-11-21). A revocation sets `revoked_at` and `status = 'disabled'`
+in one statement; revoking a revoked credential keeps the first
+`revoked_at` (inferred). Revocation is one-way in the database:
+`admin_credential_set_once` refuses to clear or change `revoked_at`
+(`Guard`), `admin_credential_revoked_disabled_check` refuses an enabled
+revoked credential (`Invariant`), `admin_credential_immutable` keeps the
+key on its row, and the `0006` delete and truncate guards keep the row, so
+`admin_credential_public_identity_key` refuses the revoked key again
+(`AlreadyExists`, naming only the constraint). Disabling an identity is
+one-way only in the registry, which has no enable function; the database
+does not guard it (inferred). A role binding is re-enabled by an update, as
+`0005` intends. `create_admin_identity` rejects the reserved actor IDs
+`deployment_operator` and every ID beginning with `recovery_key:`
+(`DEPLOYMENT_OPERATOR_ACTOR`, `recovery_key_actor(epoch)`) with
+`ReservedActorId` before any statement, byte-wise, so no operator can act
+under the actors of bootstrap and recovery; the database has no such
+check (inferred). `authorize_operator(public_identity, scope, role)` joins,
+in one statement, the credential with exactly that `public_identity`, its
+identity and the identity's binding of exactly that role and scope, and
+requires the three enabled and the credential unrevoked. No role implies
+another (API-120). Scope fails closed: an instance request needs a binding
+with no tenant and a tenant request a binding of exactly that tenant, so an
+instance `auditor` does not satisfy a tenant request nor a tenant `auditor`
+an instance one (provisional lead pick, 2026-11-21). Every comparison is an
+equality on a `COLLATE "C"` column, byte-wise under any database
+collation, and at most one row can match. Every miss is the same
+`Ok(None)`; inputs are not validated first, as for `select_grant`, so an
+empty or over-long value is a miss and a NUL is `Other` (`22021`). No claim
+is made that every miss takes the same time. The lookup reads no clock and
+writes nothing, no audit event and no `administrative_operation` row; the
+T13.3 caller writes the event in its transaction. The operator constraint
+names are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_operator.rs`
+tests the surface.
 
 Follow-ups for the registry surface:
 

@@ -196,6 +196,23 @@ text_enum! {
     }
 }
 
+text_enum! {
+    /// `admin_role_binding.role` (identity-registry section 5.2). No role
+    /// implies another (public-api API-120).
+    AdminRole {
+        /// `security_admin`, instance only.
+        SecurityAdmin = "security_admin",
+        /// `trust_admin`, tenant only.
+        TrustAdmin = "trust_admin",
+        /// `client_admin`, tenant only.
+        ClientAdmin = "client_admin",
+        /// `provider_admin`, tenant only.
+        ProviderAdmin = "provider_admin",
+        /// `auditor`, of one tenant or of the instance.
+        Auditor = "auditor",
+    }
+}
+
 /// Reads a text enumeration column.
 pub(super) fn text<T: FromStr<Err = UnknownValue>>(
     row: &PgRow,
@@ -279,13 +296,13 @@ pub(super) fn optional_since_epoch(
 /// Where a row came from, for [`UnreadableTimestamp`]: its table and the
 /// column holding its ID.
 #[derive(Clone, Copy)]
-struct Origin {
+pub(super) struct Origin {
     table: &'static str,
     id_column: &'static str,
 }
 
 impl Origin {
-    const fn new(table: &'static str) -> Self {
+    pub(super) const fn new(table: &'static str) -> Self {
         Self {
             table,
             id_column: "id",
@@ -297,7 +314,7 @@ impl Origin {
 /// [`micros!`](super::micros) as `<column>_us`, microseconds since the Unix
 /// epoch, so the crate needs no date-time dependency (inferred). A time
 /// outside the readable range is an [`UnreadableTimestamp`] naming the row.
-fn timestamp(
+pub(super) fn timestamp(
     row: &PgRow,
     origin: Origin,
     column: &'static str,
@@ -329,7 +346,7 @@ fn timestamp(
 }
 
 /// Reads a `NOT NULL` timestamp selected as [`timestamp`] expects.
-fn required_timestamp(
+pub(super) fn required_timestamp(
     row: &PgRow,
     origin: Origin,
     column: &'static str,

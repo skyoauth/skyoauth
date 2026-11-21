@@ -12,7 +12,12 @@
 //! steps 1, 3 and 4; see their modules). [`load_scope_ceilings`] loads the
 //! scope ceilings of an exchange and
 //! [`policy::resolve_scopes`](crate::policy::resolve_scopes) applies them
-//! (IR-062, IR-063, IR-083; see their modules).
+//! (IR-062, IR-063, IR-083; see their modules). The operator identities,
+//! credentials and role bindings of `0005` have their own functions, and
+//! [`authorize_operator`] looks up whether a presented operator credential
+//! holds a role in a scope (design section 7.2; API-002, API-120; see its
+//! module for the one-way rules, the reserved actor IDs and what the lookup
+//! does not do).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -193,6 +198,7 @@
 //! | `23502`  | `not_null_violation`                       | `Invariant { kind: NotNull, constraint: None }`       |
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
 //! | —        | a stored time outside the readable range   | `UnreadableTimestamp { table, column, id }`           |
+//! | —        | a reserved ID for a new operator identity  | `ReservedActorId` (before any statement)              |
 //! | `40001`  | `serialization_failure`                    | `Retry(sqlx::Error)`                                  |
 //! | `40P01`  | `deadlock_detected`                        | `Retry(sqlx::Error)`                                  |
 //! | other    | anything else, or an unlisted constraint   | `Other(sqlx::Error)`                                  |
@@ -241,6 +247,7 @@ mod error;
 mod grant;
 mod instance;
 mod model;
+mod operator;
 mod predicate;
 mod selection;
 mod tenant;
@@ -273,16 +280,25 @@ pub use instance::{
     get_egress_allowlist_entry, get_instance_security_policy, list_egress_allowlist_entries,
 };
 pub use model::{
-    ActivationState, AssertionProfile, AudienceTenantAssignment, AudienceTenantAssignmentChanges,
-    BindingProfile, EgressAllowlistEntry, EgressPurpose, GrantMode, InstanceSecurityPolicy,
-    JsonObject, NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding, NewResourceAction,
-    NewResourceServer, NewResourceServerChecker, NewServiceGrant, NewServiceIdentity, NewTenant,
-    NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Principal, PrincipalBinding,
-    PrincipalBindingChanges, PrincipalKind, PrincipalPatch, Profile, ReplayMode, ResourceAction,
-    ResourceActionChanges, ResourceServer, ResourceServerChanges, ResourceServerChecker,
-    ResourceServerCheckerChanges, ServiceGrant, ServiceGrantChanges, ServiceIdentity,
-    ServiceIdentityChanges, Status, Tenant, TenantPatch, TrustKeyset, TrustKeysetChanges,
-    TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
+    ActivationState, AdminRole, AssertionProfile, AudienceTenantAssignment,
+    AudienceTenantAssignmentChanges, BindingProfile, EgressAllowlistEntry, EgressPurpose,
+    GrantMode, InstanceSecurityPolicy, JsonObject, NewAudienceTenantAssignment, NewPrincipal,
+    NewPrincipalBinding, NewResourceAction, NewResourceServer, NewResourceServerChecker,
+    NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustKeyset, NewTrustKeysetVersion,
+    NewTrustSource, Principal, PrincipalBinding, PrincipalBindingChanges, PrincipalKind,
+    PrincipalPatch, Profile, ReplayMode, ResourceAction, ResourceActionChanges, ResourceServer,
+    ResourceServerChanges, ResourceServerChecker, ResourceServerCheckerChanges, ServiceGrant,
+    ServiceGrantChanges, ServiceIdentity, ServiceIdentityChanges, Status, Tenant, TenantPatch,
+    TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges,
+    TrustSourceKind, UnknownValue,
+};
+pub use operator::{
+    AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges, AuthorizedOperator,
+    DEPLOYMENT_OPERATOR_ACTOR, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
+    OperatorRequest, OperatorScope, RECOVERY_KEY_ACTOR_PREFIX, authorize_operator,
+    create_admin_credential, create_admin_identity, create_admin_role_binding,
+    disable_admin_identity, get_admin_credential, get_admin_identity, get_admin_role_binding,
+    is_reserved_actor_id, recovery_key_actor, revoke_admin_credential, update_admin_role_binding,
 };
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use selection::{Selection, SelectionError, select_grant};

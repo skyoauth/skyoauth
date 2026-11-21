@@ -171,6 +171,31 @@ credentials never do. That rule is
   [public-api.md API-120](public-api.md#72-approval-boundaries), which is
   canonical.
 
+Operator authorization in the registry follows these provisional lead
+picks (lead decision, 2026-11-21, provisional until the T13 operator
+endpoints ship):
+
+- **Reserved actor IDs.** Bootstrap acts for the deployment operator and
+  break-glass recovery for the holder of the offline recovery key, neither
+  of which is an operator identity (design §7.2). Their actor IDs are the
+  reserved `deployment_operator` and `recovery_key:<epoch>`, where
+  `<epoch>` is the key's `recovery_key_epoch` in decimal (the decimal form
+  is inferred), recorded with the audit actor type `operator`; a distinct
+  actor type may come later without a migration. No operator identity may
+  take a reserved ID: creating one with `deployment_operator` or with an ID
+  that begins with `recovery_key:` is rejected, so a real operator cannot
+  act as either. The comparison is exact and byte-wise, and the database
+  does not check it; the registry does (inferred).
+- **Fail-closed scope.** A role assignment satisfies a request only for
+  its own scope: an instance-scoped `auditor` assignment does not satisfy a
+  tenant request, a tenant `auditor` assignment does not satisfy an
+  instance request, and a tenant request needs an assignment of exactly
+  that tenant. With API-120, only an enabled assignment of exactly the
+  requested role counts, held by an enabled operator through an enabled,
+  unrevoked credential.
+- **Explicit time.** In the operator registry slice, time is always an
+  explicit `now` argument, never the database's `now()`.
+
 The instance security policy is one `InstanceSecurityPolicy` row per instance
 (`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
 `audit_sink_validated_at`, `revision`). (tasks §3)
