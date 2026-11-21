@@ -195,7 +195,8 @@ async fn registry_constraint_names_match_the_catalog() {
     let names: Vec<String> = sqlx::query_scalar(
         "SELECT conname::text FROM pg_constraint
          WHERE (contype IN ('c', 'f', 'p', 'u') AND conrelid = ANY(ARRAY[
-                   'tenant', 'principal', 'resource_server', 'audience_tenant_assignment',
+                   'tenant', 'principal', 'audit_event', 'audit_chain_head',
+                   'resource_server', 'audience_tenant_assignment',
                    'resource_server_checker', 'resource_server_checker_tenant',
                    'resource_action', 'trust_keyset', 'trust_keyset_version', 'trust_source',
                    'principal_binding', 'service_identity', 'service_identity_resource_server',
