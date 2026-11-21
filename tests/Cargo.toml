@@ -1,0 +1,35 @@
+[package]
+name = "skyoauth-scenarios"
+version.workspace = true
+edition.workspace = true
+description = "Conformance scenario tests of skyoauth (docs/testing/conformance-layout.md)."
+license-file = "../LICENSE"
+rust-version.workspace = true
+publish = false
+# The package lives at `tests/`, so Cargo's default test directory would be
+# `tests/tests/`. Every target is declared below instead, one per execution
+# environment (conformance layout §1.2); a target is added with its first
+# test.
+autotests = false
+
+# No features (conformance layout §1.2): the `rust`, `msrv` and coverage
+# jobs pass `--all-features`, so a feature could not keep environment tests
+# out of them. The `rust` job and the `coverage` alias exclude this package
+# instead, and the `scenarios-*` jobs run one target each.
+
+[dependencies]
+skyoauth-service = { path = "../service" }
+# The same exact pin as skyoauth-service, which calls a `#[doc(hidden)]`
+# sqlx API; one sqlx version in the workspace.
+sqlx = { version = "=0.9.1", default-features = false, features = ["postgres", "runtime-tokio"] }
+tokio = { version = "1.54.1", features = ["rt"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["macros", "rt"] }
+
+# Environment `pg` (layout §1.1): needs SKYOAUTH_IT_DATABASE_URL. Run by the
+# `scenarios-pg` job.
+[[test]]
+name = "pg"
+path = "pg.rs"
