@@ -313,10 +313,10 @@ pub enum RegistryError {
     /// A stored `timestamptz` is outside the range the registry reads
     /// (`infinity`, `-infinity`, or a finite time after `i64::MAX - 1`
     /// microseconds from the Unix epoch), so the row cannot be returned. The
-    /// `0007` range checks keep such a time out; a row restored from before
-    /// `0007`, or written with a check dropped, can still hold one. It is not
-    /// an [`Self::Invariant`]: no write was rejected (lead ruling,
-    /// 2026-11-21).
+    /// `0007` range checks keep such a time out; a row written while a check
+    /// was dropped (or left in place by a `NOT VALID` re-add), or read from
+    /// a schema not yet migrated to `0007`, can still hold one. It is not an
+    /// [`Self::Invariant`]: no write was rejected (lead ruling, 2026-11-21).
     UnreadableTimestamp {
         /// The table, for example `tenant`.
         table: &'static str,
@@ -367,11 +367,22 @@ impl InvariantKind {
 /// range, carried to [`RegistryError::from`] as the source of a
 /// [`sqlx::Error::ColumnDecode`], which turns it into
 /// [`RegistryError::UnreadableTimestamp`].
-#[derive(Debug)]
 pub(super) struct UnreadableTimestamp {
     pub(super) table: &'static str,
     pub(super) column: &'static str,
     pub(super) id: String,
+}
+
+/// Like `Display`, `Debug` leaves out the row ID, as
+/// [`RegistryError::UnreadableTimestamp`] does: the `Debug` of a
+/// [`sqlx::Error::ColumnDecode`] that carries this error prints it.
+impl fmt::Debug for UnreadableTimestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UnreadableTimestamp")
+            .field("table", &self.table)
+            .field("column", &self.column)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Display for UnreadableTimestamp {
@@ -869,6 +880,27 @@ mod tests {
             source: "timestamp out of range".into(),
         });
         assert!(matches!(error, RegistryError::Other(_)), "{error:?}");
+    }
+
+    #[test]
+    fn the_decode_error_carrier_prints_no_row_id() {
+        let carrier = UnreadableTimestamp {
+            table: "tenant",
+            column: "created_at",
+            id: "user-value-id".into(),
+        };
+        assert_eq!(
+            format!("{carrier:?}"),
+            r#"UnreadableTimestamp { table: "tenant", column: "created_at", .. }"#
+        );
+        // Nor does the decode error that carries it.
+        let error = sqlx::Error::ColumnDecode {
+            index: "created_at_us".into(),
+            source: Box::new(carrier),
+        };
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains("user-value"), "{text}");
+        }
     }
 
     #[test]

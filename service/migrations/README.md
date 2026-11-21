@@ -1598,7 +1598,9 @@ them). An update is a compare-and-set: it sets `revision = revision + 1`
 where `revision = expected`, as `skyoauth_check_revision()` requires, and
 touches only the columns these migrations leave mutable. The expected
 revision is only compared, so even `i64::MAX` gives `StaleRevision` or
-`NotFound`, not an overflow. Adding or removing a checker tenant row
+`NotFound`, not an overflow; only a row already at revision `i64::MAX`
+gives `Other` with `22003` from `revision + 1`, which is unreachable in
+practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
 cursor.
@@ -1692,20 +1694,22 @@ are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
 surface.
 
 Timestamps: the registry reads a timestamp as
-`(extract(epoch FROM <column>) * 1000000)::bigint`, signed 64-bit
-microseconds from the Unix epoch, and `since_epoch` writes only times from
-PostgreSQL's earliest `timestamptz` (4713 BC,
+`(extract(epoch FROM <column>) * 1000000)::bigint`, microseconds from the
+Unix epoch in a signed 64-bit integer. `since_epoch` writes only a part of
+that range: from PostgreSQL's earliest `timestamptz` (4713 BC,
 `-210_866_803_200_000_000` microseconds) to `i64::MAX - 1` microseconds
-(`294247-01-10 04:00:54.775806+00`), rejecting any other with `Other` (an
-encode error, "timestamp out of range") before any statement runs.
+(`294247-01-10 04:00:54.775806+00`), both inclusive, rejecting any other
+time with `Other` (an encode error, "timestamp out of range") before any
+statement runs.
 `i64::MAX` itself is excluded because PostgreSQL 16's
 `extract(epoch ...)` rounds exactly that time to
 `9_223_372_036_854_775_800`. Since `0007` the tables hold the same range:
 each `timestamptz` column has a named `<table>_<column>_range_check` that
 rejects `'infinity'`, `'-infinity'` and every finite time past the upper
 bound with `23514` (see "What 0007 adds"). Such a row can still exist if
-it was restored from before `0007` or written with a check dropped; the
-upgrade precondition finds them. The plain projection would fail the whole
+it was written while a check was dropped (or left in place by a
+`NOT VALID` re-add), or be read from a schema not yet migrated to `0007`;
+the upgrade precondition finds them. The plain projection would fail the whole
 statement on it, with `0A000` (`feature_not_supported`) for an infinity or
 `22003` (`numeric_value_out_of_range`) past the bound. So the registry
 selects a time outside the checked range as `i64::MAX`, one past the
@@ -1716,9 +1720,16 @@ list stops at the first such row in its order. `Display` and `Debug` name
 the table and column but leave out the row ID (inferred: the ID is a row
 value). The marker cannot collide with a stored time, since the range
 checks cap stored values at `i64::MAX - 1` microseconds; a test reads rows
-at both bounds back exactly. With the checks in force, an update of a row
-holding such a time fails with `23514` naming the range check, since
-PostgreSQL checks the whole new row; with the checks dropped, the update
-applies its write and then returns `UnreadableTimestamp`, so outside a
-caller transaction the write is committed. The range checks of the tables the registry writes are in
+at both bounds back exactly. An update that leaves such a column
+untouched (`update_tenant`, `update_principal`,
+`update_trust_keyset_version`) fails with `23514` naming the range check
+when a range check is in force but `NOT VALID`, since PostgreSQL checks
+the whole new row; with the check dropped, the update applies its write
+and then returns `UnreadableTimestamp`, so outside a caller transaction
+the write is committed. `update_service_grant` replaces `valid_until`, so
+with the check in force (even `NOT VALID`) a revision-checked update that
+sets a finite `valid_until` (or none) succeeds and repairs the row. A
+grant list-set change writes only the revision, so with the check in force
+it still fails with `23514`; with the check dropped it applies and returns
+only the new revision, since it does not read the timestamp column. The range checks of the tables the registry writes are in
 `KNOWN_CONSTRAINTS`.

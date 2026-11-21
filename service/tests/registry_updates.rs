@@ -445,6 +445,24 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         (&renamed.name[..], renamed.status, renamed.revision),
         ("bob", Status::Disabled, 3)
     );
+    // Setting a column to its current value still advances the revision.
+    let same =
+        registry::update_principal(&pool, "ten_a", "usr_1", 3, &principal_patch(name("bob")))
+            .await
+            .unwrap();
+    let mut expected = renamed.clone();
+    expected.revision = 4;
+    assert_eq!(same, expected);
+    assert_eq!(
+        registry::get_principal(&pool, "ten_a", "usr_1")
+            .await
+            .unwrap(),
+        same
+    );
+    let listed = registry::list_principals(&pool, "ten_a", Page::first(10))
+        .await
+        .unwrap();
+    assert!(listed.contains(&same), "{listed:?}");
     db.drop([pool]).await;
 }
 
@@ -569,10 +587,11 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
     db.drop([pool]).await;
 }
 
-/// The marker for an unreadable time cannot collide with a stored one: rows
-/// at both bounds of the `0007` range checks read back as themselves on
-/// every read path, the latest one at `i64::MAX - 1` microseconds, one below
-/// the marker.
+/// The marker for an unreadable time cannot collide with a stored one:
+/// tenant rows at both bounds of the `0007` range checks, and a principal
+/// at the upper one, read back as themselves by a get, a list (tenants
+/// only) and the row an update returns, the latest at `i64::MAX - 1`
+/// microseconds, one below the marker.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn times_at_the_range_check_bounds_read_back_exactly() {

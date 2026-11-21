@@ -2973,3 +2973,156 @@ async fn times_outside_the_range_checks_are_unreadable_timestamps_naming_the_row
     );
     db.drop([pool]).await;
 }
+
+/// `update_service_grant` replaces `valid_until`, so it repairs a grant
+/// holding a time outside the range check even with the check in force,
+/// here re-added `NOT VALID` over an `infinity` inside a rolled-back
+/// transaction. A grant list-set change writes only the grant's revision:
+/// with the check in force it fails with `23514`; with the check dropped it
+/// applies without reading `valid_until`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() {
+    const RANGE_CHECK: &str = "service_grant_valid_until_range_check";
+    let (db, pool) = seeded().await;
+    let before = grant_of(&pool, "grt_1").await;
+    assert_eq!((before.valid_until, before.revision), (None, 1));
+
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE service_grant DROP CONSTRAINT service_grant_valid_until_range_check;
+         UPDATE service_grant SET valid_until = 'infinity', revision = revision + 1
+          WHERE id = 'grt_1'",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let unreadable = registry::get_service_grant(&mut *tx, "ten_a", "grt_1").await;
+    assert!(
+        matches!(
+            &unreadable,
+            Err(RegistryError::UnreadableTimestamp {
+                table: "service_grant",
+                column: "valid_until",
+                id,
+            }) if id == "grt_1"
+        ),
+        "{unreadable:?}"
+    );
+    // With the check dropped, a list-set change applies and returns only the
+    // new revision.
+    {
+        let mut savepoint = tx.begin().await.unwrap();
+        assert_eq!(
+            registry::add_service_grant_resource_server(
+                &mut *savepoint,
+                "ten_a",
+                "grt_1",
+                2,
+                "rs_3"
+            )
+            .await
+            .unwrap(),
+            3
+        );
+        savepoint.rollback().await.unwrap();
+    }
+
+    sqlx::raw_sql(
+        "ALTER TABLE service_grant ADD CONSTRAINT service_grant_valid_until_range_check
+             CHECK (valid_until >= timestamptz '4714-11-24 00:00:00+00 BC'
+                AND valid_until <= timestamptz '294247-01-10 04:00:54.775806+00') NOT VALID",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    let validated: bool = sqlx::query_scalar(
+        "SELECT convalidated FROM pg_constraint
+         WHERE conrelid = 'service_grant'::regclass AND conname = $1",
+    )
+    .bind(RANGE_CHECK)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert!(!validated);
+
+    // A revision-only write of the grant, as every list-set change is, keeps
+    // the `infinity` in the new row, so the check rejects it.
+    {
+        let mut savepoint = tx.begin().await.unwrap();
+        assert_check(
+            registry::add_service_grant_resource_server(
+                &mut *savepoint,
+                "ten_a",
+                "grt_1",
+                2,
+                "rs_3",
+            )
+            .await,
+            RANGE_CHECK,
+        );
+        savepoint.rollback().await.unwrap();
+    }
+    {
+        let mut savepoint = tx.begin().await.unwrap();
+        assert_check(
+            registry::remove_service_grant_binding(&mut *savepoint, "ten_a", "grt_1", 2, "bnd_2")
+                .await,
+            RANGE_CHECK,
+        );
+        savepoint.rollback().await.unwrap();
+    }
+
+    // The same revision-checked update with no `valid_until` repairs the row
+    // too.
+    {
+        let mut savepoint = tx.begin().await.unwrap();
+        let cleared = registry::update_service_grant(
+            &mut *savepoint,
+            "ten_a",
+            "grt_1",
+            2,
+            &grant_changes(&before),
+        )
+        .await
+        .unwrap();
+        assert_eq!((cleared.valid_until, cleared.revision), (None, 3));
+        savepoint.rollback().await.unwrap();
+    }
+    // Stale is still stale.
+    let mut changes = grant_changes(&before);
+    changes.valid_until = Some(at(1_798_859_045_000_001));
+    assert_stale(registry::update_service_grant(&mut *tx, "ten_a", "grt_1", 1, &changes).await);
+    // A finite `valid_until` replaces the `infinity`: the update succeeds and
+    // returns a readable row.
+    let repaired = registry::update_service_grant(&mut *tx, "ten_a", "grt_1", 2, &changes)
+        .await
+        .unwrap();
+    let mut expected = before.clone();
+    expected.valid_until = Some(at(1_798_859_045_000_001));
+    expected.revision = 3;
+    assert_eq!(repaired, expected);
+    assert_eq!(
+        registry::get_service_grant(&mut *tx, "ten_a", "grt_1")
+            .await
+            .unwrap(),
+        repaired
+    );
+    // Every row now passes the check, and list-set changes work again.
+    sqlx::raw_sql(
+        "ALTER TABLE service_grant VALIDATE CONSTRAINT service_grant_valid_until_range_check",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        registry::add_service_grant_resource_server(&mut *tx, "ten_a", "grt_1", 3, "rs_3")
+            .await
+            .unwrap(),
+        4
+    );
+    tx.rollback().await.unwrap();
+
+    assert_eq!(grant_of(&pool, "grt_1").await, before);
+    db.drop([pool]).await;
+}

@@ -35,7 +35,13 @@
 //!   requires. The expected revision is only compared, never computed with,
 //!   so any `i64`, `i64::MAX` included, is a valid argument. A row at
 //!   another revision gives [`RegistryError::StaleRevision`] and changes
-//!   nothing; a missing row gives [`RegistryError::NotFound`].
+//!   nothing; a missing row gives [`RegistryError::NotFound`]. Only a row
+//!   already at revision `i64::MAX` cannot advance: an update or list-set
+//!   change of it with expected revision `i64::MAX` gives
+//!   [`RegistryError::Other`] with SQLSTATE `22003`
+//!   (`numeric_value_out_of_range`) from `revision + 1`, on every table.
+//!   That is unreachable in practice, since revisions start at 1 and
+//!   advance by 1.
 //! - Under `READ COMMITTED`, PostgreSQL's default, of two concurrent updates
 //!   from the same revision exactly one succeeds: the second waits for the
 //!   first's row lock, then finds the revision moved and gives
@@ -124,30 +130,45 @@
 //!
 //! Timestamps are [`SystemTime`](std::time::SystemTime)s. PostgreSQL keeps
 //! microseconds, so a written time is truncated toward the past to a whole
-//! microsecond (inferred), and a time outside the range of 64-bit
-//! microseconds since the Unix epoch is [`RegistryError::Other`] before any
-//! statement runs.
+//! microsecond (inferred), and a time outside the range the `0007` checks
+//! hold, from `-210_866_803_200_000_000` (`4714-11-24 00:00:00+00 BC`) to
+//! `i64::MAX - 1` microseconds from the Unix epoch, is
+//! [`RegistryError::Other`] before any statement runs.
 //!
 //! The `0007` range checks keep every stored time inside that range. A row
-//! stored without them (restored from before `0007`, or written with a
-//! check dropped) can still hold `infinity`, `-infinity` or a later finite
-//! time. A read of such a row, by a get, a list or an update's returned
-//! row, is [`RegistryError::UnreadableTimestamp`] naming the table, the
-//! column and the row's ID, instead of failing the whole statement with
-//! `0A000` or `22003` (lead ruling, 2026-11-21). A list stops at the first
-//! such row (inferred).
+//! written while a check was dropped (or left in place by a `NOT VALID`
+//! re-add), or read from a schema not yet migrated to `0007`, can still
+//! hold `infinity`, `-infinity` or a later finite time. A read of such a
+//! row, by a get, a list or an update's returned row, is
+//! [`RegistryError::UnreadableTimestamp`] naming the table, the column and
+//! the row's ID, instead of failing the whole statement with `0A000` or
+//! `22003` (lead ruling, 2026-11-21). A list stops at the first such row
+//! (inferred).
 //!
-//! An update ([`update_tenant`], [`update_principal`],
-//! [`update_trust_keyset_version`], or any other on a table with a
-//! timestamp) of a row holding such a time behaves in one of two ways:
+//! An update that leaves such a column untouched ([`update_tenant`],
+//! [`update_principal`] and [`update_trust_keyset_version`], none of which
+//! writes a timestamp) behaves in one of two ways:
 //!
-//! - With the `0007` range checks in force, PostgreSQL checks the whole new
-//!   row, so the update fails with `23514` naming the range check
+//! - With a range check in force but `NOT VALID`, PostgreSQL checks the
+//!   whole new row, so the update fails with `23514` naming the range check
 //!   ([`RegistryError::Invariant`]) and changes nothing.
-//! - With the checks dropped, the update applies its write and then returns
+//! - With the check dropped, the update applies its write and then returns
 //!   [`RegistryError::UnreadableTimestamp`] for the row it read back. On a
 //!   pool or a bare connection the write is committed; inside a caller
 //!   transaction the caller can roll it back.
+//!
+//! A grant's `valid_until` is different:
+//!
+//! - [`update_service_grant`] replaces `valid_until`, so it repairs such a
+//!   row: with the check in force (even `NOT VALID`) a revision-checked
+//!   update that sets a finite `valid_until` (or none) succeeds and returns
+//!   the readable row.
+//! - A grant list-set change ([`add_service_grant_binding`],
+//!   [`remove_service_grant_binding`], [`add_service_grant_resource_server`]
+//!   and [`remove_service_grant_resource_server`]) writes only the grant's
+//!   revision, so with the check in force it still fails with `23514`. With
+//!   the check dropped it applies and returns only the new revision: it
+//!   does not read the timestamp column.
 //!
 //! # Errors
 //!
