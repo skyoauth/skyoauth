@@ -24,7 +24,8 @@ const GUARD: &str = "SK001";
 /// `principal`, `audit_event` and `audit_chain_head`, the five `0003`
 /// tables, the nine `0004` tables, `consumed_assertion` and the operator
 /// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
-/// `0005`) and of the three list domains, as migrations `0002` to `0005`, `0007` and
+/// `0005`, and `instance_security_policy` and `recovery_state`, which
+/// bootstrap writes) and of the three list domains, as migrations `0002` to `0005`, `0007` and
 /// `0008` name them, sorted byte-wise. A unique, foreign key or check
 /// violation maps to a typed variant only for a name listed here. The
 /// database test `registry_constraint_names_match_the_catalog` keeps the
@@ -104,6 +105,16 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "consumed_assertion_tenant_id_octet_length_check",
     "consumed_assertion_trust_source_id_fkey",
     "consumed_assertion_trust_source_id_octet_length_check",
+    // The policy row and the recovery state, written by bootstrap
+    // (`bootstrap.rs`). Their single-row unique indexes are not
+    // constraints; bootstrap maps a `23505` on them itself.
+    "instance_security_policy_audit_sink_config_digest_check",
+    "instance_security_policy_audit_sink_validated_at_range_check",
+    "instance_security_policy_check",
+    "instance_security_policy_instance_id_check",
+    "instance_security_policy_instance_id_octet_length_check",
+    "instance_security_policy_pkey",
+    "instance_security_policy_revision_check",
     "principal_binding_claim_match_policy_check",
     "principal_binding_generic_production_predicates_check",
     "principal_binding_github_production_predicates_check",
@@ -139,6 +150,13 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "principal_tenant_id_id_key",
     "principal_tenant_id_id_kind_key",
     "principal_tenant_id_octet_length_check",
+    "recovery_state_instance_id_check",
+    "recovery_state_instance_id_fkey",
+    "recovery_state_instance_id_octet_length_check",
+    "recovery_state_pkey",
+    "recovery_state_recovery_key_epoch_check",
+    "recovery_state_recovery_public_key_octet_length_check",
+    "recovery_state_revision_check",
     "resource_action_action_name_check",
     "resource_action_action_name_no_space_check",
     "resource_action_action_name_octet_length_check",

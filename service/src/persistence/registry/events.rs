@@ -169,12 +169,13 @@ const EARLIEST_ENVELOPE_MICROSECONDS: i64 = -62_167_219_200_000_000;
 const LATEST_ENVELOPE_MICROSECONDS: i64 = 253_402_300_799_999_999;
 
 /// The encode error for a time outside the years `0000` to `9999`.
-const YEAR_OUT_OF_RANGE: &str = "audit timestamp outside the years 0000 to 9999";
+pub(super) const YEAR_OUT_OF_RANGE: &str = "audit timestamp outside the years 0000 to 9999";
 
 /// Whether `microseconds` from the Unix epoch lies in the years `0000` to
 /// `9999`, the ones RFC 3339 writes (see the module docs, "Envelope"). The
-/// range lies inside the one [`since_epoch`] writes.
-fn in_envelope_years(microseconds: i64) -> bool {
+/// range lies inside the one [`since_epoch`] writes. Bootstrap checks its
+/// time with it before any statement.
+pub(super) fn in_envelope_years(microseconds: i64) -> bool {
     (EARLIEST_ENVELOPE_MICROSECONDS..=LATEST_ENVELOPE_MICROSECONDS).contains(&microseconds)
 }
 

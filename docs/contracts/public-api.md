@@ -62,7 +62,8 @@ control endpoints have listeners of their own.
   and bound to the owner epoch and an increasing sequence, but high-frequency
   observation refreshes are operational telemetry and MUST NOT create
   policy-change audit events. (tasks §2 note under the endpoint matrix; design
-  §4.2)
+  §4.2) See OQ-IR-16 in identity-registry.md for the revision-less
+  `AdminIdentity` and `AdminCredential`.
 - **API-004** Withdrawn. The grouped-path shorthand of the tasks endpoint
   matrix is ambiguous (OQ-API-11); every table in this document writes each
   path in full instead. Every row whose path this contract expanded from a

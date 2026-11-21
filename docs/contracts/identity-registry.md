@@ -205,7 +205,10 @@ T00.8–T00.17 and Gate M0):
   the `0005` lock order of `service/migrations/README.md` (identity,
   credential, assignment), repeats the lookup and denies unless the repeat
   gives the same answer. A change to those rows then waits until the
-  write's transaction ends. The lock strength and the deny on any change
+  write's transaction ends, for locks taken in that transaction itself:
+  locks taken inside a savepoint are released when that savepoint is
+  rolled back. A miss on the first lookup locks nothing; a miss on the
+  repeat keeps the locks until the transaction ends. The lock strength and the deny on any change
   are inferred.
 - **Explicit time.** In the operator registry slice, time is always an
   explicit `now` argument, never the database's `now()`. Tenant and
@@ -223,7 +226,63 @@ T00.8–T00.17 and Gate M0):
   applies to the tables the registry updates, such as role assignments,
   which are re-enabled rather than assigned twice. Disabling an identity and
   revoking a credential are unconditional and idempotent, with no expected
-  revision (OQ-IR-16).
+  revision (OQ-IR-16). Both are lead decisions (2026-11-21), provisional
+  until the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0).
+- **Bootstrap event.** Bootstrap (T13.4) is one atomic transaction with one
+  audit event, `recovery_state.create`, whose `object_id` is the
+  `instance_id` (IR-057), actor the reserved `deployment_operator` and
+  `new_revision` the new `RecoveryState` revision, 1. The event also
+  records the `InstanceSecurityPolicy` row when bootstrap inserts it, so
+  bootstrap does not write `instance_security_policy.create`, which stays
+  in the action table for a later startup path (IR-059). A distinct
+  bootstrap action name may replace `recovery_state.create` later
+  without changing the hash of any stored event. Bootstrap writes no
+  `AdministrativeOperation` row (inferred).
+- **Adopting the policy row.** A policy row found without a `RecoveryState`
+  row, the state of a service started before bootstrap, is adopted:
+  bootstrap keeps its stored `instance_id` and writes nothing to the row.
+  A bootstrap request with another `instance_id` is refused, naming
+  neither value, and writes nothing; bootstrap stays open. This is the
+  lead's ruling on IR-053 and IR-057 read together. IR-053 says
+  "`single_actor_mode` is set at install, and the row mirrors it" and that
+  a change is "recorded in an audit event at startup"; IR-057 says the
+  `instance_id` is "generated once, at first bootstrap, and stored
+  immutably on the `InstanceSecurityPolicy` row". Neither says that the
+  row exists before bootstrap, nor that it does not. The startup path does
+  not exist yet; a startup that creates the row before bootstrap needs an
+  `instance_id` then, which contradicts "generated at first bootstrap"
+  unless startup generates it and bootstrap adopts it. A policy row that
+  bootstrap inserts itself takes the column defaults (`single_actor_mode`
+  and `widening_second_approver` false, no audit sink) until the IR-053
+  startup mirror exists. A policy row another writer commits while
+  bootstrap waits to insert its own is adopted the same way under
+  `READ COMMITTED`, not refused as closed; under `REPEATABLE READ` or
+  `SERIALIZABLE` bootstrap cannot see it and asks for a retry. For the
+  startup path: it must store a lowercase hyphenated UUIDv7, since a
+  stored `instance_id` that no valid request can equal makes bootstrap
+  impossible, failing closed; and a startup insert racing a bootstrap on
+  an empty database is adopted by it, not a false closure.
+- **Recovery key at bootstrap.** The offline recovery public key enrolled
+  at bootstrap is the raw 32-byte Ed25519 key of IR-058, and the registry
+  refuses any other length before writing; it does not check the bytes
+  further. The registry trusts the deployment-local bootstrap caller for
+  the rest: canonicalizing the operator's mTLS public key into
+  `public_identity` stays with the future operator tooling (T13.1,
+  T13.10), and the registry checks only that `public_identity` and
+  `trust_anchor_ref` are 1 to 2048 bytes, and that `now` lies in the years
+  `0000` to `9999` the audit event can carry (IR-056), before writing.
+  Bootstrap is closed exactly when the `RecoveryState` row exists; no
+  configuration, environment or restart is an input, so none can reopen
+  it. A `RecoveryState` row whose `bootstrap_closed` is false, which only
+  a write by other means can leave, still counts as closed (inferred).
+  When the commit's outcome is unknown, the bootstrap caller keeps all the
+  request's material until it has reconnected and reconciled the durable
+  state, then retries the same request, which is refused as closed if the
+  first attempt committed. The same rule will apply to `restore_operator`
+  (a later change, PR 3a).
+
+  These three are provisional lead picks (2026-11-21), recorded with the
+  first registry bootstrap (`service/src/persistence/registry/bootstrap.rs`).
 
 The instance security policy is one `InstanceSecurityPolicy` row per instance
 (`widening_second_approver`, `single_actor_mode`, `audit_sink_config_digest`,
@@ -385,8 +444,12 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   name in it is inferred: the startup mirror of
   IR-053 is `instance_security_policy.mirror` and the sink-change event
   `instance_security_policy.change_sink` (both write the
-  `InstanceSecurityPolicy` row); first bootstrap writes
-  `instance_security_policy.create` and `recovery_state.create`; a recovery
+  `InstanceSecurityPolicy` row); first bootstrap writes one event,
+  `recovery_state.create` with the `instance_id` as `object_id`, also when
+  it inserts the `InstanceSecurityPolicy` row (the section 5.2 pick, which
+  supersedes the earlier pair of a policy and a recovery state event), and
+  `instance_security_policy.create` stays in the table for a later startup
+  path; a recovery
   key rotation is `recovery_state.rotate_key` and the break-glass operator
   restoration `admin_identity.restore`; the IR-152 egress entry writes are
   `egress_allowlist_entry.create`, `.enable` and `.disable`; and the T13.3
@@ -853,7 +916,8 @@ follow-up. All other items are not resolved by this contract.
   `AdminCredential` no revision, and `0005` adds none. Disabling an
   identity and revoking a credential are therefore unconditional and
   idempotent: a repeated disable changes nothing, and a repeated revocation
-  keeps the first `revoked_at`. This is an explicit provisional exception
-  until T14 (lead decision, 2026-11-21). Not stated: whether the two tables
+  keeps the first `revoked_at`. This is an explicit exception (lead
+  decision, 2026-11-21), provisional until the maintainer ratifies the ADRs
+  (T00.8–T00.17, Gate M0). Not stated: whether the two tables
   get a `revision` column, whether `/admin/v1/operators` checks another
   counter instead, or whether API-003 names them as an exception.
