@@ -235,6 +235,22 @@ fn claims(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The predicates `github_production` requires (`0008`), with the values
+/// of the design section 5.7 example.
+fn github_claims() -> BTreeMap<String, String> {
+    claims(&[
+        ("repository_owner_id", "123456"),
+        ("repository_id", "456789"),
+        ("event_name", "push"),
+        ("ref", "refs/heads/main"),
+        ("environment", "production"),
+        (
+            "workflow_ref",
+            "acme/platform/.github/workflows/deploy.yml@refs/heads/main",
+        ),
+    ])
+}
+
 fn new_binding(tenant_id: &str, id: &str, source: &str, principal: &str) -> NewPrincipalBinding {
     NewPrincipalBinding {
         id: id.into(),
@@ -242,7 +258,7 @@ fn new_binding(tenant_id: &str, id: &str, source: &str, principal: &str) -> NewP
         name: format!("binding-{id}"),
         trust_source_id: source.into(),
         profile: BindingProfile::GithubProduction,
-        claim_match_policy: claims(&[("repository_id", "456789"), ("event_name", "push")]),
+        claim_match_policy: github_claims(),
         workload_principal_id: principal.into(),
         status: Status::Enabled,
     }
@@ -1214,16 +1230,20 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
         ),
         ("src_k8s", "wld_2", BindingProfile::GithubProduction, 1)
     );
-    assert_eq!(
-        created.claim_match_policy,
-        claims(&[("event_name", "push"), ("repository_id", "456789")])
-    );
+    assert_eq!(created.claim_match_policy, github_claims());
     assert_not_found(registry::get_principal_binding(&pool, "ten_b", "bnd_3").await);
 
     let changes = PrincipalBindingChanges {
         name: "k3s-ci".into(),
         profile: BindingProfile::KubernetesProduction,
-        claim_match_policy: claims(&[("namespace", "ci"), ("service_account_uid", "u-1")]),
+        claim_match_policy: claims(&[
+            ("kubernetes.io/serviceaccount/namespace", "ci"),
+            (
+                "kubernetes.io/serviceaccount/service-account.name",
+                "runner",
+            ),
+            ("kubernetes.io/serviceaccount/service-account.uid", "u-1"),
+        ]),
         status: Status::Disabled,
     };
     let updated = registry::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes)
@@ -1296,12 +1316,18 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
             "principal_binding_workload_principal_id_fkey",
         );
     }
+    // No predicate at all lacks the profile's first required one, refused
+    // before the statement (registry_predicates.rs has the rest); the
+    // 0004 check of a non-empty object is reached by raw SQL below.
     let mut no_predicate = new_binding("ten_a", "bnd_9", "src_gh", "wld_1");
     no_predicate.claim_match_policy = BTreeMap::new();
-    assert_check(
-        create(no_predicate).await,
-        "principal_binding_claim_match_policy_check",
-    );
+    match create(no_predicate).await {
+        Err(RegistryError::Other(sqlx::Error::Encode(err))) => assert_eq!(
+            err.to_string(),
+            "the required predicate repository_owner_id of github_production is missing"
+        ),
+        other => panic!("expected the encode error: {other:?}"),
+    }
     for (binding, name) in [
         (
             NewPrincipalBinding {
@@ -2537,7 +2563,7 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
     let binding_changes = PrincipalBindingChanges {
         name: "renamed".into(),
         profile: BindingProfile::GithubProduction,
-        claim_match_policy: claims(&[("repository_id", "1")]),
+        claim_match_policy: github_claims(),
         status: Status::Disabled,
     };
     let service_changes = ServiceIdentityChanges {

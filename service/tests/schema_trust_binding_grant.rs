@@ -62,9 +62,18 @@ const SEED: &str = r#"
          NULL, NULL, NULL, NULL, NULL, NULL, NULL,
          '["https://identity.example.com"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled');
     INSERT INTO principal_binding VALUES
-        ('bnd_1', 'ten_a', 'release', 'src_gh', 'github_production', '{"repository_id": "456789", "event_name": "push"}', 'wld_1', 'enabled'),
-        ('bnd_2', 'ten_a', 'deploy', 'src_gh', 'github_production', '{"repository_id": "456789", "environment": "production"}', 'wld_1', 'enabled'),
-        ('bnd_3', 'ten_a', 'k3s', 'src_k8s', 'kubernetes_production', '{"namespace": "ci", "service_account_uid": "u-1"}', 'wld_2', 'enabled'),
+        ('bnd_1', 'ten_a', 'release', 'src_gh', 'github_production',
+         '{"repository_owner_id": "123456", "repository_id": "456789", "event_name": "push", "ref": "refs/heads/main",
+           "environment": "production", "workflow_ref": "acme/platform/.github/workflows/release.yml@refs/heads/main"}',
+         'wld_1', 'enabled'),
+        ('bnd_2', 'ten_a', 'deploy', 'src_gh', 'github_production',
+         '{"repository_owner_id": "123456", "repository_id": "456789", "event_name": "push", "ref": "refs/heads/main",
+           "environment": "production", "workflow_ref": "acme/platform/.github/workflows/deploy.yml@refs/heads/main"}',
+         'wld_1', 'enabled'),
+        ('bnd_3', 'ten_a', 'k3s', 'src_k8s', 'kubernetes_production',
+         '{"kubernetes.io/serviceaccount/namespace": "ci", "kubernetes.io/serviceaccount/service-account.name": "runner",
+           "kubernetes.io/serviceaccount/service-account.uid": "u-1"}',
+         'wld_2', 'enabled'),
         ('bnd_b', 'ten_b', 'release', 'src_b', 'generic_production', '{"sub": "repo:b"}', 'wld_b', 'enabled');
     INSERT INTO service_identity VALUES
         ('svc_1', 'ten_a', 'deployer', '["read"]', '{"version": 1, "authorization": "allowlist"}', 'enabled'),
@@ -523,10 +532,21 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
     let revision = "CHECK ((revision >= 1))".to_string();
     let expected: Vec<(&str, Option<String>)> = vec![
         ("principal_binding_claim_match_policy_check", None),
+        // The required predicates of each profile, from 0008
+        // (registry_predicates.rs checks their behavior).
+        (
+            "principal_binding_generic_production_predicates_check",
+            None,
+        ),
+        ("principal_binding_github_production_predicates_check", None),
         ("principal_binding_id_check", Some(non_empty("id"))),
         (
             "principal_binding_id_octet_length_check",
             Some(at_most("id", 255)),
+        ),
+        (
+            "principal_binding_kubernetes_production_predicates_check",
+            None,
         ),
         ("principal_binding_name_check", Some(non_empty("name"))),
         (
@@ -1503,9 +1523,11 @@ async fn binding_maps_a_same_tenant_source_to_a_workload() {
     run(
         &pool,
         r#"INSERT INTO principal_binding VALUES
-               ('bnd_x', 'ten_a', 'x', 'src_up', 'generic_production', '{"sub": ""}', 'wld_2', 'enabled');
+               ('bnd_x', 'ten_a', 'x', 'src_up', 'generic_production', '{"sub": "repo:x", "actor": ""}', 'wld_2', 'enabled');
            UPDATE principal_binding SET name = 'renamed', profile = 'kubernetes_production',
-               claim_match_policy = '{"namespace": "ci", "service_account_name": "runner", "service_account_uid": "u-1"}',
+               claim_match_policy = '{"kubernetes.io/serviceaccount/namespace": "ci",
+                                      "kubernetes.io/serviceaccount/service-account.name": "builder",
+                                      "kubernetes.io/serviceaccount/service-account.uid": "u-2"}',
                status = 'disabled', revision = revision + 1
            WHERE id = 'bnd_3'"#,
     )
