@@ -20,9 +20,10 @@
 //!
 //! The fixture is local ([`fixture`]): tenants `ten_a` and `ten_b` share
 //! one resource server, `rs_api`, each by its own assignment with its own
-//! scope ceiling. Every scope a test names lies outside exactly one ceiling
-//! of `ten_a`'s grants, so a check that skipped any one ceiling lets one of
-//! them through:
+//! scope ceiling. Each of `admin`, `audit`, `logs:read` and `deploy:write`
+//! lies outside exactly one ceiling of `grt_direct` and `grt_dlg`
+//! (`deploy:write` for the delegation only), so a check that skipped any
+//! one ceiling lets one of them through:
 //!
 //! | scope          | `rs_api` | `ata_a` | `ata_b` | grants of `ten_a` | `svc_a` |
 //! | -------------- | -------- | ------- | ------- | ----------------- | ------- |
@@ -61,10 +62,15 @@
 //!   writes nothing (`a26_neg_empty_or_out_of_grant_defaults_are_refused_at_write`).
 //! - **Negative, explicit scope.** An explicit empty list (also for a grant
 //!   with defaults), a scope outside each ceiling in turn, alone or next to
-//!   an allowed one (denied, not trimmed), an unknown scope, a case or
-//!   lookalike variant of an allowed one and a token outside the RFC 6749
-//!   `scope-token` grammar each resolve to [`ScopeError::Invalid`]; the
-//!   target service's `max_scopes` bounds the delegation only
+//!   an allowed one (denied, not trimmed), an unknown scope and a case or
+//!   lookalike variant of an allowed one each resolve to
+//!   [`ScopeError::Invalid`]; the target service's `max_scopes` bounds the
+//!   delegation only. Tokens outside the RFC 6749 `scope-token` grammar
+//!   resolve to it too, but only because no ceiling contains them:
+//!   `skyoauth_scope_list_check` keeps them out of every stored ceiling, so
+//!   these tests cannot tell the policy's grammar check from its ceiling
+//!   check. The grammar check itself is pinned only by the unit tests of
+//!   `policy::scope`
 //!   (`a26_neg_explicit_empty_or_excessive_scope_is_invalid_scope`).
 //! - **Negative, shrunken ceiling.** Defaults that a ceiling other than
 //!   the grant's own no longer contains (the assignment, the resource
@@ -86,7 +92,9 @@
 //!   outside it, and after its rollback, the committed ceilings and
 //!   defaults apply unchanged. A narrowing applies only once committed
 //!   (`a26_neg_uncommitted_ceiling_changes_never_apply`). The loader takes
-//!   no lock, so nothing here waits.
+//!   no lock, so nothing here waits; each load outside the transaction is
+//!   bounded by a 10 s deadline, so a loader that took a lock fails the
+//!   test instead of hanging it.
 //!
 //! # Spec and registry picks
 //!
@@ -97,8 +105,16 @@
 //! §5.7; T12.8); the ceilings of a direct grant are the resource server's
 //! `scopes`, the assignment's `allowed_scopes` and the grant's `scopes`,
 //! and a delegation adds the target service's `max_scopes` (IR-062); and
-//! scope tokens follow the RFC 6749 `scope-token` grammar and are
-//! case-sensitive (IR-066).
+//! scope tokens are case-sensitive (IR-066). IR-066's `scope-token` grammar
+//! is pinned here only at write, where the registry refuses a malformed
+//! default (`skyoauth_scope_list_check`); a malformed request token is
+//! refused by the ceilings too (see the explicit-scope negative).
+//!
+//! Defaults equal to the whole ceiling intersection are accepted and
+//! resolve (the delegation's `read`): IR-063 requires defaults that are
+//! explicit, nonempty and within every ceiling, and tasks §8's "narrow" is
+//! read as "never the full ceiling by omission", not "strictly narrower".
+//! Provisional.
 //!
 //! These are the registry's or the policy module's behaviour, not the
 //! spec's, where the spec does not define them: that the result is sorted
@@ -108,7 +124,15 @@
 //! defaults and defaults outside the grant's own `scopes` at write
 //! (`service_grant_default_scopes_check`, `0004`), while the spec requires
 //! the subset only at issuance; and that it accepts defaults outside the
-//! other ceilings.
+//! other ceilings. That last pick is provisional:
+//! `service/migrations/README.md` ("What 0004 adds", the list "The database
+//! does not enforce these rules; the service must", line 579 at this
+//! commit) leaves keeping `default_scopes` and `scopes` within every other
+//! ceiling to the service. A later write-time check in the registry, or a
+//! typed refusal, would change the last block of
+//! `a26_neg_defaults_outside_a_narrowed_ceiling_are_invalid_not_trimmed`;
+//! a check above the registry would not turn it red, since the test calls
+//! the registry directly.
 //!
 //! **Missing, so not a claim.** A26 M1a needs its row through the
 //! in-process service (UC); these tests reach only the registry and the
@@ -118,16 +142,22 @@
 //! - The token endpoint calling the loader and [`resolve_scopes`] for a
 //!   WIF exchange, and mapping [`ScopeError::Invalid`] to the wire
 //!   `invalid_scope`, after `invalid_request`, `invalid_grant` and an
-//!   audience `invalid_target` (ERR-024; ADR-015 item 9): A26's M2 stage,
-//!   "exchange" (T21.5; T21.2 for the OAuth-shaped error).
+//!   audience `invalid_target` (ERR-024; ADR-015 item 9; the scope check
+//!   after the audience check is inferred: the ceilings need the audience's
+//!   resource server): A26's M2 stage, "exchange" (T21.5; T21.2 for the
+//!   OAuth-shaped error).
 //! - The issued credential carrying exactly the resolved, explicit scope
-//!   (IR-061), and the decision recording the ceilings' revisions
-//!   (T12.6, T21.5): A26's M2 stage.
+//!   (IR-061): A26's M2 stage.
 //! - The request layer that turns the `scope` parameter into tokens: an
-//!   absent parameter versus an empty one, a duplicated parameter
-//!   (T21.1), and repeated tokens inside one `scope` value, which
-//!   [`resolve_scopes`] tolerates following a lead lean on OQ-IR-11 (open;
-//!   not pinned here): T21.1, A26's M2 stage.
+//!   absent parameter versus an empty one (T21.1, A26's M2 stage), and
+//!   repeated tokens inside one `scope` value, which [`resolve_scopes`]
+//!   tolerates following a lead lean on OQ-IR-11 (open; not pinned here).
+//! - The wire code for a request token outside the `scope-token` grammar
+//!   is undecided: `invalid_request` (malformed input) or `invalid_scope`
+//!   (T21.1).
+//! - In the tasks only, not in A26's row: the decision recording the
+//!   ceilings' revisions (T12.6, T21.5) and a duplicated `scope` parameter
+//!   (T21.1).
 //! - The rest of the row's negative, tagged M2 in the registry: any
 //!   `resource` parameter and an audience not in the grant's set or not
 //!   assigned give `invalid_target` (the loader's `None`; the service
@@ -140,9 +170,14 @@
 //!   `activation_state` and `valid_until` (not loaded), belong to T12.6,
 //!   T12.7 and T14.2, wired into the exchange in M2 (T21.4, T21.5); a
 //!   disable with outstanding credentials is A21.
-//! - T12.8's "profile/mode mismatch denies" (a grant type that does not
-//!   fit the grant's mode) is request validation at the exchange (T21.1,
-//!   ADR-015 item 9.2, `invalid_request`), not a scope ceiling; "direct
+//! - T12.8's "profile/mode mismatch denies" is not a scope ceiling and is
+//!   credited elsewhere. A grant of the wrong mode is A25's (T12.3, T12.8):
+//!   `select_grant` with the request's expected mode gives
+//!   `NotSelectable`, the uniform `invalid_grant` at A25's M2 stage
+//!   (ADR-006; OQ-ERR-3). Proof parameters that do not fit the grant type
+//!   are request shape, `invalid_request`, checked before the grant is
+//!   loaded (ADR-015 item 9.2; T21.1). Reading "profile" as the `wif`
+//!   credential profile is the `allowed_profiles` question below. "Direct
 //!   grants have no service target" is the `0004` check
 //!   `service_grant_target_mode_check`, pinned by the service tests, and
 //!   here only as a direct grant loading no target service.
@@ -150,6 +185,12 @@
 //! Not A26's: resource constraint ceilings (IR-123) and TTL caps, which
 //! the loader does not load; human scopes and native refresh (IR-062's
 //! human rows, IR-064); the fuzzing of T21.7.
+//!
+//! Not A26's; owner to be ruled: the `wif` profile in the resource
+//! server's and the assignment's `allowed_profiles`, which
+//! `load_scope_ceilings` does not load and nothing checks. Provisional
+//! assignment: issuance-time enforcement at T21.5 (design §5.7 step 5),
+//! T14.2 for the assignment; no registry row yet.
 //!
 //! # Overlap
 //!
@@ -166,7 +207,7 @@
 //! through registry writes only, both tenants on one audience, the
 //! registry's refusals next to the policy's, and transactions.
 
-use std::fmt::Debug;
+use std::{fmt::Debug, time::Duration};
 
 use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
@@ -436,6 +477,24 @@ async fn load<'e>(executor: impl PgExecutor<'e>, tenant: &str, grant: &str) -> L
         .await
         .unwrap()
         .unwrap_or_else(|| panic!("no ceilings for {tenant} {grant}"))
+}
+
+/// How long a load outside a transaction that holds uncommitted writes may
+/// take. The loader takes no lock, so it never waits for that transaction;
+/// one that did would hang the test without this bound.
+const OUTSIDE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// [`load`] of `ten_a`'s `grant` through `pool`, bounded by
+/// [`OUTSIDE_DEADLINE`].
+async fn load_outside(pool: &PgPool, grant: &str) -> LoadedCeilings {
+    tokio::time::timeout(OUTSIDE_DEADLINE, load(pool, TEN_A, grant))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "loading {grant} outside the transaction waited {OUTSIDE_DEADLINE:?} for its \
+                 uncommitted writes: the loader must take no lock"
+            )
+        })
 }
 
 /// The decision for `request` on `loaded`.
@@ -883,8 +942,11 @@ async fn a26_neg_explicit_empty_or_excessive_scope_is_invalid_scope() {
         }
     }
 
-    // Unknown, case or lookalike variants of read, and tokens outside the
-    // scope-token grammar.
+    // Unknown, case or lookalike variants of read; then tokens outside the
+    // scope-token grammar, refused here only because no ceiling contains
+    // them (skyoauth_scope_list_check keeps them out of every ceiling). They
+    // do not pin the grammar check itself: only the policy::scope unit tests
+    // do.
     for scope in [
         "unknown",
         "write",
@@ -1103,13 +1165,14 @@ async fn a26_neg_uncommitted_ceiling_changes_never_apply() {
         Ok(strings(&["admin", "read"]))
     );
     // Outside the transaction, the committed rows decide.
-    assert_eq!(load(&pool, TEN_A, DIRECT).await, before);
+    let outside = load_outside(&pool, DIRECT).await;
+    assert_eq!(outside, before);
     assert_eq!(
-        resolve(&pool, TEN_A, DIRECT, &ScopeRequest::Omitted).await,
+        decide(&outside, &ScopeRequest::Omitted),
         Ok(strings(&["read"]))
     );
     assert_invalid(
-        resolve(&pool, TEN_A, DIRECT, &explicit(&["admin"])).await,
+        decide(&outside, &explicit(&["admin"])),
         "uncommitted widening",
     );
     tx.rollback().await.unwrap();
@@ -1127,7 +1190,7 @@ async fn a26_neg_uncommitted_ceiling_changes_never_apply() {
         "inside the narrowing",
     );
     assert_eq!(
-        resolve(&pool, TEN_A, DIRECT, &ScopeRequest::Omitted).await,
+        decide(&load_outside(&pool, DIRECT).await, &ScopeRequest::Omitted),
         Ok(strings(&["read"]))
     );
     tx.commit().await.unwrap();
