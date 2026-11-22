@@ -55,8 +55,12 @@
 //!     read as `/`;
 //!   - the `url` crate parses it, and the parsed URL serializes to exactly
 //!     the same text (`Url::as_str() == raw`);
-//!   - it percent-encodes no unreserved character (a letter, a digit, `-`,
-//!     `.`, `_` or `~`), which the parser leaves encoded in a path or query;
+//!   - every `%` starts an escape of two hex digits, and no escape encodes
+//!     an unreserved character (a letter, a digit, `-`, `.`, `_` or `~`).
+//!     The parser keeps both an incomplete or non-hex escape (`%`, `%4`,
+//!     `%zz`, reported only as a syntax violation) and an escaped unreserved
+//!     character in a path or query as they are, so the round trip alone
+//!     does not refuse them (inferred);
 //!   - its scheme is `https`, it has a non-empty host, no userinfo and no
 //!     fragment, not even an empty `@` or `#`.
 //!
@@ -74,6 +78,14 @@
 //!   IR-152 names scheme, host, port and path as the parts of an exact URL,
 //!   but it does not require a port to be written: canonical form leaves a
 //!   default port out. A query is allowed (no rule names it).
+//!
+//!   This check is about spelling, not about where an address points. A
+//!   canonical loopback, link-local, private or cloud-metadata address
+//!   (`https://127.0.0.1/`, `https://169.254.169.254/`) or an IPv4-mapped
+//!   IPv6 address passes it when an entry lists it. A policy on such
+//!   addresses, and on what a host name resolves to, belongs to the
+//!   fetcher (T11.2, T11.8) or the egress entry writer, not here
+//!   (inferred).
 //!
 //!   A refused member is [`SourceWriteError::InvalidDestination`] naming
 //!   the member. A create checks the syntax before any statement. An update
@@ -119,24 +131,31 @@
 //!    both, which the kind checks then reject;
 //! 4. the registry write: the insert (whose foreign-key checks take
 //!    `FOR KEY SHARE` on the tenant and, for `uploaded_jwks`, the keyset) or
-//!    the compare-and-set update. [`update_trust_source`] always sets
-//!    `name`, a column of the unique key `(tenant_id, name)`. When the new
-//!    name differs from the stored one, PostgreSQL takes the row
-//!    `FOR UPDATE`, not `FOR NO KEY UPDATE`, until the transaction ends. That
-//!    lock conflicts with the `FOR KEY SHARE` of a foreign-key check, so a
-//!    `principal_binding` or `consumed_assertion` insert that references the
-//!    source waits for the commit, or fails with `55P03` under a
-//!    `lock_timeout`. With the name unchanged, PostgreSQL compares the key
-//!    columns, finds none changed, keeps `FOR NO KEY UPDATE`, and those
-//!    inserts do not wait (measured, PostgreSQL 16). Commit a rename
-//!    promptly;
+//!    the compare-and-set update. Every compare-and-set takes the source
+//!    row `FOR UPDATE` until the transaction ends, whatever it changes, a
+//!    status-only write or one that changes nothing included.
+//!    [`update_trust_source`] always sets `name`, a column of the unique key
+//!    `(tenant_id, name)`. With the `BEFORE UPDATE` row triggers of
+//!    `trust_source` (`trust_source_immutable`, `trust_source_revision`),
+//!    PostgreSQL chooses the row lock from the columns in the `SET` list,
+//!    not from the values that change. `FOR UPDATE` conflicts with the
+//!    `FOR KEY SHARE` of a foreign-key check. So, from the compare-and-set
+//!    until the commit, every `principal_binding` and `consumed_assertion`
+//!    insert that references the source waits, or fails with `55P03` under
+//!    a `lock_timeout`; that is, binding writes and token exchanges through
+//!    the source. The steps before it (the `FOR NO KEY UPDATE` of step 2
+//!    and the operator locks) do not block those inserts. Callers must
+//!    commit promptly after an update;
 //! 5. [`append_audit_event`] last, which locks the tenant row
 //!    `FOR KEY SHARE` and then the chain head (migrations README, "append
-//!    audit events in this order").
+//!    audit events in this order"). It must stay after the compare-and-set.
+//!    An update that held the head while its compare-and-set waited for a
+//!    consumer's `FOR KEY SHARE` would deadlock with that consumer's own
+//!    audit append;
 //!
 //! So the lock order is: operator rows, then the source row
-//! (`FOR NO KEY UPDATE`, update only; `FOR UPDATE` from step 4 on when it
-//! renames), then the egress entry rows
+//! (`FOR NO KEY UPDATE`, update only; `FOR UPDATE` from step 4 on), then
+//! the egress entry rows
 //! (`FOR SHARE`, discovery before TokenReview), then the write's own locks,
 //! then the audit head. This differs from step 1 of "What 0005 adds" in the
 //! migrations README, which orders the `0002` to `0004` tables by name
@@ -267,8 +286,9 @@ const READ_COMMITTED: &str = "read committed";
 
 /// Step 2 of an update: the stored row, locked before any entry so that a
 /// concurrent update of the source waits here and holds no entry lock. Its
-/// compare-and-set (step 4) may take a stronger lock: `FOR UPDATE` when it
-/// changes `name` (see the module docs, "Order and locks").
+/// compare-and-set (step 4) then takes the row `FOR UPDATE`, which blocks
+/// foreign-key inserts that reference the source until the commit (see the
+/// module docs, "Order and locks").
 const LOCK_SOURCE: &str = "SELECT discovery_url, token_review_endpoint, revision \
      FROM trust_source WHERE tenant_id = $1 AND id = $2 FOR NO KEY UPDATE";
 
@@ -414,7 +434,7 @@ fn check_syntax(destination: Destination<'_>) -> Result<(), SourceWriteError> {
     let url = Url::parse(raw).map_err(|_| invalid())?;
     // Canonical form: the text is what the parser serializes, so it names
     // the host, port and path that are fetched.
-    if url.as_str() != raw || encodes_unreserved(raw) {
+    if url.as_str() != raw || bad_escape(raw) {
         return Err(invalid());
     }
     if url.scheme() != "https" || url.host_str().is_none_or(str::is_empty) {
@@ -427,19 +447,26 @@ fn check_syntax(destination: Destination<'_>) -> Result<(), SourceWriteError> {
     Ok(())
 }
 
-/// Whether `raw` percent-encodes an unreserved character (RFC 3986 section
-/// 2.3: a letter, a digit, `-`, `.`, `_` or `~`), which the parser leaves
-/// encoded in a path or a query.
-fn encodes_unreserved(raw: &str) -> bool {
-    raw.as_bytes().windows(3).any(|window| {
-        let [b'%', high, low] = *window else {
+/// Whether `raw` has a `%` that is not a valid escape of a character that
+/// must stay encoded. That is either an incomplete or non-hex escape (`%`,
+/// `%4`, `%zz`), which the parser keeps as it is while it reports only a
+/// syntax violation, or an escape of an unreserved character (RFC 3986
+/// section 2.3: a letter, a digit, `-`, `.`, `_` or `~`), which the parser
+/// leaves encoded in a path or a query.
+fn bad_escape(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.iter().enumerate().any(|(at, &byte)| {
+        if byte != b'%' {
             return false;
+        }
+        let Some(&[high, low]) = bytes.get(at + 1..at + 3) else {
+            return true;
         };
         let (Some(high), Some(low)) = (hex(high), hex(low)) else {
-            return false;
+            return true;
         };
-        let byte = high << 4 | low;
-        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+        let decoded = high << 4 | low;
+        decoded.is_ascii_alphanumeric() || matches!(decoded, b'-' | b'.' | b'_' | b'~')
     })
 }
 
@@ -580,7 +607,10 @@ async fn create_steps(
 /// `discovery_url` and `token_review_endpoint` that changes, and appends
 /// its `trust_source.update` event last, in `transaction` (see the module
 /// docs). A member left unchanged is not checked. Runs only under
-/// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
+/// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`,
+/// promptly: until then the source row is locked `FOR UPDATE`, and every
+/// `principal_binding` or `consumed_assertion` insert that references the
+/// source waits.
 pub async fn update_source(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
@@ -760,6 +790,23 @@ mod tests {
             // The parser keeps this one: only the character check refuses
             // it.
             ("backslash in query", "https://issuer.example/x?a\\b"),
+            // Incomplete or non-hex escapes, which the parser keeps.
+            ("bare % in path", "https://issuer.example/a%b"),
+            ("trailing % in path", "https://issuer.example/a%"),
+            ("incomplete escape in path", "https://issuer.example/a%4"),
+            (
+                "incomplete escape mid-segment",
+                "https://issuer.example/a%4/b",
+            ),
+            ("non-hex escape in path", "https://issuer.example/a%zzb"),
+            ("half-hex escape in path", "https://issuer.example/a%4g"),
+            ("bare % in query", "https://issuer.example/x?a=%&b"),
+            ("trailing % in query", "https://issuer.example/x?a=%"),
+            (
+                "incomplete escape in query",
+                "https://issuer.example/x?a=%4",
+            ),
+            ("non-hex escape in query", "https://issuer.example/x?a=%zz"),
         ] {
             for member in [DISCOVERY_URL, TOKEN_REVIEW_ENDPOINT] {
                 let err = check(member, value).expect_err(case);

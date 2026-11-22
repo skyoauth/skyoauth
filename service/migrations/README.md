@@ -2667,7 +2667,10 @@ inferred:
   member (lead ruling, 2026-11-22; inferred). Canonical form means: no ASCII
   whitespace, control character (NUL included) or backslash in the text;
   the `url` crate parses it and serializes it to exactly the same text; and
-  no percent-encoded unreserved character. The text an operator approves
+  every `%` starts an escape of two hex digits that does not encode an
+  unreserved character (the parser keeps `%`, `%4`, `%zz` and `%67` in a
+  path or query as they are, so the round trip alone does not refuse them;
+  inferred). The text an operator approves
   then names the host, port and path that are fetched: the parser would
   otherwise fetch `good.example` for `%67ood.example`, `127.0.0.1` for
   `0x7f.1` or `127.1`, an A-label for a U-label, and would drop a default
@@ -2677,7 +2680,11 @@ inferred:
   a separately required component (a default port is left out). A create
   checks the syntax before any statement; an update checks only a changed
   member, after it has read the stored row and before any entry lock
-  (inferred). No error names a destination.
+  (inferred). No error names a destination. The check is about spelling,
+  not about where an address points: a canonical loopback, link-local,
+  private or metadata address, or an IPv4-mapped IPv6 address, passes it
+  when an entry lists it. A policy on such addresses, and on what a name
+  resolves to, belongs to the fetcher or the egress entry writer (inferred).
 - Only `READ COMMITTED` runs: any other level is `UnsupportedIsolation`
   before any lock. A `40001` or `40P01` is `RegistryError::Retry`.
 - The event is `trust_source.create` or `trust_source.update` (every
@@ -2689,8 +2696,9 @@ inferred:
 
 Lock order, extending the orders above for this write, which creates no
 operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`),
-then, for an update, the `trust_source` row (`FOR NO KEY UPDATE`), then the
-egress entry rows `FOR SHARE` (discovery before TokenReview; a valid source
+then, for an update, the `trust_source` row (`FOR NO KEY UPDATE`, raised
+to `FOR UPDATE` by the compare-and-set, see below), then the egress entry
+rows `FOR SHARE` (discovery before TokenReview; a valid source
 has at most one), then the write's own locks, then the audit head last. It
 puts `trust_source` before `egress_allowlist_entry`, against the by-name
 table order of step 1 of "What 0005 adds", which is for writes that create
@@ -2702,18 +2710,26 @@ disables an entry, so a disable waits for an open write that checked the
 entry, and a write that reaches an entry a disable holds waits and then
 reads it `disabled`.
 
-The source row lock of an update is not always `FOR NO KEY UPDATE`.
+The compare-and-set itself takes the source row `FOR UPDATE`, for every
+update through `update_trust_source`, whatever it changes: a status-only
+write, a URL change, a rename, or a write that changes nothing.
 `update_trust_source` always sets `name`, a column of the unique key
-`(tenant_id, name)`. When the new name differs from the stored one,
-PostgreSQL takes the row `FOR UPDATE` until the transaction ends. Unlike
-`FOR NO KEY UPDATE`, that lock conflicts with the `FOR KEY SHARE` of a
-foreign-key check, so a `principal_binding` or `consumed_assertion` insert
-that references the source waits for the commit, or fails with `55P03`
-under a `lock_timeout`. With the name unchanged, PostgreSQL finds no key
-column changed, keeps `FOR NO KEY UPDATE`, and those inserts do not wait
-(measured, PostgreSQL 16). So the advice of step 1 of "What 0005 adds"
+`(tenant_id, name)`. `trust_source` has `BEFORE UPDATE` row triggers
+(`trust_source_immutable`, `trust_source_revision`). With such a trigger,
+PostgreSQL chooses the row lock from the columns in the `SET` list, not from
+the values that change. Unlike `FOR NO KEY UPDATE`, `FOR UPDATE` conflicts
+with the `FOR KEY SHARE` of a foreign-key check. So from the compare-and-set
+until the commit, every `principal_binding` and `consumed_assertion` insert
+that references the source waits, or fails with `55P03` under a
+`lock_timeout`; that is, binding writes and token exchanges through that
+source. The steps before it (the source row `FOR NO KEY UPDATE` and the
+operator locks) do not block those inserts. Callers must commit promptly
+after an update. So the advice of step 1 of "What 0005 adds"
 (`FOR NO KEY UPDATE` avoids the conflict with `FOR KEY SHARE`) does not
-hold for a renaming source update.
+hold for any trust source update. The audit append must stay after the
+compare-and-set. An update that held the audit head while its
+compare-and-set waited for a consumer's `FOR KEY SHARE` would deadlock with
+that consumer's own audit append.
 
 Follow-ups and open questions:
 

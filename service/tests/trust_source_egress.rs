@@ -18,6 +18,7 @@
 mod common;
 
 use std::{
+    collections::BTreeMap,
     error::Error as _,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -27,10 +28,11 @@ use skyoauth_service::{
     persistence::{
         self, PgPool,
         registry::{
-            self, AdminRole, AssertionProfile, AuditActor, ChainVerdict, JsonObject,
-            NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding, NewAuditEvent, NewTenant,
-            NewTrustKeyset, NewTrustSource, RegistryError, ReplayMode, Status, TrustSource,
-            TrustSourceChanges, TrustSourceKind,
+            self, AdminRole, AssertionProfile, AuditActor, BindingProfile, ChainVerdict,
+            Consumption, JsonObject, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
+            NewAuditEvent, NewConsumedAssertion, NewPrincipal, NewPrincipalBinding, NewTenant,
+            NewTrustKeyset, NewTrustSource, PrincipalKind, RegistryError, ReplayMode, Status,
+            TrustSource, TrustSourceChanges, TrustSourceKind,
         },
     },
     trust::{
@@ -65,7 +67,7 @@ const UNLISTED: &str = "https://unlisted.example/x";
 
 /// Malformed or non-canonical destinations, each of them an enabled entry of
 /// both purposes, so only the syntax check refuses them: what each one lacks.
-const MALFORMED: [(&str, &str); 22] = [
+const MALFORMED: [(&str, &str); 27] = [
     (
         "http",
         "http://issuer.example/.well-known/openid-configuration",
@@ -106,6 +108,14 @@ const MALFORMED: [(&str, &str); 22] = [
     ("backslash", "https://issuer.example\\x"),
     ("U-label", "https://bücher.example/x"),
     ("ideographic dot", "https://issuer。example/x"),
+    ("bare % in path", "https://issuer.example/a%b"),
+    ("trailing % in path", "https://issuer.example/a%"),
+    ("non-hex escape in path", "https://issuer.example/a%zz/b"),
+    (
+        "incomplete escape in query",
+        "https://issuer.example/x?a=%4",
+    ),
+    ("trailing % in query", "https://issuer.example/x?a=%"),
 ];
 
 /// A time with sub-microsecond digits, so a write truncates it.
@@ -1476,7 +1486,11 @@ async fn without_waiting(pool: &PgPool, sql: &'static str, id: &str) -> Result<(
 
 /// An update waits for its source row before it locks any egress entry, so
 /// while it waits a disable of the entry it would check applies at once;
-/// the update then reads the entry disabled.
+/// the update then reads the entry disabled. The holder takes only
+/// `FOR SHARE`, which the step-2 lock conflicts with but a weaker source
+/// lock would not: an update that locked the source more weakly would pass
+/// step 2, lock the entry and then wait at its compare-and-set, holding the
+/// entry.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn an_update_waiting_for_its_source_holds_no_entry() {
@@ -1491,7 +1505,7 @@ async fn an_update_waiting_for_its_source_holds_no_entry() {
         backend_pid(&mut writer).await,
     );
     let mut hold = holder.begin().await.unwrap();
-    sqlx::query("SELECT FROM trust_source WHERE id = 'src_1' FOR NO KEY UPDATE")
+    sqlx::query("SELECT FROM trust_source WHERE id = 'src_1' FOR SHARE")
         .execute(&mut *hold)
         .await
         .unwrap();
@@ -1641,9 +1655,47 @@ async fn a_refusal_releases_its_locks() {
         "SELECT FROM admin_role_binding WHERE admin_id = $1 FOR UPDATE",
     ];
 
+    let lock_entry = "SELECT FROM egress_allowlist_entry WHERE id = $1 FOR UPDATE";
+    let lock_source = "SELECT FROM trust_source WHERE id = $1 FOR UPDATE";
+    let mut tx = pool.begin().await.unwrap();
+
+    // Refusals by this module's own logic, with no database error: the
+    // entry was found and locked, and it is disabled.
+    let mut off = changes(&source);
+    off.discovery_url = Some(DISCOVERY_OFF.into());
+    assert_egress(
+        update_source(&mut tx, TRUST, "ten_a", "src_1", 1, &off, &audit("aud_3")).await,
+        DISCOVERY_URL,
+        DISCOVERY_OFF,
+    );
+    assert_egress(
+        create_source(
+            &mut tx,
+            TRUST,
+            &k8s("src_3", TOKEN_REVIEW_OFF),
+            &audit("aud_3"),
+        )
+        .await,
+        TOKEN_REVIEW_ENDPOINT,
+        TOKEN_REVIEW_OFF,
+    );
+    for sql in operator_rows {
+        assert_eq!(
+            without_waiting(&pool, sql, "adm_trust").await,
+            Ok(()),
+            "{sql}"
+        );
+    }
+    for (sql, id) in [
+        (lock_source, "src_1"),
+        (lock_entry, "egr_disc_off"),
+        (lock_entry, "egr_tr_off"),
+    ] {
+        assert_eq!(without_waiting(&pool, sql, id).await, Ok(()), "{id}");
+    }
+
     // An update refused at its write, after the operator, source and entry
     // locks: a rename to another source's name.
-    let mut tx = pool.begin().await.unwrap();
     let mut clash = changes(&source);
     clash.discovery_url = Some(DISCOVERY_2.into());
     clash.name = "source-src_2".into();
@@ -1659,15 +1711,7 @@ async fn a_refusal_releases_its_locks() {
             "{sql}"
         );
     }
-    assert_eq!(
-        without_waiting(
-            &pool,
-            "SELECT FROM trust_source WHERE id = $1 FOR UPDATE",
-            "src_1"
-        )
-        .await,
-        Ok(())
-    );
+    assert_eq!(without_waiting(&pool, lock_source, "src_1").await, Ok(()));
     assert_eq!(
         without_waiting(&pool, DISABLE_ENTRY, "egr_disc_2").await,
         Ok(())
@@ -1702,6 +1746,299 @@ async fn a_refusal_releases_its_locks() {
     );
     assert_eq!(source_count(&pool).await, 2);
     assert_chain(&pool, 2).await;
+    db.drop([pool]).await;
+}
+
+/// The workload principal `wld_1` of `ten_a`, which bindings to `src_1`
+/// name.
+async fn workload(pool: &PgPool) {
+    registry::create_principal(
+        pool,
+        &NewPrincipal {
+            id: "wld_1".into(),
+            tenant_id: "ten_a".into(),
+            kind: PrincipalKind::Workload,
+            name: "principal wld_1".into(),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// A consumed assertion of `src_1`, the `n`th of the test.
+fn consumed(n: u8) -> NewConsumedAssertion {
+    NewConsumedAssertion {
+        tenant_id: "ten_a".into(),
+        trust_source_id: "src_1".into(),
+        replay_key_digest: vec![n; 32],
+        digest_key_version: "dk_1".into(),
+        consumed_at: now(),
+        retain_until: now() + Duration::from_secs(600),
+    }
+}
+
+/// The SQLSTATE of a registry error that carries a database error.
+fn registry_sqlstate(err: &RegistryError) -> Option<String> {
+    match err {
+        RegistryError::Other(err) => sqlstate(err),
+        other => Some(format!("{other:?}")),
+    }
+}
+
+/// Commits `tx` on `Ok` and rolls it back on `Err`.
+async fn settle(
+    tx: Transaction<'_, Postgres>,
+    result: Result<(), Option<String>>,
+) -> Result<(), Option<String>> {
+    if result.is_ok() {
+        tx.commit().await.unwrap();
+    } else {
+        tx.rollback().await.unwrap();
+    }
+    result
+}
+
+/// The two foreign-key references to `src_1`, each in a transaction of its
+/// own with a `lock_timeout` of 100 ms, committed when it succeeds: the
+/// `n`th `principal_binding` (a binding write) and the `n`th
+/// `consumed_assertion` (a token exchange). For each, `Ok` or the SQLSTATE
+/// it failed with.
+async fn reference_source(pool: &PgPool, n: u8) -> [Result<(), Option<String>>; 2] {
+    let set_timeout = "SET LOCAL lock_timeout = '100ms'";
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(set_timeout).execute(&mut *tx).await.unwrap();
+    let binding = registry::create_principal_binding(
+        &mut *tx,
+        &NewPrincipalBinding {
+            id: format!("bnd_{n}"),
+            tenant_id: "ten_a".into(),
+            name: format!("binding-{n}"),
+            trust_source_id: "src_1".into(),
+            profile: BindingProfile::GithubProduction,
+            claim_match_policy: BTreeMap::from(
+                [
+                    ("repository_owner_id", "123456"),
+                    ("repository_id", "456789"),
+                    ("event_name", "push"),
+                    ("ref", "refs/heads/main"),
+                    ("environment", "production"),
+                    (
+                        "workflow_ref",
+                        "acme/platform/.github/workflows/deploy.yml@refs/heads/main",
+                    ),
+                ]
+                .map(|(name, value)| (name.to_string(), value.to_string())),
+            ),
+            workload_principal_id: "wld_1".into(),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|err| registry_sqlstate(&err));
+    let binding = settle(tx, binding).await;
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(set_timeout).execute(&mut *tx).await.unwrap();
+    let consumption = match registry::consume_assertion(&mut *tx, &consumed(n)).await {
+        Ok(Consumption::Consumed) => Ok(()),
+        Ok(Consumption::Replay) => panic!("consumed assertion {n} replayed"),
+        Err(err) => Err(registry_sqlstate(&err)),
+    };
+    let consumption = settle(tx, consumption).await;
+    [binding, consumption]
+}
+
+/// What an update in
+/// [`every_source_update_blocks_references_to_the_source_until_commit`]
+/// changes.
+#[derive(Debug, Clone, Copy)]
+enum Change {
+    Nothing,
+    StatusOnly,
+    UrlOnly,
+    Rename,
+}
+
+/// Every update through `update_source` takes the source row `FOR UPDATE`
+/// at its compare-and-set, whatever it changes (the `BEFORE UPDATE` triggers
+/// of `trust_source` and the `name` in the `SET` list): until the commit, a
+/// `principal_binding` or `consumed_assertion` insert that references the
+/// source fails with `55P03` under a short `lock_timeout`; after it, both
+/// apply. The locks of the steps before the compare-and-set (the operator
+/// rows and the source row `FOR NO KEY UPDATE`) block neither.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn every_source_update_blocks_references_to_the_source_until_commit() {
+    let (db, pool) = seeded().await;
+    let mut source = create(&pool, TRUST, &oidc("src_1", DISCOVERY), "aud_1")
+        .await
+        .unwrap();
+    workload(&pool).await;
+    let free = [Ok(()), Ok(())];
+    let blocked = [Err(Some("55P03".into())), Err(Some("55P03".into()))];
+    let mut n = 0;
+    assert_eq!(reference_source(&pool, n).await, free, "before any update");
+    for change in [
+        Change::Nothing,
+        Change::StatusOnly,
+        Change::UrlOnly,
+        Change::Rename,
+    ] {
+        let mut next = changes(&source);
+        match change {
+            Change::Nothing => {}
+            Change::StatusOnly => next.status = Status::Disabled,
+            Change::UrlOnly => next.discovery_url = Some(DISCOVERY_2.into()),
+            Change::Rename => next.name = "renamed".into(),
+        }
+        let mut tx = pool.begin().await.unwrap();
+        let updated = update_source(
+            &mut tx,
+            TRUST,
+            "ten_a",
+            "src_1",
+            source.revision,
+            &next,
+            &audit(&format!("aud_{change:?}")),
+        )
+        .await
+        .unwrap();
+        n += 1;
+        assert_eq!(reference_source(&pool, n).await, blocked, "{change:?}");
+        tx.commit().await.unwrap();
+        n += 1;
+        assert_eq!(reference_source(&pool, n).await, free, "{change:?}");
+        source = updated;
+    }
+
+    // An update that waits at its entry lock holds the operator rows and
+    // the source row `FOR NO KEY UPDATE`, and has not reached its
+    // compare-and-set: the references do not wait for it.
+    let mut blocker_conn = pool.acquire().await.unwrap().detach();
+    let mut writer = pool.acquire().await.unwrap().detach();
+    let (blocker_pid, writer_pid) = (
+        backend_pid(&mut blocker_conn).await,
+        backend_pid(&mut writer).await,
+    );
+    let mut blocker = blocker_conn.begin().await.unwrap();
+    sqlx::query("SELECT FROM egress_allowlist_entry WHERE id = 'egr_disc' FOR UPDATE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let mut back = changes(&source);
+    back.discovery_url = Some(DISCOVERY.into());
+    let revision = source.revision;
+    let task = tokio::spawn(async move {
+        let mut tx = writer.begin().await.unwrap();
+        let result = update_source(
+            &mut tx,
+            TRUST,
+            "ten_a",
+            "src_1",
+            revision,
+            &back,
+            &audit("aud_back"),
+        )
+        .await;
+        tx.rollback().await.unwrap();
+        (result, writer)
+    });
+    wait_until_blocked(&pool, writer_pid, blocker_pid, &task).await;
+    n += 1;
+    assert_eq!(reference_source(&pool, n).await, free, "before the write");
+    blocker.rollback().await.unwrap();
+    let (result, writer) = join(task).await;
+    result.unwrap();
+    writer.close().await.unwrap();
+    blocker_conn.close().await.unwrap();
+    assert_chain(&pool, 5).await;
+    db.drop([pool]).await;
+}
+
+/// The audit event comes after the compare-and-set, so an update that waits
+/// there for a consumer of its source (a consumed assertion not yet
+/// committed, which holds the source `FOR KEY SHARE`) holds no audit head:
+/// the consumer appends its own event and commits, and then the update
+/// completes. An update that appended first would hold the head while it
+/// waited, and the consumer's append would close a deadlock.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_update_waiting_for_a_consumer_holds_no_audit_head() {
+    let (db, pool) = seeded().await;
+    let source = create(&pool, TRUST, &oidc("src_1", DISCOVERY), "aud_1")
+        .await
+        .unwrap();
+    let mut consumer_conn = pool.acquire().await.unwrap().detach();
+    let mut writer = pool.acquire().await.unwrap().detach();
+    let (consumer_pid, writer_pid) = (
+        backend_pid(&mut consumer_conn).await,
+        backend_pid(&mut writer).await,
+    );
+    let mut consumer = consumer_conn.begin().await.unwrap();
+    assert_eq!(
+        registry::consume_assertion(&mut *consumer, &consumed(1))
+            .await
+            .unwrap(),
+        Consumption::Consumed
+    );
+    // An update that changes nothing still reaches the consumer's lock.
+    let unchanged = changes(&source);
+    let task = tokio::spawn(async move {
+        let mut tx = writer.begin().await.unwrap();
+        let result = update_source(
+            &mut tx,
+            TRUST,
+            "ten_a",
+            "src_1",
+            1,
+            &unchanged,
+            &audit("aud_3"),
+        )
+        .await;
+        match result {
+            Ok(_) => tx.commit().await.unwrap(),
+            Err(_) => tx.rollback().await.unwrap(),
+        }
+        (result, writer)
+    });
+    wait_until_blocked(&pool, writer_pid, consumer_pid, &task).await;
+    // The consumer's own event (this action stands in for it).
+    registry::append_audit_event(
+        &mut consumer,
+        &NewAuditEvent {
+            id: "aud_2".into(),
+            tenant_id: Some("ten_a".into()),
+            timestamp: now(),
+            actor: AuditActor::Operator("adm_trust".into()),
+            action: "trust_keyset.update".into(),
+            object_id: "ks_1".into(),
+            previous_revision: Some(1),
+            new_revision: Some(2),
+            outcome: "success".into(),
+        },
+    )
+    .await
+    .expect("the audit head must be free while the update waits");
+    consumer.commit().await.unwrap();
+    let (result, writer) = join(task).await;
+    assert_eq!(result.unwrap().revision, 2);
+    writer.close().await.unwrap();
+    consumer_conn.close().await.unwrap();
+    let order: Vec<_> = events(&pool)
+        .await
+        .into_iter()
+        .map(|event| (event.0, event.1))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (1, "trust_source.create".to_string()),
+            (2, "trust_keyset.update".to_string()),
+            (3, "trust_source.update".to_string()),
+        ]
+    );
+    assert_chain(&pool, 3).await;
     db.drop([pool]).await;
 }
 
