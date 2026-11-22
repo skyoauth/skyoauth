@@ -1,11 +1,12 @@
 //! The scope ceilings of an exchange (`persistence::registry`,
 //! `load_scope_ceilings`, with `policy::resolve_scopes`; IR-062, IR-063;
-//! design section 5.7; T12.8) against a real PostgreSQL server: the loaded values
-//! are the registry's rows, the target service is a ceiling exactly for a
-//! grant with a target, every miss is the same `None` (including an
-//! audience the target service does not list, IR-083), disabled records are
-//! loaded and reported by `all_enabled`, and a ceiling that shrinks after
-//! the grant was written makes its defaults fail.
+//! design section 5.7; T12.8) against a real PostgreSQL server: the loaded
+//! values are the registry's rows, the target service is a ceiling exactly
+//! for a delegation or impersonation grant (never a direct one; provisional
+//! lead pick, 2026-11-21; defense in depth), every miss is the same `None`
+//! (including an audience the target service does not list, IR-083),
+//! disabled records are loaded and reported by `all_enabled`, and a ceiling
+//! that shrinks after the grant was written makes its defaults fail.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests in the shape
@@ -125,8 +126,8 @@ async fn resolve(
 }
 
 /// The loaded values are the registry's rows; the target service is loaded
-/// exactly for a grant with a target, the delegation and the dormant
-/// impersonation grant; another tenant with the same audience gets its own
+/// exactly for a delegation or impersonation grant, here the delegation and
+/// the dormant impersonation grant; another tenant with the same audience gets its own
 /// assignment.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -225,8 +226,9 @@ async fn ceilings_are_the_registry_rows_and_the_target_only_for_a_target_grant()
 
 /// Every miss is the same `None`: another tenant's grant, an unknown grant
 /// or tenant, an unknown audience, one not assigned to the tenant, one
-/// assigned but not in the grant's set, and, for a grant with a target
-/// service, one in the grant's set but not in the service's (IR-083),
+/// assigned but not in the grant's set, and, for a delegation or
+/// impersonation grant, one in the grant's set but not in its target
+/// service's (IR-083),
 /// including once the service's audience row is removed.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -334,6 +336,73 @@ async fn the_statement_rechecks_what_the_foreign_keys_guarantee() {
                 .unwrap(),
             None,
             "{grant} {audience}"
+        );
+    }
+    sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// A direct grant loads no target service, whatever its `target_service_id`
+/// holds (provisional lead pick, 2026-11-21; defense in depth): the `0004`
+/// check `service_grant_target_mode_check` keeps it `NULL`, and the
+/// statement keys the target off `mode` rather than rely on it. With the
+/// check dropped in a rolled-back transaction, a direct grant naming `svc_1`
+/// loads with no target service for an audience `svc_1` lists and for one
+/// it does not; the delegation to `svc_1` still loads it; and a delegation
+/// or impersonation grant with no target is a miss, not a direct grant.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_direct_grant_loads_no_target_service_even_with_a_target_id() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql(
+        r#"BEGIN;
+           ALTER TABLE service_grant DROP CONSTRAINT service_grant_target_mode_check;
+           INSERT INTO service_grant VALUES
+               ('grt_dt', 'ten_a', 'direct-target', 'wld_1', 'svc_1', 'direct', '["read"]', NULL, '{}', 300,
+                NULL, 'enabled', 'not_required');
+           INSERT INTO service_grant VALUES
+               ('grt_dn', 'ten_a', 'delegated-no-target', 'wld_1', NULL, 'delegation', '["read"]', NULL, '{}',
+                300, NULL, 'enabled', 'not_required'),
+               ('grt_in', 'ten_a', 'impersonated-no-target', 'wld_1', NULL, 'impersonation', '["read"]', NULL,
+                '{}', 300, NULL, 'disabled', 'requires_reapproval');
+           INSERT INTO service_grant_binding VALUES
+               ('grt_dt', 'bnd_1', 'ten_a', 'wld_1'), ('grt_dn', 'bnd_1', 'ten_a', 'wld_1'),
+               ('grt_in', 'bnd_1', 'ten_a', 'wld_1');
+           INSERT INTO service_grant_resource_server VALUES
+               ('grt_dt', 'ten_a', 'rs_1'), ('grt_dt', 'ten_a', 'rs_4'), ('grt_dn', 'ten_a', 'rs_1'),
+               ('grt_in', 'ten_a', 'rs_1')"#,
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    // svc_1 lists api-1 but not api-4.
+    for audience in ["api-1", "api-4"] {
+        let direct = load_scope_ceilings(&mut *conn, "ten_a", "grt_dt", audience)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("grt_dt {audience}"));
+        assert_eq!(direct.grant_mode, GrantMode::Direct, "{audience}");
+        assert_eq!(direct.target_service, None, "{audience}");
+        assert_eq!(direct.scope_ceilings().target_service, None, "{audience}");
+    }
+    let delegation = load_scope_ceilings(&mut *conn, "ten_a", "grt_dlg", "api-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        delegation.target_service.map(|service| service.id),
+        Some("svc_1".to_owned())
+    );
+    // A delegation or impersonation grant with no target loads no row.
+    for grant in ["grt_dn", "grt_in"] {
+        assert_eq!(
+            load_scope_ceilings(&mut *conn, "ten_a", grant, "api-1")
+                .await
+                .unwrap(),
+            None,
+            "{grant}"
         );
     }
     sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
