@@ -1716,9 +1716,17 @@ describe('resolution part', () => {
   });
 
   test('orphans: the last path segment decides, in any binary; a planned stage\'s test is registered', () => {
-    const names = ['a24_pos_top_level', 'm::a61_neg_query_reordered_mismatch', 'helper_not_a_scenario', 'm::xa29_pos_prefixed', 'a29_pos::inner_not_last', 'm::a1_pos_one_digit'];
-    const planned = st('A24', 'M2', 'tests = []', `tests = ["${ID('a24_pos_top_level', 'skyoauth-scenarios')}"]`);
-    const res = resolve(edits(a29(), planned), list((d) => (d['rust-suites']['skyoauth-scenarios'] = suite('skyoauth-scenarios', names))));
+    const names = ['m::a61_neg_query_reordered_mismatch', 'helper_not_a_scenario', 'm::xa29_pos_prefixed', 'a29_pos::inner_not_last', 'm::a1_pos_one_digit'];
+    // A top-level test of the pg binary, which the planned A24 M2 stage lists
+    // (and which resolves: planned stages with tests are resolved too).
+    const planned = st('A24', 'M2', 'tests = []', `tests = ["${ID('a24_pos_top_level')}"]`);
+    const res = resolve(
+      edits(a29(), planned),
+      list((d) => {
+        d['rust-suites']['skyoauth-scenarios'] = suite('skyoauth-scenarios', names);
+        Object.assign(d['rust-suites'][PG].testcases, suite(PG, ['a24_pos_top_level']).testcases);
+      }),
+    );
     expectOnly(res, 'orphans', /^list\.json: error \[orphans\] "nextest:skyoauth-scenarios\/m::a61_neg_query_reordered_mismatch" is a listed/);
   });
 
@@ -1783,9 +1791,108 @@ describe('resolution part', () => {
     expectErrors(res, ['pos-neg', 'orphans'], ['pos-neg', new RegExp(`^tests/conformance/subcases\\.toml:${stageLine(read(root, SUBCASES), 'subcase', 'A58.01', 'M1b')}: error \\[pos-neg\\] A58\\.01 M1b: job scenarios-pg produces no neg test of this stage$`)], ['orphans', /a58_01_neg_stale" is a listed/]);
   });
 
-  test('planned stages are not resolved', () => {
-    const planned = st('A24', 'M2', 'tests = []', `tests = ["${ID('security::a24::a24_pos_not_written_yet')}", "vitest:x.test.ts/A24 neg: y"]`);
-    expectOk(resolve(edits(a29(), planned), list()));
+  // A planned stage that lists tests (partial tests) is resolved too: resolve,
+  // same-job and the own-entry half of pos-neg, but not a pos and a neg per
+  // job or the runners of its legs. The stage stays planned; its errors name
+  // it "planned stage, partial test".
+  describe('planned stages with partial tests', () => {
+    const PARTIAL = 'security::a24::a24_pos_partial';
+    const partial = (tests, m = 'M2', id = 'A24') => st(id, m, 'tests = []', `tests = ${JSON.stringify(tests)}`);
+    const withPartial = (d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, [PARTIAL]).testcases);
+    const at = (root) => `^tests/conformance/scenarios\\.toml:${stageLine(read(root, SCENARIOS), 'scenario', 'A24', 'M2')}: error `;
+
+    test('a partial test that resolves passes, and the summary counts it apart from the implemented stages', () => {
+      const res = resolve(edits(a29(), partial([ID(PARTIAL)])), list(withPartial));
+      expectOk(res);
+      assert.equal(res.summary, '64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 13 tests of 1 implemented stages and 1 partial tests of 1 planned stages against 14 listed tests');
+    });
+
+    test('a planned stage with tests = [] is not resolved, whatever its legs (A40 M3: typescript, typescript-browser)', () => {
+      const res = resolve(a29(), list());
+      expectOk(res);
+      assert.match(res.summary, /resolution: 13 tests of 1 implemented stages against 13 listed tests$/);
+    });
+
+    test('only the listed tests are checked: no pos and neg per job, and no runner check of legs without tests (A60 M3: scenarios-pg, typescript-browser)', () => {
+      const name = 'security::a60::a60_pos_partial';
+      expectOk(resolve(edits(a29(), partial([ID(name)], 'M3', 'A60')), list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, [name]).testcases))));
+    });
+
+    // Each must be a test of the stage's own entry: no other listed test (of
+    // another entry, of an implemented stage, or not scenario-named at all)
+    // can pad a planned stage's list and so also escape the orphans rule.
+    for (const [what, name, also] of [
+      ['a test of another entry (an a23_ test in A22 M1a)', 'security::a23::a23_pos_shared', false],
+      ['a test of an implemented stage (A29 M1a)', 'security::a29::a29_pos_partial_elsewhere', true],
+      ['a test that is not scenario-named', 'security::a22::helper_round_trip', false],
+    ]) {
+      test(`a partial test that is not one of its own entry fails: ${what}`, () => {
+        const stages = also ? edits(a29([...A29_IDS, ID(name)]), partial([ID(name)], 'M1a', 'A22')) : edits(a29(), partial([ID(name)], 'M1a', 'A22'));
+        const res = resolve(stages, list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, [name]).testcases)));
+        expectOnly(res, 'pos-neg', new RegExp(`error \\[pos-neg\\] A22 M1a \\(planned stage, partial test\\): "nextest:skyoauth-scenarios/pg/${reLiteral(name)}" is not a pos/neg scenario test of A22$`));
+      });
+    }
+
+    test('a planned subcase stage is resolved too (the conditional sub-ID A58.90)', () => {
+      const names = ['security::a58::a58_90_pos_partial', 'security::a58::a58_90_neg_not_written'];
+      const root = fixture({ [SCENARIOS]: a29(), [SUBCASES]: su('A58.90', 'tests = []', `tests = ${JSON.stringify(names.map((n) => ID(n)))}`) });
+      const lists = (have) => [{ kind: 'nextest', file: LIST, text: list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, have).testcases)) }];
+      const ok = check(root, { lists: lists(names) });
+      expectOk(ok);
+      assert.match(ok.summary, / and 2 partial tests of 1 planned stages against 15 listed tests$/);
+      const res = check(root, { lists: lists(names.slice(0, 1)) });
+      expectOnly(res, 'resolve', new RegExp(`^tests/conformance/subcases\\.toml:${stageLine(read(root, SUBCASES), 'subcase', 'A58.90', 'M3')}: error \\[resolve\\] A58\\.90 M3 \\(planned stage, partial test\\): "nextest:skyoauth-scenarios/pg/security::a58::a58_90_neg_not_written": it is not in the test list of "skyoauth-scenarios::pg" \\(list\\.json\\)$`));
+    });
+
+    test('a partial test of the lib form, which no job produces, fails (same-job)', () => {
+      const res = resolve(edits(a29(), partial([ID('a24_pos_lib', 'skyoauth-scenarios')])), list((d) => (d['rust-suites']['skyoauth-scenarios'] = suite('skyoauth-scenarios', ['a24_pos_lib']))));
+      expectOnly(res, 'same-job', /A24 M2 \(planned stage, partial test\): "nextest:skyoauth-scenarios\/a24_pos_lib" is produced by no job \(TEST_JOBS\), not by the job of a leg of this stage \(scenarios-pg\)$/);
+    });
+
+    test('a partial test that is not in the list fails', () => {
+      const root = fixture({ [SCENARIOS]: edits(a29(), partial([ID(PARTIAL)])) });
+      const res = check(root, { lists: [{ kind: 'nextest', file: LIST, text: list() }] });
+      expectOnly(res, 'resolve', new RegExp(`${at(root)}\\[resolve\\] A24 M2 \\(planned stage, partial test\\): "nextest:skyoauth-scenarios/pg/${PARTIAL}": it is not in the test list of "skyoauth-scenarios::pg" \\(list\\.json\\)$`));
+    });
+
+    test('an #[ignore]d or filtered-out partial test fails', () => {
+      const ignored = resolve(edits(a29(), partial([ID(PARTIAL)])), list((d) => (d['rust-suites'][PG].testcases[PARTIAL] = { kind: 'test', ignored: true, 'filter-match': { status: 'mismatch', reason: 'ignored' } })));
+      expectOnly(ignored, 'resolve', /A24 M2 \(planned stage, partial test\): "[^"]+a24_pos_partial": it is #\[ignore\]d \(list\.json\), so its job never runs it$/);
+      const filtered = resolve(edits(a29(), partial([ID(PARTIAL)])), list((d) => (d['rust-suites'][PG].testcases[PARTIAL] = { kind: 'test', ignored: false, 'filter-match': { status: 'mismatch', reason: 'default-filter' } })));
+      expectOnly(filtered, 'resolve', /A24 M2 \(planned stage, partial test\): "[^"]+a24_pos_partial": it is filtered out of the list of "skyoauth-scenarios::pg" \("default-filter"\)/);
+    });
+
+    test('a partial test in a binary the list does not list, or one that nextest skipped, fails', () => {
+      // Only the partial stage refers to the pg binary here (A29 stays planned).
+      const noPg = resolve(
+        partial([ID(PARTIAL)]),
+        list((d) => {
+          delete d['rust-suites'][PG];
+          d['rust-suites']['skyoauth-scenarios::hermetic'] = suite('skyoauth-scenarios::hermetic', ['helper_not_a_scenario']);
+        }),
+      );
+      expectOnly(noPg, 'resolve', /A24 M2 \(planned stage, partial test\): "[^"]+a24_pos_partial": its target "pg" of "skyoauth-scenarios" is not in the test list \(listed targets of "skyoauth-scenarios": \(lib\), "hermetic"\)$/);
+      const skipped = resolve(
+        partial([ID(PARTIAL)]),
+        list((d) => {
+          d['rust-suites'][PG].status = 'skipped-default-filter';
+          d['rust-suites'][PG].testcases = {};
+        }),
+      );
+      expectOnly(skipped, 'resolve', /A24 M2 \(planned stage, partial test\): "[^"]+a24_pos_partial": its binary "skyoauth-scenarios::pg" was not listed \(status skipped-default-filter\)$/);
+    });
+
+    test('a partial test produced by a job that is not among the stage\'s legs fails (same-job)', () => {
+      const name = 'security::a24::a24_pos_hermetic';
+      const res = resolve(edits(a29(), partial([ID(name, 'skyoauth-scenarios/hermetic')])), list((d) => (d['rust-suites']['skyoauth-scenarios::hermetic'] = suite('skyoauth-scenarios::hermetic', [name]))));
+      expectOnly(res, 'same-job', /A24 M2 \(planned stage, partial test\): "nextest:skyoauth-scenarios\/hermetic\/security::a24::a24_pos_hermetic" is produced by job scenarios-hermetic \(TEST_JOBS\), not by the job of a leg of this stage \(scenarios-pg\)$/);
+    });
+
+    test('a vitest ID or a malformed ID in a planned stage fails closed', () => {
+      const res = resolve(edits(a29(), partial([ID(PARTIAL), 'vitest:x.test.ts/A24 neg: y', 'cargo:pg/a24_pos_x'])), list(withPartial));
+      expectErrors(res, ['resolve', 'same-job'], ['resolve', /A24 M2 \(planned stage, partial test\): "vitest:x\.test\.ts\/A24 neg: y": vitest test IDs are provisional/], ['resolve', /A24 M2 \(planned stage, partial test\): "cargo:pg\/a24_pos_x" is not a test ID such as/], ['same-job', /"vitest:x\.test\.ts\/A24 neg: y" is produced by job typescript/]);
+      assert.equal(res.errors.length, 3, dump(res));
+    });
   });
 
   const MALFORMED = [
@@ -1890,6 +1997,12 @@ describe('resolution part', () => {
       const bad = cli('--root', root, '--nextest-list', missing);
       assert.equal(bad.status, 1);
       assert.equal(bad.stderr, `tests/conformance/scenarios.toml:${stageLine(read(root, SCENARIOS), 'scenario', 'A29', 'M1a')}: error [resolve] A29 M1a: "${A29_IDS[0]}": it is not in the test list of "skyoauth-scenarios::pg" (${missing})\ncheck-conformance-registry: 1 error(s)\n`);
+    });
+
+    test('--nextest-list: a planned stage\'s missing partial test exits 1', () => {
+      const r = cli('--root', fixture({ [SCENARIOS]: edits(a29(), st('A24', 'M2', 'tests = []', `tests = ["${ID('security::a24::a24_pos_partial')}"]`)) }), '--nextest-list', GOLDEN);
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, /^tests\/conformance\/scenarios\.toml:\d+: error \[resolve\] A24 M2 \(planned stage, partial test\): "nextest:skyoauth-scenarios\/pg\/security::a24::a24_pos_partial": it is not in the test list of "skyoauth-scenarios::pg" \(\S+nextest-list-scenarios\.json\)\ncheck-conformance-registry: 1 error\(s\)\n$/);
     });
 
     test('--nextest-list with a malformed list exits 1', () => {
