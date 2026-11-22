@@ -20,6 +20,7 @@
 
 pub mod keyset;
 pub mod source;
+mod write;
 
 pub use keyset::{
     KeysetAudit, KeysetWriteError, MAX_ENABLED_VERSIONS_PER_KEYSET, NewKeysetVersion,
