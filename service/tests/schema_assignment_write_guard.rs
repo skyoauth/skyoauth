@@ -64,6 +64,9 @@ const SEED: &str = r#"
         ('ata_1', 'rs_1', 'ten_a', '["wif"]', '["read"]', '[]', 'enabled'),
         ('ata_2', 'rs_2', 'ten_a', '["wif"]', '["read"]', '[]', 'disabled'),
         ('ata_3', 'rs_3', 'ten_a', '["wif"]', '["read"]', '[]', 'enabled');
+    -- Enabled egress entry for the seeded destination (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled');
     INSERT INTO trust_source VALUES
         ('src_gh', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',
@@ -384,9 +387,9 @@ async fn assignment_write_guard_migration_is_recorded_once() {
         .unwrap()
     };
     let first = recorded().await;
-    assert_eq!(
-        first.last(),
-        Some(&(10, "assignment write guard".into(), true)),
+    // Recorded, whatever later migrations follow it (`0011` does).
+    assert!(
+        first.contains(&(10, "assignment write guard".into(), true)),
         "{first:?}"
     );
     persistence::migrate(&pool).await.unwrap();

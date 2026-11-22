@@ -29,10 +29,10 @@ use skyoauth_service::{
         self, PgPool,
         registry::{
             self, AdminRole, AssertionProfile, AuditActor, BindingProfile, ChainVerdict,
-            Consumption, JsonObject, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
-            NewAuditEvent, NewConsumedAssertion, NewPrincipal, NewPrincipalBinding, NewTenant,
-            NewTrustKeyset, NewTrustSource, PrincipalKind, RegistryError, ReplayMode, Status,
-            TrustSource, TrustSourceChanges, TrustSourceKind,
+            Consumption, InvariantKind, JsonObject, NewAdminCredential, NewAdminIdentity,
+            NewAdminRoleBinding, NewAuditEvent, NewConsumedAssertion, NewPrincipal,
+            NewPrincipalBinding, NewTenant, NewTrustKeyset, NewTrustSource, PrincipalKind,
+            RegistryError, ReplayMode, Status, TrustSource, TrustSourceChanges, TrustSourceKind,
         },
     },
     trust::{
@@ -667,6 +667,89 @@ async fn a_near_miss_of_an_entry_is_refused() {
     db.drop([pool]).await;
 }
 
+/// The `0011` guard (provisional lead pick, 2026-11-22) backs the bare
+/// registry writers: a destination this path refuses with
+/// `EgressNotAllowed`, its own refusal, which comes first, the database
+/// refuses for them with `Invariant { EgressEntryEnabled }` naming the
+/// member's guard, on create and on a changed member, a disable included.
+/// It checks no syntax: a malformed destination that an enabled entry lists, which this
+/// path refuses with `InvalidDestination`, passes it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_database_guard_refuses_what_the_bare_writers_skip() {
+    let (db, pool) = seeded().await;
+    let guard = |member: &str| match member {
+        DISCOVERY_URL => "trust_source_discovery_url_egress_enabled",
+        _ => "trust_source_token_review_endpoint_egress_enabled",
+    };
+    let assert_guard = |result: Result<TrustSource, RegistryError>, member: &str| match result {
+        Err(RegistryError::Invariant {
+            kind: InvariantKind::EgressEntryEnabled,
+            constraint: Some(constraint),
+        }) if constraint == guard(member) => {}
+        other => panic!("{member}: expected the guard's Invariant, got {other:?}"),
+    };
+    let base_oidc = registry::create_trust_source(&pool, &oidc("src_base_o", DISCOVERY))
+        .await
+        .unwrap();
+    let base_k8s = registry::create_trust_source(&pool, &k8s("src_base_k", TOKEN_REVIEW))
+        .await
+        .unwrap();
+    for (member, value) in [
+        (DISCOVERY_URL, DISCOVERY_OFF),
+        (DISCOVERY_URL, JWKS_ONLY),
+        (DISCOVERY_URL, TOKEN_REVIEW_ONLY),
+        (DISCOVERY_URL, UNLISTED),
+        (TOKEN_REVIEW_ENDPOINT, TOKEN_REVIEW_OFF),
+        (TOKEN_REVIEW_ENDPOINT, DISCOVERY_ONLY),
+        (TOKEN_REVIEW_ENDPOINT, JWKS_ONLY_TR),
+        (TOKEN_REVIEW_ENDPOINT, UNLISTED),
+    ] {
+        let (new, base, mut changed) = if member == DISCOVERY_URL {
+            let mut changed = changes(&base_oidc);
+            changed.discovery_url = Some(value.into());
+            (oidc("src_1", value), "src_base_o", changed)
+        } else {
+            let mut changed = changes(&base_k8s);
+            changed.token_review_endpoint = Some(value.into());
+            (k8s("src_1", value), "src_base_k", changed)
+        };
+        assert_egress(create(&pool, TRUST, &new, "aud_1").await, member, value);
+        assert_egress(
+            update(&pool, TRUST, base, 1, &changed, "aud_1").await,
+            member,
+            value,
+        );
+        assert_guard(registry::create_trust_source(&pool, &new).await, member);
+        assert_guard(
+            registry::update_trust_source(&pool, "ten_a", base, 1, &changed).await,
+            member,
+        );
+        changed.status = Status::Disabled;
+        assert_guard(
+            registry::update_trust_source(&pool, "ten_a", base, 1, &changed).await,
+            member,
+        );
+    }
+    for (n, (_, value)) in MALFORMED.into_iter().enumerate() {
+        let id = format!("src_bad_{n}");
+        assert_invalid(
+            create(&pool, TRUST, &oidc(&id, value), "aud_1").await,
+            DISCOVERY_URL,
+            value,
+        );
+        registry::create_trust_source(&pool, &oidc(&id, value))
+            .await
+            .unwrap_or_else(|err| panic!("{value}: {err:?}"));
+    }
+    assert_eq!(
+        source_count(&pool).await,
+        2 + i64::try_from(MALFORMED.len()).unwrap()
+    );
+    assert!(events(&pool).await.is_empty());
+    db.drop([pool]).await;
+}
+
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_malformed_destination_is_refused_before_any_statement() {
@@ -901,10 +984,21 @@ async fn an_update_rechecks_only_a_changed_destination() {
         3
     );
 
-    // A stored value written by other means is not checked while it stays.
+    // A stored value written by other means (the bare registry writer, past
+    // the syntax rule, while the `0011` guard found its entry enabled) is not
+    // checked while it stays, also once its entry is disabled.
+    entry(
+        &pool,
+        "egr_legacy",
+        "oidc_discovery",
+        "https://legacy",
+        "enabled",
+    )
+    .await;
     let legacy = registry::create_trust_source(&pool, &oidc("src_legacy", "https://legacy"))
         .await
         .unwrap();
+    disable_entry(&pool, "egr_legacy").await;
     let mut next = changes(&legacy);
     next.name = "legacy-renamed".into();
     assert_eq!(

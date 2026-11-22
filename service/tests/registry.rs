@@ -188,7 +188,9 @@ fn assert_invariant<T: Debug>(result: Result<T, RegistryError>, kind: InvariantK
 /// [`KNOWN_CONSTRAINTS`] is exactly the set of named constraints of the
 /// tables the registry writes and of the list domains, together with the
 /// names of the `0010` guard triggers, which their `23514` names as its
-/// constraint, so a new constraint or guard in a later migration fails here
+/// constraint, and the names that a function of the schema raises as a
+/// literal (`CONSTRAINT = '...'` in its source, as the `0011` egress guard
+/// does), so a new constraint or guard in a later migration fails here
 /// until the mapping lists it. The triggers are selected by the function
 /// they run, whatever their timing or events: the `0010` guards are
 /// `AFTER INSERT` row triggers (`schema_assignment_write_guard.rs` pins
@@ -197,7 +199,7 @@ fn assert_invariant<T: Debug>(result: Result<T, RegistryError>, kind: InvariantK
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_constraint_names_match_the_catalog() {
     let (db, pool) = migrated().await;
-    let names: Vec<String> = sqlx::query_scalar(
+    let mut names: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM (
          SELECT conname::text AS name FROM pg_constraint
          WHERE (contype IN ('c', 'f', 'p', 'u') AND conrelid = ANY(ARRAY[
@@ -223,6 +225,34 @@ async fn registry_constraint_names_match_the_catalog() {
     .fetch_all(&pool)
     .await
     .unwrap();
+    // Every `CONSTRAINT =` in a function of the schema names a literal or
+    // `TG_NAME` (the `0010` guard, whose triggers are listed above).
+    let other: Vec<String> = sqlx::query_scalar(
+        r"SELECT p.proname::text FROM pg_proc p
+          WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+            AND p.prosrc ~* 'CONSTRAINT\s*=\s*(?!TG_NAME\M)[^\s'']'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(other, Vec::<String>::new());
+    let raised: Vec<String> = sqlx::query_scalar(
+        r"SELECT DISTINCT m[1] FROM pg_proc p
+          CROSS JOIN LATERAL regexp_matches(p.prosrc, 'CONSTRAINT\s*=\s*''([^'']*)''', 'gi') AS m
+          WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+          ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(!raised.is_empty());
+    // A guard that raises its trigger's name as a literal is listed once.
+    for name in raised {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names.sort_unstable();
     assert_eq!(names, KNOWN_CONSTRAINTS);
     db.drop([pool]).await;
 }

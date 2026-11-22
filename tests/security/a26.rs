@@ -209,7 +209,7 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use skyoauth_scenarios::pg::TestDb;
+use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -400,9 +400,9 @@ async fn fixture() -> (TestDb, PgPool) {
         (TEN_A, "src_a", "bnd_a", "wld_a"),
         (TEN_B, "src_b", "bnd_b", "wld_b"),
     ] {
-        registry::create_trust_source(&pool, &github_source(tenant, source))
-            .await
-            .unwrap();
+        let new = github_source(tenant, source);
+        egress::allow_destinations(&pool, &new).await;
+        registry::create_trust_source(&pool, &new).await.unwrap();
         registry::create_principal_binding(&pool, &binding(tenant, binding_id, source, workload))
             .await
             .unwrap();

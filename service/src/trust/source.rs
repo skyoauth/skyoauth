@@ -251,17 +251,28 @@
 //! - `ca_bundle_ref` and `reviewer_credential_ref` resolution within the
 //!   tenant's secret namespace (IR-034), tenant status (the operator lookup
 //!   does not read it), and the other source rules of T11.1 and T11.8.
-//! - A database backstop for the egress check. The trigger of
-//!   `docs/proposals/ir-080-assignment-write-guard.md` (IR-080 assignment
-//!   references) is accepted and, for that table family, is migration
-//!   `0010`; the same trigger pattern is to guard this check too: a
-//!   `trust_source` destination against `egress_allowlist_entry` (ruled by
-//!   the user, 2026-11-22, relayed by the lead). Accepted; implementation
-//!   pending: the migrations `0001` to `0009` are frozen, and no migration
-//!   adds the egress guard yet. Until it exists, the bare registry functions
-//!   still write any destination the `0004` checks allow.
+//! - A database backstop of the syntax rules. The egress check has one.
+//!   The trigger pattern of `docs/proposals/ir-080-assignment-write-guard.md`
+//!   is accepted (ruled by the user, 2026-11-22, relayed by the lead): for
+//!   the IR-080 assignment references it is migration `0010`, and for this
+//!   check it is migration `0011` (provisional lead pick, 2026-11-22;
+//!   migrations README, "What 0011 adds"). Its trigger
+//!   `trust_source_egress_enabled`, an `AFTER INSERT OR UPDATE` row
+//!   trigger, applies the "What", "Match" and "When" rules above to every
+//!   writer at the end of the statement, after the row is written and
+//!   every `0004` check has run, locking the entry `FOR SHARE`, and refuses
+//!   with `23514` naming `trust_source_discovery_url_egress_enabled` or
+//!   `trust_source_token_review_endpoint_egress_enabled`, which the
+//!   registry maps to [`RegistryError::Invariant`] of kind
+//!   [`InvariantKind::EgressEntryEnabled`]. This path checks first, so it
+//!   still refuses with [`SourceWriteError::EgressNotAllowed`]; at step 4
+//!   the trigger finds the entry this path holds, so the lock order above
+//!   is unchanged. The bare registry functions now get the `Invariant`,
+//!   but they still write a non-canonical destination that an enabled
+//!   entry lists with exactly that value.
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
+//! [`InvariantKind::EgressEntryEnabled`]: crate::persistence::registry::InvariantKind::EgressEntryEnabled
 //! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant
 //! [`AdminRole::TrustAdmin`]: crate::persistence::registry::AdminRole::TrustAdmin
 

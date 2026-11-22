@@ -94,7 +94,7 @@
 
 use std::{collections::BTreeMap, fmt::Debug};
 
-use skyoauth_scenarios::pg::TestDb;
+use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -257,33 +257,30 @@ async fn fixture() -> (TestDb, PgPool) {
         ),
         (GENERIC_SOURCE, "generic", "https://idp.example"),
     ] {
-        registry::create_trust_source(
-            &pool,
-            &NewTrustSource {
-                id: id.into(),
-                tenant_id: TENANT.into(),
-                name: name.into(),
-                kind: TrustSourceKind::OidcDiscovery,
-                exact_issuer: issuer.into(),
-                discovery_url: Some(format!("{issuer}/.well-known/openid-configuration")),
-                jwks_keyset_id: None,
-                cluster_id: None,
-                token_review_endpoint: None,
-                ca_bundle_ref: None,
-                ca_fingerprint: None,
-                reviewer_credential_ref: None,
-                review_timeout_ms: None,
-                audiences: strings(&["https://skyoauth.example"]),
-                algorithms: Some(strings(&["RS256"])),
-                proof_bounds: JsonObject::new(),
-                assertion_profile: AssertionProfile::ReusableJwt,
-                stale_revocation_acknowledged: None,
-                replay_mode: ReplayMode::Reusable,
-                status: Status::Enabled,
-            },
-        )
-        .await
-        .unwrap();
+        let new = NewTrustSource {
+            id: id.into(),
+            tenant_id: TENANT.into(),
+            name: name.into(),
+            kind: TrustSourceKind::OidcDiscovery,
+            exact_issuer: issuer.into(),
+            discovery_url: Some(format!("{issuer}/.well-known/openid-configuration")),
+            jwks_keyset_id: None,
+            cluster_id: None,
+            token_review_endpoint: None,
+            ca_bundle_ref: None,
+            ca_fingerprint: None,
+            reviewer_credential_ref: None,
+            review_timeout_ms: None,
+            audiences: strings(&["https://skyoauth.example"]),
+            algorithms: Some(strings(&["RS256"])),
+            proof_bounds: JsonObject::new(),
+            assertion_profile: AssertionProfile::ReusableJwt,
+            stale_revocation_acknowledged: None,
+            replay_mode: ReplayMode::Reusable,
+            status: Status::Enabled,
+        };
+        egress::allow_destinations(&pool, &new).await;
+        registry::create_trust_source(&pool, &new).await.unwrap();
     }
     (db, pool)
 }

@@ -91,7 +91,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use skyoauth_scenarios::pg::TestDb;
+use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -662,33 +662,30 @@ async fn a22_neg_other_registries_identities_never_authorize() {
         assert!(human.name.contains('@'));
         others.push(human.name);
         let issuer = format!("https://idp.example/{tenant}");
-        let source = registry::create_trust_source(
-            &pool,
-            &NewTrustSource {
-                id: format!("src_{tenant}"),
-                tenant_id: tenant.into(),
-                name: "idp".into(),
-                kind: TrustSourceKind::OidcDiscovery,
-                exact_issuer: issuer.clone(),
-                discovery_url: Some(format!("{issuer}/.well-known/openid-configuration")),
-                jwks_keyset_id: None,
-                cluster_id: None,
-                token_review_endpoint: None,
-                ca_bundle_ref: None,
-                ca_fingerprint: None,
-                reviewer_credential_ref: None,
-                review_timeout_ms: None,
-                audiences: vec!["https://skyoauth.example".into()],
-                algorithms: Some(vec!["RS256".into()]),
-                proof_bounds: JsonObject::new(),
-                assertion_profile: AssertionProfile::ReusableJwt,
-                stale_revocation_acknowledged: None,
-                replay_mode: ReplayMode::Reusable,
-                status: Status::Enabled,
-            },
-        )
-        .await
-        .unwrap();
+        let new = NewTrustSource {
+            id: format!("src_{tenant}"),
+            tenant_id: tenant.into(),
+            name: "idp".into(),
+            kind: TrustSourceKind::OidcDiscovery,
+            exact_issuer: issuer.clone(),
+            discovery_url: Some(format!("{issuer}/.well-known/openid-configuration")),
+            jwks_keyset_id: None,
+            cluster_id: None,
+            token_review_endpoint: None,
+            ca_bundle_ref: None,
+            ca_fingerprint: None,
+            reviewer_credential_ref: None,
+            review_timeout_ms: None,
+            audiences: vec!["https://skyoauth.example".into()],
+            algorithms: Some(vec!["RS256".into()]),
+            proof_bounds: JsonObject::new(),
+            assertion_profile: AssertionProfile::ReusableJwt,
+            stale_revocation_acknowledged: None,
+            replay_mode: ReplayMode::Reusable,
+            status: Status::Enabled,
+        };
+        egress::allow_destinations(&pool, &new).await;
+        let source = registry::create_trust_source(&pool, &new).await.unwrap();
         others.push(source.exact_issuer);
     }
     assert_eq!(others.len(), 3 * SHAPES.len() + 4 * TENANTS.len());

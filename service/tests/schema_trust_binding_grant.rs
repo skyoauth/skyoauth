@@ -43,6 +43,19 @@ const SEED: &str = r#"
     INSERT INTO trust_keyset_version VALUES
         ('kv_1', 'ten_a', 'ks_1', '{"keys": [{"kty": "EC", "crv": "P-256", "kid": "k1", "x": "AA", "y": "AA"}]}',
          'sha256:01', '2026-01-01Z', NULL, 'enabled', '{"uploaded_by": "adm_1"}');
+    -- Enabled egress entries for the seeded destinations (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled'),
+        ('egr_seed_2', 'token_review', 'https://k3s.internal.example:6443', 'enabled'),
+        -- And for the destinations the test statements write.
+        ('egr_seed_3', 'oidc_discovery', 'https://x/d', 'enabled'),
+        ('egr_seed_4', 'token_review', 'https://x:6443', 'enabled'),
+        ('egr_seed_5', 'oidc_discovery', 'https://ci.partner.example/.well-known/openid-configuration', 'enabled'),
+        ('egr_seed_6', 'oidc_discovery', 'https://kubernetes.default.svc/.well-known/openid-configuration', 'enabled'),
+        ('egr_seed_7', 'oidc_discovery', 'https://token.actions.githubusercontent.com/other', 'enabled'),
+        ('egr_seed_8', 'token_review', 'https://k3s-2.internal.example:6443', 'enabled'),
+        ('egr_seed_9', 'oidc_discovery', 'https://x/' || repeat('d', 2038), 'enabled'),
+        ('egr_seed_10', 'token_review', 'https://x/' || repeat('d', 2038), 'enabled');
     INSERT INTO trust_source VALUES
         ('src_gh', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',
@@ -275,6 +288,9 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
                 false,
             ),
             guard("service_grant_resource_server", "assignment_active", false),
+            // The egress guard of 0011
+            // (schema_trust_source_egress_guard.rs).
+            guard("trust_source", "egress_enabled", false),
         ])
         .collect();
     expected.sort();
@@ -1121,12 +1137,26 @@ async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
 
 /// Each case accepts a value with a Unicode space that is not ASCII
 /// (U+3000, U+1680, U+2000, U+2028, U+2029); each runs in a transaction
-/// that is rolled back.
+/// that is rolled back. A destination case first adds the enabled egress
+/// entry of its value in that transaction, which the `0011` egress guard
+/// needs.
 async fn accepts_unicode_spaces(pool: &PgPool, cases: &[(String, String)]) {
     let mut conn = pool.acquire().await.unwrap();
-    for (sql, _) in cases {
+    for (sql, prefix) in cases {
+        let purpose = match prefix.as_str() {
+            "trust_source_discovery_url" => Some("oidc_discovery"),
+            "trust_source_token_review_endpoint" => Some("token_review"),
+            _ => None,
+        };
         for code in [12288, 5760, 8192, 8232, 8233] {
-            let sql = sql.replace("{v}", &format!("'a' || chr({code}) || 'b'"));
+            let value = format!("'a' || chr({code}) || 'b'");
+            let entry = purpose.map_or_else(String::new, |purpose| {
+                format!(
+                    "INSERT INTO egress_allowlist_entry VALUES \
+                     ('egr_space', '{purpose}', {value}, 'enabled'); "
+                )
+            });
+            let sql = format!("{entry}{}", sql.replace("{v}", &value));
             if let Err(err) = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK")))
                 .execute(&mut *conn)
                 .await
@@ -1158,6 +1188,9 @@ async fn the_largest_keys_fit_their_indexes() {
     );
     let name = |first: u32| md5_hex(first, 64);
     let exact = |first: u32| md5_hex(first, 64);
+    // The 2048-byte TokenReview endpoint, with the enabled entry the `0011`
+    // egress guard needs.
+    let endpoint = exact(70001);
     let sql = format!(
         r#"INSERT INTO tenant VALUES ({t}, 'big', 'ns_big', 'enabled');
            INSERT INTO principal VALUES ({w}, {t}, 'workload', 'w', 'enabled'), ({s}, {t}, 'service', 's', 'enabled');
@@ -1166,7 +1199,8 @@ async fn the_largest_keys_fit_their_indexes() {
            INSERT INTO trust_keyset_version VALUES ({v}, {t}, {k}, '{{"keys": [{{"kty": "EC"}}]}}', {}, '2026-01-01Z', NULL, 'enabled', '{{}}');
            INSERT INTO trust_source VALUES ({src}, {t}, {}, 'uploaded_jwks', {}, NULL, {k}, NULL, NULL, NULL, NULL, NULL, NULL,
                '["aud"]', '["RS256"]', '{{}}', 'on_demand_jwt', NULL, 'single_use', 'enabled');
-           INSERT INTO trust_source VALUES ({tr}, {t}, {}, 'kubernetes_token_review', 'https://x', NULL, NULL, {}, {}, {}, {}, {}, 1,
+           INSERT INTO egress_allowlist_entry VALUES ('egr_big', 'token_review', {endpoint}, 'enabled');
+           INSERT INTO trust_source VALUES ({tr}, {t}, {}, 'kubernetes_token_review', 'https://x', NULL, NULL, {}, {endpoint}, {}, {}, {}, 1,
                '["aud"]', NULL, '{{}}', 'projected_service_account', NULL, 'reusable', 'enabled');
            INSERT INTO principal_binding VALUES ({b}, {t}, {}, {src}, 'generic_production', '{{"sub": "a"}}', {w}, 'enabled');
            INSERT INTO service_identity VALUES ({s}, {t}, {}, '["read"]', '{{}}', 'enabled');
@@ -1181,7 +1215,6 @@ async fn the_largest_keys_fit_their_indexes() {
         exact(40001),
         name(50001),
         md5_id(60001),
-        exact(70001),
         exact(80001),
         exact(90001),
         exact(100001),

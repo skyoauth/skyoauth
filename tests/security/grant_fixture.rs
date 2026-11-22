@@ -19,7 +19,7 @@ use std::{
 };
 
 use serde_json::json;
-use skyoauth_scenarios::pg::TestDb;
+use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -130,33 +130,30 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
         .unwrap();
     }
     let issuer = "https://token.actions.githubusercontent.com";
-    registry::create_trust_source(
-        &pool,
-        &NewTrustSource {
-            id: "src_a".into(),
-            tenant_id: TENANT.into(),
-            name: "github".into(),
-            kind: TrustSourceKind::OidcDiscovery,
-            exact_issuer: issuer.into(),
-            discovery_url: Some(format!("{issuer}/.well-known/openid-configuration")),
-            jwks_keyset_id: None,
-            cluster_id: None,
-            token_review_endpoint: None,
-            ca_bundle_ref: None,
-            ca_fingerprint: None,
-            reviewer_credential_ref: None,
-            review_timeout_ms: None,
-            audiences: strings(&["https://skyoauth.example"]),
-            algorithms: Some(strings(&["RS256"])),
-            proof_bounds: JsonObject::new(),
-            assertion_profile: AssertionProfile::ReusableJwt,
-            stale_revocation_acknowledged: None,
-            replay_mode: ReplayMode::Reusable,
-            status: Status::Enabled,
-        },
-    )
-    .await
-    .unwrap();
+    let source = NewTrustSource {
+        id: "src_a".into(),
+        tenant_id: TENANT.into(),
+        name: "github".into(),
+        kind: TrustSourceKind::OidcDiscovery,
+        exact_issuer: issuer.into(),
+        discovery_url: Some(format!("{issuer}/.well-known/openid-configuration")),
+        jwks_keyset_id: None,
+        cluster_id: None,
+        token_review_endpoint: None,
+        ca_bundle_ref: None,
+        ca_fingerprint: None,
+        reviewer_credential_ref: None,
+        review_timeout_ms: None,
+        audiences: strings(&["https://skyoauth.example"]),
+        algorithms: Some(strings(&["RS256"])),
+        proof_bounds: JsonObject::new(),
+        assertion_profile: AssertionProfile::ReusableJwt,
+        stale_revocation_acknowledged: None,
+        replay_mode: ReplayMode::Reusable,
+        status: Status::Enabled,
+    };
+    egress::allow_destinations(&pool, &source).await;
+    registry::create_trust_source(&pool, &source).await.unwrap();
     registry::create_principal_binding(
         &pool,
         &NewPrincipalBinding {

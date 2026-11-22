@@ -27,13 +27,14 @@ const GUARD: &str = "SK001";
 /// `0005`, `instance_security_policy` and `recovery_state`, which
 /// bootstrap writes, and `administrative_operation`, which the recovery
 /// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
-/// `0008` and `0009` name them, and the constraint names that the `0010`
-/// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), sorted byte-wise. A
-/// unique, foreign key or check violation maps to a typed variant only for a
-/// name listed here. The database test
+/// `0008` and `0009` name them, the constraint names that the `0010`
+/// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), and the two names the
+/// `0011` egress guard trigger raises ([`EGRESS_ENTRY_ENABLED`]), sorted
+/// byte-wise. A unique, foreign key or check violation maps to a typed
+/// variant only for a name listed here. The database test
 /// `registry_constraint_names_match_the_catalog` keeps the list equal to the
-/// catalog: the named constraints, and the triggers of the `0010` guard
-/// function.
+/// catalog: the named constraints, the triggers of the `0010` guard function,
+/// and the names the guard functions raise with `CONSTRAINT = '...'`.
 pub const KNOWN_CONSTRAINTS: &[&str] = &[
     // The three operator tables of `0005` (`operator.rs`).
     "admin_credential_admin_id_fkey",
@@ -357,6 +358,8 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_source_cluster_id_key",
     "trust_source_cluster_id_octet_length_check",
     "trust_source_discovery_url_check",
+    // Raised by the `0011` egress guard trigger, not a catalog constraint.
+    "trust_source_discovery_url_egress_enabled",
     "trust_source_discovery_url_kind_check",
     "trust_source_discovery_url_no_space_check",
     "trust_source_discovery_url_octet_length_check",
@@ -389,6 +392,8 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_source_tenant_id_name_key",
     "trust_source_tenant_id_octet_length_check",
     "trust_source_token_review_endpoint_check",
+    // Raised by the `0011` egress guard trigger, not a catalog constraint.
+    "trust_source_token_review_endpoint_egress_enabled",
     "trust_source_token_review_endpoint_no_space_check",
     "trust_source_token_review_endpoint_octet_length_check",
     "trust_source_token_review_fields_kind_check",
@@ -404,6 +409,18 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 pub const ASSIGNMENT_ACTIVE: [&str; 2] = [
     "service_grant_resource_server_assignment_active",
     "service_identity_resource_server_assignment_active",
+];
+
+/// The constraint names that the `0011` egress guard trigger of
+/// `trust_source` raises with a `check_violation` (`23514`) when a written
+/// destination matches no enabled egress allowlist entry of its purpose
+/// (IR-152; provisional lead pick, 2026-11-22), one per destination column.
+/// They are not catalog constraints; both are in [`KNOWN_CONSTRAINTS`]. They
+/// map to [`InvariantKind::EgressEntryEnabled`], not to
+/// [`InvariantKind::Check`].
+pub const EGRESS_ENTRY_ENABLED: [&str; 2] = [
+    "trust_source_discovery_url_egress_enabled",
+    "trust_source_token_review_endpoint_egress_enabled",
 ];
 
 /// The error of a registry function.
@@ -548,6 +565,13 @@ pub enum InvariantKind {
     /// provisional lead pick, 2026-11-22). A missing assignment is
     /// [`Self::ForeignKey`] instead.
     AssignmentActive,
+    /// `23514` from the `0011` egress guard trigger of `trust_source`
+    /// ([`EGRESS_ENTRY_ENABLED`]): a written destination (`discovery_url` or
+    /// `token_review_endpoint`) matches no egress allowlist entry of its
+    /// purpose, or only one that is not enabled (IR-152; provisional lead
+    /// pick, 2026-11-22). The service refuses such a write first, with its
+    /// own error; this is what a registry writer or raw SQL gets.
+    EgressEntryEnabled,
 }
 
 impl InvariantKind {
@@ -557,6 +581,7 @@ impl InvariantKind {
             Self::Check => "check",
             Self::NotNull => "not-null",
             Self::AssignmentActive => "active-assignment",
+            Self::EgressEntryEnabled => "enabled-egress-entry",
         }
     }
 }
@@ -628,6 +653,8 @@ fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
             RegistryError::Invariant {
                 kind: if ASSIGNMENT_ACTIVE.contains(&constraint) {
                     InvariantKind::AssignmentActive
+                } else if EGRESS_ENTRY_ENABLED.contains(&constraint) {
+                    InvariantKind::EgressEntryEnabled
                 } else {
                     InvariantKind::Check
                 },
@@ -955,6 +982,57 @@ mod tests {
         }
         // The deferred binding-set check at commit is a guard like any other.
         assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+    }
+
+    /// The `0011` egress guard's `23514` names a destination column and
+    /// maps to `EgressEntryEnabled`, never `Check`; a `40001` or `40P01`
+    /// naming it is still `Retry`, and the other checks of the destination
+    /// columns keep `Check`.
+    #[test]
+    fn the_egress_guard_names_map_to_their_own_invariant_kind() {
+        assert!(EGRESS_ENTRY_ENABLED.windows(2).all(|w| w[0] < w[1]));
+        for name in EGRESS_ENTRY_ENABLED {
+            assert_eq!(known_constraint(name), Some(name));
+            let error = map(Some("23514"), Some(name));
+            match &error {
+                RegistryError::Invariant {
+                    kind: InvariantKind::EgressEntryEnabled,
+                    constraint: Some(constraint),
+                } => assert_eq!(*constraint, name),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(
+                error.to_string(),
+                format!("registry write violates enabled-egress-entry constraint {name}")
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                format!("Invariant {{ kind: EgressEntryEnabled, constraint: Some({name:?}) }}")
+            );
+            assert_redacted(&error);
+            for code in ["40001", "40P01"] {
+                assert!(
+                    matches!(map(Some(code), Some(name)), RegistryError::Retry(_)),
+                    "{code}"
+                );
+            }
+        }
+        for name in [
+            "trust_source_discovery_url_check",
+            "trust_source_token_review_endpoint_no_space_check",
+        ] {
+            let error = map(Some("23514"), Some(name));
+            assert!(
+                matches!(
+                    error,
+                    RegistryError::Invariant {
+                        kind: InvariantKind::Check,
+                        constraint: Some(constraint)
+                    } if constraint == name
+                ),
+                "{error:?}"
+            );
+        }
     }
 
     /// The `0010` guards' `23514` names their trigger and maps to

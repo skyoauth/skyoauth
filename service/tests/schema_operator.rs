@@ -33,6 +33,10 @@ const SEED: &str = r#"
     UPDATE audit_chain_head SET sequence = 2, head_hash = '\x02';
     INSERT INTO audit_event VALUES ('evt_3', 'ten_a', 3, '\x02', '2026-11-20Z', 'adm_2', 'service_grant.update', 'grt_1', 1, NULL, 'pending');
     UPDATE audit_chain_head SET sequence = 3, head_hash = '\x03';
+    -- Enabled egress entries for the seeded destinations (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled'),
+        ('egr_seed_2', 'oidc_discovery', 'https://x/d', 'enabled');
     INSERT INTO trust_source VALUES
         ('src_a', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',
