@@ -665,8 +665,10 @@ jobs:
       # implemented stage lists is in the nextest list of its package and
       # target, is not #[ignore]d or filtered out, and comes from the job of
       # one of the stage's legs, each of those jobs with a pos and a neg
-      # test; and every listed scenario-named test (a<NN>_…) is in some
-      # stage's tests. Listing needs the build (the test run above made it)
+      # test; the partial tests that a planned stage lists are checked the
+      # same way (resolve, same job, a test of the stage's own entry) but
+      # need no pos and neg per job; and every listed scenario-named test
+      # (a<NN>_…) is in some stage's tests. Listing needs the build (the test run above made it)
       # but no database. A test of a package missing from the list fails the
       # check, so the list names, with -p, every package that TEST_JOBS in
       # scripts/ci/report-conformance.mjs names, from the PR that adds that
