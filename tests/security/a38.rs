@@ -17,16 +17,25 @@
 //!   revision 1, read back and listed
 //!   (`a38_pos_dormant_impersonation_grant_stored`).
 //! - **Negative.** The dormant record cannot be enabled nor lose its
-//!   reapproval marker: on create, refused by
+//!   reapproval marker. On create, the `0004` checks
 //!   `service_grant_impersonation_disabled_check` and
-//!   `service_grant_activation_mode_check`; by update, refused by the `0009`
-//!   guard that freezes a stored impersonation grant (`Guard`). A refused
-//!   write changes nothing
+//!   `service_grant_activation_mode_check` refuse it (`Invariant`); for an
+//!   impersonation grant they are reached on create only. By update, the
+//!   `0009` guard `service_grant_impersonation_frozen` refuses it first
+//!   (`Guard`). A refused write changes nothing
 //!   (`a38_neg_dormant_grant_enable_refused`,
 //!   `a38_neg_dormant_grant_reapproval_marker_kept`). A disable/re-enable
 //!   cycle of a delegation grant moves its revision forward (1, 2, 3), and
 //!   writes at the earlier revisions are stale
 //!   (`a38_neg_reenable_does_not_restore_prior_revision`).
+//!
+//! The guard refuses every update of a stored impersonation grant, whatever
+//! it changes, so the update negatives show that no update reaches the
+//! dormant record, not which value is refused: an update that changes
+//! neither the status nor the marker, such as a rename, is refused the
+//! same way (`registry_writes_to_a_dormant_grant_are_guard_errors` in
+//! `service/tests/schema_reserved_ids_and_dormant_grants.rs`). Which values
+//! the `0004` checks refuse is shown by the create negatives only.
 //!
 //! The re-enable case shows only that the registry API moves a revision
 //! forward and refuses writes at older ones: every update sets
@@ -78,7 +87,8 @@ async fn a38_neg_dormant_grant_enable_refused() {
 }
 
 /// The reapproval marker stays: clearing it, alone or while enabling, is
-/// refused on update, and a create without it (or enabled) stores nothing.
+/// refused on update (`Guard`), and a create without it (or enabled) is
+/// refused by its `0004` check and stores nothing.
 #[tokio::test]
 async fn a38_neg_dormant_grant_reapproval_marker_kept() {
     let (db, pool) = tenant().await;

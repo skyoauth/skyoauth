@@ -37,7 +37,14 @@
 //! Not covered here: export and import (rejecting an enabled or
 //! reapproval-cleared record on import), startup with an active
 //! unsupported record seeded by the restore fixture, rewriting nothing on
-//! that refusal, and the M1b forward-migration stage.
+//! that refusal, and the M1b forward-migration stage. The database bounds
+//! that fixture (docs/testing/conformance-layout.md, "Restore-state
+//! cases"): the `0004` checks refuse an active impersonation row on every
+//! insert, so it cannot be seeded as stored rows; a seeded grant and its
+//! list rows are written in one transaction, since `0009` lets only the
+//! creating transaction write them; and since `0009` a stored
+//! impersonation grant cannot be rewritten (`Guard`), though the refusal
+//! must still be shown to rewrite nothing.
 
 use skyoauth_service::persistence::registry::{ActivationState, GrantMode, Status};
 
@@ -98,7 +105,8 @@ async fn a53_neg_enabled_reapproval_cleared_create_refused() {
     create_refused(both).await;
 }
 
-/// Both enabling updates: with the reapproval marker kept, and cleared.
+/// Both enabling updates, with the reapproval marker kept and cleared, are
+/// refused by the `0009` guard (`Guard`) before any `0004` check.
 #[tokio::test]
 async fn a53_neg_enabling_patch_refused() {
     let (db, pool) = tenant().await;
