@@ -270,23 +270,28 @@
 //!   wiring precondition under "Cost").
 //! - Moving the A04 scenario tests from the raw writers to this module,
 //!   once A04 M1a is claimed.
+//!
+//! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
+//! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant
+//! [`AdminRole::TrustAdmin`]: crate::persistence::registry::AdminRole::TrustAdmin
 
 use std::{fmt, time::SystemTime};
 
 use serde_json::Value;
-use sqlx::{Connection, Postgres, Transaction};
+use sqlx::{Postgres, Transaction};
 use tokio::sync::Semaphore;
 
+use super::write::{WriteError, authorize_trust_admin, in_savepoint, require_read_committed};
 use crate::jwk::{
     Algorithm, JwkSet, JwkSetError, KNOWN_ALGORITHMS, KeysetFingerprint, KeysetVersion,
     OverlapError, PRIVATE_MEMBERS, ValidatedKeyset, VersionStatus, check_version_overlap,
     parse_stored, validate_keyset,
 };
 use crate::persistence::registry::{
-    AdminRole, AuditActor, JsonObject, KeysetVersionText, NewAuditEvent, NewTrustKeysetVersion,
-    OperatorRequest, OperatorScope, RegistryError, Status, TrustKeysetVersion, append_audit_event,
-    authorize_operator_locked, create_trust_keyset_version, floor_to_microsecond,
-    read_enabled_keyset_versions, read_keyset_version, update_trust_keyset_version,
+    AuditActor, JsonObject, KeysetVersionText, NewAuditEvent, NewTrustKeysetVersion, RegistryError,
+    Status, TrustKeysetVersion, append_audit_event, create_trust_keyset_version,
+    floor_to_microsecond, read_enabled_keyset_versions, read_keyset_version,
+    update_trust_keyset_version,
 };
 
 /// The most JWK set validations that run at once, across the process
@@ -315,13 +320,6 @@ const DISABLE_ACTION: &str = "trust_keyset_version.disable";
 
 /// The outcome of the event (inferred, as for bootstrap).
 const SUCCESS: &str = "success";
-
-/// Step 0: the transaction's isolation level.
-const TRANSACTION_ISOLATION: &str = "SELECT current_setting('transaction_isolation')";
-
-/// The one isolation level the writes run at, as `transaction_isolation`
-/// names it.
-const READ_COMMITTED: &str = "read committed";
 
 /// Step 2 of a status change: the version's keyset, immutable, unlocked.
 const VERSION_KEYSET: &str =
@@ -504,6 +502,11 @@ impl From<sqlx::Error> for KeysetWriteError {
     }
 }
 
+impl WriteError for KeysetWriteError {
+    const UNSUPPORTED_ISOLATION: Self = Self::UnsupportedIsolation;
+    const UNAUTHORIZED: Self = Self::Unauthorized;
+}
+
 /// Runs `work` on tokio's blocking pool once one of the
 /// [`VALIDATION_WORKERS`] permits is free. The permit moves into the
 /// blocking task, so it is held until `work` returns even if the caller's
@@ -654,37 +657,6 @@ fn names_a_private_member(provenance: &JsonObject) -> bool {
     }
 }
 
-/// Step 0: `READ COMMITTED` only.
-async fn require_read_committed(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<(), KeysetWriteError> {
-    let isolation: String = sqlx::query_scalar(TRANSACTION_ISOLATION)
-        .fetch_one(&mut **transaction)
-        .await?;
-    if isolation != READ_COMMITTED {
-        return Err(KeysetWriteError::UnsupportedIsolation);
-    }
-    Ok(())
-}
-
-/// Step 1: a `trust_admin` of `tenant_id`, locked until the transaction
-/// ends; the operator's ID.
-async fn authorize(
-    transaction: &mut Transaction<'_, Postgres>,
-    public_identity: &str,
-    tenant_id: &str,
-) -> Result<String, KeysetWriteError> {
-    let request = OperatorRequest {
-        public_identity,
-        scope: OperatorScope::Tenant(tenant_id),
-        role: AdminRole::TrustAdmin,
-    };
-    match authorize_operator_locked(transaction, &request).await? {
-        Some(operator) => Ok(operator.admin_id),
-        None => Err(KeysetWriteError::Unauthorized),
-    }
-}
-
 /// Step 3: the parent keyset `FOR NO KEY UPDATE`.
 async fn lock_keyset(
     transaction: &mut Transaction<'_, Postgres>,
@@ -749,18 +721,10 @@ pub async fn create_version(
     if names_a_private_member(new.provenance) {
         return Err(KeysetWriteError::PrivateMemberInProvenance);
     }
-    let mut savepoint = transaction.begin().await?;
-    match create_steps(&mut savepoint, public_identity, new, audit).await {
-        Ok(version) => {
-            savepoint.commit().await?;
-            Ok(version)
-        }
-        Err(err) => {
-            // The step's error says more than a failed savepoint rollback.
-            let _ = savepoint.rollback().await;
-            Err(err)
-        }
-    }
+    in_savepoint(transaction, async |savepoint| {
+        create_steps(savepoint, public_identity, new, audit).await
+    })
+    .await
 }
 
 /// Steps 0 to 7 of [`create_version`], in its savepoint.
@@ -770,8 +734,10 @@ async fn create_steps(
     new: &NewKeysetVersion<'_>,
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
-    require_read_committed(transaction).await?;
-    let admin_id = authorize(transaction, public_identity, new.tenant_id).await?;
+    require_read_committed::<KeysetWriteError>(transaction).await?;
+    let admin_id =
+        authorize_trust_admin::<KeysetWriteError>(transaction, public_identity, new.tenant_id)
+            .await?;
     lock_keyset(transaction, new.tenant_id, new.keyset_id).await?;
     if new.status == Status::Enabled {
         let rows =
@@ -868,18 +834,10 @@ async fn set_status(
     status: Status,
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
-    let mut savepoint = transaction.begin().await?;
-    match status_steps(&mut savepoint, public_identity, target, status, audit).await {
-        Ok(version) => {
-            savepoint.commit().await?;
-            Ok(version)
-        }
-        Err(err) => {
-            // The step's error says more than a failed savepoint rollback.
-            let _ = savepoint.rollback().await;
-            Err(err)
-        }
-    }
+    in_savepoint(transaction, async |savepoint| {
+        status_steps(savepoint, public_identity, target, status, audit).await
+    })
+    .await
 }
 
 /// Steps 0 to 7 of a status change, in its savepoint.
@@ -890,8 +848,9 @@ async fn status_steps(
     status: Status,
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
-    require_read_committed(transaction).await?;
-    let admin_id = authorize(transaction, public_identity, tenant_id).await?;
+    require_read_committed::<KeysetWriteError>(transaction).await?;
+    let admin_id =
+        authorize_trust_admin::<KeysetWriteError>(transaction, public_identity, tenant_id).await?;
     let keyset_id: String = sqlx::query_scalar(VERSION_KEYSET)
         .bind(tenant_id)
         .bind(id)

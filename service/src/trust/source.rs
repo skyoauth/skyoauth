@@ -249,16 +249,20 @@
 //!   proposes a similar guard for a different table family (IR-080
 //!   assignment references), not for this check. The bare registry functions
 //!   still write any destination the `0004` checks allow.
+//!
+//! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
+//! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant
+//! [`AdminRole::TrustAdmin`]: crate::persistence::registry::AdminRole::TrustAdmin
 
 use std::{fmt, time::SystemTime};
 
-use sqlx::{Connection, Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 use url::Url;
 
+use super::write::{WriteError, authorize_trust_admin, in_savepoint, require_read_committed};
 use crate::persistence::registry::{
-    AdminRole, AuditActor, EgressPurpose, NewAuditEvent, NewTrustSource, OperatorRequest,
-    OperatorScope, RegistryError, Status, TrustSource, TrustSourceChanges, append_audit_event,
-    authorize_operator_locked, create_trust_source, update_trust_source,
+    AuditActor, EgressPurpose, NewAuditEvent, NewTrustSource, RegistryError, Status, TrustSource,
+    TrustSourceChanges, append_audit_event, create_trust_source, update_trust_source,
 };
 
 /// The member name of a trust source's discovery URL, as errors name it.
@@ -276,13 +280,6 @@ const UPDATE_ACTION: &str = "trust_source.update";
 
 /// The outcome of the event (inferred, as for bootstrap).
 const SUCCESS: &str = "success";
-
-/// Step 0: the transaction's isolation level.
-const TRANSACTION_ISOLATION: &str = "SELECT current_setting('transaction_isolation')";
-
-/// The one isolation level the writes run at, as `transaction_isolation`
-/// names it.
-const READ_COMMITTED: &str = "read committed";
 
 /// Step 2 of an update: the stored row, locked before any entry so that a
 /// concurrent update of the source waits here and holds no entry lock. Its
@@ -384,6 +381,11 @@ impl From<sqlx::Error> for SourceWriteError {
     }
 }
 
+impl WriteError for SourceWriteError {
+    const UNSUPPORTED_ISOLATION: Self = Self::UnsupportedIsolation;
+    const UNAUTHORIZED: Self = Self::Unauthorized;
+}
+
 /// A member to check: its name, the purpose of the entries that may match
 /// it, and its value.
 #[derive(Clone, Copy)]
@@ -482,37 +484,6 @@ fn changed<'a>(new: &'a Option<String>, stored: Option<&str>) -> Option<&'a str>
     new.as_deref().filter(|new| Some(*new) != stored)
 }
 
-/// Step 0: `READ COMMITTED` only.
-async fn require_read_committed(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<(), SourceWriteError> {
-    let isolation: String = sqlx::query_scalar(TRANSACTION_ISOLATION)
-        .fetch_one(&mut **transaction)
-        .await?;
-    if isolation != READ_COMMITTED {
-        return Err(SourceWriteError::UnsupportedIsolation);
-    }
-    Ok(())
-}
-
-/// Step 1: a `trust_admin` of `tenant_id`, locked until the transaction
-/// ends; the operator's ID.
-async fn authorize(
-    transaction: &mut Transaction<'_, Postgres>,
-    public_identity: &str,
-    tenant_id: &str,
-) -> Result<String, SourceWriteError> {
-    let request = OperatorRequest {
-        public_identity,
-        scope: OperatorScope::Tenant(tenant_id),
-        role: AdminRole::TrustAdmin,
-    };
-    match authorize_operator_locked(transaction, &request).await? {
-        Some(operator) => Ok(operator.admin_id),
-        None => Err(SourceWriteError::Unauthorized),
-    }
-}
-
 /// Step 3: each destination's entry `FOR SHARE`, in order; each must be
 /// enabled.
 async fn check_egress(
@@ -557,18 +528,10 @@ pub async fn create_source(
     for destination in &destinations {
         check_syntax(*destination)?;
     }
-    let mut savepoint = transaction.begin().await?;
-    match create_steps(&mut savepoint, public_identity, new, &destinations, audit).await {
-        Ok(source) => {
-            savepoint.commit().await?;
-            Ok(source)
-        }
-        Err(err) => {
-            // The step's error says more than a failed savepoint rollback.
-            let _ = savepoint.rollback().await;
-            Err(err)
-        }
-    }
+    in_savepoint(transaction, async |savepoint| {
+        create_steps(savepoint, public_identity, new, &destinations, audit).await
+    })
+    .await
 }
 
 /// Steps 0 to 5 of [`create_source`], in its savepoint.
@@ -579,8 +542,10 @@ async fn create_steps(
     destinations: &[Destination<'_>],
     audit: &SourceAudit<'_>,
 ) -> Result<TrustSource, SourceWriteError> {
-    require_read_committed(transaction).await?;
-    let admin_id = authorize(transaction, public_identity, &new.tenant_id).await?;
+    require_read_committed::<SourceWriteError>(transaction).await?;
+    let admin_id =
+        authorize_trust_admin::<SourceWriteError>(transaction, public_identity, &new.tenant_id)
+            .await?;
     check_egress(transaction, destinations).await?;
     let source = create_trust_source(&mut **transaction, new).await?;
     append_audit_event(
@@ -621,18 +586,10 @@ pub async fn update_source(
     audit: &SourceAudit<'_>,
 ) -> Result<TrustSource, SourceWriteError> {
     let target = (tenant_id, id, expected_revision);
-    let mut savepoint = transaction.begin().await?;
-    match update_steps(&mut savepoint, public_identity, target, changes, audit).await {
-        Ok(source) => {
-            savepoint.commit().await?;
-            Ok(source)
-        }
-        Err(err) => {
-            // The step's error says more than a failed savepoint rollback.
-            let _ = savepoint.rollback().await;
-            Err(err)
-        }
-    }
+    in_savepoint(transaction, async |savepoint| {
+        update_steps(savepoint, public_identity, target, changes, audit).await
+    })
+    .await
 }
 
 /// Steps 0 to 5 of [`update_source`], in its savepoint. `target` is the
@@ -644,8 +601,9 @@ async fn update_steps(
     changes: &TrustSourceChanges,
     audit: &SourceAudit<'_>,
 ) -> Result<TrustSource, SourceWriteError> {
-    require_read_committed(transaction).await?;
-    let admin_id = authorize(transaction, public_identity, tenant_id).await?;
+    require_read_committed::<SourceWriteError>(transaction).await?;
+    let admin_id =
+        authorize_trust_admin::<SourceWriteError>(transaction, public_identity, tenant_id).await?;
     let Some(stored) = sqlx::query(LOCK_SOURCE)
         .bind(tenant_id)
         .bind(id)
