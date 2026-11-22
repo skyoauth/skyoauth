@@ -121,14 +121,21 @@
 //! - The non-empty window rule (`expires_at > effective_at`) exists only as
 //!   the `0004` check `trust_keyset_version_validity_check`, in no spec;
 //!   the window negative pins that check as it stands.
-//! - Whether adding a keyset version is a widening change that needs
-//!   review: OQ-ADR008-3's original question names "a new keyset version"
-//!   among its examples, and its decision (the server detects widening;
-//!   ADR-008 item 12) does not classify it.
 //! - Tasks §3 marks `expires_at` optional (`expires_at?`), while T24.2 asks
 //!   for "explicit validity windows" and ADR-005 item 5 for "explicit
 //!   validity": a tension inside the spec. The registry follows tasks §3
 //!   and stores an open-ended window, which the positive uploads.
+//!
+//! **Ruled, provisional (the ADRs are unratified).** Whether adding a
+//! keyset version is a widening change was open (OQ-ADR008-3's original
+//! question names "a new keyset version"); the user ruled on 2026-11-22
+//! (relayed by the lead; ADR-008 item 12) that a keyset version write (a
+//! create, an enable, a re-enable) and a trust source write count as
+//! widening and need an IR-054 second-approver approval while
+//! `widening_second_approver` is on. The registry does not enforce it and
+//! the second-approver flow (T14.1, T14.2) is not built, so no test here
+//! claims it: the positive tests create, enable and re-enable versions
+//! with no approval because the registry has none to ask for.
 //!
 //! # Not expressible in the registry, so not tested
 //!
@@ -176,9 +183,9 @@
 //!   and disable (T13.8 provisioning, T13.2 roles), writing the version and
 //!   its audit event atomically, with the expected revision (T11.6;
 //!   IR-052), and the server's widening detection with its explicit flag
-//!   for a new or re-enabled version (ADR-008 item 12; OQ-ADR008-3, open
-//!   for a keyset version, see above). The registry writes no event and
-//!   does not tell widening from narrowing.
+//!   for a new or re-enabled version, which the ruling above counts as
+//!   widening (ADR-008 item 12; OQ-ADR008-3; IR-054). The registry writes
+//!   no event and does not tell widening from narrowing.
 //!
 //! Open owner question, not claimed either: that the rotation is
 //! independent of human-provider changes (T11.6's last clause). Human

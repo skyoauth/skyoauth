@@ -588,7 +588,8 @@ The database does not enforce these rules; the service must:
   `skyoauth_service::trust` (`create_source`, `update_source`) does both,
   in the caller's transaction (T11.2; see "Trust source writes" under
   "Rust registry surface"); the bare registry functions do not, and no
-  database trigger backs it (the migrations are frozen);
+  database trigger backs it yet (the migrations are frozen; a trigger for
+  it is accepted, implementation pending, see the follow-ups there);
 - resolve `ca_bundle_ref` and `reviewer_credential_ref` only within the
   tenant's secret namespace (IR-034);
 - check that a binding's template fits its source (ADR-016 item 4), review
@@ -629,7 +630,8 @@ The database does not enforce these rules; the service must:
   negative zero) and not one of the eight small-order points, with
   hand-written arithmetic and no new dependency (provisional lead pick,
   2026-11-21; a curve crate would add 8 to 12 locked packages, a
-  maintainer decision). An Ed25519 key with a torsion component is
+  maintainer decision; ruled by the user, 2026-11-22, relayed by the lead:
+  the hand-written arithmetic stays, no new crate). An Ed25519 key with a torsion component is
   accepted and not claimed safe: T11.7 must still use strict Ed25519
   verification, and T24.3's "fake keys" negative stays the acceptance
   test. Validation is CPU-bound (about 8.8 ms per Ed25519 key in release,
@@ -2869,11 +2871,14 @@ startup. The picks are the lead's (provisional lead pick, 2026-11-22)
 unless marked inferred, and the `jwk` picks dated 2026-11-21 it relies on
 stay provisional until Gate M0:
 
-- It must not be wired to any endpoint before the maintainer rules whether
-  a keyset version write counts as widening and needs an IR-054 approval
-  while `widening_second_approver` is on (OQ-ADR008-3, IR-052), and before
-  the request layer of T14.1 and T14.2 exists. Until then it assumes a
-  single actor: no write waits for an approval.
+- A keyset version write (a create, an enable, a re-enable) counts as
+  widening and needs an IR-054 approval by a second approver while
+  `widening_second_approver` is on (ruled by the user, 2026-11-22, relayed
+  by the lead; this decides OQ-ADR008-3 and the IR-052 widening question
+  for this write). It must not be wired to any endpoint before the T14.1
+  and T14.2 design of the second-approver flow, and before the request
+  layer of T14.1 and T14.2 exists. Until then it assumes a single actor:
+  no write waits for an approval.
 - It must be the only path that writes a keyset version outside tests.
   The registry writers `create_trust_keyset_version` and
   `update_trust_keyset_version` are the unchecked floor (any `public_jwks`
@@ -3068,8 +3073,8 @@ Follow-ups and open questions:
 
 - An egress entry writer (IR-152 `create`, `enable` and `disable`; none
   exists yet):
-  - It must enforce the same canonical-form rule on `exact_destination`.
-    Entries are matched byte for byte, and nothing validates them today
+  - It must enforce the same canonical-form rule on `exact_destination`
+    (the convention ruled below). Entries are matched byte for byte, and nothing validates them today
     beyond the `0002` checks; a non-canonical entry matches no source.
   - It must lock no `trust_source` row at all when it creates an operation,
     and in any case never after the entry row, or it can deadlock with an
@@ -3079,15 +3084,23 @@ Follow-ups and open questions:
     write that checked the entry has committed or rolled back, since the
     `UPDATE` waited for its `FOR SHARE`, and any later one waits for the
     entry and then reads it `disabled`.
-- A path-less, kubeconfig-style server URL (`https://host:6443`, the
-  export's `api_server`, OQ-IR-6) is not canonical and is refused. An
-  importer (C05) must rewrite it to canonical form; none does yet. Open.
-- Whether a source write is widening and needs an IR-054 approval while
-  `widening_second_approver` is on (IR-052) is not decided here. The write
-  path must not be wired to an endpoint before that and the request layer
-  (T14.1, T14.2) are.
+- Canonical-form egress destinations are the convention (ruled by the
+  user, 2026-11-22, relayed by the lead): the entry writer enforces the
+  same rule as the source writes (above), and an importer rewrites a
+  path-less, kubeconfig-style server URL (`https://host:6443`, the
+  export's `api_server`, OQ-IR-6), which is not canonical and is refused,
+  to canonical form. No importer (C05) exists yet.
+- A trust source write counts as widening and needs an IR-054 approval by
+  a second approver while `widening_second_approver` is on (ruled by the
+  user, 2026-11-22, relayed by the lead; this decides the IR-052 widening
+  question for this write). The write path must not be wired to an
+  endpoint before the T14.1 and T14.2 design of the second-approver flow
+  and the request layer (T14.1, T14.2).
 - The fetch-time `jwks_uri` match and the degraded health signal (IR-152)
-  are not built, nor a database backstop for the egress check. No proposal
-  for such a backstop exists yet; it is a maintainer decision.
-  `0010` adds a similar guard for a different table family (IR-080
-  assignment references; `docs/proposals/ir-080-assignment-write-guard.md`).
+  are not built, nor a database backstop for the egress check. The trigger
+  of `docs/proposals/ir-080-assignment-write-guard.md` (IR-080 assignment
+  references) is accepted and is `0010`; the same trigger pattern is to
+  guard the egress check (`trust_source` destinations against
+  `egress_allowlist_entry`; ruled by the user, 2026-11-22, relayed by the
+  lead). Accepted; implementation pending: no migration adds the egress
+  guard yet.
