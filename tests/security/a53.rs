@@ -22,7 +22,9 @@
 //!   `a53_neg_reapproval_cleared_create_refused`) or both
 //!   (`a53_neg_enabled_reapproval_cleared_create_refused`) is refused by its
 //!   `0004` check and not stored; an update that enables the stored record
-//!   (`a53_neg_enabling_patch_refused`) is refused and changes nothing.
+//!   (`a53_neg_enabling_patch_refused`) is refused, by the `0009` guard
+//!   that freezes a stored impersonation grant (`Guard`), and changes
+//!   nothing.
 //!   "PATCH" is `update_service_grant`; no HTTP API exists yet. The tests
 //!   are named after the values they write: they do not claim to settle what
 //!   the row's "approved" means for this record, which the spec does not
@@ -102,9 +104,9 @@ async fn a53_neg_enabling_patch_refused() {
     let (db, pool) = tenant().await;
     let stored = assert_stored(&pool, &dormant("grt_imp")).await;
     let [enabling, _, enabling_and_clearing] = UPDATE_REFUSALS;
-    for (status, activation_state, constraint) in [enabling, enabling_and_clearing] {
+    for (status, activation_state) in [enabling, enabling_and_clearing] {
         assert_eq!(status, Status::Enabled);
-        assert_update_refused(&pool, &stored, status, activation_state, constraint).await;
+        assert_update_refused(&pool, &stored, status, activation_state).await;
     }
     db.drop([pool]).await;
 }

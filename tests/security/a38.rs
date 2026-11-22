@@ -16,10 +16,12 @@
 //!   reapproval (with its target service) is stored exactly as given at
 //!   revision 1, read back and listed
 //!   (`a38_pos_dormant_impersonation_grant_stored`).
-//! - **Negative.** The dormant record cannot be enabled
-//!   (`service_grant_impersonation_disabled_check`) nor lose its
-//!   reapproval marker (`service_grant_activation_mode_check`), by update or
-//!   on create, and a refused write changes nothing
+//! - **Negative.** The dormant record cannot be enabled nor lose its
+//!   reapproval marker: on create, refused by
+//!   `service_grant_impersonation_disabled_check` and
+//!   `service_grant_activation_mode_check`; by update, refused by the `0009`
+//!   guard that freezes a stored impersonation grant (`Guard`). A refused
+//!   write changes nothing
 //!   (`a38_neg_dormant_grant_enable_refused`,
 //!   `a38_neg_dormant_grant_reapproval_marker_kept`). A disable/re-enable
 //!   cycle of a delegation grant moves its revision forward (1, 2, 3), and
@@ -66,12 +68,12 @@ async fn a38_pos_dormant_impersonation_grant_stored() {
 async fn a38_neg_dormant_grant_enable_refused() {
     let (db, pool) = tenant().await;
     let stored = assert_stored(&pool, &dormant("grt_imp")).await;
-    let [(status, activation_state, constraint), ..] = UPDATE_REFUSALS;
+    let [(status, activation_state), ..] = UPDATE_REFUSALS;
     assert_eq!(
         (status, activation_state),
         (Status::Enabled, ActivationState::RequiresReapproval)
     );
-    assert_update_refused(&pool, &stored, status, activation_state, constraint).await;
+    assert_update_refused(&pool, &stored, status, activation_state).await;
     db.drop([pool]).await;
 }
 
@@ -83,8 +85,8 @@ async fn a38_neg_dormant_grant_reapproval_marker_kept() {
     let stored = assert_stored(&pool, &dormant("grt_imp")).await;
     // The enabling update alone is a38_neg_dormant_grant_enable_refused.
     let [_, clearing, both] = UPDATE_REFUSALS;
-    for (status, activation_state, constraint) in [clearing, both] {
-        assert_update_refused(&pool, &stored, status, activation_state, constraint).await;
+    for (status, activation_state) in [clearing, both] {
+        assert_update_refused(&pool, &stored, status, activation_state).await;
     }
     for (status, activation_state, constraint) in CREATE_REFUSALS {
         let new = grant(
