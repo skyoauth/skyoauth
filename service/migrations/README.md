@@ -436,7 +436,7 @@ not part of it.
 - **Keysets and versions.** A version holds a JWK Set whose `keys` is a
   nonempty array of objects (nonempty inferred), none with a private or
   symmetric member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k`), so a
-  private-key upload is rejected here too (ADR-005 items 2 and 8). Versions
+  private-key upload is rejected here too (ADR-005 items 1, 5 and 8). Versions
   are immutable (tasks §3 "Ownership"); that `status` alone may change is
   inferred. `expires_at`, when set, is after `effective_at` (inferred);
   versions may overlap.
@@ -575,7 +575,39 @@ The database does not enforce these rules; the service must:
   each template are checked by the database since `0008`, see "What 0008
   adds");
 - check JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
-  upload (T11.3);
+  upload (T11.3). The pure module `skyoauth_service::jwk` now does these
+  checks (provisional picks, its module docs list them, the unsourced ones
+  marked inferred): `parse_jwk_set` for one version's set, with RFC 7638
+  thumbprints; `check_version_overlap` wherever a version becomes enabled
+  (creation as enabled, re-enable, and any import or restore path;
+  creating a disabled version may skip it), against the other enabled
+  versions whose windows intersect (inferred: disabled versions are
+  retired and skipped, the function filters them and the checked
+  version's own ID itself); and `live_keys` at verification time, the
+  runtime backstop, where one conflict denies the whole live set
+  (inferred). `live_keys` alone does not cover T11.3: it sees a conflict
+  only once both versions are live. Rotation (inferred): validity windows
+  are immutable, so disabling is the only retirement; to replace a
+  `kid`'s key, disable the old open-ended version and write the
+  replacement with the same `kid`; re-enabling the old version is refused
+  while the replacement is enabled. Whether validity windows should stay
+  immutable, so an operator could close an open-ended window, is an open
+  question. Exceptions: EC points are not checked on-curve and Ed25519
+  keys are not checked canonical or non-small-order (only lengths: the
+  P-256 point (0, 0), a P-521 coordinate >= p and the Ed25519 identity
+  point pass today); the raw request body is not bounded (only the parsed
+  value is); and the module does not define what the version's
+  `fingerprint` column holds (T11.9). The module must not be the only
+  validation on any keyset write path (T11.9, T24.2) until (a) EC points
+  are checked on-curve with x, y < p and (b) Ed25519 keys are canonical
+  (y < p) and not small-order, or the write path also imports each key
+  with the verifying crate in strict mode and refuses keys it cannot
+  import. T11.7 must use strict Ed25519 verification. T24.3's "fake keys"
+  negative is the acceptance test. The wiring PR must enforce a raw
+  request-body size limit before parsing (64 KiB is consistent: a valid
+  set is at most 34,290 bytes) and serialize the writes of one keyset
+  (lock the parent keyset row or advance its revision). The keyset write
+  path does not call the module yet;
 - keep `default_scopes` and `scopes` within every other ceiling (service,
   assignment, resource server; IR-063) and check resource constraints
   against their schemas (IR-123, IR-141);
@@ -2153,18 +2185,29 @@ Scope ceilings (IR-062, IR-063, IR-083; ADR-015 items 7 and 9; design §5.7;
 T12.8; A26): `load_scope_ceilings(tenant, grant, audience)` loads, in one
 statement, the grant's `scopes` and `default_scopes`, the `scopes` of the
 resource server with that exact audience, the tenant's assignment
-`allowed_scopes` for it and, for a grant with a target, the target service's
-`max_scopes`, each with its ID, status and revision. The audience must be in
-the grant's set, assigned to the grant's tenant and, for a grant with a target
-service, in that service's set too (IR-083). A missing grant or audience, an
-audience not assigned, not in the grant's set or not in the target service's
-set are all the same `None`, mapped to no error code here (the caller maps them
-to one `invalid_target`, ERR-024 (3); ADR-015 item 9.4). Statuses are not
-checked: a disabled record is still loaded, and `LoadedCeilings::all_enabled`
-says whether the grant, resource server, assignment and target service are all
-enabled. Step 5 (design §5.7) checks the current status of the records (T12.6,
-T12.7, T14.2), wired into the exchange in M2 (T21.4, T21.5); it also needs the
-tenant's status and revision, which are not loaded. `resolve_scopes` (in
+`allowed_scopes` for it and, for a delegation or impersonation grant, the
+target service's `max_scopes`, each with its ID, status and revision. The
+audience must be in the grant's set, assigned to the grant's tenant and, for a
+delegation or impersonation grant, in its target service's set too (IR-083). A
+direct grant loads no target service and needs no target audience row, whatever
+its `target_service_id` holds (provisional lead pick, 2026-11-21; defense in
+depth): the statement keys the target off `mode` rather than rely on
+`service_grant_target_mode_check`. For a corrupt direct row this is looser than
+keying the target off `target_service_id`: a stray, dangling or other-tenant
+target now loads with no target service ceiling. It is defense in depth for the
+ceiling set should the check be dropped, not a fail-closed recheck of the check,
+unlike the rechecks of the foreign keys. `select_grant` and `get_service_grant`
+still return the raw `target_service_id` of a direct grant, so exchange code
+must key the target off `mode` too. A missing grant
+or audience, an audience not assigned, not in the grant's set or not in the
+target service's set are all the same `None`, mapped to no error code here (the
+caller maps them to one `invalid_target`, ERR-024 (3); ADR-015 item 9.4).
+Statuses are not checked: a disabled record is still loaded, and
+`LoadedCeilings::all_enabled` says whether the grant, resource server,
+assignment and target service are all enabled. Step 5 (design §5.7) checks the
+current status of the records (T12.6, T12.7, T14.2), wired into the exchange in
+M2 (T21.4, T21.5); it also needs the tenant's status and revision, which are
+not loaded. `resolve_scopes` (in
 `skyoauth_service::policy`) is pure:
 an omitted scope uses only the grant's nonempty defaults, checked again against
 every ceiling; an explicit list must be nonempty and lie in every ceiling;
