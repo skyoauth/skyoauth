@@ -413,7 +413,17 @@ impl From<sqlx::Error> for KeysetWriteError {
 async fn on_validation_worker<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, KeysetWriteError> {
-    let permit = VALIDATION
+    on_pool(&VALIDATION, work).await
+}
+
+/// [`on_validation_worker`] on the pool `pool` (the tests use pools of
+/// their own, so tests running in one process cannot disturb each other's
+/// permit counts).
+async fn on_pool<T: Send + 'static>(
+    pool: &'static Semaphore,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, KeysetWriteError> {
+    let permit = pool
         .acquire()
         .await
         .map_err(|_| KeysetWriteError::WorkerUnavailable)?;
@@ -913,44 +923,48 @@ mod tests {
 
     #[test]
     fn the_pool_has_its_workers() {
+        // Only the constant: other tests borrow permits of the shared pool
+        // while they run in the same process.
         assert_eq!(VALIDATION_WORKERS, 2);
-        assert_eq!(VALIDATION.available_permits(), VALIDATION_WORKERS);
+        assert!(VALIDATION.available_permits() <= VALIDATION_WORKERS);
     }
 
     /// A validation waits for a free worker and runs once one is free.
     #[tokio::test]
     async fn a_validation_waits_for_a_free_worker() {
-        let held = VALIDATION
+        static POOL: Semaphore = Semaphore::const_new(VALIDATION_WORKERS);
+        let held = POOL
             .acquire_many(u32::try_from(VALIDATION_WORKERS).unwrap())
             .await
             .unwrap();
-        let waiting = tokio::spawn(validate_upload(p256("k"), DEFAULT_ALLOWED_ALGORITHMS));
+        let waiting = tokio::spawn(on_pool(&POOL, || 7_u8));
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!waiting.is_finished());
         drop(held);
-        let keys = tokio::time::timeout(Duration::from_secs(10), waiting)
+        let value = tokio::time::timeout(Duration::from_secs(10), waiting)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        assert_eq!(keys.keys()[0].kid().as_str(), "k");
-        assert_eq!(VALIDATION.available_permits(), VALIDATION_WORKERS);
+        assert_eq!(value, 7);
+        assert_eq!(POOL.available_permits(), VALIDATION_WORKERS);
     }
 
     /// A running validation holds its permit until its work returns.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_running_validation_holds_its_worker() {
+        static POOL: Semaphore = Semaphore::const_new(VALIDATION_WORKERS);
         let (release, wait) = std::sync::mpsc::channel::<()>();
         let (started, running) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(on_validation_worker(move || {
+        let task = tokio::spawn(on_pool(&POOL, move || {
             started.send(()).unwrap();
             wait.recv().unwrap();
         }));
         running.await.unwrap();
-        assert_eq!(VALIDATION.available_permits(), VALIDATION_WORKERS - 1);
+        assert_eq!(POOL.available_permits(), VALIDATION_WORKERS - 1);
         release.send(()).unwrap();
         task.await.unwrap().unwrap();
-        assert_eq!(VALIDATION.available_permits(), VALIDATION_WORKERS);
+        assert_eq!(POOL.available_permits(), VALIDATION_WORKERS);
     }
 
     #[tokio::test]
