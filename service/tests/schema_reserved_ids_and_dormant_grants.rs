@@ -288,13 +288,24 @@ async fn catalog_pins_the_check_the_triggers_and_their_functions() {
             .position(|(name, _)| name.ends_with("_impersonation_frozen"))
             .unwrap();
         assert_eq!(guard, order.len() - 1, "{table}: {order:?}");
+        let (checks, others) = order[..guard].split_at(2);
         assert!(
-            order[..guard].len() == 2
-                && order[..guard].iter().all(
-                    |(name, internal)| *internal && name.starts_with("RI_ConstraintTrigger_c_")
-                ),
+            checks
+                .iter()
+                .all(|(name, internal)| *internal && name.starts_with("RI_ConstraintTrigger_c_")),
             "{table}: {order:?}"
         );
+        // Since `0010` the audience list also has the AFTER INSERT
+        // assignment guard, which sorts between the checks and this guard
+        // (schema_assignment_write_guard.rs).
+        let others: Vec<&str> = others.iter().map(|(name, _)| name.as_str()).collect();
+        let assignment_guard = format!("{table}_assignment_active");
+        let expected: Vec<&str> = if table == "service_grant_resource_server" {
+            vec![&assignment_guard]
+        } else {
+            vec![]
+        };
+        assert_eq!(others, expected, "{table}: {order:?}");
     }
     db.drop([pool]).await;
 }
@@ -1060,12 +1071,14 @@ async fn list_row_writers_need_select_on_service_grant() {
     let (mut db, pool) = seeded().await;
     let (role, connect) = db.create_login_role().await;
     // Since `0010` an audience row also needs the assignment privileges
-    // the guard of `0010` reads with (its own test checks them).
+    // the guard of `0010` reads with, here its prescribed grant (its own
+    // test checks them).
     run(
         &pool,
         &format!(
             "GRANT INSERT ON service_grant_binding, service_grant_resource_server TO {role};
-             GRANT SELECT, UPDATE ON audience_tenant_assignment TO {role}"
+             GRANT SELECT (tenant_id, resource_server_id, status), UPDATE (id)
+                 ON audience_tenant_assignment TO {role}"
         ),
     )
     .await;

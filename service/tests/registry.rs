@@ -191,7 +191,10 @@ fn assert_invariant<T: Debug>(result: Result<T, RegistryError>, kind: InvariantK
 /// constraint, and the names that a function of the schema raises as a
 /// literal (`CONSTRAINT = '...'` in its source, as the `0011` egress guard
 /// does), so a new constraint or guard in a later migration fails here
-/// until the mapping lists it.
+/// until the mapping lists it. The triggers are selected by the function
+/// they run, whatever their timing or events: the `0010` guards are
+/// `AFTER INSERT` row triggers (`schema_assignment_write_guard.rs` pins
+/// their form).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_constraint_names_match_the_catalog() {

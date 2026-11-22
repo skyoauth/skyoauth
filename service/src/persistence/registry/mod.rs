@@ -234,8 +234,11 @@
 //! exists but is not enabled (IR-080; provisional lead pick, 2026-11-22):
 //! `Invariant { kind: AssignmentActive, constraint }`, the constraint one
 //! of [`ASSIGNMENT_ACTIVE`], the name of the guard trigger that raised it.
-//! A missing assignment is still the foreign key's `Invariant { kind:
-//! ForeignKey, .. }`. The guard locks the assignment row `FOR SHARE`, so
+//! The guard is an `AFTER INSERT` row trigger that runs after the row's
+//! unique and foreign-key checks, so a duplicate audience is still
+//! `AlreadyExists` and a missing assignment still the foreign key's
+//! `Invariant { kind: ForeignKey, .. }`, whatever the assignment's status.
+//! The guard locks the assignment row `FOR SHARE`, so
 //! the insert and a concurrent update of the assignment serialize; under
 //! `REPEATABLE READ` or `SERIALIZABLE` an insert whose snapshot predates a
 //! committed update of the assignment fails with `40001`, `Retry`.

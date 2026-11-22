@@ -4,13 +4,17 @@
 //! (`service_grant_resource_server`) whose audience tenant assignment exists
 //! but is disabled is refused with `23514`, naming the guard trigger, which
 //! the registry maps to `Invariant { kind: AssignmentActive, .. }`; a
-//! missing assignment is still the foreign key's `23503`. The guard locks
-//! the assignment `FOR SHARE`, so an insert and a concurrent disable
+//! missing assignment is still the foreign key's `23503`. The guards are
+//! `AFTER INSERT` row triggers that fire after the foreign-key check; they
+//! lock the assignment `FOR SHARE`, so an insert and a concurrent disable
 //! serialize, under `READ COMMITTED` by waiting and under `REPEATABLE READ`
-//! and `SERIALIZABLE` with `40001`. The README lock order (owner row,
-//! assignment, audit head) does not deadlock; taking the head before the
-//! insert does. The tests also pin the catalog, the privileges a writer
-//! needs, replica mode and the one-statement limit ("What 0010 adds").
+//! and `SERIALIZABLE` with `40001`, and an assignment another transaction
+//! creates disabled while the statement runs is refused too. The README
+//! lock order (owner row, assignment, audit head) does not deadlock; taking
+//! the head before the insert does. The tests also pin the catalog, the
+//! tenant of the assignment read, the privileges a writer needs, replica
+//! mode, the unique and `ON CONFLICT` cases and statements that also write
+//! the assignment ("What 0010 adds").
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! test creates and drops its own database. The replica-mode test needs
@@ -40,6 +44,11 @@ use sqlx::{AssertSqlSafe, Connection, Executor, PgConnection, Postgres};
 /// and four resource servers: `rs_1` with an enabled assignment (`ata_1`),
 /// `rs_2` with a disabled one (`ata_2`), `rs_3` disabled itself behind an
 /// enabled assignment (`ata_3`), and `rs_4`, not assigned to the tenant.
+/// A second tenant, `ten_b`, with the same kind of owners (`svc_b` and
+/// `grt_b`, both without audiences), shares `rs_1` and `rs_2` with
+/// `ten_a` under the opposite statuses: `atb_1` (`rs_1`) is disabled and
+/// `atb_2` (`rs_2`) enabled, so a guard that ignored the tenant would read
+/// the other tenant's assignment.
 const SEED: &str = r#"
     INSERT INTO tenant VALUES ('ten_a', 'a', 'ns_a', 'enabled');
     INSERT INTO principal VALUES
@@ -69,7 +78,25 @@ const SEED: &str = r#"
     INSERT INTO service_grant VALUES
         ('grt_1', 'ten_a', 'direct', 'wld_1', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
     INSERT INTO service_grant_binding VALUES ('grt_1', 'bnd_1', 'ten_a', 'wld_1');
-    INSERT INTO service_grant_resource_server VALUES ('grt_1', 'ten_a', 'rs_1')"#;
+    INSERT INTO service_grant_resource_server VALUES ('grt_1', 'ten_a', 'rs_1');
+    INSERT INTO tenant VALUES ('ten_b', 'b', 'ns_b', 'enabled');
+    INSERT INTO principal VALUES
+        ('wld_b', 'ten_b', 'workload', 'w1', 'enabled'),
+        ('svc_b', 'ten_b', 'service', 's1', 'enabled');
+    INSERT INTO audience_tenant_assignment VALUES
+        ('atb_1', 'rs_1', 'ten_b', '["wif"]', '["read"]', '[]', 'disabled'),
+        ('atb_2', 'rs_2', 'ten_b', '["wif"]', '["read"]', '[]', 'enabled');
+    INSERT INTO trust_source VALUES
+        ('src_b', 'ten_b', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
+         'https://token.actions.githubusercontent.com/.well-known/openid-configuration',
+         NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+         '["https://identity.example.com"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled');
+    INSERT INTO principal_binding VALUES
+        ('bnd_b', 'ten_b', 'one', 'src_b', 'generic_production', '{"sub": "repo:1"}', 'wld_b', 'enabled');
+    INSERT INTO service_identity VALUES ('svc_b', 'ten_b', 'deployer', '["read"]', '{}', 'enabled');
+    INSERT INTO service_grant VALUES
+        ('grt_b', 'ten_b', 'direct', 'wld_b', NULL, 'direct', '["read"]', NULL, '{}', 300, NULL, 'enabled', 'not_required');
+    INSERT INTO service_grant_binding VALUES ('grt_b', 'bnd_b', 'ten_b', 'wld_b')"#;
 
 /// The two guarded tables, the owner column and seeded owner of each, and
 /// the name of the guard trigger, which its `23514` names as constraint.
@@ -312,6 +339,35 @@ async fn finished(task: SqlTask) -> (PgConnection, Result<(), sqlx::Error>) {
         .unwrap()
 }
 
+/// Waits until the backend `blocked` waits for a lock held by `holder`
+/// (`true`) or `task`, its writer, has finished without waiting (`false`).
+async fn waits_or_finishes<T>(
+    pool: &PgPool,
+    blocked: i32,
+    holder: i32,
+    task: &tokio::task::JoinHandle<T>,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY(pg_blocking_pids($2))")
+                .bind(holder)
+                .bind(blocked)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            if waiting {
+                return true;
+            }
+            if task.is_finished() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the writer neither waited nor finished")
+}
+
 /// The audit append of a writer, reduced to its locks: the event's tenant
 /// `FOR KEY SHARE`, then the chain head `FOR UPDATE` (README "append audit
 /// events in this order").
@@ -342,18 +398,22 @@ async fn assignment_write_guard_migration_is_recorded_once() {
 }
 
 /// Catalog properties that behaviour tests cannot see directly: the two
-/// triggers (`BEFORE INSERT`, each row, `ENABLE ALWAYS`, the one function),
-/// no other user trigger runs that function, the function's pinned
-/// `search_path`, `SECURITY INVOKER`, its schema-qualified `FOR SHARE`
-/// read, and the trigger names in `KNOWN_CONSTRAINTS` and
-/// `ASSIGNMENT_ACTIVE`.
+/// triggers (`AFTER INSERT`, each row, not deferrable, `ENABLE ALWAYS`, the
+/// one function), no other user trigger runs that function, the function's
+/// pinned `search_path`, `SECURITY INVOKER`, its schema-qualified `FOR
+/// SHARE` read, and the trigger names in `KNOWN_CONSTRAINTS` and
+/// `ASSIGNMENT_ACTIVE`. PostgreSQL fires the `AFTER INSERT` row triggers
+/// of a table in name order, so the firing order is pinned too: the
+/// immediate foreign-key checks (`RI_ConstraintTrigger_c_<oid>`, the
+/// assignment's among them) sort first, then the guard, then on the grant
+/// list the `0009` impersonation guard.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn catalog_pins_the_two_triggers_and_their_function() {
     let (db, pool) = seeded().await;
     // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update.
-    let mut triggers: Vec<(String, String, i16, String)> = sqlx::query_as(
-        "SELECT c.relname::text, t.tgname::text, t.tgtype, t.tgenabled::text
+    let mut triggers: Vec<(String, String, i16, bool, String)> = sqlx::query_as(
+        "SELECT c.relname::text, t.tgname::text, t.tgtype, t.tgdeferrable, t.tgenabled::text
          FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_proc p ON p.oid = t.tgfoid
          WHERE NOT t.tgisinternal AND p.proname = $1
            AND p.pronamespace = to_regnamespace(quote_ident(current_schema()))",
@@ -363,19 +423,65 @@ async fn catalog_pins_the_two_triggers_and_their_function() {
     .await
     .unwrap();
     triggers.sort();
-    let mut expected: Vec<(String, String, i16, String)> = TABLES
+    let mut expected: Vec<(String, String, i16, bool, String)> = TABLES
         .iter()
         .map(|(table, _, _, trigger)| {
             (
                 table.to_string(),
                 trigger.to_string(),
-                1 | 2 | 4,
+                1 | 4,
+                false,
                 "A".to_string(),
             )
         })
         .collect();
     expected.sort();
     assert_eq!(triggers, expected);
+
+    // The AFTER INSERT row triggers of each table in firing (name) order:
+    // the foreign-key checks, none deferrable, then the guard.
+    for (table, _, _, trigger) in TABLES {
+        let fired: Vec<(String, bool, bool)> = sqlx::query_as(
+            "SELECT t.tgname::text, t.tgisinternal, t.tgdeferrable
+             FROM pg_trigger t
+             WHERE t.tgrelid = to_regclass(quote_ident(current_schema()) || '.' || $1)
+               AND t.tgtype & (1 | 2 | 4) = (1 | 4)
+             ORDER BY t.tgname COLLATE \"C\"",
+        )
+        .bind(table)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let guard = fired
+            .iter()
+            .position(|(name, ..)| name == trigger)
+            .unwrap_or_else(|| panic!("{table}: {fired:?}"));
+        let (checks, after) = fired.split_at(guard);
+        assert!(
+            !checks.is_empty()
+                && checks.iter().all(|(name, internal, deferrable)| {
+                    name.starts_with("RI_ConstraintTrigger_c_") && *internal && !*deferrable
+                }),
+            "{table}: {fired:?}"
+        );
+        let after: Vec<&str> = after.iter().map(|(name, ..)| name.as_str()).collect();
+        let mut want = vec![trigger];
+        if table == "service_grant_resource_server" {
+            want.push("service_grant_resource_server_impersonation_frozen");
+        }
+        assert_eq!(after, want, "{table}");
+        // Its assignment foreign key is one of those immediate checks.
+        let deferrable: bool = sqlx::query_scalar(
+            "SELECT condeferrable FROM pg_constraint
+             WHERE conrelid = to_regclass(quote_ident(current_schema()) || '.' || $1)
+               AND conname = $1 || '_assignment_fkey'",
+        )
+        .bind(table)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(!deferrable, "{table}");
+    }
 
     let (config, definer, source): (Vec<String>, bool, String) = sqlx::query_as(
         "SELECT p.proconfig, p.prosecdef, p.prosrc FROM pg_proc p
@@ -526,7 +632,8 @@ async fn registry_writes_and_creating_statements_refuse_a_disabled_assignment() 
         grants,
     );
     let owners: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM service_identity UNION ALL SELECT id FROM service_grant ORDER BY 1",
+        "SELECT id FROM service_identity WHERE tenant_id = 'ten_a'
+         UNION ALL SELECT id FROM service_grant WHERE tenant_id = 'ten_a' ORDER BY 1",
     )
     .fetch_all(&pool)
     .await
@@ -578,62 +685,73 @@ async fn registry_writes_and_creating_statements_refuse_a_disabled_assignment() 
     db.drop([pool]).await;
 }
 
-/// The one-statement limit of README "What 0010 adds": a `BEFORE` row
-/// trigger sees what its statement changed before that row. A list insert
-/// that reads the assignment its own `WITH` inserts `disabled` runs after
-/// it and is refused; one that does not read it runs first, the guard finds
-/// no assignment, the foreign key at the end of the statement finds it, and
-/// the row is stored against a disabled assignment. An `UPDATE` to
-/// `disabled` in the same statement after the insert is a disable after it.
+/// A statement that also writes the assignment, in a data-modifying
+/// `WITH`: the guard is an `AFTER` trigger, so it runs at the end of the
+/// statement and sees every change of it, whatever the order of the
+/// sub-statements. The state of the assignment at the end of the statement
+/// decides: a `WITH` that creates it `disabled` or disables it is refused,
+/// whether the list insert reads the sub-statement or not; one that creates
+/// it `enabled` or enables it is accepted (README "What 0010 adds",
+/// "Limits").
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn one_statement_that_creates_the_assignment_too_is_guarded_by_row_order() {
+async fn a_statement_that_also_writes_the_assignment_is_judged_by_its_end_state() {
     let (db, pool) = seeded().await;
     let mut conn = pool.acquire().await.unwrap();
+    let create = |status: &str| {
+        format!(
+            "INSERT INTO audience_tenant_assignment
+             VALUES ('ata_4', 'rs_4', 'ten_a', '[]', '[]', '[]', '{status}')
+             RETURNING tenant_id, resource_server_id"
+        )
+    };
     for (table, column, owner, _) in TABLES {
-        let read = format!(
-            "BEGIN;
-             WITH assigned AS (INSERT INTO audience_tenant_assignment
-                               VALUES ('ata_4', 'rs_4', 'ten_a', '[]', '[]', '[]', 'disabled')
-                               RETURNING tenant_id, resource_server_id)
-             INSERT INTO {table} ({column}, tenant_id, resource_server_id)
-             SELECT '{owner}', tenant_id, resource_server_id FROM assigned"
-        );
-        let err = sqlx::raw_sql(AssertSqlSafe(read))
-            .execute(&mut *conn)
+        let read = |status: &str| {
+            format!(
+                "BEGIN;
+                 WITH assigned AS ({})
+                 INSERT INTO {table} ({column}, tenant_id, resource_server_id)
+                 SELECT '{owner}', tenant_id, resource_server_id FROM assigned",
+                create(status)
+            )
+        };
+        let unread = |sub: String, resource_server_id: &str| {
+            format!(
+                "BEGIN; WITH changed AS ({sub}) {}",
+                insert(table, resource_server_id)
+            )
+        };
+        let refused = [
+            read("disabled"),
+            unread(create("disabled"), "rs_4"),
+            unread(set_status("ata_3", "disabled"), "rs_3"),
+        ];
+        for sql in refused {
+            let err = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
+                .execute(&mut *conn)
+                .await
+                .expect_err(&sql);
+            assert_guard_refusal(err, table);
+            run(&mut *conn, "ROLLBACK").await;
+        }
+        let accepted = [
+            (read("enabled"), "rs_4"),
+            (unread(create("enabled"), "rs_4"), "rs_4"),
+            (unread(set_status("ata_2", "enabled"), "rs_2"), "rs_2"),
+        ];
+        for (sql, resource_server_id) in accepted {
+            run(&mut *conn, &sql).await;
+            let stored: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} r JOIN audience_tenant_assignment a
+                     USING (tenant_id, resource_server_id)
+                 WHERE r.resource_server_id = '{resource_server_id}' AND a.status = 'enabled'"
+            )))
+            .fetch_one(&mut *conn)
             .await
-            .expect_err(table);
-        assert_guard_refusal(err, table);
-        run(&mut *conn, "ROLLBACK").await;
-
-        let unread = format!(
-            "BEGIN;
-             WITH assigned AS (INSERT INTO audience_tenant_assignment
-                               VALUES ('ata_4', 'rs_4', 'ten_a', '[]', '[]', '[]', 'disabled'))
-             {}",
-            insert(table, "rs_4")
-        );
-        run(&mut *conn, &unread).await;
-        let stored: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
-            "SELECT count(*) FROM {table} r JOIN audience_tenant_assignment a
-                 USING (tenant_id, resource_server_id)
-             WHERE r.resource_server_id = 'rs_4' AND a.status = 'disabled'"
-        )))
-        .fetch_one(&mut *conn)
-        .await
-        .unwrap();
-        assert_eq!(stored, 1, "{table}");
-        run(&mut *conn, "ROLLBACK").await;
-
-        let disabled_after = format!(
-            "BEGIN;
-             WITH disabled AS ({})
-             {}",
-            set_status("ata_3", "disabled"),
-            insert(table, "rs_3")
-        );
-        run(&mut *conn, &disabled_after).await;
-        run(&mut *conn, "ROLLBACK").await;
+            .unwrap();
+            assert_eq!(stored, 1, "{sql}");
+            run(&mut *conn, "ROLLBACK").await;
+        }
     }
     drop(conn);
     db.drop([pool]).await;
@@ -737,6 +855,125 @@ async fn a_disable_that_commits_first_refuses_the_insert() {
                 assert_eq!(result.unwrap(), 2);
                 assert!(audiences(&pool, table).await.contains(&"rs_3".to_string()));
             }
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// The case a `BEFORE` trigger misses (review of the `0010` pull request,
+/// scenario S1), under `READ COMMITTED`: one statement inserts two audience
+/// rows, one whose assignment does not exist yet and one whose assignment
+/// another transaction holds (an update in progress). While the statement
+/// waits, a third transaction creates the missing assignment `disabled` and
+/// commits. A `BEFORE` guard has already passed the first row (no
+/// assignment then) and the foreign key at the end of the statement finds
+/// the new one, so the row would be stored against a never-enabled
+/// assignment. With the `AFTER` guard the row is refused in both row
+/// orders: held row first, the statement waits in the guard of that row,
+/// and the foreign key and the guard of the other row then see the
+/// committed `disabled` assignment (`23514`); new row first, its foreign
+/// key finds no assignment before anything waits (`23503`). The registry's
+/// create, which inserts in the order of the caller's array, is refused the
+/// same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_assignment_created_disabled_while_the_statement_runs_is_refused() {
+    let (db, pool) = seeded().await;
+    let mut next = 10;
+    let writers = [TABLES[0].0, TABLES[1].0, "create_service_identity"];
+    for writer in writers {
+        for held_first in [true, false] {
+            next += 1;
+            let new = format!("rs_{next}");
+            run(
+                &pool,
+                &format!(
+                    "INSERT INTO resource_server VALUES ('{new}', 'api-{next}', 'API {next}',
+                         '[\"wif\"]', '[\"read\"]', '[]', 'enabled')"
+                ),
+            )
+            .await;
+            let rows = if held_first {
+                ["rs_3".to_string(), new.clone()]
+            } else {
+                [new.clone(), "rs_3".to_string()]
+            };
+            let mut holder = pool.acquire().await.unwrap().detach();
+            let mut inserter = pool.acquire().await.unwrap().detach();
+            let (holder_pid, inserter_pid) = (
+                backend_pid(&mut holder).await,
+                backend_pid(&mut inserter).await,
+            );
+            run_promptly(
+                &mut holder,
+                "BEGIN; UPDATE audience_tenant_assignment SET revision = revision + 1
+                 WHERE id = 'ata_3'",
+            )
+            .await;
+            let table = if writer == "create_service_identity" {
+                TABLES[0].0
+            } else {
+                writer
+            };
+            let statement = writer.to_string();
+            let audiences_of_statement = rows.clone();
+            let task = tokio::spawn(async move {
+                if statement == "create_service_identity" {
+                    let new = NewServiceIdentity {
+                        id: "svc_2".into(),
+                        tenant_id: "ten_a".into(),
+                        name: "identity-svc_2".into(),
+                        max_scopes: vec!["read".into()],
+                        max_resource_constraints: Default::default(),
+                        resource_server_ids: audiences_of_statement.to_vec(),
+                        status: Status::Enabled,
+                    };
+                    registry::create_service_identity(&mut inserter, &new)
+                        .await
+                        .map(|_| ())
+                } else {
+                    let (_, column, owner, _) = guarded(&statement);
+                    let [first, second] = &audiences_of_statement;
+                    sqlx::raw_sql(AssertSqlSafe(format!(
+                        "INSERT INTO {statement} ({column}, tenant_id, resource_server_id)
+                         VALUES ('{owner}', 'ten_a', '{first}'), ('{owner}', 'ten_a', '{second}')"
+                    )))
+                    .execute(&mut inserter)
+                    .await
+                    .map(|_| ())
+                    .map_err(RegistryError::from)
+                }
+            });
+            let waited = waits_or_finishes(&pool, inserter_pid, holder_pid, &task).await;
+            assert_eq!(waited, held_first, "{writer}, {rows:?}");
+            // Another transaction creates the assignment disabled and
+            // commits while the statement runs.
+            run(
+                &pool,
+                &format!(
+                    "INSERT INTO audience_tenant_assignment
+                     VALUES ('ata_{next}', '{new}', 'ten_a', '[\"wif\"]', '[\"read\"]', '[]',
+                             'disabled')"
+                ),
+            )
+            .await;
+            run_promptly(&mut holder, "COMMIT").await;
+            let result = tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .expect("the insert never finished")
+                .unwrap();
+            if held_first {
+                assert_active_refusal(result, table);
+            } else {
+                assert_missing_refusal(result, table);
+            }
+            let stored: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
+                "SELECT count(*) FROM {table} WHERE resource_server_id IN ('rs_3', '{new}')"
+            )))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(stored, 0, "{writer}, {rows:?}");
         }
     }
     db.drop([pool]).await;
@@ -953,14 +1190,130 @@ async fn replica_mode_refuses_a_disabled_assignment_but_not_a_missing_one() {
     db.drop([pool]).await;
 }
 
+/// The guard reads the assignment of the row's own tenant: `ten_b` shares
+/// `rs_1` and `rs_2` with `ten_a` under the opposite statuses, so a row of
+/// `ten_b` for `rs_1` is refused although `ten_a`'s assignment of `rs_1` is
+/// enabled, and one for `rs_2` is accepted although `ten_a`'s is disabled.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_guard_reads_the_assignment_of_the_rows_own_tenant() {
+    let (db, pool) = seeded().await;
+    for (table, column, ..) in TABLES {
+        let owner = if table == "service_identity_resource_server" {
+            "svc_b"
+        } else {
+            "grt_b"
+        };
+        let insert_b = |resource_server_id: &str| {
+            format!(
+                "INSERT INTO {table} ({column}, tenant_id, resource_server_id) \
+                 VALUES ('{owner}', 'ten_b', '{resource_server_id}')"
+            )
+        };
+        let err = sqlx::raw_sql(AssertSqlSafe(insert_b("rs_1")))
+            .execute(&pool)
+            .await
+            .expect_err(table);
+        assert_guard_refusal(err, table);
+        run(&pool, &insert_b("rs_2")).await;
+        let stored: Vec<String> = sqlx::query_scalar(AssertSqlSafe(format!(
+            "SELECT resource_server_id FROM {table} WHERE tenant_id = 'ten_b'"
+        )))
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored, ["rs_2"], "{table}");
+        // And the other way round for ten_a.
+        let err = sqlx::raw_sql(AssertSqlSafe(insert(table, "rs_2")))
+            .execute(&pool)
+            .await
+            .expect_err(table);
+        assert_guard_refusal(err, table);
+    }
+    db.drop([pool]).await;
+}
+
+/// An audience that is already listed is `AlreadyExists` with the list's
+/// primary key, as the add functions document, even when its assignment
+/// has been disabled since (a stranded row): the `AFTER` guard runs only
+/// for a row that is in the table, after its unique check, so the
+/// duplicate fails first with `23505`. The owner's revision does not move.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_listed_audience_is_already_exists_even_when_its_assignment_is_disabled() {
+    let (db, pool) = seeded().await;
+    let (identities, grants) = (TABLES[0].0, TABLES[1].0);
+    assert_eq!(add(&pool, identities, 1, "rs_1").await.unwrap(), 2);
+    run(&pool, &set_status("ata_1", "disabled")).await;
+    for (table, expected) in [(identities, 2), (grants, 1)] {
+        match add(&pool, table, expected, "rs_1").await {
+            Err(RegistryError::AlreadyExists { constraint }) => {
+                assert_eq!(constraint, format!("{table}_pkey"));
+            }
+            other => panic!("expected AlreadyExists on {table}: {other:?}"),
+        }
+        let err = sqlx::raw_sql(AssertSqlSafe(insert(table, "rs_1")))
+            .execute(&pool)
+            .await
+            .expect_err(table);
+        assert_eq!(sqlstate(&err), "23505", "{table}: {err}");
+        assert_eq!(audiences(&pool, table).await, ["rs_1"]);
+    }
+    let revisions: Vec<i64> = sqlx::query_scalar(
+        "SELECT (SELECT revision FROM service_identity WHERE id = 'svc_1')
+         UNION ALL SELECT (SELECT revision FROM service_grant WHERE id = 'grt_1')",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(revisions, [2, 1]);
+    db.drop([pool]).await;
+}
+
+/// `INSERT … ON CONFLICT DO NOTHING` of a row that is already listed, here
+/// stranded by a later disable, inserts nothing and fires no `AFTER`
+/// guard: a no-op, not a refusal. A new row with a disabled assignment in
+/// the same statement is still refused.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn on_conflict_do_nothing_of_a_stranded_row_is_a_no_op() {
+    let (db, pool) = seeded().await;
+    run(&pool, &insert(TABLES[0].0, "rs_1")).await;
+    run(&pool, &set_status("ata_1", "disabled")).await;
+    for (table, column, owner, _) in TABLES {
+        run(
+            &pool,
+            &format!("{} ON CONFLICT DO NOTHING", insert(table, "rs_1")),
+        )
+        .await;
+        assert_eq!(audiences(&pool, table).await, ["rs_1"]);
+        let err = sqlx::raw_sql(AssertSqlSafe(format!(
+            "INSERT INTO {table} ({column}, tenant_id, resource_server_id)
+             VALUES ('{owner}', 'ten_a', 'rs_1'), ('{owner}', 'ten_a', 'rs_2')
+             ON CONFLICT DO NOTHING"
+        )))
+        .execute(&pool)
+        .await
+        .expect_err(table);
+        assert_guard_refusal(err, table);
+        assert_eq!(audiences(&pool, table).await, ["rs_1"]);
+    }
+    db.drop([pool]).await;
+}
+
 /// The guard reads the assignment `FOR SHARE` with the writer's
 /// privileges: a role that may insert list rows needs `SELECT` on the
 /// assignment's `tenant_id`, `resource_server_id` and `status`, and
 /// `UPDATE` on at least one of its columns, which `FOR SHARE` requires;
-/// otherwise the insert fails with `42501`.
+/// otherwise the insert fails with `42501`. The prescribed grant (README
+/// "What 0010 adds", "Privileges") is `UPDATE (id)`, a column the `0003`
+/// guard keeps immutable: with it the role takes `FOR SHARE` but cannot
+/// change an assignment (`42501` for `status`, `SK001` for `id`).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn list_row_writers_need_select_and_update_on_the_assignment() {
+    const PRESCRIBED: &str = "SELECT (tenant_id, resource_server_id, status), UPDATE (id) \
+                              ON audience_tenant_assignment";
     let (mut db, pool) = seeded().await;
     let (role, connect) = db.create_login_role().await;
     run(
@@ -988,14 +1341,9 @@ async fn list_row_writers_need_select_and_update_on_the_assignment() {
             false,
         ),
         (Some("UPDATE ON audience_tenant_assignment"), false),
-        (
-            Some(
-                "SELECT (tenant_id, resource_server_id, status), UPDATE (revision) \
-                 ON audience_tenant_assignment",
-            ),
-            true,
-        ),
         (Some("SELECT, UPDATE ON audience_tenant_assignment"), true),
+        // The prescribed grant, last: the checks below use it.
+        (Some(PRESCRIBED), true),
     ] {
         if let Some(privilege) = privilege {
             run(
@@ -1024,6 +1372,43 @@ async fn list_row_writers_need_select_and_update_on_the_assignment() {
             }
             run(&mut writer, "ROLLBACK").await;
         }
+    }
+
+    // With the prescribed grant the role locks an assignment but cannot
+    // change it.
+    let where_ata_3 = "WHERE tenant_id = 'ten_a' AND resource_server_id = 'rs_3'";
+    run(
+        &mut writer,
+        &format!(
+            "BEGIN; SELECT status FROM audience_tenant_assignment {where_ata_3} FOR SHARE; ROLLBACK"
+        ),
+    )
+    .await;
+    for (change, code, message) in [
+        (
+            "status = 'disabled'",
+            "42501",
+            "permission denied for table audience_tenant_assignment",
+        ),
+        (
+            "revision = revision + 1",
+            "42501",
+            "permission denied for table audience_tenant_assignment",
+        ),
+        (
+            "id = 'ata_x'",
+            "SK001",
+            "column audience_tenant_assignment.id is immutable",
+        ),
+    ] {
+        let err = sqlx::raw_sql(AssertSqlSafe(format!(
+            "UPDATE audience_tenant_assignment SET {change} {where_ata_3}"
+        )))
+        .execute(&mut writer)
+        .await
+        .expect_err(change);
+        assert_eq!(sqlstate(&err), code, "{change}: {err}");
+        assert_eq!(err.as_database_error().unwrap().message(), message);
     }
     drop(writer);
     db.drop([pool]).await;

@@ -360,7 +360,9 @@ pub async fn update_service_identity<'e>(
 /// with [`InvariantKind::AssignmentActive`] and
 /// `service_identity_resource_server_assignment_active`. One already listed
 /// is [`RegistryError::AlreadyExists`] with
-/// `service_identity_resource_server_pkey`. No error changes the revision.
+/// `service_identity_resource_server_pkey`, also when its assignment has
+/// been disabled since (the guard runs after the unique check). No error
+/// changes the revision.
 /// The statement locks the identity row, then the guard locks the
 /// assignment `FOR SHARE`; a caller that audits the write appends its event
 /// after this call (migrations README, "What 0010 adds").
@@ -624,8 +626,8 @@ pub async fn remove_service_grant_binding<'e>(
 /// assignment must also be enabled: otherwise [`RegistryError::Invariant`]
 /// with [`InvariantKind::AssignmentActive`] and
 /// `service_grant_resource_server_assignment_active`. One already listed is
-/// [`RegistryError::AlreadyExists`] with `service_grant_resource_server_pkey`.
-/// The lock order is that of [`add_service_identity_resource_server`]: the
+/// [`RegistryError::AlreadyExists`] with `service_grant_resource_server_pkey`,
+/// also when its assignment has been disabled since. The lock order is that of [`add_service_identity_resource_server`]: the
 /// grant row, then the assignment `FOR SHARE`, then the caller's audit
 /// event.
 ///

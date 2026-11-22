@@ -163,10 +163,10 @@ The database does not enforce these rules; the service must:
   tenant-then-head order, but one that locks the head first and then a
   tenant row does not. Since `0010` an insert of a service identity's or a
   grant's audience row also locks its audience tenant assignment
-  `FOR SHARE` (a guard trigger); that lock is one of the domain rows' and
-  comes before the tenant and head locks too ("What 0010 adds", "Lock
-  order"). A write that creates an
-  `administrative_operation` is the exception to "domain rows first": it
+  `FOR SHARE` (an `AFTER INSERT` guard trigger, at the end of the insert
+  statement); that lock is one of the domain rows' and comes before the
+  tenant and head locks too ("What 0010 adds", "Lock order"). A write
+  that creates an `administrative_operation` is the exception to "domain rows first": it
   follows steps 1 to 3 of "What 0005 adds", and its event precedes the
   operation, since `audit_id` is an immediate (not deferrable) foreign key.
 
@@ -1876,25 +1876,54 @@ Choices marked "(inferred)" are its own.
 - **The guards.** `service_identity_resource_server_assignment_active` on
   `service_identity_resource_server` and
   `service_grant_resource_server_assignment_active` on
-  `service_grant_resource_server` are `BEFORE INSERT` row triggers,
-  `ENABLE ALWAYS`, that both run `skyoauth_require_active_assignment()`. It
-  reads the assignment of `(NEW.tenant_id, NEW.resource_server_id)` with
-  `SELECT … FOR SHARE` and:
+  `service_grant_resource_server` are `AFTER INSERT` row triggers, not
+  deferrable, `ENABLE ALWAYS`, that both run
+  `skyoauth_require_active_assignment()`. It reads the assignment of
+  `(NEW.tenant_id, NEW.resource_server_id)` with `SELECT … FOR SHARE` and:
   - refuses a present assignment whose `status` is not `enabled` with
     `check_violation` (`23514`), "a row of `<table>` needs an enabled
     audience tenant assignment", naming as its constraint the name of the
     trigger that fired (`TG_NAME`; one function serves both triggers,
     inferred). The error carries no value of the row. It is a typed
     refusal, not the `SK001` guard error;
-  - leaves a missing assignment to the foreign key: it finds no row and
-    returns, and `<table>_assignment_fkey` refuses the insert with `23503`
-    at the end of the statement, as before;
+  - leaves a missing assignment to the foreign key:
+    `<table>_assignment_fkey` refuses the insert with `23503` before the
+    guard runs (below), as before; where the foreign key does not fire
+    (replica mode, "Limits" below) the guard finds no row and returns;
   - does not read `resource_server.status`: a disabled resource server
     behind an enabled assignment stays a dormant reference at write, and the
     live check denies it (IR-081; lead ruling, 2026-11-21, decision 2 of the
     proposal);
   - guards only `INSERT`: `0004` makes every column of a list row immutable
     (`<table>_immutable`), and a `DELETE` needs no check.
+- **Why `AFTER`, not `BEFORE`** (provisional lead pick, 2026-11-22, after
+  review; the `0009` list guard is `AFTER` for the same reason). An
+  `AFTER` row trigger runs at the end of the statement, once the row is in
+  the table and its indexes, and PostgreSQL fires the `AFTER` triggers of a
+  row in name order. The foreign-key check is an internal trigger named
+  `RI_ConstraintTrigger_c_<oid>`, which sorts before these names
+  byte-wise (`R` before `s`), so it runs first and the guard then reads the
+  assignment with a newer snapshot. The names must keep sorting after
+  `RI_`: a rename that sorts before it would change the order. A `BEFORE`
+  guard lets a row through under `READ COMMITTED` when another transaction
+  creates its assignment `disabled` and commits between the guard (no row
+  yet) and the foreign-key check at the end of the statement (found): a
+  statement that inserts several rows and waits on the lock of a later
+  row's assignment opens that window. The `AFTER` guard sees that
+  assignment and refuses the row (`23514`), or the foreign key, if it runs
+  before the assignment exists, refuses it (`23503`); the test
+  `an_assignment_created_disabled_while_the_statement_runs_is_refused`
+  shows both. A `DEFERRED` constraint trigger would take the `FOR SHARE`
+  lock at commit, after the audit head, which inverts the lock order below,
+  and would fail at `COMMIT`. Being `AFTER` also changes which error comes
+  first: a row that breaks a `NOT NULL`, `CHECK` or unique constraint, or
+  whose assignment is missing, fails with that error, not `23514`; an
+  audience already listed is `AlreadyExists` (`23505`) even when its
+  assignment has been disabled since; and an insert whose `ON CONFLICT`
+  clause skips an existing row (`DO NOTHING`) fires no guard for it. The
+  tests
+  `a_listed_audience_is_already_exists_even_when_its_assignment_is_disabled`
+  and `on_conflict_do_nothing_of_a_stranded_row_is_a_no_op` pin both.
 - **Why the database enforces it for these two tables.** This reverses the
   rule "the database does not enforce these rules; the service must" for
   the audience rows of service identities and grants only ("What 0003 adds"
@@ -1906,7 +1935,10 @@ Choices marked "(inferred)" are its own.
   commit between the check and the insert, and the row then references a
   disabled assignment with no error. The guard's `FOR SHARE` does conflict
   with that lock, so an insert and a concurrent update of the assignment
-  serialize, and whichever comes second sees the other's result:
+  serialize, and whichever comes second sees the other's result (the guard
+  runs after the foreign key, with a newer snapshot, so this holds too for
+  an assignment that another transaction creates while the insert runs,
+  above):
   - under `READ COMMITTED`, an insert that waits for a disable then reads
     the committed `disabled` and is refused (`23514`); a disable that waits
     for an insert proceeds once the insert commits, and leaves the new row
@@ -1946,8 +1978,9 @@ Choices marked "(inferred)" are its own.
   2. the owner row of the list, the service identity or grant: the
      registry's list-set changes update it first in their statement, and a
      create inserts it before its list rows;
-  3. the assignment row `FOR SHARE`, taken by the guard at each list
-     insert;
+  3. the assignment row, first `FOR KEY SHARE` by the foreign-key check
+     and then `FOR SHARE` by the guard, both at the end of the statement
+     that inserts the list row, before the statement returns;
   4. the audit head, last, after the tenant row that the append locks
      (`FOR KEY SHARE`), as in "append audit events in this order".
 
@@ -1961,7 +1994,9 @@ Choices marked "(inferred)" are its own.
   shows it, and that a writer that takes the head before its list insert
   deadlocks with an auditing disable (`40P01`, `Retry`). A statement that
   inserts rows for several assignments locks them in the order of its rows
-  (the registry's creates follow the order of the caller's array). Two
+  (the registry's creates follow the order of the caller's array; the
+  `AFTER` triggers fire after all rows are inserted, row by row in that
+  order). Two
   inserts never conflict with each other (`FOR SHARE` is shared), but an
   insert and a transaction that updates two of the same assignments in
   opposite orders can deadlock (`40P01`, `Retry`, fail-closed); a writer
@@ -1980,8 +2015,26 @@ Choices marked "(inferred)" are its own.
   least one of its columns, which PostgreSQL requires for any `FOR SHARE`
   lock (the proposal named only `SELECT`); otherwise the insert fails with
   `42501`, "permission denied for table audience_tenant_assignment". The
-  test `list_row_writers_need_select_and_update_on_the_assignment` checks
-  each case.
+  prescribed grant (provisional lead pick, 2026-11-22) is
+  `GRANT SELECT (tenant_id, resource_server_id, status), UPDATE (id) ON audience_tenant_assignment`:
+  `id` is a key column that the `0003` guard
+  `audience_tenant_assignment_immutable` keeps unchangeable (`SK001`), so
+  the grant lets the role lock an assignment but not change one; an `UPDATE`
+  of any other column fails with `42501`. Not `UPDATE (revision)` or
+  another mutable column, which would let the role write it. The `UPDATE`
+  privilege still lets the role lock assignment rows `FOR UPDATE`, which
+  blocks other writers until it ends its transaction but changes nothing.
+  The `UPDATE (id)` grant closes the re-enable path only for a role that
+  writes list rows and nothing else: the runtime role that calls
+  `update_audience_tenant_assignment` needs `UPDATE` on `status` anyway, so
+  the closure takes effect once the migrate and runtime roles are split
+  (T10.1 follow-up); today one URL serves both.
+  The test `list_row_writers_need_select_and_update_on_the_assignment`
+  checks each case. A `SECURITY DEFINER` function would need no privilege
+  of the writer, but every guard of this schema is `SECURITY INVOKER`
+  (the accepted proposal; a definer function owned by the table owner
+  would also run as that owner), so it stays the alternative, not the
+  pick.
 - **Limits.**
   - Like every guard, these are a tripwire against application DML, not a
     security boundary (see "Limits").
@@ -2007,18 +2060,16 @@ Choices marked "(inferred)" are its own.
   - Under `REPEATABLE READ` and `SERIALIZABLE`, any committed update of the
     assignment after the writer's snapshot, not only a disable, fails the
     insert with `40001` (`Retry`; above).
-  - One statement (inferred; reproduced on PostgreSQL 16.15): a `BEFORE`
-    row trigger's query sees what the outer statement changed before that
-    row, not after. A data-modifying `WITH` that inserts the assignment
-    `disabled` in a sub-statement the list insert does not read from may
-    run after the list insert. The guard then finds no row, the foreign
-    key, checked at the end of the statement, finds the assignment, and the
-    row is stored against a disabled assignment. A `WITH` whose list insert
-    reads the new assignment runs that insert first and is refused. An
-    `UPDATE` to `disabled` in the same statement that runs after the list
-    insert is a disable after the insert (stranding, allowed). The registry
-    never writes an assignment and a list row in one statement. The test
-    `one_statement_that_creates_the_assignment_too_is_guarded_by_row_order`
+  - One statement (reproduced on PostgreSQL 16.15): the guard runs at the
+    end of the statement and sees every change the statement made, so a
+    data-modifying `WITH` that also writes the assignment is judged by the
+    assignment's state at the end of the statement, whatever the order of
+    its sub-statements. A `WITH` that creates the assignment `disabled` or
+    disables it, and inserts a list row for it, is refused; one that
+    creates it `enabled` or enables it, and inserts the row, is accepted.
+    The registry never writes an assignment and a list row in one
+    statement. The test
+    `a_statement_that_also_writes_the_assignment_is_judged_by_its_end_state`
     pins this.
 - **Locks on existing tables.** Checked with `pg_locks` in a transaction
   that applies `0010` to a `0009` database (PostgreSQL 16.15):
@@ -2341,7 +2392,9 @@ Open for all registry tables:
   `service_grant_resource_server` also needs `SELECT` on
   `audience_tenant_assignment` (at least `tenant_id`, `resource_server_id`
   and `status`) and `UPDATE` on at least one of its columns, which a
-  `FOR SHARE` lock requires, or the insert fails with `42501`; the test
+  `FOR SHARE` lock requires, or the insert fails with `42501`; the
+  prescribed grant is `UPDATE (id)`, a column that cannot change ("What
+  0010 adds", "Privileges"); the test
   `list_row_writers_need_select_and_update_on_the_assignment` checks it.
   Since `0011`, writing a trust source `discovery_url` or
   `token_review_endpoint` also needs `SELECT` on `egress_allowlist_entry`
