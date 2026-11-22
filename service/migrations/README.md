@@ -1614,8 +1614,10 @@ Choices marked "(inferred)" are its own.
     delete them, in savepoints too (inferred).
   - A row whose grant the trigger cannot see is left alone (inferred): its
     grant was deleted by this transaction (one of another mode: `0006`
-    never deletes an impersonation grant), or it is missing in replica
-    mode, where foreign keys do not fire.
+    never deletes an impersonation grant), it is missing in replica
+    mode, where foreign keys do not fire, or (third case) it belongs to a
+    grant that another transaction committed after the writer's
+    `REPEATABLE READ` or `SERIALIZABLE` snapshot, in replica mode.
   - "Created by the current transaction" is read from the grant row's
     `xmin` (inferred), which only an `UPDATE` could change. A grant inserted inside a
     savepoint carries the subtransaction's ID, not the top-level one that
@@ -1672,17 +1674,26 @@ Choices marked "(inferred)" are its own.
     close it.
   - Like every guard, these are a tripwire against application DML, not a
     security boundary (see "Limits").
-  - At `REPEATABLE READ` and `SERIALIZABLE` the foreign key, not the guard,
-    refuses a new list row for a grant that another transaction committed
-    after the writer's snapshot (inferred; reproduced on PostgreSQL 16.15,
-    CI runs 17): the foreign key checks an inserted row with the
-    transaction snapshot, so it fails with `23503` before the guard runs.
-    At `READ COMMITTED` the guard refuses that row (`SK001`). The registry
-    gets `NotFound` at either level: each of its list changes, and
-    `update_service_grant`, first updates the grant row, which the snapshot
-    does not show. The test
+  - In origin mode at `REPEATABLE READ` and `SERIALIZABLE` the foreign
+    key, not the guard, refuses a new list row for a grant that another
+    transaction committed after the writer's snapshot (inferred;
+    reproduced on PostgreSQL 16.15 and 17.12): the foreign key checks an
+    inserted row with the transaction snapshot, so it fails with `23503`
+    before the guard runs. At `READ COMMITTED` the guard refuses that row
+    (`SK001`). At `REPEATABLE READ` and `SERIALIZABLE` the registry gets
+    `NotFound`: each of its list changes, and `update_service_grant`,
+    first updates the grant row, which the snapshot does not show; at
+    `READ COMMITTED` it gets `Guard`. The test
     `a_grant_committed_after_the_snapshot_is_refused_by_the_foreign_key`
-    pins all three.
+    pins the origin-mode results.
+  - In replica mode (`session_replication_role = replica`) at
+    `REPEATABLE READ` and `SERIALIZABLE`, a list row for an impersonation
+    grant that another transaction committed after the writer's snapshot
+    is accepted: foreign keys do not fire and the guard cannot see the
+    grant. Only a role that may set `session_replication_role` can do
+    this (inferred; reproduced on PostgreSQL 17.12 as the table owner).
+    At `READ COMMITTED` in replica mode the guard refuses the row. This is
+    a limit of the tripwire; the guard is unchanged.
   - A principal binding that a frozen list row references is never
     hard-deleted: the row cannot go, so the foreign key
     `service_grant_binding_binding_id_fkey` refuses the delete with `23503`.

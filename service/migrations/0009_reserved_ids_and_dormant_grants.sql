@@ -65,15 +65,20 @@ $$;
 --
 -- A row whose grant the trigger cannot see is left alone (inferred): its
 -- grant was deleted by this transaction (one of another mode: 0006 never
--- deletes an impersonation grant), or it is missing under
--- session_replication_role = replica, where foreign keys do not fire.
--- Under REPEATABLE READ or SERIALIZABLE, a new row for a grant that another
--- transaction committed after this transaction's snapshot never reaches the
--- guard: the foreign key, which checks an inserted row with the
--- transaction snapshot, refuses it first with 23503 (inferred; reproduced
--- on PostgreSQL 16.15, CI runs 17). The registry gets NotFound there: each
--- of its list changes first updates the grant row, which that snapshot
--- does not show.
+-- deletes an impersonation grant), it is missing under
+-- session_replication_role = replica, where foreign keys do not fire, or
+-- (third case) it belongs to a grant that another transaction committed
+-- after this transaction's REPEATABLE READ or SERIALIZABLE snapshot, in
+-- replica mode.
+-- In origin mode under REPEATABLE READ or SERIALIZABLE, a new row for a
+-- grant that another transaction committed after this transaction's
+-- snapshot never reaches the guard: the foreign key, which checks an
+-- inserted row with the transaction snapshot, refuses it first with 23503
+-- (inferred; reproduced on PostgreSQL 16.15 and 17.12). The registry gets
+-- NotFound there: each of its list changes first updates the grant row,
+-- which that snapshot does not show. In replica mode at those levels
+-- neither the foreign key nor the guard sees the grant, so the row is
+-- accepted (see README "Limits").
 --
 -- "Created by the current transaction" is decided from the xmin of the
 -- grant row (inferred), which an UPDATE would change but this migration
