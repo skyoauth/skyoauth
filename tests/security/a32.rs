@@ -80,10 +80,10 @@
 //!   restorable, and a challenge of the new epoch then restores
 //!   (`a32_neg_a_replayed_recovery_is_refused`). A restore that differs from
 //!   its challenge in any of the six plan members, in its operation ID,
-//!   digest, instance, epoch or expected revision, or that splices two
-//!   issued challenges, is `NotRestorable` and enrolls nothing, and a
-//!   challenge for another instance is not issued; the untouched challenge
-//!   then restores and the other is retired
+//!   digest, challenge hash, instance, epoch or expected revision, or that
+//!   splices two issued challenges, is `NotRestorable` and enrolls nothing,
+//!   and a challenge for another instance is not issued; the untouched
+//!   challenge then restores and the other is retired
 //!   (`a32_neg_a_restore_must_be_the_one_its_challenge_names`). At the
 //!   shortest, default and longest TTL, a restore at `expires_at`, a
 //!   microsecond after and a longest TTL after is `NotRestorable` and one a
@@ -109,7 +109,8 @@
 //! `registry::recovery` and provisional until the ADRs are ratified:
 //! registry behaviour, not the spec's. The plan's members (the new key as
 //! 64 lowercase hexadecimal digits); the byte-wise comparison of the
-//! replacement and of the instance; the binding to the recovery key epoch;
+//! replacement and of the instance; the binding to the challenge hash,
+//! compared byte-wise (inferred); the binding to the recovery key epoch;
 //! that the expected revision is the recovery state's (inferred); the
 //! refusal of every level but
 //! `READ COMMITTED`, by name, so `READ UNCOMMITTED` too; the TTL minimum of
@@ -136,14 +137,16 @@
 //!
 //! Two obligations therefore rest on the local verifier (T13.3), not on the
 //! registry; they are gaps of these tests, and the lead's rulings behind
-//! them are provisional. First, the restore does not carry or compare the
-//! challenge's `challenge_hash` (the consume only checks that it is set),
-//! so the verifier must check the signature over the operation's stored
-//! challenge, or over one recomputed from exactly the values it passes to
-//! [`restore_operator`], never over a hash taken from the response; no
-//! registry getter returns the operation row. Second, `now` must come from
-//! the verifier's own clock immediately before the call, never from the
-//! response or the operator.
+//! them are provisional. First, the restore's binding carries the
+//! challenge's `challenge_hash` and the consume compares it byte-wise with
+//! the stored one, but the registry neither hashes nor verifies the
+//! recovery signature, so the verifier must check the signature over the
+//! challenge whose hash it passes (the operation's stored challenge, or
+//! one recomputed from exactly the values it passes to
+//! [`restore_operator`]), never over a hash taken from the response or
+//! from the operator; no registry getter returns the operation row.
+//! Second, `now` must come from the verifier's own clock immediately
+//! before the call, never from the response or the operator.
 //! Neither [`issue_recovery_challenge`] nor [`restore_operator`] takes an
 //! operator identity (the issue is recorded by `deployment_operator`, the
 //! restore by the recovery key), so "a revoked or disabled operator cannot
@@ -184,10 +187,12 @@
 //!   T13.3 builds it): the "local verifier" harness component of the row.
 //!   Nothing here goes through a command, a socket or the verifier. The
 //!   verifier is the only check of the recovery signature: the registry
-//!   verifies none (`registry::recovery` "Flow"), and a restore does not
-//!   carry or compare the challenge's `challenge_hash`, so a restore here
-//!   stands for one whose signed challenge the verifier has checked against
-//!   the key [`get_recovery_state`] returns.
+//!   verifies none and hashes nothing (`registry::recovery` "Flow"). A
+//!   restore carries the challenge's `challenge_hash` and the consume
+//!   compares it byte-wise with the stored one, which binds the restore to
+//!   the hash issued, not to a signature, so a restore here stands for one
+//!   whose signed challenge, the one whose hash it carries, the verifier
+//!   has checked against the key [`get_recovery_state`] returns.
 //! - The restart and configuration-omission half of "durably closes" (T13.4)
 //!   beyond a fresh pool: no service starts or restarts here, and no
 //!   configuration is read; a new pool on the same database is all that is
@@ -262,8 +267,8 @@
 //! epoch at issue and at restore. The tamper test's per-member and binding
 //! refusals repeat `a_restore_must_name_the_planned_*` and
 //! `every_consume_miss_is_the_same_not_restorable` one for one; it adds the
-//! splices of two issued challenges and one challenge that survives every
-//! refusal. The expiry test repeats `a_challenge_expires_at_its_expiry`
+//! splices of two issued challenges, a challenge hash that differs from the
+//! issued one only in case, and one challenge that survives every refusal. The expiry test repeats `a_challenge_expires_at_its_expiry`
 //! (default TTL) and adds the shortest and longest TTL over successive
 //! epochs. The isolation test repeats `a_restore_runs_only_at_read_committed`
 //! (a level set per transaction) with the level as a replica's session
@@ -1215,6 +1220,7 @@ impl Recovery {
             operation_id: &self.operation_id,
             binding: ChallengeBinding {
                 request_digest: &self.request_digest,
+                challenge_hash: &self.challenge_hash,
                 instance_id: &self.instance_id,
                 expected_revision: self.expected_revision,
                 recovery_key_epoch: self.recovery_key_epoch,
@@ -1865,18 +1871,26 @@ type Tamper = fn(&mut Recovery);
 /// A's restore with any one of the six replacement members of the plan
 /// changed (`admin_id`, `credential_id`, `binding_id`, `public_identity`,
 /// `trust_anchor_ref`, `new_recovery_public_key`), or with its binding
-/// changed (the operation ID, the request digest, the instance, the epoch
-/// or the expected revision), or spliced with B (A's challenge naming B's
-/// replacement, B's challenge naming A's, A's challenge with B's digest),
-/// is `NotRestorable`, changes nothing the registry shows and enrolls
+/// changed (the operation ID, the request digest, the challenge hash, the
+/// instance, the epoch or the expected revision), or spliced with B (A's
+/// challenge naming B's replacement, B's challenge naming A's, A's
+/// challenge with B's digest, A's challenge with B's hash), is
+/// `NotRestorable`, changes nothing the registry shows and enrolls
 /// nothing; a challenge for another instance is not issued. After all
 /// that, A's exact request restores: no refusal consumed it. B is then
 /// `NotRestorable` too, even exact: the epoch it was bound to is retired.
 ///
 /// The registry binds all six members (step 4 of `registry::recovery`
-/// "Restore") and the binding (its consume); it does not bind
-/// `challenge_hash`, which the restore request does not carry: matching
-/// the signed challenge is the local verifier's (T13.3), not tested here.
+/// "Restore") and the binding (its consume), the challenge hash byte-wise
+/// like the digest. The changed hash is A's in upper case, 48 bytes like
+/// A's, so it passes the length check made before any statement and
+/// reaches the consume: it differs from A's only in case and only in its
+/// first bytes, and sorts before it, while B's hash differs from A's only
+/// in its last byte and sorts after it: a consume that compared only the
+/// lengths would accept both, and one that compared one end only, ignored
+/// case or compared by order would accept one. The registry neither hashes
+/// nor verifies the signature: that the hash is the signed challenge's is
+/// the local verifier's (T13.3), not tested here.
 #[tokio::test]
 async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
     let (db, pool) = fixture().await;
@@ -1888,7 +1902,7 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
     issue(&pool, &b, DEFAULT_CHALLENGE_TTL, issued_at()).await;
     let issued = state(&pool, &first).await;
 
-    let tampers: [(&str, Tamper); 11] = [
+    let tampers: [(&str, Tamper); 12] = [
         ("admin_id", |r| r.admin_id = "adm_a32_tampered".into()),
         ("credential_id", |r| {
             r.credential_id = "crd_a32_tampered".into()
@@ -1908,6 +1922,9 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
         }),
         ("request digest", |r| {
             r.request_digest = b"a32-tampered-request-digest-0000".to_vec()
+        }),
+        ("challenge hash", |r| {
+            r.challenge_hash.make_ascii_uppercase()
         }),
         ("instance", |r| r.instance_id = ids(9).instance_id),
         ("epoch", |r| r.recovery_key_epoch = 2),
@@ -1945,11 +1962,24 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
             ..a.with_events(2)
         },
     ));
+    attempts.push((
+        "A's challenge with B's hash".into(),
+        Recovery {
+            challenge_hash: b.challenge_hash.clone(),
+            ..a.with_events(3)
+        },
+    ));
     let mut refusals = Vec::new();
     for (what, attempt) in &attempts {
         assert_eq!(
             attempt.new_recovery_public_key.len(),
-            registry::RECOVERY_PUBLIC_KEY_LENGTH
+            registry::RECOVERY_PUBLIC_KEY_LENGTH,
+            "{what}"
+        );
+        assert_eq!(
+            attempt.challenge_hash.len(),
+            a.challenge_hash.len(),
+            "{what}"
         );
         refusals.push(not_restorable_text(
             &restore_on(&pool, &attempt.request(restored_at())).await,
