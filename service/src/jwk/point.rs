@@ -1,6 +1,7 @@
 //! Point validation of `EC` and `OKP` keys (the former follow-up gate of
 //! the module docs of [`crate::jwk`]), with hand-written arithmetic and no
-//! new dependency.
+//! new dependency (ruled by the user, 2026-11-22, relayed by the lead: the
+//! hand-written arithmetic stays, and no elliptic-curve crate is added).
 //!
 //! - `EC` (P-256, P-384, P-521): each coordinate is below the field prime
 //!   `p`, and `y^2 = x^3 - 3x + b (mod p)`. The three curves have cofactor
