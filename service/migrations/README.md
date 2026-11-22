@@ -596,18 +596,21 @@ The database does not enforce these rules; the service must:
   replacement with the same `kid`; re-enabling the old version is refused
   while the replacement is enabled. Whether validity windows should stay
   immutable, so an operator could close an open-ended window, is an open
-  question. Exceptions: EC points are not checked on-curve and Ed25519
-  keys are not checked canonical or non-small-order (only lengths: the
-  P-256 point (0, 0), a P-521 coordinate >= p and the Ed25519 identity
-  point pass today); the raw request body is not bounded (only the parsed
+  question. The module also checks points: EC coordinates below the
+  field prime and on the curve, and Ed25519 keys canonical (y < p, no
+  negative zero) and not one of the eight small-order points, with
+  hand-written arithmetic and no new dependency (provisional lead pick,
+  2026-11-21; a curve crate would add 8 to 12 locked packages, a
+  maintainer decision). An Ed25519 key with a torsion component is
+  accepted and not claimed safe: T11.7 must still use strict Ed25519
+  verification, and T24.3's "fake keys" negative stays the acceptance
+  test. Validation is CPU-bound (about 8.8 ms per Ed25519 key in release,
+  about 0.18 s per 20-key set): the wiring PR must run it on bounded
+  blocking workers (`spawn_blocking` with a limit), and T11.7 must select
+  from already-validated stored keys, not re-parse per request.
+  Exceptions: the raw request body is not bounded (only the parsed
   value is); and the module does not define what the version's
-  `fingerprint` column holds (T11.9). The module must not be the only
-  validation on any keyset write path (T11.9, T24.2) until (a) EC points
-  are checked on-curve with x, y < p and (b) Ed25519 keys are canonical
-  (y < p) and not small-order, or the write path also imports each key
-  with the verifying crate in strict mode and refuses keys it cannot
-  import. T11.7 must use strict Ed25519 verification. T24.3's "fake keys"
-  negative is the acceptance test. The wiring PR must enforce a raw
+  `fingerprint` column holds (T11.9). The wiring PR must enforce a raw
   request-body size limit before parsing (64 KiB is consistent: a valid
   set is at most 34,290 bytes) and serialize the writes of one keyset
   (lock the parent keyset row or advance its revision). The keyset write

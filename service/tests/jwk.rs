@@ -3,8 +3,11 @@
 //!
 //! The thumbprints expected here come from the RFCs (RFC 7638 section 3.1,
 //! RFC 8037 appendix A.3) or were computed independently with Python's
-//! `hashlib`, never from this crate's output. The P-384 and P-521 keys were
-//! generated with Python's `cryptography`.
+//! `hashlib`, never from this crate's output. The P-384 and P-521 keys and
+//! the `GENERATED_*` keys were generated with Python's `cryptography`.
+//! Every EC and Ed25519 point here, valid or not, was classified in Python
+//! (integer arithmetic for the curve equations, OpenSSL through
+//! `cryptography` for the valid NIST points), never with this crate.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +39,40 @@ const P521_X: &str =
 const P521_Y: &str =
     "AZupTVy2snFxihMve6JA6-3G5VHhoDDZiGLQibc6EqQTFhsZqlN7SUsc-5NHRahHPDnLMGa-R2m_5laWIh7PH4Y0";
 const P521_THUMBPRINT: &str = "3F6jLbdPuIfWTyAalTYo3hPNvtu7-GvwpBnEMxXBjsE";
+// Generated with Python's `cryptography`; thumbprints computed with Python.
+// Each entry: crv, x, y (empty for Ed25519), thumbprint.
+const GENERATED_KEYS: [(&str, &str, &str, &str); 5] = [
+    (
+        "P-256",
+        "60KU-t7I0SkALarT8sfRB5iNa5QkWCUlbefzbW7OlQw",
+        "AB530pP2cpYhadpS5FNwg9m8w4UgWFlJJkxIxFl_MPk",
+        "ReTyQj2cWmZjeGr2ceSTROSYokqG3coaxsX6fyD0GBM",
+    ),
+    (
+        "P-384",
+        "grHJzJDGmltQdKpdbWc8J6K8CQ9rcHdzq_1P8ranPnKnldwj6Va8pNUE8udBOPuu",
+        "-4CGkS9nzqSHR1MZZVBXiZezNmfhj7KSiKVD_8_auTMJ0YEppjlymjZiZ-Mc5nMX",
+        "6GkdwWJbxzM_ZGgM_7uKVDrIZ6EgnPtWEXt8IDXdpB0",
+    ),
+    (
+        "P-521",
+        "AVdcynxoDq-dnnl3A1dRx1E8ZdkcEcer9dMMH99ywTsYyqS3rPlrG3eQfnwn9uliJ5Xz-f9rXsmwP_W_F0hR4z3O",
+        "AWtej0Hf_sO1cXSV4wGCTZsol5liNHVe6TN45mIHVjjhuNjYTb1h-eZfhWFpK8cIV7n-HBEk2_aCYJ9kv2Q_NpVO",
+        "HvLzGXbwC4jm7UXDfsm0P9IV7FjLWpoyxyIEaUTElQU",
+    ),
+    (
+        "Ed25519",
+        "ncaI80H8hcEwcD8clmapyTEcC448Pq3zYu1UbNiTA1o",
+        "",
+        "OsWI4tpuT2QevRsi1-CTroBg5C6C5DoQTx8g7Wm2LRY",
+    ),
+    (
+        "Ed25519",
+        "IXHSjlZri83ERxwDrU3eUUWKZl2n6f6gIZ9LmQCc3CE",
+        "",
+        "UEsnB7Cybc4vyBolClBjy0YqbPF6VMtUoIPE3KEkeSM",
+    ),
+];
 
 /// A test-local unpadded base64url encoder, independent of the crate's.
 fn b64(bytes: &[u8]) -> String {
@@ -54,6 +91,42 @@ fn b64(bytes: &[u8]) -> String {
         out.push(ALPHABET[(acc << (6 - bits) & 63) as usize] as char);
     }
     out
+}
+
+/// A test-local base64url decoder (canonical unpadded input only),
+/// independent of the crate's.
+fn unb64(text: &str) -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for char in text.bytes() {
+        let value = ALPHABET.iter().position(|&a| a == char).expect("base64url") as u32;
+        acc = acc << 6 | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits & 0xff) as u8);
+        }
+    }
+    out
+}
+
+/// The octets of hexadecimal `text`.
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// An `EC` key of `crv` with these coordinate octets.
+fn ec_key(crv: &str, x: &[u8], y: &[u8]) -> Value {
+    json!({"kty": "EC", "kid": "k", "crv": crv, "x": b64(x), "y": b64(y)})
+}
+
+/// An Ed25519 key with these octets.
+fn ed_key(x: &[u8]) -> Value {
+    json!({"kty": "OKP", "kid": "k", "crv": "Ed25519", "x": b64(x)})
 }
 
 /// The RFC 7638 RSA key with `alg` `RS256`: under the default allowed
@@ -566,11 +639,21 @@ fn rsa_exponent_bounds() {
 
 #[test]
 fn ec_coordinates_have_the_exact_curve_length() {
-    for (crv, len) in [("P-256", 32), ("P-384", 48), ("P-521", 66)] {
-        // These points are not on the curve: only lengths are checked
-        // until the on-curve check lands (module follow-ups), and these
-        // fixtures will change then.
-        let key = |x: usize, y: usize| json!({"kty": "EC", "kid": "k", "crv": crv, "x": b64(&vec![7; x]), "y": b64(&vec![9; y])});
+    for (crv, len, x, y) in [
+        ("P-256", 32, P256_X, P256_Y),
+        ("P-384", 48, P384_X, P384_Y),
+        ("P-521", 66, P521_X, P521_Y),
+    ] {
+        // Real points, cut or extended: the length is checked before the
+        // point.
+        let (x, y) = (unb64(x), unb64(y));
+        let resized = |octets: &[u8], len: usize| {
+            let mut octets = octets.to_vec();
+            octets.resize(len, 0x5a);
+            octets
+        };
+        let key =
+            |x_len: usize, y_len: usize| ec_key(crv, &resized(&x, x_len), &resized(&y, y_len));
         accept(key(len, len));
         for (member, x, y) in [
             ("x", len - 1, len),
@@ -1483,25 +1566,309 @@ fn write_check_applies_the_key_and_alg_rules() {
 }
 
 // ---------------------------------------------------------------------------
-// Known gaps until the on-curve check (module follow-ups)
+// Points: EC on-curve and range, Ed25519 canonical and not small-order.
+// Every vector below was classified in Python, not with this crate.
+
+/// The field primes, big-endian hex (FIPS 186-4 appendix D.1.2; the same
+/// values as 2^256 - 2^224 + 2^192 + 2^96 - 1, 2^384 - 2^128 - 2^96 + 2^32
+/// - 1 and 2^521 - 1, checked in Python).
+const NIST_PRIMES: [(&str, &str); 3] = [
+    (
+        "P-256",
+        "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+    ),
+    (
+        "P-384",
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
+    ),
+    (
+        "P-521",
+        "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ),
+];
+
+/// The valid EC keys of this file: crv, x, y.
+fn valid_ec_keys() -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut keys = vec![
+        ("P-256", P256_X, P256_Y),
+        ("P-384", P384_X, P384_Y),
+        ("P-521", P521_X, P521_Y),
+    ];
+    keys.extend(
+        GENERATED_KEYS
+            .iter()
+            .filter(|(crv, ..)| *crv != "Ed25519")
+            .map(|&(crv, x, y, _)| (crv, x, y)),
+    );
+    keys
+}
+
+/// The big-endian octets of `p - value` for `value < p` (schoolbook
+/// subtraction, test-local).
+fn negate(p: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = vec![0; p.len()];
+    let mut borrow = 0i16;
+    for i in (0..p.len()).rev() {
+        let mut digit = i16::from(p[i]) - i16::from(value[i]) - borrow;
+        borrow = i16::from(digit < 0);
+        if digit < 0 {
+            digit += 256;
+        }
+        out[i] = digit as u8;
+    }
+    assert_eq!(borrow, 0);
+    out
+}
+
+/// `value` with bit `bit` flipped, counted from the least significant bit
+/// of the last octet (big-endian) or of the first octet (little-endian).
+fn flip(value: &[u8], bit: usize, big_endian: bool) -> Vec<u8> {
+    let mut out = value.to_vec();
+    let index = if big_endian {
+        value.len() - 1 - bit / 8
+    } else {
+        bit / 8
+    };
+    out[index] ^= 1 << (bit % 8);
+    out
+}
 
 #[test]
-fn invalid_points_pass_until_the_on_curve_check_lands() {
-    // These assertions record today's gap and must flip when the on-curve
-    // and canonical-point checks land; the write path must not rely on
-    // this module alone until then.
+fn generated_keys_are_accepted_with_their_thumbprints() {
+    for (crv, x, y, expected) in GENERATED_KEYS {
+        let jwk = if crv == "Ed25519" {
+            json!({"kty": "OKP", "kid": "k", "crv": crv, "x": x})
+        } else {
+            json!({"kty": "EC", "kid": "k", "crv": crv, "x": x, "y": y})
+        };
+        assert_eq!(
+            accept(jwk).keys()[0].thumbprint().as_str(),
+            expected,
+            "{crv} {x}"
+        );
+    }
+}
+
+#[test]
+fn one_flipped_coordinate_bit_takes_an_ec_point_off_the_curve() {
+    for (crv, x, y) in valid_ec_keys() {
+        let (x, y) = (unb64(x), unb64(y));
+        accept(ec_key(crv, &x, &y));
+        // The lowest bit of x, then of y (both stay below p).
+        assert_eq!(
+            reject(ec_key(crv, &flip(&x, 0, true), &y)),
+            JwkError::PointNotOnCurve,
+            "{crv} x"
+        );
+        assert_eq!(
+            reject(ec_key(crv, &x, &flip(&y, 0, true))),
+            JwkError::PointNotOnCurve,
+            "{crv} y"
+        );
+    }
+}
+
+#[test]
+fn the_negated_ec_point_is_accepted() {
+    // (x, p - y) is the point's negative, on the curve too.
+    for (crv, x, y) in valid_ec_keys() {
+        let p = unhex(NIST_PRIMES.iter().find(|(name, _)| *name == crv).unwrap().1);
+        let (x, y) = (unb64(x), unb64(y));
+        accept(ec_key(crv, &x, &negate(&p, &y)));
+    }
+}
+
+#[test]
+fn ec_coordinates_must_be_below_p() {
+    for (crv, p) in NIST_PRIMES {
+        let p = unhex(p);
+        let (_, x, y) = valid_ec_keys()
+            .into_iter()
+            .find(|(name, ..)| *name == crv)
+            .unwrap();
+        let (x, y) = (unb64(x), unb64(y));
+        let all_ff = vec![0xff; p.len()];
+        for (key, member) in [
+            (ec_key(crv, &p, &y), "x"),
+            (ec_key(crv, &x, &p), "y"),
+            (ec_key(crv, &p, &p), "x"),
+            (ec_key(crv, &all_ff, &all_ff), "x"),
+            (ec_key(crv, &x, &all_ff), "y"),
+        ] {
+            assert_eq!(
+                reject(key),
+                JwkError::CoordinateOutOfRange { member },
+                "{crv} {member}"
+            );
+        }
+    }
+    // A P-521 coordinate of 66 octets may exceed p by a valid value: x + p
+    // and y + p (computed in Python) are refused, not reduced.
+    let y = unb64(P521_Y);
+    let x_plus_p = unb64(
+        "AiZcq9r597gtjnSV4d4WBjMUaPF9ywO2R0MvC2vA2xTBOJ2D6SO7x6XIp1pV_hREE01OEgCbh95eah8S6-PEEiuJ",
+    );
+    assert_eq!(
+        reject(ec_key("P-521", &x_plus_p, &y)),
+        JwkError::CoordinateOutOfRange { member: "x" }
+    );
+    let y_plus_p = unb64(
+        "A5upTVy2snFxihMve6JA6-3G5VHhoDDZiGLQibc6EqQTFhsZqlN7SUsc-5NHRahHPDnLMGa-R2m_5laWIh7PH4Yz",
+    );
+    assert_eq!(
+        reject(ec_key("P-521", &unb64(P521_X), &y_plus_p)),
+        JwkError::CoordinateOutOfRange { member: "y" }
+    );
+}
+
+#[test]
+fn ec_points_at_the_ends_of_the_field() {
+    // Points with x = 0 or x = p - 1, where they exist (found in Python;
+    // OpenSSL accepts each), are accepted: the bound is strict at p only.
+    for (crv, x, y) in [
+        (
+            "P-256",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "ZkhceA4vg9ckM71dhKBrtlQcKvMdrocXKL-FahdPk_Q",
+        ),
+        (
+            "P-384",
+            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000fffffffe",
+            "jN6tu9BJEaPBkx4m3z-mQ53KnH6yhvvUb8MZ8OK7eAIyuvV4JfwMGRKtov7-hAJM",
+        ),
+        (
+            "P-384",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "wwZhD7CuWhWc9FwGBp8ipsXrNkHGAtQt6ixLT3VVB5NAbYDSuRrVT5BIvUh68a3h",
+        ),
+        (
+            "P-521",
+            "01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe",
+            "ANklT9-ABJasszeQsQPF7p-sEoMv5UbGMiJbD3_OPaRXSxqHm2I9ci-o_DTV_CqHMarWkamou4tVTJWgUdaqUFrP",
+        ),
+        (
+            "P-521",
+            "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+            "AS3xNgFZSog-8tk15Eu5C_TWYZt05Sr3VS-XdpARwHGetDnPqyqI1A_lmivtH0NVcWmi0KLM0oDGB7krv1H_4LB4",
+        ),
+    ] {
+        accept(ec_key(crv, &unhex(x), &unb64(y)));
+    }
+    // (0, 0), (p - 1, 0) and (p - 1, 1) are on no curve here.
+    for (crv, p) in NIST_PRIMES {
+        let p = unhex(p);
+        let zero = vec![0; p.len()];
+        let mut one = zero.clone();
+        *one.last_mut().unwrap() = 1;
+        let p_minus_1 = negate(&p, &one);
+        for (x, y) in [(&zero, &zero), (&p_minus_1, &zero), (&p_minus_1, &one)] {
+            assert_eq!(
+                reject(ec_key(crv, x, y)),
+                JwkError::PointNotOnCurve,
+                "{crv}"
+            );
+        }
+    }
+}
+
+/// The eight Ed25519 points of order dividing 8, little-endian hex (found
+/// in Python by multiplying random points by the group order, each checked
+/// with `8P` the identity): y = 1 (order 1), y = p - 1 (order 2), y = 0
+/// with both signs (order 4) and y = y8, p - y8 with both signs (order 8).
+const ED25519_SMALL_ORDER: [&str; 8] = [
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000080",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+];
+
+#[test]
+fn each_small_order_ed25519_point_is_refused() {
+    for encoded in ED25519_SMALL_ORDER {
+        assert_eq!(
+            reject(ed_key(&unhex(encoded))),
+            JwkError::Ed25519SmallOrder,
+            "{encoded}"
+        );
+    }
+}
+
+#[test]
+fn noncanonical_ed25519_encodings_are_refused() {
+    for encoded in [
+        // x = 0 with the sign bit set: y = 1 and y = p - 1.
+        "0100000000000000000000000000000000000000000000000000000000000080",
+        "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        // y = p, p + 1 (with either sign), 2^255 - 1 (with either sign).
+        "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    ] {
+        assert_eq!(
+            reject(ed_key(&unhex(encoded))),
+            JwkError::Ed25519NotCanonical,
+            "{encoded}"
+        );
+    }
+}
+
+#[test]
+fn ed25519_bit_flips_and_negation() {
+    // For each valid key, the lowest bit whose flip leaves a y with no x
+    // (x^2 not a square; found in Python). Flipping the sign bit gives the
+    // negated point, which is valid.
+    for (x, bit) in [
+        (ED25519_X, 0),
+        (GENERATED_KEYS[3].1, 1),
+        (GENERATED_KEYS[4].1, 0),
+    ] {
+        let x = unb64(x);
+        accept(ed_key(&x));
+        assert_eq!(
+            reject(ed_key(&flip(&x, bit, false))),
+            JwkError::PointNotOnCurve,
+            "bit {bit}"
+        );
+        accept(ed_key(&flip(&x, 255, false)));
+    }
+}
+
+#[test]
+fn ed25519_points_with_a_torsion_component_are_accepted() {
+    // The RFC 8037 key plus an order-8 point (computed in Python): not
+    // small-order, so accepted. Cofactor handling is the verifier's
+    // (T11.7, strict verification), and such a key is not claimed safe.
+    accept(json!({
+        "kty": "OKP", "kid": "k", "crv": "Ed25519",
+        "x": "kVgxKpqNbjs0yJHW1hRE-LghHFEX660VvbC9aLB-AkU"
+    }));
+}
+
+#[test]
+fn invalid_points_are_refused() {
+    // The points the length-only checks used to accept.
     // P-256 (0, 0) is not on the curve.
-    accept(
-        json!({"kty": "EC", "kid": "k", "crv": "P-256", "x": b64(&[0; 32]), "y": b64(&[0; 32])}),
+    assert_eq!(
+        reject(ec_key("P-256", &[0; 32], &[0; 32])),
+        JwkError::PointNotOnCurve
     );
     // A P-521 coordinate equal to p = 2^521 - 1 is out of the field.
     let mut p = vec![0xff; 66];
     p[0] = 0x01;
-    accept(json!({"kty": "EC", "kid": "k", "crv": "P-521", "x": b64(&p), "y": b64(&p)}));
+    assert_eq!(
+        reject(ec_key("P-521", &p, &p)),
+        JwkError::CoordinateOutOfRange { member: "x" }
+    );
     // The Ed25519 identity point (y = 1), a small-order point.
     let mut identity = [0; 32];
     identity[0] = 1;
-    accept(json!({"kty": "OKP", "kid": "k", "crv": "Ed25519", "x": b64(&identity)}));
+    assert_eq!(reject(ed_key(&identity)), JwkError::Ed25519SmallOrder);
 }
 
 // ---------------------------------------------------------------------------
@@ -1514,10 +1881,24 @@ fn marked_n() -> String {
     format!("{MARKER}{}B", "A".repeat(333))
 }
 
-/// A 32-octet Ed25519 "key" whose base64url text starts with the marker.
+/// A 32-octet Ed25519 key whose base64url text starts with the marker: a
+/// valid point, not small-order (checked in Python).
 fn marked_x() -> String {
     format!("{MARKER}{}", "A".repeat(33))
 }
+
+/// A marked 32-octet Ed25519 encoding that decodes to no point (checked in
+/// Python).
+fn marked_undecodable_x() -> String {
+    format!("{MARKER}{}Q", "A".repeat(32))
+}
+
+/// A P-256 `x` whose base64url text starts with the marker, and the `y`
+/// that makes it a point (found in Python; OpenSSL accepts the point).
+fn marked_ec_x() -> String {
+    format!("{MARKER}{}U", "A".repeat(32))
+}
+const MARKED_EC_Y: &str = "ut94dV84kk2hQ-8EJDYxIGDXqke9cfnKTmiISCnlUkw";
 
 /// The decoded leading octets of the marker as `Debug` would print them in
 /// a byte list.
@@ -1552,10 +1933,9 @@ fn marker_octets_are_what_the_leak_check_looks_for() {
 fn errors_and_debug_output_never_contain_key_material() {
     let rsa = json!({"kty": "RSA", "kid": "m", "alg": "RS256", "n": marked_n(), "e": "AQAB"});
     let ed = json!({"kty": "OKP", "kid": "m", "crv": "Ed25519", "x": marked_x()});
-    let ec = json!({"kty": "EC", "kid": "m", "crv": "P-256", "x": marked_x(), "y": marked_x()});
-    // The marked keys pass this module's checks today. They are not real
-    // keys (the EC and Ed25519 points are not on their curves), and these
-    // fixtures will change when the on-curve check lands.
+    let ec = json!({"kty": "EC", "kid": "m", "crv": "P-256", "x": marked_ec_x(), "y": MARKED_EC_Y});
+    // The marked keys pass every check: the EC and Ed25519 keys are points
+    // of their curves. The RSA key is not a real modulus (unchecked).
     let rsa_set = accept(rsa.clone());
     let ed_set = accept(ed.clone());
     let ec_set = accept(ec.clone());
@@ -1622,6 +2002,65 @@ fn errors_and_debug_output_never_contain_key_material() {
         set_of(vec![rsa.clone(), with(rsa.clone(), "kid", json!("other"))]),
         set_of(vec![rsa.clone(), ed.clone()]),
     ];
+    // The point checks, with marked input where the refused value can hold
+    // the marker.
+    let point_failures = [
+        (
+            with(ec.clone(), "y", json!(marked_ec_x())),
+            JwkError::PointNotOnCurve,
+        ),
+        (
+            with(ed.clone(), "x", json!(marked_undecodable_x())),
+            JwkError::PointNotOnCurve,
+        ),
+        (
+            json!({"kty": "EC", "kid": "m", "crv": "P-521",
+                "x": format!("{MARKER}{}", "A".repeat(78)), "y": P521_Y}),
+            JwkError::CoordinateOutOfRange { member: "x" },
+        ),
+    ];
+    for (jwk, expected) in &point_failures {
+        assert_eq!(&reject(jwk.clone()), expected);
+    }
+    let failing_sets: Vec<Value> = failing_sets
+        .into_iter()
+        .chain(point_failures.into_iter().map(|(jwk, _)| set_of(vec![jwk])))
+        .collect();
+    // A noncanonical or small-order Ed25519 key cannot hold the marker (its
+    // octets are fixed): the error text must not hold its base64url or hex
+    // text instead.
+    for (encoded, expected) in [
+        (
+            "0100000000000000000000000000000000000000000000000000000000000080",
+            JwkError::Ed25519NotCanonical,
+        ),
+        (
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            JwkError::Ed25519NotCanonical,
+        ),
+        (
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            JwkError::Ed25519SmallOrder,
+        ),
+    ] {
+        let octets = unhex(encoded);
+        let jwk = with(ed.clone(), "x", json!(b64(&octets)));
+        assert_eq!(reject(jwk.clone()), expected);
+        let error = parse(&set_of(vec![jwk])).unwrap_err();
+        for text in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert_clean(&text);
+            assert!(!text.contains(&b64(&octets)), "{text}");
+            assert!(!text.contains(&encoded[..6]), "{text}");
+            assert!(
+                !text.contains(&format!("{}, {}, {}", octets[0], octets[1], octets[2])),
+                "{text}"
+            );
+        }
+    }
     let mut failures = 0;
     for set in &failing_sets {
         if let Err(error) = parse(set) {
@@ -1672,6 +2111,22 @@ fn error_text_names_the_member_and_kid() {
     assert_eq!(
         error.to_string(),
         "JWK set key 1: member \"x5u\" refers to keys or certificates outside the upload"
+    );
+    assert_eq!(
+        reject(ec_key("P-256", &[0; 32], &[0; 32])).to_string(),
+        "the key is not a point of its curve"
+    );
+    assert_eq!(
+        reject(ec_key("P-256", &[0xff; 32], &[0; 32])).to_string(),
+        "member \"x\" is not below the curve's field prime"
+    );
+    assert_eq!(
+        reject(ed_key(&[0xff; 32])).to_string(),
+        "the Ed25519 key is not canonically encoded"
+    );
+    assert_eq!(
+        reject(ed_key(&[0; 32])).to_string(),
+        "the Ed25519 key is a small-order point"
     );
     let error = parse(&set_of(vec![rsa_key("dup"), p256_key("dup")])).unwrap_err();
     assert_eq!(error.to_string(), "JWK set keys 0 and 1 share kid \"dup\"");
