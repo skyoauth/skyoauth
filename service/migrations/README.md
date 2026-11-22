@@ -620,24 +620,24 @@ The database does not enforce these rules; the service must:
   its key cache once per version, not re-parse per request. Provisional
   lead picks, 2026-11-22: the keys of `parse_stored` are not
   verifier-ready (no point checks ran), so the T11.7 verifier's key cache
-  is built from a full `validate_keyset` pass per version, never from
-  `parse_stored`, and a row written before the keyset write wiring, or an
-  imported row, gets that full pass too (a separate verifier type, such
-  as `VerifierKeys`, stays an option); and the raw registry writer
-  `create_trust_keyset_version` stores any supplied `public_jwks` and
-  `fingerprint` unchecked, so the keyset write wiring must be the only
-  write path and must make that writer crate-private or otherwise
-  unreachable from any endpoint.
-  Exceptions: the raw request body is not bounded (only the parsed
-  value is); and whether the version's `fingerprint` column holds the
-  module's fingerprint is undecided (T11.9). The wiring PR must enforce a raw
-  request-body size limit before parsing (64 KiB is consistent: a valid
-  set is at most 34,290 bytes) and serialize the writes of one keyset
-  (lock the parent keyset row or advance its revision). The write path
-  meets the overlap input gap before T11.7: `check_version_overlap` needs
-  the other enabled versions as fully parsed sets (a re-parse, about
-  0.18 s per 20-key set, or a change of `KeysetVersion`; open). The keyset
-  write path does not call the module yet;
+  is built from a full `validate_keyset(&stored, &KNOWN_ALGORITHMS)` pass
+  per version, never from `parse_stored`, and a row written before the
+  keyset write path, or an imported row, gets that full pass too (a
+  separate verifier type, such as `VerifierKeys`, stays an option); and
+  the raw registry writer `create_trust_keyset_version` stores any
+  supplied `public_jwks` and `fingerprint` unchecked, so the keyset write
+  path `skyoauth_service::trust::keyset` must be the only write path. The
+  raw writers stay public as the test-only floor, unreachable from any
+  endpoint (see "Trust keyset version writes" under "Rust registry
+  surface"). Exceptions: the raw request body is not bounded (only the
+  parsed value is). The wiring PR must enforce a raw request-body size
+  limit before parsing (64 KiB is consistent: a valid set is at most
+  34,290 bytes). The keyset write path stores the projection and its
+  fingerprint in the `fingerprint` column, serializes the writes of one
+  keyset on the parent keyset row, and meets the overlap input gap by
+  parsing the compared stored versions again in full (about 0.18 s per
+  20-key set, inside the transaction; a change of `KeysetVersion` would
+  remove it, open);
 - keep `default_scopes` and `scopes` within every other ceiling (service,
   assignment, resource server; IR-063) and check resource constraints
   against their schemas (IR-123, IR-141);
@@ -2640,6 +2640,121 @@ grant list-set change writes only the revision, so with the check in force
 it still fails with `23514`; with the check dropped it applies and returns
 only the new revision, since it does not read the timestamp column. The range checks of the tables the registry writes are in
 `KNOWN_CONSTRAINTS`.
+
+### Trust keyset version writes
+
+`skyoauth_service::trust::keyset` (`validate_upload`, `create_version`,
+`enable_version`, `disable_version`) is the audited write path of a trust
+keyset version (T11.3, T11.9; see its module documentation for the full
+rules). Library-level only: no endpoint calls it and nothing wires it at
+startup. The picks are the lead's (provisional lead pick, 2026-11-22)
+unless marked inferred, and the `jwk` picks dated 2026-11-21 it relies on
+stay provisional until Gate M0:
+
+- It must not be wired to any endpoint before the maintainer rules whether
+  a keyset version write counts as widening and needs an IR-054 approval
+  while `widening_second_approver` is on (OQ-ADR008-3, IR-052), and before
+  the request layer of T14.1 and T14.2 exists. Until then it assumes a
+  single actor: no write waits for an approval.
+- It must be the only path that writes a keyset version outside tests.
+  The registry writers `create_trust_keyset_version` and
+  `update_trust_keyset_version` are the unchecked floor (any `public_jwks`
+  and `fingerprint` the `0004` checks allow; a re-enable with no overlap
+  check). They stay public because the scenario crate calls them, are
+  documented as test-only, and must stay unreachable from any endpoint.
+  The A04 scenario tests stay on them until A04 M1a is claimed, then switch
+  to this module (follow-up).
+- Stage A, before the caller opens its transaction: `validate_upload` runs
+  `validate_keyset` on the parsed upload on tokio's blocking pool, at most
+  two at a time across the process (inferred), behind a tokio semaphore
+  (the crate names tokio's `sync` feature, already compiled in through
+  `sqlx` and `hyper`, so the lockfile is unchanged). The write functions take that
+  `&ValidatedKeyset`, never a `StoredKeyset` or a bare string, and store
+  its canonical projection (`public_json`) and its fingerprint, never the
+  raw upload.
+- Stage B, in the caller's transaction and a savepoint of its own: only
+  `READ COMMITTED` runs (any other level is `UnsupportedIsolation` before
+  any lock); only a `trust_admin` of the tenant writes
+  (`authorize_operator_locked` with `OperatorScope::Tenant` and
+  `AdminRole::TrustAdmin`; T13.2 owns the role semantics), and every miss
+  is one `Unauthorized`, before the keyset is looked up, so a caller learns
+  nothing about a keyset it may not write.
+- `provenance` is stored as given and the database floor does not look at
+  it, so it must never carry upload content: a create whose provenance has
+  a member named like a JWK private member (`d`, `p`, `q`, `dp`, `dq`,
+  `qi`, `oth`, `k`), at any depth, is `PrivateMemberInProvenance` before any
+  statement (inferred).
+- The window is checked as the registry stores it (inferred): the create
+  floors `effective_at` and `expires_at` to whole microseconds through the
+  helper the registry writer uses, so `[T0, T1 + 500 ns)` next to an
+  enabled `[T1, T2)` is accepted whether created enabled or enabled later,
+  and a window empty once floored is left to
+  `trust_keyset_version_validity_check`.
+- A keyset has at most 8 enabled versions
+  (`MAX_ENABLED_VERSIONS_PER_KEYSET`, provisional lead pick, 2026-11-22).
+  Where a version becomes enabled the other enabled versions are counted
+  under the parent lock, before any parse; at the bound the write is
+  `TooManyEnabledVersions`. Disabled versions do not count; an enabled
+  version past its expiry still does, so disable it to free its slot.
+- `check_version_overlap` runs wherever a version becomes enabled (an
+  enabled create, an enable or re-enable); a disabled create and a disable
+  run none. The compared stored versions (the other enabled versions whose
+  windows intersect, and the re-enabled version itself) pass
+  `parse_stored` as a cheap gate and then a full
+  `validate_keyset(&stored, &KNOWN_ALGORITHMS)` on the same bounded pool;
+  a failure is `StoredVersion`, a data-integrity error. The T11.7 verifier
+  builds its keys the same way, never from `parse_stored`.
+- That full parse runs inside the transaction and is linear in the
+  intersecting enabled versions, up to 8 stored sets per write under the
+  cap (an enable's target and at most 7 others). It holds the parent keyset row, the
+  operator rows `FOR SHARE`, a database connection and one of the two
+  process-wide validation workers, so it can starve other tenants' Stage
+  A. Estimated at about 0.18 s per compared 20-key set in release; debug
+  builds measured 0.30 s for 1 and 1.31 s for 8 compared versions, the
+  most the cap allows. Wiring precondition: before any endpoint calls the module, the
+  in-transaction parses need a permit or priority separate from Stage A's,
+  or a stored marker that a projection passed the point checks (which, or
+  a change of `KeysetVersion`, removes the parse).
+- Rotation (inferred): validity windows are immutable in the registry
+  (whether they should stay so is open), so disabling is the only
+  retirement. Disable the open-ended old version, then create the
+  replacement, enabled, with the same `kid`; a re-enable of the old
+  version is refused while the replacement is enabled.
+- The event is `trust_keyset_version.create`, `.enable` or `.disable`,
+  appended last in the version's tenant with the operator as actor and
+  both revisions of a status change. It carries no fingerprint (the
+  envelope has no member for one): the link from an event to its keys
+  rests on the version row's immutability triggers (IR-059). Whether the
+  event should carry the fingerprint is an open ADR question. No error's
+  `Display` or `Debug` names a `kid`, key material or an ID.
+
+Lock order, extending the orders above for this write, which creates no
+operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`);
+for a status change, the version's `keyset_id`, read without a lock; the
+parent `trust_keyset` row `FOR NO KEY UPDATE`, which serializes the writes
+of one keyset (a second write waits for it, then reads the first's
+committed version); then, read without a lock, only what the write needs
+(an enabled create the enabled versions, an enable its target and the
+enabled versions, a disable its target's revision, a disabled create none:
+a disabled version other than the target is never fetched); the write's
+own locks (the insert's foreign-key checks, or the version row of a status
+update); then the audit head last. `FOR NO KEY UPDATE` on the keyset does
+not block the `FOR KEY SHARE` of a trust source insert's or update's
+foreign-key check; a trust source update holds its own source row
+`FOR UPDATE`, which this write never locks.
+
+One keyset per transaction: the audit head a write takes last stays held
+until the caller's transaction ends, so a second keyset's write in the same
+transaction locks a `trust_keyset` row after the audit head, against the
+order above. Two transactions writing two keysets in opposite orders
+deadlock; PostgreSQL aborts one with `40P01`, which is `Registry(Retry)`,
+and that caller retries the whole transaction.
+
+The database floor does not look below a key's own members: the `0004`
+check refuses a key with `d` but accepts a key whose unknown member holds
+an object with `d`, so a nested private member written raw reaches the
+table. Stage A refuses both (`PrivateMember`, `UnexpectedMember`), and the
+overlap check refuses to compare such a stored row.
 
 ### Trust source writes
 

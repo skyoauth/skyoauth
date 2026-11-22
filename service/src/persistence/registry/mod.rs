@@ -109,7 +109,12 @@
 //!   [`update_trust_keyset_version`] enables or disables it as a
 //!   compare-and-set on the version's own revision (added by `0007`), like
 //!   the other tables, with no tie to the keyset's revision (lead decision,
-//!   2026-11-21).
+//!   2026-11-21). [`create_trust_keyset_version`] and
+//!   [`update_trust_keyset_version`] are the unchecked floor, kept public
+//!   for tests only: the keyset version write path is
+//!   [`trust::keyset`](crate::trust::keyset), which checks the JWK rules
+//!   and the overlap, authorizes and audits (provisional lead pick,
+//!   2026-11-22).
 //! - Disabling and re-enabling a tenant, a principal or a keyset version is
 //!   a plain status change here. Whether re-enabling needs an approval, and
 //!   any other widening rule, belongs to the service layer (provisional
@@ -329,6 +334,7 @@ pub use grant::{
 pub use instance::{
     get_egress_allowlist_entry, get_instance_security_policy, list_egress_allowlist_entries,
 };
+pub(crate) use model::floor_to_microsecond;
 pub use model::{
     ActivationState, AdminRole, AssertionProfile, AudienceTenantAssignment,
     AudienceTenantAssignmentChanges, BindingProfile, EgressAllowlistEntry, EgressPurpose,
@@ -364,6 +370,7 @@ pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
     update_principal, update_tenant,
 };
+pub(crate) use trust::{KeysetVersionText, read_enabled_keyset_versions, read_keyset_version};
 pub use trust::{
     create_trust_keyset, create_trust_keyset_version, create_trust_source, get_trust_keyset,
     get_trust_keyset_version, get_trust_source, list_trust_keyset_versions, list_trust_keysets,

@@ -5,8 +5,9 @@
 //!
 //! This module is pure: no I/O, no clock (time is a parameter) and no
 //! dependency on the registry. `persistence::registry` may depend on it,
-//! never the reverse (as for `policy`, lead ruling, 2026-11-21). Nothing
-//! calls it yet (see "Follow-ups").
+//! never the reverse (as for `policy`, lead ruling, 2026-11-21). Its one
+//! caller is the keyset version write path [`crate::trust::keyset`],
+//! itself wired to no endpoint yet (see "Follow-ups").
 //!
 //! # Sources
 //!
@@ -270,27 +271,33 @@
 //!   writes of one keyset (lock the parent keyset row or advance its
 //!   revision), and deciding what the version's `fingerprint` column holds:
 //!   this module offers [`KeysetFingerprint`] (inferred), whose use is open
-//!   (OQ-IR-6). Nothing calls this module yet.
+//!   (OQ-IR-6). [`crate::trust::keyset`] now does this: it takes a
+//!   `&ValidatedKeyset`, stores the projection and the [`KeysetFingerprint`]
+//!   (provisional lead pick, 2026-11-22), runs [`check_version_overlap`] at
+//!   an enabled create and an enable, and locks the parent keyset row.
 //! - One write path (provisional lead pick, 2026-11-22). The raw registry
 //!   writer `persistence::registry::create_trust_keyset_version` stores
-//!   whatever `public_jwks` and `fingerprint` it is given, unchecked. The
-//!   keyset write wiring above must be the only write path, and must make
-//!   that raw writer crate-private or otherwise unreachable from any
-//!   endpoint.
+//!   whatever `public_jwks` and `fingerprint` it is given, unchecked.
+//!   [`crate::trust::keyset`] must be the only write path; the raw writer
+//!   stays public as the test-only floor (the scenario crate calls it),
+//!   unreachable from any endpoint.
 //! - The verifier's keys (T11.7; provisional lead pick, 2026-11-22). The
-//!   verifier's key cache is built from a full [`validate_keyset`] pass per
-//!   version (on bounded blocking workers, see "Points"), never from
-//!   [`parse_stored`], whose keys are not verifier-ready. A row written
+//!   verifier's key cache is built from a full
+//!   `validate_keyset(&stored, &KNOWN_ALGORITHMS)` pass per version (on
+//!   bounded blocking workers, see "Points"), never from [`parse_stored`],
+//!   whose keys are not verifier-ready. A row written
 //!   before the write wiring existed, or an imported row, gets that full
 //!   pass too. A separate verifier type (for example `VerifierKeys`) built
 //!   only by the full pass stays an option for later.
 //! - The overlap input gap hits the registry write path first, before
 //!   T11.7: [`check_version_overlap`] needs the other enabled versions,
 //!   read back from the database, as [`JwkSet`]s, which only the full parse
-//!   builds. Either the write path re-parses them fully (about 0.18 s per
-//!   20-key set, see "Points") or [`KeysetVersion`] changes to take
-//!   [`StoredKeyset`] keys (open). [`live_keys`] at verification (T11.7)
-//!   takes the sets of the verifier's full pass, so it has no such gap.
+//!   builds. The write path ([`crate::trust::keyset`]) now parses them again
+//!   in full, inside its transaction (about 0.18 s per 20-key set, see
+//!   "Points"; provisional lead pick, 2026-11-22); a change of
+//!   [`KeysetVersion`] to take [`StoredKeyset`] keys would remove that cost
+//!   (open). [`live_keys`] at verification (T11.7) takes the sets of the
+//!   verifier's full pass, so it has no such gap.
 //! - Whether validity windows should stay immutable, so that an operator
 //!   could close an open-ended window instead of disabling the version
 //!   (open question).

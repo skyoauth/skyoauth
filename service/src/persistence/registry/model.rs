@@ -256,25 +256,36 @@ const EARLIEST_MICROSECONDS: i64 = -210_866_803_200_000_000;
 /// division, so it would read back as `9_223_372_036_854_775_800`.
 const LATEST_MICROSECONDS: i64 = i64::MAX - 1;
 
+/// `time` truncated toward the past to a whole microsecond, the time the
+/// registry stores for it (inferred). [`since_epoch`] floors through it, and
+/// a check that must see the stored time before the write (the overlap
+/// check of [`crate::trust::keyset`]) floors through it too, so the two
+/// cannot disagree. A time whose floor the platform cannot represent is
+/// returned as is: it is far outside the range [`since_epoch`] accepts.
+pub(crate) fn floor_to_microsecond(time: SystemTime) -> SystemTime {
+    let excess = match time.duration_since(UNIX_EPOCH) {
+        Ok(after) => after.subsec_nanos() % 1000,
+        Err(before) => (1000 - before.duration().subsec_nanos() % 1000) % 1000,
+    };
+    time.checked_sub(Duration::from_nanos(u64::from(excess)))
+        .unwrap_or(time)
+}
+
 /// The microseconds from the Unix epoch to `time`, truncated toward the
-/// past (inferred), as an interval a statement adds to
-/// `timestamptz 'epoch'`, so the crate needs no date-time dependency and
-/// the conversion stays in integers.
+/// past (inferred, through [`floor_to_microsecond`]), as an interval a
+/// statement adds to `timestamptz 'epoch'`, so the crate needs no date-time
+/// dependency and the conversion stays in integers.
 ///
 /// A time before [`EARLIEST_MICROSECONDS`] or after
 /// [`LATEST_MICROSECONDS`] is an encode error, mapped to
 /// [`RegistryError::Other`](super::RegistryError::Other), before any
 /// statement runs, so every time the registry writes reads back exactly.
 pub(super) fn since_epoch(time: SystemTime) -> Result<PgInterval, sqlx::Error> {
-    let microseconds = match time.duration_since(UNIX_EPOCH) {
+    let microseconds = match floor_to_microsecond(time).duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_micros()).ok(),
-        Err(before) => {
-            let before = before.duration();
-            let partial = u128::from(before.subsec_nanos() % 1000 != 0);
-            i64::try_from(before.as_micros() + partial)
-                .ok()
-                .map(|micros| -micros)
-        }
+        Err(before) => i64::try_from(before.duration().as_micros())
+            .ok()
+            .map(|micros| -micros),
     };
     microseconds
         .filter(|microseconds| (EARLIEST_MICROSECONDS..=LATEST_MICROSECONDS).contains(microseconds))
@@ -1280,6 +1291,37 @@ mod tests {
                 .map(|interval| interval.microseconds),
             Some(7)
         );
+    }
+
+    #[test]
+    fn a_floored_time_is_the_time_the_registry_stores() {
+        let epoch = |nanos: i128| {
+            let magnitude = Duration::from_nanos(u64::try_from(nanos.unsigned_abs()).unwrap());
+            if nanos < 0 {
+                UNIX_EPOCH - magnitude
+            } else {
+                UNIX_EPOCH + magnitude
+            }
+        };
+        for (nanos, floored) in [
+            (0, 0),
+            (1, 0),
+            (999, 0),
+            (1_000, 1_000),
+            (1_500, 1_000),
+            (1_790_000_000_123_456_789, 1_790_000_000_123_456_000),
+            (-1, -1_000),
+            (-999, -1_000),
+            (-1_000, -1_000),
+            (-1_001, -2_000),
+            (-86_400_000_000_500, -86_400_000_001_000),
+        ] {
+            let time = epoch(nanos);
+            assert_eq!(floor_to_microsecond(time), epoch(floored), "{nanos}");
+            // The write stores the floor: the same microseconds either way.
+            assert_eq!(micros(floor_to_microsecond(time)), micros(time), "{nanos}");
+            assert_eq!(i128::from(micros(time)) * 1_000, floored, "{nanos}");
+        }
     }
 
     #[track_caller]

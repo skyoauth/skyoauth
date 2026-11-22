@@ -1,12 +1,14 @@
 //! Trust keysets, their versions and trust sources (`0004`). All three are
 //! tenant-owned, so every read and update names the tenant.
 
-use sqlx::{PgExecutor, types::Json};
+use std::time::SystemTime;
+
+use sqlx::{FromRow, PgExecutor, Row, postgres::PgRow, types::Json};
 
 use super::{
     NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, RegistryError, Status,
     TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges, micros,
-    model::{optional_since_epoch, since_epoch},
+    model::{Origin, optional_since_epoch, required_timestamp, since_epoch, text, timestamp},
     tenant_compare_and_set, tenant_list_page, updated,
 };
 
@@ -117,6 +119,18 @@ pub async fn update_trust_keyset<'e>(
 /// Creates a version of a same-tenant keyset at revision 1. Versions are
 /// immutable but for `status`, which [`update_trust_keyset_version`]
 /// changes.
+///
+/// **Test-only: the unchecked floor.** This writer stores whatever
+/// `public_jwks` and `fingerprint` it is given: no JWK rule, no point
+/// check, no overlap check, no authorization and no audit event; only the
+/// `0004` `CHECK`s apply. It stays public for the integration and scenario
+/// tests (provisional lead pick, 2026-11-22: they call it from other
+/// crates, so it cannot be crate-private), and it must stay unreachable
+/// from any endpoint. The write path is
+/// [`trust::keyset::create_version`](crate::trust::keyset::create_version),
+/// which validates the upload, stores its canonical projection and
+/// fingerprint, checks the overlap and appends the audit event; it must be
+/// the only path that writes a keyset version outside tests.
 pub async fn create_trust_keyset_version<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTrustKeysetVersion,
@@ -183,6 +197,78 @@ pub async fn list_trust_keyset_versions<'e>(
     .await?)
 }
 
+/// One version of a keyset as the keyset write path
+/// ([`crate::trust::keyset`]) reads it: its `public_jwks` as the text
+/// PostgreSQL prints, not parsed, so the write path can bound it before
+/// any parse.
+pub(crate) struct KeysetVersionText {
+    pub(crate) id: String,
+    pub(crate) public_jwks: String,
+    pub(crate) effective_at: SystemTime,
+    pub(crate) expires_at: Option<SystemTime>,
+    pub(crate) status: Status,
+    pub(crate) revision: i64,
+}
+
+impl FromRow<'_, PgRow> for KeysetVersionText {
+    fn from_row(row: &PgRow) -> Result<Self, sqlx::Error> {
+        const ORIGIN: Origin = Origin::new("trust_keyset_version");
+        Ok(Self {
+            id: row.try_get("id")?,
+            public_jwks: row.try_get("public_jwks")?,
+            effective_at: required_timestamp(row, ORIGIN, "effective_at")?,
+            expires_at: timestamp(row, ORIGIN, "expires_at")?,
+            status: text(row, "status")?,
+            revision: row.try_get("revision")?,
+        })
+    }
+}
+
+/// The enabled versions of the keyset `keyset_id` of `tenant_id`, by ID,
+/// for the keyset write path, which holds the parent keyset row locked
+/// while it reads them. A disabled version is never fetched, so neither its
+/// size nor its content costs the write anything (inferred). Takes no lock
+/// of its own.
+pub(crate) async fn read_enabled_keyset_versions<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    keyset_id: &str,
+) -> Result<Vec<KeysetVersionText>, RegistryError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT id, public_jwks::text AS public_jwks, ",
+        micros!("effective_at"),
+        ", ",
+        micros!("expires_at"),
+        ", status, revision FROM trust_keyset_version WHERE tenant_id = $1 AND keyset_id = $2 \
+         AND status = 'enabled' ORDER BY id COLLATE \"C\""
+    ))
+    .bind(tenant_id)
+    .bind(keyset_id)
+    .fetch_all(executor)
+    .await?)
+}
+
+/// The version `id` of `tenant_id`, for the keyset write path's enable,
+/// read after the parent keyset row is locked; `None` if there is none.
+/// Takes no lock of its own.
+pub(crate) async fn read_keyset_version<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+) -> Result<Option<KeysetVersionText>, RegistryError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT id, public_jwks::text AS public_jwks, ",
+        micros!("effective_at"),
+        ", ",
+        micros!("expires_at"),
+        ", status, revision FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2"
+    ))
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(executor)
+    .await?)
+}
+
 /// Sets the `status` of the keyset version `id` of `tenant_id` at
 /// `expected_revision` and advances the version's own revision by one, with
 /// no tie to the keyset's revision (lead decision, 2026-11-21). Every other
@@ -197,6 +283,14 @@ pub async fn list_trust_keyset_versions<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
+///
+/// **Test-only: the unchecked floor**, like
+/// [`create_trust_keyset_version`]: a re-enable here runs no overlap check,
+/// no authorization and no audit event. It stays public for the tests and
+/// must stay unreachable from any endpoint; the write path is
+/// [`trust::keyset::enable_version`](crate::trust::keyset::enable_version)
+/// and [`trust::keyset::disable_version`](crate::trust::keyset::disable_version)
+/// (provisional lead pick, 2026-11-22).
 pub async fn update_trust_keyset_version<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
