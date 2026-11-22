@@ -2137,7 +2137,11 @@ async fn set_head_sequence(pool: &PgPool, sequence: i64) {
 /// savepoint holds is its locks: once the `Err` is returned the caller's
 /// transaction holds none of them (the recovery state `FOR SHARE`, the
 /// chain head `FOR UPDATE`), and another transaction takes both at once.
-/// A caller that commits after the `Err` commits nothing of the issue, and
+/// The locks must already be released when the function returns (intended:
+/// the audit head is a global serialization point, so no other transaction
+/// may wait behind a caller whose issue has already failed), so a variant
+/// that leaves sqlx to queue the rollback, which only runs at the
+/// connection's next use, also fails here. A caller that commits after the `Err` commits nothing of the issue, and
 /// with the head back the same request issues.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
