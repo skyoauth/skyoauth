@@ -45,6 +45,9 @@ const SEED: &str = r#"
     INSERT INTO trust_keyset_version VALUES
         ('kv_1', 'ten_a', 'ks_1', '{"keys": [{"kty": "EC", "crv": "P-256", "kid": "k1", "x": "AA", "y": "AA"}]}',
          'sha256:01', '2026-01-01Z', NULL, 'enabled', '{}');
+    -- Enabled egress entries for the seeded destinations (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled');
     INSERT INTO trust_source VALUES
         ('src_gh', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',

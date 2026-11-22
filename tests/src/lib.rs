@@ -10,5 +10,6 @@
 //! A `#[test]` or doctest in this library would run in no CI job: the
 //! `rust` job excludes the package and `scenarios-pg` runs only `--test pg`.
 
+pub mod egress;
 pub mod pg;
 pub mod rep;

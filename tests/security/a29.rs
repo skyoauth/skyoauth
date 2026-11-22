@@ -68,7 +68,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use skyoauth_scenarios::pg::TestDb;
+use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -384,6 +384,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
             uploaded_source(side, side.uploaded(), "partner", side.keyset()),
             kubernetes_source(side, side.kubernetes(), "cluster"),
         ] {
+            egress::allow_destinations(&pool, &source).await;
             registry::create_trust_source(&pool, &source).await.unwrap();
         }
         registry::create_principal_binding(

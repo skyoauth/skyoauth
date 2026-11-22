@@ -185,14 +185,29 @@ fn assert_invariant<T: Debug>(result: Result<T, RegistryError>, kind: InvariantK
     }
 }
 
+/// The constraint names that trigger functions raise with `23514`, each
+/// with its function: no catalog constraint carries them.
+const TRIGGER_CONSTRAINTS: [(&str, &str); 2] = [
+    (
+        "skyoauth_check_trust_source_egress",
+        "trust_source_discovery_url_egress_enabled",
+    ),
+    (
+        "skyoauth_check_trust_source_egress",
+        "trust_source_token_review_endpoint_egress_enabled",
+    ),
+];
+
 /// [`KNOWN_CONSTRAINTS`] is exactly the set of named constraints of the
-/// tables the registry writes and of the list domains, so a new constraint
-/// in a later migration fails here until the mapping lists it.
+/// tables the registry writes and of the list domains, plus the names the
+/// `0011` egress guard raises (each found in its function's source), so a
+/// new constraint in a later migration fails here until the mapping lists
+/// it.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_constraint_names_match_the_catalog() {
     let (db, pool) = migrated().await;
-    let names: Vec<String> = sqlx::query_scalar(
+    let mut names: Vec<String> = sqlx::query_scalar(
         "SELECT conname::text FROM pg_constraint
          WHERE (contype IN ('c', 'f', 'p', 'u') AND conrelid = ANY(ARRAY[
                    'tenant', 'principal', 'audit_event', 'audit_chain_head',
@@ -213,6 +228,24 @@ async fn registry_constraint_names_match_the_catalog() {
     .fetch_all(&pool)
     .await
     .unwrap();
+    for (function, name) in TRIGGER_CONSTRAINTS {
+        let source: String = sqlx::query_scalar(
+            "SELECT p.prosrc FROM pg_proc p
+             WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+               AND p.proname = $1",
+        )
+        .bind(function)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            source.contains(&format!("CONSTRAINT = '{name}'")),
+            "{function}: {name}"
+        );
+        assert!(!names.iter().any(|known| known == name), "{name}");
+        names.push(name.into());
+    }
+    names.sort_unstable();
     assert_eq!(names, KNOWN_CONSTRAINTS);
     db.drop([pool]).await;
 }

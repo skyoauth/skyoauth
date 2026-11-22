@@ -63,6 +63,9 @@ const SEED: &str = r#"
         ('ata_b2', 'rs_2', 'ten_b', '["wif"]', '["read"]', '[]', 'enabled');
     INSERT INTO service_identity VALUES ('svc_1', 'ten_a', 'deploy-api', '["read"]', '{}', 'enabled');
     INSERT INTO service_identity_resource_server VALUES ('svc_1', 'ten_a', 'rs_1');
+    -- Enabled egress entries for the seeded destinations (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled');
     INSERT INTO trust_source VALUES
         ('src_1', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',

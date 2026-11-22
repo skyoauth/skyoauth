@@ -39,6 +39,9 @@ const PROFILES: [BindingProfile; 3] = [
 const SEED: &str = r#"
     INSERT INTO tenant VALUES ('ten_a', 'a', 'ns_a', 'enabled');
     INSERT INTO principal VALUES ('wld_1', 'ten_a', 'workload', 'w1', 'enabled');
+    -- Enabled egress entries for the seeded destinations (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled');
     INSERT INTO trust_source VALUES
         ('src_1', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',

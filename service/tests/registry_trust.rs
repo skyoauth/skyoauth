@@ -145,6 +145,21 @@ fn new_version(tenant_id: &str, id: &str, keyset_id: &str) -> NewTrustKeysetVers
     }
 }
 
+/// The `(purpose, exact_destination)` of the enabled egress entries that
+/// [`seeded`] adds: the destinations of the sources below and of the test
+/// writes whose refusal or success must not come from the `0011` egress
+/// guard.
+const EGRESS: [(&str, &str); 5] = [
+    (
+        "oidc_discovery",
+        "https://token.actions.githubusercontent.com/.well-known/openid-configuration",
+    ),
+    ("oidc_discovery", "https://x.example/.well-known"),
+    ("token_review", "https://k3s.internal.example:6443"),
+    ("token_review", "https://k3s-2.internal.example:6443"),
+    ("token_review", "https://k.example"),
+];
+
 /// An `oidc_discovery` source with an on-demand, single-use profile.
 fn oidc_source(tenant_id: &str, id: &str, name: &str) -> NewTrustSource {
     NewTrustSource {
@@ -322,7 +337,8 @@ fn grant_changes(grant: &ServiceGrant) -> ServiceGrantChanges {
 /// `src_k8s`; service identity `svc_1` with `rs_1`; grant `grt_1` of
 /// `wld_1` with `bnd_1` and `bnd_2`. In `ten_b`: workload `wld_b`, service
 /// `svc_b`, `rs_2` assigned, keyset `ks_b`, source `src_b`, binding `bnd_b`,
-/// service identity `svc_b` and grant `grt_b`.
+/// service identity `svc_b` and grant `grt_b`. The enabled egress entries of
+/// [`EGRESS`], which the `0011` guard needs for every destination written.
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for tenant in ["ten_a", "ten_b"] {
@@ -361,6 +377,18 @@ async fn seeded() -> (TestDb, PgPool) {
         registry::create_trust_keyset(&pool, &new_keyset(tenant, id, "partner"))
             .await
             .unwrap();
+    }
+    for (n, (purpose, destination)) in EGRESS.into_iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO egress_allowlist_entry (id, purpose, exact_destination, status) \
+             VALUES ($1, $2, $3, 'enabled')",
+        )
+        .bind(format!("egr_{n}"))
+        .bind(purpose)
+        .bind(destination)
+        .execute(&pool)
+        .await
+        .unwrap();
     }
     for source in [
         oidc_source("ten_a", "src_gh", "github"),
@@ -1114,21 +1142,27 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
                 discovery_url: Some("https://x.example/ well-known".into()),
                 ..oidc_new()
             },
-            "trust_source_discovery_url_no_space_check",
+            // No egress entry can hold this value, and the `0011` guard
+            // fires before the `0004` check ("trust_source_discovery_url_no_space_check").
+            "trust_source_discovery_url_egress_enabled",
         ),
         (
             NewTrustSource {
                 discovery_url: Some(String::new()),
                 ..oidc_new()
             },
-            "trust_source_discovery_url_check",
+            // No egress entry can hold this value, and the `0011` guard
+            // fires before the `0004` check ("trust_source_discovery_url_check").
+            "trust_source_discovery_url_egress_enabled",
         ),
         (
             NewTrustSource {
                 discovery_url: Some(long.clone()),
                 ..oidc_new()
             },
-            "trust_source_discovery_url_octet_length_check",
+            // No egress entry can hold this value, and the `0011` guard
+            // fires before the `0004` check ("trust_source_discovery_url_octet_length_check").
+            "trust_source_discovery_url_egress_enabled",
         ),
         (
             NewTrustSource {
@@ -1177,7 +1211,10 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
                 token_review_endpoint: Some("https://k\t.example".into()),
                 ..token_review_source("ten_a", "src_x", "x", "cluster_x")
             },
-            "trust_source_token_review_endpoint_no_space_check",
+            // No egress entry can hold this value, and the `0011` guard
+            // fires before the `0004` check
+            // ("trust_source_token_review_endpoint_no_space_check").
+            "trust_source_token_review_endpoint_egress_enabled",
         ),
         (
             token_review_source("ten_a", "src_x", "x", &"c".repeat(256)),

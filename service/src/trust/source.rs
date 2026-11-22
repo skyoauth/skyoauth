@@ -243,12 +243,19 @@
 //! - `ca_bundle_ref` and `reviewer_credential_ref` resolution within the
 //!   tenant's secret namespace (IR-034), tenant status (the operator lookup
 //!   does not read it), and the other source rules of T11.1 and T11.8.
-//! - A database backstop, such as a trigger that checks the entry: the
-//!   migrations are frozen, and there is no proposal for it yet; it is a
-//!   maintainer decision. `docs/proposals/ir-080-assignment-write-guard.md`
-//!   proposes a similar guard for a different table family (IR-080
-//!   assignment references), not for this check. The bare registry functions
-//!   still write any destination the `0004` checks allow.
+//! - A database backstop of the syntax rules. The entry check has one since
+//!   migration `0011` (provisional lead pick, 2026-11-22; migrations
+//!   README, "What 0011 adds"): the trigger `trust_source_egress_enabled`
+//!   applies the "What", "Match" and "When" rules above to every writer,
+//!   locking the entry `FOR SHARE` in the order of step 3, and refuses with
+//!   `23514` naming `trust_source_discovery_url_egress_enabled` or
+//!   `trust_source_token_review_endpoint_egress_enabled`, which the registry
+//!   maps to [`RegistryError::Invariant`]. This path checks first, so it
+//!   still refuses with [`SourceWriteError::EgressNotAllowed`]; at step 4
+//!   the trigger finds the entry this path holds. The bare registry
+//!   functions now get the `Invariant`, but they still write a
+//!   non-canonical destination that an enabled entry lists with exactly
+//!   that value.
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
 //! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant

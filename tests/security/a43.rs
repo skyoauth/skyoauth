@@ -225,6 +225,7 @@ use std::{
 
 use serde_json::{Value, json};
 use skyoauth_scenarios::{
+    egress,
     pg::TestDb,
     rep::{self, Replicas},
 };
@@ -529,6 +530,7 @@ async fn fixture() -> (TestDb, PgPool) {
                 .await
                 .unwrap();
         }
+        egress::allow_destinations(&pool, &github_source(side)).await;
         registry::create_trust_source(&pool, &github_source(side))
             .await
             .unwrap();

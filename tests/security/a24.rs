@@ -82,6 +82,7 @@ use std::{
 };
 
 use skyoauth_scenarios::{
+    egress,
     pg::TestDb,
     rep::{self, Replicas},
 };
@@ -180,12 +181,9 @@ async fn two_tenants() -> (TestDb, PgPool) {
         )
         .await
         .unwrap();
-        registry::create_trust_source(
-            &pool,
-            &single_use_source(side.tenant, side.source, "github"),
-        )
-        .await
-        .unwrap();
+        let source = single_use_source(side.tenant, side.source, "github");
+        egress::allow_destinations(&pool, &source).await;
+        registry::create_trust_source(&pool, &source).await.unwrap();
     }
     (db, pool)
 }

@@ -45,6 +45,9 @@ const SEED: &str = r#"
     INSERT INTO audience_tenant_assignment VALUES
         ('ata_1', 'rs_1', 'ten_a', '["wif"]', '["read"]', '[]', 'enabled'),
         ('ata_2', 'rs_2', 'ten_a', '["wif"]', '["read"]', '[]', 'enabled');
+    -- Enabled egress entries for the seeded destinations (0011 guard).
+    INSERT INTO egress_allowlist_entry VALUES
+        ('egr_seed_1', 'oidc_discovery', 'https://token.actions.githubusercontent.com/.well-known/openid-configuration', 'enabled');
     INSERT INTO trust_source VALUES
         ('src_gh', 'ten_a', 'github', 'oidc_discovery', 'https://token.actions.githubusercontent.com',
          'https://token.actions.githubusercontent.com/.well-known/openid-configuration',
@@ -548,7 +551,8 @@ async fn upgrade_precondition_lists_the_reserved_operator_ids() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(version, 9);
+    // 0009 and every later migration applied.
+    assert_eq!(version, MIGRATOR.iter().last().unwrap().version);
     let not_always: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled <> 'A'",
     )

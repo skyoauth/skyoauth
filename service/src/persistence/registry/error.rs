@@ -27,10 +27,13 @@ const GUARD: &str = "SK001";
 /// `0005`, `instance_security_policy` and `recovery_state`, which
 /// bootstrap writes, and `administrative_operation`, which the recovery
 /// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
-/// `0008` and `0009` name them, sorted byte-wise. A unique, foreign key or check
-/// violation maps to a typed variant only for a name listed here. The
-/// database test `registry_constraint_names_match_the_catalog` keeps the
-/// list equal to the catalog.
+/// `0008` and `0009` name them, and the two names the `0011` egress guard
+/// trigger raises with `23514` (`trust_source_discovery_url_egress_enabled`
+/// and `trust_source_token_review_endpoint_egress_enabled`), sorted
+/// byte-wise. A unique, foreign key or check violation maps to a typed
+/// variant only for a name listed here. The database test
+/// `registry_constraint_names_match_the_catalog` keeps the list equal to the
+/// catalog's constraints plus the names the trigger functions raise.
 pub const KNOWN_CONSTRAINTS: &[&str] = &[
     // The three operator tables of `0005` (`operator.rs`).
     "admin_credential_admin_id_fkey",
@@ -349,6 +352,8 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_source_cluster_id_key",
     "trust_source_cluster_id_octet_length_check",
     "trust_source_discovery_url_check",
+    // Raised by the `0011` egress guard trigger, not a catalog constraint.
+    "trust_source_discovery_url_egress_enabled",
     "trust_source_discovery_url_kind_check",
     "trust_source_discovery_url_no_space_check",
     "trust_source_discovery_url_octet_length_check",
@@ -381,6 +386,8 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_source_tenant_id_name_key",
     "trust_source_tenant_id_octet_length_check",
     "trust_source_token_review_endpoint_check",
+    // Raised by the `0011` egress guard trigger, not a catalog constraint.
+    "trust_source_token_review_endpoint_egress_enabled",
     "trust_source_token_review_endpoint_no_space_check",
     "trust_source_token_review_endpoint_octet_length_check",
     "trust_source_token_review_fields_kind_check",
@@ -514,7 +521,11 @@ pub enum InvariantKind {
     /// `23503`: a referenced row does not exist, for example a checker
     /// tenant without an assignment of the checker's resource server.
     ForeignKey,
-    /// `23514`: a table or domain `CHECK`.
+    /// `23514`: a table or domain `CHECK`, or the `0011` egress guard
+    /// trigger of `trust_source`, which raises `23514` naming
+    /// `trust_source_discovery_url_egress_enabled` or
+    /// `trust_source_token_review_endpoint_egress_enabled` when a written
+    /// destination has no enabled egress allowlist entry of its purpose.
     Check,
     /// `23502`: a required column is `NULL`.
     NotNull,
@@ -917,6 +928,37 @@ mod tests {
         }
         // The deferred binding-set check at commit is a guard like any other.
         assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+    }
+
+    /// The `0011` egress guard raises `23514` with a per-member name, which
+    /// maps like a check constraint (provisional lead pick, 2026-11-22).
+    #[test]
+    fn the_egress_guard_names_map_to_check_invariants() {
+        for name in [
+            "trust_source_discovery_url_egress_enabled",
+            "trust_source_token_review_endpoint_egress_enabled",
+        ] {
+            let error = map(Some("23514"), Some(name));
+            assert!(
+                matches!(
+                    error,
+                    RegistryError::Invariant {
+                        kind: InvariantKind::Check,
+                        constraint: Some(constraint)
+                    } if constraint == name
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("registry write violates check constraint {name}")
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                format!("Invariant {{ kind: Check, constraint: Some({name:?}) }}")
+            );
+            assert_redacted(&error);
+        }
     }
 
     #[test]

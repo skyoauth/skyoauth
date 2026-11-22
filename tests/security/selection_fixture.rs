@@ -79,7 +79,7 @@
 
 use std::collections::BTreeMap;
 
-use skyoauth_scenarios::pg::TestDb;
+use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -451,6 +451,7 @@ async fn seed(pool: &PgPool, side: Side) {
         .unwrap();
     }
     for on in SOURCES {
+        egress::allow_destinations(pool, &source(side, on)).await;
         registry::create_trust_source(pool, &source(side, on))
             .await
             .unwrap();

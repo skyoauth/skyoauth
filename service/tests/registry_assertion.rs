@@ -75,8 +75,9 @@ fn oidc_source(tenant_id: &str, id: &str) -> NewTrustSource {
     }
 }
 
-/// Tenants `ten_a` and `ten_b`; sources `src_a` and `src_a2` of `ten_a` and
-/// `src_b` of `ten_b`.
+/// Tenants `ten_a` and `ten_b`; the enabled `oidc_discovery` egress entry
+/// `egr_gh` of their discovery URL; sources `src_a` and `src_a2` of `ten_a`
+/// and `src_b` of `ten_b`.
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for tenant in ["ten_a", "ten_b"] {
@@ -92,6 +93,15 @@ async fn seeded() -> (TestDb, PgPool) {
         .await
         .unwrap();
     }
+    // The enabled egress entry the `0011` guard needs for the discovery URL.
+    sqlx::query(
+        "INSERT INTO egress_allowlist_entry (id, purpose, exact_destination, status) \
+         VALUES ('egr_gh', 'oidc_discovery', $1, 'enabled')",
+    )
+    .bind(oidc_source("ten_a", "src_a").discovery_url)
+    .execute(&pool)
+    .await
+    .unwrap();
     for (tenant, source) in [("ten_a", "src_a"), ("ten_a", "src_a2"), ("ten_b", "src_b")] {
         registry::create_trust_source(&pool, &oidc_source(tenant, source))
             .await

@@ -1840,6 +1840,135 @@ Choices marked "(inferred)" are its own.
   for an impersonation grant, rows are added or deleted only by its
   creating transaction. `0005` and `0006` say nothing about reserved IDs.
 
+## What 0011 adds
+
+`0011_trust_source_egress_guard.sql` adds a database backstop for the
+IR-152 egress check of a trust source, which only the service enforced
+until now (see "Trust source writes"): one function,
+`skyoauth_check_trust_source_egress()`, and one trigger,
+`trust_source_egress_enabled` (provisional lead pick, 2026-11-22;
+provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate
+M0). It changes no column, index, constraint or existing trigger, and it
+validates no existing row. Choices marked "(inferred)" are its own.
+
+- **Rule.** The service's rule, for the two destination columns of `0004`
+  only: `discovery_url` needs an enabled `egress_allowlist_entry` of
+  purpose `oidc_discovery` with exactly its value, and
+  `token_review_endpoint` one of purpose `token_review`, checked in that
+  order. On `INSERT` a member is checked when it is not `NULL`; on
+  `UPDATE` only when it is not `NULL` and `IS DISTINCT FROM` its old value.
+  So a status-only update, a rename, or any write that leaves both members
+  unchanged passes while the stored destination's entry is disabled, as
+  the `0004` comment on these columns requires (IR-152: such a source is
+  degraded at fetch, not refused at write). A `NULL` member is never
+  checked; the `0004` kind checks decide which members a kind has.
+  Existing rows are never revalidated, by the upgrade or later: an entry
+  disabled after a source was written leaves that source as it is.
+- **Match.** The service's `LOCK_ENTRY` predicate:
+  `purpose = <purpose> AND exact_destination = <member>`, locked
+  `FOR SHARE`. Exact byte equality (`COLLATE "C"`), no normalization: a
+  destination that differs by one byte, the case of a letter or a trailing
+  slash matches no entry, and an entry of the other purpose, or a `jwks`
+  entry, never satisfies a member. The guard checks no syntax: a
+  non-canonical destination that an enabled entry lists with exactly that
+  value passes it. The service's `InvalidDestination` stays the only
+  syntax rule.
+- **Error.** No row, or a row whose `status` is not `enabled`, fails the
+  write with `23514` (`check_violation`) naming
+  `trust_source_discovery_url_egress_enabled` or
+  `trust_source_token_review_endpoint_egress_enabled` (lead decision). The
+  error also names the schema, table and column, and its message names the
+  column and the purpose, never a value. The names are raised by the
+  trigger and are not catalog constraints. `KNOWN_CONSTRAINTS` lists them,
+  so the registry maps the error to `Invariant { kind: Check, constraint }`,
+  as for the `0008` and `0009` checks; there is no new `InvariantKind`
+  (inferred: the rule is about the row's values, like a check, not about
+  the operation, like the `SK001` guards). The registry test
+  `registry_constraint_names_match_the_catalog` checks the two names
+  against the function's source. The service keeps its own check, which
+  runs first: `create_source` and `update_source` still refuse with
+  `EgressNotAllowed` and never reach this error.
+- **Locks.** The entry row is locked `FOR SHARE`, as the service locks it.
+  The `UPDATE` that disables an entry takes `FOR NO KEY UPDATE`, which
+  conflicts with it. Under `READ COMMITTED`, either the disable waits until
+  the write commits or rolls back, or the write waits for the disable, then
+  reads the row as committed, `disabled`, and is refused. So no write
+  commits through an entry that a disable committed before it. Writes that
+  use one entry do not wait for each other. Lock order: on `UPDATE`,
+  PostgreSQL locks the target row before a `BEFORE ROW` trigger fires, so
+  the order is the service's (operator rows, the source row, the entry
+  `FOR SHARE`, discovery before TokenReview, then the audit head). On
+  `INSERT` the entry comes before the foreign-key checks of the new row,
+  which are `AFTER` triggers. Through the service, the trigger finds the
+  entry that the service already holds. The race tests run both commit
+  orders and unordered races, raw (the registry writers) and through the
+  service, creating a source and changing one; none deadlocks.
+- **Precedence.** The trigger is `BEFORE INSERT OR UPDATE`, for each row.
+  PostgreSQL fires the `BEFORE` row triggers of an event in name order, so
+  it fires before `trust_source_immutable` and `trust_source_revision`
+  (`0004`), and before the `CHECK`, `NOT NULL`, unique and foreign-key
+  constraints. A write that also changes an immutable column, does not
+  advance the revision (both `SK001`), leaves a `NOT NULL` column empty
+  (`23502`), repeats a unique key (`23505`) or names a missing tenant
+  (`23503`) fails with this `23514` when it sets a destination without an
+  enabled entry (lead ruling). A destination that a `0004` shape check
+  rejects (empty, with whitespace or a control character, or over 2048
+  bytes) matches no entry either, since `exact_destination` has the same
+  `0002` checks, so it also fails here first, and the registry now names
+  the egress constraint, not the `0004` one (inferred consequence).
+- **Scope.** Only the two destination columns that exist. A future
+  destination column adds its own check, constraint name and test, in its
+  own migration; this function does not cover it.
+- **Function.** It reads `egress_allowlist_entry`, so it is created as the
+  table readers of `0002`, `0004` and `0009` are: the schema is resolved
+  by `current_schema()`, the table is named with its schema, and the body
+  is passed as a quoted literal (`%L`). Its `search_path` is pinned to
+  `pg_catalog, pg_temp`, without the schema (lead decision): it resolves no
+  unqualified table name. This differs from the convention for table
+  readers (`pg_catalog, <schema>, pg_temp`, see "Conventions"); both are
+  safe here, since the one table is schema-qualified. It runs with the
+  caller's privileges (`SECURITY INVOKER`): a role that writes a
+  destination needs `SELECT` and `UPDATE` on `egress_allowlist_entry`
+  (`FOR SHARE` needs `UPDATE`), or the write fails with `42501`. A write
+  that checks no member needs neither.
+- **Limits.**
+  - Like every guard, it is a tripwire against application DML, not a
+    security boundary (see "Limits"). The table owner or a superuser can
+    switch it off (`ALTER TABLE … DISABLE TRIGGER`), and a source written
+    meanwhile keeps its destination. Re-enabled with plain
+    `ENABLE TRIGGER`, it fires in origin mode only; re-enable it with
+    `ENABLE ALWAYS TRIGGER`.
+  - It is `ENABLE ALWAYS`, so it also fires under
+    `session_replication_role = replica`, where foreign keys do not.
+    Replica mode does not skip it; only switching it off does. A
+    logical-replication apply or a data-only reload of `trust_source` needs
+    the matching enabled entries first (inferred; not reproduced).
+  - Under `REPEATABLE READ` and `SERIALIZABLE`, a write whose snapshot
+    predates a change of its entry fails with `40001`, which the registry
+    maps to `Retry`. A deadlock (`40P01`) is `Retry` too: an egress entry
+    writer that locks a `trust_source` row after an entry row can deadlock
+    with a source update ("Trust source writes" has the rule for that
+    writer; none exists yet).
+- **Locks on existing tables.** Checked with `pg_locks` in a transaction
+  that applies `0011` to a `0009` database (PostgreSQL 16.15):
+  `CREATE TRIGGER` and `ENABLE ALWAYS TRIGGER` take `SHARE ROW EXCLUSIVE`
+  on `trust_source`, which blocks writes of trust sources until the
+  migration commits, with no rewrite (its `relfilenode` stays the same).
+  `egress_allowlist_entry` is not locked.
+- **Upgrade precondition.** None: the trigger validates no existing row.
+- **Tests.** `service/tests/schema_trust_source_egress_guard.rs` covers
+  the catalog, the refusals and acceptances, the update rule, the order of
+  the members, the precedence, replica mode, privileges, the upgrade, the
+  isolation limit and the race harness.
+  `the_database_guard_refuses_what_the_bare_writers_skip` in
+  `service/tests/trust_source_egress.rs` covers both layers. Tests and
+  scenarios that write trust sources with raw SQL or the bare registry
+  writers first insert an enabled entry for each destination
+  (`tests/src/egress.rs`, `allow_destinations`).
+- **Frozen comments.** The `0004` comment on the destination columns ("a
+  write that leaves them unchanged must not be rejected for a missing or
+  disabled entry") still holds: the guard checks only a changed member.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -1960,7 +2089,12 @@ Open for all registry tables:
   `service_grant_resource_server` also needs `SELECT` on `service_grant`
   (at least its columns `id`, `mode` and `xmin`), which the list guard
   reads with the caller's privileges, or the write fails with `42501`; the
-  test `list_row_writers_need_select_on_service_grant` checks it.
+  test `list_row_writers_need_select_on_service_grant` checks it. Since
+  `0011`, writing a trust source `discovery_url` or `token_review_endpoint`
+  also needs `SELECT` and `UPDATE` on `egress_allowlist_entry`, which the
+  egress guard reads and locks `FOR SHARE` with the caller's privileges, or
+  the write fails with `42501`; the test
+  `destination_writers_need_select_and_update_on_the_entries` checks it.
 - A stored creation marker for impersonation grants, a possible `0010`
   (lead ruling, 2026-11-21: no schema change in `0009`). The `0009` list
   guard decides "created by this transaction" from the grant row's `xmin`,
@@ -2869,7 +3003,8 @@ Follow-ups and open questions:
   path must not be wired to an endpoint before that and the request layer
   (T14.1, T14.2) are.
 - The fetch-time `jwks_uri` match and the degraded health signal (IR-152)
-  are not built, nor a database backstop for the egress check. No proposal
-  for such a backstop exists yet; it is a maintainer decision.
+  are not built. The egress check now has a database backstop, `0011`
+  (provisional lead pick, 2026-11-22; see "What 0011 adds"); the syntax
+  rule has none.
   `docs/proposals/ir-080-assignment-write-guard.md` proposes a similar guard
   for a different table family (IR-080 assignment references).
