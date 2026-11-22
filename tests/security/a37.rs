@@ -124,7 +124,9 @@ const GENERIC_SOURCE: &str = "src_generic";
 #[derive(Clone, Copy)]
 struct Template {
     profile: BindingProfile,
-    /// The profile as stored and as the refusal names it.
+    /// The profile as stored. The refusal does not name it
+    /// (`RequiredPredicate` carries the claim and the problem only); the
+    /// tests use it in their failure messages.
     name: &'static str,
     /// The `0008` check of the profile.
     check: &'static str,
