@@ -32,10 +32,11 @@
 //! - **Match.** Exact byte equality of the member with the entry's
 //!   `exact_destination`, with no normalization of case, port, trailing
 //!   slash or percent-encoding (inferred: IR-152 says "exactly match"; the
-//!   column is `COLLATE "C"`, so `=` compares bytes). A `jwks` entry, or an
-//!   entry of the other purpose, never satisfies a member. The entry must be
-//!   `enabled`: a missing or disabled entry is
-//!   [`SourceWriteError::EgressNotAllowed`] naming the member.
+//!   column is `COLLATE "C"`, so `=` compares bytes). The member is in
+//!   canonical form (see "Syntax"), so only an entry in canonical form can
+//!   match it. A `jwks` entry, or an entry of the other purpose, never
+//!   satisfies a member. The entry must be `enabled`: a missing or disabled
+//!   entry is [`SourceWriteError::EgressNotAllowed`] naming the member.
 //! - **When.** A create checks every member that is set. An update checks
 //!   only a member whose new value differs, byte-wise, from the stored row's
 //!   (IR-152: "on create or change"). An update that leaves both unchanged,
@@ -46,22 +47,48 @@
 //!   a member in the same write is checked like any other change (inferred:
 //!   IR-152 exempts "a disable" and "a write that leaves both fields
 //!   unchanged", and this write is neither alone).
-//! - **Syntax.** A checked member must be an `https` URL with a host, a
-//!   path and no userinfo or fragment (the lead's list), read as follows
-//!   (inferred): the `url` crate parses it, and its raw text is `https://`
-//!   followed by a non-empty authority with no `@`, which ends at a `/` (not
-//!   at `?`, `#`, `\` or the end), and it has no fragment, not even an
-//!   empty `#`. The raw text is checked as well as the parsed URL because
-//!   the parser is lenient: it reads `https:///x` as the host `x`, drops the
-//!   empty userinfo of `https://@host/`, and gives `https://host` the path
-//!   `/`. A query is allowed (no rule names it), and the minimal path is
-//!   `/`, so a TokenReview endpoint is written `https://host:6443/`.
-//!   Otherwise the write is [`SourceWriteError::InvalidDestination`] naming
-//!   the member. A create checks the syntax before any statement; an update
-//!   checks only a changed member, like the entry check, so it checks after
-//!   it has read the stored row and before any egress entry lock (inferred:
-//!   an unchanged member is never refused, also not by a syntax rule that
+//! - **Syntax.** A checked member must be an `https` URL in canonical form
+//!   with a host and no userinfo or fragment (lead ruling, 2026-11-22;
+//!   inferred). In order:
+//!   - its text has no ASCII whitespace, no control character (NUL
+//!     included) and no backslash, which the parser would strip, drop or
+//!     read as `/`;
+//!   - the `url` crate parses it, and the parsed URL serializes to exactly
+//!     the same text (`Url::as_str() == raw`);
+//!   - it percent-encodes no unreserved character (a letter, a digit, `-`,
+//!     `.`, `_` or `~`), which the parser leaves encoded in a path or query;
+//!   - its scheme is `https`, it has a non-empty host, no userinfo and no
+//!     fragment, not even an empty `@` or `#`.
+//!
+//!   Canonical form makes the text an operator approves name the host,
+//!   port and path that are fetched. Otherwise the parser would fetch
+//!   `good.example` for `%67ood.example`, `127.0.0.1` for `0x7f.1`,
+//!   `0177.0.0.1` or `127.1`, an `xn--` A-label for a U-label, or
+//!   `example.com` for a fullwidth or ideographic-dot spelling. It would
+//!   also lowercase the host and scheme, compress an IPv6 address, drop a
+//!   default or empty port, a zero-width character, a soft hyphen or a dot
+//!   segment, and read `a\b` as `a/b`.
+//!
+//!   A path of at least `/` follows from canonical form (`https://h:6443`
+//!   is not canonical, `https://h:6443/` is); IR-152 does not require it.
+//!   IR-152 names scheme, host, port and path as the parts of an exact URL,
+//!   but it does not require a port to be written: canonical form leaves a
+//!   default port out. A query is allowed (no rule names it).
+//!
+//!   A refused member is [`SourceWriteError::InvalidDestination`] naming
+//!   the member. A create checks the syntax before any statement. An update
+//!   checks only a changed member, like the entry check: after it has read
+//!   the stored row and before any egress entry lock (inferred: an
+//!   unchanged member is never refused, also not by a syntax rule that
 //!   tightened after it was stored).
+//!
+//!   Open questions: a path-less, kubeconfig-style server URL
+//!   (`https://host:6443`, the export's `api_server`, OQ-IR-6) is refused,
+//!   so an importer (C05) must rewrite it to canonical form, and nothing
+//!   does that yet. And nothing checks that an egress entry's
+//!   `exact_destination` is canonical, since no entry writer exists.
+//!   Entries are matched byte for byte, so that writer must enforce this
+//!   same rule; otherwise a non-canonical entry matches no source.
 //!
 //! No error's `Display` or `Debug` contains a destination: errors name the
 //! member, never its value.
@@ -78,10 +105,12 @@
 //!    `admin_credential` and `admin_role_binding` rows `FOR SHARE`, in the
 //!    `0005` order;
 //! 2. an update only: the `trust_source` row by tenant and ID
-//!    `FOR NO KEY UPDATE`, the lock its compare-and-set takes anyway, and
-//!    reads the stored destinations and revision. A missing row is
-//!    [`RegistryError::NotFound`] and another revision
-//!    [`RegistryError::StaleRevision`], both before any entry lock;
+//!    `FOR NO KEY UPDATE`, and reads the stored destinations and revision.
+//!    A missing row is [`RegistryError::NotFound`] and another revision
+//!    [`RegistryError::StaleRevision`], both before any entry lock. A
+//!    concurrent update of the same source waits here, holding no entry
+//!    lock, and then reads the committed revision: `StaleRevision`, not a
+//!    deadlock;
 //! 3. for each member to check, in the fixed order `discovery_url`, then
 //!    `token_review_endpoint`, the matching `egress_allowlist_entry` row
 //!    `FOR SHARE`, by `purpose` and `exact_destination` (unique together, so
@@ -90,13 +119,24 @@
 //!    both, which the kind checks then reject;
 //! 4. the registry write: the insert (whose foreign-key checks take
 //!    `FOR KEY SHARE` on the tenant and, for `uploaded_jwks`, the keyset) or
-//!    the compare-and-set update;
+//!    the compare-and-set update. [`update_trust_source`] always sets
+//!    `name`, a column of the unique key `(tenant_id, name)`. When the new
+//!    name differs from the stored one, PostgreSQL takes the row
+//!    `FOR UPDATE`, not `FOR NO KEY UPDATE`, until the transaction ends. That
+//!    lock conflicts with the `FOR KEY SHARE` of a foreign-key check, so a
+//!    `principal_binding` or `consumed_assertion` insert that references the
+//!    source waits for the commit, or fails with `55P03` under a
+//!    `lock_timeout`. With the name unchanged, PostgreSQL compares the key
+//!    columns, finds none changed, keeps `FOR NO KEY UPDATE`, and those
+//!    inserts do not wait (measured, PostgreSQL 16). Commit a rename
+//!    promptly;
 //! 5. [`append_audit_event`] last, which locks the tenant row
 //!    `FOR KEY SHARE` and then the chain head (migrations README, "append
 //!    audit events in this order").
 //!
 //! So the lock order is: operator rows, then the source row
-//! (`FOR NO KEY UPDATE`, update only), then the egress entry rows
+//! (`FOR NO KEY UPDATE`, update only; `FOR UPDATE` from step 4 on when it
+//! renames), then the egress entry rows
 //! (`FOR SHARE`, discovery before TokenReview), then the write's own locks,
 //! then the audit head. This differs from step 1 of "What 0005 adds" in the
 //! migrations README, which orders the `0002` to `0004` tables by name
@@ -106,8 +146,11 @@
 //! to lock. An egress entry writer that locked a trust source row after an
 //! entry row would deadlock with an update here; PostgreSQL fails one of
 //! them with `40P01` ([`RegistryError::Retry`]), a refusal for this write.
-//! No egress entry writer exists yet; one must not lock trust sources after
-//! the entry.
+//! No egress entry writer exists yet. One that creates an operation must
+//! lock no `trust_source` row at all. It may list the affected source IDs
+//! without a lock only after its entry `UPDATE`, under `READ COMMITTED`:
+//! a source write that checked the entry has committed by then, since the
+//! `UPDATE` waited for its `FOR SHARE`, and a later one sees the new status.
 //!
 //! `FOR SHARE` on the entry conflicts with the `UPDATE` that disables it,
 //! which takes a `FOR NO KEY UPDATE` row lock, and not with another
@@ -146,8 +189,9 @@
 //! `trust_source.create` with no previous revision and the new row's
 //! revision; an update is `trust_source.update` with the stored and the new
 //! revision, for every update, a status-only one included (provisional
-//! lead pick, 2026-11-22; the action table's convention would name a
-//! status-only write `trust_source.enable` or `trust_source.disable`). The
+//! lead pick, 2026-11-22, open; the action table's convention would name a
+//! status-only write `trust_source.enable` or `trust_source.disable`, which
+//! have no writer yet; see `persistence::registry::event_actions`). The
 //! event envelope has no member for the checked members or the matched
 //! entry IDs (no `audit_event` detail column; migrations README, "Not done
 //! in `0002`"), so the event records neither (inferred: kept minimal), and
@@ -181,9 +225,11 @@
 //!   tenant's secret namespace (IR-034), tenant status (the operator lookup
 //!   does not read it), and the other source rules of T11.1 and T11.8.
 //! - A database backstop, such as a trigger that checks the entry: the
-//!   migrations are frozen, and that alternative waits for the maintainer's
-//!   ruling on a proposal. The bare registry functions still write any
-//!   destination the `0004` checks allow.
+//!   migrations are frozen, and there is no proposal for it yet; it is a
+//!   maintainer decision. `docs/proposals/ir-080-assignment-write-guard.md`
+//!   proposes a similar guard for a different table family (IR-080
+//!   assignment references), not for this check. The bare registry functions
+//!   still write any destination the `0004` checks allow.
 
 use std::{fmt, time::SystemTime};
 
@@ -219,16 +265,16 @@ const TRANSACTION_ISOLATION: &str = "SELECT current_setting('transaction_isolati
 /// names it.
 const READ_COMMITTED: &str = "read committed";
 
-/// Step 2 of an update: the stored row, locked as its update locks it.
+/// Step 2 of an update: the stored row, locked before any entry so that a
+/// concurrent update of the source waits here and holds no entry lock. Its
+/// compare-and-set (step 4) may take a stronger lock: `FOR UPDATE` when it
+/// changes `name` (see the module docs, "Order and locks").
 const LOCK_SOURCE: &str = "SELECT discovery_url, token_review_endpoint, revision \
      FROM trust_source WHERE tenant_id = $1 AND id = $2 FOR NO KEY UPDATE";
 
 /// Step 3: the entry of one purpose with exactly this destination.
 const LOCK_ENTRY: &str = "SELECT id, status FROM egress_allowlist_entry \
      WHERE purpose = $1 AND exact_destination = $2 FOR SHARE";
-
-/// The scheme and the two slashes a destination starts with.
-const HTTPS_PREFIX: &str = "https://";
 
 /// What the write's audit event takes from the caller: its ID
 /// (caller-generated, T10.2) and the caller's `now`, never the database's.
@@ -282,7 +328,7 @@ impl fmt::Display for SourceWriteError {
             }
             Self::InvalidDestination { member } => write!(
                 f,
-                "trust source {member} is not an https URL with a host, a path and no userinfo \
+                "trust source {member} is not a canonical https URL with a host and no userinfo \
                  or fragment"
             ),
             Self::EgressNotAllowed { member } => write!(
@@ -358,34 +404,50 @@ fn check_syntax(destination: Destination<'_>) -> Result<(), SourceWriteError> {
         member: destination.member,
     };
     let raw = destination.value;
+    // Characters the parser strips, drops or reads as `/`.
+    if raw
+        .chars()
+        .any(|c| c.is_ascii_whitespace() || c.is_control() || c == '\\')
+    {
+        return Err(invalid());
+    }
     let url = Url::parse(raw).map_err(|_| invalid())?;
-    // https only, written as such.
-    let Some(rest) = raw.strip_prefix(HTTPS_PREFIX) else {
-        return Err(invalid());
-    };
-    if url.scheme() != "https" {
+    // Canonical form: the text is what the parser serializes, so it names
+    // the host, port and path that are fetched.
+    if url.as_str() != raw || encodes_unreserved(raw) {
         return Err(invalid());
     }
-    // The authority ends where the parser ends it for a special scheme.
-    let end = rest.find(['/', '\\', '?', '#']).unwrap_or(rest.len());
-    let (authority, after) = rest.split_at(end);
-    // A host.
-    if authority.is_empty() {
+    if url.scheme() != "https" || url.host_str().is_none_or(str::is_empty) {
         return Err(invalid());
     }
-    // No userinfo, not even an empty one.
-    if authority.contains('@') || !url.username().is_empty() || url.password().is_some() {
-        return Err(invalid());
-    }
-    // No fragment, not even an empty one.
-    if url.fragment().is_some() {
-        return Err(invalid());
-    }
-    // A path.
-    if !after.starts_with('/') {
+    // No userinfo and no fragment, not even an empty one.
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
         return Err(invalid());
     }
     Ok(())
+}
+
+/// Whether `raw` percent-encodes an unreserved character (RFC 3986 section
+/// 2.3: a letter, a digit, `-`, `.`, `_` or `~`), which the parser leaves
+/// encoded in a path or a query.
+fn encodes_unreserved(raw: &str) -> bool {
+    raw.as_bytes().windows(3).any(|window| {
+        let [b'%', high, low] = *window else {
+            return false;
+        };
+        let (Some(high), Some(low)) = (hex(high), hex(low)) else {
+            return false;
+        };
+        let byte = high << 4 | low;
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~')
+    })
+}
+
+/// The value of one hex digit.
+fn hex(digit: u8) -> Option<u8> {
+    char::from(digit)
+        .to_digit(16)
+        .and_then(|value| u8::try_from(value).ok())
 }
 
 /// The new value of a member, when it differs byte-wise from the stored one.
@@ -616,17 +678,100 @@ mod tests {
     }
 
     #[test]
-    fn https_urls_with_a_host_and_a_path_pass() {
+    fn canonical_https_urls_with_a_host_pass() {
         for value in [
             "https://issuer.example/.well-known/openid-configuration",
             "https://issuer.example/",
             "https://k3s.internal.example:6443/",
             "https://[::1]:8443/x",
+            "https://[2001:db8::1]/x",
             "https://192.0.2.1/x",
             "https://issuer.example/x?y=1",
-            "https://ISSUER.example/X",
+            "https://issuer.example/X/Y",
+            "https://xn--bcher-kva.example/",
+            "https://issuer.example/a%2Fb",
+            "https://issuer.example/a%20b",
+            "https://issuer.example./x",
         ] {
             assert!(check(DISCOVERY_URL, value).is_ok(), "{value}");
+            assert!(check(TOKEN_REVIEW_ENDPOINT, value).is_ok(), "{value}");
+        }
+    }
+
+    /// Spellings that the parser would fetch as another text: each is
+    /// refused, naming only the member.
+    #[test]
+    fn non_canonical_spellings_are_refused() {
+        for (case, value) in [
+            ("fullwidth letter", "https://ｉssuer.example/x"),
+            ("fullwidth dot", "https://issuer．example/x"),
+            ("ideographic dot", "https://issuer。example/x"),
+            ("halfwidth ideographic dot", "https://issuer｡example/x"),
+            ("zero-width space", "https://iss\u{200B}uer.example/x"),
+            ("zero-width joiner", "https://iss\u{200D}uer.example/x"),
+            ("soft hyphen", "https://iss\u{AD}uer.example/x"),
+            ("U-label", "https://bücher.example/x"),
+            ("upper-case U-label", "https://BÜCHER.example/x"),
+            ("hex IPv4", "https://0x7f.0.0.1/x"),
+            ("hex IPv4 number", "https://0x7f000001/x"),
+            ("octal IPv4", "https://0177.0.0.1/x"),
+            ("short IPv4", "https://127.1/x"),
+            ("decimal IPv4 number", "https://2130706433/x"),
+            ("uncompressed IPv6", "https://[0:0:0:0:0:0:0:1]/x"),
+            ("leading-zero IPv6", "https://[2001:0db8::1]/x"),
+            ("upper-case IPv6", "https://[2001:DB8::1]/x"),
+            ("mapped IPv4 in IPv6", "https://[::ffff:127.0.0.1]/x"),
+            ("empty port", "https://issuer.example:/x"),
+            ("zero-padded port", "https://issuer.example:06443/x"),
+            ("default port", "https://issuer.example:443/x"),
+            ("no path", "https://h.example:6443"),
+            ("no path, default port", "https://issuer.example:443"),
+            ("dot-dot segment", "https://issuer.example/a/../b"),
+            ("dot segment", "https://issuer.example/./x"),
+            ("encoded dot segment", "https://issuer.example/a/%2e%2e/b"),
+            ("encoded host letter", "https://%67ood.example/x"),
+            ("encoded path letter", "https://issuer.example/%67"),
+            (
+                "encoded hyphen",
+                "https://issuer.example/openid%2Dconfiguration",
+            ),
+            ("encoded tilde", "https://issuer.example/%7Euser"),
+            ("encoded digit", "https://issuer.example/v%31"),
+            ("encoded query letter", "https://issuer.example/x?a=%62"),
+            ("upper-case host", "https://ISSUER.example/x"),
+            ("mixed-case host", "https://Issuer.Example/x"),
+            ("upper-case scheme", "HTTPS://issuer.example/x"),
+            ("mixed-case scheme", "Https://issuer.example/x"),
+            ("unencoded path character", "https://issuer.example/ü"),
+            ("unencoded quote in query", "https://issuer.example/x?a='b'"),
+            ("trailing space", "https://issuer.example/x "),
+            ("leading space", " https://issuer.example/x"),
+            ("trailing tab", "https://issuer.example/x\t"),
+            ("inner tab", "https://issuer.example/a\tb"),
+            ("trailing newline", "https://issuer.example/x\n"),
+            ("inner newline", "https://issuer.ex\nample/x"),
+            ("carriage return", "https://issuer.example/x\r"),
+            ("trailing NUL", "https://issuer.example/x\0"),
+            ("inner NUL", "https://issuer.example\0/x"),
+            ("C1 control", "https://issuer.example/x\u{85}"),
+            ("backslash", "https://a\\b"),
+            ("backslash path", "https://issuer.example\\x"),
+            ("backslash in path", "https://issuer.example/a\\b"),
+            // The parser keeps this one: only the character check refuses
+            // it.
+            ("backslash in query", "https://issuer.example/x?a\\b"),
+        ] {
+            for member in [DISCOVERY_URL, TOKEN_REVIEW_ENDPOINT] {
+                let err = check(member, value).expect_err(case);
+                assert!(
+                    matches!(err, SourceWriteError::InvalidDestination { member: m } if m == member),
+                    "{case}: {err:?}"
+                );
+                for text in [err.to_string(), format!("{err:?}")] {
+                    assert!(!text.contains(value), "{case}: {text}");
+                    assert!(!text.contains("example"), "{case}: {text}");
+                }
+            }
         }
     }
 
@@ -656,6 +801,7 @@ mod tests {
             "https://issuer.example#x",
             "https://issuer.example\\x",
             "https://iss uer.example/x",
+            "https://ISSUER.example/X",
         ] {
             for member in [DISCOVERY_URL, TOKEN_REVIEW_ENDPOINT] {
                 let err = check(member, value).expect_err(value);

@@ -60,10 +60,12 @@ const TOKEN_REVIEW_OFF: &str = "https://k3s-off.internal.example:6443/";
 const DISCOVERY_ONLY: &str = "https://k3s-disc.internal.example:6443/";
 /// Only an enabled `jwks` entry has this value.
 const JWKS_ONLY_TR: &str = "https://k3s-jwks.internal.example:6443/";
+/// No entry has this canonical value.
+const UNLISTED: &str = "https://unlisted.example/x";
 
-/// Malformed destinations, each of them an enabled entry of both purposes,
-/// so only the syntax check refuses them: what each one lacks.
-const MALFORMED: [(&str, &str); 11] = [
+/// Malformed or non-canonical destinations, each of them an enabled entry of
+/// both purposes, so only the syntax check refuses them: what each one lacks.
+const MALFORMED: [(&str, &str); 22] = [
     (
         "http",
         "http://issuer.example/.well-known/openid-configuration",
@@ -84,6 +86,26 @@ const MALFORMED: [(&str, &str); 11] = [
     ("empty fragment", "https://issuer.example/x#"),
     ("no path", "https://issuer.example"),
     ("query without a path", "https://issuer.example?x=1"),
+    (
+        "upper-case host",
+        "https://ISSUER.example/.well-known/openid-configuration",
+    ),
+    (
+        "default port",
+        "https://issuer.example:443/.well-known/openid-configuration",
+    ),
+    ("port without a path", "https://k3s.internal.example:6443"),
+    ("encoded host letter", "https://%69ssuer.example/x"),
+    (
+        "encoded path character",
+        "https://issuer.example/.well-known/openid%2Dconfiguration",
+    ),
+    ("short IPv4", "https://127.1/x"),
+    ("uncompressed IPv6", "https://[0:0:0:0:0:0:0:1]/x"),
+    ("dot segment", "https://issuer.example/a/../x"),
+    ("backslash", "https://issuer.example\\x"),
+    ("U-label", "https://bücher.example/x"),
+    ("ideographic dot", "https://issuer。example/x"),
 ];
 
 /// A time with sub-microsecond digits, so a write truncates it.
@@ -581,23 +603,22 @@ async fn a_destination_without_an_enabled_entry_of_its_purpose_is_refused() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_near_miss_of_an_entry_is_refused() {
     let (db, pool) = seeded().await;
+    // Canonical, and matching no entry.
     for value in [
         // Longer than the entry: the entry is a prefix.
         "https://issuer.example/.well-known/openid-configuration/",
         "https://issuer.example/.well-known/openid-configuration?x=1",
         // Shorter: a prefix of the entry.
         "https://issuer.example/.well-known/",
-        // Case.
-        "https://ISSUER.example/.well-known/openid-configuration",
-        "https://Issuer.Example/.well-known/openid-configuration",
+        // Path case.
         "https://issuer.example/.well-known/OpenID-configuration",
-        // Port, the default one included.
-        "https://issuer.example:443/.well-known/openid-configuration",
+        // Another port.
         "https://issuer.example:8443/.well-known/openid-configuration",
-        // Encodings the parser would normalize.
-        "https://issuer.example/.well-known/openid%2Dconfiguration",
+        // Spellings the parser keeps.
         "https://issuer.example./.well-known/openid-configuration",
         "https://issuer.example//.well-known/openid-configuration",
+        // An encoded reserved character.
+        "https://issuer.example/.well-known%2Fopenid-configuration",
     ] {
         let result = create(&pool, TRUST, &oidc("src_1", value), "aud_1").await;
         assert_egress(result, DISCOVERY_URL, value);
@@ -605,12 +626,32 @@ async fn a_near_miss_of_an_entry_is_refused() {
     for value in [
         "https://k3s.internal.example:6443/x",
         "https://k3s.internal.example:6443//",
-        "https://K3S.internal.example:6443/",
         "https://k3s.internal.example:6444/",
         "https://k3s.internal.example/",
     ] {
         let result = create(&pool, TRUST, &k8s("src_1", value), "aud_1").await;
         assert_egress(result, TOKEN_REVIEW_ENDPOINT, value);
+    }
+    // Not canonical: refused by the syntax check, before the entry lookup,
+    // even where the parser would fetch the entry's own URL.
+    for value in [
+        "https://ISSUER.example/.well-known/openid-configuration",
+        "https://Issuer.Example/.well-known/openid-configuration",
+        "https://issuer.example:443/.well-known/openid-configuration",
+        "https://issuer.example/.well-known/openid%2Dconfiguration",
+        "https://issuer.example/x/../.well-known/openid-configuration",
+        "https://%69ssuer.example/.well-known/openid-configuration",
+    ] {
+        let result = create(&pool, TRUST, &oidc("src_1", value), "aud_1").await;
+        assert_invalid(result, DISCOVERY_URL, value);
+    }
+    for value in [
+        "https://K3S.internal.example:6443/",
+        "https://k3s.internal.example:6443",
+        "https://k3s.internal.example:06443/",
+    ] {
+        let result = create(&pool, TRUST, &k8s("src_1", value), "aud_1").await;
+        assert_invalid(result, TOKEN_REVIEW_ENDPOINT, value);
     }
     assert_eq!(source_count(&pool).await, 0);
     db.drop([pool]).await;
@@ -678,6 +719,17 @@ async fn only_a_trust_admin_of_the_tenant_may_write() {
             create(&pool, key, &oidc("src_1", DISCOVERY), "aud_1").await,
             case,
         );
+        // Authorization comes before the egress check: an unlisted
+        // destination is the same refusal, so nothing is learned about the
+        // allowlist.
+        assert_unauthorized(
+            create(&pool, key, &oidc("src_1", UNLISTED), "aud_1").await,
+            case,
+        );
+        assert_unauthorized(
+            create(&pool, key, &k8s("src_1", UNLISTED), "aud_1").await,
+            case,
+        );
     }
     // The scope is the source's tenant.
     let mut other = oidc("src_b", DISCOVERY);
@@ -690,9 +742,15 @@ async fn only_a_trust_admin_of_the_tenant_may_write() {
         .unwrap();
     let mut renamed = changes(&source);
     renamed.name = "renamed".into();
+    let mut unlisted = changes(&source);
+    unlisted.discovery_url = Some(UNLISTED.into());
     for (case, key) in refused {
         assert_unauthorized(
             update(&pool, key, "src_1", 1, &renamed, "aud_2").await,
+            case,
+        );
+        assert_unauthorized(
+            update(&pool, key, "src_1", 1, &unlisted, "aud_2").await,
             case,
         );
         // A missing source is the same refusal: nothing is learned.
@@ -701,24 +759,27 @@ async fn only_a_trust_admin_of_the_tenant_may_write() {
             case,
         );
     }
-    // Another tenant's trust_admin, in its own tenant, does not find it.
-    let mut tx = pool.begin().await.unwrap();
-    let result = update_source(
-        &mut tx,
-        TRUST_B,
-        "ten_b",
-        "src_1",
-        1,
-        &renamed,
-        &audit("aud_2"),
-    )
-    .await;
-    finish(tx, &result).await;
-    assert_registry(
-        result,
-        |err| matches!(err, RegistryError::NotFound),
-        "ten_b",
-    );
+    // Another tenant's trust_admin, in its own tenant, does not find it,
+    // at any revision: a stale one would tell that it exists.
+    for revision in [1, 99] {
+        let mut tx = pool.begin().await.unwrap();
+        let result = update_source(
+            &mut tx,
+            TRUST_B,
+            "ten_b",
+            "src_1",
+            revision,
+            &unlisted,
+            &audit("aud_2"),
+        )
+        .await;
+        finish(tx, &result).await;
+        assert_registry(
+            result,
+            |err| matches!(err, RegistryError::NotFound),
+            "ten_b",
+        );
+    }
     assert_eq!(
         registry::get_trust_source(&pool, "ten_a", "src_1")
             .await
@@ -1347,9 +1408,18 @@ async fn a_deadlock_is_a_retry() {
         (result, other)
     });
     wait_until_blocked(&pool, other_pid, writer_pid, &task).await;
-    // Past the default deadlock_timeout of 1 s: the other transaction has
-    // run its one deadlock check and found no cycle.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Past the server's deadlock_timeout (1 s by default; setting it needs a
+    // superuser, which these tests do not use): the other transaction has
+    // run its one deadlock check and found no cycle, so the update, which
+    // closes the cycle, is the one that fails.
+    let deadlock_timeout: i64 = sqlx::query_scalar(
+        "SELECT (extract(epoch FROM current_setting('deadlock_timeout')::interval) * 1000)::bigint",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let deadlock_timeout = u64::try_from(deadlock_timeout).unwrap();
+    tokio::time::sleep(Duration::from_millis(deadlock_timeout + 500)).await;
     let mut changed = changes(&source);
     changed.discovery_url = Some(DISCOVERY_2.into());
     let result = update_source(
@@ -1380,6 +1450,258 @@ async fn a_deadlock_is_a_retry() {
         source
     );
     assert_chain(&pool, 1).await;
+    db.drop([pool]).await;
+}
+
+/// Runs `sql` with `id` in a transaction of its own with a `lock_timeout` of
+/// 100 ms and commits it: `Err` holds the SQLSTATE when it had to wait.
+async fn without_waiting(pool: &PgPool, sql: &'static str, id: &str) -> Result<(), Option<String>> {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '100ms'")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    match sqlx::query(sql).bind(id).execute(&mut *tx).await {
+        Ok(_) => {
+            tx.commit().await.unwrap();
+            Ok(())
+        }
+        Err(err) => {
+            let state = sqlstate(&err);
+            tx.rollback().await.unwrap();
+            Err(state)
+        }
+    }
+}
+
+/// An update waits for its source row before it locks any egress entry, so
+/// while it waits a disable of the entry it would check applies at once;
+/// the update then reads the entry disabled.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_update_waiting_for_its_source_holds_no_entry() {
+    let (db, pool) = seeded().await;
+    let source = create(&pool, TRUST, &oidc("src_1", DISCOVERY), "aud_1")
+        .await
+        .unwrap();
+    let mut holder = pool.acquire().await.unwrap().detach();
+    let mut writer = pool.acquire().await.unwrap().detach();
+    let (holder_pid, writer_pid) = (
+        backend_pid(&mut holder).await,
+        backend_pid(&mut writer).await,
+    );
+    let mut hold = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM trust_source WHERE id = 'src_1' FOR NO KEY UPDATE")
+        .execute(&mut *hold)
+        .await
+        .unwrap();
+    let mut changed = changes(&source);
+    changed.discovery_url = Some(DISCOVERY_2.into());
+    let task = tokio::spawn(async move {
+        let mut tx = writer.begin().await.unwrap();
+        let result = update_source(
+            &mut tx,
+            TRUST,
+            "ten_a",
+            "src_1",
+            1,
+            &changed,
+            &audit("aud_2"),
+        )
+        .await;
+        tx.rollback().await.unwrap();
+        (result, writer)
+    });
+    wait_until_blocked(&pool, writer_pid, holder_pid, &task).await;
+    without_waiting(&pool, DISABLE_ENTRY, "egr_disc_2")
+        .await
+        .expect("the waiting update must hold no entry lock");
+    hold.rollback().await.unwrap();
+    let (result, writer) = join(task).await;
+    assert_egress(result, DISCOVERY_URL, DISCOVERY_2);
+    writer.close().await.unwrap();
+    holder.close().await.unwrap();
+    assert_eq!(
+        registry::get_trust_source(&pool, "ten_a", "src_1")
+            .await
+            .unwrap(),
+        source
+    );
+    assert_chain(&pool, 1).await;
+    db.drop([pool]).await;
+}
+
+/// Two concurrent updates of one source at the same revision: the second
+/// waits for the first on the source row and then reads the committed
+/// revision, a `StaleRevision`, never a deadlock (`Retry`), whichever
+/// entries they check.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn concurrent_updates_of_one_source_are_stale_not_retry() {
+    let (db, pool) = seeded().await;
+    let source = create(&pool, TRUST, &oidc("src_1", DISCOVERY), "aud_1")
+        .await
+        .unwrap();
+    // The first keeps the name, the second also renames.
+    for (n, (first_value, second_value, second_name)) in [
+        (DISCOVERY_2, DISCOVERY_ONLY, "second"),
+        (DISCOVERY_ONLY, DISCOVERY_2, "second-again"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let revision = i64::try_from(n).unwrap() + 1;
+        let stored = registry::get_trust_source(&pool, "ten_a", "src_1")
+            .await
+            .unwrap();
+        let mut first_conn = pool.acquire().await.unwrap().detach();
+        let mut second_conn = pool.acquire().await.unwrap().detach();
+        let (first_pid, second_pid) = (
+            backend_pid(&mut first_conn).await,
+            backend_pid(&mut second_conn).await,
+        );
+        let mut first = first_conn.begin().await.unwrap();
+        let mut first_changes = changes(&stored);
+        first_changes.discovery_url = Some(first_value.into());
+        update_source(
+            &mut first,
+            TRUST,
+            "ten_a",
+            "src_1",
+            revision,
+            &first_changes,
+            &audit(&format!("aud_first_{n}")),
+        )
+        .await
+        .unwrap();
+        let mut second_changes = changes(&stored);
+        second_changes.discovery_url = Some(second_value.into());
+        second_changes.name = second_name.into();
+        let event_id = format!("aud_second_{n}");
+        let task = tokio::spawn(async move {
+            let mut tx = second_conn.begin().await.unwrap();
+            let result = update_source(
+                &mut tx,
+                TRUST,
+                "ten_a",
+                "src_1",
+                revision,
+                &second_changes,
+                &audit(&event_id),
+            )
+            .await;
+            tx.rollback().await.unwrap();
+            (result, second_conn)
+        });
+        wait_until_blocked(&pool, second_pid, first_pid, &task).await;
+        first.commit().await.unwrap();
+        let (result, second_conn) = join(task).await;
+        assert_registry(
+            result,
+            |err| matches!(err, RegistryError::StaleRevision),
+            "second",
+        );
+        second_conn.close().await.unwrap();
+        first_conn.close().await.unwrap();
+        let stored = registry::get_trust_source(&pool, "ten_a", "src_1")
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                stored.revision,
+                stored.discovery_url.as_deref(),
+                &stored.name[..]
+            ),
+            (revision + 1, Some(first_value), &source.name[..])
+        );
+    }
+    assert_eq!(events(&pool).await.len(), 3);
+    assert_chain(&pool, 3).await;
+    db.drop([pool]).await;
+}
+
+/// A refusal after the function took locks releases them with its
+/// savepoint: while the caller's transaction is still open, the operator
+/// rows, the source row and the checked entry can be locked or changed by
+/// another transaction at once.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_refusal_releases_its_locks() {
+    let (db, pool) = seeded().await;
+    let source = create(&pool, TRUST, &oidc("src_1", DISCOVERY), "aud_1")
+        .await
+        .unwrap();
+    create(&pool, TRUST, &oidc("src_2", DISCOVERY), "aud_2")
+        .await
+        .unwrap();
+    let duplicate_name = |err: &RegistryError| matches!(err, RegistryError::AlreadyExists { .. });
+    let operator_rows = [
+        "SELECT FROM admin_identity WHERE id = $1 FOR UPDATE",
+        "SELECT FROM admin_credential WHERE admin_id = $1 FOR UPDATE",
+        "SELECT FROM admin_role_binding WHERE admin_id = $1 FOR UPDATE",
+    ];
+
+    // An update refused at its write, after the operator, source and entry
+    // locks: a rename to another source's name.
+    let mut tx = pool.begin().await.unwrap();
+    let mut clash = changes(&source);
+    clash.discovery_url = Some(DISCOVERY_2.into());
+    clash.name = "source-src_2".into();
+    assert_registry(
+        update_source(&mut tx, TRUST, "ten_a", "src_1", 1, &clash, &audit("aud_3")).await,
+        duplicate_name,
+        "update",
+    );
+    for sql in operator_rows {
+        assert_eq!(
+            without_waiting(&pool, sql, "adm_trust").await,
+            Ok(()),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        without_waiting(
+            &pool,
+            "SELECT FROM trust_source WHERE id = $1 FOR UPDATE",
+            "src_1"
+        )
+        .await,
+        Ok(())
+    );
+    assert_eq!(
+        without_waiting(&pool, DISABLE_ENTRY, "egr_disc_2").await,
+        Ok(())
+    );
+
+    // A create refused at its insert, after the operator and entry locks.
+    let mut taken = oidc("src_3", DISCOVERY_ONLY);
+    taken.name = "source-src_1".into();
+    assert_registry(
+        create_source(&mut tx, TRUST, &taken, &audit("aud_3")).await,
+        duplicate_name,
+        "create",
+    );
+    for sql in operator_rows {
+        assert_eq!(
+            without_waiting(&pool, sql, "adm_trust").await,
+            Ok(()),
+            "{sql}"
+        );
+    }
+    assert_eq!(
+        without_waiting(&pool, DISABLE_ENTRY, "egr_disc_only").await,
+        Ok(())
+    );
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        registry::get_trust_source(&pool, "ten_a", "src_1")
+            .await
+            .unwrap(),
+        source
+    );
+    assert_eq!(source_count(&pool).await, 2);
+    assert_chain(&pool, 2).await;
     db.drop([pool]).await;
 }
 

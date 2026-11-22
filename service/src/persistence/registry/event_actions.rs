@@ -42,7 +42,11 @@
 //! IR-059's `egress_allowlist_entry.enable`), `update` for any other write
 //! of the row (a list-set change included, since it advances the owner's
 //! revision), and `delete` where `0006` allows one (a disabled binding or
-//! grant). Human, gateway, key and
+//! grant). One writer departs from this: [`crate::trust::update_source`]
+//! records every trust source update as `trust_source.update`, a
+//! status-only one included (provisional lead pick, 2026-11-22, open), so
+//! `trust_source.enable` and `trust_source.disable` are listed but have no
+//! writer yet. Human, gateway, key and
 //! provider-switch actions (M1b and later) are not listed yet; each lands
 //! with its writer.
 //!
