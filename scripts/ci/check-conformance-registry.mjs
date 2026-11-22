@@ -78,9 +78,10 @@
 //             not a skip.
 //   same-job  Each test is produced (TEST_JOBS in report-conformance.mjs) by
 //             the job of one of the stage's legs.
-//   pos-neg   (implemented stages only) Each test is a pos/neg test of the
-//             stage's own entry, and each job among the legs produces at
-//             least one pos and one neg test.
+//   pos-neg   Each test is a pos/neg test of the stage's own entry (partial
+//             tests included, so no other test can pad a planned stage's
+//             list), and (implemented stages only) each job among the legs
+//             produces at least one pos and one neg test.
 // And on the list:
 //   orphans   Each listed test whose last path segment matches a\d\d_ is in
 //             some stage's tests (any stage, planned ones included).
@@ -657,8 +658,8 @@ function checkResolution(binaries, stages, registered, report) {
   for (const { e, s, planned, err } of stages) {
     const jobs = [...new Set(s.legs.filter(isText).map(jobOf))];
     // A planned stage's partial tests need not cover its legs, so only the
-    // tests it lists are checked (resolve, same-job), not its legs' runners
-    // or pos-neg.
+    // tests it lists are checked (resolve, same-job, own entry), not its
+    // legs' runners or a pos and a neg per job.
     for (const job of planned ? [] : jobs) {
       const runner = runnerOf(job);
       if (runner === null) err('resolve', `job ${job} has no decided runner (layout §6 "Still open", item 5), so the tests of its legs cannot be resolved`);
@@ -671,7 +672,7 @@ function checkResolution(binaries, stages, registered, report) {
         err('resolve', `${q(t)} is not a test ID such as nextest:<package>/<target>/<path>`);
         continue;
       }
-      if (!planned && info.entry !== e.id) err('pos-neg', `${q(t)} is not a pos/neg scenario test of ${e.id}`);
+      if (info.entry !== e.id) err('pos-neg', `${q(t)} is not a pos/neg scenario test of ${e.id}`);
       else valid.push(info);
       if (!info.jobs.some((j) => jobs.includes(j))) {
         err('same-job', `${q(t)} is produced by ${info.jobs.length ? `job ${info.jobs.join(', ')}` : 'no job'} (TEST_JOBS), not by the job of a leg of this stage (${jobs.join(', ')})`);
