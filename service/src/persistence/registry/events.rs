@@ -36,6 +36,15 @@
 //! writer whose snapshot predates another's committed append fails with
 //! `40001` ([`RegistryError::Retry`]): retry the whole transaction.
 //!
+//! Since `0010` the domain rows of a write can hold one more lock: an
+//! insert of a service identity's or a grant's audience row locks its
+//! audience tenant assignment `FOR SHARE` (the guard trigger). Like every
+//! domain-row lock it comes before the append, so the order of such a
+//! write is the operator rows, the owner row (the identity or grant), the
+//! assignment, then the tenant and the head that the append locks; an
+//! update of the assignment, a disable included, also comes before its
+//! append (migrations README, "What 0010 adds").
+//!
 //! It takes a [`Transaction`] (inferred): an append is four statements, five
 //! for a tenant-scope event, that must commit together with the audited
 //! write, and the type makes an open transaction a precondition. The `0002`

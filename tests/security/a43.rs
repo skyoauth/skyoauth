@@ -121,26 +121,23 @@
 //! or refusing these values) fails it, and then the assertions and these
 //! docs need the update.
 //!
-//! # Not expressible in the registry, so not tested
+//! # Not tested here
 //!
 //! - **An enabled assignment at write.** IR-080 and T14.2 refuse a
-//!   reference "outside an active same-tenant assignment"; the registry's
-//!   composite foreign keys prove only that an assignment exists, whatever
-//!   its status (`registry::grant`, `add_service_identity_resource_server`;
-//!   migrations README, "What 0003 adds": the service must refuse
-//!   references outside an enabled assignment). So a write naming an
-//!   audience whose assignment is disabled succeeds through the registry,
-//!   and "a disabled assignment stops further writes" has no registry test;
-//!   no test here asserts the acceptance either: it is an open gap, untested
-//!   either way. An assignment cannot be removed (`0006` rejects its
-//!   `DELETE`), and the registry has no superseded assignment. The lead
-//!   recommends (a recommendation, not a decision) enforcing the check with
-//!   a database trigger rather than a check-then-insert above the registry:
-//!   the composite foreign key takes a `KEY SHARE` lock, which does not
-//!   conflict with the status `UPDATE`, so a check-then-insert races with a
-//!   concurrent disable. A trigger reverses the migrations README rule "The
-//!   database does not enforce these rules; the service must", so it is a
-//!   spec decision that goes to the user.
+//!   reference "outside an active same-tenant assignment". Since `0010` the
+//!   database refuses a service identity's or grant's audience row whose
+//!   assignment is disabled, at insert, under a `FOR SHARE` lock on the
+//!   assignment (provisional lead pick, 2026-11-22; migrations README,
+//!   "What 0010 adds"; the user accepted
+//!   `docs/proposals/ir-080-assignment-write-guard.md`, which reverses the
+//!   README rule "The database does not enforce these rules; the service
+//!   must" for these two tables). The registry reports it as
+//!   `Invariant { AssignmentActive, <table>_assignment_active }`, a refusal
+//!   distinct from the foreign-key refusal these tests compare. Its tests
+//!   are the service's, `service/tests/schema_assignment_write_guard.rs`;
+//!   no test here asserts it, so A43 makes no claim for it yet. An
+//!   assignment cannot be removed (`0006` rejects its `DELETE`), and the
+//!   registry has no superseded assignment.
 //! - **Who may assign.** The registry authorizes nobody (`registry` "Not
 //!   done here": API-147 and the endpoint roles are T14.1 and T14.2):
 //!   creating a resource server or an assignment is an instance write that
@@ -157,9 +154,9 @@
 //! these tests reach only the registry. Still needed, with the owner of
 //! each part:
 //!
-//! - The enabled-assignment check at write, the other half of T14.2 above:
-//!   not built, and where it lives is open (the lead's recommendation
-//!   above).
+//! - An A43 test of the enabled-assignment check at write, the other half
+//!   of T14.2 above: the `0010` guard is built and has service tests, but
+//!   A43 has no test of its own for it yet.
 //! - Audience syntax and Unicode normalization (OQ-IR-9, open; a service
 //!   rule per migrations README "What 0003 adds"; T14.1).
 //! - The tenant-admin negative at the endpoint: T14.1 (its tenant-admin

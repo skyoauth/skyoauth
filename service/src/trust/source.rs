@@ -245,10 +245,11 @@
 //!   does not read it), and the other source rules of T11.1 and T11.8.
 //! - A database backstop, such as a trigger that checks the entry: the
 //!   migrations are frozen, and there is no proposal for it yet; it is a
-//!   maintainer decision. `docs/proposals/ir-080-assignment-write-guard.md`
-//!   proposes a similar guard for a different table family (IR-080
-//!   assignment references), not for this check. The bare registry functions
-//!   still write any destination the `0004` checks allow.
+//!   maintainer decision. Migration `0010` adds a similar guard for a
+//!   different table family (IR-080 assignment references;
+//!   `docs/proposals/ir-080-assignment-write-guard.md`), not for this check.
+//!   The bare registry functions still write any destination the `0004`
+//!   checks allow.
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
 //! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant

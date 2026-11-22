@@ -27,10 +27,13 @@ const GUARD: &str = "SK001";
 /// `0005`, `instance_security_policy` and `recovery_state`, which
 /// bootstrap writes, and `administrative_operation`, which the recovery
 /// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
-/// `0008` and `0009` name them, sorted byte-wise. A unique, foreign key or check
-/// violation maps to a typed variant only for a name listed here. The
-/// database test `registry_constraint_names_match_the_catalog` keeps the
-/// list equal to the catalog.
+/// `0008` and `0009` name them, and the constraint names that the `0010`
+/// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), sorted byte-wise. A
+/// unique, foreign key or check violation maps to a typed variant only for a
+/// name listed here. The database test
+/// `registry_constraint_names_match_the_catalog` keeps the list equal to the
+/// catalog: the named constraints, and the triggers of the `0010` guard
+/// function.
 pub const KNOWN_CONSTRAINTS: &[&str] = &[
     // The three operator tables of `0005` (`operator.rs`).
     "admin_credential_admin_id_fkey",
@@ -254,6 +257,9 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "service_grant_name_octet_length_check",
     "service_grant_pkey",
     "service_grant_resource_constraints_check",
+    // Not a catalog constraint: the name the `0010` guard trigger of
+    // the same name raises with its `23514` ([`ASSIGNMENT_ACTIVE`]).
+    "service_grant_resource_server_assignment_active",
     "service_grant_resource_server_assignment_fkey",
     "service_grant_resource_server_grant_id_fkey",
     "service_grant_resource_server_grant_id_octet_length_check",
@@ -280,6 +286,8 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "service_identity_name_octet_length_check",
     "service_identity_pkey",
     "service_identity_principal_kind_check",
+    // As above, the `0010` guard of the identity's audience rows.
+    "service_identity_resource_server_assignment_active",
     "service_identity_resource_server_assignment_fkey",
     "service_identity_resource_server_pkey",
     "service_identity_resource_server_server_id_octet_length_check",
@@ -385,6 +393,17 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "trust_source_token_review_endpoint_octet_length_check",
     "trust_source_token_review_fields_kind_check",
     "trust_source_token_review_profile_check",
+];
+
+/// The constraint names that the two `0010` guard triggers raise with a
+/// `check_violation` (`23514`) when the audience tenant assignment of a new
+/// audience row of a service identity or a grant is not enabled (IR-080;
+/// provisional lead pick, 2026-11-22). Each is the name of the trigger that
+/// raises it; both are in [`KNOWN_CONSTRAINTS`]. They map to
+/// [`InvariantKind::AssignmentActive`], not to [`InvariantKind::Check`].
+pub const ASSIGNMENT_ACTIVE: [&str; 2] = [
+    "service_grant_resource_server_assignment_active",
+    "service_identity_resource_server_assignment_active",
 ];
 
 /// The error of a registry function.
@@ -518,6 +537,12 @@ pub enum InvariantKind {
     Check,
     /// `23502`: a required column is `NULL`.
     NotNull,
+    /// `23514` from a `0010` guard trigger ([`ASSIGNMENT_ACTIVE`]): the
+    /// audience tenant assignment that a new audience row of a service
+    /// identity or a grant references exists but is not enabled (IR-080;
+    /// provisional lead pick, 2026-11-22). A missing assignment is
+    /// [`Self::ForeignKey`] instead.
+    AssignmentActive,
 }
 
 impl InvariantKind {
@@ -526,6 +551,7 @@ impl InvariantKind {
             Self::ForeignKey => "foreign key",
             Self::Check => "check",
             Self::NotNull => "not-null",
+            Self::AssignmentActive => "active-assignment",
         }
     }
 }
@@ -592,10 +618,17 @@ fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
             kind: InvariantKind::ForeignKey,
             constraint: Some(named()?),
         },
-        CHECK_VIOLATION => RegistryError::Invariant {
-            kind: InvariantKind::Check,
-            constraint: Some(named()?),
-        },
+        CHECK_VIOLATION => {
+            let constraint = named()?;
+            RegistryError::Invariant {
+                kind: if ASSIGNMENT_ACTIVE.contains(&constraint) {
+                    InvariantKind::AssignmentActive
+                } else {
+                    InvariantKind::Check
+                },
+                constraint: Some(constraint),
+            }
+        }
         NOT_NULL_VIOLATION => RegistryError::Invariant {
             kind: InvariantKind::NotNull,
             constraint: None,
@@ -917,6 +950,72 @@ mod tests {
         }
         // The deferred binding-set check at commit is a guard like any other.
         assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+    }
+
+    /// The `0010` guards' `23514` names their trigger and maps to
+    /// `AssignmentActive`, never `Check`; a `23503` of the same table's
+    /// assignment key stays `ForeignKey`, and a `40001` or `40P01` naming it
+    /// is still `Retry`.
+    #[test]
+    fn an_inactive_assignment_maps_to_its_own_invariant_kind() {
+        assert!(ASSIGNMENT_ACTIVE.windows(2).all(|w| w[0] < w[1]));
+        for name in ASSIGNMENT_ACTIVE {
+            assert_eq!(known_constraint(name), Some(name));
+            let error = map(Some("23514"), Some(name));
+            match &error {
+                RegistryError::Invariant {
+                    kind: InvariantKind::AssignmentActive,
+                    constraint: Some(constraint),
+                } => assert_eq!(*constraint, name),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(
+                error.to_string(),
+                format!("registry write violates active-assignment constraint {name}")
+            );
+            assert_eq!(
+                format!("{error:?}"),
+                format!("Invariant {{ kind: AssignmentActive, constraint: Some({name:?}) }}")
+            );
+            assert_redacted(&error);
+            for code in ["40001", "40P01"] {
+                assert!(
+                    matches!(map(Some(code), Some(name)), RegistryError::Retry(_)),
+                    "{code}"
+                );
+            }
+        }
+        for name in [
+            "service_grant_resource_server_assignment_fkey",
+            "service_identity_resource_server_assignment_fkey",
+        ] {
+            let error = map(Some("23503"), Some(name));
+            assert!(
+                matches!(
+                    error,
+                    RegistryError::Invariant {
+                        kind: InvariantKind::ForeignKey,
+                        constraint: Some(constraint)
+                    } if constraint == name
+                ),
+                "{error:?}"
+            );
+        }
+        // Other checks of the same tables keep `Check`.
+        let error = map(
+            Some("23514"),
+            Some("service_grant_resource_server_server_id_octet_length_check"),
+        );
+        assert!(
+            matches!(
+                error,
+                RegistryError::Invariant {
+                    kind: InvariantKind::Check,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

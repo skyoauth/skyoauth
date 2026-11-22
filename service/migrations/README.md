@@ -161,7 +161,11 @@ The database does not enforce these rules; the service must:
   foreign-key checks after the head lock take `FOR KEY SHARE`. A writer
   that did lock it `FOR UPDATE` before appending still keeps the
   tenant-then-head order, but one that locks the head first and then a
-  tenant row does not. A write that creates an
+  tenant row does not. Since `0010` an insert of a service identity's or a
+  grant's audience row also locks its audience tenant assignment
+  `FOR SHARE` (a guard trigger); that lock is one of the domain rows' and
+  comes before the tenant and head locks too ("What 0010 adds", "Lock
+  order"). A write that creates an
   `administrative_operation` is the exception to "domain rows first": it
   follows steps 1 to 3 of "What 0005 adds", and its event precedes the
   operation, since `audit_id` is an immediate (not deferrable) foreign key.
@@ -344,9 +348,15 @@ The database does not enforce these rules; the service must:
   assignment is disabled, without editing its rows, so that re-enabling the
   assignment restores it (the other half of OQ-ADR018-1), and advance the
   checker's revision when its tenant rows change;
-- refuse references outside an enabled same-tenant assignment at write and
-  at issuance (IR-080, IR-081); a composite key proves only that the
-  assignment exists;
+- refuse references outside an enabled same-tenant assignment at issuance
+  (IR-081), and at write (IR-080) for the references that the database
+  does not guard: a composite key proves only that the assignment exists.
+  Since `0010` the database refuses, at insert, a service identity's or a
+  grant's audience row whose assignment is disabled, so for those two
+  tables the write half is no longer the service's ("What 0010 adds";
+  provisional lead pick, 2026-11-22). Clients, application origins and
+  human policies, which IR-080 also covers, have no tables yet; their
+  references stay a service rule until their tables exist;
 - let only instance `security_admin` write these tables (API-147); who may
   assign an audience is authorization, not schema;
 - reject out-of-range or contradictory action rules (IR-103);
@@ -464,8 +474,10 @@ not part of it.
   updated. An audience row references
   `audience_tenant_assignment (tenant_id, resource_server_id)`, so it names
   an audience assigned to the owner's own tenant (the existence half of
-  IR-080). A binding row carries the grant's actor in both references, so
-  it names only a same-tenant binding of that actor (ADR-022 item 13). A
+  IR-080; since `0010` a guard trigger adds the enabled half at insert,
+  "What 0010 adds"). A binding row carries the grant's actor in both
+  references, so it names only a same-tenant binding of that actor (ADR-022
+  item 13). A
   deferred, `ENABLE ALWAYS` constraint trigger
   (`skyoauth_service_grant_has_binding()`, pinned `search_path`, tables
   named with the schema) fails the commit with `SK001` when a grant created
@@ -560,10 +572,16 @@ not part of it.
 
 The database does not enforce these rules; the service must:
 
-- refuse an audience outside an enabled same-tenant assignment at write and
-  at issuance (IR-080, IR-081): the composite key proves only that the
-  assignment exists, whatever its status; and keep a delegation grant's
-  audience within its target service's audiences (IR-083);
+- refuse an audience outside an enabled same-tenant assignment at issuance
+  (IR-081): the composite key proves only that the assignment exists,
+  whatever its status, and a row written while its assignment was enabled
+  stays when the assignment is disabled later; and keep a delegation
+  grant's audience within its target service's audiences (IR-083). Refusing
+  a disabled assignment at write (IR-080) is no longer the service's rule
+  for these two tables: since `0010` the database refuses a new audience
+  row of a service identity or a grant whose assignment is disabled, under
+  a `FOR SHARE` lock that a check-then-insert above the registry could not
+  take ("What 0010 adds"; provisional lead pick, 2026-11-22);
 - check `discovery_url` and `token_review_endpoint` against an enabled
   egress entry of the matching purpose when they are written (IR-152), and
   validate them as URLs in canonical form. The service-layer write path
@@ -1840,6 +1858,194 @@ Choices marked "(inferred)" are its own.
   for an impersonation grant, rows are added or deleted only by its
   creating transaction. `0005` and `0006` say nothing about reserved IDs.
 
+## What 0010 adds
+
+`0010_assignment_write_guard.sql` adds one function and two guard triggers
+that refuse a new audience row of a service identity or a grant whose
+audience tenant assignment exists but is disabled (IR-080; the write half of
+T14.2 for these two tables). It implements
+`docs/proposals/ir-080-assignment-write-guard.md`, which the user accepted
+(ruling relayed by the lead, 2026-11-22). Every pick is a provisional lead
+pick, 2026-11-22, until the maintainer ratifies the ADRs (T00.8–T00.17,
+Gate M0). It changes no column, index, constraint or existing trigger.
+Choices marked "(inferred)" are its own.
+
+- **The guards.** `service_identity_resource_server_assignment_active` on
+  `service_identity_resource_server` and
+  `service_grant_resource_server_assignment_active` on
+  `service_grant_resource_server` are `BEFORE INSERT` row triggers,
+  `ENABLE ALWAYS`, that both run `skyoauth_require_active_assignment()`. It
+  reads the assignment of `(NEW.tenant_id, NEW.resource_server_id)` with
+  `SELECT … FOR SHARE` and:
+  - refuses a present assignment whose `status` is not `enabled` with
+    `check_violation` (`23514`), "a row of `<table>` needs an enabled
+    audience tenant assignment", naming as its constraint the name of the
+    trigger that fired (`TG_NAME`; one function serves both triggers,
+    inferred). The error carries no value of the row. It is a typed
+    refusal, not the `SK001` guard error;
+  - leaves a missing assignment to the foreign key: it finds no row and
+    returns, and `<table>_assignment_fkey` refuses the insert with `23503`
+    at the end of the statement, as before;
+  - does not read `resource_server.status`: a disabled resource server
+    behind an enabled assignment stays a dormant reference at write, and the
+    live check denies it (IR-081; lead ruling, 2026-11-21, decision 2 of the
+    proposal);
+  - guards only `INSERT`: `0004` makes every column of a list row immutable
+    (`<table>_immutable`), and a `DELETE` needs no check.
+- **Why the database enforces it for these two tables.** This reverses the
+  rule "the database does not enforce these rules; the service must" for
+  the audience rows of service identities and grants only ("What 0003 adds"
+  and "What 0004 adds" are rewritten to match). A check-then-insert above
+  the registry ("read the assignment, see `enabled`, insert the row")
+  races: the foreign key's check takes `FOR KEY SHARE` on the assignment
+  row, which does not conflict with the `FOR NO KEY UPDATE` lock of an
+  `UPDATE` of `status`, since `status` is not a key column. A disable can
+  commit between the check and the insert, and the row then references a
+  disabled assignment with no error. The guard's `FOR SHARE` does conflict
+  with that lock, so an insert and a concurrent update of the assignment
+  serialize, and whichever comes second sees the other's result:
+  - under `READ COMMITTED`, an insert that waits for a disable then reads
+    the committed `disabled` and is refused (`23514`); a disable that waits
+    for an insert proceeds once the insert commits, and leaves the new row
+    referencing a disabled assignment (stranding is allowed, below);
+  - under `REPEATABLE READ` or `SERIALIZABLE`, an insert whose snapshot
+    predates a committed update of the assignment fails with `40001`
+    (`serialization_failure`), `Retry`, whatever the update changed: a
+    disable, an enable or a scope change. The whole transaction is retried.
+
+  Clients, application origins and human policies, whose references IR-080
+  also covers, have no tables yet. Their references stay a service rule
+  until their tables exist; whether they get the same guard is decided with
+  those tables.
+
+- **Through the registry.** `create_service_identity`,
+  `add_service_identity_resource_server`, `create_service_grant` and
+  `add_service_grant_resource_server` with an audience whose assignment is
+  disabled fail with `Invariant { kind: AssignmentActive, constraint }`,
+  the constraint the trigger's name, and write nothing; the list-set
+  changes leave the owner's revision as it was. `KNOWN_CONSTRAINTS` lists
+  both names and `ASSIGNMENT_ACTIVE` names the two that map to
+  `AssignmentActive` rather than `Check`. They are not catalog
+  constraints, so `registry_constraint_names_match_the_catalog` compares
+  `KNOWN_CONSTRAINTS` with the named constraints and the names of the
+  triggers that run the guard function. A missing assignment stays
+  `Invariant { kind: ForeignKey, constraint: Some("<table>_assignment_fkey") }`.
+- **Carried over** (lead rulings, 2026-11-21, decisions 2 to 4 of the
+  proposal): a disabled resource server is a valid dormant reference at
+  write (above); enabling a disabled assignment revalidates nothing, and
+  references written before stay dormant until the live check; disabling an
+  assignment that rows reference is not blocked (stranding is fine), since
+  the live recheck denies them (IR-081).
+- **Lock order.** The `0005` order puts the operator rows first and the
+  audit head last; the new lock sits between the owner row and the head:
+  1. the operator rows, in the `0005` order (credentials,
+     `recovery_state`, the operation row);
+  2. the owner row of the list, the service identity or grant: the
+     registry's list-set changes update it first in their statement, and a
+     create inserts it before its list rows;
+  3. the assignment row `FOR SHARE`, taken by the guard at each list
+     insert;
+  4. the audit head, last, after the tenant row that the append locks
+     (`FOR KEY SHARE`), as in "append audit events in this order".
+
+  An update of an assignment (disable, enable or any other change) takes
+  its row `FOR NO KEY UPDATE` with the `UPDATE` and then appends its event,
+  so it follows the same order. Operator and tenant status writes that also
+  touch an assignment must take the assignment row before the audit head.
+  In this order an insert and an assignment update wait for each other and
+  do not deadlock: the test
+  `a_list_insert_and_a_disable_in_the_prescribed_order_never_deadlock`
+  shows it, and that a writer that takes the head before its list insert
+  deadlocks with an auditing disable (`40P01`, `Retry`). A statement that
+  inserts rows for several assignments locks them in the order of its rows
+  (the registry's creates follow the order of the caller's array). Two
+  inserts never conflict with each other (`FOR SHARE` is shared), but an
+  insert and a transaction that updates two of the same assignments in
+  opposite orders can deadlock (`40P01`, `Retry`, fail-closed); a writer
+  that updates several assignments in one transaction should do so in
+  ascending `(tenant_id, resource_server_id)` order, and an inserter pass
+  its audiences in ascending order too (inferred).
+
+- **Privileges.** The function is `SECURITY INVOKER`, the default, like
+  every guard. Its `search_path` is pinned to `pg_catalog, pg_temp` (lead
+  pick): it is created as the `0009` list guard is, with the schema
+  resolved by `current_schema()` at migrate time and the table named with
+  that schema, so no name resolves through the path, which is stricter than
+  the `pg_catalog, <schema>, pg_temp` form of "Conventions". A role that
+  inserts these list rows needs `SELECT` on `audience_tenant_assignment`, at
+  least on `tenant_id`, `resource_server_id` and `status`, and `UPDATE` on at
+  least one of its columns, which PostgreSQL requires for any `FOR SHARE`
+  lock (the proposal named only `SELECT`); otherwise the insert fails with
+  `42501`, "permission denied for table audience_tenant_assignment". The
+  test `list_row_writers_need_select_and_update_on_the_assignment` checks
+  each case.
+- **Limits.**
+  - Like every guard, these are a tripwire against application DML, not a
+    security boundary (see "Limits").
+  - Replica mode (`session_replication_role = replica`) does not skip these
+    guards: they are `ENABLE ALWAYS`, so they still refuse a disabled
+    assignment there. Replica mode skips the foreign key, so a row whose
+    assignment is missing is accepted (the guard finds no row and returns).
+    The proposal's "replica mode skips the trigger" holds only for a
+    trigger that is not `ENABLE ALWAYS`. The test
+    `replica_mode_refuses_a_disabled_assignment_but_not_a_missing_one` pins
+    both.
+  - Because the guards fire in replica mode, a data-only reload or an
+    initial logical-replication table sync of a list row stranded by a
+    later disable (allowed above) fails with `23514` when the assignment
+    row it copies is already `disabled` (inferred from the reload case
+    under "Limits": `COPY` fires row triggers; not reproduced for table
+    sync). A data-only reload stays owner-level surgery with the user
+    triggers disabled, as "Limits" describes.
+  - Insert time only: the guards check an assignment once, when the row is
+    inserted. A later disable or enable revalidates no existing row, and the
+    recheck at issuance and at every live authorization stays the
+    service's (IR-081).
+  - Under `REPEATABLE READ` and `SERIALIZABLE`, any committed update of the
+    assignment after the writer's snapshot, not only a disable, fails the
+    insert with `40001` (`Retry`; above).
+  - One statement (inferred; reproduced on PostgreSQL 16.15): a `BEFORE`
+    row trigger's query sees what the outer statement changed before that
+    row, not after. A data-modifying `WITH` that inserts the assignment
+    `disabled` in a sub-statement the list insert does not read from may
+    run after the list insert. The guard then finds no row, the foreign
+    key, checked at the end of the statement, finds the assignment, and the
+    row is stored against a disabled assignment. A `WITH` whose list insert
+    reads the new assignment runs that insert first and is refused. An
+    `UPDATE` to `disabled` in the same statement that runs after the list
+    insert is a disable after the insert (stranding, allowed). The registry
+    never writes an assignment and a list row in one statement. The test
+    `one_statement_that_creates_the_assignment_too_is_guarded_by_row_order`
+    pins this.
+- **Locks on existing tables.** Checked with `pg_locks` in a transaction
+  that applies `0010` to a `0009` database (PostgreSQL 16.15):
+  `CREATE TRIGGER` and `ENABLE ALWAYS TRIGGER` take `SHARE ROW EXCLUSIVE`
+  on `service_identity_resource_server` and `service_grant_resource_server`,
+  which blocks writes of their rows until the migration commits; creating
+  the function locks no table.
+- **Upgrade precondition.** None. The triggers validate no existing row:
+  a row that already references a disabled assignment stays, as one
+  stranded by a later disable would. This query lists such rows, for
+  information:
+
+  ```sql
+  SELECT 'service_identity_resource_server' AS list, r.tenant_id, r.service_id AS owner_id, r.resource_server_id
+    FROM service_identity_resource_server r
+    JOIN audience_tenant_assignment a USING (tenant_id, resource_server_id)
+   WHERE a.status <> 'enabled'
+  UNION ALL
+  SELECT 'service_grant_resource_server', r.tenant_id, r.grant_id, r.resource_server_id
+    FROM service_grant_resource_server r
+    JOIN audience_tenant_assignment a USING (tenant_id, resource_server_id)
+   WHERE a.status <> 'enabled'
+   ORDER BY 1, 2, 3, 4;
+  ```
+
+- **Frozen comments.** The `0003` and `0004` comments that the composite
+  key proves an audience is assigned to the owner's tenant still hold; the
+  enabled half is this migration's. `0006` and `0009` say nothing about
+  assignment status.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -1960,9 +2166,17 @@ Open for all registry tables:
   `service_grant_resource_server` also needs `SELECT` on `service_grant`
   (at least its columns `id`, `mode` and `xmin`), which the list guard
   reads with the caller's privileges, or the write fails with `42501`; the
-  test `list_row_writers_need_select_on_service_grant` checks it.
-- A stored creation marker for impersonation grants, a possible `0010`
-  (lead ruling, 2026-11-21: no schema change in `0009`). The `0009` list
+  test `list_row_writers_need_select_on_service_grant` checks it. Since
+  `0010`, inserting a row of `service_identity_resource_server` or
+  `service_grant_resource_server` also needs `SELECT` on
+  `audience_tenant_assignment` (at least `tenant_id`, `resource_server_id`
+  and `status`) and `UPDATE` on at least one of its columns, which a
+  `FOR SHARE` lock requires, or the insert fails with `42501`; the test
+  `list_row_writers_need_select_and_update_on_the_assignment` checks it.
+- A stored creation marker for impersonation grants, a possible later
+  migration (lead ruling, 2026-11-21: no schema change in `0009`; a
+  separate migration from the `0010` assignment guard, lead ruling of the
+  same date). The `0009` list
   guard decides "created by this transaction" from the grant row's `xmin`,
   with the 2^32 limit of "What 0009 adds". Storing the creator's `xid8` in
   the grant row instead does not work alone: a restore or logical
@@ -2598,7 +2812,11 @@ are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
 surface. Since `0009` an impersonation grant is frozen once its creating
 transaction commits: `create_service_grant` still creates one, and
 `update_service_grant` and every list-set change of one fail with `Guard`
-and change nothing (see "What 0009 adds").
+and change nothing (see "What 0009 adds"). Since `0010` a new audience row
+of a service identity or a grant, from a create or an add, whose
+assignment is disabled fails with
+`Invariant { kind: AssignmentActive, constraint }` and changes nothing (see
+"What 0010 adds").
 
 Timestamps: the registry reads a timestamp as
 `(extract(epoch FROM <column>) * 1000000)::bigint`, microseconds from the
@@ -2871,5 +3089,5 @@ Follow-ups and open questions:
 - The fetch-time `jwks_uri` match and the degraded health signal (IR-152)
   are not built, nor a database backstop for the egress check. No proposal
   for such a backstop exists yet; it is a maintainer decision.
-  `docs/proposals/ir-080-assignment-write-guard.md` proposes a similar guard
-  for a different table family (IR-080 assignment references).
+  `0010` adds a similar guard for a different table family (IR-080
+  assignment references; `docs/proposals/ir-080-assignment-write-guard.md`).
