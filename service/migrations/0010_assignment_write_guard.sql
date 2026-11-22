@@ -20,13 +20,36 @@
 -- disable then sees it and is refused; under REPEATABLE READ or
 -- SERIALIZABLE it fails with 40001 (serialization_failure) instead.
 --
+-- The triggers are AFTER INSERT ... FOR EACH ROW, not deferrable, as the
+-- 0009 list guard is (provisional lead pick, 2026-11-22, after review). An
+-- AFTER row trigger runs at the end of the statement, after the row is in
+-- the table and its indexes, and PostgreSQL fires the AFTER triggers of a
+-- row in name order: the foreign-key check, an internal trigger named
+-- "RI_ConstraintTrigger_c_<oid>", sorts before these names byte-wise
+-- ('R' < 's'), so it runs first and the guard reads the assignment after
+-- it, with a newer snapshot. The trigger names must keep sorting after
+-- "RI_"; a rename that breaks this changes the order. Under READ COMMITTED
+-- a BEFORE trigger lets a row through when another transaction inserts its
+-- assignment 'disabled' and commits between the guard (no row yet) and the
+-- foreign-key check at the end of the statement (found); after the foreign
+-- key, the guard sees that assignment and refuses the row. A DEFERRED
+-- trigger would take the FOR SHARE lock at commit, after the audit head,
+-- which inverts the lock order below, and would fail at COMMIT. Being AFTER
+-- also means: a row that breaks a NOT NULL, CHECK or unique constraint, or
+-- whose assignment is missing, fails with that error first; an INSERT ...
+-- ON CONFLICT DO NOTHING that inserts no row fires no guard; and the guard
+-- sees every change its own statement made, so the state of the
+-- assignment at the end of the statement decides (README.md "What 0010
+-- adds", "Limits").
+--
 -- A present assignment that is not enabled is refused with check_violation
 -- (23514) naming a constraint, the trigger's own name, so the registry maps
 -- it to a typed error, not to the SK001 guard error. A missing assignment
--- is left to the foreign key (23503): the guard finds no row and returns,
--- and the foreign key then refuses the insert at the end of the statement.
+-- is left to the foreign key (23503), which runs first; the guard finds no
+-- row only where the foreign key does not fire (replica mode) and returns.
 -- Only INSERT is guarded: 0004 makes every column of these list rows
--- immutable (the *_immutable guards), and a DELETE needs no check.
+-- immutable (the *_immutable guards), and a DELETE needs no check. A
+-- rejected statement changes nothing.
 --
 -- Carried over from the lead rulings of 2026-11-21 (proposal, decisions 2
 -- to 4): the guard does not read resource_server.status, so a disabled
@@ -42,9 +65,11 @@
 -- only (lead pick): every table it reads is named with its schema, so no
 -- name resolves through the schema. It is SECURITY INVOKER, the default,
 -- like every guard: a role that inserts these list rows needs SELECT on
--- audience_tenant_assignment (at least tenant_id, resource_server_id and
--- status) and, because a FOR SHARE lock requires it, UPDATE on at least
--- one of its columns (README.md "What 0010 adds", "Privileges").
+-- audience_tenant_assignment (tenant_id, resource_server_id and status)
+-- and, because a FOR SHARE lock requires it, UPDATE on at least one of its
+-- columns; the prescribed grant is UPDATE (id), a key column that the 0003
+-- guard audience_tenant_assignment_immutable keeps unchangeable (README.md
+-- "What 0010 adds", "Privileges").
 --
 -- One function serves both triggers (inferred, as for the 0009 list
 -- guard): the constraint it names is TG_NAME, the name of the trigger that
@@ -71,7 +96,7 @@ BEGIN
             USING ERRCODE = 'check_violation', CONSTRAINT = TG_NAME,
                   TABLE = TG_TABLE_NAME, SCHEMA = TG_TABLE_SCHEMA;
     END IF;
-    RETURN NEW;
+    RETURN NULL;
 END;
 $body$, '@schema@', quote_ident(schema_name)));
 END;
@@ -79,14 +104,14 @@ $migration$;
 
 -- A service identity's audiences.
 CREATE TRIGGER service_identity_resource_server_assignment_active
-    BEFORE INSERT ON service_identity_resource_server
+    AFTER INSERT ON service_identity_resource_server
     FOR EACH ROW EXECUTE FUNCTION skyoauth_require_active_assignment();
 ALTER TABLE service_identity_resource_server
     ENABLE ALWAYS TRIGGER service_identity_resource_server_assignment_active;
 
 -- A grant's audiences.
 CREATE TRIGGER service_grant_resource_server_assignment_active
-    BEFORE INSERT ON service_grant_resource_server
+    AFTER INSERT ON service_grant_resource_server
     FOR EACH ROW EXECUTE FUNCTION skyoauth_require_active_assignment();
 ALTER TABLE service_grant_resource_server
     ENABLE ALWAYS TRIGGER service_grant_resource_server_assignment_active;

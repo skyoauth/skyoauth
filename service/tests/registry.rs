@@ -189,7 +189,10 @@ fn assert_invariant<T: Debug>(result: Result<T, RegistryError>, kind: InvariantK
 /// tables the registry writes and of the list domains, together with the
 /// names of the `0010` guard triggers, which their `23514` names as its
 /// constraint, so a new constraint or guard in a later migration fails here
-/// until the mapping lists it.
+/// until the mapping lists it. The triggers are selected by the function
+/// they run, whatever their timing or events: the `0010` guards are
+/// `AFTER INSERT` row triggers (`schema_assignment_write_guard.rs` pins
+/// their form).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_constraint_names_match_the_catalog() {

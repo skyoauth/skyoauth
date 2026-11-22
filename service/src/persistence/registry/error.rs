@@ -528,7 +528,12 @@ impl fmt::Display for PredicateProblem {
 }
 
 /// The kind of constraint behind [`RegistryError::Invariant`].
+///
+/// The enum is `#[non_exhaustive]` (since `0010` added
+/// [`Self::AssignmentActive`]): a later guard may add a kind, so a `match`
+/// outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InvariantKind {
     /// `23503`: a referenced row does not exist, for example a checker
     /// tenant without an assignment of the checker's resource server.
