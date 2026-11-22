@@ -372,13 +372,19 @@ pub enum JwkError {
         expected: usize,
         actual: usize,
     },
-    /// An `EC` coordinate is not below the curve's field prime `p`.
+    /// An `EC` coordinate is not below the curve's field prime `p`. The
+    /// member name (`x` or `y`) is a fixed string; `x` is checked first, so
+    /// (p, p) reports `x` (inferred).
     CoordinateOutOfRange { member: &'static str },
     /// The `EC` coordinates are not a point of the curve, or the Ed25519
-    /// key does not decode to a point (`x^2` is not a square).
+    /// key does not decode to a point (`x^2` is not a square); one variant
+    /// for both, not a separate "does not decode" one (inferred).
     PointNotOnCurve,
     /// The Ed25519 key is not the canonical encoding of its point: `y` is
     /// not below `p = 2^255 - 19`, or `x` is 0 and the sign bit is set.
+    /// The Ed25519 checks run in this order: range, decodability and the
+    /// `x = 0` sign rule, then small order, so `0100...0080` is this error,
+    /// not `Ed25519SmallOrder` (inferred).
     Ed25519NotCanonical,
     /// The Ed25519 key is one of the eight points of order dividing 8.
     Ed25519SmallOrder,
