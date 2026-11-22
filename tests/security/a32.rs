@@ -10,8 +10,10 @@
 //! the typed registry API (`skyoauth_service::persistence::registry`:
 //! [`bootstrap_instance`], [`issue_recovery_challenge`],
 //! [`restore_operator`], [`get_recovery_state`], the operator getters and
-//! mutators, [`authorize_operator`], [`get_instance_security_policy`] and
-//! [`verify_audit_chain`]) against a real PostgreSQL, one fresh database
+//! mutators, [`authorize_operator`], [`get_instance_security_policy`],
+//! [`verify_audit_chain`], and [`append_audit_event`] for the event that
+//! holds the audit chain head in the failure tests) against a real
+//! PostgreSQL, one fresh database
 //! per test (per round in the replica tests), and write nothing past the
 //! registry. The only SQL of their own is one read-only helper, [`counts`]
 //! (see its docs), and two `SET SESSION CHARACTERISTICS AS TRANSACTION
@@ -21,8 +23,9 @@
 //! switches the last replica back to `READ COMMITTED` before its restore.
 //! The concurrent tests use the replica harness (REP,
 //! `skyoauth_scenarios::rep`): [`Replicas::race`], whose replicas a barrier
-//! releases together, and
-//! [`rep::wait_until_blocked`]. The fixture is local: every bootstrap
+//! releases together,
+//! [`rep::wait_until_blocked`] and, for a lost store,
+//! [`rep::terminate`]. The fixture is local: every bootstrap
 //! request is valid and has IDs, keys and an instance ID of its own
 //! ([`ids`]), and each bootstrap runs in a transaction of its own that
 //! commits on `Ok` and rolls back on every `Err`, as the caller must
@@ -31,8 +34,12 @@
 //! new key and event IDs of its own, and each issue and restore runs in a
 //! transaction of its own, committed on `Ok` and rolled back on `Err`
 //! ([`issue_on`], [`restore`]); a restore's transaction is
-//! `READ COMMITTED`, the session default. The registry reads no clock:
-//! every `now` is the test's and fixed ([`issued_at`], [`restored_at`]).
+//! `READ COMMITTED`, the session default. The exceptions are the failure
+//! tests' claimants ([`fail_at_append`]): a bootstrap, an issue or a
+//! restore whose event ID is taken on purpose, and a claimant that commits
+//! after its `Err` ([`end_claim`]), which the registry allows. The
+//! registry reads no clock: every `now` is the test's and fixed
+//! ([`issued_at`], [`restored_at`]).
 //!
 //! - **Bootstrap, positive.** One bootstrap on an empty database: the IDs of its
 //!   outcome are the rows the getters read back, the instance
@@ -57,7 +64,16 @@
 //!   key or audit event ID are each `AlreadyClosed` and write nothing,
 //!   also on a fresh pool; and the revoked key cannot be registered for
 //!   another operator, by the inferred `0005` rule below
-//!   (`a32_neg_a_closed_bootstrap_is_never_reopened`).
+//!   (`a32_neg_a_closed_bootstrap_is_never_reopened`). A bootstrap that
+//!   waits for the audit chain head at its append, its last step (after its
+//!   writes, by `registry::bootstrap`; not asserted here), with 4 replicas
+//!   blocked behind it, fails there, with its event ID
+//!   taken (`AlreadyExists` on `audit_event_pkey`; its caller then commits)
+//!   or with its session terminated (the store is gone; `57P01`): it
+//!   writes nothing, the replicas finish while its transaction is still
+//!   open, exactly one of them bootstraps and 3 are `AlreadyClosed`, and
+//!   the chain is intact
+//!   (`a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing`).
 //! - **Recovery, positive.** After a bootstrap, with its operator enrolled
 //!   (and given a second credential) or locked out (identity disabled,
 //!   first credential revoked, binding disabled, so no key authorizes a
@@ -99,7 +115,29 @@
 //!   replicas seen blocked behind a holder's uncommitted restore all get
 //!   `NotRestorable` after its commit, and exactly one of them restores
 //!   after its rollback
-//!   (`a32_neg_blocked_restores_follow_the_holder_commit_or_rollback`).
+//!   (`a32_neg_blocked_restores_follow_the_holder_commit_or_rollback`). An
+//!   issue whose event ID is taken is `AlreadyExists` and writes nothing.
+//!   A restore that waits for the chain head at its appends, its last step
+//!   (after its consume and writes, by `registry::recovery`; not asserted
+//!   here), with 4 replicas restoring the same challenge blocked behind
+//!   it, fails at its appends, with its second event ID
+//!   taken (its first event is appended; its caller then commits) or with
+//!   its session terminated: it writes nothing, neither its first event nor
+//!   its advance of the head is left, exactly one replica restores and 3
+//!   are `NotRestorable`, and the chain is intact
+//!   (`a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing`).
+//!
+//! The lost store of those two tests is a session that the server
+//! terminates while the call waits: the call is a typed store error, not a
+//! panic, and the database, which stays up, holds nothing of it. A pool
+//! closed on the client side never reaches these functions (they take an
+//! open transaction), so it is not tested; a server that is down or
+//! unreachable for the whole call, and a store that comes back after an
+//! outage, need a harness piece that stops the shared server, which does
+//! not exist (A64's recovery-offline and hermetic legs, parked, own the
+//! outage). A failed audit append is pinned only where it fails, with a
+//! taken event ID or a lost session; an append that fails in Rust after
+//! the head lock is left to the service tests (below).
 //!
 //! A challenge bound to its instance, its operation and arguments digest
 //! and the expected revision, expiring and single use, is the spec's
@@ -220,8 +258,10 @@
 //! Not covered here either, because `service/tests/registry_bootstrap.rs`
 //! covers it: the stored columns of every row bootstrap writes; a
 //! bootstrap whose snapshot predates another's commit (`REPEATABLE READ`,
-//! `SERIALIZABLE`); a policy row committed while bootstrap waits; a failed
-//! audit append and a caller that commits after an `Err`; the audit append
+//! `SERIALIZABLE`); a policy row committed while bootstrap waits; an audit
+//! append that fails in Rust after the head lock (a head at `2^53 - 1`) and
+//! a caller that commits after it; a failed audit append, alone, whose
+//! caller rolls back and retries with a fresh event ID; the audit append
 //! as the last step; the bounds of `now`; collisions of caller IDs before
 //! bootstrap; and the two paths that need a row written by other means: a
 //! bootstrap that waits for an existing policy row's lock
@@ -237,8 +277,10 @@
 //! second consume; malformed plans, the issue's input checks and the TTL
 //! bounds of an issue; `RecoveryKeyUnchanged`, reserved admin IDs, key
 //! lengths and the bounds of `now`; a replacement whose ID or key is taken
-//! (`AlreadyExists`); a failed restore or issue that the caller commits; a
-//! lock timeout; the lock order, the waits between a restore, an issue and
+//! (`AlreadyExists`); a failed restore or issue that the caller commits,
+//! other than the restore here whose second event ID is taken (a taken
+//! first event ID, the writer's error in Rust after the head lock, an issue
+//! whose operation ID is taken); a lock timeout; the lock order, the waits between a restore, an issue and
 //! the operator writes, and the deadlock that fails closed; and that a
 //! restore changes no other table. Through the public API every consume
 //! is a restore that also advances the epoch and the revision, so a replay
@@ -284,8 +326,10 @@
 //! [`authorize_operator`]: registry::authorize_operator
 //! [`get_instance_security_policy`]: registry::get_instance_security_policy
 //! [`verify_audit_chain`]: registry::verify_audit_chain
+//! [`append_audit_event`]: registry::append_audit_event
 
 use std::{
+    future::Future,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -302,15 +346,17 @@ use skyoauth_service::persistence::{
     PgPool,
     registry::{
         self, AdminCredential, AdminIdentity, AdminRole, AdminRoleBinding, AdminRoleBindingChanges,
-        AuditActor, AuthorizedOperator, BootstrapError, BootstrapOutcome, BootstrapRequest,
-        ChainVerdict, ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL,
+        AuditActor, AuditEvent, AuthorizedOperator, BootstrapError, BootstrapOutcome,
+        BootstrapRequest, ChainVerdict, ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL,
         DEPLOYMENT_OPERATOR_ACTOR, IssueChallenge, JsonObject, MAX_CHALLENGE_TTL,
-        MIN_CHALLENGE_TTL, NewAdminCredential, NewAdminIdentity, OPERATOR_RESTORATION,
-        OperatorRequest, OperatorScope, RecoveryChallenge, RecoveryState, RegistryError,
-        RestoreError, RestoreRequest, Restored, Status, bootstrap_instance, restore_operator,
+        MIN_CHALLENGE_TTL, NewAdminCredential, NewAdminIdentity, NewAuditEvent,
+        OPERATOR_RESTORATION, OperatorRequest, OperatorScope, RecoveryChallenge, RecoveryState,
+        RegistryError, RestoreError, RestoreRequest, Restored, Status, bootstrap_instance,
+        restore_operator,
     },
 };
-use sqlx::{Connection, PgConnection, Row};
+use sqlx::{Connection, PgConnection, Postgres, Row, Transaction, pool::PoolConnection};
+use tokio::sync::oneshot;
 
 /// Every role: a key that is not an operator's authorizes none of them.
 const ROLES: [AdminRole; 5] = [
@@ -562,6 +608,14 @@ async fn read_operator(pool: &PgPool, owner: &Ids) -> Operator {
 /// IDs; the policy row carries its instance ID; the event is its
 /// `recovery_state.create` at sequence 1, and the chain is intact at 1.
 async fn assert_only_owner(pool: &PgPool, owner: &Ids, outcome: &BootstrapOutcome) {
+    assert_owner_after(pool, owner, outcome, 0).await;
+}
+
+/// [`assert_only_owner`] after `earlier` audit events that are not
+/// bootstrap's: the event is at sequence `earlier + 1`, the only one of
+/// bootstrap, and the chain is intact there.
+async fn assert_owner_after(pool: &PgPool, owner: &Ids, outcome: &BootstrapOutcome, earlier: i64) {
+    let sequence = earlier + 1;
     assert_eq!(
         (
             &outcome.instance_id[..],
@@ -589,7 +643,7 @@ async fn assert_only_owner(pool: &PgPool, owner: &Ids, outcome: &BootstrapOutcom
         ),
         (
             &owner.audit_event_id[..],
-            1,
+            sequence,
             "recovery_state.create",
             &owner.instance_id[..],
             &AuditActor::Operator(DEPLOYMENT_OPERATOR_ACTOR.into()),
@@ -639,10 +693,18 @@ async fn assert_only_owner(pool: &PgPool, owner: &Ids, outcome: &BootstrapOutcom
             .instance_id,
         owner.instance_id
     );
-    assert_eq!(counts(pool, owner).await, ONE);
+    assert_eq!(
+        counts(pool, owner).await,
+        Counts {
+            audit_event: sequence,
+            ..ONE
+        }
+    );
     assert_eq!(
         verify(pool).await,
-        ChainVerdict::Intact { last_sequence: 1 }
+        ChainVerdict::Intact {
+            last_sequence: sequence
+        }
     );
 }
 
@@ -1016,12 +1078,14 @@ async fn assert_stays_closed(pool: &PgPool, first: &Ids, expected: &Operator, st
 /// module docs).
 ///
 /// No failure-then-retry case is folded in: a first attempt that fails
-/// (an audit event ID or an operator ID taken before bootstrap) and leaves
-/// bootstrap open after the rollback is
+/// alone (an audit event ID or an operator ID taken before bootstrap) and
+/// leaves bootstrap open after the rollback is
 /// `a_failed_audit_append_leaves_nothing_after_rollback` and
 /// `collisions_of_caller_ids_stay_already_exists` in
 /// `service/tests/registry_bootstrap.rs`, through the same public API; a
-/// copy here would add nothing.
+/// copy here would add nothing. What the scenario adds, a failed audit
+/// append or a lost store while replicas wait behind it, is
+/// `a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing`.
 #[tokio::test]
 async fn a32_neg_a_closed_bootstrap_is_never_reopened() {
     let (db, pool) = fixture().await;
@@ -1094,6 +1158,293 @@ async fn a32_neg_a_closed_bootstrap_is_never_reopened() {
     assert_eq!(counts(&pool, &first).await, ONE);
     assert_eq!(read_operator(&pool, &first).await, operator);
     db.drop([pool]).await;
+}
+
+// A failing audit append and a lost store (T13.6: "missing store/audit"),
+// for a bootstrap and for a restore that waits at its audit append with
+// replicas waiting behind it.
+
+/// How the claimant, the call that waits at its audit append, fails there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendFailure {
+    /// Its event ID is the one the head holder appended, and the holder
+    /// commits: the append is the writer's `AlreadyExists` on
+    /// `audit_event_pkey`. Its caller keeps the transaction open until the
+    /// waiters have finished and then commits after the `Err`, which the
+    /// registry allows (its savepoint is rolled back on every `Err`).
+    TakenEventId,
+    /// Its backend is terminated while it waits: the store is gone, and the
+    /// call is a store error. The head holder then rolls back.
+    LostStore,
+}
+
+/// The event ID the head holder appends.
+const HELD_EVENT_ID: &str = "aud_a32_held";
+
+/// The SQLSTATE a session terminated by `pg_terminate_backend` reports.
+const ADMIN_SHUTDOWN: &str = "57P01";
+
+/// The event the head holder appends: one that is neither bootstrap's nor
+/// a recovery's.
+fn held_event() -> NewAuditEvent {
+    NewAuditEvent {
+        id: HELD_EVENT_ID.into(),
+        tenant_id: None,
+        timestamp: now(),
+        actor: AuditActor::System,
+        action: "instance_security_policy.mirror".into(),
+        object_id: "a32_held_object".into(),
+        previous_revision: None,
+        new_revision: None,
+        outcome: "success".into(),
+    }
+}
+
+/// `err`, the store error of a call that failed at its append, is
+/// `failure`'s: `AlreadyExists` on `audit_event_pkey`, or the terminated
+/// session's `57P01`; matched by variant and SQLSTATE, not by text.
+#[track_caller]
+fn assert_append_failure(failure: AppendFailure, err: &RegistryError, what: &str) {
+    match failure {
+        AppendFailure::TakenEventId => assert!(
+            matches!(
+                err,
+                RegistryError::AlreadyExists {
+                    constraint: "audit_event_pkey"
+                }
+            ),
+            "{what}: {err:?}"
+        ),
+        AppendFailure::LostStore => {
+            let code = match err {
+                RegistryError::Other(err) => err
+                    .as_database_error()
+                    .and_then(|db| db.code())
+                    .map(|code| code.into_owned()),
+                _ => None,
+            };
+            assert_eq!(code.as_deref(), Some(ADMIN_SHUTDOWN), "{what}: {err:?}");
+        }
+    }
+}
+
+/// Ends the claimant's transaction after its call: on
+/// [`AppendFailure::TakenEventId`] (`commit_after` is `Some`) it waits,
+/// within [`rep::DEADLINE`], until the waiters have all finished, so they
+/// finished while it was still open, and then commits; on a lost store its
+/// session is gone and the transaction is dropped.
+async fn end_claim(tx: Transaction<'_, Postgres>, commit_after: Option<oneshot::Receiver<()>>) {
+    if let Some(raced) = commit_after {
+        tokio::time::timeout(rep::DEADLINE, raced)
+            .await
+            .expect("the waiters did not finish within the deadline")
+            .expect("the race ended without finishing");
+        tx.commit().await.unwrap();
+    }
+}
+
+/// What [`fail_at_append`] observed.
+struct AppendFailed<C, W> {
+    /// The claimant's outcome.
+    claimed: C,
+    /// Each waiter's outcome, and whether it finished after the head
+    /// holder began to end.
+    waited: Vec<(W, bool)>,
+    /// The head holder's event, committed on
+    /// [`AppendFailure::TakenEventId`] only.
+    held: AuditEvent,
+    /// The pools to close.
+    pools: Vec<PgPool>,
+}
+
+/// A head holder, a session of its own, appends [`held_event`] in an open
+/// transaction, so it holds the audit chain head. The claimant, on a
+/// session of its own, runs `claim` (its call, then [`end_claim`]), and
+/// the harness sees it blocked behind the holder, at its append. Then `waiters` replicas run `work`, and the
+/// harness sees them all blocked behind the holder, through the claimant.
+/// Then, for [`AppendFailure::TakenEventId`], the holder commits, so the
+/// claimant's append fails; for [`AppendFailure::LostStore`], the
+/// claimant's backend is terminated, the harness sees the waiters blocked
+/// behind the holder again (one of them now waits for the head), and the
+/// holder rolls back. Every wait is bounded by [`rep::DEADLINE`].
+async fn fail_at_append<C, CF, CT, W, WF, WT>(
+    db: &TestDb,
+    observer: &PgPool,
+    failure: AppendFailure,
+    waiters: usize,
+    claim: C,
+    work: W,
+) -> AppendFailed<CT, WT>
+where
+    C: FnOnce(PoolConnection<Postgres>, Option<oneshot::Receiver<()>>) -> CF,
+    CF: Future<Output = CT> + Send + 'static,
+    CT: Send + 'static,
+    W: Fn(usize, PoolConnection<Postgres>) -> WF + Send + Sync + 'static,
+    WF: Future<Output = WT> + Send + 'static,
+    WT: Send + 'static,
+{
+    let head_pool = db.pool_with_max_connections(1).await;
+    let mut head_conn = head_pool.acquire().await.unwrap();
+    let head_pid = rep::backend_pid(&mut head_conn).await;
+    let claimant_pool = db.pool_with_max_connections(1).await;
+    let mut claimant_conn = claimant_pool.acquire().await.unwrap();
+    let claimant_pid = rep::backend_pid(&mut claimant_conn).await;
+    let replicas = Replicas::start(db, waiters).await;
+    let pids = replicas.backend_pids().await;
+
+    let mut head = Connection::begin(&mut *head_conn).await.unwrap();
+    let held = registry::append_audit_event(&mut head, &held_event())
+        .await
+        .unwrap();
+    let (raced, raced_rx) = oneshot::channel();
+    let commit_after = (failure == AppendFailure::TakenEventId).then_some(raced_rx);
+    let claimant = tokio::spawn(claim(claimant_conn, commit_after));
+    rep::wait_until_blocked(observer, &[claimant_pid], head_pid).await;
+
+    // Set just before the holder begins to end: a waiter that finished
+    // earlier reads `false`.
+    let ending = Arc::new(AtomicBool::new(false));
+    let release = {
+        let ending = Arc::clone(&ending);
+        async move {
+            rep::wait_until_blocked(observer, &pids, head_pid).await;
+            ending.store(true, Ordering::SeqCst);
+            match failure {
+                AppendFailure::TakenEventId => head.commit().await.unwrap(),
+                AppendFailure::LostStore => {
+                    rep::terminate(observer, claimant_pid).await;
+                    rep::wait_until_blocked(observer, &pids, head_pid).await;
+                    head.rollback().await.unwrap();
+                }
+            }
+        }
+    };
+    let race = async {
+        let waited = replicas
+            .race({
+                let ending = Arc::clone(&ending);
+                move |replica, conn| {
+                    let ending = Arc::clone(&ending);
+                    let work = work(replica, conn);
+                    async move {
+                        let outcome = work.await;
+                        (outcome, ending.load(Ordering::SeqCst))
+                    }
+                }
+            })
+            .await;
+        // The claimant's transaction is still open here.
+        let _ = raced.send(());
+        waited
+    };
+    let (waited, ()) = tokio::join!(race, release);
+    let claimed = tokio::time::timeout(rep::DEADLINE, claimant)
+        .await
+        .expect("the claimant did not finish within the deadline")
+        .unwrap();
+    drop(head_conn);
+    let pools = [head_pool, claimant_pool]
+        .into_iter()
+        .chain(replicas.into_pools())
+        .collect();
+    AppendFailed {
+        claimed,
+        waited,
+        held,
+        pools,
+    }
+}
+
+/// Each waiter's outcome, after checking that it finished only after the
+/// head holder began to end.
+#[track_caller]
+fn after_the_holder<T: std::fmt::Debug>(waited: Vec<(T, bool)>, what: &str) -> Vec<T> {
+    let mut outcomes = Vec::new();
+    for (replica, (outcome, after_holder)) in waited.into_iter().enumerate() {
+        assert!(
+            after_holder,
+            "{what}: replica {replica} finished before the holder ended: {outcome:?}"
+        );
+        outcomes.push(outcome);
+    }
+    outcomes
+}
+
+/// A bootstrap that fails at its audit append, its last step (after its
+/// writes, by the registry's documented order, which this test does not
+/// observe), writes nothing and leaves bootstrap open, in two fresh databases: once with
+/// its event ID taken by an event committed while it waits for the head
+/// (`AlreadyExists` on `audit_event_pkey`; its caller commits after the
+/// `Err`, once the waiters have finished), once with its session
+/// terminated while it waits (a store error, `57P01`). 4 replicas that
+/// bootstrap with requests sharing nothing with it or with each other are
+/// seen blocked behind it; after its failure exactly one of them
+/// bootstraps, the 3 others are `AlreadyClosed`, and the state is the
+/// winner's alone: its event directly after the committed one, or first,
+/// and the chain intact. The waiters finish while the failed claimant's
+/// transaction is still open: a failed bootstrap keeps bootstrap claimed
+/// for no one until its caller ends the transaction. (PostgreSQL releases
+/// what the failed statement's subtransaction held when the statement
+/// fails, so this holds with or without the registry's own savepoint
+/// rollback; the commit after the `Err` writes nothing either way.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing() {
+    const WAITERS: usize = 4;
+    for failure in [AppendFailure::TakenEventId, AppendFailure::LostStore] {
+        let what = format!("{failure:?}");
+        let (db, pool) = fixture().await;
+        let mut failing = ids(100);
+        if failure == AppendFailure::TakenEventId {
+            failing.audit_event_id = HELD_EVENT_ID.into();
+        }
+        let claim = {
+            let failing = failing.clone();
+            move |mut conn: PoolConnection<Postgres>, commit_after| async move {
+                let mut tx = Connection::begin(&mut *conn).await.unwrap();
+                let outcome = bootstrap_instance(&mut tx, &failing.request()).await;
+                end_claim(tx, commit_after).await;
+                outcome
+            }
+        };
+        let failed = fail_at_append(
+            &db,
+            &pool,
+            failure,
+            WAITERS,
+            claim,
+            |replica, mut conn| async move { bootstrap(&mut conn, &ids(replica).request()).await },
+        )
+        .await;
+        match &failed.claimed {
+            Err(BootstrapError::Store(err)) => assert_append_failure(failure, err, &what),
+            other => panic!("{what}: expected a store error: {other:?}"),
+        }
+
+        let outcomes = after_the_holder(failed.waited, &what);
+        let winners: Vec<usize> = (0..WAITERS).filter(|&r| outcomes[r].is_ok()).collect();
+        assert_eq!(winners.len(), 1, "{what}: {outcomes:?}");
+        let winner = winners[0];
+        let refusals: Vec<String> = (0..WAITERS)
+            .filter(|&r| r != winner)
+            .map(|r| closed_text(&outcomes[r], &format!("{what}, replica {r}")))
+            .collect();
+        assert_eq!(refusals, vec![CLOSED; WAITERS - 1], "{what}");
+
+        let owner = ids(winner);
+        let outcome = outcomes[winner].as_ref().unwrap();
+        let taken = failure == AppendFailure::TakenEventId;
+        assert_owner_after(&pool, &owner, outcome, i64::from(taken)).await;
+        assert_eq!(
+            outcome.audit_event.prev_hash,
+            taken.then_some(failed.held.hash),
+            "{what}"
+        );
+        assert_absent(&pool, &failing, &owner).await;
+        for replica in (0..WAITERS).filter(|&r| r != winner) {
+            assert_absent(&pool, &ids(replica), &owner).await;
+        }
+        db.drop(std::iter::once(pool).chain(failed.pools)).await;
+    }
 }
 
 // Registry-level recovery (T13.5): `issue_recovery_challenge`,
@@ -2393,5 +2744,124 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
         );
         let pools = [pool, holder_pool].into_iter().chain(waiters.into_pools());
         db.drop(pools).await;
+    }
+}
+
+/// A recovery whose audit append fails writes nothing and leaves its
+/// challenge restorable, in two fresh databases after a bootstrap. First,
+/// an issue whose event ID is bootstrap's is `AlreadyExists` on
+/// `audit_event_pkey` and changes nothing the registry shows; with its own
+/// ID the challenge then issues as the event after bootstrap. Then a
+/// restore of it fails at its audit appends, its last step (after its
+/// consume and writes, by the registry's documented order, which this test
+/// does not observe): once with its rotation
+/// event ID taken by an event committed while it waits for the head, so
+/// its first event is appended and its second is `AlreadyExists` (its
+/// caller commits after the `Err`, once the waiters have finished), once
+/// with its session terminated while it waits (a store error, `57P01`). 4
+/// replicas that restore the same challenge with event IDs of their own
+/// are seen blocked behind it; after its failure exactly one of them
+/// restores, the 3 others are `NotRestorable`, and the state is the
+/// winner's alone: the replacement enrolled once, the key at epoch 2, its
+/// two events directly after the committed one or the issue, and the chain
+/// intact, so neither the failed restore's first event nor its advance of
+/// the chain head is left.
+#[tokio::test(flavor = "multi_thread")]
+async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
+    const WAITERS: usize = 4;
+    for failure in [AppendFailure::TakenEventId, AppendFailure::LostStore] {
+        let what = format!("{failure:?}");
+        let (db, pool) = fixture().await;
+        let first = ids(0);
+        bootstrapped(&pool, &first).await;
+        let challenge = recovery(1, &first, 1);
+        let mut taken = challenge.clone();
+        taken.issue_event_id = first.audit_event_id.clone();
+        let before = state(&pool, &first).await;
+        let plan = taken.plan();
+        let request = taken.issue_request(&plan, DEFAULT_CHALLENGE_TTL, issued_at());
+        match issue_on(&pool, &request).await {
+            Err(ChallengeError::Store(err)) => {
+                assert_append_failure(AppendFailure::TakenEventId, &err, "issue");
+            }
+            other => panic!("{what}: expected the issue's store error: {other:?}"),
+        }
+        assert_eq!(state(&pool, &first).await, before, "{what}");
+        let issued = issue(&pool, &challenge, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+        assert_issued(&issued, &challenge, DEFAULT_CHALLENGE_TTL, issued_at(), 2);
+
+        let mut failing = challenge.with_events(100);
+        if failure == AppendFailure::TakenEventId {
+            failing.rotation_event_id = HELD_EVENT_ID.into();
+        }
+        let mine: Vec<Recovery> = (0..WAITERS).map(|r| challenge.with_events(r)).collect();
+        let claim = move |mut conn: PoolConnection<Postgres>, commit_after| async move {
+            let mut tx = Connection::begin(&mut *conn).await.unwrap();
+            let restored = restore_operator(&mut tx, &failing.request(restored_at())).await;
+            end_claim(tx, commit_after).await;
+            restored
+        };
+        let work = {
+            let mine = mine.clone();
+            move |replica: usize, mut conn: PoolConnection<Postgres>| {
+                let recovery = mine[replica].clone();
+                async move { restore(&mut conn, &recovery.request(restored_at())).await }
+            }
+        };
+        let failed = fail_at_append(&db, &pool, failure, WAITERS, claim, work).await;
+        match &failed.claimed {
+            Err(RestoreError::Store(err)) => assert_append_failure(failure, err, &what),
+            other => panic!("{what}: expected a store error: {other:?}"),
+        }
+
+        let outcomes = after_the_holder(failed.waited, &what);
+        let winners: Vec<usize> = (0..WAITERS).filter(|&r| outcomes[r].is_ok()).collect();
+        assert_eq!(winners.len(), 1, "{what}: {outcomes:?}");
+        let winner = winners[0];
+        let refusals: Vec<String> = (0..WAITERS)
+            .filter(|&r| r != winner)
+            .map(|r| not_restorable_text(&outcomes[r], &format!("{what}, replica {r}")))
+            .collect();
+        assert_eq!(refusals, vec![NOT_RESTORABLE; WAITERS - 1], "{what}");
+
+        let outcome = outcomes[winner].as_ref().unwrap();
+        assert_restored(&pool, &mine[winner], outcome, restored_at()).await;
+        assert_eq!(
+            outcome.revoked_credential_ids,
+            vec![first.credential_id.clone()],
+            "{what}"
+        );
+        let taken = failure == AppendFailure::TakenEventId;
+        let earlier = i64::from(taken);
+        let before_restore = if taken {
+            failed.held.hash
+        } else {
+            issued.audit_event.hash
+        };
+        assert_eq!(
+            (outcome.audit_event.sequence, outcome.audit_event.prev_hash),
+            (3 + earlier, Some(before_restore)),
+            "{what}"
+        );
+        assert_eq!(
+            state(&pool, &first).await,
+            State {
+                counts: Counts {
+                    owner_recovery_state: 0,
+                    admin_identity: 2,
+                    admin_credential: 2,
+                    admin_role_binding: 2,
+                    audit_event: 4 + earlier,
+                    administrative_operation: 1,
+                    ..ONE
+                },
+                recovery_state: registry::get_recovery_state(&pool).await.unwrap(),
+                chain: ChainVerdict::Intact {
+                    last_sequence: 4 + earlier
+                },
+            },
+            "{what}"
+        );
+        db.drop(std::iter::once(pool).chain(failed.pools)).await;
     }
 }

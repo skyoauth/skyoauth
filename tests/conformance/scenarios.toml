@@ -823,7 +823,9 @@ status = "planned"
 tests = [
   "nextest:skyoauth-scenarios/pg/security::a32::a32_pos_one_bootstrap_enrolls_one_operator_and_closes",
   "nextest:skyoauth-scenarios/pg/security::a32::a32_pos_signed_recovery_restores_a_replacement_operator",
+  "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing",
   "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_closed_bootstrap_is_never_reopened",
+  "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing",
   "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_replayed_recovery_is_refused",
   "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_restore_must_be_the_one_its_challenge_names",
   "nextest:skyoauth-scenarios/pg/security::a32::a32_neg_a_restore_outside_read_committed_writes_nothing",
