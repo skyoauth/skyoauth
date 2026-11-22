@@ -175,6 +175,16 @@ pub async fn list_audience_tenant_assignments<'e>(
 
 /// Replaces the mutable columns of an assignment at `expected_revision` and
 /// advances its revision by one.
+///
+/// Since `0010` a service identity's or grant's audience insert locks the
+/// assignment `FOR SHARE` until its transaction ends, so this update, a
+/// disable included, waits for such an insert to commit or roll back, and
+/// an insert waits for this update. Disabling an assignment that rows
+/// already reference is not refused (provisional lead pick, 2026-11-22: the
+/// live check denies them), and enabling one revalidates nothing. A caller
+/// that audits the update appends its event after this call, so it locks
+/// the assignment before the audit head (migrations README, "What 0010
+/// adds").
 pub async fn update_audience_tenant_assignment<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,

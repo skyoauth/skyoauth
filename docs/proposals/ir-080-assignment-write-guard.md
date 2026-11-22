@@ -1,14 +1,17 @@
 # Proposal: database guard for IR-080 assignment references (T14.2)
 
-Status: accepted; implementation pending (ruled by the user, 2026-11-22,
-relayed by the lead). The acceptance includes reversing the migrations README
-rule for these two tables (see "Open" below), and the same trigger pattern is
-also to guard the IR-152 egress check (`trust_source` destinations against
-`egress_allowlist_entry`). No migration and no code yet. Before that ruling
-the status was "proposal only", with all picks provisional, dated 2026-11-21,
-until the maintainer decides. Picks marked "(inferred)" are the coding
-session's reading; picks marked "lead" are lead rulings of the same date, and
-they stay provisional until the maintainer ratifies the ADRs (Gate M0).
+Status: accepted, implemented in 0010
+(`service/migrations/0010_assignment_write_guard.sql`; migrations README,
+"What 0010 adds"; ruled by the user, 2026-11-22, relayed by the lead). The
+acceptance includes reversing the migrations README rule for these two tables
+(see "Resolved" below), and the same trigger pattern is also to guard the
+IR-152 egress check (`trust_source` destinations against
+`egress_allowlist_entry`). Before that ruling the status was "proposal only",
+with all picks provisional, dated 2026-11-21, until the maintainer decides.
+Picks marked "(inferred)" are the coding session's reading; picks marked
+"lead" are lead rulings of the same date, and they stay provisional until the
+maintainer ratifies the ADRs (Gate M0). The text below is the proposal as
+accepted; where the implementation differs, "Implementation notes" says so.
 
 ## Problem
 
@@ -77,9 +80,12 @@ snapshot fails with 40001, which maps to `Retry`.
 
 ## Limits
 
-- Replica mode (`session_replication_role = replica`) skips the trigger, like
-  every guard of this schema. This is a tripwire against application DML, not
-  a security boundary (see the 0009 "Limits").
+- Replica mode (`session_replication_role = replica`) does not skip the
+  triggers: they are `ENABLE ALWAYS`, so they fire there and still refuse a
+  disabled assignment. Replica mode skips the foreign key, so a row whose
+  assignment is missing is accepted (corrected at implementation; the text
+  first said replica mode skips the trigger). This is a tripwire against
+  application DML, not a security boundary (see the 0009 "Limits").
 - It checks the assignment only at insert. Re-enabling or disabling the
   assignment later does not revalidate existing rows (lead, Q3 and Q4 below).
 
@@ -113,11 +119,52 @@ to the wrong variant.
    not blocked, because the live recheck denies them.
 5. This is a separate migration from the 0009 stored-marker follow-up.
 
-## Open
+## Resolved
 
-- The migration number (the next free number after `0009`, or a number shared
-  with the stored-marker follow-up) is open.
-- Whether the maintainer accepts reversing the README rule for these two
-  tables. Decided: accepted (ruled by the user, 2026-11-22, relayed by the
-  lead); implementation pending. The README rule itself changes with the
-  migration that adds the triggers, not before.
+- The migration number: `0010`, separate from the stored-marker follow-up
+  (decision 5).
+- Reversing the README rule for these two tables: accepted by the user
+  (ruling relayed by the lead, 2026-11-22). The migrations README rewrites
+  the rule in "What 0003 adds" and "What 0004 adds" and explains it in "What
+  0010 adds".
+
+## Implementation notes
+
+Where `0010` and its tests differ from the text above (all provisional, as
+above):
+
+- Timing: the triggers are `AFTER INSERT ... FOR EACH ROW`, not deferrable,
+  not `BEFORE INSERT` (provisional lead pick, 2026-11-22, after review; the
+  `0009` list guard is `AFTER` for the same reason). PostgreSQL fires a row's
+  `AFTER` triggers in name order, and the foreign-key check
+  (`RI_ConstraintTrigger_c_<oid>`) sorts before these names, so the guard runs
+  after it with a newer snapshot. A `BEFORE` guard let a row through under
+  `READ COMMITTED` when another transaction created its assignment `disabled`
+  and committed between the guard and the foreign-key check at the end of the
+  statement; a `DEFERRED` trigger would lock the assignment after the audit
+  head and fail at `COMMIT`. The lock order above is unchanged: the guard runs
+  at the end of the inserting statement, before the audit append.
+- Names: the triggers are `service_identity_resource_server_assignment_active`
+  and `service_grant_resource_server_assignment_active`, both running one
+  function, `skyoauth_require_active_assignment()`. The `23514` names the
+  trigger that fired as its constraint, and the registry maps both names to
+  `Invariant { kind: AssignmentActive, constraint }`. The names must keep
+  sorting after `RI_` byte-wise.
+- Privileges: a `FOR SHARE` read needs `UPDATE` on at least one column of the
+  table as well as `SELECT`, so a writer needs `SELECT` on
+  `audience_tenant_assignment` (`tenant_id`, `resource_server_id`, `status`)
+  and `UPDATE` on one of its columns, not `SELECT` alone. The prescribed
+  grant is `UPDATE (id)`, a column the `0003` immutability guard keeps
+  unchangeable, so the role can lock an assignment but not change it.
+  `SECURITY DEFINER` would avoid the grant but breaks the `SECURITY INVOKER`
+  convention of every guard, so it is not used.
+- Replica mode: corrected in "Limits" above.
+- Error order: being `AFTER`, a duplicate audience is `AlreadyExists`
+  (`23505`) and a missing assignment `ForeignKey` (`23503`) before the guard
+  runs, whatever the assignment's status, and an insert whose `ON CONFLICT`
+  clause skips an existing row (`DO NOTHING`) fires no guard for it.
+- One statement: the guard sees every change of its own statement, so a
+  data-modifying `WITH` that also writes the assignment is judged by the
+  assignment's state at the end of the statement (created or set `disabled`:
+  refused; created or set `enabled`: accepted). The registry never writes
+  both in one statement.

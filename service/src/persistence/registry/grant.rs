@@ -252,7 +252,16 @@ pub async fn update_principal_binding<'e>(
 /// Creates a service identity at revision 1 with its initial audiences, in
 /// one statement. Its ID must be that of a same-tenant service principal,
 /// created first (in the caller's transaction, identity-registry section
-/// 5.1), and each audience must be assigned to the tenant.
+/// 5.1), and each audience must be assigned to the tenant
+/// (`service_identity_resource_server_assignment_fkey`) by an enabled
+/// assignment: since `0010` one that is disabled is
+/// [`RegistryError::Invariant`] with [`InvariantKind::AssignmentActive`] and
+/// `service_identity_resource_server_assignment_active`, and nothing is
+/// written. The guard locks each assignment `FOR SHARE` until the caller's
+/// transaction ends (migrations README, "What 0010 adds", for the lock
+/// order).
+///
+/// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
 pub async fn create_service_identity<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewServiceIdentity,
@@ -344,12 +353,21 @@ pub async fn update_service_identity<'e>(
 
 /// Adds `resource_server_id` to the audiences of the service identity of
 /// `tenant_id` at `expected_revision` and advances its revision by one,
-/// returning the new revision. The audience must be assigned to the tenant,
-/// whatever the assignment's status: otherwise [`RegistryError::Invariant`]
-/// with `service_identity_resource_server_assignment_fkey`. One already
-/// listed is [`RegistryError::AlreadyExists`] with
-/// `service_identity_resource_server_pkey`. Neither error changes the
-/// revision.
+/// returning the new revision. The audience must be assigned to the tenant:
+/// otherwise [`RegistryError::Invariant`] with
+/// `service_identity_resource_server_assignment_fkey`. Since `0010` the
+/// assignment must also be enabled: otherwise [`RegistryError::Invariant`]
+/// with [`InvariantKind::AssignmentActive`] and
+/// `service_identity_resource_server_assignment_active`. One already listed
+/// is [`RegistryError::AlreadyExists`] with
+/// `service_identity_resource_server_pkey`, also when its assignment has
+/// been disabled since (the guard runs after the unique check). No error
+/// changes the revision.
+/// The statement locks the identity row, then the guard locks the
+/// assignment `FOR SHARE`; a caller that audits the write appends its event
+/// after this call (migrations README, "What 0010 adds").
+///
+/// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
 pub async fn add_service_identity_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
@@ -409,7 +427,12 @@ pub async fn remove_service_identity_resource_server<'e>(
 /// [`add_service_grant_binding`] runs first. Each binding must be a
 /// same-tenant binding of the grant's actor
 /// (`service_grant_binding_binding_id_fkey`), and each audience assigned to
-/// the tenant (`service_grant_resource_server_assignment_fkey`).
+/// the tenant (`service_grant_resource_server_assignment_fkey`) by an
+/// enabled assignment: since `0010` one that is disabled is
+/// [`RegistryError::Invariant`] with [`InvariantKind::AssignmentActive`] and
+/// `service_grant_resource_server_assignment_active`. A disabled resource
+/// server behind an enabled assignment is accepted as a dormant reference
+/// (the live check denies it, IR-081).
 ///
 /// An impersonation grant must be created with all its bindings and
 /// audiences in this call. Since `0009` it never changes afterwards:
@@ -417,6 +440,8 @@ pub async fn remove_service_identity_resource_server<'e>(
 /// advance the grant's revision with an `UPDATE`, which the guard refuses,
 /// so they fail with [`RegistryError::Guard`] even inside the creating
 /// transaction.
+///
+/// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
 pub async fn create_service_grant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewServiceGrant,
@@ -597,8 +622,16 @@ pub async fn remove_service_grant_binding<'e>(
 /// at `expected_revision` and advances its revision by one, returning the
 /// new revision. The audience must be assigned to the tenant: otherwise
 /// [`RegistryError::Invariant`] with
-/// `service_grant_resource_server_assignment_fkey`. One already listed is
-/// [`RegistryError::AlreadyExists`] with `service_grant_resource_server_pkey`.
+/// `service_grant_resource_server_assignment_fkey`. Since `0010` the
+/// assignment must also be enabled: otherwise [`RegistryError::Invariant`]
+/// with [`InvariantKind::AssignmentActive`] and
+/// `service_grant_resource_server_assignment_active`. One already listed is
+/// [`RegistryError::AlreadyExists`] with `service_grant_resource_server_pkey`,
+/// also when its assignment has been disabled since. The lock order is that of [`add_service_identity_resource_server`]: the
+/// grant row, then the assignment `FOR SHARE`, then the caller's audit
+/// event.
+///
+/// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
 pub async fn add_service_grant_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,

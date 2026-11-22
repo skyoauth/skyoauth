@@ -211,6 +211,7 @@
 //! | `23505`  | `unique_violation`                         | `AlreadyExists { constraint }`                        |
 //! | `23503`  | `foreign_key_violation`                    | `Invariant { kind: ForeignKey, constraint: Some(_) }` |
 //! | `23514`  | `check_violation` (table or list domain)   | `Invariant { kind: Check, constraint: Some(_) }`      |
+//! | `23514`  | a `0010` guard: assignment not enabled     | `Invariant { kind: AssignmentActive, .. }`            |
 //! | `23502`  | `not_null_violation`                       | `Invariant { kind: NotNull, constraint: None }`       |
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
 //! | —        | a stored time outside the readable range   | `UnreadableTimestamp { table, column, id }`           |
@@ -224,6 +225,22 @@
 //! the caller rolls back and runs every statement of the transaction again,
 //! reading the rows anew; the registry does not retry. A `40001` is never
 //! `StaleRevision`.
+//!
+//! Since `0010` the database refuses a new audience row of a service
+//! identity or a grant ([`create_service_identity`],
+//! [`add_service_identity_resource_server`], [`create_service_grant`],
+//! [`add_service_grant_resource_server`]) whose audience tenant assignment
+//! exists but is not enabled (IR-080; provisional lead pick, 2026-11-22):
+//! `Invariant { kind: AssignmentActive, constraint }`, the constraint one
+//! of [`ASSIGNMENT_ACTIVE`], the name of the guard trigger that raised it.
+//! The guard is an `AFTER INSERT` row trigger that runs after the row's
+//! unique and foreign-key checks, so a duplicate audience is still
+//! `AlreadyExists` and a missing assignment still the foreign key's
+//! `Invariant { kind: ForeignKey, .. }`, whatever the assignment's status.
+//! The guard locks the assignment row `FOR SHARE`, so
+//! the insert and a concurrent update of the assignment serialize; under
+//! `REPEATABLE READ` or `SERIALIZABLE` an insert whose snapshot predates a
+//! committed update of the assignment fails with `40001`, `Retry`.
 //!
 //! The `Display` and `Debug` text of a [`RegistryError`] never includes a
 //! value from the request or the row: the variants carry only constraint,
@@ -269,9 +286,12 @@
 //! [`issue_recovery_challenge`] and [`restore_operator`] are the
 //! exceptions), does not verify a recovery signature (the verifier does,
 //! before the restore), does not check rules the database
-//! does not enforce (an enabled same-tenant assignment behind a reference,
-//! scope and profile vocabulary, leaving a disabled assignment's tenant out
-//! of a checker's effective set; migrations README, "What 0003 adds"; the
+//! does not enforce (scope and profile vocabulary, leaving a disabled
+//! assignment's tenant out of a checker's effective set; migrations README,
+//! "What 0003 adds"; an enabled assignment behind a service identity's or a
+//! grant's audience is checked by the `0010` guards at insert only, so the
+//! recheck at issuance and live authorization stays with the service,
+//! IR-081; the
 //! egress check of a source's URLs, which the service-layer write path
 //! [`trust::create_source`](crate::trust::create_source) and
 //! [`trust::update_source`](crate::trust::update_source) does (T11.2,
@@ -316,7 +336,9 @@ pub use bootstrap::{
     bootstrap_instance,
 };
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
-pub use error::{InvariantKind, KNOWN_CONSTRAINTS, PredicateProblem, RegistryError};
+pub use error::{
+    ASSIGNMENT_ACTIVE, InvariantKind, KNOWN_CONSTRAINTS, PredicateProblem, RegistryError,
+};
 pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
 pub use events::{
     AUDIT_HASH_PREFIX, AuditActor, AuditEvent, ChainBreak, ChainVerdict, MAX_ENVELOPE_INTEGER,

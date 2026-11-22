@@ -285,13 +285,24 @@ async fn catalog_pins_the_check_the_triggers_and_their_functions() {
             .position(|(name, _)| name.ends_with("_impersonation_frozen"))
             .unwrap();
         assert_eq!(guard, order.len() - 1, "{table}: {order:?}");
+        let (checks, others) = order[..guard].split_at(2);
         assert!(
-            order[..guard].len() == 2
-                && order[..guard].iter().all(
-                    |(name, internal)| *internal && name.starts_with("RI_ConstraintTrigger_c_")
-                ),
+            checks
+                .iter()
+                .all(|(name, internal)| *internal && name.starts_with("RI_ConstraintTrigger_c_")),
             "{table}: {order:?}"
         );
+        // Since `0010` the audience list also has the AFTER INSERT
+        // assignment guard, which sorts between the checks and this guard
+        // (schema_assignment_write_guard.rs).
+        let others: Vec<&str> = others.iter().map(|(name, _)| name.as_str()).collect();
+        let assignment_guard = format!("{table}_assignment_active");
+        let expected: Vec<&str> = if table == "service_grant_resource_server" {
+            vec![&assignment_guard]
+        } else {
+            vec![]
+        };
+        assert_eq!(others, expected, "{table}: {order:?}");
     }
     db.drop([pool]).await;
 }
@@ -543,7 +554,9 @@ async fn upgrade_precondition_lists_the_reserved_operator_ids() {
     .unwrap();
     assert_eq!(disabled, Vec::<String>::new());
 
-    persistence::migrate(&pool).await.unwrap();
+    // Up to `0009` only, the upgrade under test; later migrations have
+    // their own tests.
+    MIGRATOR.run_to(9, &pool).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
@@ -1054,9 +1067,16 @@ async fn a_grant_committed_after_the_snapshot_is_refused_by_the_foreign_key() {
 async fn list_row_writers_need_select_on_service_grant() {
     let (mut db, pool) = seeded().await;
     let (role, connect) = db.create_login_role().await;
+    // Since `0010` an audience row also needs the assignment privileges
+    // the guard of `0010` reads with, here its prescribed grant (its own
+    // test checks them).
     run(
         &pool,
-        &format!("GRANT INSERT ON service_grant_binding, service_grant_resource_server TO {role}"),
+        &format!(
+            "GRANT INSERT ON service_grant_binding, service_grant_resource_server TO {role};
+             GRANT SELECT (tenant_id, resource_server_id, status), UPDATE (id)
+                 ON audience_tenant_assignment TO {role}"
+        ),
     )
     .await;
     let mut writer = PgConnection::connect_with(&connect).await.unwrap();
