@@ -152,14 +152,17 @@
 //!   [`ValidatedKeyset`]: the set, its canonical public projection
 //!   ([`ValidatedKeyset::public_json`], also [`JwkSet::to_public_json`])
 //!   and its [`KeysetFingerprint`]. The projection is what the write path
-//!   stores, never the raw upload (inferred): per key, `alg` when uploaded
-//!   and the key type's [`RSA_MEMBERS`], [`EC_MEMBERS`] or [`OKP_MEMBERS`]
-//!   with `kty` and `kid`, in lexicographic member order (as RFC 7638
-//!   orders its input), with no whitespace, the keys in upload order. `use`,
-//!   `key_ops`, `x5t` and `x5t#S256` are dropped (inferred: `use` and
-//!   `key_ops` can only be `sig` and `["verify"]`, the certificate
-//!   thumbprints are unused), so a private member can never reach it. A
-//!   projection is itself an accepted upload.
+//!   stores, never the raw upload (inferred): only `alg` (when uploaded),
+//!   `kty`, `kid` and the key members ([`RSA_MEMBERS`], [`EC_MEMBERS`] or
+//!   [`OKP_MEMBERS`]); members sorted (lexicographic, as RFC 7638 orders
+//!   its input), keys sorted by `kid` (byte order), no whitespace. So the
+//!   same keys uploaded in any order give the same bytes and fingerprint,
+//!   and every set this module returns ([`JwkSet`], [`ValidatedKeyset`],
+//!   [`StoredKeyset`]) lists its keys in that order (provisional lead pick,
+//!   2026-11-22). `use`, `key_ops`, `x5t` and `x5t#S256` are dropped
+//!   (inferred: `use` and `key_ops` can only be `sig` and `["verify"]`, the
+//!   certificate thumbprints are unused), so a private member can never
+//!   reach it. A projection is itself an accepted upload.
 //! - The fingerprint (inferred) is the unpadded base64url of the SHA-256
 //!   digest of the projection's bytes. Its use is open: the design section
 //!   5.7 export gives a version only `id` and `public_jwks_ref` (OQ-IR-6),
@@ -169,12 +172,17 @@
 //!   database, as text or bytes, into a [`StoredKeyset`]: every rule above
 //!   (shape, size, allowlist, `alg` rules, lengths, unique `kid`s and keys)
 //!   but no point arithmetic (provisional lead pick, 2026-11-22), with
-//!   [`KNOWN_ALGORITHMS`] as the allowed set (inferred). It recomputes the
+//!   [`KNOWN_ALGORITHMS`] as the allowed set (inferred), after refusing
+//!   input longer than [`MAX_STORED_BYTES`] (4 × [`MAX_SET_BYTES`]) before
+//!   the raw parse (provisional lead pick, 2026-11-22). It recomputes the
 //!   projection and fingerprint, which do not depend on how `jsonb` orders
 //!   or spaces the text. The stored value is trusted to have been validated
 //!   at write; the `0004` `CHECK` floor does not make that true by itself.
-//!   Runtime verification (T11.7) must select from these already validated
-//!   stored keys.
+//!   Its keys are not verifier-ready, since no point checks ran
+//!   (provisional lead pick, 2026-11-22): the verifier (T11.7) builds its
+//!   keys from a full [`validate_keyset`] pass instead. Its errors are data-integrity errors (a stored row that
+//!   breaks the rules), not client errors: a future HTTP mapping must not
+//!   reuse the upload mapping of [`JwkSetError`].
 //!
 //! # Versions
 //!
@@ -243,9 +251,8 @@
 //!   T24.3's "fake keys" negative stays the acceptance test. Validation is
 //!   CPU-bound (about 8.8 ms per Ed25519 key in release, about 0.18 s per
 //!   20-key set): the wiring PR must run it on bounded blocking workers
-//!   (`spawn_blocking` with a limit), and T11.7 must select from
-//!   already-validated stored keys (read with [`parse_stored`], which skips
-//!   the point checks), not re-parse per request with the full parse. An
+//!   (`spawn_blocking` with a limit), and T11.7 must build its key cache
+//!   once per version (see below), not re-parse per request. An
 //!   optimisation of the `x^2` computation (as `u * v`) is deferred.
 //! - The wiring PR must bound the raw request body before parsing it: this
 //!   module bounds only the parsed value.
@@ -253,17 +260,37 @@
 //!   source's `algorithms` allowlist.
 //! - Wiring into the trust keyset write path (T11.9, T24.2): calling
 //!   [`validate_keyset`] at write and storing its
-//!   [`ValidatedKeyset::public_json`], never the raw upload, calling
+//!   [`ValidatedKeyset::public_json`], never the raw upload. The registry
+//!   write API must take a `&ValidatedKeyset`, never a `&StoredKeyset` or
+//!   a bare `&str`: [`StoredKeyset::public_json`] returns the same `&str`,
+//!   so a copy or restore path could otherwise store keys whose points were
+//!   never checked. Also calling
 //!   [`check_version_overlap`] wherever a version becomes enabled
 //!   (creation as enabled, re-enable, import, restore), serializing the
 //!   writes of one keyset (lock the parent keyset row or advance its
 //!   revision), and deciding what the version's `fingerprint` column holds:
 //!   this module offers [`KeysetFingerprint`] (inferred), whose use is open
 //!   (OQ-IR-6). Nothing calls this module yet.
-//! - Reading stored versions with [`parse_stored`] (T11.7). [`live_keys`]
-//!   and [`check_version_overlap`] take a [`JwkSet`], which only the full
-//!   parse builds, so feeding them stored keys needs a change of
-//!   [`KeysetVersion`] (open).
+//! - One write path (provisional lead pick, 2026-11-22). The raw registry
+//!   writer `persistence::registry::create_trust_keyset_version` stores
+//!   whatever `public_jwks` and `fingerprint` it is given, unchecked. The
+//!   keyset write wiring above must be the only write path, and must make
+//!   that raw writer crate-private or otherwise unreachable from any
+//!   endpoint.
+//! - The verifier's keys (T11.7; provisional lead pick, 2026-11-22). The
+//!   verifier's key cache is built from a full [`validate_keyset`] pass per
+//!   version (on bounded blocking workers, see "Points"), never from
+//!   [`parse_stored`], whose keys are not verifier-ready. A row written
+//!   before the write wiring existed, or an imported row, gets that full
+//!   pass too. A separate verifier type (for example `VerifierKeys`) built
+//!   only by the full pass stays an option for later.
+//! - The overlap input gap hits the registry write path first, before
+//!   T11.7: [`check_version_overlap`] needs the other enabled versions,
+//!   read back from the database, as [`JwkSet`]s, which only the full parse
+//!   builds. Either the write path re-parses them fully (about 0.18 s per
+//!   20-key set, see "Points") or [`KeysetVersion`] changes to take
+//!   [`StoredKeyset`] keys (open). [`live_keys`] at verification (T11.7)
+//!   takes the sets of the verifier's full pass, so it has no such gap.
 //! - Whether validity windows should stay immutable, so that an operator
 //!   could close an open-ended window instead of disabling the version
 //!   (open question).
@@ -289,7 +316,8 @@ pub use overlap::{
     KeysetVersion, LiveKey, OverlapError, VersionStatus, check_version_overlap, live_keys,
 };
 pub use projection::{
-    KeysetFingerprint, StoredKeyset, ValidatedKeyset, parse_stored, validate_keyset,
+    KeysetFingerprint, MAX_STORED_BYTES, StoredKeyset, ValidatedKeyset, parse_stored,
+    validate_keyset,
 };
 pub use set::{JwkSet, JwkSetError, MAX_KEYS, MAX_SET_BYTES, parse_jwk_set};
 pub use thumbprint::Thumbprint;

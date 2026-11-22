@@ -15,9 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::{Map, Value, json};
 use skyoauth_service::jwk::{
     Algorithm, Base64urlError, DEFAULT_ALLOWED_ALGORITHMS, JwkError, JwkSet, JwkSetError,
-    KEY_REFERENCE_MEMBERS, KeysetVersion, MAX_KEYS, MAX_SET_BYTES, OverlapError, PRIVATE_MEMBERS,
-    PublicKey, ValidatedKeyset, VersionStatus, check_version_overlap, live_keys, parse_jwk_set,
-    parse_stored, validate_keyset,
+    KEY_REFERENCE_MEMBERS, KeysetVersion, MAX_KEYS, MAX_SET_BYTES, MAX_STORED_BYTES, OverlapError,
+    PRIVATE_MEMBERS, PublicKey, ValidatedKeyset, VersionStatus, check_version_overlap, live_keys,
+    parse_jwk_set, parse_stored, validate_keyset,
 };
 
 // RFC 7517 appendix A.1 / RFC 7638 section 3.1 (kid "2011-04-29").
@@ -2166,21 +2166,24 @@ fn fixed_set() -> Value {
     ])
 }
 
-/// The projection of [`fixed_set`], written by hand.
+/// The projection of [`fixed_set`], written by hand: keys sorted by `kid`
+/// (`ec`, `ed`, `rsa`), members sorted.
 fn fixed_projection() -> String {
     format!(
         concat!(
-            r#"{{"keys":[{{"alg":"RS256","e":"AQAB","kid":"rsa","kty":"RSA","n":"{}"}},"#,
-            r#"{{"crv":"P-256","kid":"ec","kty":"EC","x":"{}","y":"{}"}},"#,
-            r#"{{"alg":"EdDSA","crv":"Ed25519","kid":"ed","kty":"OKP","x":"{}"}}]}}"#,
+            r#"{{"keys":[{{"crv":"P-256","kid":"ec","kty":"EC","x":"{}","y":"{}"}},"#,
+            r#"{{"alg":"EdDSA","crv":"Ed25519","kid":"ed","kty":"OKP","x":"{}"}},"#,
+            r#"{{"alg":"RS256","e":"AQAB","kid":"rsa","kty":"RSA","n":"{}"}}]}}"#,
         ),
-        RSA_N, P256_X, P256_Y, ED25519_X
+        P256_X, P256_Y, ED25519_X, RSA_N
     )
 }
 
-/// The fingerprint of [`fixed_projection`], computed with Python's
-/// `hashlib` and `base64` over that text, never from this crate.
-const FIXED_FINGERPRINT: &str = "0P4sEMSZ4GrHB8Jbqs6aPt8PfU9ciKu68wgiBhG1m9Y";
+/// The fingerprint of [`fixed_projection`], computed with Python
+/// (`json.dumps` with `sort_keys=True` and `separators=(",", ":")` over the
+/// keys sorted by `kid`, then `hashlib.sha256` and unpadded
+/// `base64.urlsafe_b64encode`), never from this crate.
+const FIXED_FINGERPRINT: &str = "kmw_flxprrqx5hAs8p0vEVuCoTPn9KA9a_dZ9kH1Tfk";
 
 /// The members a projected key may have.
 const PROJECTION_MEMBERS: [&str; 8] = ["alg", "crv", "e", "kid", "kty", "n", "x", "y"];
@@ -2261,8 +2264,15 @@ fn full_parse_projection_and_stored_parse_round_trip() {
         let validated = validate(&set);
         let projection = validated.public_json();
         let stored = parse_stored(projection).expect("stored projection accepted");
-        // Same keys, same projection, same fingerprint.
+        // Same keys in the same order (sorted by kid), same projection,
+        // same fingerprint.
         assert_eq!(stored.keys(), validated.keys());
+        assert!(
+            validated
+                .keys()
+                .windows(2)
+                .all(|pair| pair[0].kid() < pair[1].kid())
+        );
         assert_eq!(stored.public_json(), projection);
         assert_eq!(stored.fingerprint(), validated.fingerprint());
         for key in validated.keys() {
@@ -2375,8 +2385,7 @@ fn fingerprint_changes_when_any_member_changes() {
             ec.clone(),
             with(ed.clone(), "x", json!(GENERATED_KEYS[3].1)),
         ),
-        // Key order, one key fewer, one key more.
-        set_of(vec![ec.clone(), rsa.clone(), ed.clone()]),
+        // One key fewer, one key more.
         set_of(vec![rsa.clone(), ec.clone()]),
         set_of(vec![rsa.clone(), ec.clone(), ed.clone(), p384_key("p384")]),
     ];
@@ -2390,6 +2399,10 @@ fn fingerprint_changes_when_any_member_changes() {
         );
         assert_eq!(validate(variant).fingerprint(), validated.fingerprint());
     }
+    // The same keys in another order give the same bytes and fingerprint.
+    let reordered = validate(&set_of(vec![ec.clone(), rsa.clone(), ed.clone()]));
+    assert_eq!(reordered.public_json(), base.public_json());
+    assert_eq!(reordered.fingerprint(), base.fingerprint());
     // The members the projection drops do not change it.
     for (index, member) in [(0, "use"), (0, "key_ops"), (1, "x5t"), (1, "x5t#S256")] {
         let mut set = fixed_set();
@@ -2623,4 +2636,75 @@ fn projection_types_and_stored_errors_never_print_key_material() {
     for output in &outputs {
         assert_clean(output);
     }
+}
+
+fn kids_of(keys: &[skyoauth_service::jwk::PublicJwk]) -> Vec<&str> {
+    keys.iter().map(|key| key.kid().as_str()).collect()
+}
+
+#[test]
+fn keys_are_sorted_by_kid_whatever_the_input_order() {
+    let keys = fixed_set()["keys"].as_array().unwrap().clone();
+    let base = validate(&fixed_set());
+    assert_eq!(kids_of(base.keys()), ["ec", "ed", "rsa"]);
+    // Every permutation of the three keys: the same bytes, fingerprint and
+    // key order, in JwkSet, ValidatedKeyset and StoredKeyset alike.
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let set = set_of(order.iter().map(|&i| keys[i].clone()).collect());
+        let validated = validate(&set);
+        assert_eq!(validated.public_json(), fixed_projection(), "{order:?}");
+        assert_eq!(validated.fingerprint().as_str(), FIXED_FINGERPRINT);
+        assert_eq!(validated, base);
+        assert_eq!(kids_of(parse(&set).unwrap().keys()), ["ec", "ed", "rsa"]);
+        // A stored value in that order reads back sorted.
+        let stored = parse_stored(set.to_string()).unwrap();
+        assert_eq!(kids_of(stored.keys()), ["ec", "ed", "rsa"]);
+        assert_eq!(stored.keys(), base.keys());
+        assert_eq!(stored.public_json(), fixed_projection());
+        assert_eq!(stored.fingerprint().as_str(), FIXED_FINGERPRINT);
+    }
+    // Byte order, not case-insensitive or numeric: "B" < "a" and
+    // "k10" < "k9".
+    let set = set_of(vec![
+        p256_key("a"),
+        p384_key("k9"),
+        ed25519_key("B"),
+        p521_key("k10"),
+    ]);
+    assert_eq!(kids_of(validate(&set).keys()), ["B", "a", "k10", "k9"]);
+}
+
+#[test]
+fn stored_input_is_bounded_before_parsing() {
+    assert_eq!(MAX_STORED_BYTES, 4 * MAX_SET_BYTES);
+    let set = set_of(vec![rsa_key("k")]);
+    let compact = serde_json::to_string(&set).unwrap();
+    let padded = |len: usize| format!("{compact}{}", " ".repeat(len - compact.len()));
+    // At the limit: parsed, and valid.
+    let at_limit = padded(MAX_STORED_BYTES);
+    assert_eq!(at_limit.len(), MAX_STORED_BYTES);
+    assert_eq!(
+        parse_stored(&at_limit).unwrap().public_json(),
+        validate(&set).public_json()
+    );
+    // One byte over: refused.
+    let over = padded(MAX_STORED_BYTES + 1);
+    assert_eq!(parse_stored(&over), Err(JwkSetError::TooLarge));
+    // Refused before the parse: text that is not JSON is TooLarge, not
+    // NotJson, once over the limit.
+    assert_eq!(
+        parse_stored("{".repeat(MAX_STORED_BYTES)),
+        Err(JwkSetError::NotJson)
+    );
+    assert_eq!(
+        parse_stored("{".repeat(MAX_STORED_BYTES + 1)),
+        Err(JwkSetError::TooLarge)
+    );
 }

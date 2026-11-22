@@ -282,7 +282,8 @@ impl fmt::Display for Kid {
 /// [`parse_jwk_set`](super::parse_jwk_set) and
 /// [`validate_keyset`](super::validate_keyset), which run every check, and
 /// by [`parse_stored`](super::parse_stored), which runs every check but the
-/// point checks. `Debug` prints the `kid`, key type, curve or modulus size,
+/// point checks and swaps the allowed set for [`KNOWN_ALGORITHMS`].
+/// `Debug` prints the `kid`, key type, curve or modulus size,
 /// algorithm and thumbprint, never the key octets.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublicJwk {

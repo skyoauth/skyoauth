@@ -16,15 +16,15 @@ pub const MAX_KEYS: usize = 20;
 pub const MAX_SET_BYTES: usize = 64 * 1024;
 
 /// A validated JWK Set: at most [`MAX_KEYS`] public keys with distinct
-/// `kid`s and distinct thumbprints, in upload order. Built only by
-/// [`parse_jwk_set`].
+/// `kid`s and distinct thumbprints, sorted by `kid` (byte order, the
+/// projection's order). Built only by [`parse_jwk_set`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JwkSet {
     keys: Vec<PublicJwk>,
 }
 
 impl JwkSet {
-    /// The keys, in upload order.
+    /// The keys, sorted by `kid` (byte order).
     pub fn keys(&self) -> &[PublicJwk] {
         &self.keys
     }
@@ -36,8 +36,8 @@ impl JwkSet {
 
     /// The canonical public projection of the set, the JSON text to store
     /// (see "Projection, fingerprint and stored sets" in the module docs of
-    /// [`crate::jwk`]): only allowlisted public members, in a fixed order,
-    /// with no whitespace. [`validate_keyset`](super::validate_keyset)
+    /// [`crate::jwk`]): only `alg`, `kty`, `kid` and the key members;
+    /// members sorted, keys sorted by `kid`, no whitespace. [`validate_keyset`](super::validate_keyset)
     /// returns it with the set.
     pub fn to_public_json(&self) -> String {
         projection::public_json(&self.keys)
@@ -46,13 +46,26 @@ impl JwkSet {
 
 /// Why a JWK Set is refused. A key is named by its index in `keys` and,
 /// once validated, its `kid`; no variant holds key material.
+///
+/// From [`parse_jwk_set`] or [`validate_keyset`](super::validate_keyset)
+/// it is a client error (the upload is refused). From
+/// [`parse_stored`](super::parse_stored) it is a data-integrity error (a
+/// stored row breaks the rules it was written under), not a client error:
+/// a future HTTP mapping must not reuse the upload mapping for it.
+///
+/// The enum is `#[non_exhaustive]`: a later task may add a variant, so a
+/// `match` outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JwkSetError {
     /// The stored value is not JSON text. Only
     /// [`parse_stored`](super::parse_stored) returns it; the parser's
     /// message is dropped, so no input text is echoed.
     NotJson,
-    /// The compact serialization is longer than [`MAX_SET_BYTES`].
+    /// The compact serialization is longer than [`MAX_SET_BYTES`], or
+    /// (only from [`parse_stored`](super::parse_stored)) the raw stored
+    /// input is longer than [`MAX_STORED_BYTES`](super::MAX_STORED_BYTES)
+    /// and was not parsed.
     TooLarge,
     /// The set is not a JSON object.
     NotAnObject,
@@ -155,7 +168,8 @@ pub fn parse_jwk_set(value: &Value, allowed: &[Algorithm]) -> Result<JwkSet, Jwk
 }
 
 /// The set rules of [`parse_jwk_set`], with the point checks run or
-/// skipped as `points` says; the keys in set order.
+/// skipped as `points` says; the keys sorted by `kid` (byte order). Error
+/// indexes are positions in the input `keys`.
 pub(crate) fn parse_keys(
     value: &Value,
     allowed: &[Algorithm],
@@ -206,5 +220,8 @@ pub(crate) fn parse_keys(
         }
         keys.push(key);
     }
+    // The projection's order (provisional lead pick, 2026-11-22): the same
+    // keys in any input order give the same bytes and fingerprint.
+    keys.sort_by(|a, b| a.kid().cmp(b.kid()));
     Ok(keys)
 }

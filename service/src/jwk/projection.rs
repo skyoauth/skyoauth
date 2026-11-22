@@ -7,7 +7,10 @@
 //! lexicographic member order, with no whitespace: `alg` (only when the
 //! upload had it), then `e`, `kid`, `kty`, `n` for `RSA`; `crv`, `kid`,
 //! `kty`, `x`, `y` for `EC`; `crv`, `kid`, `kty`, `x` for `OKP`. The set is
-//! `{"keys":[…]}`, its keys in set order, joined by `,`. The key values are
+//! `{"keys":[…]}`, its keys sorted by `kid` (byte order; the `kid`s are
+//! unique ASCII, and the set parse already returns them in that order),
+//! joined by `,`. So the same keys in any upload order give the same bytes
+//! and fingerprint (provisional lead pick, 2026-11-22). The key values are
 //! the canonical unpadded base64url of the validated octets and the `kid`
 //! is validated text (`A`-`Z`, `a`-`z`, `0`-`9`, `-._~:+/=`): plain ASCII
 //! with nothing to escape, as in the `thumbprint` submodule.
@@ -19,7 +22,14 @@ use sha2::{Digest, Sha256};
 
 use super::base64url::encode;
 use super::key::{Algorithm, KNOWN_ALGORITHMS, Points, PublicJwk, PublicKey};
-use super::set::{JwkSet, JwkSetError, parse_jwk_set, parse_keys};
+use super::set::{JwkSet, JwkSetError, MAX_SET_BYTES, parse_jwk_set, parse_keys};
+
+/// The longest input [`parse_stored`] parses, in bytes: 4 ×
+/// [`MAX_SET_BYTES`], checked on the raw input before the JSON parse, room
+/// for the spaces and reordering of `jsonb` text output (provisional lead
+/// pick, 2026-11-22). The compact size rule of [`MAX_SET_BYTES`] still
+/// applies to the parsed value.
+pub const MAX_STORED_BYTES: usize = 4 * MAX_SET_BYTES;
 
 /// The canonical projection of one key (see the submodule docs).
 fn key_json(jwk: &PublicJwk) -> String {
@@ -48,7 +58,8 @@ fn key_json(jwk: &PublicJwk) -> String {
     }
 }
 
-/// The canonical projection of a set of `keys` (see the submodule docs).
+/// The canonical projection of a set of `keys`, which the set parse has
+/// sorted by `kid` (see the submodule docs).
 pub(crate) fn public_json(keys: &[PublicJwk]) -> String {
     let keys: Vec<String> = keys.iter().map(key_json).collect();
     format!(r#"{{"keys":[{}]}}"#, keys.join(","))
@@ -84,7 +95,11 @@ impl fmt::Display for KeysetFingerprint {
 
 /// An uploaded set that passed every check of [`parse_jwk_set`], with its
 /// canonical public projection and fingerprint: what the keyset write path
-/// stores. Built only by [`validate_keyset`]. `Debug` prints the keys (as
+/// stores. Built only by [`validate_keyset`]. The registry write API must
+/// take a `&ValidatedKeyset`, never a [`StoredKeyset`] or a bare `&str`:
+/// [`StoredKeyset::public_json`] returns the same `&str`, so a copy or
+/// restore path could otherwise store keys whose points were never checked.
+/// `Debug` prints the keys (as
 /// [`PublicJwk`] does, without key octets) and the fingerprint, never the
 /// projection, which holds the key octets.
 #[derive(Clone, PartialEq, Eq)]
@@ -100,7 +115,7 @@ impl ValidatedKeyset {
         &self.set
     }
 
-    /// The keys, in upload order.
+    /// The keys, sorted by `kid` (the projection's order).
     pub fn keys(&self) -> &[PublicJwk] {
         self.set.keys()
     }
@@ -146,9 +161,14 @@ pub fn validate_keyset(
 }
 
 /// A set read back from the database by [`parse_stored`]: every rule of
-/// [`parse_jwk_set`] but the point checks, so its keys are not
-/// point-checked here. Built only by [`parse_stored`]. `Debug` prints the
-/// keys (without key octets) and the fingerprint, never the projection.
+/// [`parse_jwk_set`] but the point checks, and with [`KNOWN_ALGORITHMS`] in
+/// place of the allowed set, so its keys are not point-checked here. Built
+/// only by [`parse_stored`]. Its keys are **not verifier-ready**: no point
+/// checks ran, so the verifier never takes them (provisional lead pick,
+/// 2026-11-22; see [`parse_stored`]). Never pass it, or its
+/// [`public_json`](Self::public_json), to a write: writes take a
+/// [`ValidatedKeyset`]. `Debug` prints the keys (without key octets) and
+/// the fingerprint, never the projection.
 #[derive(Clone, PartialEq, Eq)]
 pub struct StoredKeyset {
     keys: Vec<PublicJwk>,
@@ -157,7 +177,8 @@ pub struct StoredKeyset {
 }
 
 impl StoredKeyset {
-    /// The keys, in stored order.
+    /// The keys, sorted by `kid` (the projection's order), whatever the
+    /// stored order.
     pub fn keys(&self) -> &[PublicJwk] {
         &self.keys
     }
@@ -206,7 +227,9 @@ impl fmt::Debug for StoredKeyset {
 /// `algorithms` and the allowed set (T11.7, OQ-TP-3), so narrowing the
 /// allowed set later does not make every stored set unreadable. An RSA key
 /// without `alg` is still refused. The size bound is measured on the parsed
-/// value, as for an upload; the raw input is parsed whole first.
+/// value, as for an upload; before that, input longer than
+/// [`MAX_STORED_BYTES`] is refused with [`JwkSetError::TooLarge`] without
+/// being parsed (provisional lead pick, 2026-11-22).
 ///
 /// # Trust
 ///
@@ -214,12 +237,25 @@ impl fmt::Debug for StoredKeyset {
 /// [`validate_keyset`] (or [`parse_jwk_set`]), with every point check. The
 /// database `CHECK` floor (`0004`: a nonempty `keys` array of objects, no
 /// private or symmetric member) does not make that true by itself: a row
-/// written by any other path passes it with an off-curve key. Runtime
-/// verification (T11.7) must select from stored keys that were validated
-/// at write, read through this function, and not re-run the full parse per
-/// request.
+/// written by any other path passes it with an off-curve key.
+///
+/// The keys are **not verifier-ready**: no point checks ran (provisional
+/// lead pick, 2026-11-22). The verifier's key cache (T11.7) is built from a
+/// full [`validate_keyset`] pass per version, once, never from this
+/// function; this function is for reading a stored set back where no key
+/// is used to verify (for example its projection or fingerprint).
+///
+/// # Errors
+///
+/// A [`JwkSetError`] here is a data-integrity error (a stored row that
+/// breaks the rules it was written under), not a client error: a future
+/// HTTP mapping must not reuse the upload mapping for it.
 pub fn parse_stored(stored: impl AsRef<[u8]>) -> Result<StoredKeyset, JwkSetError> {
-    let value: Value = serde_json::from_slice(stored.as_ref()).map_err(|_| JwkSetError::NotJson)?;
+    let stored = stored.as_ref();
+    if stored.len() > MAX_STORED_BYTES {
+        return Err(JwkSetError::TooLarge);
+    }
+    let value: Value = serde_json::from_slice(stored).map_err(|_| JwkSetError::NotJson)?;
     let keys = parse_keys(&value, &KNOWN_ALGORITHMS, Points::Skip)?;
     let public_json = public_json(&keys);
     let fingerprint = KeysetFingerprint::of(&public_json);
