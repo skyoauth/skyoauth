@@ -1036,13 +1036,6 @@ async fn ids_and_references_are_bounded() {
 /// included); each rule is a named check, so an over-long name is 23514, not
 /// 54000 from the (tenant_id, name) index. Other Unicode spaces pass,
 /// whatever the collation.
-///
-/// The two destination columns are written with the `0011` egress guard
-/// switched off in the statement's own implicit transaction, which rolls
-/// it back: the guard fires before these checks, and no egress entry can
-/// hold such a value, so with it on they fail with its 23514 instead
-/// (`schema_trust_source_egress_guard.rs` pins that), and an accepted
-/// value would need an entry.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
@@ -1062,15 +1055,9 @@ async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
     ]
     .iter()
     .map(|(table, column, id)| {
-        let guard_off = if matches!(*column, "discovery_url" | "token_review_endpoint") {
-            "ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; "
-        } else {
-            ""
-        };
         (
             format!(
-                "{guard_off}UPDATE {table} SET {column} = {{v}}, revision = revision + 1 \
-                 WHERE id = '{id}'"
+                "UPDATE {table} SET {column} = {{v}}, revision = revision + 1 WHERE id = '{id}'"
             ),
             format!("{table}_{column}"),
         )
@@ -1150,12 +1137,26 @@ async fn names_and_exact_strings_are_bounded_and_have_no_whitespace() {
 
 /// Each case accepts a value with a Unicode space that is not ASCII
 /// (U+3000, U+1680, U+2000, U+2028, U+2029); each runs in a transaction
-/// that is rolled back.
+/// that is rolled back. A destination case first adds the enabled egress
+/// entry of its value in that transaction, which the `0011` egress guard
+/// needs.
 async fn accepts_unicode_spaces(pool: &PgPool, cases: &[(String, String)]) {
     let mut conn = pool.acquire().await.unwrap();
-    for (sql, _) in cases {
+    for (sql, prefix) in cases {
+        let purpose = match prefix.as_str() {
+            "trust_source_discovery_url" => Some("oidc_discovery"),
+            "trust_source_token_review_endpoint" => Some("token_review"),
+            _ => None,
+        };
         for code in [12288, 5760, 8192, 8232, 8233] {
-            let sql = sql.replace("{v}", &format!("'a' || chr({code}) || 'b'"));
+            let value = format!("'a' || chr({code}) || 'b'");
+            let entry = purpose.map_or_else(String::new, |purpose| {
+                format!(
+                    "INSERT INTO egress_allowlist_entry VALUES \
+                     ('egr_space', '{purpose}', {value}, 'enabled'); "
+                )
+            });
+            let sql = format!("{entry}{}", sql.replace("{v}", &value));
             if let Err(err) = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK")))
                 .execute(&mut *conn)
                 .await
@@ -1460,10 +1461,6 @@ async fn single_use_replay_needs_an_on_demand_locally_verified_source() {
 
 /// Names are tenant-local and issuers are not unique (IR-021, IR-032); the
 /// keyset is the tenant's own; destinations take the egress entry syntax.
-/// The destination shape lines switch the `0011` egress guard off in their
-/// own implicit transaction, which rolls it back: no egress entry can hold
-/// such a value, so with the guard on its 23514 would come first and hide
-/// the `0004` check (`schema_trust_source_egress_guard.rs` pins that order).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn trust_source_names_selectors_and_references() {
@@ -1480,14 +1477,14 @@ async fn trust_source_names_selectors_and_references() {
         23514 INSERT INTO trust_source VALUES ('src_x', 'ten_a', '', 'oidc_discovery', 'https://x', 'https://x/d', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '["aud"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled')
         SK001 INSERT INTO trust_source VALUES ('src_x', 'ten_a', 'x', 'oidc_discovery', 'https://x', 'https://x/d', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '["aud"]', '["RS256"]', '{}', 'reusable_jwt', NULL, 'reusable', 'enabled', 2)
         23514 UPDATE trust_source SET exact_issuer = '', revision = revision + 1 WHERE id = 'src_gh'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET discovery_url = '', revision = revision + 1 WHERE id = 'src_gh'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET discovery_url = 'https://x/ d', revision = revision + 1 WHERE id = 'src_gh'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET discovery_url = E'https://x/d\n', revision = revision + 1 WHERE id = 'src_gh'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET discovery_url = 'https://x/' || repeat('d', 2039), revision = revision + 1 WHERE id = 'src_gh'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET token_review_endpoint = '', revision = revision + 1 WHERE id = 'src_k8s'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET token_review_endpoint = 'https://x :6443', revision = revision + 1 WHERE id = 'src_k8s'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET token_review_endpoint = E'https://x:6443\u0085', revision = revision + 1 WHERE id = 'src_k8s'
-        23514 ALTER TABLE trust_source DISABLE TRIGGER trust_source_egress_enabled; UPDATE trust_source SET token_review_endpoint = 'https://x/' || repeat('d', 2039), revision = revision + 1 WHERE id = 'src_k8s'
+        23514 UPDATE trust_source SET discovery_url = '', revision = revision + 1 WHERE id = 'src_gh'
+        23514 UPDATE trust_source SET discovery_url = 'https://x/ d', revision = revision + 1 WHERE id = 'src_gh'
+        23514 UPDATE trust_source SET discovery_url = E'https://x/d\n', revision = revision + 1 WHERE id = 'src_gh'
+        23514 UPDATE trust_source SET discovery_url = 'https://x/' || repeat('d', 2039), revision = revision + 1 WHERE id = 'src_gh'
+        23514 UPDATE trust_source SET token_review_endpoint = '', revision = revision + 1 WHERE id = 'src_k8s'
+        23514 UPDATE trust_source SET token_review_endpoint = 'https://x :6443', revision = revision + 1 WHERE id = 'src_k8s'
+        23514 UPDATE trust_source SET token_review_endpoint = E'https://x:6443\u0085', revision = revision + 1 WHERE id = 'src_k8s'
+        23514 UPDATE trust_source SET token_review_endpoint = 'https://x/' || repeat('d', 2039), revision = revision + 1 WHERE id = 'src_k8s'
         23514 UPDATE trust_source SET ca_bundle_ref = '', revision = revision + 1 WHERE id = 'src_k8s'
         23514 UPDATE trust_source SET ca_fingerprint = '', revision = revision + 1 WHERE id = 'src_k8s'
         23514 UPDATE trust_source SET reviewer_credential_ref = '', revision = revision + 1 WHERE id = 'src_k8s'

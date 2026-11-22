@@ -2,13 +2,16 @@
 -- write that sets discovery_url or token_review_endpoint to a destination
 -- without an enabled egress_allowlist_entry of its purpose is rejected,
 -- whoever writes it (provisional lead pick, 2026-11-22; provisional until
--- the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0). Until now
--- only the service checked it (skyoauth_service::trust::source), and the
--- registry writers and raw SQL wrote any destination the 0004 checks allow.
--- The service keeps its own check, which still refuses first
--- (EgressNotAllowed); this one is defense in depth. The conventions of 0002
--- to 0009 apply. "(inferred)" marks a choice the specifications and lead
--- decisions do not dictate; README.md "What 0011 adds" has the details.
+-- the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0). It follows
+-- the trigger pattern of docs/proposals/ir-080-assignment-write-guard.md,
+-- which the user accepted (ruling relayed by the lead, 2026-11-22), as 0010
+-- does for the IR-080 assignment references. Until now only the service
+-- checked it (skyoauth_service::trust::source), and the registry writers
+-- and raw SQL wrote any destination the 0004 checks allow. The service
+-- keeps its own check, which still refuses first (EgressNotAllowed); this
+-- one is defense in depth. The conventions of 0002 to 0010 apply.
+-- "(inferred)" marks a choice the specifications and lead decisions do not
+-- dictate; README.md "What 0011 adds" has the details.
 --
 -- The rule is the service's (README.md "Trust source writes"), for the two
 -- destination columns of 0004 only, checked in a fixed order:
@@ -18,10 +21,11 @@
 -- NULL and IS DISTINCT FROM its old value: the 0004 comment on these
 -- columns says a write that leaves them unchanged must not be rejected for
 -- a missing or disabled entry (IR-152: such a source is degraded at fetch,
--- not refused at write). A NULL member is never checked; the 0004 kind
--- checks decide which members a kind has. Existing rows are never
--- revalidated, by this migration or later: an entry disabled after a
--- source was written leaves that source as it is.
+-- not refused at write). An unchanged member takes no lock either: the
+-- change test comes before the SELECT ... FOR SHARE. A NULL member is
+-- never checked; the 0004 kind checks decide which members a kind has.
+-- Existing rows are never revalidated, by this migration or later: an
+-- entry disabled after a source was written leaves that source as it is.
 --
 -- The match is the service's LOCK_ENTRY predicate: purpose = <purpose> AND
 -- exact_destination = <member>, exact byte equality (both columns are
@@ -30,39 +34,44 @@
 -- row, or a row whose status is not 'enabled', fails the write with
 -- check_violation (23514) naming a per-member constraint,
 -- trust_source_discovery_url_egress_enabled or
--- trust_source_token_review_endpoint_egress_enabled (lead decision), so the
--- registry maps it to Invariant { kind: Check, constraint } by name, as the
--- 0008 and 0009 checks; unlike the SK001 guards, it is a rule on the
--- row's values, not on the operation. The message names the column and
--- the purpose, never a value. A future destination column adds its own
--- check, constraint name and test here or in a later migration; this
--- function does not cover it.
+-- trust_source_token_review_endpoint_egress_enabled (lead decision); the
+-- registry maps both names to their own InvariantKind, EgressEntryEnabled,
+-- as it maps the 0010 names to AssignmentActive. The message names the
+-- column and the purpose, never a value. A future destination column adds
+-- its own check, constraint name and test here or in a later migration;
+-- this function does not cover it.
+--
+-- The trigger is a plain (non-deferrable) AFTER INSERT OR UPDATE ... FOR
+-- EACH ROW trigger, as 0010's: it fires at the end of the statement, after
+-- the statement's own changes, those of its WITH sub-statements included,
+-- so the end state of the statement decides. A statement whose WITH
+-- sub-statement disables the entry while the main statement writes a
+-- source on it is refused; one whose sub-statement creates or enables the
+-- entry is accepted. Every 0004 check runs first: the BEFORE guards
+-- (trust_source_immutable, trust_source_revision: SK001), the CHECK, NOT
+-- NULL and unique constraints, and the foreign-key checks, whose internal
+-- AFTER triggers (RI_ConstraintTrigger_c_*) sort, and so fire, before
+-- trust_source_egress_enabled. A write that breaks one of them fails with
+-- that error, whatever its destination. An INSERT ... ON CONFLICT DO
+-- NOTHING that inserts no row fires nothing; one whose DO UPDATE updates
+-- the row fires the UPDATE check.
 --
 -- The entry row is locked FOR SHARE, as the service locks it: a concurrent
 -- UPDATE that disables the entry takes FOR NO KEY UPDATE, which conflicts,
 -- so under READ COMMITTED either the disable waits until the write commits
 -- or rolls back, or the write waits for the disable and then reads the row
--- as committed, 'disabled', and is refused. Under REPEATABLE READ and
--- SERIALIZABLE a lock on an entry changed after the snapshot fails with
--- 40001 (the registry's Retry). Lock order: on UPDATE, a BEFORE ROW trigger
--- fires after PostgreSQL has locked the target row, so the order is the
--- service's (operator rows, the source row, the entry FOR SHARE, discovery
--- before token_review, then the audit head); on INSERT the entry comes
--- before the foreign-key checks of the new row (tenant, keyset), which are
--- AFTER triggers. An egress entry writer must still lock no trust_source
--- row after an entry row, or it can deadlock with a source update (40P01,
--- Retry).
---
--- The trigger is BEFORE INSERT OR UPDATE ... FOR EACH ROW. PostgreSQL fires
--- the BEFORE row triggers of an event in name order, so
--- trust_source_egress_enabled fires before trust_source_immutable and
--- trust_source_revision (0004), and before the CHECK, NOT NULL, unique and
--- foreign-key constraints: a write that both changes an immutable column
--- and sets a destination without an enabled entry fails with this 23514,
--- not with SK001 (lead ruling). A destination that a 0004 column check
--- rejects (empty, with whitespace or a control character, over 2048 bytes)
--- matches no entry either, since exact_destination has the same checks
--- (0002), so it too fails here first (inferred consequence).
+-- as committed, 'disabled', and is refused. FOR SHARE does not conflict
+-- with FOR SHARE, so writes that use one entry do not wait for each other.
+-- Under REPEATABLE READ and SERIALIZABLE a lock on an entry changed after
+-- the snapshot fails with 40001 (the registry's Retry). Lock order: on
+-- UPDATE, PostgreSQL locks and changes the source row before the AFTER
+-- trigger takes the entry, so the order is the service's (operator rows,
+-- the source row, the entry FOR SHARE, discovery before token_review, then
+-- the audit head, which the service appends in a later statement); on
+-- INSERT the foreign-key checks of the new row (tenant, keyset; FOR KEY
+-- SHARE) come before the entry. An egress entry writer must still lock no
+-- trust_source row after an entry row, or it can deadlock with a source
+-- update (40P01, Retry).
 --
 -- ENABLE ALWAYS, as every guard, so it fires under
 -- session_replication_role = replica as well; a role that may switch
@@ -72,12 +81,14 @@
 --
 -- The function reads egress_allowlist_entry, so the table is named with
 -- the schema this migration runs in, resolved by current_schema(), and the
--- body is passed as a quoted literal (%L), as in 0002, 0004 and 0009. It
--- pins search_path to pg_catalog, pg_temp (lead decision): it resolves no
--- unqualified table, so the schema need not be on its path. It runs with
--- the caller's privileges (SECURITY INVOKER, the default): a role that
--- writes a trust source destination needs SELECT and UPDATE (for the row
--- lock) on egress_allowlist_entry, as the service's own LOCK_ENTRY does.
+-- body is passed as a quoted literal (%L), as in 0002, 0004, 0009 and 0010.
+-- It pins search_path to pg_catalog, pg_temp (lead decision): it resolves
+-- no unqualified table, so the schema need not be on its path. It runs
+-- with the caller's privileges (SECURITY INVOKER, the default): a role
+-- that writes a trust source destination needs SELECT on
+-- egress_allowlist_entry and, because FOR SHARE requires it, UPDATE on at
+-- least one of its columns, granted on an immutable column such as id
+-- only, never on status (README.md "What 0011 adds").
 DO $migration$
 DECLARE
     schema_name constant text := current_schema();
@@ -133,13 +144,13 @@ BEGIN
         END IF;
     END IF;
 
-    RETURN NEW;
+    RETURN NULL;
 END;
 $body$, '@schema@', quote_ident(schema_name)));
 END;
 $migration$;
 
 CREATE TRIGGER trust_source_egress_enabled
-    BEFORE INSERT OR UPDATE ON trust_source
+    AFTER INSERT OR UPDATE ON trust_source
     FOR EACH ROW EXECUTE FUNCTION skyoauth_check_trust_source_egress();
 ALTER TABLE trust_source ENABLE ALWAYS TRIGGER trust_source_egress_enabled;

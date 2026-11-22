@@ -670,9 +670,9 @@ async fn a_near_miss_of_an_entry_is_refused() {
 /// The `0011` guard (provisional lead pick, 2026-11-22) backs the bare
 /// registry writers: a destination this path refuses with
 /// `EgressNotAllowed`, its own refusal, which comes first, the database
-/// refuses for them with `Invariant { Check }` naming the member's guard,
-/// on create and on a changed member, a disable included. It checks no
-/// syntax: a malformed destination that an enabled entry lists, which this
+/// refuses for them with `Invariant { EgressEntryEnabled }` naming the
+/// member's guard, on create and on a changed member, a disable included.
+/// It checks no syntax: a malformed destination that an enabled entry lists, which this
 /// path refuses with `InvalidDestination`, passes it.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -684,7 +684,7 @@ async fn the_database_guard_refuses_what_the_bare_writers_skip() {
     };
     let assert_guard = |result: Result<TrustSource, RegistryError>, member: &str| match result {
         Err(RegistryError::Invariant {
-            kind: InvariantKind::Check,
+            kind: InvariantKind::EgressEntryEnabled,
             constraint: Some(constraint),
         }) if constraint == guard(member) => {}
         other => panic!("{member}: expected the guard's Invariant, got {other:?}"),

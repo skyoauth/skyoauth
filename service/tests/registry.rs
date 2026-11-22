@@ -185,25 +185,13 @@ fn assert_invariant<T: Debug>(result: Result<T, RegistryError>, kind: InvariantK
     }
 }
 
-/// The constraint names that trigger functions raise with `23514`, each
-/// with its function: no catalog constraint carries them.
-const TRIGGER_CONSTRAINTS: [(&str, &str); 2] = [
-    (
-        "skyoauth_check_trust_source_egress",
-        "trust_source_discovery_url_egress_enabled",
-    ),
-    (
-        "skyoauth_check_trust_source_egress",
-        "trust_source_token_review_endpoint_egress_enabled",
-    ),
-];
-
 /// [`KNOWN_CONSTRAINTS`] is exactly the set of named constraints of the
 /// tables the registry writes and of the list domains, together with the
 /// names of the `0010` guard triggers, which their `23514` names as its
-/// constraint, and the names the `0011` egress guard raises (each found in
-/// its function's source), so a new constraint or guard in a later
-/// migration fails here until the mapping lists it.
+/// constraint, and the names that a function of the schema raises as a
+/// literal (`CONSTRAINT = '...'` in its source, as the `0011` egress guard
+/// does), so a new constraint or guard in a later migration fails here
+/// until the mapping lists it.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_constraint_names_match_the_catalog() {
@@ -234,22 +222,32 @@ async fn registry_constraint_names_match_the_catalog() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    for (function, name) in TRIGGER_CONSTRAINTS {
-        let source: String = sqlx::query_scalar(
-            "SELECT p.prosrc FROM pg_proc p
-             WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
-               AND p.proname = $1",
-        )
-        .bind(function)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(
-            source.contains(&format!("CONSTRAINT = '{name}'")),
-            "{function}: {name}"
-        );
-        assert!(!names.iter().any(|known| known == name), "{name}");
-        names.push(name.into());
+    // Every `CONSTRAINT =` in a function of the schema names a literal or
+    // `TG_NAME` (the `0010` guard, whose triggers are listed above).
+    let other: Vec<String> = sqlx::query_scalar(
+        r"SELECT p.proname::text FROM pg_proc p
+          WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+            AND p.prosrc ~* 'CONSTRAINT\s*=\s*(?!TG_NAME\M)[^\s'']'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(other, Vec::<String>::new());
+    let raised: Vec<String> = sqlx::query_scalar(
+        r"SELECT DISTINCT m[1] FROM pg_proc p
+          CROSS JOIN LATERAL regexp_matches(p.prosrc, 'CONSTRAINT\s*=\s*''([^'']*)''', 'gi') AS m
+          WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+          ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(!raised.is_empty());
+    // A guard that raises its trigger's name as a literal is listed once.
+    for name in raised {
+        if !names.contains(&name) {
+            names.push(name);
+        }
     }
     names.sort_unstable();
     assert_eq!(names, KNOWN_CONSTRAINTS);

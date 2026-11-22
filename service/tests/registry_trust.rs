@@ -1142,27 +1142,21 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
                 discovery_url: Some("https://x.example/ well-known".into()),
                 ..oidc_new()
             },
-            // No egress entry can hold this value, and the `0011` guard
-            // fires before the `0004` check ("trust_source_discovery_url_no_space_check").
-            "trust_source_discovery_url_egress_enabled",
+            "trust_source_discovery_url_no_space_check",
         ),
         (
             NewTrustSource {
                 discovery_url: Some(String::new()),
                 ..oidc_new()
             },
-            // No egress entry can hold this value, and the `0011` guard
-            // fires before the `0004` check ("trust_source_discovery_url_check").
-            "trust_source_discovery_url_egress_enabled",
+            "trust_source_discovery_url_check",
         ),
         (
             NewTrustSource {
                 discovery_url: Some(long.clone()),
                 ..oidc_new()
             },
-            // No egress entry can hold this value, and the `0011` guard
-            // fires before the `0004` check ("trust_source_discovery_url_octet_length_check").
-            "trust_source_discovery_url_egress_enabled",
+            "trust_source_discovery_url_octet_length_check",
         ),
         (
             NewTrustSource {
@@ -1211,10 +1205,7 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
                 token_review_endpoint: Some("https://k\t.example".into()),
                 ..token_review_source("ten_a", "src_x", "x", "cluster_x")
             },
-            // No egress entry can hold this value, and the `0011` guard
-            // fires before the `0004` check
-            // ("trust_source_token_review_endpoint_no_space_check").
-            "trust_source_token_review_endpoint_egress_enabled",
+            "trust_source_token_review_endpoint_no_space_check",
         ),
         (
             token_review_source("ten_a", "src_x", "x", &"c".repeat(256)),

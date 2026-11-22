@@ -315,6 +315,16 @@ pub async fn update_trust_keyset_version<'e>(
 /// Creates a trust source at revision 1. The database checks that the
 /// kind-specific fields match `kind` (the `trust_source_*_kind_check`
 /// constraints).
+///
+/// The `0011` egress guard refuses a `discovery_url` or
+/// `token_review_endpoint` that matches no enabled egress allowlist entry
+/// of its purpose with [`RegistryError::Invariant`] of kind
+/// [`InvariantKind::EgressEntryEnabled`](super::InvariantKind::EgressEntryEnabled),
+/// after every other check. It checks no syntax, so this still writes a
+/// non-canonical destination that an enabled entry lists. The guard runs
+/// with the caller's privileges: a role that writes a destination needs
+/// `SELECT` on `egress_allowlist_entry` and `UPDATE` on one of its columns,
+/// granted on `id` only (migrations README, "What 0011 adds").
 pub async fn create_trust_source<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTrustSource,
@@ -389,6 +399,11 @@ pub async fn list_trust_sources<'e>(
 /// Replaces the mutable columns of a trust source of `tenant_id` at
 /// `expected_revision` and advances its revision by one. `kind`,
 /// `cluster_id` and `jwks_keyset_id` keep their values.
+///
+/// A changed `discovery_url` or `token_review_endpoint` meets the `0011`
+/// egress guard and needs the privileges, as in [`create_trust_source`]; an
+/// unchanged one is not checked, so a source whose entry was disabled
+/// still takes this write.
 pub async fn update_trust_source<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,

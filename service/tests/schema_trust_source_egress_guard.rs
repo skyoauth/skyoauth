@@ -6,11 +6,13 @@
 //! whoever writes it. On `INSERT` a member is checked when it is not
 //! `NULL`, on `UPDATE` only when it also changes; the refusal is `23514`
 //! naming a per-member constraint, which the registry maps to
-//! `Invariant { kind: Check, constraint }`; the entry is locked `FOR SHARE`,
-//! so a concurrent disable and a write serialize, in either order, raw or
-//! through the service, without a deadlock; the trigger fires before the
-//! `0004` guards and checks; it stays on in replica mode; and existing rows
-//! are never revalidated.
+//! `Invariant { kind: EgressEntryEnabled, constraint }`; the entry is locked
+//! `FOR SHARE`, so a concurrent disable and a write serialize, in either
+//! order, raw or through the service, without a deadlock, and writes on one
+//! entry do not wait for each other; it is an `AFTER` row trigger, so every
+//! `0004` guard and check comes first and the end state of a statement
+//! decides; it stays on in replica mode; and existing rows are never
+//! revalidated.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! test creates and drops its own database. The replica-role test needs
@@ -432,13 +434,13 @@ fn assert_registry_refusal<T: std::fmt::Debug>(result: Result<T, RegistryError>,
     match result {
         Err(
             ref err @ RegistryError::Invariant {
-                kind: InvariantKind::Check,
+                kind: InvariantKind::EgressEntryEnabled,
                 constraint: Some(constraint),
             },
         ) if constraint == member.constraint() => {
             assert_eq!(
                 err.to_string(),
-                format!("registry write violates check constraint {constraint}")
+                format!("registry write violates enabled-egress-entry constraint {constraint}")
             );
         }
         other => panic!("{member:?}: expected the guard's Invariant, got {other:?}"),
@@ -460,9 +462,11 @@ async fn sources(pool: &PgPool) -> Vec<SourceRow> {
 }
 
 /// Catalog properties that behaviour tests cannot see directly: the
-/// migration's record, the trigger (`BEFORE INSERT OR UPDATE`, each row,
-/// `ENABLE ALWAYS`, its function) and its place first among the `BEFORE`
-/// row triggers of `trust_source`, the function's pinned `search_path`,
+/// migration's record, the trigger (`AFTER INSERT OR UPDATE`, each row,
+/// `ENABLE ALWAYS`, not a constraint trigger, so not deferrable, its
+/// function) and its place last among the `AFTER` row triggers of
+/// `trust_source`, after the foreign-key checks, the function's pinned
+/// `search_path`,
 /// `SECURITY INVOKER`, schema-qualified table and the two constraint names
 /// it raises, which `KNOWN_CONSTRAINTS` lists.
 #[tokio::test]
@@ -482,8 +486,9 @@ async fn catalog_pins_the_egress_trigger_and_its_function() {
     persistence::migrate(&pool).await.unwrap();
 
     // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update.
-    let triggers: Vec<(String, String, i16, String)> = sqlx::query_as(
-        "SELECT t.tgname::text, p.proname::text, t.tgtype, t.tgenabled::text
+    let triggers: Vec<(String, String, i16, String, bool, bool)> = sqlx::query_as(
+        "SELECT t.tgname::text, p.proname::text, t.tgtype, t.tgenabled::text,
+                t.tgdeferrable, t.tgconstraint <> 0
          FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
          WHERE NOT t.tgisinternal AND t.tgfoid = to_regproc($1)::oid",
     )
@@ -496,8 +501,10 @@ async fn catalog_pins_the_egress_trigger_and_its_function() {
         [(
             TRIGGER.to_string(),
             FUNCTION.to_string(),
-            1 | 2 | 4 | 16,
-            "A".to_string()
+            1 | 4 | 16,
+            "A".to_string(),
+            false,
+            false
         )]
     );
     let on_source: i64 = sqlx::query_scalar(
@@ -509,23 +516,28 @@ async fn catalog_pins_the_egress_trigger_and_its_function() {
     .unwrap();
     assert_eq!(on_source, 1);
 
-    // PostgreSQL fires the BEFORE row triggers of an event in name order.
+    // PostgreSQL fires the AFTER row triggers of an event in name order
+    // (byte-wise): the internal foreign-key triggers, `RI_ConstraintTrigger_`,
+    // come first, and this one is the only other.
     for event in [4_i16, 16] {
-        let order: Vec<String> = sqlx::query_scalar(
-            "SELECT tgname::text FROM pg_trigger
-             WHERE tgrelid = 'trust_source'::regclass AND tgtype & 3 = 3 AND tgtype & $1 <> 0
-             ORDER BY tgname",
+        let order: Vec<(String, bool)> = sqlx::query_as(
+            r#"SELECT tgname::text, tgisinternal FROM pg_trigger
+             WHERE tgrelid = 'trust_source'::regclass AND tgtype & 3 = 1 AND tgtype & $1 <> 0
+             ORDER BY tgname COLLATE "C""#,
         )
         .bind(event)
         .fetch_all(&pool)
         .await
         .unwrap();
-        let expected: &[&str] = if event == 4 {
-            &[TRIGGER, "trust_source_revision"]
-        } else {
-            &[TRIGGER, "trust_source_immutable", "trust_source_revision"]
-        };
-        assert_eq!(order, expected, "{event}");
+        let (last, before) = order.split_last().unwrap();
+        assert_eq!(last, &(TRIGGER.to_string(), false), "{event}: {order:?}");
+        assert!(!before.is_empty(), "{event}: {order:?}");
+        assert!(
+            before
+                .iter()
+                .all(|(name, internal)| *internal && name.starts_with("RI_ConstraintTrigger_")),
+            "{event}: {order:?}"
+        );
     }
 
     let (config, definer, source): (Vec<String>, bool, String) = sqlx::query_as(
@@ -614,14 +626,19 @@ async fn an_insert_needs_an_enabled_entry_of_its_purpose_with_exactly_its_value(
     db.drop([pool]).await;
 }
 
-/// The members are checked in a fixed order, `discovery_url` first: a row
-/// that sets both (which the `0004` kind checks then reject) is refused
-/// for the first member without an entry.
+/// The members are checked in a fixed order, `discovery_url` first. No
+/// kind has both, and the `0004` kind checks, which run first, refuse a row
+/// that sets both whatever its destinations; with those checks dropped (in
+/// a transaction that is rolled back) such a row is refused for the first
+/// member without an entry.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn discovery_url_is_checked_before_token_review_endpoint() {
     let (db, pool) = seeded().await;
     let mut conn = pool.acquire().await.unwrap();
+    let no_kind_checks = "ALTER TABLE trust_source \
+                          DROP CONSTRAINT trust_source_discovery_url_kind_check, \
+                          DROP CONSTRAINT trust_source_token_review_fields_kind_check; ";
     for kind in ["oidc_discovery", "kubernetes_token_review"] {
         let both = |discovery, endpoint| {
             format!(
@@ -629,30 +646,64 @@ async fn discovery_url_is_checked_before_token_review_endpoint() {
                 row("src_x", kind, Some(discovery), Some(endpoint))
             )
         };
-        assert_refused(&mut conn, &both(UNLISTED, UNLISTED), Member::Discovery).await;
-        assert_refused(&mut conn, &both(UNLISTED, TOKEN_REVIEW), Member::Discovery).await;
-        assert_refused(&mut conn, &both(DISCOVERY, UNLISTED), Member::TokenReview).await;
-        // Both allowed: a kind check refuses the row (PostgreSQL checks
-        // them in name order).
+        // The kind check of the member the kind lacks refuses the row first
+        // (PostgreSQL checks the constraints in name order).
         let check = if kind == "oidc_discovery" {
             "trust_source_token_review_fields_kind_check"
         } else {
             "trust_source_discovery_url_kind_check"
         };
-        let err = try_run(
-            &mut *conn,
-            &format!("BEGIN; {}", both(DISCOVERY, TOKEN_REVIEW)),
-        )
-        .await
-        .expect_err(kind);
-        assert_eq!(sqlstate(&err), "23514", "{kind}: {err}");
-        assert_eq!(
-            err.as_database_error().unwrap().constraint(),
-            Some(check),
-            "{kind}: {err}"
-        );
-        run(&mut *conn, "ROLLBACK").await;
+        for (discovery, endpoint) in [
+            (UNLISTED, UNLISTED),
+            (UNLISTED, TOKEN_REVIEW),
+            (DISCOVERY, UNLISTED),
+            (DISCOVERY, TOKEN_REVIEW),
+        ] {
+            assert_fails(&mut conn, &both(discovery, endpoint), "23514", Some(check)).await;
+        }
+        let both = |discovery, endpoint| format!("{no_kind_checks}{}", both(discovery, endpoint));
+        assert_refused(&mut conn, &both(UNLISTED, UNLISTED), Member::Discovery).await;
+        assert_refused(&mut conn, &both(UNLISTED, TOKEN_REVIEW), Member::Discovery).await;
+        assert_refused(&mut conn, &both(DISCOVERY, UNLISTED), Member::TokenReview).await;
+        assert_passes(&mut conn, &both(DISCOVERY, TOKEN_REVIEW)).await;
     }
+    assert_eq!(sources(&pool).await, []);
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// A `discovery_url` set on a `kubernetes_token_review` source, which has
+/// none, fails the `0004` kind check, not the guard, even when no entry
+/// lists the value: the check runs first. The guard does check that
+/// member whatever the kind: with the kind check dropped (in a transaction
+/// that is rolled back) the same write names the egress constraint.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_discovery_url_on_a_token_review_source_fails_its_kind_check_first() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    run(
+        &mut *conn,
+        &insert("src_k8s", Member::TokenReview, TOKEN_REVIEW),
+    )
+    .await;
+    let set_discovery = update("src_k8s", &set(Member::Discovery, UNLISTED));
+    assert_fails(
+        &mut conn,
+        &set_discovery,
+        "23514",
+        Some("trust_source_discovery_url_kind_check"),
+    )
+    .await;
+    assert_refused(
+        &mut conn,
+        &format!(
+            "ALTER TABLE trust_source DROP CONSTRAINT trust_source_discovery_url_kind_check; \
+             {set_discovery}"
+        ),
+        Member::Discovery,
+    )
+    .await;
     drop(conn);
     db.drop([pool]).await;
 }
@@ -772,8 +823,69 @@ async fn an_update_checks_only_a_changed_member() {
     db.drop([pool]).await;
 }
 
-/// The registry writers map the refusal to `Invariant { Check, name }`, on
-/// create and on update, and write nothing.
+/// An `UPDATE` that leaves both members unchanged (a status-only update,
+/// a rename) takes no lock on any entry, even while the stored
+/// destination's entry is disabled: its transaction holds no lock on
+/// `egress_allowlist_entry` (`pg_locks`), and another transaction can lock
+/// the entry row `FOR UPDATE NOWAIT`. An `UPDATE` that changes a member
+/// locks that member's entry row, and only it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_unchanged_destination_takes_no_entry_lock() {
+    let (db, pool) = seeded().await;
+    let held = "SELECT count(*) FROM pg_locks \
+                WHERE pid = pg_backend_pid() AND relation = 'egress_allowlist_entry'::regclass";
+    let nowait = |id: &str| {
+        format!("BEGIN; SELECT 1 FROM egress_allowlist_entry WHERE id = '{id}' FOR UPDATE NOWAIT")
+    };
+    let mut other = pool.acquire().await.unwrap();
+    for member in Member::ALL {
+        let id = format!("src_{}", member.column());
+        run(&pool, &insert(&id, member, member.enabled())).await;
+        run(
+            &pool,
+            &format!(
+                "UPDATE egress_allowlist_entry SET status = 'disabled', revision = revision + 1 \
+                 WHERE id = '{}'",
+                member.enabled_id()
+            ),
+        )
+        .await;
+        let column = member.column();
+        for unchanged in [
+            "status = 'disabled'".to_string(),
+            format!("name = '{id}-renamed'"),
+            format!("{column} = {column}"),
+        ] {
+            let mut tx = pool.begin().await.unwrap();
+            run(&mut *tx, &update(&id, &unchanged)).await;
+            let locks: i64 = sqlx::query_scalar(held).fetch_one(&mut *tx).await.unwrap();
+            assert_eq!(locks, 0, "{unchanged}");
+            run(&mut *other, &nowait(member.enabled_id())).await;
+            run(&mut *other, "ROLLBACK").await;
+            tx.rollback().await.unwrap();
+        }
+        let second = format!("{}_2", member.enabled_id());
+        let mut tx = pool.begin().await.unwrap();
+        run(&mut *tx, &update(&id, &set(member, member.enabled_2()))).await;
+        let locks: i64 = sqlx::query_scalar(held).fetch_one(&mut *tx).await.unwrap();
+        assert_ne!(locks, 0, "{member:?}");
+        let err = try_run(&mut *other, &nowait(&second))
+            .await
+            .expect_err("the changed member's entry is locked");
+        assert_eq!(sqlstate(&err), "55P03", "{err}");
+        run(&mut *other, "ROLLBACK").await;
+        run(&mut *other, &nowait(member.enabled_id())).await;
+        run(&mut *other, "ROLLBACK").await;
+        tx.rollback().await.unwrap();
+    }
+    drop(other);
+    db.drop([pool]).await;
+}
+
+/// The registry writers map the refusal to
+/// `Invariant { EgressEntryEnabled, name }`, on create and on update, and
+/// write nothing.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_registry_writers_get_the_guards_invariant() {
@@ -806,15 +918,15 @@ async fn the_registry_writers_get_the_guards_invariant() {
     db.drop([pool]).await;
 }
 
-/// The trigger fires before the `0004` guards and constraints: a write
-/// that also changes an immutable column, does not advance the revision,
-/// leaves a `NOT NULL` column empty, repeats a unique key or names a
-/// missing tenant fails with the egress refusal when its destination has
-/// no enabled entry, and with its own error when it has one (lead ruling,
-/// 2026-11-22).
+/// Every `0004` guard and constraint comes first: a write that also changes
+/// an immutable column, does not advance the revision, leaves a `NOT NULL`
+/// column empty, repeats a unique key or names a missing tenant fails with
+/// its own error, whether its destination has an enabled entry or none. A
+/// destination that the `0004` shape checks reject (empty, a space, a
+/// control character, over 2048 bytes) fails them, never the guard.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn the_egress_refusal_comes_before_the_0004_guards_and_constraints() {
+async fn every_0004_guard_and_constraint_comes_before_the_egress_refusal() {
     let (db, pool) = seeded().await;
     let mut conn = pool.acquire().await.unwrap();
     for member in Member::ALL {
@@ -846,7 +958,8 @@ async fn the_egress_refusal_comes_before_the_0004_guards_and_constraints() {
             // A NOT NULL column.
             (update(&id, &format!("name = NULL, {dest}")), "23502", None),
             // On INSERT: a revision other than 1, a unique key, a missing
-            // tenant (a foreign key).
+            // tenant (a foreign key, whose internal trigger fires before
+            // this one).
             (fresh.replace("'enabled')", "'enabled', 2)"), "SK001", None),
             (
                 fresh.replace(
@@ -864,18 +977,212 @@ async fn the_egress_refusal_comes_before_the_0004_guards_and_constraints() {
         ];
         for (template, code, constraint) in cases {
             assert_ne!(template.matches(DEST).count(), 0, "{template}");
-            for bad in [UNLISTED, member.disabled()] {
-                assert_refused(&mut conn, &template.replace(DEST, bad), member).await;
+            for value in [UNLISTED, member.disabled(), member.enabled_2()] {
+                assert_fails(&mut conn, &template.replace(DEST, value), code, constraint).await;
             }
-            let good = template.replace(DEST, member.enabled_2());
-            assert_fails(&mut conn, &good, code, constraint).await;
         }
-        // A destination the 0004 shape checks reject has no entry either
-        // (`exact_destination` has the same checks), so it fails here
-        // first.
-        for bad in ["", " https://x/d", "https://x/\u{7f}d"] {
-            assert_refused(&mut conn, &insert("src_new", member, bad), member).await;
+        let column = format!("trust_source_{}", member.column());
+        let long = format!("https://x/{}", "d".repeat(2039));
+        for (bad, check) in [
+            ("", format!("{column}_check")),
+            (" https://x/d", format!("{column}_no_space_check")),
+            ("https://x/\u{7f}d", format!("{column}_no_space_check")),
+            (&long[..], format!("{column}_octet_length_check")),
+        ] {
+            for sql in [
+                insert("src_new", member, bad),
+                update(&id, &set(member, bad)),
+            ] {
+                assert_fails(&mut conn, &sql, "23514", Some(&check)).await;
+            }
         }
+    }
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// The trigger runs at the end of the statement, so the end state of the
+/// statement decides, its `WITH` sub-statements included: a write whose
+/// statement also disables its entry is refused, whichever part does
+/// which; one whose statement creates or enables the entry passes. A
+/// statement that disables the entry of a destination it leaves unchanged
+/// passes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_end_state_of_one_statement_decides() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    let entry = |id: &str, status: &str| {
+        format!(
+            "UPDATE egress_allowlist_entry SET status = '{status}', revision = revision + 1 \
+             WHERE id = '{id}'"
+        )
+    };
+    for member in Member::ALL {
+        let id = format!("src_{}", member.column());
+        run(&mut *conn, &insert(&id, member, member.enabled())).await;
+        let disable = entry(member.enabled_id(), "disabled");
+        let disable_2 = format!(
+            "UPDATE egress_allowlist_entry SET status = 'disabled', revision = revision + 1 \
+             WHERE purpose = '{}' AND exact_destination = '{}'",
+            member.purpose(),
+            member.enabled_2()
+        );
+        let enable_off = format!(
+            "UPDATE egress_allowlist_entry SET status = 'enabled', revision = revision + 1 \
+             WHERE purpose = '{}' AND exact_destination = '{}'",
+            member.purpose(),
+            member.disabled()
+        );
+        let add_unlisted = format!(
+            "INSERT INTO egress_allowlist_entry VALUES ('egr_new', '{}', '{UNLISTED}', 'enabled')",
+            member.purpose()
+        );
+        // The sub-statement disables the entry the main statement writes.
+        for sql in [
+            format!(
+                "WITH off AS ({disable} RETURNING id) {}",
+                insert("src_x", member, member.enabled())
+            ),
+            format!(
+                "WITH off AS ({disable_2} RETURNING id) {}",
+                update(&id, &set(member, member.enabled_2()))
+            ),
+            // The other way round: the sub-statement writes, the main
+            // statement disables.
+            format!(
+                "WITH src AS ({} RETURNING id) {disable}",
+                insert("src_x", member, member.enabled())
+            ),
+        ] {
+            assert_refused(&mut conn, &sql, member).await;
+        }
+        // The statement enables or creates the entry it writes on.
+        for sql in [
+            format!(
+                "WITH on_ AS ({enable_off} RETURNING id) {}",
+                insert("src_x", member, member.disabled())
+            ),
+            format!(
+                "WITH added AS ({add_unlisted} RETURNING id) {}",
+                update(&id, &set(member, UNLISTED))
+            ),
+            // Unchanged destination: not checked.
+            format!(
+                "WITH off AS ({disable} RETURNING id) {}",
+                update(&id, "status = 'disabled'")
+            ),
+        ] {
+            assert_passes(&mut conn, &sql).await;
+        }
+    }
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// An upsert of a degraded source, one whose entry was disabled after it
+/// was written, that carries its stored destination: `ON CONFLICT (id)
+/// DO NOTHING` passes and changes nothing, and `DO UPDATE` that leaves the
+/// destination as it is passes, though the proposed row names the disabled
+/// entry; a `DO UPDATE` that sets the destination to an unlisted or another
+/// disabled value is refused. A `BEFORE` trigger would check the proposed
+/// row before the conflict and refuse the first two.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_upsert_of_a_degraded_source_with_its_stored_destination_passes() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    for member in Member::ALL {
+        let id = format!("src_{}", member.column());
+        let column = member.column();
+        run(&pool, &insert(&id, member, member.enabled())).await;
+        run(
+            &pool,
+            &format!(
+                "UPDATE egress_allowlist_entry SET status = 'disabled', revision = revision + 1 \
+                 WHERE id = '{}'",
+                member.enabled_id()
+            ),
+        )
+        .await;
+        let upsert = |action: &str| {
+            format!(
+                "{} ON CONFLICT (id) {action}",
+                insert(&id, member, member.enabled())
+            )
+        };
+        let before = sources(&pool).await;
+        run(&pool, &upsert("DO NOTHING")).await;
+        assert_eq!(sources(&pool).await, before, "{member:?}");
+        run(
+            &pool,
+            &upsert(
+                "DO UPDATE SET name = trust_source.id || '-renamed', \
+                 revision = trust_source.revision + 1",
+            ),
+        )
+        .await;
+        let (name, destination, revision): (String, Option<String>, i64) =
+            sqlx::query_as(AssertSqlSafe(format!(
+                "SELECT name, {column}, revision FROM trust_source WHERE id = $1"
+            )))
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            (name, destination.as_deref(), revision),
+            (format!("{id}-renamed"), Some(member.enabled()), 2),
+            "{member:?}"
+        );
+        for value in [UNLISTED, member.disabled()] {
+            assert_refused(
+                &mut conn,
+                &upsert(&format!(
+                    "DO UPDATE SET {column} = '{value}', revision = trust_source.revision + 1"
+                )),
+                member,
+            )
+            .await;
+        }
+    }
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// `INSERT ... ON CONFLICT`: `DO NOTHING` that inserts no row checks
+/// nothing; `DO UPDATE` checks the row as it updates it, so a changed
+/// destination is checked and an unchanged one is not, whatever the
+/// proposed row holds.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn on_conflict_checks_the_row_it_writes() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    for member in Member::ALL {
+        let id = format!("src_{}", member.column());
+        run(&mut *conn, &insert(&id, member, member.enabled())).await;
+        let column = member.column();
+        let upsert = |action: &str| {
+            format!(
+                "{} ON CONFLICT (id) {action}",
+                insert(&id, member, UNLISTED)
+            )
+        };
+        assert_passes(&mut conn, &upsert("DO NOTHING")).await;
+        assert_refused(
+            &mut conn,
+            &upsert(&format!(
+                "DO UPDATE SET {column} = EXCLUDED.{column}, revision = trust_source.revision + 1"
+            )),
+            member,
+        )
+        .await;
+        assert_passes(
+            &mut conn,
+            &upsert("DO UPDATE SET name = 'renamed', revision = trust_source.revision + 1"),
+        )
+        .await;
     }
     drop(conn);
     db.drop([pool]).await;
@@ -937,9 +1244,10 @@ async fn replica_mode_keeps_the_guard_and_only_switching_it_off_skips_it() {
 }
 
 /// The function runs with the writer's privileges and locks the entry: a
-/// role that writes a destination needs `SELECT` and `UPDATE` on
-/// `egress_allowlist_entry` (`FOR SHARE` needs `UPDATE`); without either
-/// the write fails with `42501`. A write that checks no member needs
+/// role that writes a destination needs `SELECT` on
+/// `egress_allowlist_entry` and `UPDATE` on at least one of its columns
+/// (`FOR SHARE` needs it), which a column-level `UPDATE (id)` grants; without
+/// either the write fails with `42501`. A write that checks no member needs
 /// neither.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -956,8 +1264,8 @@ async fn destination_writers_need_select_and_update_on_the_entries() {
     for (privilege, allowed) in [
         (None, false),
         (Some("SELECT"), false),
-        (Some("UPDATE"), false),
-        (Some("SELECT, UPDATE"), true),
+        (Some("UPDATE (id)"), false),
+        (Some("SELECT, UPDATE (id)"), true),
     ] {
         run(
             &pool,
@@ -993,6 +1301,60 @@ async fn destination_writers_need_select_and_update_on_the_entries() {
         )
         .await;
     }
+    writer.close().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// Why the grant must be column-level: a destination writer that holds
+/// table-level `UPDATE` on `egress_allowlist_entry` can enable a disabled
+/// entry, and then write a source on it, or disable one; with
+/// `UPDATE (id)` it can change no status (`42501`), and `id` itself is
+/// immutable (`SK001`).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_table_level_update_lets_a_destination_writer_flip_an_entry() {
+    let (mut db, pool) = seeded().await;
+    let (role, connect) = db.create_login_role().await;
+    run(
+        &pool,
+        &format!("GRANT SELECT, INSERT, UPDATE ON trust_source TO {role}"),
+    )
+    .await;
+    let mut writer = PgConnection::connect_with(&connect).await.unwrap();
+    let enable_off = format!(
+        "UPDATE egress_allowlist_entry SET status = 'enabled', revision = revision + 1 \
+         WHERE id = 'egr_disc_off'; {}",
+        insert("src_x", Member::Discovery, DISCOVERY_OFF)
+    );
+    let disable = "UPDATE egress_allowlist_entry SET status = 'disabled', revision = revision + 1 \
+                   WHERE id = 'egr_disc'";
+    run(
+        &pool,
+        &format!("GRANT SELECT, UPDATE ON egress_allowlist_entry TO {role}"),
+    )
+    .await;
+    assert_passes(&mut writer, &enable_off).await;
+    assert_passes(&mut writer, disable).await;
+    run(
+        &pool,
+        &format!("REVOKE ALL ON egress_allowlist_entry FROM {role}"),
+    )
+    .await;
+    run(
+        &pool,
+        &format!("GRANT SELECT, UPDATE (id) ON egress_allowlist_entry TO {role}"),
+    )
+    .await;
+    assert_fails(&mut writer, &enable_off, "42501", None).await;
+    assert_fails(&mut writer, disable, "42501", None).await;
+    assert_fails(
+        &mut writer,
+        "UPDATE egress_allowlist_entry SET id = 'egr_moved' WHERE id = 'egr_disc'",
+        "SK001",
+        None,
+    )
+    .await;
+    assert_passes(&mut writer, &insert("src_x", Member::Discovery, DISCOVERY)).await;
     writer.close().await.unwrap();
     db.drop([pool]).await;
 }
@@ -1212,7 +1574,7 @@ async fn write(tx: &mut Transaction<'_, Postgres>, case: Case, n: usize, value: 
     let raw = |result: Result<TrustSource, RegistryError>| match result {
         Ok(_) => Outcome::Written,
         Err(RegistryError::Invariant {
-            kind: InvariantKind::Check,
+            kind: InvariantKind::EgressEntryEnabled,
             constraint: Some(constraint),
         }) if constraint == case.member.constraint() => Outcome::Refused,
         Err(err) => Outcome::Failed(format!("{err:?}: {err}")),
@@ -1485,4 +1847,71 @@ async fn unordered_races_never_commit_through_a_disabled_entry() {
     }
     assert_eq!(outcomes.len(), cases().len() * ROUNDS);
     db.drop([pool]).await;
+}
+
+/// Two open transactions that write sources on the same entry do not wait
+/// for each other (`FOR SHARE` does not conflict with `FOR SHARE`): raw
+/// with raw, and raw with the service in both orders. Each write finishes
+/// while the other transaction is open, neither backend is blocked, and
+/// both commit. Two service writes are not paired: each appends an audit
+/// event, and the audit chain head (`FOR UPDATE`) serializes them by
+/// design.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn writes_on_one_entry_do_not_block_each_other() {
+    let (db, pool) = seeded().await;
+    let mut n = 0;
+    for member in Member::ALL {
+        for (first, second) in [
+            (Path::Raw, Path::Raw),
+            (Path::Raw, Path::Service),
+            (Path::Service, Path::Raw),
+        ] {
+            let (entry, value) = race_entry(&pool, member, n).await;
+            let mut conns = Vec::new();
+            let mut pids = Vec::new();
+            let mut txs = Vec::new();
+            for _ in 0..2 {
+                let mut conn = pool.acquire().await.unwrap().detach();
+                pids.push(backend_pid(&mut conn).await);
+                conns.push(conn);
+            }
+            for (conn, path) in conns.iter_mut().zip([first, second]) {
+                let mut tx = conn.begin().await.unwrap();
+                let case = Case {
+                    path,
+                    op: Op::Create,
+                    member,
+                };
+                let written =
+                    tokio::time::timeout(Duration::from_secs(5), write(&mut tx, case, n, &value))
+                        .await
+                        .unwrap_or_else(|_| panic!("{case:?} {n}: blocked by the other write"));
+                assert_eq!(written, Outcome::Written, "{case:?} {n}");
+                txs.push(tx);
+                n += 1;
+            }
+            let blocking: Vec<Vec<i32>> = sqlx::query_scalar(
+                "SELECT pg_blocking_pids(pid) FROM unnest($1::int4[]) AS pid ORDER BY pid",
+            )
+            .bind(&pids)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(blocking, [Vec::<i32>::new(), Vec::new()], "{entry}");
+            for tx in txs {
+                tx.commit().await.unwrap();
+            }
+            for conn in conns {
+                conn.close().await.unwrap();
+            }
+            assert_eq!(listed_in(&pool, member, &value).await.len(), 2, "{entry}");
+        }
+    }
+    db.drop([pool]).await;
+}
+
+async fn listed_in(pool: &PgPool, member: Member, value: &str) -> Vec<String> {
+    let mut conn = pool.acquire().await.unwrap();
+    listed(&mut conn, member, value).await
 }

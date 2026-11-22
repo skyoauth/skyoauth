@@ -212,6 +212,7 @@
 //! | `23503`  | `foreign_key_violation`                    | `Invariant { kind: ForeignKey, constraint: Some(_) }` |
 //! | `23514`  | `check_violation` (table or list domain)   | `Invariant { kind: Check, constraint: Some(_) }`      |
 //! | `23514`  | a `0010` guard: assignment not enabled     | `Invariant { kind: AssignmentActive, .. }`            |
+//! | `23514`  | the `0011` guard: no enabled egress entry  | `Invariant { kind: EgressEntryEnabled, .. }`          |
 //! | `23502`  | `not_null_violation`                       | `Invariant { kind: NotNull, constraint: None }`       |
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
 //! | —        | a stored time outside the readable range   | `UnreadableTimestamp { table, column, id }`           |
@@ -238,6 +239,16 @@
 //! the insert and a concurrent update of the assignment serialize; under
 //! `REPEATABLE READ` or `SERIALIZABLE` an insert whose snapshot predates a
 //! committed update of the assignment fails with `40001`, `Retry`.
+//!
+//! Since `0011` the database refuses a trust source write
+//! ([`create_trust_source`], [`update_trust_source`]) that sets
+//! `discovery_url` or `token_review_endpoint` to a value, new or changed,
+//! that no enabled egress allowlist entry of its purpose lists (IR-152;
+//! provisional lead pick, 2026-11-22):
+//! `Invariant { kind: EgressEntryEnabled, constraint }`, the constraint one
+//! of [`EGRESS_ENTRY_ENABLED`]. The guard runs after every other check of
+//! the row and locks the entry `FOR SHARE`, with the caller's privileges
+//! (migrations README, "What 0011 adds").
 //!
 //! The `Display` and `Debug` text of a [`RegistryError`] never includes a
 //! value from the request or the row: the variants carry only constraint,
@@ -334,7 +345,8 @@ pub use bootstrap::{
 };
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{
-    ASSIGNMENT_ACTIVE, InvariantKind, KNOWN_CONSTRAINTS, PredicateProblem, RegistryError,
+    ASSIGNMENT_ACTIVE, EGRESS_ENTRY_ENABLED, InvariantKind, KNOWN_CONSTRAINTS, PredicateProblem,
+    RegistryError,
 };
 pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
 pub use events::{

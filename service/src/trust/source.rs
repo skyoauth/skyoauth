@@ -257,19 +257,22 @@
 //!   the IR-080 assignment references it is migration `0010`, and for this
 //!   check it is migration `0011` (provisional lead pick, 2026-11-22;
 //!   migrations README, "What 0011 adds"). Its trigger
-//!   `trust_source_egress_enabled` applies the "What", "Match" and "When"
-//!   rules above to every writer, locking the entry `FOR SHARE` in the order
-//!   of step 3, and refuses with `23514` naming
-//!   `trust_source_discovery_url_egress_enabled` or
-//!   `trust_source_token_review_endpoint_egress_enabled`, which the registry
-//!   maps to [`RegistryError::Invariant`]. This path checks first, so it
+//!   `trust_source_egress_enabled`, an `AFTER INSERT OR UPDATE` row
+//!   trigger, applies the "What", "Match" and "When" rules above to every
+//!   writer at the end of the statement, after the row is written and
+//!   every `0004` check has run, locking the entry `FOR SHARE`, and refuses
+//!   with `23514` naming `trust_source_discovery_url_egress_enabled` or
+//!   `trust_source_token_review_endpoint_egress_enabled`, which the
+//!   registry maps to [`RegistryError::Invariant`] of kind
+//!   [`InvariantKind::EgressEntryEnabled`]. This path checks first, so it
 //!   still refuses with [`SourceWriteError::EgressNotAllowed`]; at step 4
-//!   the trigger finds the entry this path holds. The bare registry
-//!   functions now get the `Invariant`, but they still write a
-//!   non-canonical destination that an enabled entry lists with exactly
-//!   that value.
+//!   the trigger finds the entry this path holds, so the lock order above
+//!   is unchanged. The bare registry functions now get the `Invariant`,
+//!   but they still write a non-canonical destination that an enabled
+//!   entry lists with exactly that value.
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
+//! [`InvariantKind::EgressEntryEnabled`]: crate::persistence::registry::InvariantKind::EgressEntryEnabled
 //! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant
 //! [`AdminRole::TrustAdmin`]: crate::persistence::registry::AdminRole::TrustAdmin
 
