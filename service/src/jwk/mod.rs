@@ -115,6 +115,17 @@
 //! `Display` nor `Debug` can print them. [`PublicKey`] and [`PublicJwk`]
 //! implement `Debug` by hand and print no key octets either.
 //!
+//! # Test vectors
+//!
+//! rfc-editor.org was not reachable when this was written, so the vectors
+//! are not copied from the RFC text. The RFC 7638 RSA key and the RFC 8037
+//! Ed25519 key (appendix A.3) are the values known from those documents,
+//! and Python's `hashlib` reproduces their published thumbprints
+//! independently. The RFC 7517 appendix A.1 P-256 key has no published
+//! thumbprint: its thumbprint, and those of the generated P-384 and P-521
+//! keys, were computed with Python (`hashlib`, `cryptography`), never from
+//! this module's output. See `service/tests/jwk.rs`.
+//!
 //! # Follow-ups
 //!
 //! - The on-curve check of `EC` points and the field-range check of their
