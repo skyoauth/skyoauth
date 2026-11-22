@@ -75,7 +75,12 @@ pub(super) const CREATE_REFUSALS: [(Status, ActivationState, &str); 3] = [
 
 /// Updates of a dormant impersonation grant refused: (status, activation
 /// state). Each is refused by the `0009` guard as `Guard`, before the
-/// `0004` checks it would also fail.
+/// `0004` checks it would also fail. The guard refuses every update of the
+/// grant whatever its values, so the cases name the attempts A38 and A53
+/// care about, not distinct refusals, and carry no check name. Used by
+/// [`assert_update_refused`] in `a38_neg_dormant_grant_enable_refused`
+/// (the first), `a38_neg_dormant_grant_reapproval_marker_kept` (the second
+/// and third) and `a53_neg_enabling_patch_refused` (the first and third).
 pub(super) const UPDATE_REFUSALS: [(Status, ActivationState); 3] = [
     // Enabling, reapproval marker kept.
     (Status::Enabled, ActivationState::RequiresReapproval),
