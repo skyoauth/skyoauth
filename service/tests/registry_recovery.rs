@@ -57,6 +57,10 @@ const HASH: [u8; 48] = [0xc7; 48];
 const OTHER_HASH: [u8; 48] = [0xc8; 48];
 /// A challenge hash that [`HASH`] is a prefix of.
 const LONG_HASH: [u8; 64] = [0xc7; 64];
+/// A request digest and a challenge hash of ASCII letters of both cases,
+/// so a value that differs from them only in case differs in its bytes.
+const LETTER_DIGEST: &[u8; 32] = b"Recovery-Digest-ABCDEF-abcdef-Zz";
+const LETTER_HASH: &[u8; 48] = b"Challenge-Hash-ABCDEFGHIJKL-abcdefghijkl-MnOpQrS";
 const T0: u64 = 1_790_000_000_123_456;
 
 /// `micros` after `T0`.
@@ -914,7 +918,10 @@ async fn a_revoked_challenge_is_not_restorable() {
 /// Every miss of the consume is the same `NotRestorable`, equal by
 /// `Debug`, `Display` and `PartialEq`, and writes nothing. A row written by
 /// other means with every value right is restorable, so each miss is its
-/// one difference.
+/// one difference. The consume compares the digest and the hash with the
+/// issued ones byte-wise: a value that differs from the issued one only in
+/// the case of its ASCII letters is a miss too, and the issued values
+/// restore.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn every_consume_miss_is_the_same_not_restorable() {
@@ -929,6 +936,17 @@ async fn every_consume_miss_is_the_same_not_restorable() {
     .await;
     issue(&pool, "op_replayed", "aud_issue_4").await;
     issue(&pool, "op_failed", "aud_issue_5").await;
+    let letters_plan = good_plan();
+    issue_on(
+        &pool,
+        &IssueChallenge {
+            request_digest: LETTER_DIGEST,
+            challenge_hash: LETTER_HASH,
+            ..issue_request("op_letters", "aud_issue_6", &letters_plan)
+        },
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "UPDATE administrative_operation SET outcome = 'failed', revision = revision + 1 \
          WHERE id = 'op_failed'",
@@ -1099,6 +1117,41 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         challenge_hash: &DIGEST,
         ..bound
     };
+    // `op_letters`'s binding, and its digest or hash with the case of
+    // every letter flipped: the same text but for case, other bytes.
+    let swap_case = |bytes: &[u8]| -> Vec<u8> {
+        bytes
+            .iter()
+            .map(|b| {
+                if b.is_ascii_alphabetic() {
+                    b ^ 0x20
+                } else {
+                    *b
+                }
+            })
+            .collect()
+    };
+    let (swapped_digest, swapped_hash) = (swap_case(LETTER_DIGEST), swap_case(LETTER_HASH));
+    for (flipped, issued) in [
+        (&swapped_digest, &LETTER_DIGEST[..]),
+        (&swapped_hash, &LETTER_HASH[..]),
+    ] {
+        assert_ne!(&flipped[..], issued);
+        assert!(flipped.eq_ignore_ascii_case(issued));
+    }
+    let letters = ChallengeBinding {
+        request_digest: LETTER_DIGEST,
+        challenge_hash: LETTER_HASH,
+        ..bound
+    };
+    let case_digest = ChallengeBinding {
+        request_digest: &swapped_digest,
+        ..letters
+    };
+    let case_hash = ChallengeBinding {
+        challenge_hash: &swapped_hash,
+        ..letters
+    };
     let other_instance = ChallengeBinding {
         instance_id: OTHER_INSTANCE,
         ..bound
@@ -1133,6 +1186,8 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         ("op_1", prefix_hash, now()),
         ("op_1", long_hash, now()),
         ("op_1", digest_as_hash, now()),
+        ("op_letters", case_digest, now()),
+        ("op_letters", case_hash, now()),
         ("op_1", other_instance, now()),
         ("op_1", upper_instance, now()),
         ("op_1", other_revision, now()),
@@ -1174,9 +1229,14 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         assert_eq!(format!("{miss:?}"), format!("{first:?}"), "{id}");
         assert_eq!(miss.to_string(), first.to_string(), "{id}");
     }
-    // The issued challenge is restorable, and so is the control row.
+    // The issued challenges are restorable, and so is the control row.
     let mut transaction = pool.begin().await.unwrap();
     consume_and_restore(&mut transaction, "op_1").await.unwrap();
+    transaction.rollback().await.unwrap();
+    let mut request = restore_request("op_letters");
+    request.binding = letters;
+    let mut transaction = pool.begin().await.unwrap();
+    restore_operator(&mut transaction, &request).await.unwrap();
     transaction.rollback().await.unwrap();
     restore_on(&pool, &restore_request("raw_good"))
         .await

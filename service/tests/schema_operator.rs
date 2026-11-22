@@ -905,6 +905,14 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
             ),
         ));
     }
+    // The reserved actor IDs of 0009
+    // (schema_reserved_ids_and_dormant_grants.rs).
+    expected.push((
+        "admin_identity_id_not_reserved_check".to_string(),
+        "CHECK (((id <> 'deployment_operator'::text) AND \
+         (NOT starts_with(id, 'recovery_key:'::text))))"
+            .to_string(),
+    ));
     expected.sort();
     assert_eq!(checks, expected);
     db.drop([pool]).await;
