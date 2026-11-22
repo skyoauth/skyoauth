@@ -2694,7 +2694,8 @@ stay provisional until Gate M0:
   (`MAX_ENABLED_VERSIONS_PER_KEYSET`, provisional lead pick, 2026-11-22).
   Where a version becomes enabled the other enabled versions are counted
   under the parent lock, before any parse; at the bound the write is
-  `TooManyEnabledVersions`. Disabled versions do not count.
+  `TooManyEnabledVersions`. Disabled versions do not count; an enabled
+  version past its expiry still does, so disable it to free its slot.
 - `check_version_overlap` runs wherever a version becomes enabled (an
   enabled create, an enable or re-enable); a disabled create and a disable
   run none. The compared stored versions (the other enabled versions whose
@@ -2704,12 +2705,13 @@ stay provisional until Gate M0:
   a failure is `StoredVersion`, a data-integrity error. The T11.7 verifier
   builds its keys the same way, never from `parse_stored`.
 - That full parse runs inside the transaction and is linear in the
-  intersecting enabled versions. It holds the parent keyset row, the
+  intersecting enabled versions, up to 8 stored sets per write under the
+  cap (an enable's target and at most 7 others). It holds the parent keyset row, the
   operator rows `FOR SHARE`, a database connection and one of the two
   process-wide validation workers, so it can starve other tenants' Stage
   A. Estimated at about 0.18 s per compared 20-key set in release; debug
-  builds measured 0.30 s, 1.31 s and 4.93 s for 1, 8 and 32 compared
-  versions. Wiring precondition: before any endpoint calls the module, the
+  builds measured 0.30 s for 1 and 1.31 s for 8 compared versions, the
+  most the cap allows. Wiring precondition: before any endpoint calls the module, the
   in-transaction parses need a permit or priority separate from Stage A's,
   or a stored marker that a projection passed the point checks (which, or
   a change of `KeysetVersion`, removes the parse).
@@ -2737,7 +2739,9 @@ enabled versions, a disable its target's revision, a disabled create none:
 a disabled version other than the target is never fetched); the write's
 own locks (the insert's foreign-key checks, or the version row of a status
 update); then the audit head last. `FOR NO KEY UPDATE` on the keyset does
-not block the `FOR KEY SHARE` of a trust source insert's foreign-key check.
+not block the `FOR KEY SHARE` of a trust source insert's or update's
+foreign-key check; a trust source update holds its own source row
+`FOR UPDATE`, which this write never locks.
 
 One keyset per transaction: the audit head a write takes last stays held
 until the caller's transaction ends, so a second keyset's write in the same

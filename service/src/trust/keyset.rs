@@ -108,7 +108,8 @@
 //!   the other enabled versions of the keyset are counted under the parent
 //!   lock, before any stored version is parsed; at the bound the write is
 //!   [`KeysetWriteError::TooManyEnabledVersions`]. Disabled versions do not
-//!   count, and a re-enable does not count itself.
+//!   count, and a re-enable does not count itself. An enabled version past
+//!   its expiry still counts: disabling it is what frees its slot.
 //! - **Stored versions are parsed again in full.** The check needs every
 //!   compared version as a [`JwkSet`], which only the full parse builds, and
 //!   [`KeysetVersion`] is not changed here. So each stored version the check
@@ -123,14 +124,15 @@
 //!   version whose window does not intersect is not parsed (inferred: the
 //!   check would skip it).
 //! - **Cost.** That full parse runs inside the transaction and is linear in
-//!   the intersecting enabled versions (at most
-//!   [`MAX_ENABLED_VERSIONS_PER_KEYSET`]). While it runs it holds the parent
+//!   the intersecting enabled versions; the cap holds it to up to 8 stored
+//!   sets per write (an enable's target and at most 7 others). While it
+//!   runs it holds the parent
 //!   keyset row, the operator rows `FOR SHARE`, a database connection and
 //!   one of the [`VALIDATION_WORKERS`] process-wide workers, so it can
 //!   starve every other tenant's Stage A. The estimate is about 0.18 s per
 //!   compared 20-key set in release, plus any wait for a free worker; debug
-//!   builds measured 0.30 s, 1.31 s and 4.93 s for 1, 8 and 32 compared
-//!   versions. It is a known cost, not a design goal. **Wiring
+//!   builds measured 0.30 s for 1 and 1.31 s for 8 compared versions, the
+//!   most the cap allows. It is a known cost, not a design goal. **Wiring
 //!   precondition:** before any endpoint calls this module, the
 //!   in-transaction parses need a permit or priority of their own,
 //!   separate from Stage A's (or the stored marker below, which removes
@@ -199,7 +201,9 @@
 //! (`FOR NO KEY UPDATE`), then the version row (a status change), then the
 //! audit head. `FOR NO KEY UPDATE` conflicts with another
 //! `FOR NO KEY UPDATE` and with a keyset update, not with the
-//! `FOR KEY SHARE` of a trust source insert's foreign-key check.
+//! `FOR KEY SHARE` of a trust source insert's or update's foreign-key
+//! check. A trust source update holds its own source row `FOR UPDATE`
+//! ([`crate::trust::source`]), a row this path never locks.
 //!
 //! **One keyset per transaction.** A caller's transaction writes the
 //! versions of one keyset only. The audit head a write takes last stays

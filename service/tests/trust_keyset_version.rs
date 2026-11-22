@@ -1921,6 +1921,21 @@ async fn a_keyset_has_at_most_eight_enabled_versions() {
         },
         "the ID of an enabled version at the bound",
     );
+    // A disabled version whose own keys are off their curve, enabled at the
+    // bound: the count refuses it before even its own parse.
+    raw_version(
+        &pool,
+        "ver_raw_off",
+        "ks_1",
+        set(vec![p256_off_curve("bad_own")]),
+        Status::Disabled,
+        (t0(), None),
+    )
+    .await;
+    too_many(
+        enable(&pool, "ver_raw_off", 1, "aud_14").await,
+        "an off-curve enable at the bound",
+    );
     // The bound is per keyset.
     create(
         &pool,
@@ -1940,7 +1955,73 @@ async fn a_keyset_has_at_most_eight_enabled_versions() {
     .await
     .unwrap();
     assert_eq!(enabled, 8);
-    assert_eq!(version_count(&pool).await, 10);
+    assert_eq!(version_count(&pool).await, 11);
+    db.drop([pool]).await;
+}
+
+/// The cap is counted under the parent lock: while one transaction holds
+/// it, having created (then enabled) the eighth enabled version, a create
+/// of an enabled version (then an enable) waits for it, then counts the
+/// committed eighth and is refused.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_write_at_the_cap_waits_for_the_eighth_version() {
+    let (db, pool) = seeded().await;
+    let keys = upload(vec![p256_a(KID)]).await;
+    for n in 1..=7 {
+        let id = format!("ver_{n:02}");
+        create(&pool, TRUST, &version(&id, &keys), &format!("aud_{id}"))
+            .await
+            .unwrap();
+    }
+    create(&pool, TRUST, &disabled("ver_off", &keys), "aud_off")
+        .await
+        .unwrap();
+    for round in ["create", "enable"] {
+        let mut first = pool.acquire().await.unwrap().detach();
+        let mut second = pool.acquire().await.unwrap().detach();
+        let (first_pid, second_pid) = (
+            backend_pid(&mut first).await,
+            backend_pid(&mut second).await,
+        );
+        let mut tx = first.begin().await.unwrap();
+        // The eighth: created enabled, or (after its disable) enabled again.
+        let eighth = match round {
+            "create" => {
+                create_version(&mut tx, TRUST, &version("ver_08", &keys), &audit("aud_8a")).await
+            }
+            _ => enable_version(&mut tx, TRUST, "ten_a", "ver_08", 2, &audit("aud_8c")).await,
+        };
+        eighth.unwrap();
+        let keys = keys.clone();
+        let task = tokio::spawn(async move {
+            let mut tx = second.begin().await.unwrap();
+            let result = match round {
+                "create" => {
+                    create_version(&mut tx, TRUST, &version("ver_09", &keys), &audit("aud_9a"))
+                        .await
+                }
+                _ => enable_version(&mut tx, TRUST, "ten_a", "ver_off", 1, &audit("aud_9c")).await,
+            };
+            finish(tx, &result).await;
+            (result, second)
+        });
+        wait_until_blocked(&pool, second_pid, first_pid, &task).await;
+        tx.commit().await.unwrap();
+        let (result, second) = join(task).await;
+        assert!(
+            matches!(result, Err(KeysetWriteError::TooManyEnabledVersions)),
+            "{round}: {result:?}"
+        );
+        second.close().await.unwrap();
+        first.close().await.unwrap();
+        if round == "create" {
+            disable(&pool, "ver_08", 1, "aud_8b").await.unwrap();
+        }
+    }
+    assert_eq!(state(&pool, "ver_off").await, (Status::Disabled, 1));
+    assert_eq!(version_count(&pool).await, 9);
+    assert_chain(&pool, 11).await;
     db.drop([pool]).await;
 }
 
