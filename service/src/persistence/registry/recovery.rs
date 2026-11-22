@@ -99,18 +99,29 @@
 //! by one) where the ID matches, there is no tenant, the kind is
 //! `operator_restoration`, `challenge_hash` is set, `consumed_at` and
 //! `revoked_at` are unset, the outcome is still `issued`,
-//! `$now < expires_at`, `request_digest` and `expected_revision` equal the
-//! binding's, the plan's `instance_id` is a JSON string equal byte-wise
-//! (`COLLATE "C"`) to the binding's and its `recovery_key_epoch` a JSON
-//! number whose text is the binding's epoch in decimal, and the
-//! `recovery_state` row is closed (`bootstrap_closed`) and has the
-//! binding's `instance_id`, the binding's epoch and the binding's
+//! `$now < expires_at`, `request_digest`, `challenge_hash` and
+//! `expected_revision` equal the binding's, the plan's `instance_id` is a
+//! JSON string equal byte-wise (`COLLATE "C"`) to the binding's and its
+//! `recovery_key_epoch` a JSON number whose text is the binding's epoch in
+//! decimal, and the `recovery_state` row is closed (`bootstrap_closed`) and
+//! has the binding's `instance_id`, the binding's epoch and the binding's
 //! `expected_revision` as its `revision` (inferred: the challenge is bound
 //! to the revision of the state it rotates). A plan epoch that is a string,
 //! a fraction (`1.5`, and `1.0` too, whose `jsonb` text keeps the
 //! fraction), `null`, negative or missing therefore matches nothing. It
 //! writes no audit event of its own: the restore's events, in the same
 //! savepoint, record it (inferred).
+//!
+//! The binding covers the digest and the challenge hash (inferred pick, a
+//! lead follow-up, provisional, 2026-11-21): a restore presenting another
+//! `request_digest` or `challenge_hash` of 32 to 64 bytes, of the stored
+//! one's length or another, is `NotRestorable` like any other miss, with
+//! the challenge left unconsumed; a digest or hash that is not 32 to 64
+//! bytes is refused before any statement, as at the issue (see
+//! "Validation"), and is not a consume miss. The registry still does not
+//! hash: it compares the caller's bytes with the stored ones, and that they
+//! are the hash of the challenge the recovery key signed is the verifier's
+//! to check (see "Flow").
 //!
 //! # Restore
 //!
@@ -260,7 +271,10 @@
 //!   above [`MAX_CHALLENGE_TTL`];
 //! - restore: a reserved `admin_id` ([`RegistryError::ReservedActorId`]); a
 //!   new recovery key that is not exactly 32 bytes; an empty or
-//!   over-2048-byte `public_identity` or `trust_anchor_ref`;
+//!   over-2048-byte `public_identity` or `trust_anchor_ref`; a binding
+//!   `request_digest` or `challenge_hash` not 32 to 64 bytes, as the issue
+//!   checks them and with its messages, the digest first (inferred pick, a
+//!   lead follow-up, provisional, 2026-11-21);
 //! - both: a `now` outside the `0007` range, or outside the years
 //!   `0000` to `9999` the audit event can carry.
 //!
@@ -440,7 +454,8 @@ const INSERT_CHALLENGE: &str = concat!(
 );
 
 /// Step 3 of a restore. `$1` the ID, `$2` `now`, `$3` the digest, `$4` the
-/// expected revision, `$5` the instance and `$6` the epoch.
+/// expected revision, `$5` the instance, `$6` the epoch and `$7` the
+/// challenge hash.
 const CONSUME_CHALLENGE: &str = "UPDATE administrative_operation \
      SET consumed_at = timestamptz 'epoch' + $2::interval, revision = revision + 1 \
      WHERE id = $1 \
@@ -452,6 +467,7 @@ const CONSUME_CHALLENGE: &str = "UPDATE administrative_operation \
        AND outcome = 'issued' \
        AND timestamptz 'epoch' + $2::interval < expires_at \
        AND request_digest = $3 \
+       AND challenge_hash = $7 \
        AND expected_revision = $4 \
        AND jsonb_typeof(immutable_plan -> 'instance_id') = 'string' \
        AND immutable_plan ->> 'instance_id' = $5 COLLATE \"C\" \
@@ -555,6 +571,10 @@ pub struct RecoveryChallenge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChallengeBinding<'a> {
     pub request_digest: &'a [u8],
+    /// The challenge hash the issue stored, 32 to 64 bytes, compared
+    /// byte-wise; the registry does not hash (see the module docs,
+    /// "Consume").
+    pub challenge_hash: &'a [u8],
     pub instance_id: &'a str,
     pub expected_revision: i64,
     pub recovery_key_epoch: i64,
@@ -880,6 +900,12 @@ fn validate_restore(request: &RestoreRequest<'_>) -> Result<PgInterval, Registry
             "trust anchor reference is empty or over 2048 bytes",
         ));
     }
+    if !digest_length(request.binding.request_digest) {
+        return Err(encode_error("request digest is not 32 to 64 bytes"));
+    }
+    if !digest_length(request.binding.challenge_hash) {
+        return Err(encode_error("challenge hash is not 32 to 64 bytes"));
+    }
     audit_time(request.now)
 }
 
@@ -992,6 +1018,7 @@ async fn consume(
         .bind(binding.expected_revision)
         .bind(binding.instance_id)
         .bind(binding.recovery_key_epoch)
+        .bind(binding.challenge_hash)
         .fetch_optional(&mut **transaction)
         .await?;
     row.map(|row| json(&row, "immutable_plan")).transpose()
@@ -1226,6 +1253,7 @@ mod tests {
             operation_id: "op_1",
             binding: ChallengeBinding {
                 request_digest: &DIGEST,
+                challenge_hash: &HASH,
                 instance_id: "inst",
                 expected_revision: 1,
                 recovery_key_epoch: 1,
@@ -1556,6 +1584,58 @@ mod tests {
                 "{length}"
             );
         }
+        // The binding's request digest and challenge hash, as the issue
+        // checks them, with the issue's messages; the digest first.
+        let plan = good_plan();
+        for length in [0, 1, 31, 65, 128] {
+            let bytes = vec![2; length];
+            let mut issued = issue(&plan);
+            issued.request_digest = &bytes;
+            let mut bad = restore();
+            bad.binding.request_digest = &bytes;
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                "request digest is not 32 to 64 bytes",
+                "{length}"
+            );
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                encode(validate_issue(&issued)),
+                "{length}"
+            );
+            let mut issued = issue(&plan);
+            issued.challenge_hash = &bytes;
+            let mut bad = restore();
+            bad.binding.challenge_hash = &bytes;
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                "challenge hash is not 32 to 64 bytes",
+                "{length}"
+            );
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                encode(validate_issue(&issued)),
+                "{length}"
+            );
+            // Both wrong: the digest is reported.
+            bad.binding.request_digest = &bytes;
+            assert_eq!(
+                encode(validate_restore(&bad)),
+                "request digest is not 32 to 64 bytes",
+                "{length}"
+            );
+        }
+        for length in [32, 48, 64] {
+            let bytes = vec![2; length];
+            let mut good = restore();
+            good.binding.request_digest = &bytes;
+            assert!(validate_restore(&good).is_ok(), "{length}");
+            good.binding.challenge_hash = &bytes;
+            assert!(validate_restore(&good).is_ok(), "{length}");
+            let mut good = restore();
+            good.binding.challenge_hash = &bytes;
+            assert!(validate_restore(&good).is_ok(), "{length}");
+        }
         let long = "k".repeat(2049);
         let longest = "k".repeat(2048);
         for (value, ok) in [("", false), (&long[..], false), (&longest[..], true)] {
@@ -1653,6 +1733,7 @@ mod tests {
             "outcome = 'issued'",
             "timestamptz 'epoch' + $2::interval < expires_at",
             "request_digest = $3",
+            "challenge_hash = $7",
             "expected_revision = $4",
             "jsonb_typeof(immutable_plan -> 'instance_id') = 'string'",
             "immutable_plan ->> 'instance_id' = $5 COLLATE \"C\"",
