@@ -6,6 +6,7 @@ use serde::Serialize;
 pub mod jwk;
 pub mod persistence;
 pub mod policy;
+pub mod trust;
 
 /// Response body of `GET /healthz`.
 #[derive(Debug, Serialize)]
