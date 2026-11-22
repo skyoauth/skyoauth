@@ -22,7 +22,9 @@
 //!   `a53_neg_reapproval_cleared_create_refused`) or both
 //!   (`a53_neg_enabled_reapproval_cleared_create_refused`) is refused by its
 //!   `0004` check and not stored; an update that enables the stored record
-//!   (`a53_neg_enabling_patch_refused`) is refused and changes nothing.
+//!   (`a53_neg_enabling_patch_refused`) is refused, by the `0009` guard
+//!   that freezes a stored impersonation grant (`Guard`), and changes
+//!   nothing.
 //!   "PATCH" is `update_service_grant`; no HTTP API exists yet. The tests
 //!   are named after the values they write: they do not claim to settle what
 //!   the row's "approved" means for this record, which the spec does not
@@ -35,7 +37,14 @@
 //! Not covered here: export and import (rejecting an enabled or
 //! reapproval-cleared record on import), startup with an active
 //! unsupported record seeded by the restore fixture, rewriting nothing on
-//! that refusal, and the M1b forward-migration stage.
+//! that refusal, and the M1b forward-migration stage. The database bounds
+//! that fixture (docs/testing/conformance-layout.md, "Restore-state
+//! cases"): the `0004` checks refuse an active impersonation row on every
+//! insert, so it cannot be seeded as stored rows; a seeded grant and its
+//! list rows are written in one transaction, since `0009` lets only the
+//! creating transaction write them; and since `0009` a stored
+//! impersonation grant cannot be rewritten (`Guard`), though the refusal
+//! must still be shown to rewrite nothing.
 
 use skyoauth_service::persistence::registry::{ActivationState, GrantMode, Status};
 
@@ -96,15 +105,16 @@ async fn a53_neg_enabled_reapproval_cleared_create_refused() {
     create_refused(both).await;
 }
 
-/// Both enabling updates: with the reapproval marker kept, and cleared.
+/// Both enabling updates, with the reapproval marker kept and cleared, are
+/// refused by the `0009` guard (`Guard`) before any `0004` check.
 #[tokio::test]
 async fn a53_neg_enabling_patch_refused() {
     let (db, pool) = tenant().await;
     let stored = assert_stored(&pool, &dormant("grt_imp")).await;
     let [enabling, _, enabling_and_clearing] = UPDATE_REFUSALS;
-    for (status, activation_state, constraint) in [enabling, enabling_and_clearing] {
+    for (status, activation_state) in [enabling, enabling_and_clearing] {
         assert_eq!(status, Status::Enabled);
-        assert_update_refused(&pool, &stored, status, activation_state, constraint).await;
+        assert_update_refused(&pool, &stored, status, activation_state).await;
     }
     db.drop([pool]).await;
 }

@@ -85,9 +85,10 @@
 //! every ID that begins with `recovery_key:` with
 //! [`RegistryError::ReservedActorId`] before any statement runs. The
 //! comparison is exact and byte-wise, as every ID comparison of the
-//! registry is: `Deployment_Operator` is another ID. The database does not
-//! check it; an identity inserted with such an ID by other means is not
-//! rejected anywhere (inferred: no migration adds a check).
+//! registry is: `Deployment_Operator` is another ID. Since `0009` the
+//! database refuses the same IDs with `admin_identity_id_not_reserved_check`,
+//! the backstop for an identity inserted by other means, which maps to
+//! [`RegistryError::Invariant`] naming the check.
 //!
 //! # Authorization lookup
 //!

@@ -210,6 +210,7 @@
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
 //! | —        | a stored time outside the readable range   | `UnreadableTimestamp { table, column, id }`           |
 //! | —        | a reserved ID for a new operator identity  | `ReservedActorId` (before any statement)              |
+//! | —        | an unmet required predicate of a binding   | `RequiredPredicate { claim, problem }` (no statement) |
 //! | `40001`  | `serialization_failure`                    | `Retry(sqlx::Error)`                                  |
 //! | `40P01`  | `deadlock_detected`                        | `Retry(sqlx::Error)`                                  |
 //! | other    | anything else, or an unlisted constraint   | `Other(sqlx::Error)`                                  |
@@ -221,9 +222,9 @@
 //!
 //! The `Display` and `Debug` text of a [`RegistryError`] never includes a
 //! value from the request or the row: the variants carry only constraint,
-//! table and column names, `Display` and `Debug` of `Retry` and `Other`
-//! print only the SQLSTATE, and those of `UnreadableTimestamp` leave out
-//! its row ID (inferred). The [`source`](std::error::Error::source) of
+//! table, column and required claim names, `Display` and `Debug` of `Retry`
+//! and `Other` print only the SQLSTATE, and those of `UnreadableTimestamp`
+//! leave out its row ID (inferred). The [`source`](std::error::Error::source) of
 //! `Retry` and `Other` is the raw [`sqlx::Error`], whose message and detail
 //! may quote request or row values (for example the key of a unique
 //! violation), so logging must not walk the source chain of a
@@ -267,9 +268,11 @@
 //! scope and profile vocabulary, leaving a disabled assignment's tenant out
 //! of a checker's effective set; migrations README, "What 0003 adds"; the
 //! egress check of a source's URLs, secret reference resolution, template
-//! predicates, JWK checks, the other scope ceilings and keeping an
-//! impersonation grant dormant; "What 0004 adds"), does not generate IDs
-//! (T10.2) and does not run migrations.
+//! predicates, JWK checks and the other scope ceilings; "What 0004 adds"),
+//! does not generate IDs (T10.2) and does not run migrations. An
+//! impersonation grant is kept dormant by the database since `0009`: an
+//! update of one, or a change of its list rows after its creating
+//! transaction, is [`RegistryError::Guard`].
 
 mod assertion;
 mod audience;
@@ -305,7 +308,7 @@ pub use bootstrap::{
     bootstrap_instance,
 };
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
-pub use error::{InvariantKind, KNOWN_CONSTRAINTS, RegistryError};
+pub use error::{InvariantKind, KNOWN_CONSTRAINTS, PredicateProblem, RegistryError};
 pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
 pub use events::{
     AUDIT_HASH_PREFIX, AuditActor, AuditEvent, ChainBreak, ChainVerdict, MAX_ENVELOPE_INTEGER,

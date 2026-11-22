@@ -579,8 +579,10 @@ The database does not enforce these rules; the service must:
 - keep `default_scopes` and `scopes` within every other ceiling (service,
   assignment, resource server; IR-063) and check resource constraints
   against their schemas (IR-123, IR-141);
-- keep an impersonation grant dormant when it is edited or reapproved
-  (design §5.6; T10.11): the `CHECK`s fix only its stored state;
+- answer an edit or reapproval of an impersonation grant with its own
+  refusal (design §5.6; T10.11): since `0009` the database keeps the grant
+  dormant, refusing every `UPDATE` of it and every change of its list rows
+  after its creating transaction with `SK001` (see "What 0009 adds");
 - create a service principal and its service identity in one transaction
   (identity-registry §5.1);
 - generate every ID, `cluster_id` included, and normalize the Unicode form
@@ -1552,6 +1554,228 @@ rejection maps to `Invariant { kind: Check, constraint }` naming one; the
 registry's own check before the statement normally rejects the policy
 first (see "Rust registry surface").
 
+## What 0009 adds
+
+`0009_reserved_ids_and_dormant_grants.sql` adds one named check on
+`admin_identity` and three guard triggers that freeze an impersonation
+grant, two rules that only the service enforced until now (lead decisions,
+2026-11-21; provisional until the maintainer ratifies the ADRs,
+T00.8–T00.17, Gate M0). It adds two functions, three triggers and one
+check, and changes no column, index, constraint or existing trigger.
+Choices marked "(inferred)" are its own.
+
+- **Reserved actor IDs.** `admin_identity_id_not_reserved_check` is
+  `CHECK (id <> 'deployment_operator' AND NOT starts_with(id, 'recovery_key:'))`:
+  no operator identity takes the actor ID of bootstrap or of an offline
+  recovery key (identity-registry §5.2, "Reserved actor IDs"). It is the
+  registry's rule, `is_reserved_actor_id`: exact and byte-wise, with no
+  case folding, so `recovery_key:`, `recovery_key:1` and `recovery_key:x`
+  are refused, and `Recovery_Key:1`, `recovery_key` (no colon) and
+  `deployment_operator ` (a trailing space) are other IDs. `starts_with`
+  rather than `LIKE` (inferred): `_` and `%` in an ID are plain characters,
+  so `recoveryXkey:1` is not reserved. The registry still refuses a
+  reserved ID before its statement (`ReservedActorId`); the check is the
+  backstop for any other writer, and a raw `INSERT` fails with `23514`,
+  which the registry maps to `Invariant { kind: Check, constraint }` naming
+  the check (`KNOWN_CONSTRAINTS` lists it). It is a plain
+  `ADD CONSTRAINT`, which validates the existing rows at once (inferred):
+  `NOT VALID` with a later `VALIDATE CONSTRAINT` would shorten nothing,
+  since the migration runs in one transaction that holds the
+  `ACCESS EXCLUSIVE` lock of `ADD CONSTRAINT` until it commits, and the
+  table holds a few rows per instance.
+- **Dormant impersonation grants.** An impersonation grant, which v0.1
+  stores only disabled and requiring reapproval, never changes after the
+  transaction that creates it, its list rows included (lead ruling,
+  2026-11-21; design §5.6 "remain unchanged and inactive"; T10.11 "preserve
+  it unchanged"; T12.10):
+  - `service_grant_impersonation_frozen` (`BEFORE UPDATE`, each row,
+    `skyoauth_reject_impersonation_grant_update()`) refuses every `UPDATE`
+    of a grant whose old or new `mode` is `impersonation`: "an
+    impersonation grant of service_grant is never updated". It makes no
+    exception for the creating transaction, which inserts the row complete,
+    nor for an update that sets columns to their own values: every update
+    of `service_grant` must advance `revision` (`0004`), so none leaves a
+    row as it was, and the guard does not compare the rows (inferred). It
+    fires before the checks, so enabling the grant or clearing its
+    reapproval marker now fails with `SK001` from this guard, not `23514`
+    from `service_grant_impersonation_disabled_check` or
+    `service_grant_activation_mode_check`, which still refuse such a row on
+    `INSERT`. The new-`mode` test is a second line behind the `0004`
+    `service_grant_immutable`, which already keeps `mode` from changing.
+  - `service_grant_binding_impersonation_frozen` and
+    `service_grant_resource_server_impersonation_frozen`
+    (`AFTER INSERT OR UPDATE OR DELETE`, each row,
+    `skyoauth_reject_impersonation_grant_list_change()`) refuse a change of
+    a list row whose grant is an impersonation grant that the current
+    transaction did not create: "the rows of `<table>` of an impersonation
+    grant change only in the transaction that creates it". The creating
+    transaction inserts the list rows after the grant (the deferred `0004`
+    check needs a binding row at commit), so it may still add, change and
+    delete them, in savepoints too (inferred).
+  - A row whose grant the trigger cannot see is left alone (inferred): its
+    grant was deleted by this transaction (one of another mode: `0006`
+    never deletes an impersonation grant), it is missing in replica
+    mode, where foreign keys do not fire, or (third case) it belongs to a
+    grant that another transaction committed after the writer's
+    `REPEATABLE READ` or `SERIALIZABLE` snapshot, in replica mode.
+  - "Created by the current transaction" is read from the grant row's
+    `xmin` (inferred), which only an `UPDATE` could change. A grant inserted inside a
+    savepoint carries the subtransaction's ID, not the top-level one that
+    `pg_current_xact_id()` returns, so the function widens `xmin` to an
+    `xid8` in the epoch of the top-level ID and asks `pg_xact_status()`: it
+    is `in progress` for the top-level ID and every live or released
+    subtransaction, and a transaction in progress whose row the trigger can
+    see can only be the current one. A grant that another transaction
+    committed later, with a newer ID, is `committed` and refused. A grant
+    from a rolled-back savepoint is not visible, and the foreign key
+    refuses its rows. `pg_locks` cannot replace the status test: a released
+    savepoint gives up the lock on its own ID.
+  - The list guards are `AFTER` triggers (inferred): the foreign-key check
+    of an inserted row is an internal `AFTER` trigger whose name
+    (`RI_ConstraintTrigger_c_<oid>`) sorts first, and PostgreSQL fires the
+    triggers of one event in name order, so the guard reads the grant with
+    a snapshot no older than the one that found it. Under `READ COMMITTED`
+    a `BEFORE` trigger could miss a grant that a concurrent transaction
+    commits between the two reads. A rejected statement still changes
+    nothing, and a row that breaks a `NOT NULL`, unique or check constraint
+    fails with that error first, as before.
+  - The `0006` delete guard is unchanged: an impersonation grant is never
+    deleted, also in its creating transaction.
+- **Through the registry.** `create_service_grant` writes a grant and its
+  sets in one statement, so creating a dormant grant with its bindings and
+  audiences works as before. An impersonation grant must get every binding
+  and audience in that call: adding one afterwards fails with `Guard`, also
+  inside the creating transaction. `update_service_grant` and the list-set
+  changes
+  (`add_service_grant_binding`, `remove_service_grant_binding`,
+  `add_service_grant_resource_server`,
+  `remove_service_grant_resource_server`) of an impersonation grant fail
+  with `Guard` and change nothing; each list-set change advances the
+  grant's revision with an `UPDATE`, which the grant guard refuses first.
+- **Functions.** `skyoauth_reject_impersonation_grant_update()` reads no
+  table and pins `search_path` to `pg_catalog, pg_temp`.
+  `skyoauth_reject_impersonation_grant_list_change()` reads
+  `service_grant`, so it is created as the `0004` check is (schema resolved
+  by `current_schema()`, `pg_catalog, <schema>, pg_temp`, the table named
+  with its schema). It runs with the caller's privileges: a role that
+  writes list rows needs `SELECT` on `service_grant`, or at least on its
+  columns `id`, `mode` and `xmin` (the guard reads `xmin`, so `SELECT` on
+  `id` and `mode` alone fails with `42501`).
+- **Limits.**
+  - A row frozen by `VACUUM` keeps its raw 32-bit `xmin`. Widened, it may
+    name an ID in the future (`pg_xact_status()` fails with `22023`, which
+    the function catches: not created here), or, once the cluster has used
+    2^32 more transaction IDs, the ID of any transaction then in progress,
+    the writer's own top-level ID included if it times its transaction to
+    match; that transaction then counts as having created the grant and may
+    change its list rows. The registry never reaches this path: each of its
+    list changes first updates the grant row, which the grant guard refuses
+    with no `xmin` logic. "Follow-ups" has a stored-marker design that would
+    close it.
+  - Like every guard, these are a tripwire against application DML, not a
+    security boundary (see "Limits").
+  - In origin mode at `REPEATABLE READ` and `SERIALIZABLE` the foreign
+    key, not the guard, refuses a new list row for a grant that another
+    transaction committed after the writer's snapshot (inferred;
+    reproduced on PostgreSQL 16.15 and 17.12): the foreign key checks an
+    inserted row with the transaction snapshot, so it fails with `23503`
+    before the guard runs. At `READ COMMITTED` the guard refuses that row
+    (`SK001`). At `REPEATABLE READ` and `SERIALIZABLE` the registry gets
+    `NotFound`: each of its list changes, and `update_service_grant`,
+    first updates the grant row, which the snapshot does not show; at
+    `READ COMMITTED` it gets `Guard`. The test
+    `a_grant_committed_after_the_snapshot_is_refused_by_the_foreign_key`
+    pins the origin-mode results.
+  - In replica mode (`session_replication_role = replica`) at
+    `REPEATABLE READ` and `SERIALIZABLE`, a list row for an impersonation
+    grant that another transaction committed after the writer's snapshot
+    is accepted: foreign keys do not fire and the guard cannot see the
+    grant. Only a role that may set `session_replication_role` can do
+    this (inferred; reproduced on PostgreSQL 17.12 as the table owner).
+    At `READ COMMITTED` in replica mode the guard refuses the row. This is
+    a limit of the tripwire; the guard is unchanged.
+  - A principal binding that a frozen list row references is never
+    hard-deleted: the row cannot go, so the foreign key
+    `service_grant_binding_binding_id_fkey` refuses the delete with `23503`.
+  - A bulk `UPDATE` of `service_grant` that reaches an impersonation grant
+    fails as a whole, so the service must filter such writes by `mode`.
+  - T10.11 stays open: this is the database side of "preserve it
+    unchanged". Refusing enablement through the API, startup and import
+    validation, and the API errors for these refusals are service work.
+- **Locks on existing tables.** Checked with `pg_locks` in a transaction
+  that applies `0009` to a `0008` database (PostgreSQL 16.15; the
+  reviewer repeated this lock check, and only it, on 17.12): the
+  `ALTER TABLE` takes `ACCESS EXCLUSIVE` on `admin_identity` and scans it
+  once, without a rewrite (its `relfilenode` stays the same);
+  `CREATE TRIGGER` and `ENABLE ALWAYS TRIGGER` take `SHARE ROW EXCLUSIVE` on
+  `service_grant`, `service_grant_binding` and
+  `service_grant_resource_server`, which blocks writes of grants until the
+  migration commits.
+- **Upgrade precondition.** A row that fails the new check makes `0009`
+  fail with `23514` and roll back, leaving the database at `0008`. The
+  triggers validate nothing: an existing impersonation grant is frozen as
+  it is. Before the upgrade, this query must return no row; it lists every
+  operator identity that would fail:
+
+  ```sql
+  SELECT id, status FROM admin_identity
+   WHERE id = 'deployment_operator' OR starts_with(id, 'recovery_key:')
+   ORDER BY id;
+  ```
+
+  `id` is `COLLATE "C"`, so the order is byte-wise. The registry has
+  refused these IDs since `create_admin_identity` was added, so a listed
+  row was written by direct SQL, and an operator enrolled under a reserved
+  ID is not legitimate (lead ruling, 2026-11-21). An identity is never
+  deleted (`0006`) and its ID never changes (`0005`).
+
+  Repair (inferred): owner-level surgery that frees no key. Every
+  credential of the identity keeps its row, so a key stays registered and
+  `admin_credential_public_identity_key` refuses it forever; nothing is
+  deleted but the reserved identity. Run it as the table owner, which
+  suffices (no superuser), and not in replica mode: the guards are
+  `ENABLE ALWAYS`, and replica mode would only switch the foreign keys off.
+  Run it once per listed ID, with `<reserved-id>` that ID and `<new-id>` a
+  new, unused ID that is not reserved:
+
+  ```sql
+  BEGIN;
+  INSERT INTO admin_identity (id, status, created_at)
+  SELECT '<new-id>', 'disabled', created_at FROM admin_identity WHERE id = '<reserved-id>';
+  ALTER TABLE admin_credential DISABLE TRIGGER admin_credential_immutable;
+  ALTER TABLE admin_role_binding DISABLE TRIGGER admin_role_binding_immutable;
+  ALTER TABLE admin_identity DISABLE TRIGGER admin_identity_no_delete;
+  UPDATE admin_credential
+     SET admin_id = '<new-id>', status = 'disabled', revoked_at = coalesce(revoked_at, now())
+   WHERE admin_id = '<reserved-id>';
+  UPDATE admin_role_binding
+     SET admin_id = '<new-id>', status = 'disabled', revision = revision + 1
+   WHERE admin_id = '<reserved-id>';
+  DELETE FROM admin_identity WHERE id = '<reserved-id>';
+  ALTER TABLE admin_credential ENABLE ALWAYS TRIGGER admin_credential_immutable;
+  ALTER TABLE admin_role_binding ENABLE ALWAYS TRIGGER admin_role_binding_immutable;
+  ALTER TABLE admin_identity ENABLE ALWAYS TRIGGER admin_identity_no_delete;
+  COMMIT;
+  ```
+
+  In one transaction it inserts the replacement identity, disabled, with
+  the old `created_at`; disables the three guards in its way; moves every
+  credential to the new identity, disabled and revoked (an unrevoked one is
+  revoked now, a revoked one keeps its `revoked_at`); moves every role
+  binding, disabled, with the revision step; deletes the reserved identity;
+  and re-enables the three guards with `ENABLE ALWAYS`. Audit events keep
+  the old actor ID: actor IDs are text with no foreign key. The operator is
+  enrolled again with a new key through the registry. Then run the query
+  again: it must return no row before the upgrade.
+  `service/tests/schema_reserved_ids_and_dormant_grants.rs` runs both
+  blocks from this file.
+
+- **Frozen comments.** The `0004` comment on `service_grant_binding` ("A
+  row is added or deleted, never changed, and the service advances the
+  grant's revision with it") still holds for direct and delegation grants;
+  for an impersonation grant, rows are added or deleted only by its
+  creating transaction. `0005` and `0006` say nothing about reserved IDs.
+
 ## Limits
 
 - The guard triggers are a tripwire against application DML, not a
@@ -1668,6 +1892,22 @@ Open for all registry tables:
   binding row also need `UPDATE` on `service_grant_binding` (the row locks),
   or the commit fails with `42501`. The test
   `grant_binding_check_needs_the_callers_privileges` checks each case.
+  Since `0009`, writing a row of `service_grant_binding` or
+  `service_grant_resource_server` also needs `SELECT` on `service_grant`
+  (at least its columns `id`, `mode` and `xmin`), which the list guard
+  reads with the caller's privileges, or the write fails with `42501`; the
+  test `list_row_writers_need_select_on_service_grant` checks it.
+- A stored creation marker for impersonation grants, a possible `0010`
+  (lead ruling, 2026-11-21: no schema change in `0009`). The `0009` list
+  guard decides "created by this transaction" from the grant row's `xmin`,
+  with the 2^32 limit of "What 0009 adds". Storing the creator's `xid8` in
+  the grant row instead does not work alone: a restore or logical
+  replication carries a foreign marker that can equal a later local ID (and
+  a new impersonation grant would then fail to apply), and a writer can
+  forge the marker. Only a two-signal design would hold: the stored marker
+  and an `xmin` in progress, with an `ENABLE ALWAYS` `BEFORE INSERT`
+  trigger that sets the marker. That is too large for `0009`; the registry
+  never reaches the `xmin` path, and the guards are a tripwire ("Limits").
 - The `no_space` checks of `0002` (`exact_destination`) and `0003`
   (`audience`, `action_name`) do not name a collation in the expression;
   they rely on their columns being `COLLATE "C"`, so they hold the same
@@ -1799,7 +2039,9 @@ never mapped to `StaleRevision`. A deadlock (`40P01`,
 Errors map by SQLSTATE and, for constraint errors, by the constraint names
 in the tables above (the module's `KNOWN_CONSTRAINTS`, checked against the
 catalog by a test). The `Display` and `Debug` text of an error carries
-constraint, table and column names and SQLSTATEs only, never a value. The `source()` of
+constraint, table, column and required claim names and SQLSTATEs only,
+never a value. `RegistryError` is `#[non_exhaustive]`, so a `match` outside
+the crate needs a wildcard arm. The `source()` of
 `Retry` and `Other` is the raw `sqlx::Error`, which may quote values, so
 logging must not walk the source chain.
 
@@ -1813,6 +2055,7 @@ logging must not walk the source chain.
 | `SK001`  | `Guard`                                         |
 | —        | `UnreadableTimestamp { table, column, id }`     |
 | —        | `ReservedActorId` (before any statement)        |
+| —        | `RequiredPredicate { claim, problem }` (before) |
 | `40001`  | `Retry` (retry the whole transaction)           |
 | `40P01`  | `Retry` (retry the whole transaction)           |
 | other    | `Other`, also for a constraint not listed       |
@@ -1896,8 +2139,9 @@ binding profile requires, the sets of "What 0008 adds", and
 `validate_claim_match_policy` checks that a policy has each with a
 non-empty value. `create_principal_binding` and `update_principal_binding`
 call it before their statement, so a missing or empty required predicate is
-an encode error, `Other`, as for an empty patch; the message names the
-claim and the profile, never a value. An update is checked whether or not
+`RequiredPredicate { claim, problem }`: the first unmet claim name of the
+table, and `PredicateProblem::Missing` or `PredicateProblem::Empty`, never
+a value. An update is checked whether or not
 the binding exists. A whitespace-only value is not empty and passes, as in
 the database. Optional predicates, `GITHUB_JOB_WORKFLOW_REF` among them,
 are not checked, and reviewing the removal of one stays with the service,
@@ -1995,8 +2239,9 @@ updates: a role binding is re-enabled by an update, as `0005` intends.
 `deployment_operator` and every ID beginning with `recovery_key:`
 (`DEPLOYMENT_OPERATOR_ACTOR`, `recovery_key_actor(epoch)`) with
 `ReservedActorId` before any statement, byte-wise, so no operator can act
-under the actors of bootstrap and recovery; the database has no such
-check (inferred). `authorize_operator(public_identity, scope, role)` joins,
+under the actors of bootstrap and recovery; since `0009` the database
+refuses them too, with `admin_identity_id_not_reserved_check`
+(`Invariant`), as the backstop for other writers. `authorize_operator(public_identity, scope, role)` joins,
 in one statement, the credential with exactly that `public_identity`, its
 identity and the identity's binding of exactly that role and scope, and
 requires the three enabled and the credential unrevoked. No role implies
@@ -2275,7 +2520,10 @@ removals from one grant revision, the later is `StaleRevision` under
 `READ COMMITTED`; under `REPEATABLE READ` and `SERIALIZABLE` PostgreSQL
 fails it with `40001`, which maps to `Retry`. The `0004` constraint names
 are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_trust.rs` tests the
-surface.
+surface. Since `0009` an impersonation grant is frozen once its creating
+transaction commits: `create_service_grant` still creates one, and
+`update_service_grant` and every list-set change of one fail with `Guard`
+and change nothing (see "What 0009 adds").
 
 Timestamps: the registry reads a timestamp as
 `(extract(epoch FROM <column>) * 1000000)::bigint`, microseconds from the

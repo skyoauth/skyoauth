@@ -157,7 +157,8 @@ async fn change_list<'e>(
 /// Creates a binding at revision 1. Its source and its workload principal
 /// must be of the same tenant, and the principal a workload. Its
 /// `claim_match_policy` must have every predicate its profile requires
-/// ([`validate_claim_match_policy`], checked before the statement).
+/// ([`validate_claim_match_policy`], checked before the statement; an unmet
+/// one is [`RegistryError::RequiredPredicate`]).
 pub async fn create_principal_binding<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipalBinding,
@@ -219,7 +220,8 @@ pub async fn list_principal_bindings<'e>(
 /// `expected_revision` and advances its revision by one. The new
 /// `claim_match_policy` must have every predicate the new profile requires
 /// ([`validate_claim_match_policy`], checked before the statement, so a
-/// rejected policy is that error whether or not the binding exists).
+/// rejected policy is [`RegistryError::RequiredPredicate`] whether or not
+/// the binding exists).
 /// Removing an optional predicate widens the binding; reviewing that stays
 /// with the service (ADR-016 item 2).
 pub async fn update_principal_binding<'e>(
@@ -408,6 +410,13 @@ pub async fn remove_service_identity_resource_server<'e>(
 /// same-tenant binding of the grant's actor
 /// (`service_grant_binding_binding_id_fkey`), and each audience assigned to
 /// the tenant (`service_grant_resource_server_assignment_fkey`).
+///
+/// An impersonation grant must be created with all its bindings and
+/// audiences in this call. Since `0009` it never changes afterwards:
+/// [`add_service_grant_binding`] and the other list-set changes first
+/// advance the grant's revision with an `UPDATE`, which the guard refuses,
+/// so they fail with [`RegistryError::Guard`] even inside the creating
+/// transaction.
 pub async fn create_service_grant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewServiceGrant,

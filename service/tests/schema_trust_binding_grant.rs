@@ -258,6 +258,15 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
             guard("service_grant", "delete_disabled_only", false),
             // The version revision of 0007 (schema_registry_shape.rs).
             guard("trust_keyset_version", "revision", false),
+            // The impersonation freeze of 0009
+            // (schema_reserved_ids_and_dormant_grants.rs).
+            guard("service_grant", "impersonation_frozen", false),
+            guard("service_grant_binding", "impersonation_frozen", false),
+            guard(
+                "service_grant_resource_server",
+                "impersonation_frozen",
+                false,
+            ),
         ])
         .collect();
     expected.sort();
@@ -1655,8 +1664,8 @@ async fn grant_mode_fixes_its_target_and_activation_state() {
         23503 INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', 'usr_1', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required')
         23503 INSERT INTO service_grant VALUES ('grt_x', 'ten_x', 'x', 'wld_1', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required')
         23514 INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', 'svc_1', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required', 1, 'service')
-        23514 UPDATE service_grant SET status = 'enabled', revision = revision + 1 WHERE id = 'grt_3'
-        23514 UPDATE service_grant SET activation_state = 'not_required', revision = revision + 1 WHERE id = 'grt_3'
+        SK001 UPDATE service_grant SET status = 'enabled', revision = revision + 1 WHERE id = 'grt_3'
+        SK001 UPDATE service_grant SET activation_state = 'not_required', revision = revision + 1 WHERE id = 'grt_3'
         23514 UPDATE service_grant SET activation_state = 'requires_reapproval', revision = revision + 1 WHERE id = 'grt_2'
         SK001 UPDATE service_grant SET mode = 'delegation', revision = revision + 1 WHERE id = 'grt_3'
         SK001 UPDATE service_grant SET mode = 'delegation', target_service_id = 'svc_1', revision = revision + 1 WHERE id = 'grt_1'
@@ -1664,17 +1673,17 @@ async fn grant_mode_fixes_its_target_and_activation_state() {
         SK001 UPDATE service_grant SET actor_principal_id = 'wld_2', revision = revision + 1 WHERE id = 'grt_1'
         SK001 UPDATE service_grant SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'grt_1'
         SK001 UPDATE service_grant SET id = 'grt_9', revision = revision + 1 WHERE id = 'grt_1'
+        SK001 UPDATE service_grant SET name = 'dormant-renamed', scopes = '["read", "deploy:write"]', revision = revision + 1 WHERE id = 'grt_3'
     "#).await;
-    // The dormant record keeps its desired policy; other fields of a
-    // disabled impersonation grant may still be edited.
+    // Enabling the dormant record or clearing its marker fails the 0004
+    // checks, but since 0009 its guard refuses every update of it first,
+    // other fields included (schema_reserved_ids_and_dormant_grants.rs).
     run(
         &pool,
-        r#"UPDATE service_grant SET name = 'dormant-renamed', scopes = '["read", "deploy:write"]',
-               revision = revision + 1 WHERE id = 'grt_3';
-           UPDATE service_grant SET status = 'disabled', revision = revision + 1 WHERE id = 'grt_2'"#,
+        "UPDATE service_grant SET status = 'disabled', revision = revision + 1 WHERE id = 'grt_2'",
     )
     .await;
-    assert_eq!(revision(&pool, "service_grant").await, [1, 2, 2, 1]);
+    assert_eq!(revision(&pool, "service_grant").await, [1, 2, 1, 1]);
     db.drop([pool]).await;
 }
 
@@ -1752,11 +1761,13 @@ async fn grant_references_stay_with_its_actor_and_tenant() {
         23503 ALTER TABLE audience_tenant_assignment DISABLE TRIGGER USER; DELETE FROM audience_tenant_assignment WHERE id = 'ata_2'
         23503 ALTER TABLE service_identity DISABLE TRIGGER USER; DELETE FROM service_identity WHERE id = 'svc_1'
         23503 ALTER TABLE service_grant DISABLE TRIGGER USER; DELETE FROM service_grant WHERE id = 'grt_1'
+        SK001 INSERT INTO service_grant_resource_server VALUES ('grt_3', 'ten_a', 'rs_1')
     ").await;
+    // The impersonation grant grt_3 takes no new audience after its
+    // creating transaction (0009, schema_reserved_ids_and_dormant_grants.rs).
     run(
         &pool,
-        "INSERT INTO service_grant_binding VALUES ('grt_1', 'bnd_2', 'ten_a', 'wld_1');
-         INSERT INTO service_grant_resource_server VALUES ('grt_3', 'ten_a', 'rs_1')",
+        "INSERT INTO service_grant_binding VALUES ('grt_1', 'bnd_2', 'ten_a', 'wld_1')",
     )
     .await;
     let bindings = rows(
@@ -2304,7 +2315,7 @@ async fn trust_guards_hold_under_replica_role() {
         SK001 DELETE FROM service_grant_binding WHERE grant_id = 'grt_1'
         SK001 INSERT INTO service_grant VALUES ('grt_x', 'ten_a', 'x', 'wld_1', NULL, 'direct', '[]', NULL, '{}', 300, NULL, 'enabled', 'not_required')
         23514 UPDATE trust_source SET discovery_url = NULL, revision = revision + 1 WHERE id = 'src_gh'
-        23514 UPDATE service_grant SET status = 'enabled', revision = revision + 1 WHERE id = 'grt_3'
+        SK001 UPDATE service_grant SET status = 'enabled', revision = revision + 1 WHERE id = 'grt_3'
     "#).await;
     conn.close().await.unwrap();
     for table in TABLES {
