@@ -18,9 +18,20 @@
 //! statement checks all three again rather than rely on them.
 //!
 //! A direct grant loads no target service and needs no target audience
-//! row, whatever its `target_service_id` holds (inferred). The `0004` check
+//! row, whatever its `target_service_id` holds (provisional lead pick,
+//! 2026-11-21; defense in depth). The `0004` check
 //! `service_grant_target_mode_check` keeps that column `NULL` for a direct
 //! grant; the statement keys the target off `mode` rather than rely on it.
+//! For a corrupt direct row this is looser than keying the target off
+//! `target_service_id`: a stray, dangling or other-tenant target now loads
+//! with no target service ceiling, where that would have loaded the stray
+//! target as a ceiling or given `None`. It is defense in depth for the
+//! ceiling set should the check be dropped, not a fail-closed recheck of
+//! the check, unlike the foreign key rechecks above.
+//! [`select_grant`](super::select_grant) and
+//! [`get_service_grant`](super::get_service_grant) still return the raw
+//! [`ServiceGrant::target_service_id`](super::ServiceGrant::target_service_id)
+//! of a direct grant, so exchange code must key the target off `mode` too.
 //!
 //! When the grant does not exist in the tenant, or the audience does not
 //! exist, is not assigned to the tenant, is not in the grant's set or, for
@@ -62,10 +73,16 @@ use super::{
 /// The target is joined, and its audience row required, only for a grant
 /// whose `mode` is not `direct`: a direct grant loads no target service
 /// even with a `target_service_id` (which the `0004` check
-/// `service_grant_target_mode_check` prevents; inferred). A delegation or
-/// impersonation grant whose target service is missing (which the `0004`
-/// foreign key prevents), or whose target service does not list the
-/// resource server (IR-083), gives no row.
+/// `service_grant_target_mode_check` prevents; provisional lead pick,
+/// 2026-11-21; defense in depth). For a corrupt direct row that is looser
+/// than keying the target off `target_service_id`: a stray, dangling or
+/// other-tenant target loads with no target service ceiling. It guards the
+/// ceiling set should the check be dropped; it is not a fail-closed
+/// recheck of the check, unlike the tenant rechecks of the foreign keys. A
+/// delegation or impersonation grant whose target service is missing
+/// (which the `0004` foreign key prevents), whose `target_service_id` is
+/// `NULL` (which the check prevents), or whose target service does not
+/// list the resource server (IR-083), gives no row.
 const LOAD_SCOPE_CEILINGS: &str = "\
     SELECT g.id AS grant_id, g.mode AS grant_mode, g.status AS grant_status, \
            g.revision AS grant_revision, g.scopes AS grant_scopes, \
@@ -120,7 +137,8 @@ pub struct LoadedCeilings {
     /// The grant's target service identity, with its `max_scopes`: `Some`
     /// exactly for a delegation grant or an impersonation grant (stored only
     /// disabled); `None` for a direct grant, whatever its
-    /// `target_service_id` holds (inferred).
+    /// `target_service_id` holds (provisional lead pick, 2026-11-21;
+    /// defense in depth).
     pub target_service: Option<CeilingRecord>,
 }
 
@@ -130,7 +148,7 @@ impl LoadedCeilings {
     /// delegation or impersonation grant (IR-062; inferred for
     /// impersonation, which v0.1 never issues). A direct grant has no
     /// target service ceiling, whatever its `target_service_id` holds
-    /// (inferred).
+    /// (provisional lead pick, 2026-11-21; defense in depth).
     pub fn scope_ceilings(&self) -> ScopeCeilings {
         ScopeCeilings {
             resource_server: self.resource_server.scopes.clone(),
@@ -180,8 +198,9 @@ fn record(row: &PgRow, prefix: &str) -> Result<CeilingRecord, sqlx::Error> {
 /// `None` when the grant, the audience, its assignment to the tenant, its
 /// place in the grant's audience set or, for a delegation or impersonation
 /// grant, its target service or its place in that service's audience set is
-/// missing. A direct grant loads no target service (inferred). Disabled
-/// records are returned; see [`LoadedCeilings::all_enabled`].
+/// missing. A direct grant loads no target service (provisional lead pick,
+/// 2026-11-21; defense in depth). Disabled records are returned; see
+/// [`LoadedCeilings::all_enabled`].
 pub async fn load_scope_ceilings<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,

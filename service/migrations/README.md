@@ -2158,8 +2158,15 @@ target service's `max_scopes`, each with its ID, status and revision. The
 audience must be in the grant's set, assigned to the grant's tenant and, for a
 delegation or impersonation grant, in its target service's set too (IR-083). A
 direct grant loads no target service and needs no target audience row, whatever
-its `target_service_id` holds (inferred): the statement keys the target off
-`mode` rather than rely on `service_grant_target_mode_check`. A missing grant
+its `target_service_id` holds (provisional lead pick, 2026-11-21; defense in
+depth): the statement keys the target off `mode` rather than rely on
+`service_grant_target_mode_check`. For a corrupt direct row this is looser than
+keying the target off `target_service_id`: a stray, dangling or other-tenant
+target now loads with no target service ceiling. It is defense in depth for the
+ceiling set should the check be dropped, not a fail-closed recheck of the check,
+unlike the rechecks of the foreign keys. `select_grant` and `get_service_grant`
+still return the raw `target_service_id` of a direct grant, so exchange code
+must key the target off `mode` too. A missing grant
 or audience, an audience not assigned, not in the grant's set or not in the
 target service's set are all the same `None`, mapped to no error code here (the
 caller maps them to one `invalid_target`, ERR-024 (3); ADR-015 item 9.4).
