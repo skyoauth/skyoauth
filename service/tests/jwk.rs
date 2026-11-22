@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use skyoauth_service::jwk::{
     Algorithm, Base64urlError, DEFAULT_ALLOWED_ALGORITHMS, JwkError, JwkSet, JwkSetError,
     KEY_REFERENCE_MEMBERS, KeysetVersion, MAX_KEYS, MAX_SET_BYTES, OverlapError, PRIVATE_MEMBERS,
-    PublicKey, VersionStatus, live_keys, parse_jwk_set,
+    PublicKey, VersionStatus, check_version_overlap, live_keys, parse_jwk_set,
 };
 
 // RFC 7517 appendix A.1 / RFC 7638 section 3.1 (kid "2011-04-29").
@@ -56,8 +56,10 @@ fn b64(bytes: &[u8]) -> String {
     out
 }
 
+/// The RFC 7638 RSA key with `alg` `RS256`: under the default allowed
+/// set an RSA key needs `alg`, since both RS256 and PS256 fit it.
 fn rsa_key(kid: &str) -> Value {
-    json!({"kty": "RSA", "kid": kid, "n": RSA_N, "e": "AQAB"})
+    json!({"kty": "RSA", "kid": kid, "alg": "RS256", "n": RSA_N, "e": "AQAB"})
 }
 
 fn p256_key(kid: &str) -> Value {
@@ -78,7 +80,7 @@ fn ed25519_key(kid: &str) -> Value {
 
 /// A synthetic RSA key with the given modulus and exponent octets.
 fn rsa_with(kid: &str, n: &[u8], e: &[u8]) -> Value {
-    json!({"kty": "RSA", "kid": kid, "n": b64(n), "e": b64(e)})
+    json!({"kty": "RSA", "kid": kid, "alg": "RS256", "n": b64(n), "e": b64(e)})
 }
 
 /// An odd modulus of `len` octets whose first octet is `first`; `seed`
@@ -199,15 +201,123 @@ fn rfc_private_key_examples_are_refused() {
 }
 
 #[test]
-fn unknown_members_are_ignored() {
-    let jwk = with(
-        with(with(rsa_key("k"), "x5t", json!("abc")), "ext", json!(true)),
-        "D",
-        json!("not the private d: names are case-sensitive"),
-    );
-    accept(jwk);
-    // At the set level too.
-    parse(&json!({"keys": [rsa_key("k")], "extra": 1})).unwrap();
+fn allowlisted_members_are_accepted() {
+    // Every common member on every key type: kty, kid, use, key_ops, alg,
+    // x5t (20 octets) and x5t#S256 (32 octets).
+    let decorate = |jwk: Value, alg: &str| {
+        let jwk = with(jwk, "use", json!("sig"));
+        let jwk = with(jwk, "key_ops", json!(["verify"]));
+        let jwk = with(jwk, "alg", json!(alg));
+        let jwk = with(jwk, "x5t", json!(b64(&[0x11; 20])));
+        with(jwk, "x5t#S256", json!(b64(&[0x22; 32])))
+    };
+    for (jwk, alg) in [
+        (rsa_key("k"), "RS256"),
+        (p256_key("k"), "ES256"),
+        (p384_key("k"), "ES384"),
+        (p521_key("k"), "ES512"),
+        (ed25519_key("k"), "EdDSA"),
+    ] {
+        accept(decorate(jwk, alg));
+    }
+    for member in ["x5t", "x5t#S256"] {
+        accept(with(
+            rsa_key("k"),
+            member,
+            json!(b64(&vec![0x33; if member == "x5t" { 20 } else { 32 }])),
+        ));
+    }
+}
+
+#[test]
+fn certificate_thumbprints_are_checked() {
+    for (member, len) in [("x5t", 20), ("x5t#S256", 32)] {
+        for actual in [len - 1, len + 1, 0x40] {
+            assert_eq!(
+                reject(with(rsa_key("k"), member, json!(b64(&vec![1; actual])))),
+                JwkError::KeyLength {
+                    member,
+                    expected: len,
+                    actual
+                }
+            );
+        }
+        assert_eq!(
+            reject(with(
+                rsa_key("k"),
+                member,
+                json!("-----BEGIN CERTIFICATE-----")
+            )),
+            JwkError::Encoding {
+                member,
+                reason: Base64urlError::Alphabet
+            }
+        );
+        assert_eq!(
+            reject(with(rsa_key("k"), member, json!(1))),
+            JwkError::WrongType(member)
+        );
+    }
+}
+
+#[test]
+fn members_outside_the_allowlist_are_refused() {
+    let pem = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIJ1hsZ3v/VpguoRK9JLsLMREScVpezJpGXA7rAMcrn9g\n-----END PRIVATE KEY-----";
+    for jwk in [
+        // Nested private members.
+        with(rsa_key("k"), "privateKey", json!({"d": P256_D})),
+        with(
+            ed25519_key("k"),
+            "private",
+            json!({"kty": "OKP", "d": ED25519_D}),
+        ),
+        // A PEM string.
+        with(rsa_key("k"), "pem", json!(pem)),
+        with(p256_key("k"), "privateKeyPem", json!(pem)),
+        // Members of another key type.
+        with(
+            with(
+                with(rsa_key("k"), "crv", json!("P-256")),
+                "x",
+                json!(P256_X),
+            ),
+            "y",
+            json!(P256_Y),
+        ),
+        with(rsa_key("k"), "crv", json!("P-256")),
+        with(rsa_key("k"), "x", json!(P256_X)),
+        with(rsa_key("k"), "y", json!(P256_Y)),
+        with(with(p256_key("k"), "n", json!(RSA_N)), "e", json!("AQAB")),
+        with(p256_key("k"), "n", json!(RSA_N)),
+        with(p256_key("k"), "e", json!("AQAB")),
+        with(ed25519_key("k"), "y", json!(P256_Y)),
+        with(ed25519_key("k"), "n", json!(RSA_N)),
+        with(ed25519_key("k"), "e", json!("AQAB")),
+        // Unknown, extension and differently cased members.
+        with(rsa_key("k"), "ext", json!(true)),
+        with(rsa_key("k"), "Kid", json!("k")),
+        with(rsa_key("k"), "", json!("")),
+        with(rsa_key("k"), "x5t#S512", json!(b64(&[1; 64]))),
+        with(rsa_key("k"), "jwk", json!(rsa_key("k"))),
+    ] {
+        assert_eq!(reject(jwk.clone()), JwkError::UnexpectedMember, "{jwk}");
+    }
+}
+
+#[test]
+fn set_members_other_than_keys_are_refused() {
+    for extra in [
+        json!({"kty": "oct", "k": "AQAB"}),
+        json!(1),
+        json!("-----BEGIN PRIVATE KEY-----"),
+        json!(null),
+    ] {
+        for name in ["private_jwk", "extra", "Keys", ""] {
+            let mut set = set_of(vec![rsa_key("k")]);
+            set[name] = extra.clone();
+            assert_eq!(parse(&set), Err(JwkSetError::UnexpectedMember), "{name}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -245,8 +355,37 @@ fn each_private_member_is_refused_without_a_valid_public_part() {
 
 #[test]
 fn private_members_are_case_sensitive() {
+    // Other cases are not the private members, but they are outside the
+    // allowlist.
     for member in ["D", "P", "Q", "DP", "Dq", "QI", "OTH", "K"] {
-        accept(with(rsa_key("k"), member, json!("AQAB")));
+        assert_eq!(
+            reject(with(rsa_key("k"), member, json!("AQAB"))),
+            JwkError::UnexpectedMember
+        );
+    }
+}
+
+#[test]
+fn private_members_are_refused_whatever_their_value() {
+    for member in PRIVATE_MEMBERS {
+        for value in [
+            json!(null),
+            json!(0),
+            json!(1.5),
+            json!({}),
+            json!({"d": "AQAB"}),
+            json!([]),
+            json!(true),
+            json!(""),
+        ] {
+            for jwk in [rsa_key("k"), p256_key("k"), ed25519_key("k"), json!({})] {
+                assert_eq!(
+                    reject(with(jwk, member, value.clone())),
+                    JwkError::PrivateMember(member),
+                    "{member}: {value}"
+                );
+            }
+        }
     }
 }
 
@@ -427,6 +566,9 @@ fn rsa_exponent_bounds() {
 #[test]
 fn ec_coordinates_have_the_exact_curve_length() {
     for (crv, len) in [("P-256", 32), ("P-384", 48), ("P-521", 66)] {
+        // These points are not on the curve: only lengths are checked
+        // until the on-curve check lands (module follow-ups), and these
+        // fixtures will change then.
         let key = |x: usize, y: usize| json!({"kty": "EC", "kid": "k", "crv": crv, "x": b64(&vec![7; x]), "y": b64(&vec![9; y])});
         accept(key(len, len));
         for (member, x, y) in [
@@ -749,14 +891,49 @@ fn alg_must_be_in_the_allowed_set() {
 
 #[test]
 fn a_key_without_alg_needs_an_allowed_algorithm_of_its_type() {
+    let rsa = without(rsa_key("k"), "alg");
     let only_es256 = &[Algorithm::Es256][..];
     parse_jwk_set(&set_of(vec![p256_key("k")]), only_es256).unwrap();
-    for jwk in [rsa_key("k"), p384_key("k"), p521_key("k"), ed25519_key("k")] {
+    for jwk in [rsa.clone(), p384_key("k"), p521_key("k"), ed25519_key("k")] {
         assert_eq!(reject_with(jwk, only_es256), JwkError::NoAllowedAlgorithm);
     }
-    parse_jwk_set(&set_of(vec![rsa_key("k")]), &[Algorithm::Ps256]).unwrap();
-    for jwk in [rsa_key("k"), p256_key("k"), ed25519_key("k")] {
+    parse_jwk_set(&set_of(vec![rsa.clone()]), &[Algorithm::Ps256]).unwrap();
+    parse_jwk_set(
+        &set_of(vec![rsa.clone()]),
+        &[Algorithm::Rs256, Algorithm::Es256],
+    )
+    .unwrap();
+    for jwk in [rsa, p256_key("k"), ed25519_key("k")] {
         assert_eq!(reject_with(jwk, &[]), JwkError::NoAllowedAlgorithm);
+    }
+}
+
+#[test]
+fn alg_is_required_when_several_allowed_algorithms_fit() {
+    let rsa = without(rsa_key("k"), "alg");
+    // RS256 and PS256 both fit an RSA key.
+    assert_eq!(reject(rsa.clone()), JwkError::AlgorithmRequired);
+    assert_eq!(
+        reject_with(rsa.clone(), &[Algorithm::Rs256, Algorithm::Ps256]),
+        JwkError::AlgorithmRequired
+    );
+    for alg in ["RS256", "PS256"] {
+        assert_eq!(
+            accept(with(rsa.clone(), "alg", json!(alg))).keys()[0]
+                .alg()
+                .unwrap()
+                .name(),
+            alg
+        );
+    }
+    // Exactly one algorithm fits each EC curve and Ed25519.
+    for jwk in [
+        p256_key("k"),
+        p384_key("k"),
+        p521_key("k"),
+        ed25519_key("k"),
+    ] {
+        assert_eq!(accept(jwk).keys()[0].alg(), None);
     }
 }
 
@@ -805,8 +982,10 @@ fn key_count_bound() {
     );
 }
 
-/// A valid set whose compact JSON is exactly `size` bytes, padded with an
-/// ignored top-level member.
+/// A set whose compact JSON is exactly `size` bytes, padded with a
+/// top-level member. The member makes the set invalid (no set within the
+/// allowlist and the key bounds reaches 64 KiB), so the bound shows as
+/// `TooLarge` above it and as another error at it.
 fn set_of_size(size: usize) -> Value {
     let mut set = json!({"keys": [rsa_key("k")], "pad": ""});
     let base = serde_json::to_string(&set).unwrap().len();
@@ -818,7 +997,10 @@ fn set_of_size(size: usize) -> Value {
 #[test]
 fn serialized_size_bound() {
     assert_eq!(MAX_SET_BYTES, 65536);
-    parse(&set_of_size(MAX_SET_BYTES)).unwrap();
+    assert_eq!(
+        parse(&set_of_size(MAX_SET_BYTES)),
+        Err(JwkSetError::UnexpectedMember)
+    );
     assert_eq!(
         parse(&set_of_size(MAX_SET_BYTES + 1)),
         Err(JwkSetError::TooLarge)
@@ -975,7 +1157,11 @@ fn one_key_under_two_kids_in_live_versions_conflicts() {
 fn one_kid_and_key_with_two_algs_in_live_versions_conflicts() {
     let first = accept(with(rsa_key("a"), "alg", json!("RS256")));
     let second = accept(with(rsa_key("a"), "alg", json!("PS256")));
-    let third = accept(rsa_key("a"));
+    let third = parse_jwk_set(
+        &set_of(vec![without(rsa_key("a"), "alg")]),
+        &[Algorithm::Rs256],
+    )
+    .unwrap();
     for other in [&second, &third] {
         let versions = [
             version("v1", &first, t(0), None),
@@ -995,6 +1181,227 @@ fn one_kid_and_key_with_two_algs_in_live_versions_conflicts() {
 #[test]
 fn no_versions_give_no_live_keys() {
     assert!(live_keys(&[], t(0)).unwrap().is_empty());
+}
+
+#[test]
+fn a_version_given_twice_is_listed_once() {
+    let keys = accept(p256_key("a"));
+    let v = version("v1", &keys, t(0), None);
+    let live = live_keys(&[v, v], t(0)).unwrap();
+    assert_eq!(kids(&live), [("a".into(), vec!["v1".into()])]);
+}
+
+#[test]
+fn empty_and_inverted_windows_are_never_live() {
+    let keys = accept(p256_key("a"));
+    let empty = version("v1", &keys, t(100), Some(t(100)));
+    let inverted = version("v2", &keys, t(100), Some(t(50)));
+    for at in [t(49), t(50), t(75), t(99), t(100), t(101)] {
+        assert!(!empty.is_live(at));
+        assert!(!inverted.is_live(at));
+    }
+    let open = version("v3", &keys, t(0), None);
+    for v in [empty, inverted] {
+        assert!(!v.windows_intersect(&open));
+        assert!(!open.windows_intersect(&v));
+        assert!(!v.windows_intersect(&v));
+    }
+}
+
+fn kid_conflict(kid: &str, first: &str, second: &str) -> OverlapError {
+    let kid = accept(p256_key(kid)).keys()[0].kid().clone();
+    OverlapError::KidConflict {
+        kid,
+        first_version: first.into(),
+        second_version: second.into(),
+    }
+}
+
+#[test]
+fn windows_intersect_is_half_open_and_symmetric() {
+    let keys = accept(p256_key("a"));
+    let window = |start: u64, end: Option<u64>| version("v", &keys, t(start), end.map(t));
+    let cases = [
+        // (a, b, intersect)
+        ((0, Some(100)), (100, None), false),
+        ((0, Some(100)), (99, None), true),
+        ((0, Some(100)), (100, Some(200)), false),
+        ((0, Some(100)), (50, Some(60)), true),
+        ((0, None), (1_000_000, None), true),
+        ((100, None), (100, Some(200)), true),
+        ((100, Some(101)), (100, Some(101)), true),
+        ((0, Some(100)), (200, Some(300)), false),
+    ];
+    for ((a0, a1), (b0, b1), expected) in cases {
+        let (a, b) = (window(a0, a1), window(b0, b1));
+        assert_eq!(
+            a.windows_intersect(&b),
+            expected,
+            "{a0} {a1:?} / {b0} {b1:?}"
+        );
+        assert_eq!(
+            b.windows_intersect(&a),
+            expected,
+            "{b0} {b1:?} / {a0} {a1:?}"
+        );
+    }
+    // Statuses play no part.
+    let (mut a, mut b) = (window(0, None), window(0, None));
+    a.status = VersionStatus::Disabled;
+    b.status = VersionStatus::Disabled;
+    assert!(a.windows_intersect(&b));
+}
+
+#[test]
+fn write_check_catches_a_future_conflict() {
+    let first = accept(p256_key("a"));
+    let second = accept(p384_key("a"));
+    let existing = [version("v1", &first, t(0), None)];
+    let new = version("v2", &second, t(1000), None);
+    // Nothing is live together yet, so the live check sees no conflict...
+    assert_eq!(live_keys(&[existing[0], new], t(0)).unwrap().len(), 1);
+    // ...but the write check refuses the version that will conflict.
+    assert_eq!(
+        check_version_overlap(&new, &existing),
+        Err(kid_conflict("a", "v1", "v2"))
+    );
+}
+
+#[test]
+fn write_check_catches_a_conflict_on_re_enable() {
+    let first = accept(p256_key("a"));
+    let second = accept(p384_key("a"));
+    let v1 = version("v1", &first, t(0), None);
+    let mut v2 = version("v2", &second, t(0), None);
+    v2.status = VersionStatus::Disabled;
+    // While v2 is disabled, the live set has no conflict.
+    assert_eq!(live_keys(&[v1, v2], t(10)).unwrap().len(), 1);
+    // Re-enabling v2 is checked against v1, whatever the statuses say.
+    assert_eq!(
+        check_version_overlap(&v2, &[v1]),
+        Err(kid_conflict("a", "v1", "v2"))
+    );
+    v2.status = VersionStatus::Enabled;
+    assert_eq!(
+        check_version_overlap(&v2, &[v1]),
+        Err(kid_conflict("a", "v1", "v2"))
+    );
+    // A disabled existing version still counts: it may be re-enabled.
+    let mut v1_disabled = v1;
+    v1_disabled.status = VersionStatus::Disabled;
+    assert_eq!(
+        check_version_overlap(&v2, &[v1_disabled]),
+        Err(kid_conflict("a", "v1", "v2"))
+    );
+}
+
+#[test]
+fn write_check_passes_windows_that_do_not_intersect() {
+    let first = accept(p256_key("a"));
+    let second = accept(p384_key("a"));
+    let v1 = version("v1", &first, t(0), Some(t(100)));
+    // Starts exactly when v1 expires.
+    let v2 = version("v2", &second, t(100), None);
+    assert_eq!(check_version_overlap(&v2, &[v1]), Ok(()));
+    assert_eq!(check_version_overlap(&v1, &[v2]), Ok(()));
+    // One instant of overlap is enough.
+    let v3 = version("v3", &second, t(99), None);
+    assert_eq!(
+        check_version_overlap(&v3, &[v1]),
+        Err(kid_conflict("a", "v1", "v3"))
+    );
+    // Empty and inverted windows conflict with nothing.
+    for end in [t(0), t(50)] {
+        let empty = version("v4", &second, t(50), Some(end));
+        assert!(end <= t(50));
+        assert_eq!(check_version_overlap(&empty, &[v1]), Ok(()));
+        assert_eq!(check_version_overlap(&v1, &[empty]), Ok(()));
+    }
+}
+
+#[test]
+fn write_check_with_equal_starts() {
+    let first = accept(p256_key("a"));
+    let second = accept(p384_key("a"));
+    let v1 = version("v1", &first, t(100), None);
+    let v2 = version("v2", &second, t(100), Some(t(200)));
+    assert_eq!(
+        check_version_overlap(&v2, &[v1]),
+        Err(kid_conflict("a", "v1", "v2"))
+    );
+    // An equal start and expiry is an empty window.
+    let v3 = version("v3", &second, t(100), Some(t(100)));
+    assert_eq!(check_version_overlap(&v3, &[v1]), Ok(()));
+}
+
+#[test]
+fn write_check_applies_the_key_and_alg_rules() {
+    let rsa_a = accept(rsa_key("a"));
+    let rsa_b = accept(rsa_key("b"));
+    let rsa_a_ps = accept(with(rsa_key("a"), "alg", json!("PS256")));
+    let other = parse(&set_of(vec![p256_key("c"), ed25519_key("d")])).unwrap();
+    let v1 = version("v1", &rsa_a, t(0), None);
+    // One key under two kids.
+    match check_version_overlap(&version("v2", &rsa_b, t(0), None), &[v1]) {
+        Err(OverlapError::KeyConflict {
+            first_kid,
+            second_kid,
+            first_version,
+            second_version,
+        }) => assert_eq!(
+            (
+                first_kid.as_str(),
+                second_kid.as_str(),
+                &*first_version,
+                &*second_version
+            ),
+            ("a", "b", "v1", "v2")
+        ),
+        other => panic!("{other:?}"),
+    }
+    // One kid and key with two algs.
+    assert_eq!(
+        check_version_overlap(&version("v2", &rsa_a_ps, t(0), None), &[v1]),
+        Err(OverlapError::AlgorithmConflict {
+            kid: rsa_a.keys()[0].kid().clone(),
+            first_version: "v1".into(),
+            second_version: "v2".into(),
+        })
+    );
+    // The same kid, key and alg (explicit overlap) and unrelated keys pass.
+    let v_same = version("v2", &rsa_a, t(0), None);
+    let v_other = version("v3", &other, t(0), None);
+    assert_eq!(check_version_overlap(&v_same, &[v1, v_other]), Ok(()));
+    assert_eq!(check_version_overlap(&v_other, &[v1, v_same]), Ok(()));
+    assert_eq!(check_version_overlap(&v1, &[]), Ok(()));
+    // Existing versions are compared with the new one, not each other.
+    let v_conflicting = version("v4", &rsa_b, t(0), None);
+    assert_eq!(
+        check_version_overlap(&v_other, &[v1, v_conflicting]),
+        Ok(())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Known gaps until the on-curve check (module follow-ups)
+
+#[test]
+fn invalid_points_pass_until_the_on_curve_check_lands() {
+    // These assertions record today's gap and must flip when the on-curve
+    // and canonical-point checks land; the write path must not rely on
+    // this module alone until then.
+    // P-256 (0, 0) is not on the curve.
+    accept(
+        json!({"kty": "EC", "kid": "k", "crv": "P-256", "x": b64(&[0; 32]), "y": b64(&[0; 32])}),
+    );
+    // A P-521 coordinate equal to p = 2^521 - 1 is out of the field.
+    let mut p = vec![0xff; 66];
+    p[0] = 0x01;
+    accept(json!({"kty": "EC", "kid": "k", "crv": "P-521", "x": b64(&p), "y": b64(&p)}));
+    // The Ed25519 identity point (y = 1), a small-order point.
+    let mut identity = [0; 32];
+    identity[0] = 1;
+    accept(json!({"kty": "OKP", "kid": "k", "crv": "Ed25519", "x": b64(&identity)}));
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,10 +1450,12 @@ fn marker_octets_are_what_the_leak_check_looks_for() {
 
 #[test]
 fn errors_and_debug_output_never_contain_key_material() {
-    let rsa = json!({"kty": "RSA", "kid": "m", "n": marked_n(), "e": "AQAB"});
+    let rsa = json!({"kty": "RSA", "kid": "m", "alg": "RS256", "n": marked_n(), "e": "AQAB"});
     let ed = json!({"kty": "OKP", "kid": "m", "crv": "Ed25519", "x": marked_x()});
     let ec = json!({"kty": "EC", "kid": "m", "crv": "P-256", "x": marked_x(), "y": marked_x()});
-    // The marked keys are valid on their own.
+    // The marked keys pass this module's checks today. They are not real
+    // keys (the EC and Ed25519 points are not on their curves), and these
+    // fixtures will change when the on-curve check lands.
     let rsa_set = accept(rsa.clone());
     let ed_set = accept(ed.clone());
     let ec_set = accept(ec.clone());
@@ -1065,6 +1474,19 @@ fn errors_and_debug_output_never_contain_key_material() {
         set_of(vec![with(rsa.clone(), "alg", json!(MARKER))]),
         set_of(vec![with(rsa.clone(), "d", json!(marked_n()))]),
         set_of(vec![with(rsa.clone(), MARKER, json!(marked_n()))]),
+        set_of(vec![with(rsa.clone(), &marked_n(), json!(1))]),
+        set_of(vec![with(
+            rsa.clone(),
+            "privateKey",
+            json!({"d": marked_n()}),
+        )]),
+        set_of(vec![with(rsa.clone(), "x5t", json!(marked_x()))]),
+        set_of(vec![without(rsa.clone(), "alg")]),
+        with(
+            set_of(vec![rsa.clone()]),
+            MARKER,
+            json!({"kty": "oct", "k": marked_n()}),
+        ),
         set_of(vec![with(rsa.clone(), "x5c", json!([marked_n()]))]),
         set_of(vec![with(rsa.clone(), "use", json!(MARKER))]),
         set_of(vec![with(rsa.clone(), "key_ops", json!([MARKER]))]),
@@ -1109,9 +1531,8 @@ fn errors_and_debug_output_never_contain_key_material() {
             outputs.push(format!("{error:#?}"));
         }
     }
-    // Every set above fails but the one with an unknown member, which is
-    // ignored.
-    assert_eq!(failures, failing_sets.len() - 1);
+    // Every set above fails.
+    assert_eq!(failures, failing_sets.len());
     // Overlap conflicts between the marked keys.
     let ed_other = accept(with(ed.clone(), "kid", json!("other")));
     for (first, second) in [(&ed_set, &ed_other), (&rsa_set, &ed_set)] {
@@ -1120,6 +1541,9 @@ fn errors_and_debug_output_never_contain_key_material() {
             version("v2", second, t(0), None),
         ];
         let error = live_keys(&versions, t(0)).unwrap_err();
+        outputs.push(error.to_string());
+        outputs.push(format!("{error:?}"));
+        let error = check_version_overlap(&versions[1], &versions[..1]).unwrap_err();
         outputs.push(error.to_string());
         outputs.push(format!("{error:?}"));
     }

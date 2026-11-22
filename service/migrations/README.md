@@ -436,7 +436,7 @@ not part of it.
 - **Keysets and versions.** A version holds a JWK Set whose `keys` is a
   nonempty array of objects (nonempty inferred), none with a private or
   symmetric member (`d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k`), so a
-  private-key upload is rejected here too (ADR-005 items 2 and 8). Versions
+  private-key upload is rejected here too (ADR-005 items 1, 5 and 8). Versions
   are immutable (tasks §3 "Ownership"); that `status` alone may change is
   inferred. `expires_at`, when set, is after `effective_at` (inferred);
   versions may overlap.
@@ -576,10 +576,25 @@ The database does not enforce these rules; the service must:
   adds");
 - check JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
   upload (T11.3). The pure module `skyoauth_service::jwk` now does these
-  checks (provisional picks, its module docs list them): `parse_jwk_set`
-  for one version's set, RFC 7638 thumbprints, and `live_keys` for
-  conflicts between live versions. The keyset write path does not call it
-  yet (T11.9, T24.2);
+  checks (provisional picks, its module docs list them, the unsourced ones
+  marked inferred): `parse_jwk_set` for one version's set, with RFC 7638
+  thumbprints; `check_version_overlap` at write and at re-enable, against
+  every version whose window intersects, whatever its status; and
+  `live_keys` at verification time, where one conflict denies the whole
+  live set (inferred). `live_keys` alone does not cover T11.3: it sees a
+  conflict only once both versions are live. Exceptions: EC points are
+  not checked on-curve and Ed25519 keys are not checked canonical or
+  non-small-order (only lengths: the P-256 point (0, 0), a P-521
+  coordinate >= p and the Ed25519 identity point pass today), and the raw
+  request body is not bounded (only the parsed value is). The module must
+  not be the only validation on any keyset write path (T11.9, T24.2)
+  until (a) EC points are checked on-curve with x, y < p and (b) Ed25519
+  keys are canonical (y < p) and not small-order, or the write path also
+  imports each key with the verifying crate in strict mode and refuses
+  keys it cannot import. T11.7 must use strict Ed25519 verification.
+  T24.3's "fake keys" negative is the acceptance test. The wiring PR must
+  enforce a raw request-body size limit before parsing. The keyset write
+  path does not call the module yet;
 - keep `default_scopes` and `scopes` within every other ceiling (service,
   assignment, resource server; IR-063) and check resource constraints
   against their schemas (IR-123, IR-141);

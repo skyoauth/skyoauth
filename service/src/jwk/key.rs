@@ -20,6 +20,18 @@ pub const PRIVATE_MEMBERS: [&str; 8] = ["d", "p", "q", "dp", "dq", "qi", "oth", 
 /// ADR-005 item 8 (see the module docs of [`crate::jwk`]).
 pub const KEY_REFERENCE_MEMBERS: [&str; 3] = ["x5u", "x5c", "jku"];
 
+/// The members every accepted key may carry besides its key type's own
+/// (inferred allowlist): `kty`, `kid`, `use`, `key_ops`, `alg`, `x5t`
+/// and `x5t#S256`. Any other member is refused, unknown ones included.
+pub const COMMON_MEMBERS: [&str; 7] = ["kty", "kid", "use", "key_ops", "alg", "x5t", "x5t#S256"];
+
+/// The key members of `kty` `RSA` (RFC 7518 section 6.3.1).
+pub const RSA_MEMBERS: [&str; 2] = ["n", "e"];
+/// The key members of `kty` `EC` (RFC 7518 section 6.2.1).
+pub const EC_MEMBERS: [&str; 3] = ["crv", "x", "y"];
+/// The key members of `kty` `OKP` (RFC 8037 section 2).
+pub const OKP_MEMBERS: [&str; 2] = ["crv", "x"];
+
 /// The smallest RSA modulus, in bits (lead pick, inferred).
 pub const RSA_MIN_MODULUS_BITS: usize = 2048;
 /// The largest RSA modulus, in bits (inferred: a bound on verification
@@ -52,6 +64,18 @@ pub enum Algorithm {
     EdDsa,
 }
 
+/// Every algorithm this module knows, the list [`Algorithm::from_name`]
+/// parses, kept apart from the allowed set so that changing the allowed
+/// set never changes how a name parses.
+pub const KNOWN_ALGORITHMS: [Algorithm; 6] = [
+    Algorithm::Rs256,
+    Algorithm::Ps256,
+    Algorithm::Es256,
+    Algorithm::Es384,
+    Algorithm::Es512,
+    Algorithm::EdDsa,
+];
+
 /// The provisional default allowed algorithm set (lead decision,
 /// 2026-11-21, provisional; the set itself is OQ-TP-3, open).
 pub const DEFAULT_ALLOWED_ALGORITHMS: &[Algorithm] = &[
@@ -76,12 +100,10 @@ impl Algorithm {
         }
     }
 
-    /// The algorithm named exactly `name`, if this module knows it.
+    /// The algorithm named exactly `name`, if this module knows it (one of
+    /// [`KNOWN_ALGORITHMS`], whatever the allowed set).
     pub fn from_name(name: &str) -> Option<Self> {
-        DEFAULT_ALLOWED_ALGORITHMS
-            .iter()
-            .copied()
-            .find(|alg| alg.name() == name)
+        KNOWN_ALGORITHMS.into_iter().find(|alg| alg.name() == name)
     }
 }
 
@@ -311,6 +333,11 @@ pub enum JwkError {
     /// A member referring to keys or certificates outside the upload is
     /// present (one of [`KEY_REFERENCE_MEMBERS`]).
     KeyReference(&'static str),
+    /// A member outside the allowlist of the key type is present
+    /// ([`COMMON_MEMBERS`] plus [`RSA_MEMBERS`], [`EC_MEMBERS`] or
+    /// [`OKP_MEMBERS`]). The member is not named: its name is uploaded
+    /// text and may hold anything, key material included.
+    UnexpectedMember,
     /// A required member is absent.
     MissingMember(&'static str),
     /// A member has the wrong JSON type.
@@ -326,7 +353,8 @@ pub enum JwkError {
     },
     /// `crv` is not an accepted curve of the key type.
     UnsupportedCurve,
-    /// An `EC` coordinate or `OKP` key is not exactly the curve's length.
+    /// An `EC` coordinate or `OKP` key is not exactly the curve's length,
+    /// or an `x5t` or `x5t#S256` is not exactly 20 or 32 octets.
     KeyLength {
         member: &'static str,
         expected: usize,
@@ -366,6 +394,9 @@ pub enum JwkError {
     AlgorithmMismatch(Algorithm),
     /// No `alg`, and no allowed algorithm fits the key type and curve.
     NoAllowedAlgorithm,
+    /// No `alg`, and more than one allowed algorithm fits the key type
+    /// and curve (inferred: one algorithm per key, RFC 8725 section 3.1).
+    AlgorithmRequired,
 }
 
 impl fmt::Display for JwkError {
@@ -379,6 +410,7 @@ impl fmt::Display for JwkError {
                 f,
                 "member \"{member}\" refers to keys or certificates outside the upload"
             ),
+            Self::UnexpectedMember => f.write_str("a member outside the allowlist is present"),
             Self::MissingMember(member) => write!(f, "member \"{member}\" is missing"),
             Self::WrongType(member) => write!(f, "member \"{member}\" has the wrong JSON type"),
             Self::SymmetricKeyType => f.write_str("kty \"oct\" (a symmetric key) is not accepted"),
@@ -431,6 +463,9 @@ impl fmt::Display for JwkError {
             }
             Self::NoAllowedAlgorithm => {
                 f.write_str("no allowed algorithm fits the key type or curve")
+            }
+            Self::AlgorithmRequired => {
+                f.write_str("alg is required: several allowed algorithms fit the key")
             }
         }
     }
@@ -575,6 +610,17 @@ pub(crate) fn parse_jwk(
         "oct" => return Err(JwkError::SymmetricKeyType),
         _ => return Err(JwkError::UnsupportedKeyType),
     };
+    let own: &[&str] = match kty {
+        Kty::Rsa => &RSA_MEMBERS,
+        Kty::Ec => &EC_MEMBERS,
+        Kty::Okp => &OKP_MEMBERS,
+    };
+    if jwk
+        .keys()
+        .any(|member| !COMMON_MEMBERS.contains(&member.as_str()) && !own.contains(&member.as_str()))
+    {
+        return Err(JwkError::UnexpectedMember);
+    }
     let kid = Kid::parse(required(jwk, "kid")?)?;
     if string(jwk, "use")?.is_some_and(|value| value != "sig") {
         return Err(JwkError::Use);
@@ -584,6 +630,14 @@ pub(crate) fn parse_jwk(
             if matches!(ops.as_slice(), [Value::String(op)] if op == "verify"));
         if !verify_only {
             return Err(JwkError::KeyOps);
+        }
+    }
+    // x5t and x5t#S256 are certificate thumbprints (RFC 7517 sections 4.8
+    // and 4.9): checked as such so they cannot carry anything else
+    // (inferred); otherwise unused.
+    for (member, len) in [("x5t", 20), ("x5t#S256", 32)] {
+        if jwk.contains_key(member) {
+            exact(jwk, member, len)?;
         }
     }
     let key = match kty {
@@ -607,12 +661,15 @@ pub(crate) fn parse_jwk(
             }
             Some(alg)
         }
-        None => {
-            if !compatible.iter().any(|alg| allowed.contains(alg)) {
-                return Err(JwkError::NoAllowedAlgorithm);
-            }
-            None
-        }
+        None => match compatible
+            .iter()
+            .filter(|alg| allowed.contains(alg))
+            .count()
+        {
+            0 => return Err(JwkError::NoAllowedAlgorithm),
+            1 => None,
+            _ => return Err(JwkError::AlgorithmRequired),
+        },
     };
     let thumbprint = thumbprint(&key);
     Ok(PublicJwk {

@@ -44,6 +44,9 @@ pub enum JwkSetError {
     NotAnObject,
     /// The set has no `keys` member.
     MissingKeys,
+    /// The set has a member other than `keys` (inferred). The member is
+    /// not named: its name is uploaded text.
+    UnexpectedMember,
     /// `keys` is not an array.
     KeysNotArray,
     /// `keys` is empty.
@@ -70,6 +73,7 @@ impl fmt::Display for JwkSetError {
             Self::TooLarge => write!(f, "JWK set is larger than {MAX_SET_BYTES} bytes"),
             Self::NotAnObject => f.write_str("JWK set is not a JSON object"),
             Self::MissingKeys => f.write_str("JWK set has no \"keys\" member"),
+            Self::UnexpectedMember => f.write_str("JWK set has a member other than \"keys\""),
             Self::KeysNotArray => f.write_str("JWK set \"keys\" is not an array"),
             Self::NoKeys => f.write_str("JWK set \"keys\" is empty"),
             Self::TooManyKeys { count } => {
@@ -141,6 +145,9 @@ pub fn parse_jwk_set(value: &Value, allowed: &[Algorithm]) -> Result<JwkSet, Jwk
         Some(Value::Array(entries)) => entries,
         Some(_) => return Err(JwkSetError::KeysNotArray),
     };
+    if set.len() != 1 {
+        return Err(JwkSetError::UnexpectedMember);
+    }
     if entries.is_empty() {
         return Err(JwkSetError::NoKeys);
     }

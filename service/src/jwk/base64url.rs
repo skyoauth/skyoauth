@@ -159,6 +159,28 @@ mod tests {
     }
 
     #[test]
+    fn two_and_three_character_tails() {
+        // Canonical and noncanonical tails, checked with Python's base64
+        // module (decode, re-encode, compare): "ZA", "ZQ", "Zg", "Zw" are
+        // "d", "e", "f", "g"; "ZB", "ZC", "ZE", "ZI" decode to "d" with one
+        // of the four unused bits set.
+        for (text, bytes) in [("ZA", &b"d"[..]), ("ZQ", b"e"), ("Zg", b"f"), ("Zw", b"g")] {
+            assert_eq!(decode(text).unwrap(), bytes, "{text}");
+        }
+        for text in ["ZB", "ZC", "ZE", "ZI"] {
+            assert_eq!(decode(text), Err(Base64urlError::TrailingBits), "{text}");
+        }
+        // Three characters: "Zm8", "Zm4", "Zm0" are canonical; "Zm9",
+        // "Zm-", "Zm_" set one of the two unused bits.
+        for (text, bytes) in [("Zm8", &b"fo"[..]), ("Zm4", b"fn"), ("Zm0", b"fm")] {
+            assert_eq!(decode(text).unwrap(), bytes, "{text}");
+        }
+        for text in ["Zm9", "Zm-", "Zm_"] {
+            assert_eq!(decode(text), Err(Base64urlError::TrailingBits), "{text}");
+        }
+    }
+
+    #[test]
     fn rejects_noncanonical_forms() {
         assert_eq!(decode(""), Err(Base64urlError::Empty));
         assert_eq!(decode("Zg=="), Err(Base64urlError::Padding));
