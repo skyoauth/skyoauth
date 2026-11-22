@@ -234,6 +234,7 @@ use skyoauth_scenarios::{
     pg::TestDb,
     rep::{self, Replicas},
 };
+use skyoauth_service::jwk::{DEFAULT_ALLOWED_ALGORITHMS, parse_jwk_set};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -340,46 +341,341 @@ fn object(value: Value) -> JsonObject {
     }
 }
 
-/// A P-256 coordinate (`axis` `x` or `y`) of the key with `kid`: 32
-/// bytes derived deterministically from both, base64url without padding
-/// (43 characters), so each kid has its own key. The bytes are FNV-1a of
-/// `<axis>:<kid>` expanded by SplitMix64, with no new dependency. They are
-/// well-formed but not a point on the curve: the registry stores a JWK Set
-/// without checking its keys (only the `0004`
-/// `trust_keyset_version_public_jwks_check` against private members), no
-/// curve check exists yet, and no test here verifies a signature.
-fn coordinate(axis: &str, kid: &str) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut state = format!("{axis}:{kid}")
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-    let bytes: Vec<u8> = (0..4)
-        .flat_map(|_| {
-            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            (z ^ (z >> 31)).to_be_bytes()
-        })
-        .collect();
-    let mut out = String::with_capacity(43);
-    for chunk in bytes.chunks(3) {
-        let n = chunk
-            .iter()
-            .enumerate()
-            .fold(0_u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
-        for i in 0..=chunk.len() {
-            out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
-        }
-    }
-    out
+/// Real P-256 public points, `k`G for `k` = 1 to 34, as unpadded base64url
+/// `x` and `y` (43 characters each). Computed offline in pure Python and
+/// cross-checked with the `cryptography` package (each row equals the
+/// public key of private value `k` and loads as a P-256 public key);
+/// [`point`] checks each one again with [`on_p256`] whenever a fixture
+/// uses it.
+const P256_POINTS: [(&str, &str); 34] = [
+    // 1G
+    (
+        "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+        "T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+    ),
+    // 2G
+    (
+        "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXg",
+        "B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E",
+    ),
+    // 3G
+    (
+        "Xsvk0aYzCkTI9--VHUvxZebGtyHvramF-0FmG8bn_Ww",
+        "hzRkDEmY_343SwbOGmSi7NgqsDY4T7g9mnmxJ6J9UDI",
+    ),
+    // 4G
+    (
+        "4lNKNTLQj7ugLd5lnuYr0AMf4tt4VZbvUJMCRGsDCFI",
+        "4PFXWkxjPMcZ3-5f2oYtdk78lsPzDuAFXELCPxhO2MY",
+    ),
+    // 5G
+    (
+        "UVkLelFRQNLXhMhWCGaP3--Mgv0fW-UkIVVKDcPQM-0",
+        "4MF9qJBKcn2K4b82v4p5Jg0BLwDU2AiI0dC7RP2hbaQ",
+    ),
+    // 6G
+    (
+        "sBoXKnakYCyS0yQsuJfd4wJMdA3rshW0xrCq6Twikak",
+        "6FwQdDI32tVv7A4t-6cDeRwA93Acfha9_XxIU4_Hf-I",
+    ),
+    // 7G
+    (
+        "jlM7b6C_e0YluzBmfAH7YH75-LioD-9bMAYocDGHsqM",
+        "c-sdveAzGDZtBp-DpvWQAFPHNjPLBBshxV4ahsH0ALQ",
+    ),
+    // 8G
+    (
+        "Ytl3nb7psFNAQnQtOrVMrcHSOJgPzpfbtN2dwdtvs5M",
+        "rVrMvZHp2CRP8V13EWfO4KLtUfa752p42lQKag8JlX4",
+    ),
+    // 9G
+    (
+        "6mjXtv7fC3GHiTjVHXH4cp4Ky4wsbfiz156KS5CUnuA",
+        "KidEyXLJ_OeHAUqWSo6gyE1xT-qk3oI_6FoiSk3QSPo",
+    ),
+    // 10G
+    (
+        "zvZtayo6mT5ZEhTR6iI_tUXKbEccSDBuTDYGlATFcj8",
+        "h4ZioimqrpBuEjzdnTtMEFkN7Sn-dR7uyjS7qkSvB3M",
+    ),
+    // 11G
+    (
+        "PtETt4g7TFkGODedsMIc2hZ0LtAlUEi_QzOR03S8IdE",
+        "kJkgmszEyKIkyEOvpPTGigkNBNpemIna4vju_OgqN0A",
+    ),
+    // 12G
+    (
+        "dB3VvagX2V5GJlNzIOXVUXmYMCiy-CyZ1QDF7oYk48Q",
+        "B3C0apw4X9xWc4NVSIexVI7rkSw1ulynGZX_Is1EgdM",
+    ),
+    // 13G
+    (
+        "F3yDeuCsSVphgF3y2F7i_HkuKEtl6tWKmOFdnUYHLAE",
+        "Y7tYzU6-pViiQJGttA9OcibuFMOh-03znEO74u_Hv9g",
+    ),
+    // 14G
+    (
+        "VOd6ABw4Yrl6dmR_QzbfPPEmrL56BpxeVwkncyTSkgs",
+        "9Znxuyn0MXVCEh-MBaLnw3Fx6ndzUJAIG6fIL2DQs3U",
+    ),
+    // 15G
+    (
+        "8EVNxpcauuet-zeJmYiCZa4Dr5LeOg7xY2aMY-WbnV8",
+        "tbk-41kuLR9OZZTlH5ZD5io7Ic51tfo_R-Wc3g0DTzY",
+    ),
+    // 16G
+    (
+        "dqlNE4prQYWLghximDYxX80oOS7_bKA4petHh-EnfG4",
+        "qYX-YTQfJg5ssKG14R6HIIWZoAQPx4uqDp3dckuMURA",
+    ),
+    // 17G
+    (
+        "R3dpBMDxzDqcCYS2b3UwGl-mhnjw1kr4uhq840c4pz4",
+        "qgBe5rW5VyhiMYVld2SOg4GygEQo1XM_MveH_3Hx_Nw",
+    ),
+    // 18G
+    (
+        "EFfgq1eA9HDe_JN40cfIdDe7TG-epVxj2TYmbb14H9o",
+        "9vFkWhXL5dyfqbff2W7lp9zBG1xe9PH3jYOzOTxqRaI",
+    ),
+    // 19G
+    (
+        "y20oYRAsDCXOObfBcQjFB3gsRSJXiEiVwfx7dKsD7YM",
+        "WNdhSyTZ71FcNecQDW1s5KSWcW4w-j4D45FQdSvOzao",
+    ),
+    // 20G
+    (
+        "g6Aak3g5W6ubzWoK0DzFbVbmsZJQRlqUojTcTGso2po",
+        "duSbbeL3MjSual651hK3XJ8iArtpI_VP-CQKqob2QLg",
+    ),
+    // 21G
+    (
+        "MlD89oZjfHsuSshutHO8pTpYITn0KxUj_XY2Tmc5noM",
+        "QufDQmZ9NZOXswkNHX64jIl808M7VmqCFd4koHHUjAk",
+    ),
+    // 22G
+    (
+        "wN0kGlDUj5n8x6GGptROB2PskEeOHe-ONvXE6VDWevs",
+        "goZzLqllSLhBp83G6sBi2Np45XzgPqLWDLzRa9jK7Gw",
+    ),
+    // 23G
+    (
+        "DpHHI5wmQNfSij451Fg_pjwLwKXfZKT-Zy5XMEXKeJY",
+        "XfZcO1UNuiIaInM7uOC9bX5ogzV156WuE4BGVDFArVU",
+    ),
+    // 24G
+    (
+        "20dJGOxirX62Uriwr1haupsvOUcjqxA3duJ9fYwqpMs",
+        "hYEdObt0PyhDl5RgewbVK4oknEeDCjfSIdtlbJSnq1U",
+    ),
+    // 25G
+    (
+        "OmfiVUsMC7aF9PUtjAf6hEFlL8W3bxskhKTcRfIA1oc",
+        "J9Dxhy8fz0Mm2vJnFjr7DYwYivc1p2GKqe0WswL3kyQ",
+    ),
+    // 26G
+    (
+        "9XV8ASGFpZnR85WLCuaKpd_9PXjhou7mdBcAGFdlgzE",
+        "OTpu0Cx2dbJLEjjR0qCP1QpuXlEI34QL_1M9_nJo3sQ",
+    ),
+    // 27G
+    (
+        "GE_6WBnYDVHeui-sRhHzeFdjVb1oPlSr8uIBFzsIg9E",
+        "wKZuJ2aI81mkxtkIJsuZlUW97Mxj8EkWINJCwmCQbm8",
+    ),
+    // 28G
+    (
+        "ONhvpVtP0VhsXwX656z8TTbL3Pf6YhKTOSRvacQwDk4",
+        "P5O4Wkq9Dyd_9qaJCecCLvi5_LuR2Ju3n5MNwP9p5Hs",
+    ),
+    // 29G
+    (
+        "1tM63voZWwenw22gkIU7jP2M0caItYpB3t1pPRx4Te8",
+        "hKq6Fu4ZXX4_eCRfVYpdywmhZqtLle3tVQwSRZPRvKY",
+    ),
+    // 30G
+    (
+        "QJ-NohrqI2pfWhkE0DEMHGGSpn0NoIk2MZhpqK0IOKM",
+        "cNz3sc8AjlcOJucr071A9z6ZoOwWKmeT4WPSxyoej1o",
+    ),
+    // 31G
+    (
+        "MB2eUC3H4F2oXaAmp66aoPrJ231SqVs-Pj-aoKG0W4s",
+        "ZVG29rMGEiPg0jwCawF9cimNmuRoh8ph1Y22rqF-4mc",
+    ),
+    // 32G
+    (
+        "I3fH1pCiQspsRQdOjqW-76pVf9W2g3HZ0Udb1Sp-0OE",
+        "R6E_uYQTpDk_jZDpv5AbfmZYps3s9GcW58Bnsd240rI",
+    ),
+    // 33G
+    (
+        "mAfWmfzYE1b6mqJbidnTTqA7ClM6qHL9ZcEA88ss15M",
+        "wqWc3MqxG_KGoBpNHQkbL__mMLlsWHhTL2v5JHljSvQ",
+    ),
+    // 34G
+    (
+        "L55uv3F97xGNGgkvzpcTORnPLTG3-L5s-3_b4WggmZ4",
+        "eu6q2FMviCHjyxoU0PUk9haC0pUK7eoNdWuIAwa-Cy8",
+    ),
+];
+
+/// The labels of the fixture's kids (`<label>-<t>`), in table order: each
+/// tenant has its own block of [`P256_POINTS`], so no two kids of the
+/// fixture share a point. `r0` to `r7` are the replicas of the race tests,
+/// `w0` to `w3` and `w100` the waiters and the holder of the blocked tests.
+const KID_LABELS: [&str; 17] = [
+    "old", "new", "next", "other", "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "w0", "w1",
+    "w2", "w3", "w100",
+];
+
+/// The P-256 public point (`x`, `y`) of the key with `kid`: a real point
+/// on the curve, distinct per kid. An on-curve check such as the one #97
+/// adds to `skyoauth_service::jwk` rejects only off-curve points, and
+/// `check_version_overlap` refuses one key under two kids, so neither would
+/// stop these uploads if the registry write path gained JWK validation:
+/// they would still reach the lifecycle assertions.
+fn point(kid: &str) -> (&'static str, &'static str) {
+    let (label, suffix) = kid.rsplit_once('-').expect("a kid is <label>-<t>");
+    let index = KID_LABELS
+        .iter()
+        .position(|known| *known == label)
+        .unwrap_or_else(|| panic!("{kid}: no P-256 point for this label"));
+    let block = match suffix {
+        "a" => 0,
+        "b" => 1,
+        _ => panic!("{kid}: no P-256 point for this tenant"),
+    };
+    let point = P256_POINTS[block * KID_LABELS.len() + index];
+    assert!(on_p256(point), "{kid}: not a point on P-256");
+    point
 }
 
-/// An enabled version `<base>_<t>` of `keyset` holding one public EC key
-/// with the kid `<label>-<t>` and coordinates from [`coordinate`], from
-/// `effective_micros` to `expires_at`.
+/// A 256-bit integer as four 64-bit limbs, least significant first.
+type U256 = [u64; 4];
+
+/// The P-256 field prime `p` and curve coefficient `b` (SEC 2 section
+/// 2.4.2; `a` is `-3`).
+const P256_P: U256 = [
+    0xffff_ffff_ffff_ffff,
+    0x0000_0000_ffff_ffff,
+    0x0000_0000_0000_0000,
+    0xffff_ffff_0000_0001,
+];
+const P256_B: U256 = [
+    0x3bce_3c3e_27d2_604b,
+    0x651d_06b0_cc53_b0f6,
+    0xb3eb_bd55_7698_86bc,
+    0x5ac6_35d8_aa3a_93e7,
+];
+
+/// Whether (`x`, `y`), unpadded base64url of 32 octets each, is a point on
+/// P-256: both coordinates below `p` and `y^2 = x^3 - 3x + b (mod p)`.
+/// Plain 256-bit arithmetic, so no bignum dependency.
+fn on_p256((x, y): (&str, &str)) -> bool {
+    let (x, y) = (decode_u256(x), decode_u256(y));
+    if !(less(&x, &P256_P) && less(&y, &P256_P)) {
+        return false;
+    }
+    let cube = mul_mod(&mul_mod(&x, &x), &x);
+    let three_x = add_mod(&add_mod(&x, &x), &x);
+    mul_mod(&y, &y) == add_mod(&sub_mod(&cube, &three_x), &P256_B)
+}
+
+/// Unpadded canonical base64url of exactly 32 octets, as a [`U256`].
+fn decode_u256(text: &str) -> U256 {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let (mut bytes, mut buffer, mut bits) = (Vec::with_capacity(32), 0_u32, 0);
+    for c in text.bytes() {
+        let value = ALPHABET
+            .iter()
+            .position(|&known| known == c)
+            .unwrap_or_else(|| panic!("{text}: not base64url"));
+        buffer = buffer << 6 | value as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buffer >> bits) as u8);
+            buffer &= (1 << bits) - 1;
+        }
+    }
+    assert_eq!((bytes.len(), buffer), (32, 0), "{text}: not 32 octets");
+    let mut limbs = [0; 4];
+    for (limb, chunk) in limbs.iter_mut().zip(bytes.rchunks(8)) {
+        *limb = u64::from_be_bytes(chunk.try_into().unwrap());
+    }
+    limbs
+}
+
+fn less(a: &U256, b: &U256) -> bool {
+    (0..4)
+        .rev()
+        .find(|&i| a[i] != b[i])
+        .is_some_and(|i| a[i] < b[i])
+}
+
+/// `a + b` modulo 2^256, and whether it carried out.
+fn add_raw(a: &U256, b: &U256) -> (U256, bool) {
+    let (mut sum, mut carry) = ([0; 4], false);
+    for i in 0..4 {
+        let (partial, first) = a[i].overflowing_add(b[i]);
+        let (total, second) = partial.overflowing_add(u64::from(carry));
+        sum[i] = total;
+        carry = first || second;
+    }
+    (sum, carry)
+}
+
+/// `a - b` modulo 2^256.
+fn sub_raw(a: &U256, b: &U256) -> U256 {
+    let (mut difference, mut borrow) = ([0; 4], false);
+    for i in 0..4 {
+        let (partial, first) = a[i].overflowing_sub(b[i]);
+        let (total, second) = partial.overflowing_sub(u64::from(borrow));
+        difference[i] = total;
+        borrow = first || second;
+    }
+    difference
+}
+
+/// `a + b mod p`, for `a` and `b` below `p`.
+fn add_mod(a: &U256, b: &U256) -> U256 {
+    let (sum, carry) = add_raw(a, b);
+    if carry || !less(&sum, &P256_P) {
+        sub_raw(&sum, &P256_P)
+    } else {
+        sum
+    }
+}
+
+/// `a - b mod p`, for `a` and `b` below `p`.
+fn sub_mod(a: &U256, b: &U256) -> U256 {
+    let difference = sub_raw(a, b);
+    if less(a, b) {
+        add_raw(&difference, &P256_P).0
+    } else {
+        difference
+    }
+}
+
+/// `a * b mod p`, for `a` below `p`: double and add over the bits of `b`.
+fn mul_mod(a: &U256, b: &U256) -> U256 {
+    let mut product = [0; 4];
+    for bit in (0..256).rev() {
+        product = add_mod(&product, &product);
+        if b[bit / 64] >> (bit % 64) & 1 == 1 {
+            product = add_mod(&product, a);
+        }
+    }
+    product
+}
+
+/// An enabled version `<base>_<t>` of `keyset` holding one public P-256
+/// key with the kid `<label>-<t>` and its own point from [`point`], from
+/// `effective_micros` to `expires_at`. The set must pass the service's JWK
+/// Set validation (`skyoauth_service::jwk::parse_jwk_set`, unwired; with
+/// #97 it also checks the point), so no test here relies on the registry
+/// accepting a malformed key.
 fn version(
     side: Side,
     base: &str,
@@ -389,14 +685,19 @@ fn version(
     expires_at: Option<SystemTime>,
 ) -> NewTrustKeysetVersion {
     let kid = format!("{label}-{}", side.suffix);
+    let (x, y) = point(&kid);
+    let public_jwks = json!({
+        "keys": [{"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig",
+                  "kid": kid, "x": x, "y": y}]
+    });
+    if let Err(refusal) = parse_jwk_set(&public_jwks, DEFAULT_ALLOWED_ALGORITHMS) {
+        panic!("{kid}: the fixture's JWK Set is refused: {refusal:?}");
+    }
     NewTrustKeysetVersion {
         id: side.id(base),
         tenant_id: side.tenant.into(),
         keyset_id: keyset.into(),
-        public_jwks: object(json!({
-            "keys": [{"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig",
-                      "kid": kid, "x": coordinate("x", &kid), "y": coordinate("y", &kid)}]
-        })),
+        public_jwks: object(public_jwks),
         fingerprint: format!("sha256:{kid}"),
         effective_at: at(effective_micros),
         expires_at,
