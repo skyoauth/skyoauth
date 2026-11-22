@@ -82,30 +82,53 @@
 //! with explicit validity, several of them active at once (ADR-005 items 1
 //! and 5; design §5.4; tasks §3 "Verifier union"); rotation and disable
 //! keep the parent, source, binding and grant IDs (T11.6, T24.2; ADR-005
-//! item 5); versions are immutable (tasks §3 "Ownership") and reference
-//! their parent, which holds no current-version pointer, so overlapping
-//! versions create no circular reference (T11.9; `0004`); and tenant
-//! ownership (T11.9; IR-031).
+//! item 5); versions reference their parent, which holds no
+//! current-version pointer, so overlapping versions create no circular
+//! reference (T11.9; `0004`); and tenant ownership (T11.9; IR-031). Tasks
+//! §3 "Ownership" speaks of "their immutable versions", yet a version's
+//! `status` is mutable (`0004` exempts it from the immutability guard);
+//! that disable needs a mutable status is inferred from T11.6, not stated.
 //!
 //! These are the registry's behaviour, not the spec's, where the spec does
 //! not define them: that `status` is a version's one mutable column, changed
 //! by a compare-and-set on the version's own revision with no tie to the
 //! parent's (`0004` "inferred"; `0007` and the lead decision of
-//! 2026-11-21); that `expires_at` may be absent; that times are stored
-//! truncated to whole microseconds, before the window check (inferred,
-//! registry "Timestamps"); that a version list is per keyset, in byte-wise
-//! ID order; that re-enabling a version or a keyset is a plain status
-//! change (provisional lead pick, 2026-11-21); and that a disabled parent
-//! leaves its versions' rows unchanged. The registry reads no clock: it
-//! stores windows as given and compares none with the current time, so
+//! 2026-11-21); that times are stored truncated to whole microseconds,
+//! before the window check (inferred, registry "Timestamps"); that a
+//! version list is per keyset, in byte-wise ID order; that re-enabling a
+//! version is a plain status change (`persistence::registry` module docs,
+//! which name a tenant, a principal or a keyset version: provisional lead
+//! pick, 2026-11-21), and the same for a keyset (inferred; at the service
+//! layer, re-enabling a version is subject to
+//! `skyoauth_service::jwk::check_version_overlap`); and that a disabled
+//! parent leaves its versions' rows unchanged. The registry reads no clock:
+//! it stores windows as given and compares none with the current time, so
 //! these tests use fixed times and pass whatever the date.
 //!
-//! **Open, provisional.** No spec settles two points: the non-empty window
-//! rule (`expires_at > effective_at`), which exists only as the `0004`
-//! check `trust_keyset_version_validity_check` and in no spec (the window
-//! negative pins that check as it stands), and whether adding a keyset
-//! version is a widening change that needs review (ADR-008 item 12, which
-//! names "a new keyset version" among its open examples).
+//! Also registry picks, not the spec's (T11.6, T24.2 and ADR-005 item 5
+//! require stable IDs, not stable revisions): that a version write leaves
+//! the parent's revision unchanged (the lineage checks of the rotation, the
+//! concurrent uploads, the concurrent steps and the blocked steps), and
+//! that concurrent uploads under one parent never contend. The
+//! `skyoauth_service::jwk` module docs ("Follow-ups") tell the wiring PR to
+//! serialize the writes of one keyset, by locking the parent row or
+//! advancing its revision; wiring that advances the parent's revision
+//! inside the registry write would turn these checks red, and they should
+//! then follow it.
+//!
+//! **Open, provisional.** Points no spec settles:
+//!
+//! - The non-empty window rule (`expires_at > effective_at`) exists only as
+//!   the `0004` check `trust_keyset_version_validity_check`, in no spec;
+//!   the window negative pins that check as it stands.
+//! - Whether adding a keyset version is a widening change that needs
+//!   review: OQ-ADR008-3's original question names "a new keyset version"
+//!   among its examples, and its decision (the server detects widening;
+//!   ADR-008 item 12) does not classify it.
+//! - Tasks §3 marks `expires_at` optional (`expires_at?`), while T24.2 asks
+//!   for "explicit validity windows" and ADR-005 item 5 for "explicit
+//!   validity": a tension inside the spec. The registry follows tasks §3
+//!   and stores an open-ended window, which the positive uploads.
 //!
 //! # Not expressible in the registry, so not tested
 //!
@@ -116,14 +139,22 @@
 //!   neither: it stores the windows and the statuses, and nothing here
 //!   claims a key valid or invalid. Whether a disabled parent, a window not
 //!   yet started or one already ended stops verification is untested
-//!   either way.
+//!   either way. The building block exists but is unwired:
+//!   `skyoauth_service::jwk::live_keys` and `KeysetVersion::is_live`, with
+//!   the half-open window `[effective_at, expires_at)`; nothing calls them.
 //! - **Conflicting live kids and key checks.** The registry does not
 //!   compare the kids or keys of overlapping versions, nor algorithms,
-//!   strength or size (migrations README, "What 0004 adds": "Algorithms,
-//!   sizes and kid uniqueness are the service's checks"), so a conflicting
-//!   live kid has no registry test either way. Private and symmetric key
-//!   members are refused by `trust_keyset_version_public_jwks_check`, which
-//!   is A05's upload rejection and the service tests', not A04's lifecycle.
+//!   strength or size (`0004_trust_binding_grant.sql`, the `public_jwks`
+//!   comment: "Algorithms, sizes and kid uniqueness are the service's
+//!   checks"; the migrations README leaves the service to "check JWK
+//!   algorithms, key sizes, `kid` conflicts and fingerprints of an upload
+//!   (T11.3)"), so a conflicting live kid has no registry test either way.
+//!   The building blocks exist but are unwired:
+//!   `skyoauth_service::jwk::parse_jwk_set` and `check_version_overlap`,
+//!   to run "wherever a version becomes enabled"; nothing calls them.
+//!   Private and symmetric key members are refused by
+//!   `trust_keyset_version_public_jwks_check`, which is A05's upload
+//!   rejection and the service tests', not A04's lifecycle.
 //!
 //! **Missing, so not a claim.** A04 M1a needs its keyset lifecycle through
 //! the in-process service (UC); these tests reach only the registry. Still
@@ -133,27 +164,34 @@
 //!   key valid in its window, the old and the new key both valid in the
 //!   overlap, each key refused outside its window and a disabled version's
 //!   key refused, against an injected clock (T11.3 "explicit overlap",
-//!   T24.2 "explicit validity windows").
+//!   T24.2 "explicit validity windows"). Its place in M1a is inferred and
+//!   provisional: T24.2 is an M2 task. `skyoauth_service::jwk::live_keys`
+//!   is the unwired building block.
 //! - **Not claimed:** the live kid conflict: a unique, nonconflicting kid
 //!   across overlapping versions, and the algorithm, strength and size
 //!   checks of an upload (T11.3; the conflicting kid is also in A05's M2
-//!   negative, T24.3).
+//!   negative, T24.3). `skyoauth_service::jwk::parse_jwk_set` and
+//!   `check_version_overlap` are the unwired building blocks.
 //! - **Not claimed:** the audited trust_admin keyset endpoints for rotation
 //!   and disable (T13.8 provisioning, T13.2 roles), writing the version and
 //!   its audit event atomically, with the expected revision (T11.6;
 //!   IR-052), and the server's widening detection with its explicit flag
-//!   for a new or re-enabled version (ADR-008 item 12, open, see above;
-//!   IR-052). The registry writes no event and does not tell widening from
-//!   narrowing.
-//! - That the rotation is independent of human-provider changes (T11.6's
-//!   last clause): human providers are M1b records with no tables yet.
+//!   for a new or re-enabled version (ADR-008 item 12; OQ-ADR008-3, open
+//!   for a keyset version, see above). The registry writes no event and
+//!   does not tell widening from narrowing.
+//!
+//! Open owner question, not claimed either: that the rotation is
+//! independent of human-provider changes (T11.6's last clause). Human
+//! providers are M1b records with no tables yet, and A04 has no M1b stage
+//! and a PG+UC harness, so which stage or scenario owns it is undecided.
 //!
 //! Not A04 M1a's, with their owners: the exchange through the overlap, an
 //! issued token from a key of the old and of the new version with the same
 //! grant and binding, is A04's M2 stage, "exchange through the overlap"
-//! (T24.2 with the exchange of T21.x); the survival of keyset IDs and
-//! lifecycle metadata across a migration is C05 and A15 (T51.2, T51.6);
-//! upload rejection (private members, `jku`, `x5u`) is A05.
+//! (T24.2 with the exchange of T21.x); the survival of keyset IDs across a
+//! migration is A15's (M5; T51.2, T51.6), and contract C05 is covered by
+//! A15 and A04 (layout Q11); upload rejection (private members, `jku`,
+//! `x5u`) is A05.
 //!
 //! # Overlap
 //!
@@ -168,13 +206,19 @@
 //! `keyset_versions_are_created_read_and_listed_per_keyset` in
 //! `service/tests/registry_trust.rs`); a version's status changing by its
 //! own revision, unchanged other columns, stale and other-tenant updates,
-//! and one blocked updater behind an uncommitted one
-//! (`keyset_versions_change_only_status_by_their_own_revision` and the
-//! `Target::Version` cases in `service/tests/registry_updates.rs`); and in
-//! SQL, the immutability guard on every column but `status`
-//! (`service/tests/schema_trust_binding_grant.rs`). This module adds the
-//! lifecycle with its parent, source, binding and grant, both tenants, the
-//! sub-microsecond window, and replica races.
+//! one blocked updater behind an uncommitted one, a race of status updates
+//! from one revision with one winner, and a rollback with the caller's
+//! transaction (`keyset_versions_change_only_status_by_their_own_revision`,
+//! and the `Target::Version` cases of
+//! `concurrent_updates_from_one_revision_have_exactly_one_winner` and
+//! `updates_roll_back_with_the_callers_transaction` in
+//! `service/tests/registry_updates.rs`); and in SQL, the immutability guard
+//! on every column but `status`
+//! (`service/tests/schema_trust_binding_grant.rs`).
+//! This module adds the lifecycle with its parent, source, binding, grant
+//! and sibling keyset, both tenants, the sub-microsecond window, the upload
+//! race on one version ID, the blocked steps' holder-rollback branch, and
+//! eight replicas with separate pools.
 
 use std::{
     fmt::Debug,
@@ -296,8 +340,46 @@ fn object(value: Value) -> JsonObject {
     }
 }
 
+/// A P-256 coordinate (`axis` `x` or `y`) of the key with `kid`: 32
+/// bytes derived deterministically from both, base64url without padding
+/// (43 characters), so each kid has its own key. The bytes are FNV-1a of
+/// `<axis>:<kid>` expanded by SplitMix64, with no new dependency. They are
+/// well-formed but not a point on the curve: the registry stores a JWK Set
+/// without checking its keys (only the `0004`
+/// `trust_keyset_version_public_jwks_check` against private members), no
+/// curve check exists yet, and no test here verifies a signature.
+fn coordinate(axis: &str, kid: &str) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut state = format!("{axis}:{kid}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let bytes: Vec<u8> = (0..4)
+        .flat_map(|_| {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            (z ^ (z >> 31)).to_be_bytes()
+        })
+        .collect();
+    let mut out = String::with_capacity(43);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+        }
+    }
+    out
+}
+
 /// An enabled version `<base>_<t>` of `keyset` holding one public EC key
-/// with the kid `<label>-<t>`, from `effective_micros` to `expires_at`.
+/// with the kid `<label>-<t>` and coordinates from [`coordinate`], from
+/// `effective_micros` to `expires_at`.
 fn version(
     side: Side,
     base: &str,
@@ -313,7 +395,7 @@ fn version(
         keyset_id: keyset.into(),
         public_jwks: object(json!({
             "keys": [{"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig",
-                      "kid": kid, "x": format!("x-{kid}"), "y": format!("y-{kid}")}]
+                      "kid": kid, "x": coordinate("x", &kid), "y": coordinate("y", &kid)}]
         })),
         fingerprint: format!("sha256:{kid}"),
         effective_at: at(effective_micros),
@@ -597,6 +679,9 @@ async fn a04_pos_rotation_overlaps_versions_and_keeps_every_id() {
     for (side, other) in DIRECTIONS {
         let t = side.tenant;
         let before = lineage(&pool, side).await;
+        let sibling_before = registry::get_trust_keyset(&pool, t, &side.other_keyset())
+            .await
+            .unwrap();
         let other_before = tenant_snapshot(&pool, other).await;
         // The fixture's lineage: the source names the parent, the binding
         // the source, the grant the binding; all at revision 1.
@@ -707,7 +792,18 @@ async fn a04_pos_rotation_overlaps_versions_and_keeps_every_id() {
             }
         );
 
-        // The tenant's other keyset and the other tenant are untouched.
+        // The tenant's other keyset (every column, its revision included)
+        // and its version, and the other tenant, are untouched.
+        assert_eq!(
+            registry::get_trust_keyset(&pool, t, &side.other_keyset())
+                .await
+                .unwrap(),
+            sibling_before
+        );
+        assert_eq!(
+            (sibling_before.status, sibling_before.revision),
+            (Status::Enabled, 1)
+        );
         assert_eq!(
             versions(&pool, side, &side.other_keyset()).await,
             [stored(&side.other(), Status::Enabled, 1)]
