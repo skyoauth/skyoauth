@@ -174,9 +174,15 @@
 //!    lock serializes the writes of one keyset: every write here takes it
 //!    before it reads the versions, so two writes of one keyset never both
 //!    see the keyset without the other's version;
-//! 4. reads the keyset's versions (no lock: the parent lock covers them);
-//!    a status change refuses another revision of its version with
-//!    [`RegistryError::StaleRevision`] here;
+//! 4. reads only what the write needs, in new statements after the parent
+//!    lock and with no lock of their own (the parent lock covers them;
+//!    inferred): a create of a disabled version reads no version; a create
+//!    of an enabled version reads the keyset's enabled versions; an enable
+//!    reads its target (keys included), refuses another revision with
+//!    [`RegistryError::StaleRevision`], then reads the enabled versions; a
+//!    disable reads its target's revision only and refuses another one the
+//!    same way. A disabled version other than the target is never fetched,
+//!    so its size or content costs the write nothing;
 //! 5. when the version becomes enabled: the count of the other enabled
 //!    versions against [`MAX_ENABLED_VERSIONS_PER_KEYSET`], then the full
 //!    parse of the compared stored versions on the blocking pool and
@@ -276,7 +282,7 @@ use crate::persistence::registry::{
     AdminRole, AuditActor, JsonObject, KeysetVersionText, NewAuditEvent, NewTrustKeysetVersion,
     OperatorRequest, OperatorScope, RegistryError, Status, TrustKeysetVersion, append_audit_event,
     authorize_operator_locked, create_trust_keyset_version, floor_to_microsecond,
-    read_keyset_versions, update_trust_keyset_version,
+    read_enabled_keyset_versions, read_keyset_version, update_trust_keyset_version,
 };
 
 /// The most JWK set validations that run at once, across the process
@@ -316,6 +322,11 @@ const READ_COMMITTED: &str = "read committed";
 /// Step 2 of a status change: the version's keyset, immutable, unlocked.
 const VERSION_KEYSET: &str =
     "SELECT keyset_id FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2";
+
+/// Step 4 of a disable: the version's revision, after the parent lock; no
+/// other column is fetched.
+const TARGET_REVISION: &str =
+    "SELECT revision FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2";
 
 /// Step 3: the parent keyset, locked for the rest of the transaction.
 const LOCK_KEYSET: &str =
@@ -577,8 +588,9 @@ fn as_version<'a>(row: &'a KeysetVersionText, keys: &'a JwkSet) -> KeysetVersion
     }
 }
 
-/// Step 5: `version`, becoming enabled, against the other enabled versions
-/// of `rows` whose windows intersect its own, each parsed in full first.
+/// Step 5: `version`, becoming enabled, against the keyset's enabled
+/// versions `rows` (as [`read_enabled_keyset_versions`] reads them) but its
+/// own ID, those whose windows intersect its own, each parsed in full first.
 async fn check_overlap(
     version: &KeysetVersion<'_>,
     rows: Vec<KeysetVersionText>,
@@ -589,7 +601,7 @@ async fn check_overlap(
         // skips it anyway, but a create that reuses the ID of a stored
         // version would parse that row and could fail as `StoredVersion`
         // instead of the insert's `AlreadyExists`.
-        .filter(|row| row.status == Status::Enabled && row.id != version.id)
+        .filter(|row| row.id != version.id)
         // The window only: `version`'s keys stand in for the unparsed ones.
         .filter(|row| version.windows_intersect(&as_version(row, version.keys)))
         .collect();
@@ -602,13 +614,11 @@ async fn check_overlap(
 }
 
 /// Step 5, first: refuses a version becoming enabled when the keyset
-/// already has [`MAX_ENABLED_VERSIONS_PER_KEYSET`] other enabled versions in
-/// `rows` (read under the parent lock), before any parse.
+/// already has [`MAX_ENABLED_VERSIONS_PER_KEYSET`] enabled versions but
+/// `id` in `rows` (its enabled versions, read under the parent lock),
+/// before any parse.
 fn check_enabled_count(rows: &[KeysetVersionText], id: &str) -> Result<(), KeysetWriteError> {
-    let enabled = rows
-        .iter()
-        .filter(|row| row.status == Status::Enabled && row.id != id)
-        .count();
+    let enabled = rows.iter().filter(|row| row.id != id).count();
     if enabled >= MAX_ENABLED_VERSIONS_PER_KEYSET {
         return Err(KeysetWriteError::TooManyEnabledVersions);
     }
@@ -760,7 +770,8 @@ async fn create_steps(
     let admin_id = authorize(transaction, public_identity, new.tenant_id).await?;
     lock_keyset(transaction, new.tenant_id, new.keyset_id).await?;
     if new.status == Status::Enabled {
-        let rows = read_keyset_versions(&mut **transaction, new.tenant_id, new.keyset_id).await?;
+        let rows =
+            read_enabled_keyset_versions(&mut **transaction, new.tenant_id, new.keyset_id).await?;
         check_enabled_count(&rows, new.id)?;
         // The window as the write stores it: the stored versions are whole
         // microseconds, so an unfloored bound could see an intersection
@@ -884,19 +895,19 @@ async fn status_steps(
         .await?
         .ok_or(RegistryError::NotFound)?;
     lock_keyset(transaction, tenant_id, &keyset_id).await?;
-    let mut rows = read_keyset_versions(&mut **transaction, tenant_id, &keyset_id).await?;
-    let Some(index) = rows.iter().position(|row| row.id == id) else {
-        return Err(RegistryError::NotFound.into());
-    };
-    // `remove`, not `swap_remove`: the others stay in ID order, so the
-    // first conflict reported is the one with the lowest ID.
-    let stored = rows.remove(index);
-    let previous_revision = stored.revision;
-    if previous_revision != expected_revision {
-        return Err(RegistryError::StaleRevision.into());
-    }
-    let action = match status {
+    // The target, in a new statement after the parent lock: an enable reads
+    // the row with its keys, a disable its revision only.
+    let (previous_revision, action) = match status {
         Status::Enabled => {
+            let stored = read_keyset_version(&mut **transaction, tenant_id, id)
+                .await?
+                .ok_or(RegistryError::NotFound)?;
+            let previous_revision = stored.revision;
+            if previous_revision != expected_revision {
+                return Err(RegistryError::StaleRevision.into());
+            }
+            let rows =
+                read_enabled_keyset_versions(&mut **transaction, tenant_id, &keyset_id).await?;
             check_enabled_count(&rows, id)?;
             let mut own = parse_stored_versions(vec![stored]).await?;
             let (row, keys) = own.remove(0);
@@ -905,9 +916,20 @@ async fn status_steps(
                 ..as_version(&row, keys.set())
             };
             check_overlap(&version, rows).await?;
-            ENABLE_ACTION
+            (previous_revision, ENABLE_ACTION)
         }
-        Status::Disabled => DISABLE_ACTION,
+        Status::Disabled => {
+            let previous_revision: i64 = sqlx::query_scalar(TARGET_REVISION)
+                .bind(tenant_id)
+                .bind(id)
+                .fetch_optional(&mut **transaction)
+                .await?
+                .ok_or(RegistryError::NotFound)?;
+            if previous_revision != expected_revision {
+                return Err(RegistryError::StaleRevision.into());
+            }
+            (previous_revision, DISABLE_ACTION)
+        }
     };
     let version =
         update_trust_keyset_version(&mut **transaction, tenant_id, id, expected_revision, status)
@@ -957,6 +979,10 @@ mod tests {
         assert_eq!(
             VERSION_KEYSET,
             "SELECT keyset_id FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2"
+        );
+        assert_eq!(
+            TARGET_REVISION,
+            "SELECT revision FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2"
         );
         assert_eq!(
             [CREATE_ACTION, ENABLE_ACTION, DISABLE_ACTION],

@@ -2105,6 +2105,209 @@ async fn a_provenance_naming_a_private_member_is_refused() {
     db.drop([pool]).await;
 }
 
+/// A write reads only the versions it needs, under the parent lock: a
+/// create of a disabled version none, a create of an enabled version the
+/// enabled ones, an enable its target and the enabled ones, a disable its
+/// target's revision. Many disabled versions with keys off their curve
+/// change no outcome.
+///
+/// What is read is shown with traps: a version whose `effective_at` is
+/// `infinity`, written with the `0007` range check dropped, which every
+/// read of the row fails as `UnreadableTimestamp`. A disabled trap in
+/// `ks_1` must never be fetched; an enabled trap in `ks_2` must be fetched
+/// by a create or enable of an enabled version there, and by nothing else.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_write_reads_only_the_versions_it_needs() {
+    let (db, pool) = seeded().await;
+    let (keys, replacement) = (
+        &upload(vec![p256_a(KID)]).await,
+        &upload(vec![p256_b(KID)]).await,
+    );
+    fn in_ks_2(new: NewKeysetVersion<'_>) -> NewKeysetVersion<'_> {
+        NewKeysetVersion {
+            keyset_id: "ks_2",
+            ..new
+        }
+    }
+    create(&pool, TRUST, &in_ks_2(version("ver_x", keys)), "aud_1")
+        .await
+        .unwrap();
+    for n in 0..12 {
+        raw_version(
+            &pool,
+            &format!("ver_off_{n:02}"),
+            "ks_1",
+            set(vec![p256_off_curve(&format!("bad{n}"))]),
+            Status::Disabled,
+            (t0(), None),
+        )
+        .await;
+    }
+    let trap_keys = set(vec![p256_a("trap")]);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE trust_keyset_version \
+             DROP CONSTRAINT trust_keyset_version_effective_at_range_check; \
+         INSERT INTO trust_keyset_version (id, tenant_id, keyset_id, public_jwks, fingerprint, \
+             effective_at, status, provenance) VALUES \
+             ('ver_trap', 'ten_a', 'ks_1', '{trap_keys}', 'raw', 'infinity', 'disabled', '{{}}'), \
+             ('ver_trap_on', 'ten_a', 'ks_2', '{trap_keys}', 'raw', 'infinity', 'enabled', '{{}}')"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let unreadable = |err: &RegistryError| {
+        matches!(
+            err,
+            RegistryError::UnreadableTimestamp {
+                table: "trust_keyset_version",
+                column: "effective_at",
+                ..
+            }
+        )
+    };
+    // The traps are armed: a read of either row fails.
+    for id in ["ver_trap", "ver_trap_on"] {
+        let err = registry::get_trust_keyset_version(&pool, "ten_a", id)
+            .await
+            .unwrap_err();
+        assert!(unreadable(&err), "{id}: {err:?}");
+    }
+
+    // ks_1: the disabled versions, the trap among them, are never fetched.
+    create(&pool, TRUST, &disabled("ver_a", keys), "aud_2")
+        .await
+        .unwrap();
+    create(&pool, TRUST, &version("ver_b", keys), "aud_3")
+        .await
+        .unwrap();
+    assert_overlap(
+        create(&pool, TRUST, &version("ver_c", replacement), "aud_4").await,
+        "KidConflict",
+        "ver_b",
+        "ver_c",
+    );
+    enable(&pool, "ver_a", 1, "aud_4").await.unwrap();
+    disable(&pool, "ver_b", 1, "aud_5").await.unwrap();
+    enable(&pool, "ver_b", 2, "aud_6").await.unwrap();
+    // Enabling a disabled version reads it, and only it fails.
+    match enable(&pool, "ver_off_03", 1, "aud_7").await {
+        Err(KeysetWriteError::StoredVersion { version_id, .. }) => {
+            assert_eq!(version_id, "ver_off_03");
+        }
+        other => panic!("enable of an off-curve version: {other:?}"),
+    }
+
+    // ks_2: a disable and a disabled create fetch no enabled version...
+    disable(&pool, "ver_x", 1, "aud_7").await.unwrap();
+    create(&pool, TRUST, &in_ks_2(disabled("ver_y", keys)), "aud_8")
+        .await
+        .unwrap();
+    // ...and a version becoming enabled fetches them all.
+    assert_registry(
+        create(&pool, TRUST, &in_ks_2(version("ver_z", keys)), "aud_9").await,
+        unreadable,
+        "enabled create",
+    );
+    assert_registry(
+        enable(&pool, "ver_y", 1, "aud_9").await,
+        unreadable,
+        "enable",
+    );
+    // A disabled target is read, the disabled trap too when it is the one
+    // enabled.
+    assert_registry(
+        enable(&pool, "ver_trap", 1, "aud_9").await,
+        unreadable,
+        "enable of the trap",
+    );
+    assert_eq!(state(&pool, "ver_a").await, (Status::Enabled, 2));
+    assert_eq!(state(&pool, "ver_b").await, (Status::Enabled, 3));
+    assert_eq!(state(&pool, "ver_x").await, (Status::Disabled, 2));
+    assert_eq!(
+        event_summary(&pool).await,
+        [
+            event("create", "ver_x", None, 1),
+            event("create", "ver_a", None, 1),
+            event("create", "ver_b", None, 1),
+            event("enable", "ver_a", Some(1), 2),
+            event("disable", "ver_b", Some(1), 2),
+            event("enable", "ver_b", Some(2), 3),
+            event("disable", "ver_x", Some(1), 2),
+            event("create", "ver_y", None, 1),
+        ]
+    );
+    assert_chain(&pool, 8).await;
+    db.drop([pool]).await;
+}
+
+/// A status change reads its target in a new statement after the parent
+/// lock: while another transaction holding the lock moves the version from
+/// revision 1 to 2, a change expecting revision 2 waits, then reads the
+/// committed revision and succeeds (an earlier read would see revision 1
+/// and refuse it as stale). Both ways: an enable after a disable, and a
+/// disable after an enable.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_status_change_reads_its_target_after_the_parent_lock() {
+    let (db, pool) = seeded().await;
+    let keys = upload(vec![p256_a(KID)]).await;
+    create(&pool, TRUST, &version("ver_on", &keys), "aud_1")
+        .await
+        .unwrap();
+    create(&pool, TRUST, &disabled("ver_off", &keys), "aud_2")
+        .await
+        .unwrap();
+    for (n, (id, first_status, then)) in [
+        ("ver_on", Status::Disabled, Status::Enabled),
+        ("ver_off", Status::Enabled, Status::Disabled),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut first = pool.acquire().await.unwrap().detach();
+        let mut second = pool.acquire().await.unwrap().detach();
+        let (first_pid, second_pid) = (
+            backend_pid(&mut first).await,
+            backend_pid(&mut second).await,
+        );
+        let mut tx = first.begin().await.unwrap();
+        let audit_first = format!("aud_first_{n}");
+        let changed = match first_status {
+            Status::Enabled => {
+                enable_version(&mut tx, TRUST, "ten_a", id, 1, &audit(&audit_first)).await
+            }
+            Status::Disabled => {
+                disable_version(&mut tx, TRUST, "ten_a", id, 1, &audit(&audit_first)).await
+            }
+        };
+        assert_eq!(changed.unwrap().revision, 2);
+        let task = tokio::spawn(async move {
+            let mut tx = second.begin().await.unwrap();
+            let audit_then = format!("aud_then_{n}");
+            let result = match then {
+                Status::Enabled => {
+                    enable_version(&mut tx, TRUST, "ten_a", id, 2, &audit(&audit_then)).await
+                }
+                Status::Disabled => {
+                    disable_version(&mut tx, TRUST, "ten_a", id, 2, &audit(&audit_then)).await
+                }
+            };
+            finish(tx, &result).await;
+            (result, second)
+        });
+        wait_until_blocked(&pool, second_pid, first_pid, &task).await;
+        tx.commit().await.unwrap();
+        let (result, second) = join(task).await;
+        let version = result.unwrap_or_else(|err| panic!("{id}: {err:?}"));
+        assert_eq!((version.status, version.revision), (then, 3), "{id}");
+        second.close().await.unwrap();
+        first.close().await.unwrap();
+    }
+    assert_chain(&pool, 6).await;
+    db.drop([pool]).await;
+}
+
 /// The module is reachable as `skyoauth_service::trust` with its bound.
 #[test]
 fn the_module_is_reachable() {

@@ -2731,7 +2731,10 @@ operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`);
 for a status change, the version's `keyset_id`, read without a lock; the
 parent `trust_keyset` row `FOR NO KEY UPDATE`, which serializes the writes
 of one keyset (a second write waits for it, then reads the first's
-committed version); the keyset's versions, read without a lock; the write's
+committed version); then, read without a lock, only what the write needs
+(an enabled create the enabled versions, an enable its target and the
+enabled versions, a disable its target's revision, a disabled create none:
+a disabled version other than the target is never fetched); the write's
 own locks (the insert's foreign-key checks, or the version row of a status
 update); then the audit head last. `FOR NO KEY UPDATE` on the keyset does
 not block the `FOR KEY SHARE` of a trust source insert's foreign-key check.

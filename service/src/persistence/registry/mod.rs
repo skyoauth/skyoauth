@@ -370,7 +370,7 @@ pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
     update_principal, update_tenant,
 };
-pub(crate) use trust::{KeysetVersionText, read_keyset_versions};
+pub(crate) use trust::{KeysetVersionText, read_enabled_keyset_versions, read_keyset_version};
 pub use trust::{
     create_trust_keyset, create_trust_keyset_version, create_trust_source, get_trust_keyset,
     get_trust_keyset_version, get_trust_source, list_trust_keyset_versions, list_trust_keysets,

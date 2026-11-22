@@ -224,10 +224,12 @@ impl FromRow<'_, PgRow> for KeysetVersionText {
     }
 }
 
-/// Every version of the keyset `keyset_id` of `tenant_id`, by ID, for the
-/// keyset write path, which holds the parent keyset row locked while it
-/// reads them. Takes no lock of its own.
-pub(crate) async fn read_keyset_versions<'e>(
+/// The enabled versions of the keyset `keyset_id` of `tenant_id`, by ID,
+/// for the keyset write path, which holds the parent keyset row locked
+/// while it reads them. A disabled version is never fetched, so neither its
+/// size nor its content costs the write anything (inferred). Takes no lock
+/// of its own.
+pub(crate) async fn read_enabled_keyset_versions<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     keyset_id: &str,
@@ -238,11 +240,32 @@ pub(crate) async fn read_keyset_versions<'e>(
         ", ",
         micros!("expires_at"),
         ", status, revision FROM trust_keyset_version WHERE tenant_id = $1 AND keyset_id = $2 \
-         ORDER BY id COLLATE \"C\""
+         AND status = 'enabled' ORDER BY id COLLATE \"C\""
     ))
     .bind(tenant_id)
     .bind(keyset_id)
     .fetch_all(executor)
+    .await?)
+}
+
+/// The version `id` of `tenant_id`, for the keyset write path's enable,
+/// read after the parent keyset row is locked; `None` if there is none.
+/// Takes no lock of its own.
+pub(crate) async fn read_keyset_version<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+) -> Result<Option<KeysetVersionText>, RegistryError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT id, public_jwks::text AS public_jwks, ",
+        micros!("effective_at"),
+        ", ",
+        micros!("expires_at"),
+        ", status, revision FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2"
+    ))
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(executor)
     .await?)
 }
 
