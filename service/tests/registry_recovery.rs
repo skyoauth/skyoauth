@@ -2107,6 +2107,94 @@ async fn a_failed_issue_commits_nothing_even_when_the_caller_commits() {
     db.drop([pool]).await;
 }
 
+/// Whether the backend `pid` holds or waits for any lock on `table`.
+async fn locks_on(pool: &PgPool, pid: i32, table: &str) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_locks WHERE pid = $1 AND relation = $2::regclass)",
+    )
+    .bind(pid)
+    .bind(table)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Sets the chain head's sequence by other means, keeping its hash.
+async fn set_head_sequence(pool: &PgPool, sequence: i64) {
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "ALTER TABLE audit_chain_head DISABLE TRIGGER audit_chain_head_advance; \
+         UPDATE audit_chain_head SET sequence = {sequence}; \
+         ALTER TABLE audit_chain_head ENABLE ALWAYS TRIGGER audit_chain_head_advance"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// An issue that fails in Rust after the audit head lock (a head at
+/// `2^53 - 1` leaves no sequence for its event) rolls its savepoint back,
+/// not releases it. The issue writes no row before that error, so what the
+/// savepoint holds is its locks: once the `Err` is returned the caller's
+/// transaction holds none of them (the recovery state `FOR SHARE`, the
+/// chain head `FOR UPDATE`), and another transaction takes both at once.
+/// A caller that commits after the `Err` commits nothing of the issue, and
+/// with the head back the same request issues.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_issue_that_fails_after_the_head_lock_rolls_its_savepoint_back() {
+    let (db, pool) = bootstrapped().await;
+    set_head_sequence(&pool, 9_007_199_254_740_991).await;
+    let before = pool_snapshot(&pool).await;
+    let plan = good_plan();
+    let request = issue_request("op_1", "aud_issue_1", &plan);
+
+    let mut connection = pool.acquire().await.unwrap();
+    let pid = backend_pid(&mut connection).await;
+    let mut transaction = connection.begin().await.unwrap();
+    assert_issue_encode(
+        issue_recovery_challenge(&mut transaction, &request).await,
+        "audit integer above 2^53 - 1",
+    );
+    // The locks went with the savepoint: a released savepoint would hand
+    // them to the caller's transaction until it ends.
+    for table in ["recovery_state", "audit_chain_head"] {
+        assert!(!locks_on(&pool, pid, table).await, "{table}");
+    }
+    let mut other = pool.begin().await.unwrap();
+    for statement in [
+        "SELECT 1 FROM recovery_state FOR UPDATE NOWAIT",
+        "SELECT 1 FROM audit_chain_head FOR UPDATE NOWAIT",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut *other)
+            .await
+            .unwrap_or_else(|err| panic!("{statement}: {err}"));
+    }
+    other.rollback().await.unwrap();
+    // The transaction is usable, sees nothing of the issue, and its commit
+    // writes nothing.
+    assert_eq!(counts(&mut transaction).await, [0, 1, 1]);
+    transaction.commit().await.unwrap();
+    drop(connection);
+    assert_eq!(pool_snapshot(&pool).await, before);
+
+    // With the head back, the same request issues.
+    set_head_sequence(&pool, 1).await;
+    let challenge = issue_on(&pool, &request).await.unwrap();
+    assert_eq!(
+        (
+            challenge.operation_id.as_str(),
+            challenge.audit_event.sequence
+        ),
+        ("op_1", 2)
+    );
+    assert_eq!(
+        verify(&pool).await,
+        ChainVerdict::Intact { last_sequence: 2 }
+    );
+    db.drop([pool]).await;
+}
+
 /// A restore whose consume fails (here on a lock timeout, while another
 /// transaction holds the operation row) rolls its savepoint back: the
 /// caller's transaction stays usable and commits nothing of it.
