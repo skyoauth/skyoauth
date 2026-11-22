@@ -6,6 +6,7 @@ use std::fmt;
 use serde_json::{Map, Value};
 
 use super::base64url::{self, Base64urlError};
+use super::point;
 use super::thumbprint::{Thumbprint, thumbprint};
 
 /// The private and symmetric key members (RFC 7518 section 6: `d`, `p`,
@@ -371,6 +372,16 @@ pub enum JwkError {
         expected: usize,
         actual: usize,
     },
+    /// An `EC` coordinate is not below the curve's field prime `p`.
+    CoordinateOutOfRange { member: &'static str },
+    /// The `EC` coordinates are not a point of the curve, or the Ed25519
+    /// key does not decode to a point (`x^2` is not a square).
+    PointNotOnCurve,
+    /// The Ed25519 key is not the canonical encoding of its point: `y` is
+    /// not below `p = 2^255 - 19`, or `x` is 0 and the sign bit is set.
+    Ed25519NotCanonical,
+    /// The Ed25519 key is one of the eight points of order dividing 8.
+    Ed25519SmallOrder,
     /// The RSA modulus has a leading zero octet.
     RsaModulusLeadingZero,
     /// The RSA modulus is shorter than [`RSA_MIN_MODULUS_BITS`].
@@ -440,6 +451,15 @@ impl fmt::Display for JwkError {
                 f,
                 "member \"{member}\" is {actual} octets, expected {expected}"
             ),
+            Self::CoordinateOutOfRange { member } => {
+                write!(
+                    f,
+                    "member \"{member}\" is not below the curve's field prime"
+                )
+            }
+            Self::PointNotOnCurve => f.write_str("the key is not a point of its curve"),
+            Self::Ed25519NotCanonical => f.write_str("the Ed25519 key is not canonically encoded"),
+            Self::Ed25519SmallOrder => f.write_str("the Ed25519 key is a small-order point"),
             Self::RsaModulusLeadingZero => f.write_str("the RSA modulus has a leading zero octet"),
             Self::RsaModulusTooSmall { bits } => write!(
                 f,
@@ -572,6 +592,7 @@ fn ec(jwk: &Map<String, Value>) -> Result<PublicKey, JwkError> {
     let curve = EcCurve::from_name(required(jwk, "crv")?).ok_or(JwkError::UnsupportedCurve)?;
     let x = exact(jwk, "x", curve.coordinate_len())?;
     let y = exact(jwk, "y", curve.coordinate_len())?;
+    point::check_ec(curve, &x, &y)?;
     Ok(PublicKey::Ec { curve, x, y })
 }
 
@@ -581,6 +602,9 @@ fn okp(jwk: &Map<String, Value>) -> Result<PublicKey, JwkError> {
         _ => return Err(JwkError::UnsupportedCurve),
     };
     let x = exact(jwk, "x", curve.key_len())?;
+    match curve {
+        OkpCurve::Ed25519 => point::check_ed25519(&x)?,
+    }
     Ok(PublicKey::Okp { curve, x })
 }
 

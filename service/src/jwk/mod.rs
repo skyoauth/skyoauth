@@ -6,8 +6,7 @@
 //! This module is pure: no I/O, no clock (time is a parameter) and no
 //! dependency on the registry. `persistence::registry` may depend on it,
 //! never the reverse (as for `policy`, lead ruling, 2026-11-21). Nothing
-//! calls it yet, and it must not be the only validation of a keyset write
-//! until the gate under "Follow-ups" is met.
+//! calls it yet (see "Follow-ups").
 //!
 //! # Sources
 //!
@@ -101,9 +100,22 @@
 //!   bounds (inferred);
 //! - `EC`: `crv` `P-256`, `P-384` or `P-521` with `x` and `y` exactly 32,
 //!   48 or 66 octets (RFC 7518 section 6.2.1); `secp256k1` and every other
-//!   curve are refused (inferred);
+//!   curve are refused (inferred). The point is then checked: `x` and `y`
+//!   below the field prime `p` ([`JwkError::CoordinateOutOfRange`]) and
+//!   `y^2 = x^3 - 3x + b (mod p)` ([`JwkError::PointNotOnCurve`]), the
+//!   public-key validation of NIST SP 800-56A section 5.6.2.3 (these
+//!   curves have cofactor 1);
 //! - `OKP`: `crv` `Ed25519` with `x` exactly 32 octets; `Ed448`, `X25519`,
-//!   `X448` and every other curve are refused (inferred);
+//!   `X448` and every other curve are refused (inferred). The key is then
+//!   decoded as in RFC 8032 section 5.1.3, made strict (provisional lead
+//!   pick, 2026-11-21): `y` below `p = 2^255 - 19` and, when `x` is 0, the
+//!   sign bit clear ([`JwkError::Ed25519NotCanonical`]); `y` must decode
+//!   to a point ([`JwkError::PointNotOnCurve`]); and the eight points of
+//!   order dividing 8 are refused ([`JwkError::Ed25519SmallOrder`]). A
+//!   point with a torsion component (a prime-order point plus a
+//!   small-order one) is accepted and not claimed safe: cofactor handling
+//!   belongs to the verifier (T11.7, strict verification). This is not a
+//!   full strict-verification validation;
 //! - has `alg`, when present, in the allowed set and consistent with its
 //!   type and curve: `RS256` or `PS256` for `RSA`, `ES256` for `P-256`,
 //!   `ES384` for `P-384`, `ES512` for `P-521`, `EdDSA` for `Ed25519`;
@@ -121,6 +133,13 @@
 //!
 //! Every accepted key gets its RFC 7638 SHA-256 [`Thumbprint`] (see the
 //! `thumbprint` submodule).
+//!
+//! The point checks (the `point` submodule) use hand-written modular
+//! arithmetic on public data, not constant-time, with no new dependency
+//! (provisional lead pick, 2026-11-21: an elliptic-curve crate would add 8
+//! to 12 locked packages, a maintainer decision). Their constants are
+//! cross-checked there against FIPS 186-4, SEC 2 and RFC 8032 and against a
+//! Python recomputation.
 //!
 //! # Versions
 //!
@@ -173,20 +192,18 @@
 //! independently. The RFC 7517 appendix A.1 P-256 key has no published
 //! thumbprint: its thumbprint, and those of the generated P-384 and P-521
 //! keys, were computed with Python (`hashlib`, `cryptography`), never from
-//! this module's output. See `service/tests/jwk.rs`.
+//! this module's output. Further EC and Ed25519 keys were generated with
+//! `cryptography`, and every point vector, valid or not, was classified in
+//! Python (integer arithmetic, and OpenSSL through `cryptography` for the
+//! valid NIST points). See `service/tests/jwk.rs`.
 //!
 //! # Follow-ups
 //!
-//! - **Gate.** This module must not be the only validation on any keyset
-//!   write path (T11.9, T24.2) until (a) EC points are checked on-curve
-//!   with `x`, `y` < p and (b) Ed25519 keys are canonical (y < p) and not
-//!   small-order, or the write path also imports each key with the
-//!   verifying crate in strict mode and refuses keys it cannot import.
-//!   T11.7 must use strict Ed25519 verification. T24.3's "fake keys"
-//!   negative is the acceptance test. Today only lengths are checked: the
-//!   module accepts the P-256 point (0, 0), a P-521 coordinate >= p and
-//!   the Ed25519 identity point (pinned by a test that must flip when the
-//!   check lands).
+//! - **Points.** The former gate is met: EC points are checked on-curve
+//!   with `x`, `y` < p, and Ed25519 keys canonical (y < p, no negative
+//!   zero) and not small-order. T11.7 must still use strict Ed25519
+//!   verification (a key with a torsion component passes this module), and
+//!   T24.3's "fake keys" negative stays the acceptance test.
 //! - The wiring PR must bound the raw request body before parsing it: this
 //!   module bounds only the parsed value.
 //! - The allowed algorithm set (OQ-TP-3, open) and its intersection with a
@@ -207,6 +224,7 @@
 mod base64url;
 mod key;
 mod overlap;
+mod point;
 mod set;
 mod thumbprint;
 

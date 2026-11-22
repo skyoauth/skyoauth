@@ -102,9 +102,9 @@ pub enum OverlapError {
         second_version: String,
     },
     /// One `kid` and key resolve to different algorithms
-    /// ([`PublicJwk::algorithm`]), whether from an `alg` member or from the
-    /// allowed set (inferred: a conflict, since the merged key would have no
-    /// single algorithm).
+    /// ([`PublicJwk::algorithm`]: the `alg` member, or the curve's one
+    /// algorithm for a key without one; inferred: a conflict, since the
+    /// merged key would have no single algorithm).
     AlgorithmConflict {
         kid: Kid,
         first_version: String,
