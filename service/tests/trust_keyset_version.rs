@@ -1959,6 +1959,89 @@ async fn a_keyset_has_at_most_eight_enabled_versions() {
     db.drop([pool]).await;
 }
 
+/// An enable checks its target's revision before the count: at the bound,
+/// a stale revision is `Registry(StaleRevision)`, not
+/// `TooManyEnabledVersions`, and writes nothing. The current revision
+/// reaches the count and is refused there.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_stale_enable_at_the_bound_is_stale_not_too_many() {
+    let (db, pool) = seeded().await;
+    let keys = upload(vec![p256_a(KID)]).await;
+    for n in 1..=8 {
+        let id = format!("ver_{n:02}");
+        create(&pool, TRUST, &version(&id, &keys), &format!("aud_{id}"))
+            .await
+            .unwrap_or_else(|err| panic!("{id}: {err:?}"));
+    }
+    create(&pool, TRUST, &disabled("ver_off", &keys), "aud_off")
+        .await
+        .unwrap();
+    for stale in [0, 2] {
+        assert_registry(
+            enable(&pool, "ver_off", stale, "aud_stale").await,
+            |err| matches!(err, RegistryError::StaleRevision),
+            &format!("stale revision {stale} at the bound"),
+        );
+    }
+    match enable(&pool, "ver_off", 1, "aud_current").await {
+        Err(KeysetWriteError::TooManyEnabledVersions) => {}
+        other => panic!("the current revision at the bound: {other:?}"),
+    }
+    assert_eq!(state(&pool, "ver_off").await, (Status::Disabled, 1));
+    assert_eq!(version_count(&pool).await, 9);
+    assert_chain(&pool, 9).await;
+    db.drop([pool]).await;
+}
+
+/// An enabled version past its expiry still counts toward the bound: with
+/// seven open-ended enabled versions and an eighth whose window ended
+/// before the write's `now`, a ninth (created enabled, or enabled later) is
+/// `TooManyEnabledVersions`, though its window intersects no expired one.
+/// Disabling the expired version frees its slot.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_expired_enabled_version_still_counts_toward_the_bound() {
+    let (db, pool) = seeded().await;
+    let keys = upload(vec![p256_a(KID)]).await;
+    for n in 1..=7 {
+        let id = format!("ver_{n:02}");
+        create(&pool, TRUST, &version(&id, &keys), &format!("aud_{id}"))
+            .await
+            .unwrap_or_else(|err| panic!("{id}: {err:?}"));
+    }
+    // The same key and `kid` as the others: its window ends before theirs
+    // start, so no overlap check compares it with them.
+    let expired = NewKeysetVersion {
+        effective_at: t0() - secs(2000),
+        expires_at: Some(t0() - secs(1000)),
+        ..version("ver_expired", &keys)
+    };
+    let created = create(&pool, TRUST, &expired, "aud_expired").await.unwrap();
+    assert_eq!(created.status, Status::Enabled);
+    assert!(created.expires_at.unwrap() < now());
+
+    match create(&pool, TRUST, &version("ver_09", &keys), "aud_9").await {
+        Err(KeysetWriteError::TooManyEnabledVersions) => {}
+        other => panic!("a ninth create beside an expired version: {other:?}"),
+    }
+    create(&pool, TRUST, &disabled("ver_09", &keys), "aud_9")
+        .await
+        .unwrap();
+    match enable(&pool, "ver_09", 1, "aud_10").await {
+        Err(KeysetWriteError::TooManyEnabledVersions) => {}
+        other => panic!("a ninth enable beside an expired version: {other:?}"),
+    }
+    assert_eq!(state(&pool, "ver_09").await, (Status::Disabled, 1));
+
+    // Disabling the expired version is what frees its slot.
+    disable(&pool, "ver_expired", 1, "aud_10").await.unwrap();
+    enable(&pool, "ver_09", 1, "aud_11").await.unwrap();
+    assert_eq!(state(&pool, "ver_09").await, (Status::Enabled, 2));
+    assert_chain(&pool, 11).await;
+    db.drop([pool]).await;
+}
+
 /// The cap is counted under the parent lock: while one transaction holds
 /// it, having created (then enabled) the eighth enabled version, a create
 /// of an enabled version (then an enable) waits for it, then counts the
