@@ -37,8 +37,9 @@
 //!   (one algorithm per key).
 //!
 //! Every pick below is a lead decision dated 2026-11-21, provisional until
-//! the maintainer ratifies the ADRs (T00.8 to T00.17). A pick no source
-//! states is marked "(inferred)".
+//! the maintainer ratifies the ADRs (T00.8 to T00.17), except the
+//! dependency choice of the point checks, which the user ruled on (see
+//! below). A pick no source states is marked "(inferred)".
 //!
 //! # Rules
 //!
@@ -140,7 +141,9 @@
 //! The point checks (the `point` submodule) use hand-written modular
 //! arithmetic on public data, not constant-time, with no new dependency
 //! (provisional lead pick, 2026-11-21: an elliptic-curve crate would add 8
-//! to 12 locked packages, a maintainer decision). Their constants are
+//! to 12 locked packages, a maintainer decision). Ruled by the user,
+//! 2026-11-22, relayed by the lead: the hand-written arithmetic stays, and
+//! no elliptic-curve crate is added. Their constants are
 //! written as remembered from FIPS 186-4, SEC 2 and RFC 8032, not checked
 //! against those documents; what was checked, by a Python recomputation,
 //! is listed in the `point` submodule: the formulas, OpenSSL's generator

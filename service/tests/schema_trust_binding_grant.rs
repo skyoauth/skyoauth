@@ -280,6 +280,14 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
                 "impersonation_frozen",
                 false,
             ),
+            // The assignment guards of 0010
+            // (schema_assignment_write_guard.rs).
+            guard(
+                "service_identity_resource_server",
+                "assignment_active",
+                false,
+            ),
+            guard("service_grant_resource_server", "assignment_active", false),
             // The egress guard of 0011
             // (schema_trust_source_egress_guard.rs).
             guard("trust_source", "egress_enabled", false),

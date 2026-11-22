@@ -9,7 +9,10 @@
 //! transaction and neither commit nor roll it back. The picks below are
 //! the lead's (provisional lead pick, 2026-11-22) unless marked (inferred);
 //! all are provisional until the maintainer ratifies the ADRs (T00.8 to
-//! T00.17, Gate M0).
+//! T00.17, Gate M0). Three rulings below are the user's (2026-11-22,
+//! relayed by the lead), not provisional picks: canonical-form
+//! destinations as the convention (end of "Rules"), source writes as
+//! widening, and the database backstop (both under "Not done here").
 //!
 //! # Rules
 //!
@@ -94,13 +97,14 @@
 //!   unchanged member is never refused, also not by a syntax rule that
 //!   tightened after it was stored).
 //!
-//!   Open questions: a path-less, kubeconfig-style server URL
-//!   (`https://host:6443`, the export's `api_server`, OQ-IR-6) is refused,
-//!   so an importer (C05) must rewrite it to canonical form, and nothing
-//!   does that yet. And nothing checks that an egress entry's
-//!   `exact_destination` is canonical, since no entry writer exists.
-//!   Entries are matched byte for byte, so that writer must enforce this
-//!   same rule; otherwise a non-canonical entry matches no source.
+//!   Canonical-form egress destinations are the convention (ruled by the
+//!   user, 2026-11-22, relayed by the lead): an egress entry writer must
+//!   enforce this same rule on `exact_destination`, and an importer (C05)
+//!   must rewrite a path-less, kubeconfig-style server URL
+//!   (`https://host:6443`, the export's `api_server`, OQ-IR-6), which this
+//!   check refuses, to canonical form. Neither exists yet: nothing checks
+//!   today that an entry's `exact_destination` is canonical, and entries
+//!   are matched byte for byte, so a non-canonical entry matches no source.
 //!
 //! No error's `Display` or `Debug` contains a destination: errors name the
 //! member, never its value.
@@ -232,23 +236,31 @@
 //! - No endpoint and no HTTP: nothing calls these functions yet. They must
 //!   not be wired to a request path before the request layer of T14.1 and
 //!   T14.2 exists (generated IDs, NUL rejection, the role of each endpoint)
-//!   and the widening question below is decided, since a wired write would
-//!   apply a widening source write without the approval IR-052 may require.
-//! - Widening: whether a source write is widening and needs an IR-054
-//!   approval while `widening_second_approver` is on (IR-052) is not decided
-//!   here; no write waits for an approval.
+//!   and before the T14.1 and T14.2 design of the second-approver flow,
+//!   since a wired write would apply a widening source write without the
+//!   approval IR-052 requires.
+//! - Widening: a trust source write counts as widening and needs an IR-054
+//!   approval by a second approver while `widening_second_approver` is on
+//!   (ruled by the user, 2026-11-22, relayed by the lead; this decides the
+//!   IR-052 widening question for this write). What remains is the design
+//!   of the second-approver flow (T14.1, T14.2); no write here waits for an
+//!   approval.
 //! - The fetch-time match of a discovered `jwks_uri` against an enabled
 //!   `jwks` entry, the degraded health signal and the fetches themselves
 //!   (IR-152; T11.2, T11.8).
 //! - `ca_bundle_ref` and `reviewer_credential_ref` resolution within the
 //!   tenant's secret namespace (IR-034), tenant status (the operator lookup
 //!   does not read it), and the other source rules of T11.1 and T11.8.
-//! - A database backstop of the syntax rules. The entry check has one since
-//!   migration `0011` (provisional lead pick, 2026-11-22; migrations
-//!   README, "What 0011 adds"): the trigger `trust_source_egress_enabled`
-//!   applies the "What", "Match" and "When" rules above to every writer,
-//!   locking the entry `FOR SHARE` in the order of step 3, and refuses with
-//!   `23514` naming `trust_source_discovery_url_egress_enabled` or
+//! - A database backstop of the syntax rules. The egress check has one.
+//!   The trigger pattern of `docs/proposals/ir-080-assignment-write-guard.md`
+//!   is accepted (ruled by the user, 2026-11-22, relayed by the lead): for
+//!   the IR-080 assignment references it is migration `0010`, and for this
+//!   check it is migration `0011` (provisional lead pick, 2026-11-22;
+//!   migrations README, "What 0011 adds"). Its trigger
+//!   `trust_source_egress_enabled` applies the "What", "Match" and "When"
+//!   rules above to every writer, locking the entry `FOR SHARE` in the order
+//!   of step 3, and refuses with `23514` naming
+//!   `trust_source_discovery_url_egress_enabled` or
 //!   `trust_source_token_review_endpoint_egress_enabled`, which the registry
 //!   maps to [`RegistryError::Invariant`]. This path checks first, so it
 //!   still refuses with [`SourceWriteError::EgressNotAllowed`]; at step 4

@@ -1,9 +1,13 @@
 # Proposal: database guard for IR-080 assignment references (T14.2)
 
-Status: proposal only. No migration and no code. All picks are provisional,
-dated 2026-11-21, until the maintainer decides. Picks marked "(inferred)" are
-the coding session's reading; picks marked "lead" are lead rulings of the
-same date.
+Status: accepted, implemented in 0010
+(`service/migrations/0010_assignment_write_guard.sql`; migrations README,
+"What 0010 adds"). The user accepted the proposal (ruling relayed by the
+lead, 2026-11-22); every pick stays a provisional lead pick, 2026-11-22,
+until the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0). Picks marked
+"(inferred)" were the coding session's reading; picks marked "lead" are lead
+rulings of 2026-11-21. The text below is the proposal as accepted; where the
+implementation corrects it, "Implementation notes" says so.
 
 ## Problem
 
@@ -108,9 +112,36 @@ to the wrong variant.
    not blocked, because the live recheck denies them.
 5. This is a separate migration from the 0009 stored-marker follow-up.
 
-## Open
+## Resolved
 
-- The migration number (the next free number after `0009`, or a number shared
-  with the stored-marker follow-up) is open.
-- Whether the maintainer accepts reversing the README rule for these two
-  tables. This document does not decide it.
+- The migration number: `0010`, separate from the stored-marker follow-up
+  (decision 5).
+- Reversing the README rule for these two tables: accepted by the user
+  (ruling relayed by the lead, 2026-11-22). The migrations README rewrites
+  the rule in "What 0003 adds" and "What 0004 adds" and explains it in "What
+  0010 adds".
+
+## Implementation notes
+
+Where `0010` and its tests differ from the text above (all provisional, as
+above):
+
+- Names: the triggers are `service_identity_resource_server_assignment_active`
+  and `service_grant_resource_server_assignment_active`, both running one
+  function, `skyoauth_require_active_assignment()`. The `23514` names the
+  trigger that fired as its constraint, and the registry maps both names to
+  `Invariant { kind: AssignmentActive, constraint }`.
+- Privileges: a `FOR SHARE` read needs `UPDATE` on at least one column of the
+  table as well as `SELECT`, so a writer needs `SELECT` on
+  `audience_tenant_assignment` (`tenant_id`, `resource_server_id`, `status`)
+  and `UPDATE` on one of its columns, not `SELECT` alone.
+- Replica mode: the triggers are `ENABLE ALWAYS`, so replica mode does not
+  skip them; they still refuse a disabled assignment there. Replica mode
+  skips the foreign key, so a row whose assignment is missing is accepted.
+  The "Limits" bullet above holds only for a trigger that is not
+  `ENABLE ALWAYS`.
+- One statement: a `BEFORE` trigger does not see an assignment that the same
+  statement inserts after the list row (a `WITH` sub-statement the list
+  insert does not read), so such a row is stored against a disabled
+  assignment. The registry never writes both in one statement; the README
+  states the limit and a test pins it.

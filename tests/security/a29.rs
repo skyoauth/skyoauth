@@ -33,8 +33,10 @@
 //! Not covered here: the M2 stage (a proof from one tenant's source with
 //! another tenant's grant at exchange); checker tenant sets (instance
 //! records, A31/A45); records of later milestones (clients, origins, human
-//! policies); authorization and the service rules the database does not
-//! enforce (an enabled assignment, scope ceilings; T14.1, T14.2). Principal
+//! policies); authorization, the enabled-assignment check (since `0010` a
+//! database guard at insert, tested in
+//! `service/tests/schema_assignment_write_guard.rs`), and the service rules
+//! the database does not enforce (scope ceilings; T14.1, T14.2). Principal
 //! and tenant names have no uniqueness rule: `0002` has no name key on
 //! `principal` (IR-021; `service/migrations/README.md`, "Not done in
 //! `0004`") nor on `tenant`, so the shared principal names (`"ci"`, …) and

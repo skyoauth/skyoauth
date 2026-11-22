@@ -199,16 +199,18 @@ const TRIGGER_CONSTRAINTS: [(&str, &str); 2] = [
 ];
 
 /// [`KNOWN_CONSTRAINTS`] is exactly the set of named constraints of the
-/// tables the registry writes and of the list domains, plus the names the
-/// `0011` egress guard raises (each found in its function's source), so a
-/// new constraint in a later migration fails here until the mapping lists
-/// it.
+/// tables the registry writes and of the list domains, together with the
+/// names of the `0010` guard triggers, which their `23514` names as its
+/// constraint, and the names the `0011` egress guard raises (each found in
+/// its function's source), so a new constraint or guard in a later
+/// migration fails here until the mapping lists it.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_constraint_names_match_the_catalog() {
     let (db, pool) = migrated().await;
     let mut names: Vec<String> = sqlx::query_scalar(
-        "SELECT conname::text FROM pg_constraint
+        "SELECT name FROM (
+         SELECT conname::text AS name FROM pg_constraint
          WHERE (contype IN ('c', 'f', 'p', 'u') AND conrelid = ANY(ARRAY[
                    'tenant', 'principal', 'audit_event', 'audit_chain_head',
                    'resource_server', 'audience_tenant_assignment',
@@ -223,7 +225,11 @@ async fn registry_constraint_names_match_the_catalog() {
             OR contypid = ANY(ARRAY[
                    'skyoauth_scope_list', 'skyoauth_profile_list',
                    'skyoauth_string_list']::regtype[])
-         ORDER BY conname::text COLLATE \"C\"",
+         UNION ALL
+         SELECT t.tgname::text FROM pg_trigger t
+         WHERE NOT t.tgisinternal
+           AND t.tgfoid = 'skyoauth_require_active_assignment()'::regprocedure) names
+         ORDER BY name COLLATE \"C\"",
     )
     .fetch_all(&pool)
     .await

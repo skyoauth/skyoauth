@@ -213,7 +213,13 @@ New questions raised by this ADR:
   (identity-registry OQ-IR-13). Both are in the tasks §3 schema with the M1a
   spec amendments. Contracts: identity-registry IR-052 (the setting and its
   effect) and IR-054 (second-approver approvals), public-api API-156 and the
-  `/approve` operation endpoints (OQ-API-13). Still open: the audit sink TLS
+  `/approve` operation endpoints (OQ-API-13). Ruled by the user, 2026-11-22,
+  relayed by the lead: a trust keyset version write (a create, an enable, a
+  re-enable) and a trust source write count as widening, so while
+  `widening_second_approver` is on they need an IR-054 approval by a second
+  approver; the design of the second-approver flow (T14.1, T14.2) remains,
+  and the service-layer write paths of both (`skyoauth_service::trust`) must
+  not be wired to an endpoint before it. Still open: the audit sink TLS
   trust settings and alert routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a

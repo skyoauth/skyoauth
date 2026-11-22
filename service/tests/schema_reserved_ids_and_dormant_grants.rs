@@ -546,13 +546,14 @@ async fn upgrade_precondition_lists_the_reserved_operator_ids() {
     .unwrap();
     assert_eq!(disabled, Vec::<String>::new());
 
-    persistence::migrate(&pool).await.unwrap();
+    // Up to `0009` only, the upgrade under test; later migrations have
+    // their own tests.
+    MIGRATOR.run_to(9, &pool).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await
         .unwrap();
-    // 0009 and every later migration applied.
-    assert_eq!(version, MIGRATOR.iter().last().unwrap().version);
+    assert_eq!(version, 9);
     let not_always: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled <> 'A'",
     )
@@ -1058,9 +1059,14 @@ async fn a_grant_committed_after_the_snapshot_is_refused_by_the_foreign_key() {
 async fn list_row_writers_need_select_on_service_grant() {
     let (mut db, pool) = seeded().await;
     let (role, connect) = db.create_login_role().await;
+    // Since `0010` an audience row also needs the assignment privileges
+    // the guard of `0010` reads with (its own test checks them).
     run(
         &pool,
-        &format!("GRANT INSERT ON service_grant_binding, service_grant_resource_server TO {role}"),
+        &format!(
+            "GRANT INSERT ON service_grant_binding, service_grant_resource_server TO {role};
+             GRANT SELECT, UPDATE ON audience_tenant_assignment TO {role}"
+        ),
     )
     .await;
     let mut writer = PgConnection::connect_with(&connect).await.unwrap();
