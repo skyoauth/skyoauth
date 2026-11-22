@@ -566,7 +566,11 @@ The database does not enforce these rules; the service must:
   audience within its target service's audiences (IR-083);
 - check `discovery_url` and `token_review_endpoint` against an enabled
   egress entry of the matching purpose when they are written (IR-152), and
-  validate them as URLs;
+  validate them as URLs. The service-layer write path
+  `skyoauth_service::trust` (`create_source`, `update_source`) does both,
+  in the caller's transaction (T11.2; see "Trust source writes" under
+  "Rust registry surface"); the bare registry functions do not, and no
+  database trigger backs it (the migrations are frozen);
 - resolve `ca_bundle_ref` and `reviewer_credential_ref` only within the
   tenant's secret namespace (IR-034);
 - check that a binding's template fits its source (ADR-016 item 4), review
@@ -1030,7 +1034,9 @@ The database does not enforce these rules; the service must:
   the operation and the remaining updates of step 3. `audit_id` stays an
   immediate, not deferrable foreign key, so the event is inserted first.
   Writes that create no operation (consume, outcome) update their rows
-  before the head, in the `0002` order.
+  before the head, in the `0002` order. A trust source write (T11.2)
+  creates no operation either; its order is in "Trust source writes" under
+  "Rust registry surface".
 
 - `0005` makes two `0002` tables foreign-key targets, so a bare `TRUNCATE`
   of them now fails with `0A000` (a table referenced in a foreign key) before
@@ -2608,3 +2614,63 @@ grant list-set change writes only the revision, so with the check in force
 it still fails with `23514`; with the check dropped it applies and returns
 only the new revision, since it does not read the timestamp column. The range checks of the tables the registry writes are in
 `KNOWN_CONSTRAINTS`.
+
+### Trust source writes
+
+`skyoauth_service::trust::create_source` and `update_source` are the
+audited write path of a trust source with the IR-152 egress check (T11.2;
+see their module documentation for the full rules). Library-level only: no
+endpoint calls them and nothing wires them at startup. Each runs in the
+caller's transaction, in a savepoint of its own that it rolls back on every
+error, and neither commits nor rolls back the caller's transaction. The
+picks are the lead's (provisional lead pick, 2026-11-22) unless marked
+inferred:
+
+- Only a `trust_admin` of the source's tenant writes
+  (`authorize_operator_locked` with `OperatorScope::Tenant` and
+  `AdminRole::TrustAdmin`); every miss is one `Unauthorized`.
+- `discovery_url` must equal, byte for byte, the `exact_destination` of an
+  enabled `oidc_discovery` entry, and `token_review_endpoint` that of an
+  enabled `token_review` entry (no normalization, inferred), or the write is
+  `EgressNotAllowed` naming the member. A create checks each member that is
+  set; an update only a member whose value changes, so a write that leaves
+  both unchanged, a disable included, is never refused for a missing or
+  disabled entry (IR-152): such a source is degraded at fetch.
+- A checked member must be an `https` URL with a host, a path and no
+  userinfo or fragment, or the write is `InvalidDestination` naming the
+  member. A create checks it before any statement; an update checks only a
+  changed member, after it has read the stored row and before any entry
+  lock (inferred, like the reading of the raw text). No error names a
+  destination.
+- Only `READ COMMITTED` runs: any other level is `UnsupportedIsolation`
+  before any lock. A `40001` or `40P01` is `RegistryError::Retry`.
+- The event is `trust_source.create` or `trust_source.update` (every
+  update, a status-only one included), appended last in the source's
+  tenant, with the operator as actor; it records no destination and no
+  entry ID, since the envelope has no member for them (inferred).
+
+Lock order, extending the orders above for this write, which creates no
+operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`),
+then, for an update, the `trust_source` row (`FOR NO KEY UPDATE`), then the
+egress entry rows `FOR SHARE` (discovery before TokenReview; a valid source
+has at most one), then the write's own locks, then the audit head last. It
+puts `trust_source` before `egress_allowlist_entry`, against the by-name
+table order of step 1 of "What 0005 adds", which is for writes that create
+an operation: an update reads the stored row before it knows which entry to
+lock. `FOR SHARE` conflicts with the `UPDATE` that disables an entry, so a
+disable waits for an open write that checked the entry, and a write that
+reaches an entry a disable holds waits and then reads it `disabled`.
+
+Follow-ups:
+
+- An egress entry writer (IR-152 `enable` and `disable`; none exists yet)
+  must not lock `trust_source` rows after the entry row, or it can deadlock
+  with an update here (`40P01`, `Retry`, fail-closed). Listing the affected
+  source IDs in its audit event needs no lock.
+- Whether a source write is widening and needs an IR-054 approval while
+  `widening_second_approver` is on (IR-052) is not decided here. The write
+  path must not be wired to an endpoint before that and the request layer
+  (T14.1, T14.2) are.
+- The fetch-time `jwks_uri` match and the degraded health signal (IR-152)
+  are not built, nor a database backstop for the egress check: a trigger
+  alternative waits for the maintainer's ruling on a proposal.
