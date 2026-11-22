@@ -578,7 +578,14 @@ The database does not enforce these rules; the service must:
   upload (T11.3). The pure module `skyoauth_service::jwk` now does these
   checks (provisional picks, its module docs list them, the unsourced ones
   marked inferred): `parse_jwk_set` for one version's set, with RFC 7638
-  thumbprints; `check_version_overlap` wherever a version becomes enabled
+  thumbprints; `validate_keyset`, the same parse returning a
+  `ValidatedKeyset` with the canonical public projection to store, never
+  the raw upload (only allowlisted public members, sorted, no whitespace),
+  and its fingerprint, the base64url SHA-256 of that projection
+  (inferred; its use is open, OQ-IR-6); `parse_stored` to read a stored
+  `public_jwks` back with the shape, size and member rules but no point
+  arithmetic (trusted as validated at write: the `CHECK` floor above does
+  not make it so); `check_version_overlap` wherever a version becomes enabled
   (creation as enabled, re-enable, and any import or restore path;
   creating a disabled version may skip it), against the other enabled
   versions whose windows intersect (inferred: disabled versions are
@@ -603,10 +610,11 @@ The database does not enforce these rules; the service must:
   test. Validation is CPU-bound (about 8.8 ms per Ed25519 key in release,
   about 0.18 s per 20-key set): the wiring PR must run it on bounded
   blocking workers (`spawn_blocking` with a limit), and T11.7 must select
-  from already-validated stored keys, not re-parse per request.
+  from already-validated stored keys (`parse_stored`), not re-parse per
+  request.
   Exceptions: the raw request body is not bounded (only the parsed
-  value is); and the module does not define what the version's
-  `fingerprint` column holds (T11.9). The wiring PR must enforce a raw
+  value is); and whether the version's `fingerprint` column holds the
+  module's fingerprint is undecided (T11.9). The wiring PR must enforce a raw
   request-body size limit before parsing (64 KiB is consistent: a valid
   set is at most 34,290 bytes) and serialize the writes of one keyset
   (lock the parent keyset row or advance its revision). The keyset write

@@ -146,6 +146,36 @@
 //! and generated keys on the curve, the SEED relation and RFC 8032's
 //! decimal `d`.
 //!
+//! # Projection, fingerprint and stored sets
+//!
+//! - [`validate_keyset`] runs [`parse_jwk_set`] and returns a
+//!   [`ValidatedKeyset`]: the set, its canonical public projection
+//!   ([`ValidatedKeyset::public_json`], also [`JwkSet::to_public_json`])
+//!   and its [`KeysetFingerprint`]. The projection is what the write path
+//!   stores, never the raw upload (inferred): per key, `alg` when uploaded
+//!   and the key type's [`RSA_MEMBERS`], [`EC_MEMBERS`] or [`OKP_MEMBERS`]
+//!   with `kty` and `kid`, in lexicographic member order (as RFC 7638
+//!   orders its input), with no whitespace, the keys in upload order. `use`,
+//!   `key_ops`, `x5t` and `x5t#S256` are dropped (inferred: `use` and
+//!   `key_ops` can only be `sig` and `["verify"]`, the certificate
+//!   thumbprints are unused), so a private member can never reach it. A
+//!   projection is itself an accepted upload.
+//! - The fingerprint (inferred) is the unpadded base64url of the SHA-256
+//!   digest of the projection's bytes. Its use is open: the design section
+//!   5.7 export gives a version only `id` and `public_jwks_ref` (OQ-IR-6),
+//!   and what the version's `fingerprint` column holds is the wiring's
+//!   decision (T11.9).
+//! - [`parse_stored`] parses a version's `public_jwks` read back from the
+//!   database, as text or bytes, into a [`StoredKeyset`]: every rule above
+//!   (shape, size, allowlist, `alg` rules, lengths, unique `kid`s and keys)
+//!   but no point arithmetic (provisional lead pick, 2026-11-22), with
+//!   [`KNOWN_ALGORITHMS`] as the allowed set (inferred). It recomputes the
+//!   projection and fingerprint, which do not depend on how `jsonb` orders
+//!   or spaces the text. The stored value is trusted to have been validated
+//!   at write; the `0004` `CHECK` floor does not make that true by itself.
+//!   Runtime verification (T11.7) must select from these already validated
+//!   stored keys.
+//!
 //! # Versions
 //!
 //! A version's window is `[effective_at, expires_at)`: start inclusive,
@@ -186,7 +216,9 @@
 //! or an uploaded member name: no variant holds `n`, `e`, `x`, `y`, key
 //! octets, an unexpected member's name or the JWK, so neither `Display`
 //! nor `Debug` can print them. [`PublicKey`] and [`PublicJwk`] implement
-//! `Debug` by hand and print no key octets either.
+//! `Debug` by hand and print no key octets either; nor do
+//! [`ValidatedKeyset`] and [`StoredKeyset`], whose `Debug` leaves out the
+//! projection. [`JwkSetError::NotJson`] drops the JSON parser's message.
 //!
 //! # Test vectors
 //!
@@ -212,19 +244,26 @@
 //!   CPU-bound (about 8.8 ms per Ed25519 key in release, about 0.18 s per
 //!   20-key set): the wiring PR must run it on bounded blocking workers
 //!   (`spawn_blocking` with a limit), and T11.7 must select from
-//!   already-validated stored keys, not re-parse per request. An
+//!   already-validated stored keys (read with [`parse_stored`], which skips
+//!   the point checks), not re-parse per request with the full parse. An
 //!   optimisation of the `x^2` computation (as `u * v`) is deferred.
 //! - The wiring PR must bound the raw request body before parsing it: this
 //!   module bounds only the parsed value.
 //! - The allowed algorithm set (OQ-TP-3, open) and its intersection with a
 //!   source's `algorithms` allowlist.
 //! - Wiring into the trust keyset write path (T11.9, T24.2): calling
-//!   [`parse_jwk_set`] at write and [`check_version_overlap`] wherever a
-//!   version becomes enabled (creation as enabled, re-enable, import,
-//!   restore), serializing the writes of one keyset (lock the parent
-//!   keyset row or advance its revision), and deciding what the version's
-//!   `fingerprint` column holds: this module does not define it. Nothing
-//!   calls this module yet.
+//!   [`validate_keyset`] at write and storing its
+//!   [`ValidatedKeyset::public_json`], never the raw upload, calling
+//!   [`check_version_overlap`] wherever a version becomes enabled
+//!   (creation as enabled, re-enable, import, restore), serializing the
+//!   writes of one keyset (lock the parent keyset row or advance its
+//!   revision), and deciding what the version's `fingerprint` column holds:
+//!   this module offers [`KeysetFingerprint`] (inferred), whose use is open
+//!   (OQ-IR-6). Nothing calls this module yet.
+//! - Reading stored versions with [`parse_stored`] (T11.7). [`live_keys`]
+//!   and [`check_version_overlap`] take a [`JwkSet`], which only the full
+//!   parse builds, so feeding them stored keys needs a change of
+//!   [`KeysetVersion`] (open).
 //! - Whether validity windows should stay immutable, so that an operator
 //!   could close an open-ended window instead of disabling the version
 //!   (open question).
@@ -235,6 +274,7 @@ mod base64url;
 mod key;
 mod overlap;
 mod point;
+mod projection;
 mod set;
 mod thumbprint;
 
@@ -247,6 +287,9 @@ pub use key::{
 };
 pub use overlap::{
     KeysetVersion, LiveKey, OverlapError, VersionStatus, check_version_overlap, live_keys,
+};
+pub use projection::{
+    KeysetFingerprint, StoredKeyset, ValidatedKeyset, parse_stored, validate_keyset,
 };
 pub use set::{JwkSet, JwkSetError, MAX_KEYS, MAX_SET_BYTES, parse_jwk_set};
 pub use thumbprint::Thumbprint;
