@@ -486,9 +486,10 @@ async fn catalog_pins_the_egress_trigger_and_its_function() {
     persistence::migrate(&pool).await.unwrap();
 
     // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update.
-    let triggers: Vec<(String, String, i16, String, bool, bool)> = sqlx::query_as(
+    let triggers: Vec<(String, String, i16, String, bool, bool, bool)> = sqlx::query_as(
         "SELECT t.tgname::text, p.proname::text, t.tgtype, t.tgenabled::text,
-                t.tgdeferrable, t.tgconstraint <> 0
+                t.tgdeferrable, t.tgconstraint <> 0,
+                t.tgattr::text = ''
          FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
          WHERE NOT t.tgisinternal AND t.tgfoid = to_regproc($1)::oid",
     )
@@ -504,7 +505,9 @@ async fn catalog_pins_the_egress_trigger_and_its_function() {
             1 | 4 | 16,
             "A".to_string(),
             false,
-            false
+            false,
+            // Not `UPDATE OF <columns>`: every update fires it.
+            true
         )]
     );
     let on_source: i64 = sqlx::query_scalar(
@@ -747,6 +750,22 @@ async fn an_update_checks_only_a_changed_member() {
             assert_refused(&mut conn, &update(&id, &disable), member).await;
         }
         assert_passes(&mut conn, &update(&id, &set(member, member.enabled_2()))).await;
+        // A NULL member is never checked. The kind check refuses clearing,
+        // so drop it (in a transaction that is rolled back); the stored
+        // entry is disabled, so the write passes only if the guard skips
+        // the NULL member.
+        let drop_kind_check = match member {
+            Member::Discovery => "trust_source_discovery_url_kind_check",
+            Member::TokenReview => "trust_source_token_review_fields_kind_check",
+        };
+        assert_passes(
+            &mut conn,
+            &format!(
+                "ALTER TABLE trust_source DROP CONSTRAINT {drop_kind_check}; {}",
+                update(&id, &format!("{column} = NULL"))
+            ),
+        )
+        .await;
         // Cleared: not checked; the kind check refuses it.
         let kind_check = match member {
             Member::Discovery => "trust_source_discovery_url_kind_check",

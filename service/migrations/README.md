@@ -2148,11 +2148,12 @@ validates no existing row. Choices marked "(inferred)" are its own.
   schema raises). The service keeps its own check, which runs first:
   `create_source` and `update_source` still refuse with `EgressNotAllowed`
   and never reach this error.
-- **Timing and precedence.** The trigger is a plain `AFTER INSERT OR
-UPDATE` row trigger, as `0010`'s: not a constraint trigger, so not
-  deferrable. It fires at the end of the statement, so every `0004` check
-  comes first: the `BEFORE` guards `trust_source_immutable` and
-  `trust_source_revision` (`SK001`), the `CHECK`, `NOT NULL` and unique
+- **Timing and precedence.** The trigger is a plain
+  `AFTER INSERT OR UPDATE` row trigger, as `0010`'s: not a constraint
+  trigger, so not deferrable. It fires at the end of the statement, so
+  every `0004` check comes first: the `BEFORE` guards
+  `trust_source_immutable` and `trust_source_revision` (`SK001`), the
+  `CHECK`, `NOT NULL` and unique
   constraints, and the foreign-key checks, whose internal `AFTER` triggers
   (`RI_ConstraintTrigger_c_…`) sort, and so fire, before
   `trust_source_egress_enabled`. A write that breaks one of them fails
@@ -2170,12 +2171,13 @@ UPDATE` row trigger, as `0010`'s: not a constraint trigger, so not
   reads the row as committed, `disabled`, and is refused. So no write
   commits through an entry that a disable committed before it. `FOR SHARE`
   does not conflict with `FOR SHARE`, so writes that use one entry do not
-  wait for each other. An `UPDATE` that leaves both members unchanged (a status-only update, a
-  rename) locks no entry, since the change test comes before the lock
-  (`an_unchanged_destination_takes_no_entry_lock` checks it with
-  `pg_locks` and a `FOR UPDATE NOWAIT` from another transaction). Lock order: on `UPDATE`, PostgreSQL locks and
-  changes the source row before the `AFTER` trigger takes the entry, so
-  the order is the service's (operator rows, the source row, the entry
+  wait for each other. An `UPDATE` that leaves both members unchanged (a
+  status-only update, a rename) locks no entry, since the change test
+  comes before the lock (`an_unchanged_destination_takes_no_entry_lock`
+  checks it with `pg_locks` and a `FOR UPDATE NOWAIT` from another
+  transaction). Lock order: on `UPDATE`, PostgreSQL locks and changes
+  the source row before the `AFTER` trigger takes the entry, so the
+  order is the service's (operator rows, the source row, the entry
   `FOR SHARE`, discovery before TokenReview, then the audit head, which
   the service appends in a later statement). On `INSERT`, the foreign-key
   checks of the new row (`FOR KEY SHARE` on the tenant and, for
@@ -2209,6 +2211,9 @@ UPDATE` row trigger, as `0010`'s: not a constraint trigger, so not
   while a destination writer with table-level `UPDATE` could enable a
   disabled entry and write a source on it, or disable one, which is the
   egress entry writer's job. That is why the grant must be column-level.
+  As in `0010`, the `UPDATE (id)` closure takes effect only once the
+  migrate and runtime roles are split (T10.1 follow-up); today one URL
+  serves both, so the runtime role holds table-level privileges anyway.
   The tests `destination_writers_need_select_and_update_on_the_entries`
   and `a_table_level_update_lets_a_destination_writer_flip_an_entry`
   check both.
@@ -2247,9 +2252,10 @@ UPDATE` row trigger, as `0010`'s: not a constraint trigger, so not
     with a source update ("Trust source writes" has the rule for that
     writer; none exists yet).
 - **Locks on existing tables.** Checked with `pg_locks` in a transaction
-  that applies `0011` to a `0010` database (PostgreSQL 16.15):
-  `CREATE TRIGGER` and `ENABLE ALWAYS TRIGGER` take `SHARE ROW EXCLUSIVE`
-  on `trust_source`, which blocks writes of trust sources until the
+  that applies `0011` to a `0010` database (PostgreSQL 16.15 here; 17.12
+  in the lead's review, same result): `CREATE TRIGGER` and
+  `ENABLE ALWAYS TRIGGER` take `SHARE ROW EXCLUSIVE` on `trust_source`,
+  which blocks writes of trust sources until the
   migration commits, with no rewrite (its `relfilenode` stays the same).
   `egress_allowlist_entry` is not locked.
 - **Upgrade precondition.** None: the trigger validates no existing row.
