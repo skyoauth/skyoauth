@@ -9,13 +9,15 @@
 //! (integer arithmetic for the curve equations, OpenSSL through
 //! `cryptography` for the valid NIST points), never with this crate.
 
+use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 use skyoauth_service::jwk::{
     Algorithm, Base64urlError, DEFAULT_ALLOWED_ALGORITHMS, JwkError, JwkSet, JwkSetError,
-    KEY_REFERENCE_MEMBERS, KeysetVersion, MAX_KEYS, MAX_SET_BYTES, OverlapError, PRIVATE_MEMBERS,
-    PublicKey, VersionStatus, check_version_overlap, live_keys, parse_jwk_set,
+    KEY_REFERENCE_MEMBERS, KeysetVersion, MAX_KEYS, MAX_SET_BYTES, MAX_STORED_BYTES, OverlapError,
+    PRIVATE_MEMBERS, PublicKey, ValidatedKeyset, VersionStatus, check_version_overlap, live_keys,
+    parse_jwk_set, parse_stored, validate_keyset,
 };
 
 // RFC 7517 appendix A.1 / RFC 7638 section 3.1 (kid "2011-04-29").
@@ -1084,10 +1086,10 @@ fn set_of_size(size: usize) -> Value {
     set
 }
 
-#[test]
-fn the_largest_valid_set_is_well_under_the_size_bound() {
-    // 20 RSA keys of 8192 bits, a 32-octet e, a 128-byte kid and every
-    // allowlisted member: the bound the module docs state.
+/// 20 RSA keys of 8192 bits, a 32-octet e, a 128-byte kid and every
+/// allowlisted member: the largest valid set, the bound the module docs
+/// state.
+fn largest_valid_set() -> Value {
     let keys: Vec<Value> = (0..20u8)
         .map(|i| {
             let jwk = rsa_with(
@@ -1101,7 +1103,12 @@ fn the_largest_valid_set_is_well_under_the_size_bound() {
             with(jwk, "x5t#S256", json!(b64(&[0x22; 32])))
         })
         .collect();
-    let set = set_of(keys);
+    set_of(keys)
+}
+
+#[test]
+fn the_largest_valid_set_is_well_under_the_size_bound() {
+    let set = largest_valid_set();
     assert_eq!(serde_json::to_string(&set).unwrap().len(), 34_290);
     assert_eq!(parse(&set).unwrap().keys().len(), 20);
 }
@@ -2134,5 +2141,570 @@ fn error_text_names_the_member_and_kid() {
     assert_eq!(
         parse(&Value::Object(map)).unwrap_err().to_string(),
         "JWK set has no \"keys\" member"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Projection, fingerprint and stored sets
+
+/// The set whose projection and fingerprint are pinned: the RFC 7638 RSA
+/// key with `alg`, the RFC 7517 P-256 key without `alg` and the RFC 8037
+/// Ed25519 key with `alg`, the first two with members the projection drops.
+fn fixed_set() -> Value {
+    set_of(vec![
+        with(
+            with(rsa_key("rsa"), "use", json!("sig")),
+            "key_ops",
+            json!(["verify"]),
+        ),
+        with(
+            with(p256_key("ec"), "x5t", json!(b64(&[0x11; 20]))),
+            "x5t#S256",
+            json!(b64(&[0x22; 32])),
+        ),
+        with(ed25519_key("ed"), "alg", json!("EdDSA")),
+    ])
+}
+
+/// The projection of [`fixed_set`], written by hand: keys sorted by `kid`
+/// (`ec`, `ed`, `rsa`), members sorted.
+fn fixed_projection() -> String {
+    format!(
+        concat!(
+            r#"{{"keys":[{{"crv":"P-256","kid":"ec","kty":"EC","x":"{}","y":"{}"}},"#,
+            r#"{{"alg":"EdDSA","crv":"Ed25519","kid":"ed","kty":"OKP","x":"{}"}},"#,
+            r#"{{"alg":"RS256","e":"AQAB","kid":"rsa","kty":"RSA","n":"{}"}}]}}"#,
+        ),
+        P256_X, P256_Y, ED25519_X, RSA_N
+    )
+}
+
+/// The fingerprint of [`fixed_projection`], computed with Python
+/// (`json.dumps` with `sort_keys=True` and `separators=(",", ":")` over the
+/// keys sorted by `kid`, then `hashlib.sha256` and unpadded
+/// `base64.urlsafe_b64encode`), never from this crate.
+const FIXED_FINGERPRINT: &str = "kmw_flxprrqx5hAs8p0vEVuCoTPn9KA9a_dZ9kH1Tfk";
+
+/// The members a projected key may have.
+const PROJECTION_MEMBERS: [&str; 8] = ["alg", "crv", "e", "kid", "kty", "n", "x", "y"];
+
+fn validate(set: &Value) -> ValidatedKeyset {
+    validate_keyset(set, DEFAULT_ALLOWED_ALGORITHMS).expect("accepted")
+}
+
+/// `value` as JSON text the way `jsonb` might give it back: every object's
+/// members in reverse order, with spaces after `:` and `,`.
+fn jsonb_like(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let members: Vec<String> = map
+                .iter()
+                .rev()
+                .map(|(name, value)| format!("{}: {}", json!(name), jsonb_like(value)))
+                .collect();
+            format!("{{{}}}", members.join(", "))
+        }
+        Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(jsonb_like).collect();
+            format!("[{}]", items.join(", "))
+        }
+        other => other.to_string(),
+    }
+}
+
+#[test]
+fn projection_and_fingerprint_of_a_fixed_set_are_pinned() {
+    let validated = validate(&fixed_set());
+    assert_eq!(validated.public_json(), fixed_projection());
+    assert_eq!(validated.set().to_public_json(), fixed_projection());
+    assert_eq!(validated.fingerprint().as_str(), FIXED_FINGERPRINT);
+    assert_eq!(validated.fingerprint().to_string(), FIXED_FINGERPRINT);
+    // The same set and keys as the plain parse.
+    let set = parse(&fixed_set()).unwrap();
+    assert_eq!(validated.set(), &set);
+    assert_eq!(validated.keys(), set.keys());
+    // Stable: the same upload gives the same projection and fingerprint.
+    assert_eq!(validate(&fixed_set()), validated);
+    let stored = parse_stored(fixed_projection()).unwrap();
+    assert_eq!(stored.fingerprint().as_str(), FIXED_FINGERPRINT);
+    assert_eq!(stored.public_json(), fixed_projection());
+}
+
+fn round_trip_sets() -> Vec<Value> {
+    let generated: Vec<Value> = GENERATED_KEYS
+        .iter()
+        .enumerate()
+        .map(|(i, (crv, x, y, _))| {
+            if y.is_empty() {
+                json!({"kty": "OKP", "kid": format!("g{i}"), "crv": crv, "x": x})
+            } else {
+                json!({"kty": "EC", "kid": format!("g{i}"), "crv": crv, "x": x, "y": y})
+            }
+        })
+        .collect();
+    vec![
+        fixed_set(),
+        set_of(vec![rsa_key("k")]),
+        set_of(vec![p384_key("a:b/c+d=e~f"), p521_key("b")]),
+        set_of(vec![
+            with(p256_key("a"), "alg", json!("ES256")),
+            with(rsa_key("b"), "alg", json!("PS256")),
+            with(p384_key("c"), "alg", json!("ES384")),
+            with(p521_key("d"), "alg", json!("ES512")),
+        ]),
+        set_of(generated),
+        set_of(distinct_rsa_keys(MAX_KEYS)),
+        largest_valid_set(),
+    ]
+}
+
+#[test]
+fn full_parse_projection_and_stored_parse_round_trip() {
+    for set in round_trip_sets() {
+        let validated = validate(&set);
+        let projection = validated.public_json();
+        let stored = parse_stored(projection).expect("stored projection accepted");
+        // Same keys in the same order (sorted by kid), same projection,
+        // same fingerprint.
+        assert_eq!(stored.keys(), validated.keys());
+        assert!(
+            validated
+                .keys()
+                .windows(2)
+                .all(|pair| pair[0].kid() < pair[1].kid())
+        );
+        assert_eq!(stored.public_json(), projection);
+        assert_eq!(stored.fingerprint(), validated.fingerprint());
+        for key in validated.keys() {
+            assert_eq!(stored.get(key.kid().as_str()), Some(key));
+        }
+        // As bytes, an owned string or owned bytes.
+        assert_eq!(parse_stored(projection.as_bytes()).unwrap(), stored);
+        let owned: (String, Vec<u8>) = (projection.into(), projection.into());
+        assert_eq!(parse_stored(owned.0).unwrap(), stored);
+        assert_eq!(parse_stored(owned.1).unwrap(), stored);
+        // As jsonb might give it back: reordered and spaced, the same.
+        let value: Value = serde_json::from_str(projection).unwrap();
+        let reordered = jsonb_like(&value);
+        assert_ne!(reordered, projection);
+        assert_eq!(parse_stored(&reordered).unwrap(), stored);
+        // A projection is itself an accepted upload, with the same result.
+        assert_eq!(validate(&value), validated);
+        // No whitespace, only the projection's members, sorted.
+        assert!(!projection.contains(char::is_whitespace));
+        for key in value["keys"].as_array().unwrap() {
+            let members: Vec<&str> = key
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert!(
+                members.iter().all(|m| PROJECTION_MEMBERS.contains(m)),
+                "{members:?}"
+            );
+        }
+        assert!(projection.len() <= serde_json::to_string(&set).unwrap().len());
+    }
+}
+
+#[test]
+fn projection_member_order_is_lexicographic() {
+    // The member names of each key, in the order they appear in the text.
+    let projection = validate(&fixed_set()).public_json().to_owned();
+    for key in projection
+        .trim_start_matches(r#"{"keys":[{"#)
+        .trim_end_matches("}]}")
+        .split("},{")
+    {
+        let names: Vec<&str> = key
+            .split(',')
+            .map(|member| member.split(':').next().unwrap().trim_matches('"'))
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
+    }
+}
+
+#[test]
+fn fingerprint_changes_when_any_member_changes() {
+    let base = validate(&fixed_set());
+    let keys = fixed_set()["keys"].as_array().unwrap().clone();
+    let (rsa, ec, ed) = (keys[0].clone(), keys[1].clone(), keys[2].clone());
+    let three = |rsa: Value, ec: Value, ed: Value| set_of(vec![rsa, ec, ed]);
+    let variants = vec![
+        three(
+            with(rsa.clone(), "kid", json!("rsa2")),
+            ec.clone(),
+            ed.clone(),
+        ),
+        three(
+            rsa.clone(),
+            with(ec.clone(), "kid", json!("ec2")),
+            ed.clone(),
+        ),
+        three(
+            rsa.clone(),
+            ec.clone(),
+            with(ed.clone(), "kid", json!("ed2")),
+        ),
+        three(
+            with(rsa.clone(), "alg", json!("PS256")),
+            ec.clone(),
+            ed.clone(),
+        ),
+        // 65539, another valid exponent.
+        three(
+            with(rsa.clone(), "e", json!("AQAD")),
+            ec.clone(),
+            ed.clone(),
+        ),
+        three(
+            with(rsa.clone(), "n", json!(b64(&modulus(256, 0x80, 1)))),
+            ec.clone(),
+            ed.clone(),
+        ),
+        three(
+            rsa.clone(),
+            with(ec.clone(), "alg", json!("ES256")),
+            ed.clone(),
+        ),
+        three(
+            rsa.clone(),
+            with(
+                with(ec.clone(), "x", json!(GENERATED_KEYS[0].1)),
+                "y",
+                json!(GENERATED_KEYS[0].2),
+            ),
+            ed.clone(),
+        ),
+        three(rsa.clone(), ec.clone(), without(ed.clone(), "alg")),
+        three(
+            rsa.clone(),
+            ec.clone(),
+            with(ed.clone(), "x", json!(GENERATED_KEYS[3].1)),
+        ),
+        // One key fewer, one key more.
+        set_of(vec![rsa.clone(), ec.clone()]),
+        set_of(vec![rsa.clone(), ec.clone(), ed.clone(), p384_key("p384")]),
+    ];
+    let mut seen = HashSet::from([base.fingerprint().clone()]);
+    for variant in &variants {
+        let validated = validate(variant);
+        assert_eq!(validated.fingerprint().as_str().len(), 43);
+        assert!(
+            seen.insert(validated.fingerprint().clone()),
+            "fingerprint unchanged or repeated: {variant}"
+        );
+        assert_eq!(validate(variant).fingerprint(), validated.fingerprint());
+    }
+    // The same keys in another order give the same bytes and fingerprint.
+    let reordered = validate(&set_of(vec![ec.clone(), rsa.clone(), ed.clone()]));
+    assert_eq!(reordered.public_json(), base.public_json());
+    assert_eq!(reordered.fingerprint(), base.fingerprint());
+    // The members the projection drops do not change it.
+    for (index, member) in [(0, "use"), (0, "key_ops"), (1, "x5t"), (1, "x5t#S256")] {
+        let mut set = fixed_set();
+        set["keys"][index].as_object_mut().unwrap().remove(member);
+        assert_eq!(validate(&set).fingerprint(), base.fingerprint(), "{member}");
+    }
+}
+
+#[test]
+fn stored_parse_refuses_what_the_full_parse_refuses_for_shape_size_and_members() {
+    let mut cases: Vec<Value> = PRIVATE_MEMBERS
+        .iter()
+        .map(|member| set_of(vec![with(p256_key("k"), member, json!(P256_D))]))
+        .collect();
+    cases.extend(
+        KEY_REFERENCE_MEMBERS
+            .iter()
+            .map(|member| set_of(vec![with(rsa_key("k"), member, json!("u"))])),
+    );
+    cases.extend([
+        // Unexpected members, in a key and in the set.
+        set_of(vec![with(rsa_key("k"), "foo", json!("x"))]),
+        set_of(vec![with(p256_key("k"), "n", json!(RSA_N))]),
+        set_of(vec![with(ed25519_key("k"), "y", json!(P256_Y))]),
+        with(set_of(vec![rsa_key("k")]), "pad", json!("")),
+        // Size and shape.
+        set_of_size(MAX_SET_BYTES + 1),
+        json!([rsa_key("k")]),
+        json!({}),
+        json!({"keys": {}}),
+        json!({"keys": []}),
+        json!({"keys": [rsa_key("k"), "AQAB"]}),
+        set_of(distinct_rsa_keys(MAX_KEYS + 1)),
+        // Missing alg for RSA, and the other alg rules.
+        set_of(vec![without(rsa_key("k"), "alg")]),
+        set_of(vec![with(rsa_key("k"), "alg", json!("ES256"))]),
+        set_of(vec![with(rsa_key("k"), "alg", json!("none"))]),
+        set_of(vec![with(rsa_key("k"), "alg", json!("HS256"))]),
+        set_of(vec![with(rsa_key("k"), "alg", json!("RS384"))]),
+        set_of(vec![with(p256_key("k"), "alg", json!("ES384"))]),
+        // Duplicate kid, one key under two kids.
+        set_of(vec![rsa_key("dup"), p256_key("dup")]),
+        set_of(vec![p256_key("a"), p256_key("b")]),
+        // Lengths, encodings and RSA bounds.
+        set_of(vec![ec_key("P-256", &[1; 31], &[1; 32])]),
+        set_of(vec![ed_key(&[1; 33])]),
+        set_of(vec![with(p256_key("k"), "x5t", json!(b64(&[0x11; 19])))]),
+        set_of(vec![with(rsa_key("k"), "n", json!(format!("{RSA_N}=")))]),
+        set_of(vec![rsa_with("k", &modulus(255, 0x80, 0), &[1, 0, 1])]),
+        set_of(vec![rsa_with("k", &modulus(256, 0x80, 0), &[3])]),
+        // Members: kid, use, key_ops, kty, crv.
+        set_of(vec![without(rsa_key("k"), "kid")]),
+        set_of(vec![with(rsa_key("k"), "kid", json!("a b"))]),
+        set_of(vec![with(rsa_key("k"), "use", json!("enc"))]),
+        set_of(vec![with(rsa_key("k"), "key_ops", json!(["sign"]))]),
+        set_of(vec![json!({"kty": "oct", "kid": "k"})]),
+        set_of(vec![with(p256_key("k"), "crv", json!("secp256k1"))]),
+    ]);
+    for set in &cases {
+        let full = parse(set).expect_err("the full parse refuses it");
+        assert_eq!(parse_stored(set.to_string()), Err(full.clone()), "{full}");
+        assert_eq!(parse_stored(jsonb_like(set)), Err(full), "jsonb-like");
+    }
+    // Text that is not JSON.
+    for text in [
+        &b""[..],
+        b"{",
+        b"{\"keys\":[}",
+        b"\xef\xbb\xbf{\"keys\":[]}",
+        b"\xff\xfe",
+    ] {
+        assert_eq!(parse_stored(text), Err(JwkSetError::NotJson));
+    }
+    assert_eq!(
+        JwkSetError::NotJson.to_string(),
+        "stored JWK set is not JSON"
+    );
+}
+
+#[test]
+fn stored_size_is_measured_on_the_parsed_value() {
+    // Whitespace past the bound does not count, as for an upload.
+    let set = set_of(vec![rsa_key("k")]);
+    let text = format!(
+        "{}{}",
+        serde_json::to_string(&set).unwrap(),
+        " ".repeat(MAX_SET_BYTES)
+    );
+    assert_eq!(
+        parse_stored(&text).unwrap().public_json(),
+        validate(&set).public_json()
+    );
+}
+
+#[test]
+fn stored_parse_ignores_the_allowed_set() {
+    // Stored under a wider allowed set, read whatever the allowed set now
+    // is: the allowed set is applied at write and at verification.
+    let set = set_of(vec![rsa_key("r"), p256_key("e")]);
+    assert_eq!(
+        parse_jwk_set(&set, &[Algorithm::Es256]),
+        Err(JwkSetError::Key {
+            index: 0,
+            error: JwkError::AlgorithmNotAllowed(Algorithm::Rs256)
+        })
+    );
+    let projection = validate(&set).public_json().to_owned();
+    assert_eq!(parse_stored(&projection).unwrap().keys().len(), 2);
+}
+
+#[test]
+fn point_invalid_keys_are_accepted_by_the_stored_parse_only() {
+    // The documented difference: parse_stored runs no point arithmetic.
+    let mut p521 = vec![0xff; 66];
+    p521[0] = 0x01;
+    let mut identity = [0; 32];
+    identity[0] = 1;
+    let (p256_x, p256_y) = (unb64(P256_X), unb64(P256_Y));
+    let cases = [
+        (
+            ec_key("P-256", &[0; 32], &[0; 32]),
+            JwkError::PointNotOnCurve,
+        ),
+        (
+            ec_key("P-256", &flip(&p256_x, 0, true), &p256_y),
+            JwkError::PointNotOnCurve,
+        ),
+        (
+            ec_key("P-521", &p521, &p521),
+            JwkError::CoordinateOutOfRange { member: "x" },
+        ),
+        (
+            ed_key(&flip(&unb64(ED25519_X), 0, false)),
+            JwkError::PointNotOnCurve,
+        ),
+        (ed_key(&[0xff; 32]), JwkError::Ed25519NotCanonical),
+        (ed_key(&identity), JwkError::Ed25519SmallOrder),
+    ];
+    for (jwk, error) in cases {
+        let set = set_of(vec![jwk]);
+        assert_eq!(
+            validate_keyset(&set, DEFAULT_ALLOWED_ALGORITHMS),
+            Err(JwkSetError::Key { index: 0, error })
+        );
+        let stored = parse_stored(set.to_string()).expect("no point checks");
+        assert_eq!(stored.keys().len(), 1);
+        assert!(stored.get("k").is_some());
+        assert!(stored.get("K").is_none());
+        // Its projection reads back the same.
+        assert_eq!(parse_stored(stored.public_json()).unwrap(), stored);
+    }
+}
+
+#[test]
+fn projection_never_holds_private_members() {
+    // An upload with a private member is refused, so it has no projection.
+    for member in PRIVATE_MEMBERS {
+        for jwk in [p256_key("k"), ed25519_key("k"), rsa_key("k")] {
+            assert_eq!(
+                validate_keyset(
+                    &set_of(vec![with(jwk, member, json!(P256_D))]),
+                    DEFAULT_ALLOWED_ALGORITHMS
+                ),
+                Err(JwkSetError::Key {
+                    index: 0,
+                    error: JwkError::PrivateMember(member)
+                })
+            );
+        }
+    }
+    assert_eq!(
+        validate_keyset(
+            &set_of(vec![with(ed25519_key("k"), "d", json!(ED25519_D))]),
+            DEFAULT_ALLOWED_ALGORITHMS
+        ),
+        Err(JwkSetError::Key {
+            index: 0,
+            error: JwkError::PrivateMember("d")
+        })
+    );
+    // An accepted projection holds only the projection's members, and
+    // none of the dropped ones even when uploaded.
+    for set in round_trip_sets() {
+        let value: Value = serde_json::from_str(validate(&set).public_json()).unwrap();
+        for key in value["keys"].as_array().unwrap() {
+            for member in key.as_object().unwrap().keys() {
+                assert!(!PRIVATE_MEMBERS.contains(&member.as_str()), "{member}");
+                assert!(PROJECTION_MEMBERS.contains(&member.as_str()), "{member}");
+            }
+        }
+    }
+}
+
+#[test]
+fn projection_types_and_stored_errors_never_print_key_material() {
+    let rsa = json!({"kty": "RSA", "kid": "r", "alg": "RS256", "n": marked_n(), "e": "AQAB"});
+    let ed = json!({"kty": "OKP", "kid": "o", "crv": "Ed25519", "x": marked_x()});
+    let ec = json!({"kty": "EC", "kid": "e", "crv": "P-256", "x": marked_ec_x(), "y": MARKED_EC_Y});
+    let validated = validate(&set_of(vec![rsa.clone(), ed.clone(), ec.clone()]));
+    // The projection does hold the key material; the Debug output does not.
+    assert!(validated.public_json().contains(MARKER));
+    let stored = parse_stored(validated.public_json()).unwrap();
+    let mut outputs = vec![
+        format!("{validated:?}"),
+        format!("{validated:#?}"),
+        format!("{stored:?}"),
+        format!("{stored:#?}"),
+        format!("{:?}", validated.fingerprint()),
+    ];
+    let failing = [
+        set_of(vec![with(rsa.clone(), "d", json!(marked_n()))]),
+        set_of(vec![with(rsa.clone(), MARKER, json!(marked_n()))]),
+        set_of(vec![with(rsa.clone(), "alg", json!(MARKER))]),
+        set_of(vec![with(ed.clone(), "crv", json!(MARKER))]),
+        set_of(vec![with(
+            ed.clone(),
+            "x",
+            json!(format!("{}AAAA", marked_x())),
+        )]),
+        with(set_of(vec![ec.clone()]), MARKER, json!(1)),
+    ];
+    for set in &failing {
+        let error = parse_stored(set.to_string()).unwrap_err();
+        outputs.push(error.to_string());
+        outputs.push(format!("{error:?}"));
+    }
+    let error = parse_stored(format!("{{\"keys\":[\"{MARKER}")).unwrap_err();
+    assert_eq!(error, JwkSetError::NotJson);
+    outputs.push(error.to_string());
+    outputs.push(format!("{error:?}"));
+    for output in &outputs {
+        assert_clean(output);
+    }
+}
+
+fn kids_of(keys: &[skyoauth_service::jwk::PublicJwk]) -> Vec<&str> {
+    keys.iter().map(|key| key.kid().as_str()).collect()
+}
+
+#[test]
+fn keys_are_sorted_by_kid_whatever_the_input_order() {
+    let keys = fixed_set()["keys"].as_array().unwrap().clone();
+    let base = validate(&fixed_set());
+    assert_eq!(kids_of(base.keys()), ["ec", "ed", "rsa"]);
+    // Every permutation of the three keys: the same bytes, fingerprint and
+    // key order, in JwkSet, ValidatedKeyset and StoredKeyset alike.
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let set = set_of(order.iter().map(|&i| keys[i].clone()).collect());
+        let validated = validate(&set);
+        assert_eq!(validated.public_json(), fixed_projection(), "{order:?}");
+        assert_eq!(validated.fingerprint().as_str(), FIXED_FINGERPRINT);
+        assert_eq!(validated, base);
+        assert_eq!(kids_of(parse(&set).unwrap().keys()), ["ec", "ed", "rsa"]);
+        // A stored value in that order reads back sorted.
+        let stored = parse_stored(set.to_string()).unwrap();
+        assert_eq!(kids_of(stored.keys()), ["ec", "ed", "rsa"]);
+        assert_eq!(stored.keys(), base.keys());
+        assert_eq!(stored.public_json(), fixed_projection());
+        assert_eq!(stored.fingerprint().as_str(), FIXED_FINGERPRINT);
+    }
+    // Byte order, not case-insensitive or numeric: "B" < "a" and
+    // "k10" < "k9".
+    let set = set_of(vec![
+        p256_key("a"),
+        p384_key("k9"),
+        ed25519_key("B"),
+        p521_key("k10"),
+    ]);
+    assert_eq!(kids_of(validate(&set).keys()), ["B", "a", "k10", "k9"]);
+}
+
+#[test]
+fn stored_input_is_bounded_before_parsing() {
+    assert_eq!(MAX_STORED_BYTES, 4 * MAX_SET_BYTES);
+    let set = set_of(vec![rsa_key("k")]);
+    let compact = serde_json::to_string(&set).unwrap();
+    let padded = |len: usize| format!("{compact}{}", " ".repeat(len - compact.len()));
+    // At the limit: parsed, and valid.
+    let at_limit = padded(MAX_STORED_BYTES);
+    assert_eq!(at_limit.len(), MAX_STORED_BYTES);
+    assert_eq!(
+        parse_stored(&at_limit).unwrap().public_json(),
+        validate(&set).public_json()
+    );
+    // One byte over: refused.
+    let over = padded(MAX_STORED_BYTES + 1);
+    assert_eq!(parse_stored(&over), Err(JwkSetError::TooLarge));
+    // Refused before the parse: text that is not JSON is TooLarge, not
+    // NotJson, once over the limit.
+    assert_eq!(
+        parse_stored("{".repeat(MAX_STORED_BYTES)),
+        Err(JwkSetError::NotJson)
+    );
+    assert_eq!(
+        parse_stored("{".repeat(MAX_STORED_BYTES + 1)),
+        Err(JwkSetError::TooLarge)
     );
 }
