@@ -1,9 +1,14 @@
 # Proposal: database guard for IR-080 assignment references (T14.2)
 
-Status: proposal only. No migration and no code. All picks are provisional,
-dated 2026-11-21, until the maintainer decides. Picks marked "(inferred)" are
-the coding session's reading; picks marked "lead" are lead rulings of the
-same date.
+Status: accepted; implementation pending (ruled by the user, 2026-11-22,
+relayed by the lead). The acceptance includes reversing the migrations README
+rule for these two tables (see "Open" below), and the same trigger pattern is
+also to guard the IR-152 egress check (`trust_source` destinations against
+`egress_allowlist_entry`). No migration and no code yet. Before that ruling
+the status was "proposal only", with all picks provisional, dated 2026-11-21,
+until the maintainer decides. Picks marked "(inferred)" are the coding
+session's reading; picks marked "lead" are lead rulings of the same date, and
+they stay provisional until the maintainer ratifies the ADRs (Gate M0).
 
 ## Problem
 
@@ -113,4 +118,6 @@ to the wrong variant.
 - The migration number (the next free number after `0009`, or a number shared
   with the stored-marker follow-up) is open.
 - Whether the maintainer accepts reversing the README rule for these two
-  tables. This document does not decide it.
+  tables. Decided: accepted (ruled by the user, 2026-11-22, relayed by the
+  lead); implementation pending. The README rule itself changes with the
+  migration that adds the triggers, not before.

@@ -12,20 +12,27 @@
 //! pick, 2026-11-22) unless marked (inferred); all are provisional until
 //! the maintainer ratifies the ADRs (T00.8 to T00.17, Gate M0), and so are
 //! the [`crate::jwk`] picks dated 2026-11-21 that this module relies on.
+//! The widening ruling below is the user's, not a provisional pick.
 //!
 //! # Not wired, and the one write path
 //!
+//! - **Widening.** A keyset version write (a create, an enable, a
+//!   re-enable) counts as widening: while `widening_second_approver` is on
+//!   it needs an IR-054 approval by a second approver (ruled by the user,
+//!   2026-11-22, relayed by the lead; this decides OQ-ADR008-3 and the
+//!   widening question of identity-registry IR-052 for this write). What
+//!   remains is the design of the second-approver flow (T14.1, T14.2).
 //! - **No endpoint.** Nothing calls these functions yet, and they must not
-//!   be wired to any endpoint before the maintainer rules whether a keyset
-//!   version write (a create, an enable, a re-enable) counts as widening and
-//!   so needs an IR-054 approval while `widening_second_approver` is on
-//!   (OQ-ADR008-3, identity-registry IR-052), and before the request layer
-//!   of T14.1 and T14.2 exists (generated IDs, the raw body bound, the role
-//!   of each endpoint).
+//!   be wired to any endpoint before the T14.1 and T14.2 design of the
+//!   second-approver flow, and before the request layer of T14.1 and T14.2
+//!   exists (generated IDs, the raw body bound, the role of each endpoint).
 //! - **Single actor.** A write takes effect at once on one operator's
-//!   authority: no write waits for an approval, so the module assumes
-//!   either that the setting is off or that the write is not widening, which
-//!   is exactly what is undecided above.
+//!   authority: no write waits for an approval. With
+//!   `widening_second_approver` on, a [`create_version`] or an
+//!   [`enable_version`] here would apply a widening write without the
+//!   approval it needs, which is why the module must not be wired before
+//!   that flow is designed. (The ruling names a create, an enable and a
+//!   re-enable; [`disable_version`] is not among them.)
 //! - **The only write path.** The registry writers
 //!   [`create_trust_keyset_version`] and [`update_trust_keyset_version`]
 //!   are the unchecked floor: they store any `public_jwks` and
@@ -255,8 +262,9 @@
 //!
 //! # Not done here
 //!
-//! - Wiring to an endpoint, and the widening decision above (OQ-ADR008-3,
-//!   IR-052; T14.1, T14.2).
+//! - Wiring to an endpoint, and the second-approver flow that the widening
+//!   ruling above requires (IR-054 approvals while
+//!   `widening_second_approver` is on; OQ-ADR008-3, IR-052; T14.1, T14.2).
 //! - The raw request-body bound before the upload is parsed.
 //! - The keyset's own status: a version of a disabled keyset is written
 //!   like any other (inferred: the verifier reads the keyset's status).

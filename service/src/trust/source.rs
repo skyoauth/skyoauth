@@ -9,7 +9,10 @@
 //! transaction and neither commit nor roll it back. The picks below are
 //! the lead's (provisional lead pick, 2026-11-22) unless marked (inferred);
 //! all are provisional until the maintainer ratifies the ADRs (T00.8 to
-//! T00.17, Gate M0).
+//! T00.17, Gate M0). Three rulings below are the user's (2026-11-22,
+//! relayed by the lead), not provisional picks: canonical-form
+//! destinations as the convention (end of "Rules"), source writes as
+//! widening, and the database backstop (both under "Not done here").
 //!
 //! # Rules
 //!
@@ -94,13 +97,14 @@
 //!   unchanged member is never refused, also not by a syntax rule that
 //!   tightened after it was stored).
 //!
-//!   Open questions: a path-less, kubeconfig-style server URL
-//!   (`https://host:6443`, the export's `api_server`, OQ-IR-6) is refused,
-//!   so an importer (C05) must rewrite it to canonical form, and nothing
-//!   does that yet. And nothing checks that an egress entry's
-//!   `exact_destination` is canonical, since no entry writer exists.
-//!   Entries are matched byte for byte, so that writer must enforce this
-//!   same rule; otherwise a non-canonical entry matches no source.
+//!   Canonical-form egress destinations are the convention (ruled by the
+//!   user, 2026-11-22, relayed by the lead): an egress entry writer must
+//!   enforce this same rule on `exact_destination`, and an importer (C05)
+//!   must rewrite a path-less, kubeconfig-style server URL
+//!   (`https://host:6443`, the export's `api_server`, OQ-IR-6), which this
+//!   check refuses, to canonical form. Neither exists yet: nothing checks
+//!   today that an entry's `exact_destination` is canonical, and entries
+//!   are matched byte for byte, so a non-canonical entry matches no source.
 //!
 //! No error's `Display` or `Debug` contains a destination: errors name the
 //! member, never its value.
@@ -232,23 +236,30 @@
 //! - No endpoint and no HTTP: nothing calls these functions yet. They must
 //!   not be wired to a request path before the request layer of T14.1 and
 //!   T14.2 exists (generated IDs, NUL rejection, the role of each endpoint)
-//!   and the widening question below is decided, since a wired write would
-//!   apply a widening source write without the approval IR-052 may require.
-//! - Widening: whether a source write is widening and needs an IR-054
-//!   approval while `widening_second_approver` is on (IR-052) is not decided
-//!   here; no write waits for an approval.
+//!   and before the T14.1 and T14.2 design of the second-approver flow,
+//!   since a wired write would apply a widening source write without the
+//!   approval IR-052 requires.
+//! - Widening: a trust source write counts as widening and needs an IR-054
+//!   approval by a second approver while `widening_second_approver` is on
+//!   (ruled by the user, 2026-11-22, relayed by the lead; this decides the
+//!   IR-052 widening question for this write). What remains is the design
+//!   of the second-approver flow (T14.1, T14.2); no write here waits for an
+//!   approval.
 //! - The fetch-time match of a discovered `jwks_uri` against an enabled
 //!   `jwks` entry, the degraded health signal and the fetches themselves
 //!   (IR-152; T11.2, T11.8).
 //! - `ca_bundle_ref` and `reviewer_credential_ref` resolution within the
 //!   tenant's secret namespace (IR-034), tenant status (the operator lookup
 //!   does not read it), and the other source rules of T11.1 and T11.8.
-//! - A database backstop, such as a trigger that checks the entry: the
-//!   migrations are frozen, and there is no proposal for it yet; it is a
-//!   maintainer decision. `docs/proposals/ir-080-assignment-write-guard.md`
-//!   proposes a similar guard for a different table family (IR-080
-//!   assignment references), not for this check. The bare registry functions
-//!   still write any destination the `0004` checks allow.
+//! - A database backstop for the egress check. The trigger of
+//!   `docs/proposals/ir-080-assignment-write-guard.md` (IR-080 assignment
+//!   references) is accepted, and the same trigger pattern is to guard this
+//!   check too: a `trust_source` destination against
+//!   `egress_allowlist_entry` (ruled by the user, 2026-11-22, relayed by
+//!   the lead). Accepted; implementation pending: the migrations `0001` to
+//!   `0009` are frozen, and no migration adds it yet. Until it exists, the
+//!   bare registry functions still write any destination the `0004` checks
+//!   allow.
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
 //! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant
