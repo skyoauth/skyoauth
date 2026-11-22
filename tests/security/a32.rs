@@ -34,10 +34,11 @@
 //! new key and event IDs of its own, and each issue and restore runs in a
 //! transaction of its own, committed on `Ok` and rolled back on `Err`
 //! ([`issue_on`], [`restore`]); a restore's transaction is
-//! `READ COMMITTED`, the session default. The exceptions are the failure
-//! tests' claimants ([`fail_at_append`]): a bootstrap, an issue or a
-//! restore whose event ID is taken on purpose, and a claimant that commits
-//! after its `Err` ([`end_claim`]), which the registry allows. The
+//! `READ COMMITTED`, the session default. The exceptions are in the
+//! failure tests: their claimants ([`fail_at_append`]), a bootstrap or a
+//! restore whose event ID is taken on purpose and whose caller commits
+//! after its `Err` ([`end_claim`]), which the registry allows, and an issue
+//! whose event ID is taken, whose caller also commits after its `Err`. The
 //! registry reads no clock: every `now` is the test's and fixed
 //! ([`issued_at`], [`restored_at`]).
 //!
@@ -70,9 +71,9 @@
 //!   blocked behind it, fails there, with its event ID
 //!   taken (`AlreadyExists` on `audit_event_pkey`; its caller then commits)
 //!   or with its session terminated (the store is gone; `57P01`): it
-//!   writes nothing, the replicas finish while its transaction is still
-//!   open, exactly one of them bootstraps and 3 are `AlreadyClosed`, and
-//!   the chain is intact
+//!   writes nothing (with its event ID taken, the replicas finish while its
+//!   transaction is still open), exactly one of them bootstraps and 3 are
+//!   `AlreadyClosed`, and the chain is intact
 //!   (`a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing`).
 //! - **Recovery, positive.** After a bootstrap, with its operator enrolled
 //!   (and given a second credential) or locked out (identity disabled,
@@ -116,7 +117,9 @@
 //!   `NotRestorable` after its commit, and exactly one of them restores
 //!   after its rollback
 //!   (`a32_neg_blocked_restores_follow_the_holder_commit_or_rollback`). An
-//!   issue whose event ID is taken is `AlreadyExists` and writes nothing.
+//!   issue whose event ID is taken is `AlreadyExists` and writes nothing,
+//!   also when its caller commits after the `Err`, and the chain stays
+//!   intact.
 //!   A restore that waits for the chain head at its appends, its last step
 //!   (after its consume and writes, by `registry::recovery`; not asserted
 //!   here), with 4 replicas restoring the same challenge blocked behind
@@ -129,13 +132,19 @@
 //!
 //! The lost store of those two tests is a session that the server
 //! terminates while the call waits: the call is a typed store error, not a
-//! panic, and the database, which stays up, holds nothing of it. A pool
-//! closed on the client side never reaches these functions (they take an
-//! open transaction), so it is not tested; a server that is down or
-//! unreachable for the whole call, and a store that comes back after an
-//! outage, need a harness piece that stops the shared server, which does
-//! not exist (A64's recovery-offline and hermetic legs, parked, own the
-//! outage). A failed audit append is pinned only where it fails, with a
+//! panic, and the database, which stays up, holds nothing of it. At the
+//! registry level that is the only store failure a call can meet: these
+//! functions take an open transaction, so neither a pool closed on the
+//! client side nor a server that is down or unreachable for the whole call
+//! ever reaches them, and neither is tested here. A store outage for a
+//! whole bootstrap, issue or restore, and the state once the store comes
+//! back, are a service-level (UC) gap, like a store error at the operator
+//! endpoint: no scenario row names them, and their owner is to be ruled.
+//! Their harness piece is the `pg` environment's planned fault-injecting
+//! repository (conformance layout §1.1; compare A11's "store down → 503");
+//! if ruled into A32, they belong with its end-to-end parts, the bootstrap
+//! command and the local verifier on UC (T13.3, T13.4). A failed audit
+//! append is pinned only where it fails, with a
 //! taken event ID or a lost session; an append that fails in Rust after
 //! the head lock is left to the service tests (below).
 //!
@@ -278,9 +287,10 @@
 //! bounds of an issue; `RecoveryKeyUnchanged`, reserved admin IDs, key
 //! lengths and the bounds of `now`; a replacement whose ID or key is taken
 //! (`AlreadyExists`); a failed restore or issue that the caller commits,
-//! other than the restore here whose second event ID is taken (a taken
-//! first event ID, the writer's error in Rust after the head lock, an issue
-//! whose operation ID is taken); a lock timeout; the lock order, the waits between a restore, an issue and
+//! other than the restore here whose second event ID is taken and the
+//! issue here whose event ID is taken (a taken first event ID, the
+//! writer's error in Rust after the head lock, an issue whose operation ID
+//! is taken); a lock timeout; the lock order, the waits between a restore, an issue and
 //! the operator writes, and the deadlock that fails closed; and that a
 //! restore changes no other table. Through the public API every consume
 //! is a restore that also advances the epoch and the revision, so a replay
@@ -1381,12 +1391,17 @@ fn after_the_holder<T: std::fmt::Debug>(waited: Vec<(T, bool)>, what: &str) -> V
 /// seen blocked behind it; after its failure exactly one of them
 /// bootstraps, the 3 others are `AlreadyClosed`, and the state is the
 /// winner's alone: its event directly after the committed one, or first,
-/// and the chain intact. The waiters finish while the failed claimant's
-/// transaction is still open: a failed bootstrap keeps bootstrap claimed
-/// for no one until its caller ends the transaction. (PostgreSQL releases
-/// what the failed statement's subtransaction held when the statement
-/// fails, so this holds with or without the registry's own savepoint
-/// rollback; the commit after the `Err` writes nothing either way.)
+/// and the chain intact. With its event ID taken, the waiters finish while
+/// the failed claimant's transaction is still open: a failed bootstrap
+/// keeps bootstrap claimed for no one until its caller ends the
+/// transaction. (PostgreSQL releases what the failed statement's
+/// subtransaction held when the statement fails, so this holds with or
+/// without the registry's own savepoint rollback, and the commit after the
+/// `Err` writes nothing either way. Without that rollback, sqlx's `Drop`
+/// only queues `ROLLBACK TO SAVEPOINT` for the connection's next use, so
+/// after an error in Rust, with no failed statement, the head lock would
+/// stay held until the caller's next statement; that case is the service
+/// tests'.)
 #[tokio::test(flavor = "multi_thread")]
 async fn a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing() {
     const WAITERS: usize = 4;
@@ -2750,7 +2765,8 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
 /// A recovery whose audit append fails writes nothing and leaves its
 /// challenge restorable, in two fresh databases after a bootstrap. First,
 /// an issue whose event ID is bootstrap's is `AlreadyExists` on
-/// `audit_event_pkey` and changes nothing the registry shows; with its own
+/// `audit_event_pkey` and changes nothing the registry shows, the chain
+/// included, though its caller commits after the `Err`; with its own
 /// ID the challenge then issues as the event after bootstrap. Then a
 /// restore of it fails at its audit appends, its last step (after its
 /// consume and writes, by the registry's documented order, which this test
@@ -2780,12 +2796,15 @@ async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
         let before = state(&pool, &first).await;
         let plan = taken.plan();
         let request = taken.issue_request(&plan, DEFAULT_CHALLENGE_TTL, issued_at());
-        match issue_on(&pool, &request).await {
+        let mut tx = pool.begin().await.unwrap();
+        match registry::issue_recovery_challenge(&mut tx, &request).await {
             Err(ChallengeError::Store(err)) => {
                 assert_append_failure(AppendFailure::TakenEventId, &err, "issue");
             }
             other => panic!("{what}: expected the issue's store error: {other:?}"),
         }
+        // Its caller commits after the `Err`: nothing is written.
+        tx.commit().await.unwrap();
         assert_eq!(state(&pool, &first).await, before, "{what}");
         let issued = issue(&pool, &challenge, DEFAULT_CHALLENGE_TTL, issued_at()).await;
         assert_issued(&issued, &challenge, DEFAULT_CHALLENGE_TTL, issued_at(), 2);
