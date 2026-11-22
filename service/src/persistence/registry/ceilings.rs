@@ -8,21 +8,26 @@
 //! [`load_scope_ceilings`] finds the grant by tenant and ID, and the
 //! resource server by its exact `audience`. The resource server must be in
 //! the grant's audience set (`service_grant_resource_server`) and assigned
-//! to the grant's tenant (`audience_tenant_assignment`). A grant with a
-//! target service also loads that service identity of the same tenant, and
-//! the resource server must be in the target service's audience set too
-//! (`service_identity_resource_server`; IR-083: "in the target service's
-//! set for delegation"). The `0004` foreign keys already keep a listed
-//! audience assigned to the grant's tenant, the target in the grant's
+//! to the grant's tenant (`audience_tenant_assignment`). A delegation or
+//! impersonation grant also loads its target service identity of the same
+//! tenant, and the resource server must be in the target service's audience
+//! set too (`service_identity_resource_server`; IR-083: "in the target
+//! service's set for delegation"). The `0004` foreign keys already keep a
+//! listed audience assigned to the grant's tenant, the target in the grant's
 //! tenant and a service's audience row in the service's tenant; the
 //! statement checks all three again rather than rely on them.
 //!
+//! A direct grant loads no target service and needs no target audience
+//! row, whatever its `target_service_id` holds (inferred). The `0004` check
+//! `service_grant_target_mode_check` keeps that column `NULL` for a direct
+//! grant; the statement keys the target off `mode` rather than rely on it.
+//!
 //! When the grant does not exist in the tenant, or the audience does not
 //! exist, is not assigned to the tenant, is not in the grant's set or, for
-//! a grant with a target service, is not in that service's set, the result
-//! is `None`: one value with no detail, so the caller can map all of them
-//! to the same `invalid_target` (ERR-024 (3); ADR-015 item 9.4). The
-//! registry does no such mapping.
+//! a delegation or impersonation grant, is not in its target service's set
+//! (or that service is missing), the result is `None`: one value with no
+//! detail, so the caller can map all of them to the same `invalid_target`
+//! (ERR-024 (3); ADR-015 item 9.4). The registry does no such mapping.
 //!
 //! # Not done here
 //!
@@ -54,9 +59,13 @@ use super::{
 /// its audience row by `(grant, resource server)`, the resource server by
 /// its unique audience, the assignment by `(tenant, resource server)`, the
 /// service by its key and its audience row by `(service, resource server)`.
-/// A grant whose target service is missing (which
-/// the `0004` foreign key prevents), or whose target service does not list
-/// the resource server (IR-083), gives no row.
+/// The target is joined, and its audience row required, only for a grant
+/// whose `mode` is not `direct`: a direct grant loads no target service
+/// even with a `target_service_id` (which the `0004` check
+/// `service_grant_target_mode_check` prevents; inferred). A delegation or
+/// impersonation grant whose target service is missing (which the `0004`
+/// foreign key prevents), or whose target service does not list the
+/// resource server (IR-083), gives no row.
 const LOAD_SCOPE_CEILINGS: &str = "\
     SELECT g.id AS grant_id, g.mode AS grant_mode, g.status AS grant_status, \
            g.revision AS grant_revision, g.scopes AS grant_scopes, \
@@ -75,8 +84,9 @@ const LOAD_SCOPE_CEILINGS: &str = "\
         ON a.tenant_id = g.tenant_id AND a.resource_server_id = rs.id \
       LEFT JOIN service_identity s \
         ON s.tenant_id = g.tenant_id AND s.id = g.target_service_id \
+       AND g.mode <> 'direct' \
      WHERE g.tenant_id = $1 AND g.id = $2 AND rs.audience = $3 \
-       AND (g.target_service_id IS NULL \
+       AND (g.mode = 'direct' \
             OR (s.id IS NOT NULL \
                 AND EXISTS (SELECT FROM service_identity_resource_server sr \
                              WHERE sr.tenant_id = g.tenant_id AND sr.service_id = s.id \
@@ -108,16 +118,19 @@ pub struct LoadedCeilings {
     /// `allowed_scopes`.
     pub assignment: CeilingRecord,
     /// The grant's target service identity, with its `max_scopes`: `Some`
-    /// exactly for a grant with a target (delegation; impersonation, which
-    /// is stored only disabled, too).
+    /// exactly for a delegation grant or an impersonation grant (stored only
+    /// disabled); `None` for a direct grant, whatever its
+    /// `target_service_id` holds (inferred).
     pub target_service: Option<CeilingRecord>,
 }
 
 impl LoadedCeilings {
     /// The ceilings for [`resolve_scopes`](crate::policy::resolve_scopes).
-    /// The target service's `max_scopes` is a ceiling exactly when the grant
-    /// has a target (IR-062; inferred for impersonation, which v0.1 never
-    /// issues).
+    /// The target service's `max_scopes` is a ceiling exactly for a
+    /// delegation or impersonation grant (IR-062; inferred for
+    /// impersonation, which v0.1 never issues). A direct grant has no
+    /// target service ceiling, whatever its `target_service_id` holds
+    /// (inferred).
     pub fn scope_ceilings(&self) -> ScopeCeilings {
         ScopeCeilings {
             resource_server: self.resource_server.scopes.clone(),
@@ -137,10 +150,10 @@ impl LoadedCeilings {
     }
 
     /// Whether the grant, the resource server, the assignment and, for a
-    /// grant with a target, the target service were all enabled when
-    /// loaded. The loader returns disabled records too (see the module
-    /// docs); this is the status part of step 5 for the records it loads,
-    /// not all of step 5: the tenant, the actor and the grant's
+    /// delegation or impersonation grant, the target service were all
+    /// enabled when loaded. The loader returns disabled records too (see the
+    /// module docs); this is the status part of step 5 for the records it
+    /// loads, not all of step 5: the tenant, the actor and the grant's
     /// `activation_state` and `valid_until` are not loaded.
     pub fn all_enabled(&self) -> bool {
         self.grant.status == Status::Enabled
@@ -165,9 +178,10 @@ fn record(row: &PgRow, prefix: &str) -> Result<CeilingRecord, sqlx::Error> {
 /// Loads the scope ceilings of grant `grant_id` of `tenant_id` for the
 /// resource server of `audience`, in one statement (see the module docs).
 /// `None` when the grant, the audience, its assignment to the tenant, its
-/// place in the grant's audience set or, for a grant with a target service,
-/// its place in that service's audience set is missing. Disabled records
-/// are returned; see [`LoadedCeilings::all_enabled`].
+/// place in the grant's audience set or, for a delegation or impersonation
+/// grant, its target service or its place in that service's audience set is
+/// missing. A direct grant loads no target service (inferred). Disabled
+/// records are returned; see [`LoadedCeilings::all_enabled`].
 pub async fn load_scope_ceilings<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,

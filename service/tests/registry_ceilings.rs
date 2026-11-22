@@ -2,7 +2,7 @@
 //! `load_scope_ceilings`, with `policy::resolve_scopes`; IR-062, IR-063;
 //! design section 5.7; T12.8) against a real PostgreSQL server: the loaded values
 //! are the registry's rows, the target service is a ceiling exactly for a
-//! grant with a target, every miss is the same `None` (including an
+//! delegation or impersonation grant (never a direct one, inferred), every miss is the same `None` (including an
 //! audience the target service does not list, IR-083), disabled records are
 //! loaded and reported by `all_enabled`, and a ceiling that shrinks after
 //! the grant was written makes its defaults fail.
@@ -336,6 +336,53 @@ async fn the_statement_rechecks_what_the_foreign_keys_guarantee() {
             "{grant} {audience}"
         );
     }
+    sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
+    drop(conn);
+    db.drop([pool]).await;
+}
+
+/// A direct grant loads no target service, whatever its `target_service_id`
+/// holds (inferred): the `0004` check `service_grant_target_mode_check`
+/// keeps it `NULL`, and the statement keys the target off `mode` rather than
+/// rely on it. With the check dropped in a rolled-back transaction, a direct
+/// grant naming `svc_1` loads with no target service for an audience `svc_1`
+/// lists and for one it does not; the delegation to `svc_1` still loads it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_direct_grant_loads_no_target_service_even_with_a_target_id() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql(
+        r#"BEGIN;
+           ALTER TABLE service_grant DROP CONSTRAINT service_grant_target_mode_check;
+           INSERT INTO service_grant VALUES
+               ('grt_dt', 'ten_a', 'direct-target', 'wld_1', 'svc_1', 'direct', '["read"]', NULL, '{}', 300,
+                NULL, 'enabled', 'not_required');
+           INSERT INTO service_grant_binding VALUES ('grt_dt', 'bnd_1', 'ten_a', 'wld_1');
+           INSERT INTO service_grant_resource_server VALUES
+               ('grt_dt', 'ten_a', 'rs_1'), ('grt_dt', 'ten_a', 'rs_4')"#,
+    )
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    // svc_1 lists api-1 but not api-4.
+    for audience in ["api-1", "api-4"] {
+        let direct = load_scope_ceilings(&mut *conn, "ten_a", "grt_dt", audience)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("grt_dt {audience}"));
+        assert_eq!(direct.grant_mode, GrantMode::Direct, "{audience}");
+        assert_eq!(direct.target_service, None, "{audience}");
+        assert_eq!(direct.scope_ceilings().target_service, None, "{audience}");
+    }
+    let delegation = load_scope_ceilings(&mut *conn, "ten_a", "grt_dlg", "api-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        delegation.target_service.map(|service| service.id),
+        Some("svc_1".to_owned())
+    );
     sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
     drop(conn);
     db.drop([pool]).await;
