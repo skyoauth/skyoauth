@@ -514,8 +514,8 @@ async fn resolve(
 }
 
 /// The ceilings the registry's getters give for `grant` of `tenant`: the
-/// grant, [`RS`], the tenant's own assignment and the grant's target
-/// service, if any.
+/// grant, [`RS`], the tenant's own assignment and, for a delegation or
+/// impersonation grant, its target service.
 async fn from_getters(pool: &PgPool, tenant: &str, grant: &str) -> LoadedCeilings {
     let grant = registry::get_service_grant(pool, tenant, grant)
         .await
@@ -525,8 +525,15 @@ async fn from_getters(pool: &PgPool, tenant: &str, grant: &str) -> LoadedCeiling
         .await
         .unwrap();
     assert_eq!(assignment.tenant_id, tenant);
-    let target_service = match &grant.target_service_id {
-        Some(id) => {
+    // The target service is keyed off the grant's mode, as the loader keys
+    // it: only a delegation or impersonation grant has one, and a direct
+    // grant has none whatever `target_service_id` holds.
+    let target_service = match grant.mode {
+        GrantMode::Delegation | GrantMode::Impersonation => {
+            let id = grant
+                .target_service_id
+                .as_deref()
+                .expect("a delegation or impersonation grant names its target (`0004`)");
             let service = registry::get_service_identity(pool, tenant, id)
                 .await
                 .unwrap();
@@ -537,7 +544,7 @@ async fn from_getters(pool: &PgPool, tenant: &str, grant: &str) -> LoadedCeiling
                 scopes: service.max_scopes,
             })
         }
-        None => None,
+        GrantMode::Direct => None,
     };
     LoadedCeilings {
         grant: CeilingRecord {
