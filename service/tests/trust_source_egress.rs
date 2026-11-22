@@ -1300,6 +1300,40 @@ async fn a_failed_audit_append_undoes_the_write() {
     db.drop([pool]).await;
 }
 
+/// Step 0 comes before step 1: at a level other than READ COMMITTED, an
+/// unknown key gets `UnsupportedIsolation`, not `Unauthorized`, so the
+/// isolation is read before the operator is looked up.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_isolation_is_checked_before_the_operator() {
+    let (db, pool) = seeded().await;
+    let source = create(&pool, TRUST, &oidc("src_1", DISCOVERY_2), "aud_1")
+        .await
+        .unwrap();
+    let mut changed = changes(&source);
+    changed.discovery_url = Some(DISCOVERY.into());
+    for write in ["create", "update"] {
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let key = "key_unknown";
+        let result = match write {
+            "create" => {
+                create_source(&mut tx, key, &oidc("src_2", DISCOVERY), &audit("aud_2")).await
+            }
+            _ => update_source(&mut tx, key, "ten_a", "src_1", 1, &changed, &audit("aud_2")).await,
+        };
+        assert!(
+            matches!(result, Err(SourceWriteError::UnsupportedIsolation)),
+            "{write}: {result:?}"
+        );
+        tx.rollback().await.unwrap();
+    }
+    db.drop([pool]).await;
+}
+
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn isolation_other_than_read_committed_is_refused_before_any_lock() {
