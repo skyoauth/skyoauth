@@ -91,15 +91,21 @@
 //! not define them: that `status` is a version's one mutable column, changed
 //! by a compare-and-set on the version's own revision with no tie to the
 //! parent's (`0004` "inferred"; `0007` and the lead decision of
-//! 2026-11-21); that a window must not be empty (`0004`,
-//! `trust_keyset_version_validity_check`, "inferred") and `expires_at` may
-//! be absent; that times are stored truncated to whole microseconds, before
-//! the check (inferred, registry "Timestamps"); that a version list is per
-//! keyset, in byte-wise ID order; that re-enabling a version or a keyset
-//! is a plain status change (provisional lead pick, 2026-11-21); and that a
-//! disabled parent leaves its versions' rows unchanged. The registry reads
-//! no clock: it stores windows as given and compares none with the current
-//! time, so these tests use fixed times and pass whatever the date.
+//! 2026-11-21); that `expires_at` may be absent; that times are stored
+//! truncated to whole microseconds, before the window check (inferred,
+//! registry "Timestamps"); that a version list is per keyset, in byte-wise
+//! ID order; that re-enabling a version or a keyset is a plain status
+//! change (provisional lead pick, 2026-11-21); and that a disabled parent
+//! leaves its versions' rows unchanged. The registry reads no clock: it
+//! stores windows as given and compares none with the current time, so
+//! these tests use fixed times and pass whatever the date.
+//!
+//! **Open, provisional.** No spec settles two points: the non-empty window
+//! rule (`expires_at > effective_at`), which exists only as the `0004`
+//! check `trust_keyset_version_validity_check` and in no spec (the window
+//! negative pins that check as it stands), and whether adding a keyset
+//! version is a widening change that needs review (ADR-008 item 12, which
+//! names "a new keyset version" among its open examples).
 //!
 //! # Not expressible in the registry, so not tested
 //!
@@ -121,22 +127,24 @@
 //!
 //! **Missing, so not a claim.** A04 M1a needs its keyset lifecycle through
 //! the in-process service (UC); these tests reach only the registry. Still
-//! needed, with the owner of each part:
+//! needed, and not claimed here, with the owner of each part:
 //!
-//! - The verifier's window decision: each key valid in its window, the old
-//!   and the new key both valid in the overlap, each key refused outside
-//!   its window and a disabled version's key refused, against an injected
-//!   clock (T11.3 "explicit overlap", T24.2 "explicit validity windows").
-//! - The unique, nonconflicting live kid across overlapping versions and
-//!   the algorithm, strength and size checks of an upload (T11.3; the
-//!   conflicting kid is also in A05's M2 negative, T24.3).
-//! - The audited rotation and disable: the trust_admin keyset endpoints
-//!   (T13.8 provisioning, T13.2 roles) writing the version and its audit
-//!   event atomically, with the expected revision (T11.6; IR-052), and the
-//!   server's widening detection with its explicit flag for a new or
-//!   re-enabled version (ADR-008 item 12, which names "a new keyset
-//!   version" among the open examples; IR-052). The registry writes no
-//!   event and does not tell widening from narrowing.
+//! - **Not claimed:** the verifier's window decision at token time: each
+//!   key valid in its window, the old and the new key both valid in the
+//!   overlap, each key refused outside its window and a disabled version's
+//!   key refused, against an injected clock (T11.3 "explicit overlap",
+//!   T24.2 "explicit validity windows").
+//! - **Not claimed:** the live kid conflict: a unique, nonconflicting kid
+//!   across overlapping versions, and the algorithm, strength and size
+//!   checks of an upload (T11.3; the conflicting kid is also in A05's M2
+//!   negative, T24.3).
+//! - **Not claimed:** the audited trust_admin keyset endpoints for rotation
+//!   and disable (T13.8 provisioning, T13.2 roles), writing the version and
+//!   its audit event atomically, with the expected revision (T11.6;
+//!   IR-052), and the server's widening detection with its explicit flag
+//!   for a new or re-enabled version (ADR-008 item 12, open, see above;
+//!   IR-052). The registry writes no event and does not tell widening from
+//!   narrowing.
 //! - That the rotation is independent of human-provider changes (T11.6's
 //!   last clause): human providers are M1b records with no tables yet.
 //!
