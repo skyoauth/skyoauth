@@ -2656,10 +2656,13 @@ stay provisional until Gate M0:
   and `fingerprint` the `0004` checks allow; a re-enable with no overlap
   check). They stay public because the scenario crate calls them, are
   documented as test-only, and must stay unreachable from any endpoint.
+  The A04 scenario tests stay on them until A04 M1a is claimed, then switch
+  to this module (follow-up).
 - Stage A, before the caller opens its transaction: `validate_upload` runs
   `validate_keyset` on the parsed upload on tokio's blocking pool, at most
   two at a time across the process (inferred), behind a tokio semaphore
-  already compiled in (no new dependency). The write functions take that
+  (the crate names tokio's `sync` feature, already compiled in through
+  `sqlx` and `hyper`, so the lockfile is unchanged). The write functions take that
   `&ValidatedKeyset`, never a `StoredKeyset` or a bare string, and store
   its canonical projection (`public_json`) and its fingerprint, never the
   raw upload.
@@ -2668,19 +2671,42 @@ stay provisional until Gate M0:
   any lock); only a `trust_admin` of the tenant writes
   (`authorize_operator_locked` with `OperatorScope::Tenant` and
   `AdminRole::TrustAdmin`; T13.2 owns the role semantics), and every miss
-  is one `Unauthorized`.
+  is one `Unauthorized`, before the keyset is looked up, so a caller learns
+  nothing about a keyset it may not write.
+- `provenance` is stored as given and the database floor does not look at
+  it, so it must never carry upload content: a create whose provenance has
+  a member named like a JWK private member (`d`, `p`, `q`, `dp`, `dq`,
+  `qi`, `oth`, `k`), at any depth, is `PrivateMemberInProvenance` before any
+  statement (inferred).
+- The window is checked as the registry stores it (inferred): the create
+  floors `effective_at` and `expires_at` to whole microseconds through the
+  helper the registry writer uses, so `[T0, T1 + 500 ns)` next to an
+  enabled `[T1, T2)` is accepted whether created enabled or enabled later,
+  and a window empty once floored is left to
+  `trust_keyset_version_validity_check`.
+- A keyset has at most 8 enabled versions
+  (`MAX_ENABLED_VERSIONS_PER_KEYSET`, provisional lead pick, 2026-11-22).
+  Where a version becomes enabled the other enabled versions are counted
+  under the parent lock, before any parse; at the bound the write is
+  `TooManyEnabledVersions`. Disabled versions do not count.
 - `check_version_overlap` runs wherever a version becomes enabled (an
   enabled create, an enable or re-enable); a disabled create and a disable
   run none. The compared stored versions (the other enabled versions whose
   windows intersect, and the re-enabled version itself) pass
   `parse_stored` as a cheap gate and then a full
   `validate_keyset(&stored, &KNOWN_ALGORITHMS)` on the same bounded pool;
-  a failure is `StoredVersion`, a data-integrity error. That full parse
-  runs inside the transaction while the locks are held, about 0.18 s per
-  compared 20-key set: a known cost, to be removed later by a change of
-  `KeysetVersion` or a stored marker that a projection passed the point
-  checks. The T11.7 verifier builds its keys the same way, never from
-  `parse_stored`.
+  a failure is `StoredVersion`, a data-integrity error. The T11.7 verifier
+  builds its keys the same way, never from `parse_stored`.
+- That full parse runs inside the transaction and is linear in the
+  intersecting enabled versions. It holds the parent keyset row, the
+  operator rows `FOR SHARE`, a database connection and one of the two
+  process-wide validation workers, so it can starve other tenants' Stage
+  A. Estimated at about 0.18 s per compared 20-key set in release; debug
+  builds measured 0.30 s, 1.31 s and 4.93 s for 1, 8 and 32 compared
+  versions. Wiring precondition: before any endpoint calls the module, the
+  in-transaction parses need a permit or priority separate from Stage A's,
+  or a stored marker that a projection passed the point checks (which, or
+  a change of `KeysetVersion`, removes the parse).
 - Rotation (inferred): validity windows are immutable in the registry
   (whether they should stay so is open), so disabling is the only
   retirement. Disable the open-ended old version, then create the
@@ -2688,8 +2714,11 @@ stay provisional until Gate M0:
   version is refused while the replacement is enabled.
 - The event is `trust_keyset_version.create`, `.enable` or `.disable`,
   appended last in the version's tenant with the operator as actor and
-  both revisions of a status change. No error's `Display` or `Debug`
-  names a `kid`, key material or an ID.
+  both revisions of a status change. It carries no fingerprint (the
+  envelope has no member for one): the link from an event to its keys
+  rests on the version row's immutability triggers (IR-059). Whether the
+  event should carry the fingerprint is an open ADR question. No error's
+  `Display` or `Debug` names a `kid`, key material or an ID.
 
 Lock order, extending the orders above for this write, which creates no
 operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`);
@@ -2700,6 +2729,13 @@ committed version); the keyset's versions, read without a lock; the write's
 own locks (the insert's foreign-key checks, or the version row of a status
 update); then the audit head last. `FOR NO KEY UPDATE` on the keyset does
 not block the `FOR KEY SHARE` of a trust source insert's foreign-key check.
+
+One keyset per transaction: the audit head a write takes last stays held
+until the caller's transaction ends, so a second keyset's write in the same
+transaction locks a `trust_keyset` row after the audit head, against the
+order above. Two transactions writing two keysets in opposite orders
+deadlock; PostgreSQL aborts one with `40P01`, which is `Registry(Retry)`,
+and that caller retries the whole transaction.
 
 The database floor does not look below a key's own members: the `0004`
 check refuses a key with `d` but accepts a key whose unknown member holds

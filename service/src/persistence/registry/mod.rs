@@ -331,6 +331,7 @@ pub use grant::{
 pub use instance::{
     get_egress_allowlist_entry, get_instance_security_policy, list_egress_allowlist_entries,
 };
+pub(crate) use model::floor_to_microsecond;
 pub use model::{
     ActivationState, AdminRole, AssertionProfile, AudienceTenantAssignment,
     AudienceTenantAssignmentChanges, BindingProfile, EgressAllowlistEntry, EgressPurpose,

@@ -34,7 +34,9 @@
 //!   (the scenario crate calls them, so they cannot be crate-private), are
 //!   documented as test-only, and must stay unreachable from any endpoint.
 //!   This module must be the only path that writes a keyset version
-//!   outside tests.
+//!   outside tests. The A04 scenario tests (`tests/security`) stay on the
+//!   raw writers until A04 M1a is claimed, then switch to this module
+//!   (follow-up).
 //!
 //! # Stage A: the upload, outside the transaction
 //!
@@ -46,12 +48,11 @@
 //! "Follow-ups"), so it runs on tokio's blocking pool
 //! (`spawn_blocking`), at most [`VALIDATION_WORKERS`] at a time across the
 //! process (2, inferred), behind a semaphore; a caller over the limit waits
-//! for a worker. The semaphore is tokio's: its `sync` feature is already
-//! compiled in through `sqlx` and `hyper` (feature unification; this
-//! crate's manifest does not name it), so no dependency or feature was
-//! added. The raw request body
-//! must be bounded before it is parsed into the `Value` this function takes
-//! (64 KiB is consistent; [`crate::jwk`], "Rules"): that is the wiring's.
+//! for a worker. The semaphore is tokio's: this crate's manifest names
+//! tokio's `sync` feature, which `sqlx` and `hyper` already compiled in, so
+//! the lockfile did not change. The raw request body must be bounded before
+//! it is parsed into the `Value` this function takes (64 KiB is consistent;
+//! [`crate::jwk`], "Rules"): that is the wiring's.
 //!
 //! The write functions take that `&ValidatedKeyset`, never a
 //! [`StoredKeyset`](crate::jwk::StoredKeyset) or a bare string, so only a
@@ -78,6 +79,12 @@
 //!   unpadded base64url SHA-256 of the projection; provisional lead pick,
 //!   2026-11-22). `jsonb` keeps the projection's members, not its bytes; a
 //!   reader recomputes the projection with [`parse_stored`].
+//! - **Provenance** (inferred). `provenance` is stored as given, and the
+//!   database floor does not look at it. It must never carry upload
+//!   content: [`create_version`] refuses one with a member named like a JWK
+//!   private member ([`PRIVATE_MEMBERS`]), at any depth and inside arrays,
+//!   with [`KeysetWriteError::PrivateMemberInProvenance`], before any
+//!   statement. Member names only: a value is not looked at.
 //! - **Overlap.** [`check_version_overlap`] runs wherever a version becomes
 //!   enabled: [`create_version`] of an enabled version and
 //!   [`enable_version`] (a re-enable included). A disabled create and
@@ -87,6 +94,21 @@
 //!   [`enable_version`] of a version that is already enabled is checked and
 //!   written like any other (inferred: the revision advances and the event
 //!   is appended).
+//! - **Whole microseconds** (inferred). The registry stores a time floored
+//!   to a whole microsecond, so [`create_version`] floors `effective_at`
+//!   and `expires_at` the same way, through the one helper the writer uses,
+//!   before the check: a window `[T0, T1 + 500 ns)` next to an enabled
+//!   `[T1, T2)` is stored as `[T0, T1)` and is accepted whether it is
+//!   created enabled or created disabled and then enabled. A window empty
+//!   once floored (`[T, T + 500 ns)`) is not checked: the `0004` validity
+//!   check refuses it ([`RegistryError::Invariant`],
+//!   `trust_keyset_version_validity_check`).
+//! - **At most [`MAX_ENABLED_VERSIONS_PER_KEYSET`] enabled versions** (8,
+//!   provisional lead pick, 2026-11-22). Where a version becomes enabled,
+//!   the other enabled versions of the keyset are counted under the parent
+//!   lock, before any stored version is parsed; at the bound the write is
+//!   [`KeysetWriteError::TooManyEnabledVersions`]. Disabled versions do not
+//!   count, and a re-enable does not count itself.
 //! - **Stored versions are parsed again in full.** The check needs every
 //!   compared version as a [`JwkSet`], which only the full parse builds, and
 //!   [`KeysetVersion`] is not changed here. So each stored version the check
@@ -100,12 +122,21 @@
 //!   error naming no value, and the version is not enabled. An enabled
 //!   version whose window does not intersect is not parsed (inferred: the
 //!   check would skip it).
-//! - **Cost.** That full parse runs inside the transaction, holding the
-//!   parent keyset row and the operator rows: about 0.18 s per compared
-//!   20-key set, plus any wait for a free worker. It is a known cost, not a
-//!   design goal. Follow-up: a change of [`KeysetVersion`] to take stored
-//!   keys, or a stored marker that a projection passed the point checks,
-//!   would remove it.
+//! - **Cost.** That full parse runs inside the transaction and is linear in
+//!   the intersecting enabled versions (at most
+//!   [`MAX_ENABLED_VERSIONS_PER_KEYSET`]). While it runs it holds the parent
+//!   keyset row, the operator rows `FOR SHARE`, a database connection and
+//!   one of the [`VALIDATION_WORKERS`] process-wide workers, so it can
+//!   starve every other tenant's Stage A. The estimate is about 0.18 s per
+//!   compared 20-key set in release, plus any wait for a free worker; debug
+//!   builds measured 0.30 s, 1.31 s and 4.93 s for 1, 8 and 32 compared
+//!   versions. It is a known cost, not a design goal. **Wiring
+//!   precondition:** before any endpoint calls this module, the
+//!   in-transaction parses need a permit or priority of their own,
+//!   separate from Stage A's (or the stored marker below, which removes
+//!   them). Follow-up: a change of [`KeysetVersion`] to take stored keys,
+//!   or a stored marker that a projection passed the point checks, would
+//!   remove the parse.
 //! - **The verifier.** The T11.7 verifier's key cache is built the same
 //!   way, from `validate_keyset(&stored, &KNOWN_ALGORITHMS)` per version,
 //!   never from [`parse_stored`], whose keys are not verifier-ready.
@@ -125,7 +156,9 @@
 //!
 //! # Order and locks
 //!
-//! Each write function runs these steps in a savepoint of its own:
+//! [`create_version`] first refuses a `provenance` naming a private member,
+//! before any statement. Then each write function runs these steps in a
+//! savepoint of its own:
 //!
 //! 0. reads `transaction_isolation` and refuses any value but
 //!    `read committed` with [`KeysetWriteError::UnsupportedIsolation`],
@@ -144,8 +177,10 @@
 //! 4. reads the keyset's versions (no lock: the parent lock covers them);
 //!    a status change refuses another revision of its version with
 //!    [`RegistryError::StaleRevision`] here;
-//! 5. when the version becomes enabled, the full parse of the compared
-//!    stored versions on the blocking pool and [`check_version_overlap`];
+//! 5. when the version becomes enabled: the count of the other enabled
+//!    versions against [`MAX_ENABLED_VERSIONS_PER_KEYSET`], then the full
+//!    parse of the compared stored versions on the blocking pool and
+//!    [`check_version_overlap`];
 //! 6. the registry write: the insert (whose foreign-key checks take
 //!    `FOR KEY SHARE` on the tenant and the keyset, already held more
 //!    strongly by step 3) or the compare-and-set status update (which
@@ -159,6 +194,17 @@
 //! audit head. `FOR NO KEY UPDATE` conflicts with another
 //! `FOR NO KEY UPDATE` and with a keyset update, not with the
 //! `FOR KEY SHARE` of a trust source insert's foreign-key check.
+//!
+//! **One keyset per transaction.** A caller's transaction writes the
+//! versions of one keyset only. The audit head a write takes last stays
+//! held until the caller's transaction ends (the write's savepoint is
+//! released, not rolled back), so a second write of another keyset in the
+//! same transaction locks a `trust_keyset` row after the audit head,
+//! against the order above. Two such transactions writing two keysets in
+//! opposite orders deadlock: PostgreSQL aborts one statement with `40P01`,
+//! which is [`RegistryError::Retry`] in [`KeysetWriteError::Registry`];
+//! its savepoint is rolled back, and the caller retries the whole
+//! transaction.
 //!
 //! # Isolation
 //!
@@ -182,7 +228,11 @@
 //! row's revision; a status change is `trust_keyset_version.enable` or
 //! `trust_keyset_version.disable` (identity-registry IR-059) with the
 //! stored and the new revision. The envelope has no member for the keys,
-//! the fingerprint or the window, so the event records none of them.
+//! the fingerprint or the window, so the event records none of them: the
+//! link from an event to the keys it covers rests on the version row,
+//! whose keys, fingerprint and window the `0004` immutability triggers
+//! keep fixed (IR-059). Whether the event should carry the fingerprint is
+//! an ADR question (see "Not done here").
 //!
 //! # Errors and rollback
 //!
@@ -204,6 +254,12 @@
 //! - Import and restore paths (T10.5): they must run the same overlap
 //!   check where a version becomes enabled.
 //! - What the design section 5.7 export carries of a version (OQ-IR-6).
+//! - A fingerprint in the audit event (an ADR question: the envelope has
+//!   no member for it).
+//! - A separate permit or priority for the in-transaction parses (the
+//!   wiring precondition under "Cost").
+//! - Moving the A04 scenario tests from the raw writers to this module,
+//!   once A04 M1a is claimed.
 
 use std::{fmt, time::SystemTime};
 
@@ -213,19 +269,27 @@ use tokio::sync::Semaphore;
 
 use crate::jwk::{
     Algorithm, JwkSet, JwkSetError, KNOWN_ALGORITHMS, KeysetFingerprint, KeysetVersion,
-    OverlapError, ValidatedKeyset, VersionStatus, check_version_overlap, parse_stored,
-    validate_keyset,
+    OverlapError, PRIVATE_MEMBERS, ValidatedKeyset, VersionStatus, check_version_overlap,
+    parse_stored, validate_keyset,
 };
 use crate::persistence::registry::{
     AdminRole, AuditActor, JsonObject, KeysetVersionText, NewAuditEvent, NewTrustKeysetVersion,
     OperatorRequest, OperatorScope, RegistryError, Status, TrustKeysetVersion, append_audit_event,
-    authorize_operator_locked, create_trust_keyset_version, read_keyset_versions,
-    update_trust_keyset_version,
+    authorize_operator_locked, create_trust_keyset_version, floor_to_microsecond,
+    read_keyset_versions, update_trust_keyset_version,
 };
 
 /// The most JWK set validations that run at once, across the process
 /// (inferred). Each takes one blocking worker.
 pub const VALIDATION_WORKERS: usize = 2;
+
+/// The most enabled versions one keyset may have (provisional lead pick,
+/// 2026-11-22). A create of an enabled version or an enable that would
+/// pass it is [`KeysetWriteError::TooManyEnabledVersions`], counted under
+/// the parent keyset lock and before any stored version is parsed; disabled
+/// versions do not count. It bounds the in-transaction parse of
+/// [`check_version_overlap`]'s input (see the module docs, "Cost").
+pub const MAX_ENABLED_VERSIONS_PER_KEYSET: usize = 8;
 
 /// The permits of the bounded validation pool.
 static VALIDATION: Semaphore = Semaphore::const_new(VALIDATION_WORKERS);
@@ -282,7 +346,10 @@ pub struct NewKeysetVersion<'a> {
     /// [`Status::Enabled`] runs the overlap check; [`Status::Disabled`]
     /// does not.
     pub status: Status,
-    /// Who supplied the keys and from where; no shape is specified.
+    /// Who supplied the keys and from where; no shape is specified. It
+    /// must never carry upload content: a member named like a JWK private
+    /// member ([`PRIVATE_MEMBERS`]), at any depth, is
+    /// [`KeysetWriteError::PrivateMemberInProvenance`] (inferred).
     pub provenance: &'a JsonObject,
 }
 
@@ -317,6 +384,14 @@ pub enum KeysetWriteError {
         /// The rule it breaks.
         error: JwkSetError,
     },
+    /// The version, becoming enabled, would give the keyset more than
+    /// [`MAX_ENABLED_VERSIONS_PER_KEYSET`] enabled versions. Disable one
+    /// first.
+    TooManyEnabledVersions,
+    /// The version's `provenance` names a JWK private member
+    /// ([`PRIVATE_MEMBERS`]) at some depth (inferred): it may carry no
+    /// upload content. Checked before any statement.
+    PrivateMemberInProvenance,
     /// The caller's transaction does not run at `READ COMMITTED` (see the
     /// module docs, "Isolation"). Not retryable as is: the caller retries
     /// in a `READ COMMITTED` transaction.
@@ -362,6 +437,12 @@ impl fmt::Display for KeysetWriteError {
             Self::StoredVersion { .. } => {
                 f.write_str("a stored version of the keyset breaks the JWK set rules")
             }
+            Self::TooManyEnabledVersions => {
+                f.write_str("the keyset already has the most enabled versions allowed")
+            }
+            Self::PrivateMemberInProvenance => {
+                f.write_str("the keyset version's provenance names a JWK private member")
+            }
             Self::UnsupportedIsolation => {
                 f.write_str("trust keyset version writes run only at READ COMMITTED")
             }
@@ -378,6 +459,8 @@ impl fmt::Debug for KeysetWriteError {
             Self::Upload(_) => f.write_str("Upload(..)"),
             Self::Overlap(err) => write!(f, "Overlap({})", conflict_kind(err)),
             Self::StoredVersion { .. } => f.write_str("StoredVersion { .. }"),
+            Self::TooManyEnabledVersions => f.write_str("TooManyEnabledVersions"),
+            Self::PrivateMemberInProvenance => f.write_str("PrivateMemberInProvenance"),
             Self::UnsupportedIsolation => f.write_str("UnsupportedIsolation"),
             Self::WorkerUnavailable => f.write_str("WorkerUnavailable"),
             Self::Registry(err) => f.debug_tuple("Registry").field(err).finish(),
@@ -502,6 +585,10 @@ async fn check_overlap(
 ) -> Result<(), KeysetWriteError> {
     let compared: Vec<KeysetVersionText> = rows
         .into_iter()
+        // Excluding the version's own ID is not only a saving: the check
+        // skips it anyway, but a create that reuses the ID of a stored
+        // version would parse that row and could fail as `StoredVersion`
+        // instead of the insert's `AlreadyExists`.
         .filter(|row| row.status == Status::Enabled && row.id != version.id)
         // The window only: `version`'s keys stand in for the unparsed ones.
         .filter(|row| version.windows_intersect(&as_version(row, version.keys)))
@@ -512,6 +599,45 @@ async fn check_overlap(
         .map(|(row, keys)| as_version(row, keys.set()))
         .collect();
     check_version_overlap(version, &existing).map_err(KeysetWriteError::Overlap)
+}
+
+/// Step 5, first: refuses a version becoming enabled when the keyset
+/// already has [`MAX_ENABLED_VERSIONS_PER_KEYSET`] other enabled versions in
+/// `rows` (read under the parent lock), before any parse.
+fn check_enabled_count(rows: &[KeysetVersionText], id: &str) -> Result<(), KeysetWriteError> {
+    let enabled = rows
+        .iter()
+        .filter(|row| row.status == Status::Enabled && row.id != id)
+        .count();
+    if enabled >= MAX_ENABLED_VERSIONS_PER_KEYSET {
+        return Err(KeysetWriteError::TooManyEnabledVersions);
+    }
+    Ok(())
+}
+
+/// Whether `provenance` has a member named like a JWK private member
+/// ([`PRIVATE_MEMBERS`]), in itself or in any object it holds, arrays
+/// included. Iterative, so a deep value cannot exhaust the stack.
+fn names_a_private_member(provenance: &JsonObject) -> bool {
+    let mut pending: Vec<&Value> = Vec::new();
+    let mut object = Some(provenance);
+    loop {
+        if let Some(members) = object.take() {
+            if members
+                .keys()
+                .any(|name| PRIVATE_MEMBERS.contains(&name.as_str()))
+            {
+                return true;
+            }
+            pending.extend(members.values());
+        }
+        match pending.pop() {
+            None => return false,
+            Some(Value::Object(members)) => object = Some(members),
+            Some(Value::Array(items)) => pending.extend(items),
+            Some(_) => {}
+        }
+    }
 }
 
 /// Step 0: `READ COMMITTED` only.
@@ -606,6 +732,9 @@ pub async fn create_version(
     new: &NewKeysetVersion<'_>,
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
+    if names_a_private_member(new.provenance) {
+        return Err(KeysetWriteError::PrivateMemberInProvenance);
+    }
     let mut savepoint = transaction.begin().await?;
     match create_steps(&mut savepoint, public_identity, new, audit).await {
         Ok(version) => {
@@ -632,14 +761,25 @@ async fn create_steps(
     lock_keyset(transaction, new.tenant_id, new.keyset_id).await?;
     if new.status == Status::Enabled {
         let rows = read_keyset_versions(&mut **transaction, new.tenant_id, new.keyset_id).await?;
-        let version = KeysetVersion {
-            id: new.id,
-            effective_at: new.effective_at,
-            expires_at: new.expires_at,
-            status: VersionStatus::Enabled,
-            keys: new.keys.set(),
-        };
-        check_overlap(&version, rows).await?;
+        check_enabled_count(&rows, new.id)?;
+        // The window as the write stores it: the stored versions are whole
+        // microseconds, so an unfloored bound could see an intersection
+        // that a later enable of the stored row would not (inferred).
+        let effective_at = floor_to_microsecond(new.effective_at);
+        let expires_at = new.expires_at.map(floor_to_microsecond);
+        // An empty window is the `0004` validity check's to refuse. The
+        // check would compare nothing with it (an empty window intersects
+        // none), so skipping it only spares a worker.
+        if expires_at.is_none_or(|expires_at| expires_at > effective_at) {
+            let version = KeysetVersion {
+                id: new.id,
+                effective_at,
+                expires_at,
+                status: VersionStatus::Enabled,
+                keys: new.keys.set(),
+            };
+            check_overlap(&version, rows).await?;
+        }
     }
     let fingerprint: &KeysetFingerprint = new.keys.fingerprint();
     let version = create_trust_keyset_version(
@@ -757,6 +897,7 @@ async fn status_steps(
     }
     let action = match status {
         Status::Enabled => {
+            check_enabled_count(&rows, id)?;
             let mut own = parse_stored_versions(vec![stored]).await?;
             let (row, keys) = own.remove(0);
             let version = KeysetVersion {
@@ -895,6 +1036,16 @@ mod tests {
                 "StoredVersion { .. }",
             ),
             (
+                KeysetWriteError::TooManyEnabledVersions,
+                "the keyset already has the most enabled versions allowed",
+                "TooManyEnabledVersions",
+            ),
+            (
+                KeysetWriteError::PrivateMemberInProvenance,
+                "the keyset version's provenance names a JWK private member",
+                "PrivateMemberInProvenance",
+            ),
+            (
                 KeysetWriteError::UnsupportedIsolation,
                 "trust keyset version writes run only at READ COMMITTED",
                 "UnsupportedIsolation",
@@ -965,6 +1116,49 @@ mod tests {
         release.send(()).unwrap();
         task.await.unwrap().unwrap();
         assert_eq!(POOL.available_permits(), VALIDATION_WORKERS);
+    }
+
+    /// A panic in the work reaches the caller as that panic, not as
+    /// [`KeysetWriteError::WorkerUnavailable`], and its permit comes back.
+    #[tokio::test]
+    async fn a_panicking_validation_panics_its_caller_and_frees_its_worker() {
+        static POOL: Semaphore = Semaphore::const_new(VALIDATION_WORKERS);
+        let task = tokio::spawn(on_pool(&POOL, || -> u8 {
+            std::panic::panic_any("validation panicked")
+        }));
+        let err = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .expect_err("the caller panics");
+        assert!(err.is_panic());
+        assert_eq!(
+            err.into_panic().downcast_ref::<&str>(),
+            Some(&"validation panicked")
+        );
+        assert_eq!(POOL.available_permits(), VALIDATION_WORKERS);
+        // The pool still runs work.
+        assert_eq!(on_pool(&POOL, || 7_u8).await.unwrap(), 7);
+    }
+
+    #[test]
+    fn a_provenance_naming_a_private_member_is_found_at_any_depth() {
+        let object = |value: Value| value.as_object().unwrap().clone();
+        for value in [
+            json!({"d": "x"}),
+            json!({"source": {"jwk": {"kty": "EC", "x": "x", "dq": "x"}}}),
+            json!({"keys": [{"kty": "oct", "k": "x"}]}),
+            json!({"history": [[{"other": [{"oth": []}]}]]}),
+        ] {
+            assert!(names_a_private_member(&object(value.clone())), "{value}");
+        }
+        // Names only, exactly: a value or a longer name is not a member.
+        for value in [
+            json!({}),
+            json!({"supplied_by": "d", "via": ["p", "q"], "kid": "k"}),
+            json!({"d_source": {"key_ops": ["sign"]}, "notes": [{"D": 1}]}),
+        ] {
+            assert!(!names_a_private_member(&object(value.clone())), "{value}");
+        }
     }
 
     #[tokio::test]

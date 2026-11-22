@@ -13,6 +13,6 @@
 pub mod keyset;
 
 pub use keyset::{
-    KeysetAudit, KeysetWriteError, NewKeysetVersion, VALIDATION_WORKERS, create_version,
-    disable_version, enable_version, validate_upload,
+    KeysetAudit, KeysetWriteError, MAX_ENABLED_VERSIONS_PER_KEYSET, NewKeysetVersion,
+    VALIDATION_WORKERS, create_version, disable_version, enable_version, validate_upload,
 };

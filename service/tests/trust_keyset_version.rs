@@ -663,6 +663,24 @@ async fn only_a_trust_admin_of_the_tenant_may_write() {
             create(&pool, key, &version("ver_2", &keys), "aud_2").await,
             case,
         );
+        // Not even whether the keyset exists: a missing keyset, or another
+        // tenant's keyset named under the tenant the caller chose, is the
+        // same refusal, never NotFound.
+        for keyset_id in ["ks_missing", "ks_b"] {
+            assert_unauthorized(
+                create(
+                    &pool,
+                    key,
+                    &NewKeysetVersion {
+                        keyset_id,
+                        ..version("ver_2", &keys)
+                    },
+                    "aud_2",
+                )
+                .await,
+                case,
+            );
+        }
         for status in [Status::Enabled, Status::Disabled] {
             assert_unauthorized(
                 set_status(&pool, key, status, "ver_1", 1, "aud_2").await,
@@ -1099,6 +1117,20 @@ async fn stored_versions_are_parsed_in_full_before_the_check() {
         .await
         .unwrap();
     stored(enable(&pool, "ver_1", 1, "aud_2").await, "ver_bad", "point");
+    // A create reusing a stored version's ID does not compare (or parse)
+    // that row: the insert refuses the ID.
+    assert_registry(
+        create(&pool, TRUST, &version("ver_bad", &keys), "aud_2").await,
+        |err| {
+            matches!(
+                err,
+                RegistryError::AlreadyExists {
+                    constraint: "trust_keyset_version_pkey"
+                }
+            )
+        },
+        "the ID of a stored version",
+    );
 
     // ks_2: neither the earlier nor the disabled version is compared.
     let in_ks_2 = |id| NewKeysetVersion {
@@ -1710,6 +1742,366 @@ async fn a_refusal_releases_the_locks_it_took() {
         tx.rollback().await.unwrap();
     }
     assert_chain(&pool, 2).await;
+    db.drop([pool]).await;
+}
+
+/// The overlap check sees the window the registry stores, floored to whole
+/// microseconds: a window ending 500 ns after an enabled version starts is
+/// stored as ending where it starts, and is accepted whether it is created
+/// enabled or created disabled and then enabled. A window that is empty
+/// once floored is the `0004` validity check's, not an overlap.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_window_is_checked_as_the_registry_stores_it() {
+    let (db, pool) = seeded().await;
+    let old = upload(vec![p256_a(KID)]).await;
+    let replacement = upload(vec![p256_b(KID)]).await;
+    let (t1, t2) = (t0() + secs(3600), t0() + secs(7200));
+    let half = Duration::from_nanos(500);
+    create(
+        &pool,
+        TRUST,
+        &NewKeysetVersion {
+            effective_at: t1,
+            expires_at: Some(t2),
+            ..version("ver_mid", &old)
+        },
+        "aud_1",
+    )
+    .await
+    .unwrap();
+    let before = |id| NewKeysetVersion {
+        expires_at: Some(t1 + half),
+        ..version(id, &replacement)
+    };
+    let created = create(&pool, TRUST, &before("ver_enabled"), "aud_2")
+        .await
+        .unwrap();
+    assert_eq!(created.expires_at, Some(t1));
+    create(
+        &pool,
+        TRUST,
+        &NewKeysetVersion {
+            status: Status::Disabled,
+            ..before("ver_later")
+        },
+        "aud_3",
+    )
+    .await
+    .unwrap();
+    enable(&pool, "ver_later", 1, "aud_4").await.unwrap();
+    // Unfloored, these windows intersect ver_mid's: the conflict is real
+    // one microsecond later.
+    assert_overlap(
+        create(
+            &pool,
+            TRUST,
+            &NewKeysetVersion {
+                expires_at: Some(t1 + Duration::from_micros(1)),
+                ..version("ver_late", &replacement)
+            },
+            "aud_5",
+        )
+        .await,
+        "KidConflict",
+        "ver_mid",
+        "ver_late",
+    );
+    // [T, T + 500 ns) inside ver_mid, with a conflicting kid: empty once
+    // floored, so the database refuses it, not the overlap check.
+    let start = t1 + secs(10);
+    for status in [Status::Enabled, Status::Disabled] {
+        assert_registry(
+            create(
+                &pool,
+                TRUST,
+                &NewKeysetVersion {
+                    effective_at: start,
+                    expires_at: Some(start + half),
+                    status,
+                    ..version("ver_empty", &replacement)
+                },
+                "aud_5",
+            )
+            .await,
+            |err| {
+                matches!(
+                    err,
+                    RegistryError::Invariant {
+                        kind: InvariantKind::Check,
+                        constraint: Some("trust_keyset_version_validity_check")
+                    }
+                )
+            },
+            "empty once floored",
+        );
+    }
+    assert_eq!(version_count(&pool).await, 3);
+    assert_chain(&pool, 4).await;
+    db.drop([pool]).await;
+}
+
+/// A keyset has at most [`trust::MAX_ENABLED_VERSIONS_PER_KEYSET`] enabled
+/// versions: the eighth is accepted, a ninth (created enabled or enabled
+/// later) is refused before any stored version is parsed, disabled
+/// versions and a re-enabled version itself do not count, and a disable
+/// makes room.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_keyset_has_at_most_eight_enabled_versions() {
+    let (db, pool) = seeded().await;
+    assert_eq!(trust::MAX_ENABLED_VERSIONS_PER_KEYSET, 8);
+    let keys = upload(vec![p256_a(KID)]).await;
+    let ids: Vec<String> = (1..=10).map(|n| format!("ver_{n:02}")).collect();
+    for id in &ids[..7] {
+        create(&pool, TRUST, &version(id, &keys), &format!("aud_{id}"))
+            .await
+            .unwrap_or_else(|err| panic!("{id}: {err:?}"));
+    }
+    // The eighth, written raw with a key off its curve: any parse of it
+    // fails, so a refusal that names the bound came before the parse.
+    raw_version(
+        &pool,
+        "ver_08",
+        "ks_1",
+        set(vec![p256_off_curve("bad")]),
+        Status::Enabled,
+        (t0(), None),
+    )
+    .await;
+    let too_many = |result: Result<TrustKeysetVersion, KeysetWriteError>, case: &str| {
+        let err = result.expect_err(case);
+        assert!(
+            matches!(err, KeysetWriteError::TooManyEnabledVersions),
+            "{case}: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "the keyset already has the most enabled versions allowed"
+        );
+        assert_eq!(format!("{err:?}"), "TooManyEnabledVersions");
+        assert!(err.source().is_none());
+    };
+    too_many(
+        create(&pool, TRUST, &version(&ids[8], &keys), "aud_9").await,
+        "a ninth create",
+    );
+    // A disabled version does not count, and is created.
+    create(&pool, TRUST, &disabled(&ids[8], &keys), "aud_9")
+        .await
+        .unwrap();
+    too_many(enable(&pool, &ids[8], 1, "aud_10").await, "a ninth enable");
+    // A re-enable does not count itself: it passes the bound and reaches
+    // the parse of the stored versions.
+    match enable(&pool, &ids[0], 1, "aud_10").await {
+        Err(KeysetWriteError::StoredVersion { version_id, .. }) => {
+            assert_eq!(version_id, "ver_08");
+        }
+        other => panic!("re-enable at the bound: {other:?}"),
+    }
+    // A disable makes room; the eighth enabled version is accepted.
+    disable(&pool, "ver_08", 1, "aud_11").await.unwrap();
+    enable(&pool, &ids[8], 1, "aud_12").await.unwrap();
+    enable(&pool, &ids[0], 1, "aud_13").await.unwrap();
+    too_many(
+        create(&pool, TRUST, &version(&ids[9], &keys), "aud_14").await,
+        "a ninth create, all parseable",
+    );
+    // A create reusing an enabled version's ID does not count that row: it
+    // passes the bound and the insert refuses the ID.
+    assert_registry(
+        create(&pool, TRUST, &version(&ids[0], &keys), "aud_14").await,
+        |err| {
+            matches!(
+                err,
+                RegistryError::AlreadyExists {
+                    constraint: "trust_keyset_version_pkey"
+                }
+            )
+        },
+        "the ID of an enabled version at the bound",
+    );
+    // The bound is per keyset.
+    create(
+        &pool,
+        TRUST,
+        &NewKeysetVersion {
+            keyset_id: "ks_2",
+            ..version(&ids[9], &keys)
+        },
+        "aud_14",
+    )
+    .await
+    .unwrap();
+    let enabled: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM trust_keyset_version WHERE keyset_id = 'ks_1' AND status = 'enabled'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(enabled, 8);
+    assert_eq!(version_count(&pool).await, 10);
+    db.drop([pool]).await;
+}
+
+/// Two transactions that each write one keyset and then the other's
+/// deadlock: the first holds the audit head when it asks for the second
+/// keyset, which the second holds while it waits for the head. PostgreSQL
+/// aborts exactly one statement with `40P01`, which is
+/// `Registry(Retry)`; that transaction rolls back and the other commits.
+/// Which one loses depends on whose deadlock check runs first, so the test
+/// accepts either, but exactly one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn two_keysets_in_one_transaction_can_deadlock_into_a_retry() {
+    let (db, pool) = seeded().await;
+    let keys = upload(vec![p256_a(KID)]).await;
+    let mut first = pool.begin().await.unwrap();
+    let mut second = pool.begin().await.unwrap();
+    let (first_pid, second_pid) = (
+        backend_pid(&mut first).await,
+        backend_pid(&mut second).await,
+    );
+    let write = |mut tx: Transaction<'static, Postgres>,
+                 id: &'static str,
+                 keyset_id: &'static str,
+                 event_id: &'static str| {
+        let keys = keys.clone();
+        async move {
+            let new = NewKeysetVersion {
+                keyset_id,
+                ..disabled(id, &keys)
+            };
+            let result = create_version(&mut tx, TRUST, &new, &audit(event_id)).await;
+            (tx, result)
+        }
+    };
+    // The first holds ks_1 and the audit head.
+    create_version(
+        &mut first,
+        TRUST,
+        &disabled("ver_1", &keys),
+        &audit("aud_1"),
+    )
+    .await
+    .unwrap();
+    // The second takes ks_2, then waits for the head.
+    let second_task = tokio::spawn(write(second, "ver_2", "ks_2", "aud_2"));
+    wait_until_blocked(&pool, second_pid, first_pid, &second_task).await;
+    // The first now asks for ks_2.
+    let first_task = tokio::spawn(write(first, "ver_3", "ks_2", "aud_3"));
+    let mut tasks = [Some(first_task), Some(second_task)];
+    let done = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(index) = tasks
+                .iter()
+                .position(|task| task.as_ref().is_some_and(|task| task.is_finished()))
+            {
+                return index;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the deadlock was never resolved");
+    // Whichever returned first is finished first (a losing first still
+    // holds the audit head the second waits for); `finish` shows a loser's
+    // transaction is usable and rolls it back whole.
+    let (tx, done_result) = join(tasks[done].take().unwrap()).await;
+    finish(tx, &done_result).await;
+    let (tx, other_result) = join(tasks[1 - done].take().unwrap()).await;
+    finish(tx, &other_result).await;
+    let (first_result, second_result) = if done == 0 {
+        (done_result, other_result)
+    } else {
+        (other_result, done_result)
+    };
+    let (err, kept, events) = match (first_result, second_result) {
+        (Err(err), Ok(winner)) => (err, vec![winner.id], 1),
+        (Ok(winner), Err(err)) => (err, vec!["ver_1".to_string(), winner.id], 2),
+        other => panic!("expected exactly one deadlock victim: {other:?}"),
+    };
+    let KeysetWriteError::Registry(registry_err) = &err else {
+        panic!("expected Registry(Retry), got {err:?}");
+    };
+    assert!(matches!(registry_err, RegistryError::Retry(_)), "{err:?}");
+    assert_eq!(
+        format!("{err:?}"),
+        r#"Registry(Retry { sqlstate: Some("40P01"), .. })"#
+    );
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM trust_keyset_version ORDER BY id COLLATE \"C\"")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(ids, kept);
+    assert_chain(&pool, events).await;
+    db.drop([pool]).await;
+}
+
+/// A provenance naming a JWK private member, at any depth, is refused
+/// before any statement, and nothing is written.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_provenance_naming_a_private_member_is_refused() {
+    let (db, pool) = seeded().await;
+    let keys = upload(vec![p256_a(KID)]).await;
+    for provenance in [
+        json!({"supplied_by": "operator", "d": A_D}),
+        json!({"supplied_by": "operator", "upload": {"keys": [{"kty": "EC", "d": A_D}]}}),
+        json!({"history": [{"jwk": {"kty": "oct", "k": A_X}}]}),
+    ] {
+        let provenance = provenance.as_object().unwrap().clone();
+        for status in [Status::Enabled, Status::Disabled] {
+            let new = NewKeysetVersion {
+                provenance: &provenance,
+                status,
+                ..version("ver_1", &keys)
+            };
+            // Even in a transaction no write may run in: no statement runs.
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let result = create_version(&mut tx, "key_unknown", &new, &audit("aud_1")).await;
+            tx.rollback().await.unwrap();
+            let err = result.expect_err("a private member in the provenance");
+            assert!(
+                matches!(err, KeysetWriteError::PrivateMemberInProvenance),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "the keyset version's provenance names a JWK private member"
+            );
+            assert_redacted(&err, &[]);
+            let err = create(&pool, TRUST, &new, "aud_1").await.unwrap_err();
+            assert!(
+                matches!(err, KeysetWriteError::PrivateMemberInProvenance),
+                "{err:?}"
+            );
+        }
+    }
+    // Names only: a value, or a longer name, is no private member.
+    let allowed = json!({"supplied_by": "d", "d_source": ["k", "p"]})
+        .as_object()
+        .unwrap()
+        .clone();
+    let created = create(
+        &pool,
+        TRUST,
+        &NewKeysetVersion {
+            provenance: &allowed,
+            ..version("ver_1", &keys)
+        },
+        "aud_1",
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.provenance, allowed);
+    assert_eq!(version_count(&pool).await, 1);
+    assert_chain(&pool, 1).await;
     db.drop([pool]).await;
 }
 
