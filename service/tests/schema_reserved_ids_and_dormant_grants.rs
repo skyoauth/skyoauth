@@ -5,12 +5,15 @@
 //! impersonation grant is frozen once the transaction that creates it
 //! commits: no `UPDATE` of the grant row, and no `INSERT`, `UPDATE` or
 //! `DELETE` of its binding and audience rows, while the creating
-//! transaction, savepoints included, still builds them. Other grants are
-//! unaffected.
+//! transaction, savepoints included, still builds them. Under `REPEATABLE
+//! READ` and `SERIALIZABLE` the foreign key refuses a row for a grant
+//! committed after the writer's snapshot. Other grants are unaffected. The README's upgrade precondition and
+//! repair run as written there.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! test creates and drops its own database. The tests that disable a guard
-//! inside a rolled-back transaction need the table owner.
+//! inside a rolled-back transaction need the table owner, and the
+//! privilege test needs `CREATEROLE`.
 //!
 //! No test name here may match the scenario pattern
 //! `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, so `scenarios-pg` never selects them.
@@ -25,7 +28,7 @@ use skyoauth_service::persistence::{
         ServiceGrantChanges, Status, is_reserved_actor_id,
     },
 };
-use sqlx::{AssertSqlSafe, Executor, PgConnection, Postgres};
+use sqlx::{AssertSqlSafe, Connection, Executor, PgConnection, Postgres};
 
 /// A tenant with a workload actor and its two bindings, a service with an
 /// audience, and three grants created and committed before any test
@@ -84,6 +87,22 @@ fn create_impersonation(id: &str) -> String {
          INSERT INTO service_grant_binding VALUES ('{id}', 'bnd_1', 'ten_a', 'wld_1');
          INSERT INTO service_grant_resource_server VALUES ('{id}', 'ten_a', 'rs_1');"
     )
+}
+
+/// An insert of a new list row of `table` for the grant `id`, and the
+/// foreign key of that row to its grant.
+fn list_insert(table: &str, id: &str) -> (String, &'static str) {
+    if table == "service_grant_binding" {
+        (
+            format!("INSERT INTO service_grant_binding VALUES ('{id}', 'bnd_2', 'ten_a', 'wld_1')"),
+            "service_grant_binding_grant_id_fkey",
+        )
+    } else {
+        (
+            format!("INSERT INTO service_grant_resource_server VALUES ('{id}', 'ten_a', 'rs_2')"),
+            "service_grant_resource_server_grant_id_fkey",
+        )
+    }
 }
 
 async fn seeded() -> (TestDb, PgPool) {
@@ -355,14 +374,14 @@ async fn admin_identity_refuses_the_reserved_actor_ids_byte_wise() {
     db.drop([pool]).await;
 }
 
-/// The upgrade precondition query of the migrations README ("What 0009
-/// adds"), the fenced block after "Upgrade precondition".
-fn precondition_sql() -> String {
+/// The first fenced SQL block after `marker` in the "What 0009 adds"
+/// section of the migrations README, without its list indentation.
+fn readme_sql(marker: &str) -> String {
     let readme = include_str!("../migrations/README.md");
     let section = &readme[readme.find("## What 0009 adds").unwrap()..];
     let section = &section[section
-        .find("- **Upgrade precondition.**")
-        .expect("the 0009 section has the upgrade precondition")..];
+        .find(marker)
+        .unwrap_or_else(|| panic!("the 0009 section has {marker:?}"))..];
     let start = section.find("```sql\n").unwrap() + "```sql\n".len();
     let end = start + section[start..].find("  ```").unwrap();
     section[start..end]
@@ -372,10 +391,30 @@ fn precondition_sql() -> String {
         .join("\n")
 }
 
+/// The upgrade precondition query of the README.
+fn precondition_sql() -> String {
+    readme_sql("- **Upgrade precondition.**")
+}
+
+/// The README repair of one listed identity, `reserved`, moved to `new`.
+fn repair_sql(reserved: &str, new: &str) -> String {
+    let template = readme_sql("Repair (inferred)");
+    assert!(template.contains("'<reserved-id>'") && template.contains("'<new-id>'"));
+    template
+        .replace("<reserved-id>", reserved)
+        .replace("<new-id>", new)
+}
+
 /// On a `0008` database the README query lists the operator identities
 /// `0009` would reject; with one, `0009` fails with `23514` and leaves the
-/// database at `0008`; after the owner-level repair the README describes,
-/// the query lists none and `0009` applies.
+/// database at `0008`. The README repair, run once per listed identity,
+/// moves its credentials and role bindings to a fresh disabled identity,
+/// revokes every credential (a revoked one keeps its time) and disables
+/// every binding, and deletes only the reserved identity: no key is freed,
+/// so neither a revoked nor an unrevoked key of it can be registered again.
+/// Every guard is back at `ENABLE ALWAYS`, the query lists none, and
+/// `0009` applies. The test runs as the database's role, a superuser; the
+/// README asks for the table owner, which suffices.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn upgrade_precondition_lists_the_reserved_operator_ids() {
@@ -384,13 +423,15 @@ async fn upgrade_precondition_lists_the_reserved_operator_ids() {
     MIGRATOR.run_to(8, &pool).await.unwrap();
     run(
         &pool,
-        "INSERT INTO admin_identity (id, status) VALUES
-             ('adm_1', 'enabled'), ('deployment_operator', 'enabled'),
-             ('recovery_key:1', 'disabled'), ('recovery_key', 'enabled');
+        "INSERT INTO admin_identity (id, status, created_at) VALUES
+             ('adm_1', 'enabled', '2026-01-01Z'), ('deployment_operator', 'enabled', '2026-01-02Z'),
+             ('recovery_key:1', 'disabled', '2026-01-03Z'), ('recovery_key', 'enabled', '2026-01-04Z');
          INSERT INTO admin_credential VALUES
-             ('crd_1', 'recovery_key:1', 'sha256:c1', 'ops-ca', 'disabled', '2026-11-20Z');
+             ('crd_1', 'recovery_key:1', 'sha256:c1', 'ops-ca', 'disabled', '2026-11-20Z'),
+             ('crd_2', 'deployment_operator', 'sha256:c2', 'ops-ca', 'enabled', NULL);
          INSERT INTO admin_role_binding VALUES
-             ('rb_1', 'deployment_operator', 'security_admin', NULL, 'enabled')",
+             ('rb_1', 'deployment_operator', 'security_admin', NULL, 'enabled'),
+             ('rb_2', 'recovery_key:1', 'auditor', NULL, 'enabled')",
     )
     .await;
     let precondition = || async {
@@ -422,39 +463,85 @@ async fn upgrade_precondition_lists_the_reserved_operator_ids() {
         .unwrap();
     assert_eq!(version, 8);
 
-    // The owner-level repair of the README: in one transaction, remove each
-    // listed identity with its credentials and role bindings, with the
-    // guards of the three tables disabled, then re-enable every guard as
-    // ALWAYS.
-    let mut tx = pool.begin().await.unwrap();
-    run(
-        &mut *tx,
-        "ALTER TABLE admin_identity DISABLE TRIGGER USER;
-         ALTER TABLE admin_credential DISABLE TRIGGER USER;
-         ALTER TABLE admin_role_binding DISABLE TRIGGER USER;
-         DELETE FROM admin_credential WHERE admin_id IN ('deployment_operator', 'recovery_key:1');
-         DELETE FROM admin_role_binding WHERE admin_id IN ('deployment_operator', 'recovery_key:1');
-         DELETE FROM admin_identity WHERE id IN ('deployment_operator', 'recovery_key:1')",
+    run(&pool, &repair_sql("deployment_operator", "adm_repaired_1")).await;
+    run(&pool, &repair_sql("recovery_key:1", "adm_repaired_2")).await;
+    assert_eq!(precondition().await, []);
+    let identities: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT id, status, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')
+         FROM admin_identity ORDER BY id",
     )
-    .await;
-    let triggers: Vec<(String, String)> = sqlx::query_as(
-        "SELECT tgrelid::regclass::text, tgname::text FROM pg_trigger
-         WHERE NOT tgisinternal
-           AND tgrelid IN ('admin_identity'::regclass, 'admin_credential'::regclass,
-                           'admin_role_binding'::regclass)",
-    )
-    .fetch_all(&mut *tx)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    for (table, trigger) in triggers {
-        run(
-            &mut *tx,
-            &format!("ALTER TABLE {table} ENABLE ALWAYS TRIGGER {trigger}"),
-        )
-        .await;
-    }
-    tx.commit().await.unwrap();
-    assert_eq!(precondition().await, []);
+    let identity = |id: &str, status: &str, created: &str| {
+        (id.to_string(), status.to_string(), created.to_string())
+    };
+    assert_eq!(
+        identities,
+        [
+            identity("adm_1", "enabled", "2026-01-01"),
+            identity("adm_repaired_1", "disabled", "2026-01-02"),
+            identity("adm_repaired_2", "disabled", "2026-01-03"),
+            identity("recovery_key", "enabled", "2026-01-04"),
+        ]
+    );
+    // (id, admin_id, status, revoked, revoked at the original time)
+    let credentials: Vec<(String, String, String, bool, bool)> = sqlx::query_as(
+        "SELECT id, admin_id, status, revoked_at IS NOT NULL,
+                revoked_at IS NOT DISTINCT FROM '2026-11-20Z'
+         FROM admin_credential ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        credentials,
+        [
+            (
+                "crd_1".to_string(),
+                "adm_repaired_2".to_string(),
+                "disabled".to_string(),
+                true,
+                true
+            ),
+            (
+                "crd_2".to_string(),
+                "adm_repaired_1".to_string(),
+                "disabled".to_string(),
+                true,
+                false
+            ),
+        ]
+    );
+    let bindings: Vec<(String, String, String, i64)> =
+        sqlx::query_as("SELECT id, admin_id, status, revision FROM admin_role_binding ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        bindings,
+        [
+            (
+                "rb_1".to_string(),
+                "adm_repaired_1".to_string(),
+                "disabled".to_string(),
+                2
+            ),
+            (
+                "rb_2".to_string(),
+                "adm_repaired_2".to_string(),
+                "disabled".to_string(),
+                2
+            ),
+        ]
+    );
+    let disabled: Vec<String> = sqlx::query_scalar(
+        "SELECT tgname::text FROM pg_trigger WHERE NOT tgisinternal AND tgenabled <> 'A'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(disabled, Vec::<String>::new());
 
     persistence::migrate(&pool).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
@@ -470,6 +557,23 @@ async fn upgrade_precondition_lists_the_reserved_operator_ids() {
     .unwrap();
     assert_eq!(not_always, 0);
     assert_eq!(precondition().await, []);
+    // Neither key is free: the revoked one nor the one the repair revoked.
+    for key in ["sha256:c1", "sha256:c2"] {
+        let err = sqlx::query(
+            "INSERT INTO admin_credential VALUES ('crd_again', 'adm_1', $1, 'ops-ca', 'enabled', NULL)",
+        )
+        .bind(key)
+        .execute(&pool)
+        .await
+        .expect_err(key);
+        let database = err.as_database_error().unwrap();
+        assert_eq!(database.code().as_deref(), Some("23505"), "{key}: {err}");
+        assert_eq!(
+            database.constraint(),
+            Some("admin_credential_public_identity_key"),
+            "{key}"
+        );
+    }
     db.drop([pool]).await;
 }
 
@@ -805,6 +909,22 @@ async fn an_impersonation_grants_list_rows_never_change() {
         None,
     )
     .await;
+    // The principal binding a frozen row references is never hard-deleted:
+    // disabled, and gone from every other grant, it still has the frozen
+    // row, so the foreign key refuses the delete.
+    rejected(
+        &mut conn,
+        "BEGIN; UPDATE principal_binding SET status = 'disabled', revision = revision + 1
+                 WHERE id = 'bnd_1';
+         DELETE FROM service_grant_binding WHERE binding_id = 'bnd_1' AND grant_id <> 'grt_i';
+         DELETE FROM principal_binding WHERE id = 'bnd_1'",
+        "23503",
+        Some(
+            "update or delete on table \"principal_binding\" violates foreign key constraint \
+             \"service_grant_binding_binding_id_fkey\" on table \"service_grant_binding\"",
+        ),
+    )
+    .await;
     assert_eq!(grants(&mut conn).await, before);
     drop(conn);
     db.drop([pool]).await;
@@ -834,6 +954,143 @@ async fn a_grant_committed_by_a_later_transaction_is_not_the_current_ones() {
     }
     drop(writer);
     drop(other);
+    db.drop([pool]).await;
+}
+
+/// A writer whose snapshot is older than an impersonation grant that
+/// another transaction then creates and commits. Under `REPEATABLE READ`
+/// and `SERIALIZABLE` the foreign key, which checks an inserted row with
+/// the transaction snapshot, refuses a new list row for it with `23503`
+/// before the guard runs; under `READ COMMITTED` the guard refuses it
+/// (`SK001`). Through the registry, `add_service_grant_binding` and
+/// `update_service_grant` update a grant row the snapshot does not show:
+/// `NotFound`. README "What 0009 adds", "Limits", states this.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_grant_committed_after_the_snapshot_is_refused_by_the_foreign_key() {
+    let (db, pool) = seeded().await;
+    let mut writer = pool.acquire().await.unwrap();
+    let mut other = pool.acquire().await.unwrap();
+    let mut created = 0;
+    let mut late_grant = |writer_isolation: &str| {
+        created += 1;
+        (
+            format!("grt_late_{created}"),
+            format!("BEGIN ISOLATION LEVEL {writer_isolation}; SELECT 1"),
+        )
+    };
+    for isolation in ["REPEATABLE READ", "SERIALIZABLE", "READ COMMITTED"] {
+        for table in LISTS {
+            let (id, begin) = late_grant(isolation);
+            run(&mut *writer, &begin).await;
+            run(&mut *other, &create_impersonation(&id)).await;
+            let (insert, foreign_key) = list_insert(table, &id);
+            let err = sqlx::raw_sql(AssertSqlSafe(insert))
+                .execute(&mut *writer)
+                .await
+                .expect_err(isolation);
+            let database = err.as_database_error().unwrap();
+            if isolation == "READ COMMITTED" {
+                assert_eq!(database.code().as_deref(), Some("SK001"), "{table}");
+                assert_eq!(database.message(), frozen_rows(table), "{table}");
+            } else {
+                assert_eq!(
+                    database.code().as_deref(),
+                    Some("23503"),
+                    "{isolation}, {table}"
+                );
+                assert_eq!(
+                    database.constraint(),
+                    Some(foreign_key),
+                    "{isolation}, {table}"
+                );
+            }
+            run(&mut *writer, "ROLLBACK").await;
+        }
+        if isolation == "READ COMMITTED" {
+            continue;
+        }
+        let (id, begin) = late_grant(isolation);
+        run(&mut *writer, &begin).await;
+        run(&mut *other, &create_impersonation(&id)).await;
+        let grant = registry::get_service_grant(&pool, "ten_a", &id)
+            .await
+            .unwrap();
+        let changes = ServiceGrantChanges {
+            name: "renamed".into(),
+            scopes: grant.scopes.clone(),
+            default_scopes: grant.default_scopes.clone(),
+            resource_constraints: grant.resource_constraints.clone(),
+            max_ttl: grant.max_ttl,
+            valid_until: grant.valid_until,
+            status: grant.status,
+            activation_state: grant.activation_state,
+        };
+        let added =
+            registry::add_service_grant_binding(&mut *writer, "ten_a", &id, 1, "bnd_2").await;
+        assert!(
+            matches!(added, Err(RegistryError::NotFound)),
+            "{isolation}: {added:?}"
+        );
+        let updated = registry::update_service_grant(&mut *writer, "ten_a", &id, 1, &changes).await;
+        assert!(
+            matches!(updated, Err(RegistryError::NotFound)),
+            "{isolation}: {updated:?}"
+        );
+        run(&mut *writer, "ROLLBACK").await;
+    }
+    drop(writer);
+    drop(other);
+    db.drop([pool]).await;
+}
+
+/// The list guard reads `service_grant` with the writer's privileges: a
+/// role that may insert list rows but not read `service_grant` fails with
+/// `42501`, also with `SELECT` on `id` and `mode` alone, since the guard
+/// reads `xmin`; with `SELECT` on `id`, `mode` and `xmin`, or on the table,
+/// the insert passes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn list_row_writers_need_select_on_service_grant() {
+    let (mut db, pool) = seeded().await;
+    let (role, connect) = db.create_login_role().await;
+    run(
+        &pool,
+        &format!("GRANT INSERT ON service_grant_binding, service_grant_resource_server TO {role}"),
+    )
+    .await;
+    let mut writer = PgConnection::connect_with(&connect).await.unwrap();
+    for (privilege, allowed) in [
+        (None, false),
+        (Some("SELECT (id, mode) ON service_grant"), false),
+        (Some("SELECT (id, mode, xmin) ON service_grant"), true),
+        (Some("SELECT ON service_grant"), true),
+    ] {
+        if let Some(privilege) = privilege {
+            run(
+                &pool,
+                &format!("REVOKE ALL ON service_grant FROM {role}; GRANT {privilege} TO {role}"),
+            )
+            .await;
+        }
+        for table in LISTS {
+            let (insert, _) = list_insert(table, "grt_d");
+            let sql = format!("BEGIN; {insert}");
+            if allowed {
+                run(&mut writer, &sql).await;
+                run(&mut writer, "ROLLBACK").await;
+            } else {
+                rejected(
+                    &mut writer,
+                    &sql,
+                    "42501",
+                    Some("permission denied for table service_grant"),
+                )
+                .await;
+            }
+        }
+    }
+    drop(writer);
     db.drop([pool]).await;
 }
 
@@ -914,7 +1171,9 @@ async fn other_grants_are_unaffected_and_impersonation_grants_stay_undeletable()
 }
 
 /// Through the registry: a dormant grant is created as before; its update
-/// and every list change map to `RegistryError::Guard` and change nothing.
+/// and every list change, the four list calls included, map to
+/// `RegistryError::Guard` and change nothing. Adding a binding fails so
+/// also in the creating transaction.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
@@ -958,6 +1217,17 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
             .await
             .map(|_| ()),
     );
+    run(
+        &pool,
+        r#"INSERT INTO principal_binding VALUES
+               ('bnd_3', 'ten_a', 'three', 'src_gh', 'generic_production', '{"sub": "repo:3"}', 'wld_1', 'enabled')"#,
+    )
+    .await;
+    guard(
+        registry::add_service_grant_binding(&pool, "ten_a", "grt_reg", 1, "bnd_3")
+            .await
+            .map(|_| ()),
+    );
     guard(
         registry::remove_service_grant_binding(&pool, "ten_a", "grt_reg", 1, "bnd_2")
             .await
@@ -979,5 +1249,25 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
             .unwrap(),
         created
     );
+    // Also in the creating transaction: a binding is added only by the
+    // create call.
+    let mut tx = pool.begin().await.unwrap();
+    registry::create_service_grant(
+        &mut *tx,
+        &NewServiceGrant {
+            id: "grt_tx".into(),
+            name: "in-transaction".into(),
+            allowed_binding_ids: vec!["bnd_1".into()],
+            ..new
+        },
+    )
+    .await
+    .unwrap();
+    guard(
+        registry::add_service_grant_binding(&mut *tx, "ten_a", "grt_tx", 1, "bnd_3")
+            .await
+            .map(|_| ()),
+    );
+    tx.rollback().await.unwrap();
     db.drop([pool]).await;
 }

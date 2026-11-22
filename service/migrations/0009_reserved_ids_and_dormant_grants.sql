@@ -58,33 +58,52 @@ $$;
 -- service_grant_resource_server whose grant is an impersonation grant that
 -- the current transaction did not create. The creating transaction inserts
 -- the list rows after the grant row (the deferred 0004 check requires a
--- binding row at commit), so it may still add, change and delete them; once
--- it commits, the set is frozen with the grant. A row whose grant is not
--- visible (deleted in this transaction, or missing under
--- session_replication_role = replica, where foreign keys do not fire) is
--- left alone.
+-- binding row at commit), so it may still add, change and delete them, in
+-- savepoints too (inferred: the lead ruling freezes the grant, and the
+-- registry writes the rows in the creating statement); once it commits,
+-- the set is frozen with the grant.
+--
+-- A row whose grant the trigger cannot see is left alone (inferred): its
+-- grant was deleted by this transaction (one of another mode: 0006 never
+-- deletes an impersonation grant), or it is missing under
+-- session_replication_role = replica, where foreign keys do not fire.
+-- Under REPEATABLE READ or SERIALIZABLE, a new row for a grant that another
+-- transaction committed after this transaction's snapshot never reaches the
+-- guard: the foreign key, which checks an inserted row with the
+-- transaction snapshot, refuses it first with 23503 (inferred; reproduced
+-- on PostgreSQL 16.15, CI runs 17). The registry gets NotFound there: each
+-- of its list changes first updates the grant row, which that snapshot
+-- does not show.
 --
 -- "Created by the current transaction" is decided from the xmin of the
--- grant row, which an UPDATE would change but this migration forbids
--- (above) and a row lock leaves alone. pg_current_xact_id() is the
+-- grant row (inferred), which an UPDATE would change but this migration
+-- forbids (above) and a row lock leaves alone. pg_current_xact_id() is the
 -- top-level transaction ID, but a grant inserted inside a savepoint carries
 -- the subtransaction's ID, which is newer, so an equality test would
--- misjudge it. Instead the 32-bit xmin is widened to an xid8 in the epoch of
--- the top-level ID (subtransaction IDs are assigned after it, and xmin is
--- at most 2^31 transactions away from it while the row is unfrozen), and
--- pg_xact_status() says whether that transaction is in progress. It is 'in
--- progress' for the top-level ID and every live or released subtransaction
--- of the current transaction, and an in-progress transaction whose row the
--- trigger can see is the current one: MVCC never shows another
--- transaction's uncommitted row. A grant row from a rolled-back savepoint
--- is not visible at all (and its foreign keys reject the list row). An
--- xmin older than the top-level ID is not the current transaction's.
--- pg_locks cannot replace pg_xact_status(): a released savepoint gives up
--- the lock on its own ID. Limit: a row frozen by VACUUM keeps its raw xmin,
--- which widens to an ID that may be in the future (pg_xact_status() then
--- fails with 22023, caught below: not created here) or, after 2^32 more
--- transactions in the cluster, equal to the ID of a transaction in
--- progress, which then counts as having created the grant.
+-- misjudge it. Instead the 32-bit xmin is widened to an xid8 in the epoch
+-- of the top-level ID (subtransaction IDs are assigned after it, and xmin
+-- is at most 2^31 transactions away from it while the row is unfrozen),
+-- and pg_xact_status() says whether that transaction is in progress. It is
+-- 'in progress' for the top-level ID and every live or released
+-- subtransaction of the current transaction, and an in-progress
+-- transaction whose row the trigger can see is the current one: MVCC never
+-- shows another transaction's uncommitted row. A grant row from a
+-- rolled-back savepoint is not visible at all (and its foreign keys reject
+-- the list row). An xmin older than the top-level ID is not the current
+-- transaction's. pg_locks cannot replace pg_xact_status(): a released
+-- savepoint gives up the lock on its own ID.
+--
+-- Limit: a row frozen by VACUUM keeps its raw 32-bit xmin. Widened, it
+-- names an ID that may be in the future (pg_xact_status() then fails with
+-- 22023, caught below: not created here) or, once the cluster has used
+-- 2^32 more transaction IDs, the ID of any transaction then in progress,
+-- the writer's own top-level ID included if it times its transaction to
+-- match; that transaction then counts as having created the grant and may
+-- change its list rows. The registry never reaches this path: every list
+-- change it makes first updates the grant row, which the guard above
+-- refuses with no xmin logic. Like every guard of 0006, this is a tripwire
+-- against application DML, not a security boundary (README.md "Limits";
+-- "Follow-ups" has a stored-marker design).
 --
 -- The trigger is AFTER ... FOR EACH ROW, not BEFORE (inferred): it then
 -- runs after the foreign-key check of the inserted row (its internal
@@ -100,7 +119,8 @@ $$;
 -- schema resolved by current_schema(), pinned search_path, the table named
 -- with the schema, body passed as a quoted literal (%L). It runs with the
 -- caller's privileges: a role that writes the list rows needs SELECT on
--- service_grant (README.md "What 0009 adds").
+-- service_grant, or at least on its columns id, mode and xmin (README.md
+-- "What 0009 adds").
 DO $migration$
 DECLARE
     schema_name constant text := current_schema();

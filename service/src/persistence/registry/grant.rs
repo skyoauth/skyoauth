@@ -410,6 +410,13 @@ pub async fn remove_service_identity_resource_server<'e>(
 /// same-tenant binding of the grant's actor
 /// (`service_grant_binding_binding_id_fkey`), and each audience assigned to
 /// the tenant (`service_grant_resource_server_assignment_fkey`).
+///
+/// An impersonation grant must be created with all its bindings and
+/// audiences in this call. Since `0009` it never changes afterwards:
+/// [`add_service_grant_binding`] and the other list-set changes first
+/// advance the grant's revision with an `UPDATE`, which the guard refuses,
+/// so they fail with [`RegistryError::Guard`] even inside the creating
+/// transaction.
 pub async fn create_service_grant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewServiceGrant,
