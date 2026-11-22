@@ -2184,18 +2184,29 @@ Scope ceilings (IR-062, IR-063, IR-083; ADR-015 items 7 and 9; design §5.7;
 T12.8; A26): `load_scope_ceilings(tenant, grant, audience)` loads, in one
 statement, the grant's `scopes` and `default_scopes`, the `scopes` of the
 resource server with that exact audience, the tenant's assignment
-`allowed_scopes` for it and, for a grant with a target, the target service's
-`max_scopes`, each with its ID, status and revision. The audience must be in
-the grant's set, assigned to the grant's tenant and, for a grant with a target
-service, in that service's set too (IR-083). A missing grant or audience, an
-audience not assigned, not in the grant's set or not in the target service's
-set are all the same `None`, mapped to no error code here (the caller maps them
-to one `invalid_target`, ERR-024 (3); ADR-015 item 9.4). Statuses are not
-checked: a disabled record is still loaded, and `LoadedCeilings::all_enabled`
-says whether the grant, resource server, assignment and target service are all
-enabled. Step 5 (design §5.7) checks the current status of the records (T12.6,
-T12.7, T14.2), wired into the exchange in M2 (T21.4, T21.5); it also needs the
-tenant's status and revision, which are not loaded. `resolve_scopes` (in
+`allowed_scopes` for it and, for a delegation or impersonation grant, the
+target service's `max_scopes`, each with its ID, status and revision. The
+audience must be in the grant's set, assigned to the grant's tenant and, for a
+delegation or impersonation grant, in its target service's set too (IR-083). A
+direct grant loads no target service and needs no target audience row, whatever
+its `target_service_id` holds (provisional lead pick, 2026-11-21; defense in
+depth): the statement keys the target off `mode` rather than rely on
+`service_grant_target_mode_check`. For a corrupt direct row this is looser than
+keying the target off `target_service_id`: a stray, dangling or other-tenant
+target now loads with no target service ceiling. It is defense in depth for the
+ceiling set should the check be dropped, not a fail-closed recheck of the check,
+unlike the rechecks of the foreign keys. `select_grant` and `get_service_grant`
+still return the raw `target_service_id` of a direct grant, so exchange code
+must key the target off `mode` too. A missing grant
+or audience, an audience not assigned, not in the grant's set or not in the
+target service's set are all the same `None`, mapped to no error code here (the
+caller maps them to one `invalid_target`, ERR-024 (3); ADR-015 item 9.4).
+Statuses are not checked: a disabled record is still loaded, and
+`LoadedCeilings::all_enabled` says whether the grant, resource server,
+assignment and target service are all enabled. Step 5 (design §5.7) checks the
+current status of the records (T12.6, T12.7, T14.2), wired into the exchange in
+M2 (T21.4, T21.5); it also needs the tenant's status and revision, which are
+not loaded. `resolve_scopes` (in
 `skyoauth_service::policy`) is pure:
 an omitted scope uses only the grant's nonempty defaults, checked again against
 every ceiling; an explicit list must be nonempty and lie in every ceiling;

@@ -13,9 +13,9 @@
 //!
 //! - **Ceilings** (IR-062). Every scope must lie in the resource server's
 //!   `scopes`, the tenant's assignment `allowed_scopes` and the grant's
-//!   `scopes`, and, for a grant with a target service, in that service's
-//!   `max_scopes`. A scope matches a ceiling entry only when the two are
-//!   the same string, byte for byte (IR-066: scope tokens are
+//!   `scopes`, and, for a delegation or impersonation grant, in its target
+//!   service's `max_scopes`. A scope matches a ceiling entry only when the
+//!   two are the same string, byte for byte (IR-066: scope tokens are
 //!   case-sensitive).
 //! - **Omitted scope** (IR-063; ADR-015 item 7). Only the grant's explicit
 //!   nonempty `default_scopes` are used. No defaults is an error; the full
@@ -73,8 +73,8 @@ pub struct ScopeCeilings {
     pub assignment: Vec<String>,
     /// `ServiceGrant.scopes`.
     pub grant: Vec<String>,
-    /// The target `ServiceIdentity.max_scopes`: `Some` for a grant with a
-    /// target service (delegation; IR-062), `None` for a direct grant.
+    /// The target `ServiceIdentity.max_scopes`: `Some` for a delegation or
+    /// impersonation grant (IR-062), `None` for a direct grant.
     pub target_service: Option<Vec<String>>,
 }
 
