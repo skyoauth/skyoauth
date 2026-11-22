@@ -64,19 +64,24 @@
 // (CI); --libtest-list the text of `cargo test -p PKG --test TARGET -- --list`
 // (a local fallback that reads only the plain list, which does not mark
 // #[ignore]d tests, so that is not checked, with a note). Both may be
-// repeated. On every implemented stage:
+// repeated. On every implemented stage, and on every planned stage that
+// lists tests (partial tests, which count for nothing in the report; their
+// errors name the stage "planned stage, partial test"):
 //   resolve   Each test ID names a test of the list: its package and target
 //             (nextest binary) are listed, the test is in that binary's list,
 //             and it is neither #[ignore]d nor filtered out; a binary that
 //             nextest skipped (status skipped or skipped-default-filter)
 //             lists no test, so its tests fail. vitest and
-//             Playwright IDs, and the legs of jobs that report with those
-//             runners or with no decided runner, are not resolvable yet
-//             (layout §6 "Still open", item 5): an error, not a skip.
+//             Playwright IDs, and (implemented stages only) the legs of jobs
+//             that report with those runners or with no decided runner, are
+//             not resolvable yet (layout §6 "Still open", item 5): an error,
+//             not a skip.
 //   same-job  Each test is produced (TEST_JOBS in report-conformance.mjs) by
 //             the job of one of the stage's legs.
-//   pos-neg   Each test is a pos/neg test of the stage's own entry, and each
-//             job among the legs produces at least one pos and one neg test.
+//   pos-neg   Each test is a pos/neg test of the stage's own entry (partial
+//             tests included, so no other test can pad a planned stage's
+//             list), and (implemented stages only) each job among the legs
+//             produces at least one pos and one neg test.
 // And on the list:
 //   orphans   Each listed test whose last path segment matches a\d\d_ is in
 //             some stage's tests (any stage, planned ones included).
@@ -627,11 +632,12 @@ function readLists(specs, report) {
   return ok ? binaries : null;
 }
 
-// The rules resolve, same-job, pos-neg and orphans (header). `implemented`
-// holds { e, s, err } for each implemented stage with valid columns, where
-// err(rule, msg) reports against the stage; `registered` holds every test ID
-// of every stage. Returns the number of listed tests.
-function checkResolution(binaries, implemented, registered, report) {
+// The rules resolve, same-job, pos-neg and orphans (header). `stages` holds
+// { e, s, planned, err } for each implemented stage, and each planned stage
+// that lists tests, with valid columns, where err(rule, msg) reports against
+// the stage; `registered` holds every test ID of every stage. Returns the
+// number of listed tests.
+function checkResolution(binaries, stages, registered, report) {
   const packages = [...new Set([...binaries.values()].map((b) => b.pkg))].sort();
   const lookup = (info) => {
     const id = info.target === '' ? info.pkg : `${info.pkg}::${info.target}`;
@@ -649,9 +655,12 @@ function checkResolution(binaries, implemented, registered, report) {
     if (t.filter !== null) return `it is filtered out of the list of ${q(id)} (${q(t.filter)}), so its job does not run it`;
     return null;
   };
-  for (const { e, s, err } of implemented) {
+  for (const { e, s, planned, err } of stages) {
     const jobs = [...new Set(s.legs.filter(isText).map(jobOf))];
-    for (const job of jobs) {
+    // A planned stage's partial tests need not cover its legs, so only the
+    // tests it lists are checked (resolve, same-job, own entry), not its
+    // legs' runners or a pos and a neg per job.
+    for (const job of planned ? [] : jobs) {
       const runner = runnerOf(job);
       if (runner === null) err('resolve', `job ${job} has no decided runner (layout §6 "Still open", item 5), so the tests of its legs cannot be resolved`);
       else if (runner !== 'nextest') err('resolve', `job ${job} reports ${runner} tests, whose test IDs are provisional (layout §6 "Still open", item 5): the tests-exist check cannot resolve them yet`);
@@ -675,7 +684,7 @@ function checkResolution(binaries, implemented, registered, report) {
       const why = lookup(info);
       if (why) err('resolve', `${q(t)}: ${why}`);
     }
-    for (const job of jobs) {
+    for (const job of planned ? [] : jobs) {
       for (const pol of ['pos', 'neg']) {
         if (!valid.some((x) => x.polarity === pol && x.jobs.includes(job))) err('pos-neg', `job ${job} produces no ${pol} test of this stage`);
       }
@@ -798,7 +807,7 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
   // Scenario and subcase entries: columns, owners, stages, legs.
   let rendered = true;
   const stagesByTest = new Map();
-  const implemented = [];
+  const resolved = [];
   const checkEntry = (e, file, where, keys) => {
     const id = show(e.id);
     const err = (msg) => report.error(file, where.get(e.id), 'fields', msg);
@@ -821,9 +830,12 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
     for (const s of e.stage) {
       if (gated && gates.includes(s.milestone) && s.status !== 'implemented') stageErr('gates')(s.milestone, `${id} ${s.milestone}: gates_passed lists ${s.milestone}, but this stage is ${show(s.status)}, not implemented`);
       for (const t of Array.isArray(s.tests) ? s.tests : []) stagesByTest.set(t, [...(stagesByTest.get(t) ?? []), { legs: Array.isArray(s.legs) ? s.legs : [] }]);
-      // The stages rule reports tests or legs of the wrong type.
-      if (s.status === 'implemented' && isList(s.tests, isText) && Array.isArray(s.legs)) {
-        implemented.push({ e, s, err: (rule, msg) => stageErr(rule)(s.milestone, `${id} ${show(s.milestone)}: ${msg}`) });
+      // The stages rule reports tests or legs of the wrong type. A planned
+      // stage with tests = [] has nothing to resolve.
+      if ((s.status === 'implemented' || s.status === 'planned') && isList(s.tests, isText) && Array.isArray(s.legs)) {
+        const planned = s.status === 'planned';
+        const where = `${id} ${show(s.milestone)}${planned ? ' (planned stage, partial test)' : ''}`;
+        resolved.push({ e, s, planned, err: (rule, msg) => stageErr(rule)(s.milestone, `${where}: ${msg}`) });
       }
     }
   };
@@ -903,9 +915,12 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
   if (!lists) return done(summary);
   const binaries = readLists(lists, report);
   if (!binaries) return done(summary);
-  const listed = checkResolution(binaries, implemented, new Set(stagesByTest.keys()), report);
-  const tests = implemented.reduce((n, x) => n + x.s.tests.length, 0);
-  return done(`${summary}; resolution: ${tests} tests of ${implemented.length} implemented stages against ${listed} listed tests`);
+  const listed = checkResolution(binaries, resolved, new Set(stagesByTest.keys()), report);
+  const tests = (xs) => xs.reduce((n, x) => n + x.s.tests.length, 0);
+  const impl = resolved.filter((x) => !x.planned);
+  const part = resolved.filter((x) => x.planned);
+  const partial = part.length ? ` and ${tests(part)} partial tests of ${part.length} planned stages` : '';
+  return done(`${summary}; resolution: ${tests(impl)} tests of ${impl.length} implemented stages${partial} against ${listed} listed tests`);
 }
 
 // ---------------------------------------------------------------------------
