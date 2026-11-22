@@ -720,6 +720,7 @@ mod tests {
             "https://issuer.example/X/Y",
             "https://xn--bcher-kva.example/",
             "https://issuer.example/a%2Fb",
+            "https://issuer.example/a%2fb",
             "https://issuer.example/a%20b",
             "https://issuer.example./x",
         ] {
@@ -807,6 +808,19 @@ mod tests {
                 "https://issuer.example/x?a=%4",
             ),
             ("non-hex escape in query", "https://issuer.example/x?a=%zz"),
+            ("non-hex letters g-z in path", "https://issuer.example/a%gg"),
+            (
+                "non-hex letters g-z in query",
+                "https://issuer.example/x?a=%gg",
+            ),
+            (
+                "bad escape after a valid one",
+                "https://issuer.example/%2F%zz",
+            ),
+            (
+                "trailing % after a valid escape",
+                "https://issuer.example/a%20b%",
+            ),
         ] {
             for member in [DISCOVERY_URL, TOKEN_REVIEW_ENDPOINT] {
                 let err = check(member, value).expect_err(case);
