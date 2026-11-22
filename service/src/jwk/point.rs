@@ -6,12 +6,14 @@
 //!   `p`, and `y^2 = x^3 - 3x + b (mod p)`. The three curves have cofactor
 //!   1, so a point on the curve is in the prime-order group: with the range
 //!   check this is the partial public-key validation of NIST SP 800-56A
-//!   section 5.6.2.3, which for cofactor 1 amounts to the full one (the
-//!   point at infinity has no affine JWK form).
-//! - `OKP` Ed25519: the RFC 8032 section 5.1.3 decoding, made strict: `y`
-//!   below `p = 2^255 - 19`, the encoding decodes to a point, `x = 0` with
-//!   the sign bit set is refused as noncanonical, and the eight points of
-//!   order dividing 8 are refused. A point with a torsion component (a
+//!   section 5.6.2.3 (the umbrella section; the subsection numbering
+//!   varies by revision), which for cofactor 1 amounts to the full one
+//!   (the point at infinity has no affine JWK form).
+//! - `OKP` Ed25519: the RFC 8032 section 5.1.3 decoding (from memory,
+//!   unverified), which refuses `y >= p = 2^255 - 19`, a `y` that does not
+//!   decode to a point, and `x = 0` with the sign bit set, plus the
+//!   refusal of the eight small-order points (provisional lead pick,
+//!   2026-11-21). A point with a torsion component (a
 //!   prime-order point plus a small-order point) is accepted: it is not
 //!   claimed safe, and cofactor handling belongs to the verifier (T11.7,
 //!   strict verification). This is not a full strict-verification
@@ -22,7 +24,7 @@
 //! multiplication, square-and-multiply exponentiation and Fermat inversion
 //! (every modulus here is prime). It processes public keys only, so it is
 //! not constant-time and need not be. Speed is not a goal either: an EC key
-//! costs four modular multiplications, an Ed25519 key about a thousand
+//! costs three modular multiplications, an Ed25519 key about a thousand
 //! (an inversion and Euler's criterion), each a few hundred additions.
 
 use std::cmp::Ordering;

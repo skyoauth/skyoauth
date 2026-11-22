@@ -600,7 +600,11 @@ The database does not enforce these rules; the service must:
   maintainer decision). An Ed25519 key with a torsion component is
   accepted and not claimed safe: T11.7 must still use strict Ed25519
   verification, and T24.3's "fake keys" negative stays the acceptance
-  test. Exceptions: the raw request body is not bounded (only the parsed
+  test. Validation is CPU-bound (about 8.8 ms per Ed25519 key in release,
+  about 0.18 s per 20-key set): the wiring PR must run it on bounded
+  blocking workers (`spawn_blocking` with a limit), and T11.7 must select
+  from already-validated stored keys, not re-parse per request.
+  Exceptions: the raw request body is not bounded (only the parsed
   value is); and the module does not define what the version's
   `fingerprint` column holds (T11.9). The wiring PR must enforce a raw
   request-body size limit before parsing (64 KiB is consistent: a valid
