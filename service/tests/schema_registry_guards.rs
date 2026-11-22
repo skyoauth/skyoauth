@@ -282,7 +282,7 @@ async fn every_table_guards_truncate_and_each_delete_guard_is_pinned() {
     .unwrap();
     triggers.sort();
 
-    // tgtype bits: 1 row, 2 before, 8 delete, 16 update, 32 truncate.
+    // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update, 32 truncate.
     const TRUNCATE: i16 = 2 | 32;
     const DELETE: i16 = 1 | 2 | 8;
     const UPDATE_OR_DELETE: i16 = 1 | 2 | 8 | 16;
@@ -347,6 +347,21 @@ async fn every_table_guards_truncate_and_each_delete_guard_is_pinned() {
                 "keeps_one",
                 "skyoauth_service_grant_has_binding",
                 1 | 8,
+            ),
+            // The impersonation list guards of 0009 (AFTER INSERT OR UPDATE
+            // OR DELETE ... FOR EACH ROW;
+            // schema_reserved_ids_and_dormant_grants.rs).
+            trigger(
+                "service_grant_binding",
+                "impersonation_frozen",
+                "skyoauth_reject_impersonation_grant_list_change",
+                1 | 4 | 8 | 16,
+            ),
+            trigger(
+                "service_grant_resource_server",
+                "impersonation_frozen",
+                "skyoauth_reject_impersonation_grant_list_change",
+                1 | 4 | 8 | 16,
             ),
         ])
         .collect();

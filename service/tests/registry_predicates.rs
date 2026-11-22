@@ -21,7 +21,7 @@ use skyoauth_service::persistence::{
     self, MIGRATOR, MigrateError, PgPool,
     registry::{
         self, BindingProfile, GITHUB_JOB_WORKFLOW_REF, InvariantKind, NewPrincipalBinding,
-        PrincipalBindingChanges, RegistryError, Status, required_claims,
+        PredicateProblem, PrincipalBindingChanges, RegistryError, Status, required_claims,
         validate_claim_match_policy,
     },
 };
@@ -110,20 +110,20 @@ fn new_binding(
     }
 }
 
-/// The encode error the registry returns before its statement.
+/// The typed refusal the registry returns before its statement.
 #[track_caller]
 fn assert_refused<T: Debug>(
     result: Result<T, RegistryError>,
     claim: &str,
     profile: BindingProfile,
-    problem: &str,
+    problem: PredicateProblem,
 ) {
     match result {
-        Err(RegistryError::Other(sqlx::Error::Encode(err))) => assert_eq!(
-            err.to_string(),
-            format!("the required predicate {claim} of {profile} {problem}")
-        ),
-        other => panic!("expected the refusal of {claim}: {other:?}"),
+        Err(RegistryError::RequiredPredicate {
+            claim: named,
+            problem: found,
+        }) => assert_eq!((named, found), (claim, problem), "{profile}"),
+        other => panic!("expected the refusal of {claim} of {profile}: {other:?}"),
     }
 }
 
@@ -157,7 +157,10 @@ async fn registry_refuses_a_missing_or_empty_required_predicate() {
     let before = bindings(&pool).await;
     for profile in PROFILES {
         for claim in required_claims(profile) {
-            for (problem, value) in [("is missing", None), ("is empty", Some(String::new()))] {
+            for (problem, value) in [
+                (PredicateProblem::Missing, None),
+                (PredicateProblem::Empty, Some(String::new())),
+            ] {
                 let mut policy = complete(profile);
                 policy.remove(*claim);
                 if let Some(value) = value {
@@ -289,7 +292,7 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
         .await,
         "repository_owner_id",
         BindingProfile::GithubProduction,
-        "is missing",
+        PredicateProblem::Missing,
     );
     github.insert(
         "sub".into(),
@@ -728,7 +731,8 @@ async fn upgrade_precondition_lists_the_bindings_that_would_fail_the_upgrade() {
     .await;
     assert_eq!(precondition(&pool).await, []);
 
-    persistence::migrate(&pool).await.unwrap();
+    // Up to 0008 only, so later migrations do not change what is checked.
+    MIGRATOR.run_to(8, &pool).await.unwrap();
     let version: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
         .fetch_one(&pool)
         .await

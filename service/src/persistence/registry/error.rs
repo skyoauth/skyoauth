@@ -26,8 +26,8 @@ const GUARD: &str = "SK001";
 /// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
 /// `0005`, `instance_security_policy` and `recovery_state`, which
 /// bootstrap writes, and `administrative_operation`, which the recovery
-/// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007` and
-/// `0008` name them, sorted byte-wise. A unique, foreign key or check
+/// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
+/// `0008` and `0009` name them, sorted byte-wise. A unique, foreign key or check
 /// violation maps to a typed variant only for a name listed here. The
 /// database test `registry_constraint_names_match_the_catalog` keeps the
 /// list equal to the catalog.
@@ -49,6 +49,7 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "admin_credential_trust_anchor_ref_octet_length_check",
     "admin_identity_created_at_range_check",
     "admin_identity_id_check",
+    "admin_identity_id_not_reserved_check",
     "admin_identity_id_octet_length_check",
     "admin_identity_pkey",
     "admin_identity_status_check",
@@ -388,8 +389,10 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 
 /// The error of a registry function.
 ///
-/// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`] and
-/// table and column names, never a value from the request or the row, and
+/// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`],
+/// table and column names, and the claim names of
+/// [`required_claims`](super::required_claims), never a value from the
+/// request or the row, and
 /// `Display` and `Debug` print nothing else. The one exception is the row ID
 /// of [`RegistryError::UnreadableTimestamp`], which `Display` and `Debug`
 /// leave out (inferred). The database's own message for a retryable or an
@@ -397,6 +400,10 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
 /// of [`RegistryError::Retry`] and [`RegistryError::Other`]: that source is
 /// the raw [`sqlx::Error`], whose message and detail may quote request or
 /// row values, so logging must not walk the source chain.
+///
+/// The enum is `#[non_exhaustive]`: a later task may add a variant, so a
+/// `match` outside this crate needs a wildcard arm.
+#[non_exhaustive]
 pub enum RegistryError {
     /// No row has the given ID (in the given tenant, for a tenant-owned
     /// table), or a list set does not contain the item to remove (a
@@ -465,6 +472,40 @@ pub enum RegistryError {
     /// [`is_reserved_actor_id`](super::is_reserved_actor_id)). Returned
     /// before any statement runs; nothing was written.
     ReservedActorId,
+    /// The `claim_match_policy` of a binding lacks a predicate its profile
+    /// requires, or holds it with an empty value (ADR-016 items 2 to 4;
+    /// [`validate_claim_match_policy`](super::validate_claim_match_policy)).
+    /// Returned before any statement runs; nothing was written. The first
+    /// unmet predicate, in the order of
+    /// [`required_claims`](super::required_claims), is the one named.
+    RequiredPredicate {
+        /// The claim name of the predicate, from
+        /// [`required_claims`](super::required_claims), for example
+        /// `repository_owner_id`; never a value of the policy.
+        claim: &'static str,
+        /// Whether the key is absent or its value is empty.
+        problem: PredicateProblem,
+    },
+}
+
+/// Why a required predicate is unmet, in [`RegistryError::RequiredPredicate`].
+/// `Display` prints `missing` or `empty`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PredicateProblem {
+    /// The policy has no key with the claim name (byte-wise).
+    Missing,
+    /// The policy has the key with an empty string. A whitespace-only value
+    /// is not empty.
+    Empty,
+}
+
+impl fmt::Display for PredicateProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Missing => "missing",
+            Self::Empty => "empty",
+        })
+    }
 }
 
 /// The kind of constraint behind [`RegistryError::Invariant`].
@@ -642,6 +683,10 @@ impl fmt::Display for RegistryError {
                 f,
                 "registry ID is reserved for an actor that is not an operator identity"
             ),
+            Self::RequiredPredicate { claim, problem } => write!(
+                f,
+                "registry binding's required predicate {claim} is {problem}"
+            ),
         }
     }
 }
@@ -678,6 +723,11 @@ impl fmt::Debug for RegistryError {
                 .field("sqlstate", &self.sqlstate())
                 .finish_non_exhaustive(),
             Self::ReservedActorId => f.write_str("ReservedActorId"),
+            Self::RequiredPredicate { claim, problem } => f
+                .debug_struct("RequiredPredicate")
+                .field("claim", claim)
+                .field("problem", problem)
+                .finish(),
         }
     }
 }
@@ -1061,5 +1111,36 @@ mod tests {
         );
         assert_eq!(format!("{error:?}"), "ReservedActorId");
         assert!(error.source().is_none());
+    }
+
+    #[test]
+    fn a_required_predicate_displays_the_claim_and_the_problem() {
+        assert_eq!(PredicateProblem::Missing.to_string(), "missing");
+        assert_eq!(PredicateProblem::Empty.to_string(), "empty");
+        let error = RegistryError::RequiredPredicate {
+            claim: "repository_owner_id",
+            problem: PredicateProblem::Missing,
+        };
+        assert_eq!(
+            error.to_string(),
+            "registry binding's required predicate repository_owner_id is missing"
+        );
+        assert_eq!(
+            format!("{error:?}"),
+            "RequiredPredicate { claim: \"repository_owner_id\", problem: Missing }"
+        );
+        assert!(error.source().is_none());
+        let error = RegistryError::RequiredPredicate {
+            claim: "sub",
+            problem: PredicateProblem::Empty,
+        };
+        assert_eq!(
+            error.to_string(),
+            "registry binding's required predicate sub is empty"
+        );
+        assert_eq!(
+            format!("{error:?}"),
+            "RequiredPredicate { claim: \"sub\", problem: Empty }"
+        );
     }
 }

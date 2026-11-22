@@ -15,10 +15,12 @@
 //!
 //! [`create_principal_binding`](super::create_principal_binding) and
 //! [`update_principal_binding`](super::update_principal_binding) call
-//! [`validate_claim_match_policy`] before their statement. Removing an
-//! optional predicate widens the binding and needs review (ADR-016 item 2;
-//! ADR-008 items 12 and 13), which stays with the service: the registry
-//! cannot tell a reviewed update from another.
+//! [`validate_claim_match_policy`] before their statement; an unmet required
+//! predicate is [`RegistryError::RequiredPredicate`], naming the claim and
+//! whether it is [`PredicateProblem::Missing`] or [`PredicateProblem::Empty`],
+//! never a value. Removing an optional predicate widens the binding and
+//! needs review (ADR-016 item 2; ADR-008 items 12 and 13), which stays with
+//! the service: the registry cannot tell a reviewed update from another.
 //!
 //! A profile change that drops a predicate is such a removal too: moving a
 //! binding from `github_production` to `generic_production` with a policy
@@ -30,7 +32,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{BindingProfile, RegistryError};
+use super::{BindingProfile, PredicateProblem, RegistryError};
 
 /// `github_production`: the ADR-016 item 3 set, as the keys of the design
 /// section 5.7 example: immutable owner and repository IDs, explicit event,
@@ -82,10 +84,10 @@ pub fn required_claims(profile: BindingProfile) -> &'static [&'static str] {
 
 /// Checks that `policy` has every predicate `profile` requires, each with a
 /// non-empty value. The first one missing or empty, in the order of
-/// [`required_claims`], is an encode error, [`RegistryError::Other`], as for
-/// the other rejections the registry makes before a statement (an empty
-/// patch, an empty assertion set). Its message names the claim and the
-/// profile, never a value. Keys outside the required set are not checked.
+/// [`required_claims`], is [`RegistryError::RequiredPredicate`] with its
+/// claim name and [`PredicateProblem::Missing`] (no such key, byte-wise) or
+/// [`PredicateProblem::Empty`] (the empty string); the error carries no
+/// value of the policy. Keys outside the required set are not checked.
 pub fn validate_claim_match_policy(
     profile: BindingProfile,
     policy: &BTreeMap<String, String>,
@@ -93,13 +95,10 @@ pub fn validate_claim_match_policy(
     for claim in required_claims(profile) {
         let problem = match policy.get(*claim) {
             Some(value) if !value.is_empty() => continue,
-            Some(_) => "is empty",
-            None => "is missing",
+            Some(_) => PredicateProblem::Empty,
+            None => PredicateProblem::Missing,
         };
-        return Err(sqlx::Error::Encode(
-            format!("the required predicate {claim} of {profile} {problem}").into(),
-        )
-        .into());
+        return Err(RegistryError::RequiredPredicate { claim, problem });
     }
     Ok(())
 }
@@ -123,12 +122,20 @@ mod tests {
     }
 
     #[track_caller]
-    fn assert_rejected(profile: BindingProfile, policy: &BTreeMap<String, String>, message: &str) {
+    fn assert_rejected(
+        profile: BindingProfile,
+        policy: &BTreeMap<String, String>,
+        claim: &str,
+        problem: PredicateProblem,
+    ) {
         match validate_claim_match_policy(profile, policy) {
-            Err(RegistryError::Other(sqlx::Error::Encode(err))) => {
-                assert_eq!(err.to_string(), message);
+            Err(RegistryError::RequiredPredicate {
+                claim: named,
+                problem: found,
+            }) => {
+                assert_eq!((named, found), (claim, problem), "{profile}");
             }
-            other => panic!("expected {message:?}: {other:?}"),
+            other => panic!("{profile}: expected {claim} {problem}: {other:?}"),
         }
     }
 
@@ -203,18 +210,10 @@ mod tests {
             for claim in required_claims(profile) {
                 let mut missing = complete(profile);
                 missing.remove(*claim);
-                assert_rejected(
-                    profile,
-                    &missing,
-                    &format!("the required predicate {claim} of {profile} is missing"),
-                );
+                assert_rejected(profile, &missing, claim, PredicateProblem::Missing);
                 let mut empty = complete(profile);
                 empty.insert((*claim).to_string(), String::new());
-                assert_rejected(
-                    profile,
-                    &empty,
-                    &format!("the required predicate {claim} of {profile} is empty"),
-                );
+                assert_rejected(profile, &empty, claim, PredicateProblem::Empty);
             }
         }
     }
@@ -224,7 +223,8 @@ mod tests {
         assert_rejected(
             BindingProfile::GithubProduction,
             &BTreeMap::new(),
-            "the required predicate repository_owner_id of github_production is missing",
+            "repository_owner_id",
+            PredicateProblem::Missing,
         );
         let mut policy = complete(BindingProfile::GithubProduction);
         policy.remove("workflow_ref");
@@ -232,8 +232,20 @@ mod tests {
         assert_rejected(
             BindingProfile::GithubProduction,
             &policy,
-            "the required predicate event_name of github_production is empty",
+            "event_name",
+            PredicateProblem::Empty,
         );
+        // Every profile names its first claim for an empty policy, and the
+        // first claim when every value is empty.
+        for profile in PROFILES {
+            let first = required_claims(profile)[0];
+            assert_rejected(profile, &BTreeMap::new(), first, PredicateProblem::Missing);
+            let empty = required_claims(profile)
+                .iter()
+                .map(|claim| ((*claim).to_string(), String::new()))
+                .collect();
+            assert_rejected(profile, &empty, first, PredicateProblem::Empty);
+        }
     }
 
     /// A claim name that differs from a required one in any byte (case, a
@@ -254,15 +266,46 @@ mod tests {
             let mut policy = complete(profile);
             let value = policy.remove(claim).unwrap();
             policy.insert(near.into(), value);
-            assert_rejected(
-                profile,
-                &policy,
-                &format!("the required predicate {claim} of {profile} is missing"),
-            );
+            assert_rejected(profile, &policy, claim, PredicateProblem::Missing);
         }
     }
 
-    /// The message names the claim and the profile, never a value.
+    /// The claim of the error is the `'static` name from the table of the
+    /// profile, for every profile and both problems, and its `Display`
+    /// names that claim and the problem.
+    #[test]
+    fn the_variant_carries_the_table_claim_and_the_problem() {
+        for profile in PROFILES {
+            for (index, claim) in required_claims(profile).iter().enumerate() {
+                for problem in [PredicateProblem::Missing, PredicateProblem::Empty] {
+                    let mut policy = complete(profile);
+                    match problem {
+                        PredicateProblem::Missing => policy.remove(*claim),
+                        PredicateProblem::Empty => {
+                            policy.insert((*claim).to_string(), String::new())
+                        }
+                    };
+                    let err = validate_claim_match_policy(profile, &policy).unwrap_err();
+                    let RegistryError::RequiredPredicate {
+                        claim: named,
+                        problem: found,
+                    } = err
+                    else {
+                        panic!("{profile} {claim}: {err:?}");
+                    };
+                    assert!(std::ptr::eq(named, required_claims(profile)[index]));
+                    assert_eq!(found, problem);
+                    assert_eq!(
+                        err.to_string(),
+                        format!("registry binding's required predicate {claim} is {problem}")
+                    );
+                    assert!(std::error::Error::source(&err).is_none());
+                }
+            }
+        }
+    }
+
+    /// The error names the claim, never a value.
     #[test]
     fn the_error_carries_no_value() {
         let mut policy = complete(BindingProfile::GenericProduction);
