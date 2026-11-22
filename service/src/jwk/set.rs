@@ -5,7 +5,8 @@ use std::{fmt, io};
 
 use serde_json::Value;
 
-use super::key::{Algorithm, JwkError, Kid, PublicJwk, parse_jwk};
+use super::key::{Algorithm, JwkError, Kid, Points, PublicJwk, parse_jwk};
+use super::projection;
 
 /// The most keys one set may hold (inferred).
 pub const MAX_KEYS: usize = 20;
@@ -15,15 +16,15 @@ pub const MAX_KEYS: usize = 20;
 pub const MAX_SET_BYTES: usize = 64 * 1024;
 
 /// A validated JWK Set: at most [`MAX_KEYS`] public keys with distinct
-/// `kid`s and distinct thumbprints, in upload order. Built only by
-/// [`parse_jwk_set`].
+/// `kid`s and distinct thumbprints, sorted by `kid` (byte order, the
+/// projection's order). Built only by [`parse_jwk_set`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JwkSet {
     keys: Vec<PublicJwk>,
 }
 
 impl JwkSet {
-    /// The keys, in upload order.
+    /// The keys, sorted by `kid` (byte order).
     pub fn keys(&self) -> &[PublicJwk] {
         &self.keys
     }
@@ -32,13 +33,39 @@ impl JwkSet {
     pub fn get(&self, kid: &str) -> Option<&PublicJwk> {
         self.keys.iter().find(|key| key.kid().as_str() == kid)
     }
+
+    /// The canonical public projection of the set, the JSON text to store
+    /// (see "Projection, fingerprint and stored sets" in the module docs of
+    /// [`crate::jwk`]): only `alg`, `kty`, `kid` and the key members;
+    /// members sorted, keys sorted by `kid`, no whitespace. [`validate_keyset`](super::validate_keyset)
+    /// returns it with the set.
+    pub fn to_public_json(&self) -> String {
+        projection::public_json(&self.keys)
+    }
 }
 
 /// Why a JWK Set is refused. A key is named by its index in `keys` and,
 /// once validated, its `kid`; no variant holds key material.
+///
+/// From [`parse_jwk_set`] or [`validate_keyset`](super::validate_keyset)
+/// it is a client error (the upload is refused). From
+/// [`parse_stored`](super::parse_stored) it is a data-integrity error (a
+/// stored row breaks the rules it was written under), not a client error:
+/// a future HTTP mapping must not reuse the upload mapping for it.
+///
+/// The enum is `#[non_exhaustive]`: a later task may add a variant, so a
+/// `match` outside this crate needs a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum JwkSetError {
-    /// The compact serialization is longer than [`MAX_SET_BYTES`].
+    /// The stored value is not JSON text. Only
+    /// [`parse_stored`](super::parse_stored) returns it; the parser's
+    /// message is dropped, so no input text is echoed.
+    NotJson,
+    /// The compact serialization is longer than [`MAX_SET_BYTES`], or
+    /// (only from [`parse_stored`](super::parse_stored)) the raw stored
+    /// input is longer than [`MAX_STORED_BYTES`](super::MAX_STORED_BYTES)
+    /// and was not parsed.
     TooLarge,
     /// The set is not a JSON object.
     NotAnObject,
@@ -70,6 +97,7 @@ pub enum JwkSetError {
 impl fmt::Display for JwkSetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NotJson => f.write_str("stored JWK set is not JSON"),
             Self::TooLarge => write!(f, "JWK set is larger than {MAX_SET_BYTES} bytes"),
             Self::NotAnObject => f.write_str("JWK set is not a JSON object"),
             Self::MissingKeys => f.write_str("JWK set has no \"keys\" member"),
@@ -136,6 +164,17 @@ fn within_size(value: &Value, max: usize) -> bool {
 /// [`DEFAULT_ALLOWED_ALGORITHMS`](super::DEFAULT_ALLOWED_ALGORITHMS).
 /// The first refusal found is returned.
 pub fn parse_jwk_set(value: &Value, allowed: &[Algorithm]) -> Result<JwkSet, JwkSetError> {
+    parse_keys(value, allowed, Points::Check).map(|keys| JwkSet { keys })
+}
+
+/// The set rules of [`parse_jwk_set`], with the point checks run or
+/// skipped as `points` says; the keys sorted by `kid` (byte order). Error
+/// indexes are positions in the input `keys`.
+pub(crate) fn parse_keys(
+    value: &Value,
+    allowed: &[Algorithm],
+    points: Points,
+) -> Result<Vec<PublicJwk>, JwkSetError> {
     if !within_size(value, MAX_SET_BYTES) {
         return Err(JwkSetError::TooLarge);
     }
@@ -161,7 +200,8 @@ pub fn parse_jwk_set(value: &Value, allowed: &[Algorithm]) -> Result<JwkSet, Jwk
         let jwk = entry
             .as_object()
             .ok_or(JwkSetError::KeyNotObject { index })?;
-        let key = parse_jwk(jwk, allowed).map_err(|error| JwkSetError::Key { index, error })?;
+        let key =
+            parse_jwk(jwk, allowed, points).map_err(|error| JwkSetError::Key { index, error })?;
         if let Some(first) = keys.iter().position(|other| other.kid() == key.kid()) {
             return Err(JwkSetError::DuplicateKid {
                 kid: key.kid().clone(),
@@ -180,5 +220,8 @@ pub fn parse_jwk_set(value: &Value, allowed: &[Algorithm]) -> Result<JwkSet, Jwk
         }
         keys.push(key);
     }
-    Ok(JwkSet { keys })
+    // The projection's order (provisional lead pick, 2026-11-22): the same
+    // keys in any input order give the same bytes and fingerprint.
+    keys.sort_by(|a, b| a.kid().cmp(b.kid()));
+    Ok(keys)
 }

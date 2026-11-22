@@ -279,9 +279,12 @@ impl fmt::Display for Kid {
 }
 
 /// A validated public JWK: built only by
-/// [`parse_jwk_set`](super::parse_jwk_set). `Debug` prints the `kid`, key
-/// type, curve or modulus size, algorithm and thumbprint, never the key
-/// octets.
+/// [`parse_jwk_set`](super::parse_jwk_set) and
+/// [`validate_keyset`](super::validate_keyset), which run every check, and
+/// by [`parse_stored`](super::parse_stored), which runs every check but the
+/// point checks and swaps the allowed set for [`KNOWN_ALGORITHMS`].
+/// `Debug` prints the `kid`, key type, curve or modulus size,
+/// algorithm and thumbprint, never the key octets.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublicJwk {
     kid: Kid,
@@ -594,22 +597,26 @@ fn exact(
     Ok(bytes)
 }
 
-fn ec(jwk: &Map<String, Value>) -> Result<PublicKey, JwkError> {
+fn ec(jwk: &Map<String, Value>, points: Points) -> Result<PublicKey, JwkError> {
     let curve = EcCurve::from_name(required(jwk, "crv")?).ok_or(JwkError::UnsupportedCurve)?;
     let x = exact(jwk, "x", curve.coordinate_len())?;
     let y = exact(jwk, "y", curve.coordinate_len())?;
-    point::check_ec(curve, &x, &y)?;
+    if points == Points::Check {
+        point::check_ec(curve, &x, &y)?;
+    }
     Ok(PublicKey::Ec { curve, x, y })
 }
 
-fn okp(jwk: &Map<String, Value>) -> Result<PublicKey, JwkError> {
+fn okp(jwk: &Map<String, Value>, points: Points) -> Result<PublicKey, JwkError> {
     let curve = match required(jwk, "crv")? {
         "Ed25519" => OkpCurve::Ed25519,
         _ => return Err(JwkError::UnsupportedCurve),
     };
     let x = exact(jwk, "x", curve.key_len())?;
-    match curve {
-        OkpCurve::Ed25519 => point::check_ed25519(&x)?,
+    if points == Points::Check {
+        match curve {
+            OkpCurve::Ed25519 => point::check_ed25519(&x)?,
+        }
     }
     Ok(PublicKey::Okp { curve, x })
 }
@@ -626,10 +633,22 @@ enum Kty {
     Okp,
 }
 
-/// Validates one JWK of a set; `allowed` is the allowed algorithm set.
+/// Whether [`parse_jwk`] runs the point checks of the `point` submodule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Points {
+    /// Run them: an upload ([`parse_jwk_set`](super::parse_jwk_set)).
+    Check,
+    /// Skip them: a value read back from the database
+    /// ([`parse_stored`](super::parse_stored)), validated at write.
+    Skip,
+}
+
+/// Validates one JWK of a set; `allowed` is the allowed algorithm set and
+/// `points` whether the point checks run.
 pub(crate) fn parse_jwk(
     jwk: &Map<String, Value>,
     allowed: &[Algorithm],
+    points: Points,
 ) -> Result<PublicJwk, JwkError> {
     if let Some(member) = PRIVATE_MEMBERS
         .into_iter()
@@ -682,8 +701,8 @@ pub(crate) fn parse_jwk(
     }
     let key = match kty {
         Kty::Rsa => rsa(jwk)?,
-        Kty::Ec => ec(jwk)?,
-        Kty::Okp => okp(jwk)?,
+        Kty::Ec => ec(jwk, points)?,
+        Kty::Okp => okp(jwk, points)?,
     };
     let compatible = key.compatible_algorithms();
     let alg = match string(jwk, "alg")? {
