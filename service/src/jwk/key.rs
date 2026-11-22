@@ -279,13 +279,14 @@ impl fmt::Display for Kid {
 
 /// A validated public JWK: built only by
 /// [`parse_jwk_set`](super::parse_jwk_set). `Debug` prints the `kid`, key
-/// type, curve or modulus size, `alg` and thumbprint, never the key
+/// type, curve or modulus size, algorithm and thumbprint, never the key
 /// octets.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublicJwk {
     kid: Kid,
     key: PublicKey,
     alg: Option<Algorithm>,
+    algorithm: Algorithm,
     thumbprint: Thumbprint,
 }
 
@@ -300,9 +301,18 @@ impl PublicJwk {
         &self.key
     }
 
-    /// The `alg` member, when present.
+    /// The uploaded `alg` member, when present.
     pub fn alg(&self) -> Option<Algorithm> {
         self.alg
+    }
+
+    /// The one algorithm this key verifies with (inferred: one algorithm
+    /// per key, RFC 8725 section 3.1): its `alg` member, or, for a key
+    /// without one, the single algorithm its curve admits (an RSA key
+    /// always has `alg`). It does not depend on the allowed set. The
+    /// overlap checks compare keys by this algorithm.
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
     }
 
     /// The RFC 7638 SHA-256 thumbprint.
@@ -317,6 +327,7 @@ impl fmt::Debug for PublicJwk {
             .field("kid", &self.kid)
             .field("key", &self.key)
             .field("alg", &self.alg)
+            .field("algorithm", &self.algorithm)
             .field("thumbprint", &self.thumbprint)
             .finish()
     }
@@ -392,10 +403,11 @@ pub enum JwkError {
     AlgorithmNotAllowed(Algorithm),
     /// `alg` does not fit the key type or curve.
     AlgorithmMismatch(Algorithm),
-    /// No `alg`, and no allowed algorithm fits the key type and curve.
+    /// No `alg`, and the one algorithm the curve admits is not allowed.
     NoAllowedAlgorithm,
-    /// No `alg`, and more than one allowed algorithm fits the key type
-    /// and curve (inferred: one algorithm per key, RFC 8725 section 3.1).
+    /// No `alg` on a key whose type admits more than one algorithm (every
+    /// RSA key), whatever the allowed set (inferred: one algorithm per key,
+    /// RFC 8725 section 3.1).
     AlgorithmRequired,
 }
 
@@ -426,7 +438,7 @@ impl fmt::Display for JwkError {
                 actual,
             } => write!(
                 f,
-                "member \"{member}\" is {actual} octets, not the curve's {expected}"
+                "member \"{member}\" is {actual} octets, expected {expected}"
             ),
             Self::RsaModulusLeadingZero => f.write_str("the RSA modulus has a leading zero octet"),
             Self::RsaModulusTooSmall { bits } => write!(
@@ -461,11 +473,9 @@ impl fmt::Display for JwkError {
             Self::AlgorithmMismatch(alg) => {
                 write!(f, "alg {alg} does not fit the key type or curve")
             }
-            Self::NoAllowedAlgorithm => {
-                f.write_str("no allowed algorithm fits the key type or curve")
-            }
+            Self::NoAllowedAlgorithm => f.write_str("the curve's one algorithm is not allowed"),
             Self::AlgorithmRequired => {
-                f.write_str("alg is required: several allowed algorithms fit the key")
+                f.write_str("alg is required: the key type admits several algorithms")
             }
         }
     }
@@ -661,21 +671,27 @@ pub(crate) fn parse_jwk(
             }
             Some(alg)
         }
-        None => match compatible
-            .iter()
-            .filter(|alg| allowed.contains(alg))
-            .count()
-        {
-            0 => return Err(JwkError::NoAllowedAlgorithm),
-            1 => None,
-            _ => return Err(JwkError::AlgorithmRequired),
-        },
+        None => None,
+    };
+    let algorithm = match (alg, compatible) {
+        (Some(alg), _) => alg,
+        // The curve fixes the algorithm.
+        (None, &[only]) => {
+            if !allowed.contains(&only) {
+                return Err(JwkError::NoAllowedAlgorithm);
+            }
+            only
+        }
+        // The key type admits several algorithms (every RSA key), whatever
+        // the allowed set: `alg` is required.
+        (None, _) => return Err(JwkError::AlgorithmRequired),
     };
     let thumbprint = thumbprint(&key);
     Ok(PublicJwk {
         kid,
         key,
         alg,
+        algorithm,
         thumbprint,
     })
 }

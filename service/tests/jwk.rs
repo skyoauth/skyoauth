@@ -143,6 +143,7 @@ fn rfc_7638_example_key_has_the_rfc_thumbprint() {
     assert_eq!(key.thumbprint().to_string(), RSA_THUMBPRINT);
     assert_eq!(key.kid().as_str(), "2011-04-29");
     assert_eq!(key.alg(), Some(Algorithm::Rs256));
+    assert_eq!(key.algorithm(), Algorithm::Rs256);
     assert!(matches!(key.key(), PublicKey::Rsa { n, e } if n.len() == 256 && e == &[1, 0, 1]));
     assert_eq!(set.get("2011-04-29"), Some(key));
     assert_eq!(set.get("2011-04-2"), None);
@@ -812,7 +813,9 @@ fn alg_must_fit_the_key_type_and_curve() {
         for &alg in all {
             let jwk = with(jwk.clone(), "alg", json!(alg.name()));
             if fits.contains(&alg) {
-                assert_eq!(accept(jwk).keys()[0].alg(), Some(alg));
+                let set = accept(jwk);
+                assert_eq!(set.keys()[0].alg(), Some(alg));
+                assert_eq!(set.keys()[0].algorithm(), alg);
             } else {
                 assert_eq!(reject(jwk), JwkError::AlgorithmMismatch(alg), "{alg}");
             }
@@ -890,50 +893,54 @@ fn alg_must_be_in_the_allowed_set() {
 }
 
 #[test]
-fn a_key_without_alg_needs_an_allowed_algorithm_of_its_type() {
-    let rsa = without(rsa_key("k"), "alg");
+fn a_key_without_alg_needs_its_curve_algorithm_allowed() {
     let only_es256 = &[Algorithm::Es256][..];
-    parse_jwk_set(&set_of(vec![p256_key("k")]), only_es256).unwrap();
-    for jwk in [rsa.clone(), p384_key("k"), p521_key("k"), ed25519_key("k")] {
+    let set = parse_jwk_set(&set_of(vec![p256_key("k")]), only_es256).unwrap();
+    assert_eq!(set.keys()[0].alg(), None);
+    assert_eq!(set.keys()[0].algorithm(), Algorithm::Es256);
+    for jwk in [p384_key("k"), p521_key("k"), ed25519_key("k")] {
         assert_eq!(reject_with(jwk, only_es256), JwkError::NoAllowedAlgorithm);
     }
-    parse_jwk_set(&set_of(vec![rsa.clone()]), &[Algorithm::Ps256]).unwrap();
-    parse_jwk_set(
-        &set_of(vec![rsa.clone()]),
-        &[Algorithm::Rs256, Algorithm::Es256],
-    )
-    .unwrap();
-    for jwk in [rsa, p256_key("k"), ed25519_key("k")] {
+    for jwk in [p256_key("k"), ed25519_key("k")] {
         assert_eq!(reject_with(jwk, &[]), JwkError::NoAllowedAlgorithm);
     }
 }
 
 #[test]
-fn alg_is_required_when_several_allowed_algorithms_fit() {
+fn rsa_keys_require_alg_whatever_the_allowed_set() {
     let rsa = without(rsa_key("k"), "alg");
-    // RS256 and PS256 both fit an RSA key.
-    assert_eq!(reject(rsa.clone()), JwkError::AlgorithmRequired);
-    assert_eq!(
-        reject_with(rsa.clone(), &[Algorithm::Rs256, Algorithm::Ps256]),
-        JwkError::AlgorithmRequired
-    );
-    for alg in ["RS256", "PS256"] {
+    // RS256 and PS256 both fit an RSA key, so alg is required even when
+    // the allowed set holds one of them, or none.
+    for allowed in [
+        DEFAULT_ALLOWED_ALGORITHMS,
+        &[Algorithm::Rs256, Algorithm::Ps256][..],
+        &[Algorithm::Rs256][..],
+        &[Algorithm::Ps256][..],
+        &[Algorithm::Rs256, Algorithm::Es256][..],
+        &[Algorithm::Es256][..],
+        &[][..],
+    ] {
         assert_eq!(
-            accept(with(rsa.clone(), "alg", json!(alg))).keys()[0]
-                .alg()
-                .unwrap()
-                .name(),
-            alg
+            reject_with(rsa.clone(), allowed),
+            JwkError::AlgorithmRequired,
+            "{allowed:?}"
         );
     }
-    // Exactly one algorithm fits each EC curve and Ed25519.
-    for jwk in [
-        p256_key("k"),
-        p384_key("k"),
-        p521_key("k"),
-        ed25519_key("k"),
+    for alg in [Algorithm::Rs256, Algorithm::Ps256] {
+        let set = accept(with(rsa.clone(), "alg", json!(alg.name())));
+        assert_eq!(set.keys()[0].alg(), Some(alg));
+        assert_eq!(set.keys()[0].algorithm(), alg);
+    }
+    // The curve fixes the algorithm of EC and Ed25519 keys.
+    for (jwk, alg) in [
+        (p256_key("k"), Algorithm::Es256),
+        (p384_key("k"), Algorithm::Es384),
+        (p521_key("k"), Algorithm::Es512),
+        (ed25519_key("k"), Algorithm::EdDsa),
     ] {
-        assert_eq!(accept(jwk).keys()[0].alg(), None);
+        let set = accept(jwk);
+        assert_eq!(set.keys()[0].alg(), None);
+        assert_eq!(set.keys()[0].algorithm(), alg);
     }
 }
 
@@ -992,6 +999,28 @@ fn set_of_size(size: usize) -> Value {
     set["pad"] = json!("a".repeat(size - base));
     assert_eq!(serde_json::to_string(&set).unwrap().len(), size);
     set
+}
+
+#[test]
+fn the_largest_valid_set_is_well_under_the_size_bound() {
+    // 20 RSA keys of 8192 bits, a 32-octet e, a 128-byte kid and every
+    // allowlisted member: the bound the module docs state.
+    let keys: Vec<Value> = (0..20u8)
+        .map(|i| {
+            let jwk = rsa_with(
+                &format!("{i:02}{}", "k".repeat(126)),
+                &modulus(1024, 0xff, i),
+                &[0xff; 32],
+            );
+            let jwk = with(jwk, "use", json!("sig"));
+            let jwk = with(jwk, "key_ops", json!(["verify"]));
+            let jwk = with(jwk, "x5t", json!(b64(&[0x11; 20])));
+            with(jwk, "x5t#S256", json!(b64(&[0x22; 32])))
+        })
+        .collect();
+    let set = set_of(keys);
+    assert_eq!(serde_json::to_string(&set).unwrap().len(), 34_290);
+    assert_eq!(parse(&set).unwrap().keys().len(), 20);
 }
 
 #[test]
@@ -1154,28 +1183,41 @@ fn one_key_under_two_kids_in_live_versions_conflicts() {
 }
 
 #[test]
-fn one_kid_and_key_with_two_algs_in_live_versions_conflicts() {
-    let first = accept(with(rsa_key("a"), "alg", json!("RS256")));
-    let second = accept(with(rsa_key("a"), "alg", json!("PS256")));
-    let third = parse_jwk_set(
-        &set_of(vec![without(rsa_key("a"), "alg")]),
-        &[Algorithm::Rs256],
-    )
-    .unwrap();
-    for other in [&second, &third] {
-        let versions = [
-            version("v1", &first, t(0), None),
-            version("v2", other, t(0), None),
-        ];
-        assert_eq!(
-            live_keys(&versions, t(0)).unwrap_err(),
-            OverlapError::AlgorithmConflict {
-                kid: first.keys()[0].kid().clone(),
-                first_version: "v1".into(),
-                second_version: "v2".into(),
-            }
-        );
-    }
+fn one_kid_and_key_with_two_algorithms_conflicts() {
+    let rs = accept(with(rsa_key("a"), "alg", json!("RS256")));
+    let ps = accept(with(rsa_key("a"), "alg", json!("PS256")));
+    let versions = [
+        version("v1", &rs, t(0), None),
+        version("v2", &ps, t(0), None),
+    ];
+    let conflict = OverlapError::AlgorithmConflict {
+        kid: rs.keys()[0].kid().clone(),
+        first_version: "v1".into(),
+        second_version: "v2".into(),
+    };
+    assert_eq!(live_keys(&versions, t(0)).unwrap_err(), conflict);
+    assert_eq!(
+        check_version_overlap(&versions[1], &versions[..1]),
+        Err(conflict)
+    );
+}
+
+#[test]
+fn a_curve_key_without_alg_matches_the_same_key_with_its_alg() {
+    // The algorithm is compared, not the presence of the alg member.
+    let bare = accept(p256_key("a"));
+    let explicit = accept(with(p256_key("a"), "alg", json!("ES256")));
+    assert_eq!(bare.keys()[0].algorithm(), explicit.keys()[0].algorithm());
+    let versions = [
+        version("v1", &bare, t(0), None),
+        version("v2", &explicit, t(0), None),
+    ];
+    assert_eq!(
+        kids(&live_keys(&versions, t(0)).unwrap()),
+        [("a".into(), vec!["v1".into(), "v2".into()])]
+    );
+    assert_eq!(check_version_overlap(&versions[1], &versions[..1]), Ok(()));
+    assert_eq!(check_version_overlap(&versions[0], &versions[1..]), Ok(()));
 }
 
 #[test]
@@ -1276,7 +1318,8 @@ fn write_check_catches_a_conflict_on_re_enable() {
     v2.status = VersionStatus::Disabled;
     // While v2 is disabled, the live set has no conflict.
     assert_eq!(live_keys(&[v1, v2], t(10)).unwrap().len(), 1);
-    // Re-enabling v2 is checked against v1, whatever the statuses say.
+    // Re-enabling v2 is checked against the enabled v1; v2's own status
+    // (disabled before, enabled after) is not read.
     assert_eq!(
         check_version_overlap(&v2, &[v1]),
         Err(kid_conflict("a", "v1", "v2"))
@@ -1286,12 +1329,69 @@ fn write_check_catches_a_conflict_on_re_enable() {
         check_version_overlap(&v2, &[v1]),
         Err(kid_conflict("a", "v1", "v2"))
     );
-    // A disabled existing version still counts: it may be re-enabled.
+    // A disabled existing version is retired and does not count.
     let mut v1_disabled = v1;
     v1_disabled.status = VersionStatus::Disabled;
+    assert_eq!(check_version_overlap(&v2, &[v1_disabled]), Ok(()));
+}
+
+#[test]
+fn rotation_replaces_a_disabled_open_ended_version() {
+    let old_keys = accept(p256_key("a"));
+    let new_keys = accept(p384_key("a"));
+    let mut old = version("v-old", &old_keys, t(0), None);
+    let mut new = version("v-new", &new_keys, t(1000), None);
+    // An enabled intersecting version still conflicts at write.
     assert_eq!(
-        check_version_overlap(&v2, &[v1_disabled]),
-        Err(kid_conflict("a", "v1", "v2"))
+        check_version_overlap(&new, &[old]),
+        Err(kid_conflict("a", "v-old", "v-new"))
+    );
+    // Disable the old open-ended version; the same-kid replacement is
+    // then accepted.
+    old.status = VersionStatus::Disabled;
+    assert_eq!(check_version_overlap(&new, &[old]), Ok(()));
+    // Re-enabling the old version is refused while the replacement is
+    // enabled...
+    assert_eq!(
+        check_version_overlap(&old, &[old, new]),
+        Err(kid_conflict("a", "v-new", "v-old"))
+    );
+    // ...and accepted once the replacement is disabled.
+    new.status = VersionStatus::Disabled;
+    assert_eq!(check_version_overlap(&old, &[old, new]), Ok(()));
+}
+
+#[test]
+fn a_replacement_created_disabled_waits_for_the_old_version() {
+    let old_keys = accept(p256_key("a"));
+    let new_keys = accept(p384_key("a"));
+    let mut old = version("v-old", &old_keys, t(0), None);
+    let mut new = version("v-new", &new_keys, t(0), None);
+    new.status = VersionStatus::Disabled;
+    // Creating it disabled may skip the check; enabling it may not, and is
+    // refused while the old version is enabled...
+    assert_eq!(
+        check_version_overlap(&new, &[old, new]),
+        Err(kid_conflict("a", "v-old", "v-new"))
+    );
+    // ...and accepted once the old version is disabled.
+    old.status = VersionStatus::Disabled;
+    assert_eq!(check_version_overlap(&new, &[old, new]), Ok(()));
+}
+
+#[test]
+fn the_checked_version_is_excluded_by_id() {
+    // The keyset's full list may be passed: the version itself (same ID,
+    // here with a different key, as a stale copy would be) is skipped.
+    let keys = accept(p256_key("a"));
+    let stale = accept(p384_key("a"));
+    let v = version("v1", &keys, t(0), None);
+    let same_id = version("v1", &stale, t(0), None);
+    assert_eq!(check_version_overlap(&v, &[same_id]), Ok(()));
+    let other_id = version("v2", &stale, t(0), None);
+    assert_eq!(
+        check_version_overlap(&v, &[same_id, other_id]),
+        Err(kid_conflict("a", "v2", "v1"))
     );
 }
 

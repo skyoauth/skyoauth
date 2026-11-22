@@ -170,8 +170,8 @@ mod tests {
         for text in ["ZB", "ZC", "ZE", "ZI"] {
             assert_eq!(decode(text), Err(Base64urlError::TrailingBits), "{text}");
         }
-        // Three characters: "Zm8", "Zm4", "Zm0" are canonical; "Zm9",
-        // "Zm-", "Zm_" set one of the two unused bits.
+        // Three characters: "Zm8", "Zm4", "Zm0" are canonical; "Zm9" (61)
+        // and "Zm-" (62) set one of the two unused bits, "Zm_" (63) both.
         for (text, bytes) in [("Zm8", &b"fo"[..]), ("Zm4", b"fn"), ("Zm0", b"fm")] {
             assert_eq!(decode(text).unwrap(), bytes, "{text}");
         }

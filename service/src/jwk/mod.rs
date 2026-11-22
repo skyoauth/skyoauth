@@ -48,8 +48,12 @@
 //!   other member (inferred);
 //! - is at most [`MAX_SET_BYTES`] (64 KiB) in compact JSON and holds at
 //!   most [`MAX_KEYS`] (20) keys (both inferred). The size is measured on
-//!   the parsed value only; bounding the raw request body before parsing
-//!   is the caller's (see "Follow-ups"). Duplicate member names are
+//!   the parsed value only, as an early cut-off: a set within the other
+//!   rules is at most 34,290 bytes (20 RSA keys of 8192 bits with a 32-octet
+//!   `e`, a 128-byte `kid` and every allowlisted member; a test builds it),
+//!   so a raw request-body limit of 64 KiB in the wiring is consistent.
+//!   Bounding the raw body before parsing is the caller's (see
+//!   "Follow-ups"). Duplicate member names are
 //!   resolved by the JSON parser (`serde_json` and `jsonb` both keep the
 //!   last), not seen here;
 //! - has no two keys with the same `kid`, and (inferred) no two keys with
@@ -104,11 +108,13 @@
 //!   type and curve: `RS256` or `PS256` for `RSA`, `ES256` for `P-256`,
 //!   `ES384` for `P-384`, `ES512` for `P-521`, `EdDSA` for `Ed25519`;
 //!   `none` and `HS*` never (ADR-005 item 8). Names parse against
-//!   [`KNOWN_ALGORITHMS`], whatever the allowed set. Without `alg`, a key
-//!   is accepted only when exactly one allowed algorithm fits its type and
-//!   curve (inferred: one algorithm per key, RFC 8725 section 3.1): an RSA
-//!   key needs `alg` while RS256 and PS256 are both allowed, an EC or
-//!   Ed25519 key does not. The allowed set is a parameter; its default
+//!   [`KNOWN_ALGORITHMS`], whatever the allowed set. A key whose type admits
+//!   more than one algorithm (every RSA key: RS256 and PS256) must carry
+//!   `alg`, whatever the allowed set; an EC or Ed25519 key may omit it,
+//!   since its curve fixes the algorithm, which must then be allowed
+//!   (inferred: one algorithm per key, RFC 8725 section 3.1).
+//!   [`PublicJwk::algorithm`] is that one algorithm: the `alg` member or the
+//!   curve's algorithm. The allowed set is a parameter; its default
 //!   [`DEFAULT_ALLOWED_ALGORITHMS`] (`RS256`, `PS256`, `ES256`, `ES384`,
 //!   `ES512`, `EdDSA`) is provisional: the set is OQ-TP-3, open for the
 //!   maintainer.
@@ -123,20 +129,31 @@
 //! after the start (all inferred). Three rules make two versions conflict
 //! ("conflicting live kid/key combinations deny"): one `kid` with two
 //! different keys (thumbprints), one key under two different `kid`s, and
-//! (inferred) one `kid` and key with different `alg` members, an absent
-//! `alg` counting as different. One `kid` with the same key and `alg` in
-//! several versions is the explicit overlap.
+//! (inferred) one `kid` and key with two different algorithms
+//! ([`PublicJwk::algorithm`], so a curve key without `alg` and the same key
+//! with its curve's `alg` do not conflict). One `kid` with the same key and
+//! algorithm in several versions is the explicit overlap.
 //!
-//! - [`check_version_overlap`] runs at write and at re-enable (inferred):
-//!   it compares the new version with every existing version whose window
-//!   intersects its own, whatever the statuses, so a conflict that would
-//!   arise later (a future start, a re-enabled version) is refused up
-//!   front.
+//! - [`check_version_overlap`] runs at every point where a version becomes
+//!   enabled (inferred): creation as enabled, re-enable, and any import or
+//!   restore path; creating a disabled version may skip it. It compares
+//!   that version with every other enabled version whose window intersects
+//!   its own (it skips disabled versions and any entry with the checked
+//!   version's ID itself), so a conflict that would arise later (a future
+//!   start) is
+//!   refused up front. The writes of one keyset must be serialized for it
+//!   to hold (see "Follow-ups").
 //! - [`live_keys`] runs at verification time: the versions enabled and
 //!   live at `at`, merged into one list sorted by `kid`. One conflict
-//!   denies the whole live set (inferred). It does not replace the write
-//!   check: on its own it sees a conflict only once both versions are
-//!   live.
+//!   denies the whole live set (inferred). It is the runtime backstop and
+//!   does not replace the enabling check: on its own it sees a conflict
+//!   only once both versions are live.
+//!
+//! Rotation (inferred): validity windows are immutable in the registry,
+//! so disabling is the only way to retire a version, an open-ended one
+//! included. To replace the key of a `kid`, disable the old open-ended
+//! version and write the replacement with the same `kid`; re-enabling the
+//! old version is refused while the replacement is enabled.
 //!
 //! # Errors
 //!
@@ -175,9 +192,15 @@
 //! - The allowed algorithm set (OQ-TP-3, open) and its intersection with a
 //!   source's `algorithms` allowlist.
 //! - Wiring into the trust keyset write path (T11.9, T24.2): calling
-//!   [`parse_jwk_set`] and [`check_version_overlap`] at write and at
-//!   re-enable, and deciding what the version's `fingerprint` column
-//!   holds. Nothing calls this module yet.
+//!   [`parse_jwk_set`] at write and [`check_version_overlap`] wherever a
+//!   version becomes enabled (creation as enabled, re-enable, import,
+//!   restore), serializing the writes of one keyset (lock the parent
+//!   keyset row or advance its revision), and deciding what the version's
+//!   `fingerprint` column holds: this module does not define it. Nothing
+//!   calls this module yet.
+//! - Whether validity windows should stay immutable, so that an operator
+//!   could close an open-ended window instead of disabling the version
+//!   (open question).
 //! - Selecting the live verification key of the explicitly selected source
 //!   (T11.7) from [`live_keys`].
 

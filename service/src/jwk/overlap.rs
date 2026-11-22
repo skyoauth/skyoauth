@@ -4,10 +4,25 @@
 //! deny").
 //!
 //! Two checks use the same three rules (a `kid` with two keys, a key with
-//! two `kid`s, a `kid` and key with two `alg`s): [`check_version_overlap`]
-//! at write and at re-enable, over every version whose window could ever
-//! overlap, whatever its status; and [`live_keys`] at verification time,
-//! over the versions live at one instant.
+//! two `kid`s, a `kid` and key with two algorithms, see
+//! [`PublicJwk::algorithm`]): [`check_version_overlap`] whenever a version
+//! becomes enabled, over the other enabled versions whose windows
+//! intersect; and [`live_keys`] at verification time, over the versions
+//! live at one instant, the runtime backstop.
+//!
+//! # Rotation (inferred)
+//!
+//! Validity windows are immutable in the registry (a version's `status` is
+//! its one mutable column), so disabling is the only way to retire a
+//! version, an open-ended one included. To replace the key of a `kid`:
+//! disable the old version, then write the replacement, enabled, with the
+//! same `kid`; the check skips disabled versions, so it passes. While the
+//! replacement is enabled, re-enabling the old version is refused; once
+//! the replacement is disabled, it is accepted again. A replacement created
+//! disabled can be enabled only once the old version is disabled. Whether
+//! validity windows should stay immutable, so that an operator could
+//! instead close an open-ended window, is an open question (module
+//! follow-ups).
 
 use std::{collections::BTreeMap, fmt, time::SystemTime};
 
@@ -70,7 +85,7 @@ pub struct LiveKey<'a> {
 /// A conflict between two versions. From [`live_keys`], `first_version`
 /// is the earlier of the two in the input order; from
 /// [`check_version_overlap`], it is the existing version and
-/// `second_version` the new one. No variant holds key material.
+/// `second_version` the one checked. No variant holds key material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlapError {
     /// One `kid` names two different keys (different thumbprints).
@@ -86,9 +101,10 @@ pub enum OverlapError {
         first_version: String,
         second_version: String,
     },
-    /// One `kid` and key carry different `alg` members, an absent `alg`
-    /// counting as different from a present one (inferred: a conflict,
-    /// since the merged key would have no single `alg`).
+    /// One `kid` and key resolve to different algorithms
+    /// ([`PublicJwk::algorithm`]), whether from an `alg` member or from the
+    /// allowed set (inferred: a conflict, since the merged key would have no
+    /// single algorithm).
     AlgorithmConflict {
         kid: Kid,
         first_version: String,
@@ -105,7 +121,7 @@ impl fmt::Display for OverlapError {
                 second_version,
             } => write!(
                 f,
-                "live versions \"{first_version}\" and \"{second_version}\" give kid \"{kid}\" different keys"
+                "versions \"{first_version}\" and \"{second_version}\" give kid \"{kid}\" different keys"
             ),
             Self::KeyConflict {
                 first_kid,
@@ -114,7 +130,7 @@ impl fmt::Display for OverlapError {
                 second_version,
             } => write!(
                 f,
-                "live versions \"{first_version}\" and \"{second_version}\" give one key the kids \"{first_kid}\" and \"{second_kid}\""
+                "versions \"{first_version}\" and \"{second_version}\" give one key the kids \"{first_kid}\" and \"{second_kid}\""
             ),
             Self::AlgorithmConflict {
                 kid,
@@ -122,7 +138,7 @@ impl fmt::Display for OverlapError {
                 second_version,
             } => write!(
                 f,
-                "live versions \"{first_version}\" and \"{second_version}\" give kid \"{kid}\" different alg members"
+                "versions \"{first_version}\" and \"{second_version}\" give kid \"{kid}\" different algorithms"
             ),
         }
     }
@@ -132,7 +148,8 @@ impl std::error::Error for OverlapError {}
 
 /// The merged live keys of `versions` at `at`, sorted by `kid`
 /// byte-wise, or the first conflict found (see [`OverlapError`]). A key
-/// with the same `kid`, thumbprint and `alg` in several live versions is
+/// with the same `kid`, thumbprint and resolved algorithm in several live
+/// versions is
 /// one entry (explicit overlap). Versions that are not live at `at` (see
 /// [`KeysetVersion::is_live`]) are ignored entirely. One conflict denies
 /// the whole live set, not only the conflicting `kid` (inferred).
@@ -153,7 +170,7 @@ pub fn live_keys<'a>(
                         second_version: version.id.to_owned(),
                     });
                 }
-                if live.key.alg() != key.alg() {
+                if live.key.algorithm() != key.algorithm() {
                     return Err(OverlapError::AlgorithmConflict {
                         kid: key.kid().clone(),
                         first_version,
@@ -187,22 +204,36 @@ pub fn live_keys<'a>(
     Ok(by_kid.into_values().collect())
 }
 
-/// Checks a new or re-enabled version against the other versions of its
-/// keyset, at write and at re-enable (inferred). Statuses are ignored, so
-/// a disabled version that may be re-enabled later still counts; `new` is
-/// compared with every version of `existing` whose window intersects its
+/// Checks a version that is becoming enabled against the other versions of
+/// its keyset (inferred). The caller runs it at every point where a
+/// version becomes enabled: creation as enabled, re-enable, and any import
+/// or restore path; creating a disabled version may skip it. For a
+/// re-enable, pass the re-enabled version as `version` and the keyset's
+/// versions as `existing`; `version`'s own status is not read.
+///
+/// The function filters `existing` itself: it skips disabled versions
+/// (retired, see the module docs, "Rotation") and any version with
+/// `version`'s ID, so `existing` may be the keyset's full list. `version`
+/// is compared with every remaining version whose window intersects its
 /// own (see [`KeysetVersion::windows_intersect`]), under the rules of
 /// [`live_keys`]: a `kid` with a different key, a key under a different
-/// `kid`, or a `kid` and key with a different `alg` (an absent `alg`
-/// counting as different) is a conflict. Versions of `existing` are not
-/// compared with each other. `existing` should not contain `new` itself.
+/// `kid`, or a `kid` and key with a different [`PublicJwk::algorithm`] is a
+/// conflict. Versions of `existing` are not compared with each other.
+///
+/// The check is only sound if the writes of one keyset are serialized (the
+/// wiring locks the parent keyset row or advances its revision, T11.9,
+/// T24.2); [`live_keys`] stays the runtime backstop.
 pub fn check_version_overlap(
-    new: &KeysetVersion<'_>,
+    version: &KeysetVersion<'_>,
     existing: &[KeysetVersion<'_>],
 ) -> Result<(), OverlapError> {
-    for other in existing.iter().filter(|other| new.windows_intersect(other)) {
-        let versions = || (other.id.to_owned(), new.id.to_owned());
-        for key in new.keys.keys() {
+    let others = existing
+        .iter()
+        .filter(|other| other.status == VersionStatus::Enabled)
+        .filter(|other| other.id != version.id);
+    for other in others.filter(|other| version.windows_intersect(other)) {
+        let versions = || (other.id.to_owned(), version.id.to_owned());
+        for key in version.keys.keys() {
             for old in other.keys.keys() {
                 let (first_version, second_version) = versions();
                 if old.kid() == key.kid() {
@@ -213,7 +244,7 @@ pub fn check_version_overlap(
                             second_version,
                         });
                     }
-                    if old.alg() != key.alg() {
+                    if old.algorithm() != key.algorithm() {
                         return Err(OverlapError::AlgorithmConflict {
                             kid: key.kid().clone(),
                             first_version,

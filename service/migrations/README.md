@@ -578,22 +578,35 @@ The database does not enforce these rules; the service must:
   upload (T11.3). The pure module `skyoauth_service::jwk` now does these
   checks (provisional picks, its module docs list them, the unsourced ones
   marked inferred): `parse_jwk_set` for one version's set, with RFC 7638
-  thumbprints; `check_version_overlap` at write and at re-enable, against
-  every version whose window intersects, whatever its status; and
-  `live_keys` at verification time, where one conflict denies the whole
-  live set (inferred). `live_keys` alone does not cover T11.3: it sees a
-  conflict only once both versions are live. Exceptions: EC points are
-  not checked on-curve and Ed25519 keys are not checked canonical or
-  non-small-order (only lengths: the P-256 point (0, 0), a P-521
-  coordinate >= p and the Ed25519 identity point pass today), and the raw
-  request body is not bounded (only the parsed value is). The module must
-  not be the only validation on any keyset write path (T11.9, T24.2)
-  until (a) EC points are checked on-curve with x, y < p and (b) Ed25519
-  keys are canonical (y < p) and not small-order, or the write path also
-  imports each key with the verifying crate in strict mode and refuses
-  keys it cannot import. T11.7 must use strict Ed25519 verification.
-  T24.3's "fake keys" negative is the acceptance test. The wiring PR must
-  enforce a raw request-body size limit before parsing. The keyset write
+  thumbprints; `check_version_overlap` wherever a version becomes enabled
+  (creation as enabled, re-enable, and any import or restore path;
+  creating a disabled version may skip it), against the other enabled
+  versions whose windows intersect (inferred: disabled versions are
+  retired and skipped, the function filters them and the checked
+  version's own ID itself); and `live_keys` at verification time, the
+  runtime backstop, where one conflict denies the whole live set
+  (inferred). `live_keys` alone does not cover T11.3: it sees a conflict
+  only once both versions are live. Rotation (inferred): validity windows
+  are immutable, so disabling is the only retirement; to replace a
+  `kid`'s key, disable the old open-ended version and write the
+  replacement with the same `kid`; re-enabling the old version is refused
+  while the replacement is enabled. Whether validity windows should stay
+  immutable, so an operator could close an open-ended window, is an open
+  question. Exceptions: EC points are not checked on-curve and Ed25519
+  keys are not checked canonical or non-small-order (only lengths: the
+  P-256 point (0, 0), a P-521 coordinate >= p and the Ed25519 identity
+  point pass today); the raw request body is not bounded (only the parsed
+  value is); and the module does not define what the version's
+  `fingerprint` column holds (T11.9). The module must not be the only
+  validation on any keyset write path (T11.9, T24.2) until (a) EC points
+  are checked on-curve with x, y < p and (b) Ed25519 keys are canonical
+  (y < p) and not small-order, or the write path also imports each key
+  with the verifying crate in strict mode and refuses keys it cannot
+  import. T11.7 must use strict Ed25519 verification. T24.3's "fake keys"
+  negative is the acceptance test. The wiring PR must enforce a raw
+  request-body size limit before parsing (64 KiB is consistent: a valid
+  set is at most 34,290 bytes) and serialize the writes of one keyset
+  (lock the parent keyset row or advance its revision). The keyset write
   path does not call the module yet;
 - keep `default_scopes` and `scopes` within every other ceiling (service,
   assignment, resource server; IR-063) and check resource constraints
