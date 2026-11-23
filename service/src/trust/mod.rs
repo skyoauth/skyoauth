@@ -23,8 +23,9 @@ pub mod source;
 mod write;
 
 pub use keyset::{
-    KeysetAudit, KeysetWriteError, MAX_ENABLED_VERSIONS_PER_KEYSET, NewKeysetVersion,
-    VALIDATION_WORKERS, create_version, disable_version, enable_version, validate_upload,
+    IN_TRANSACTION_WAIT, IN_TRANSACTION_WORKERS, KeysetAudit, KeysetWriteError,
+    MAX_ENABLED_VERSIONS_PER_KEYSET, NewKeysetVersion, VALIDATION_WORKERS, create_version,
+    disable_version, enable_version, validate_upload,
 };
 pub use source::{
     DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT, create_source,

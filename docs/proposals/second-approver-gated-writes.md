@@ -1492,6 +1492,15 @@ test PR or the test PR follows.
 
 ## Implementation notes
 
+**Line numbers.** Line numbers into the code and the migrations README
+refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed
+after PR 1.
+
+**Runtime sizing test.** The endpoint-wiring PR owns the runtime builder: it
+pins `max_blocking_threads` headroom for both parse pools plus other blocking
+work (sqlx's lookups, tokio's own) in a test. PR 1 documents the requirement
+and checks only the worker counts against tokio's default blocking limit.
+
 **What stays unwired.** The user ruled on Q1-Q7 and on the `0005`
 trigger on 2026-11-23 (D1 to D29 otherwise stay provisional), so PRs 1 to
 5 below may start; the lead says when. Until they land, no
@@ -1511,7 +1520,7 @@ the harness and `docs/testing/conformance-layout.md`):
 | 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                                      | —       |
 | 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated | —       |
 | 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                        | 2       |
-| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3131-3133, :3350-3351)          | 1, 3    |
+| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)          | 1, 3    |
 | 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23)                                                                                                           | 3       |
 | 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                               | each PR |
 | 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                           | 6       |
