@@ -217,9 +217,11 @@ New questions raised by this ADR:
   relayed by the lead: a trust keyset version write (a create, an enable, a
   re-enable) and a trust source write count as widening, so while
   `widening_second_approver` is on they need an IR-054 approval by a second
-  approver; the design of the second-approver flow (T14.1, T14.2) remains,
-  and the service-layer write paths of both (`skyoauth_service::trust`) must
-  not be wired to an endpoint before it. Still open: the audit sink TLS
+  approver; the design of the second-approver flow remains (no task ID names
+  it; nearest owners T13.3, which names OQ-API-14, T13.2, T13.8, T11.6, T10.4
+  and T10.2; see docs/proposals/second-approver-gated-writes.md), and the
+  service-layer write paths of both (`skyoauth_service::trust`) must not be
+  wired to an endpoint before it. Still open: the audit sink TLS
   trust settings and alert routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a
