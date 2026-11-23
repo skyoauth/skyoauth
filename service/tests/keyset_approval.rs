@@ -51,7 +51,7 @@ use skyoauth_service::{
     },
     trust::{
         KeysetAudit, KeysetWriteError, NewKeysetVersion, create_version, disable_version,
-        submit_create_version, submit_enable_version, validate_upload,
+        enable_version, submit_create_version, submit_enable_version, validate_upload,
     },
 };
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres, Transaction};
@@ -2178,5 +2178,231 @@ async fn an_approval_and_a_direct_write_serialize_on_the_keyset() {
         Some(("enabled".into(), 3))
     );
     assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// Runs `statement` with the `0004` and `0007` triggers of
+/// `trust_keyset_version` that keep its keys fixed and its revision moving
+/// disabled, then enables them again as the migrations do: a row written
+/// past the database floor.
+async fn past_the_version_guards(pool: &PgPool, statement: &str, id: &str, keys: &ValidatedKeyset) {
+    let triggers = [
+        "trust_keyset_version_immutable",
+        "trust_keyset_version_revision",
+    ];
+    for trigger in triggers {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER TABLE trust_keyset_version DISABLE TRIGGER {trigger}"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    let projection = object(serde_json::from_str(keys.public_json()).unwrap());
+    let done = sqlx::query(AssertSqlSafe(statement.to_string()))
+        .bind(id)
+        .bind(sqlx::types::Json(&projection))
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(done.rows_affected(), 1);
+    for trigger in triggers {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER TABLE trust_keyset_version ENABLE ALWAYS TRIGGER {trigger}"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// The keys that go live are the ones the stored fingerprint names, which
+/// is the fingerprint an enable's plan names: a version whose stored keys
+/// do not match its stored fingerprint is `StoredFingerprintMismatch` at
+/// the request, gated or applied at once, and at a direct enable. Nothing
+/// is written.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_enable_request_refuses_keys_that_do_not_match_the_stored_fingerprint() {
+    let (db, pool) = seeded().await;
+    let key_a = upload(key_a("k1")).await;
+    let key_b = upload(key_b("k2")).await;
+    // The bare writer stores any fingerprint the `0004` checks allow.
+    registry::create_trust_keyset_version(
+        &pool,
+        &NewTrustKeysetVersion {
+            id: "ver_x".into(),
+            tenant_id: "ten_a".into(),
+            keyset_id: "ks_1".into(),
+            public_jwks: object(serde_json::from_str(key_a.public_json()).unwrap()),
+            fingerprint: key_b.fingerprint().as_str().into(),
+            effective_at: at(0),
+            expires_at: None,
+            status: Status::Disabled,
+            provenance: JsonObject::new(),
+        },
+    )
+    .await
+    .unwrap();
+    for (widening, single_actor) in [(true, false), (false, false)] {
+        set_policy(&pool, widening, single_actor).await;
+        let before = snapshot(&pool).await;
+        refused(
+            submit_enable(&pool, "key_trust", "op_x", true, "ver_x", 1).await,
+            "StoredFingerprintMismatch",
+        );
+        assert_eq!(snapshot(&pool).await, before, "{widening}");
+    }
+    let before = snapshot(&pool).await;
+    let mut transaction = pool.begin().await.unwrap();
+    let direct = enable_version(
+        &mut transaction,
+        "key_trust",
+        "ten_a",
+        "ver_x",
+        1,
+        &audit("evt_x"),
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    refused(direct, "StoredFingerprintMismatch");
+    assert_eq!(snapshot(&pool).await, before);
+    db.drop([pool]).await;
+}
+
+/// The same check at the approval: keys written past the `0004`
+/// immutability trigger after the request, the stored fingerprint left as
+/// the plan names it, are `Keyset(StoredFingerprintMismatch)`; nothing is
+/// written and the operation stays pending.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_approval_refuses_keys_that_do_not_match_the_stored_fingerprint() {
+    let (db, pool) = seeded().await;
+    let key_a = upload(key_a("k1")).await;
+    let key_b = upload(key_b("k2")).await;
+    direct_create(&pool, &version("ver_y", "ks_1", &key_a, Status::Disabled)).await;
+    set_policy(&pool, true, false).await;
+    let op = pending(submit_enable(&pool, "key_trust", "op_y", true, "ver_y", 1).await);
+    let prepared = prepare(&pool, "key_sec1", "op_y").await.unwrap();
+    past_the_version_guards(
+        &pool,
+        "UPDATE trust_keyset_version SET public_jwks = $2 WHERE id = $1",
+        "ver_y",
+        &key_b,
+    )
+    .await;
+    let before = snapshot(&pool).await;
+    let clock = TestClock::new(at(10));
+    refused(
+        approve(&pool, "key_sec1", &prepared, &echo(&op), &*clock).await,
+        "Keyset(StoredFingerprintMismatch)",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    assert_eq!(operation(&pool, "op_y").await.outcome, "pending");
+    assert_eq!(
+        version_row(&pool, "ver_y").await,
+        Some(("disabled".into(), 1))
+    );
+    db.drop([pool]).await;
+}
+
+/// The preparation authorizes before it reads or parses the plan (D20): a
+/// plan whose projection the caller's algorithms refuse is reported only
+/// to an instance `security_admin` on the operation's own path; any other
+/// caller learns nothing (`Unauthorized`), and the right approver on
+/// another path finds nothing (`NotFound`).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_preparation_authorizes_before_it_parses_the_plan() {
+    let (db, pool) = seeded().await;
+    set_policy(&pool, true, false).await;
+    let keys = upload(key_a("k1")).await;
+    pending(
+        submit_create(
+            &pool,
+            "key_trust",
+            "op_1",
+            true,
+            &version("ver_1", "ks_1", &keys, Status::Disabled),
+            ALLOWED,
+        )
+        .await,
+    );
+    let eddsa: &[Algorithm] = &[Algorithm::EdDsa];
+    let prepare_as = async |key: &str, scope: ApprovalScope<'_>| {
+        prepare_approval(&pool, key, scope, "op_1", eddsa, at(1)).await
+    };
+    refused(prepare_as("key_sec1", TEN_A).await, "Keyset(Upload(..))");
+    for key in ["key_trust", "key_other", "key_tb", "spki-sha256:unknown"] {
+        refused(prepare_as(key, TEN_A).await, "Unauthorized");
+    }
+    for scope in [INSTANCE, TEN_B] {
+        refused(prepare_as("key_sec1", scope).await, "NotFound");
+    }
+    db.drop([pool]).await;
+}
+
+/// The approval compares the stored digest with the one the preparation
+/// read, not only with the echo: a digest changed past the `0005`
+/// immutability trigger while the operation was prepared, then put back,
+/// matches the echo and recomputes from the row, and is still
+/// `EchoMismatch`; nothing is written.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_approval_refuses_a_digest_other_than_the_prepared_one() {
+    let (db, pool) = seeded().await;
+    set_policy(&pool, true, false).await;
+    let keys = upload(key_a("k1")).await;
+    let op = pending(
+        submit_create(
+            &pool,
+            "key_trust",
+            "op_1",
+            true,
+            &version("ver_1", "ks_1", &keys, Status::Disabled),
+            ALLOWED,
+        )
+        .await,
+    );
+    let mut other = op.request_digest.as_bytes().to_vec();
+    other[0] ^= 1;
+    let write_digest = async |digest: &[u8]| {
+        sqlx::raw_sql(
+            "ALTER TABLE administrative_operation \
+             DISABLE TRIGGER administrative_operation_immutable",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE administrative_operation SET request_digest = $2, revision = revision + 1 \
+             WHERE id = $1",
+        )
+        .bind("op_1")
+        .bind(digest)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "ALTER TABLE administrative_operation \
+             ENABLE ALWAYS TRIGGER administrative_operation_immutable",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+    };
+    write_digest(&other).await;
+    let prepared = prepare(&pool, "key_sec1", "op_1").await.unwrap();
+    write_digest(op.request_digest.as_bytes()).await;
+    let before = snapshot(&pool).await;
+    let clock = TestClock::new(at(10));
+    refused(
+        approve(&pool, "key_sec1", &prepared, &echo(&op), &*clock).await,
+        "EchoMismatch",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    // The same approval with a fresh preparation applies.
+    let prepared = prepare(&pool, "key_sec1", "op_1").await.unwrap();
+    applied_version(approve(&pool, "key_sec1", &prepared, &echo(&op), &*clock).await);
     db.drop([pool]).await;
 }

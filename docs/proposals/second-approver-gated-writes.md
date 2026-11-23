@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 3 merged, PR 4 open, PRs 5 to 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 3 merged, PR 4 open, PR 6 in progress (#116 merged), PRs 5, 7 and 8 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
@@ -10,9 +10,10 @@ into migration `0005` itself (section 11; D15); the read-path index of the
 same sketch is a provisional lead pick, not ruled. Implemented so far: the
 in-transaction permit (PR 1), the registry operation module with the
 `0005` guard and index (PR 2), `crate::operation` with the toggle (PR 3),
-and, in review, the keyset kinds (PR 4). Not yet: the source kinds (PR 5),
-their tests and the ungated entry points made crate-private (PRs 6 and 7),
-the test session's documents (PR 8), and any endpoint; no T00.x box is
+and, in review, the keyset kinds (PR 4); the tests of PR 6 have started
+(#116, merged). Not yet: the source kinds (PR 5), the rest of the tests
+(PR 6), the ungated entry points made crate-private (PR 7), the test
+session's documents (PR 8), and any endpoint; no T00.x box is
 ticked. Every other choice below that goes beyond the written
 spec is a "provisional lead pick, 2026-11-23" (the Decisions list numbers
 them D1 to D29); "(inferred)" marks a point where the spec is silent. All
@@ -908,10 +909,15 @@ only by `admin_id`. Each writer is therefore split into step 1 and an
 `create_version`, `enable_version`, `create_source` and `update_source`
 become step 1 plus `apply_*`, ungated. They
 stay public, documented as test-only like the bare registry writers
-(`keyset.rs:36-46`), until the test session has moved
-`service/tests/trust_keyset_version.rs` and
-`service/tests/trust_source_egress.rs` to `submit_*`; then they become
-crate-private (PR 7 below).
+(`keyset.rs:36-46`), until the test session has moved their callers
+to `submit_*`; then they become crate-private (PR 7 below). The callers
+PR 7 must move are `service/tests/trust_keyset_version.rs`,
+`service/tests/trust_source_egress.rs`, `direct_create` in
+`service/tests/keyset_approval.rs` (it calls the ungated
+`create_version` to set up rows) and the service path of
+`service/tests/schema_trust_source_egress_guard.rs` (its `trust::`
+import of `create_source` and `update_source`, and their calls in the
+case runner).
 
 ### 10. Errors
 
@@ -921,7 +927,9 @@ an ID, a revision, a destination, a `kid` or another value of the request
 (as `keyset.rs:381-388` and `source.rs:326-331`):
 
 - `KeysetWriteError`: `WideningNotAcknowledged`, `PolicyUnavailable`,
-  `ValidationBusy`.
+  `ValidationBusy`; PR 4 adds `StoredFingerprintMismatch` (inferred: the
+  stored keys of a version being enabled do not recompute to its stored
+  fingerprint, a data-integrity error like `PlanIntegrity`).
 - `SourceWriteError`: `WideningNotAcknowledged`, `PolicyUnavailable`.
 - `ApprovalError` (new): `Unauthorized`; `NotFound`;
   `NotApprovable(NotApprovableReason)` with `Consumed`, `Revoked`,
@@ -938,7 +946,8 @@ No contract maps admin write errors to HTTP statuses
 is inferred: `Unauthorized` and `SelfApproval` 403; `NotFound` 404;
 `NotApprovable`, `EchoMismatch`, `RequesterNotAuthorized` and
 `StaleRevision` 409; `WideningNotAcknowledged` 422; `PolicyUnavailable`,
-`ValidationBusy` and `Retry` 503 with `Retry-After`; `PlanIntegrity` 500. A
+`ValidationBusy` and `Retry` 503 with `Retry-After`; `PlanIntegrity` and
+`StoredFingerprintMismatch` 500. A
 pending write returns 202 with the operation's ID, digest and `expires_at`.
 
 ### 11. Schema (text to merge into `0005`)
@@ -1596,7 +1605,46 @@ is the target's (the `0005` guard requires it). `Applied` is `Debug`,
 JSON). On a tenant path a cancel of
 another operator's operation is now `NotFound`, like a missing one (the PR
 5 row's item, done here since PR 4 adds the first tenant kind); on the
-instance path it stays `Unauthorized`.
+instance path it stays `Unauthorized`. An enable, direct, requested or
+approved, refuses a version whose parsed stored keys do not recompute to
+its stored `fingerprint` (the one its plan names) with the new
+`KeysetWriteError::StoredFingerprintMismatch` (inferred: a variant of its
+own, since the keys break no JWK set rule `StoredVersion` names); the
+check sits in the one status step the request and the approval share,
+after the parse and under its one permit, so at approve it is
+`ApprovalError::Keyset(StoredFingerprintMismatch)`, not `PlanIntegrity`
+(a plan whose fingerprint is not the stored one stays `PlanIntegrity`).
+
+PR 4's mutants (outside the repository; this records the verdicts).
+Equivalent in PR 4, two: the cancel's kind-role guard dropped (recorded in
+"Left open for PR 5" below), and `authorize_trust_admin` returning the
+admin ID as the credential ID (recorded here: the ungated writes, its only
+callers, never read `Requester::credential_id`; the gated writes take it
+from `authorize_widening_write`). Not equivalent, though PR 4's
+keyset-scoped run missed it: a revoked credential accepted by the
+operator statement, killed by
+`operator::tests::the_statement_checks_every_status_role_and_scope` and
+`registry_operator`'s
+`a_revoked_credential_is_refused_even_without_the_status_check` and
+`every_miss_is_the_same_none`. Two mutants that PR 4's first run did not
+include, and that survived its tests in review, are now killed:
+`prepare_approval` parsing a keyset create's projection before it
+authorizes (D20), by `the_preparation_authorizes_before_it_parses_the_plan`
+(moving the whole authorization after the plan's read is also killed by
+`operation_approval` tests), and the
+approve's comparison of the stored digest with the prepared one dropped,
+by `an_approval_refuses_a_digest_other_than_the_prepared_one`. The
+stored-fingerprint check dropped is killed at the request and at the
+approval, each by a test of its own.
+What PR 4 does not test: `keyset_approval.rs` has no plan-restoration
+test (a plan changed past the guard before the preparation and put back
+before the approval is #116's toggle test; PR 4's D24 tests change the
+locked plan after the preparation and leave it changed, and its one
+restoration test puts back a digest); and the keyset path's policy row
+`FOR SHARE` is tested by `NOWAIT` lock-strength probes only, with no race
+of a keyset request against a toggle (the toggle's race is #116's
+emulation). The races PR 4 runs on two connections are on the operation
+row, the `trust_keyset` row and a version ID's insert.
 
 **Left open for PR 5.** Before T13.3 wires the endpoint, the lead decides
 whether `acknowledge_widening` applies to the toggle, turning it off

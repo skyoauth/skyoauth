@@ -270,7 +270,12 @@
 //! 5. when the version becomes enabled: the count of the other enabled
 //!    versions against [`MAX_ENABLED_VERSIONS_PER_KEYSET`], then the full
 //!    parse of the compared stored versions (and an enable's target, in
-//!    the same blocking task) on the in-transaction pool (see "Cost") and
+//!    the same blocking task) on the in-transaction pool (see "Cost"); for
+//!    an enable, the fingerprint of its parsed keys against its stored
+//!    `fingerprint` (a mismatch is
+//!    [`KeysetWriteError::StoredFingerprintMismatch`], a data-integrity
+//!    error: the plan of a gated enable names that stored fingerprint, so
+//!    the keys that go live are the ones it names); then
 //!    [`check_version_overlap`];
 //! 6. the registry write: the insert (whose foreign-key checks take
 //!    `FOR KEY SHARE` on the tenant and the keyset, already held more
@@ -280,12 +285,20 @@
 //!    `FOR KEY SHARE` and then the chain head (migrations README, "append
 //!    audit events in this order").
 //!
-//! So the lock order is: operator rows, then the `trust_keyset` row
-//! (`FOR NO KEY UPDATE`), then the version row (a status change), then the
-//! audit head. `FOR NO KEY UPDATE` conflicts with another
-//! `FOR NO KEY UPDATE` and with a keyset update, not with the
-//! `FOR KEY SHARE` of a trust source insert's or update's foreign-key
-//! check. A trust source update holds its own source row `FOR UPDATE`
+//! So the lock order of a direct write is: operator rows, then the
+//! `trust_keyset` row (`FOR NO KEY UPDATE`), then the version row (a status
+//! change), then the audit head. A gated request (see "The gate") takes
+//! step 1 through `authorize_roles_locked`, with the instance
+//! `security_admin` binding in the same ordered statement as the tenant
+//! one, then the `instance_security_policy` row `FOR SHARE`, between the
+//! operator rows and the `trust_keyset` row. Applied at once, it goes on
+//! as above. Pending, it runs steps 2 to 5, writes no version, appends its
+//! `administrative_operation.create` event (the audit head) and inserts
+//! the operation row after the audit head.
+//!
+//! `FOR NO KEY UPDATE` conflicts with another `FOR NO KEY UPDATE` and with
+//! a keyset update, not with the `FOR KEY SHARE` of a trust source insert's
+//! or update's foreign-key check. A trust source update holds its own source row `FOR UPDATE`
 //! ([`crate::trust::source`]), a row this path never locks.
 //!
 //! **One keyset per transaction.** A caller's transaction writes the
@@ -517,6 +530,12 @@ pub enum KeysetWriteError {
         /// The rule it breaks.
         error: JwkSetError,
     },
+    /// The version being enabled has keys whose fingerprint is not its
+    /// stored `fingerprint`: a data-integrity error (a row written outside
+    /// this module), not a client error, and the version is not enabled.
+    /// A variant of its own (inferred: [`Self::StoredVersion`] names a
+    /// broken JWK set rule, and these keys break none).
+    StoredFingerprintMismatch,
     /// The version, becoming enabled, would give the keyset more than
     /// [`MAX_ENABLED_VERSIONS_PER_KEYSET`] enabled versions. Disable one
     /// first.
@@ -588,6 +607,9 @@ impl fmt::Display for KeysetWriteError {
             Self::StoredVersion { .. } => {
                 f.write_str("a stored version of the keyset breaks the JWK set rules")
             }
+            Self::StoredFingerprintMismatch => f.write_str(
+                "the stored keys of the keyset version do not match its stored fingerprint",
+            ),
             Self::TooManyEnabledVersions => {
                 f.write_str("the keyset already has the most enabled versions allowed")
             }
@@ -617,6 +639,7 @@ impl fmt::Debug for KeysetWriteError {
             Self::Upload(_) => f.write_str("Upload(..)"),
             Self::Overlap(err) => write!(f, "Overlap({})", conflict_kind(err)),
             Self::StoredVersion { .. } => f.write_str("StoredVersion { .. }"),
+            Self::StoredFingerprintMismatch => f.write_str("StoredFingerprintMismatch"),
             Self::TooManyEnabledVersions => f.write_str("TooManyEnabledVersions"),
             Self::PrivateMemberInProvenance => f.write_str("PrivateMemberInProvenance"),
             Self::UnsupportedIsolation => f.write_str("UnsupportedIsolation"),
@@ -1313,8 +1336,7 @@ async fn status_steps(
     let requester =
         authorize_trust_admin::<KeysetWriteError>(transaction, public_identity, target.0).await?;
     let identity = read_version_identity(transaction, target.0, target.1).await?;
-    let (version, event) =
-        apply_status(transaction, &requester, target, &identity.keyset_id, status).await?;
+    let (version, event) = apply_status(transaction, &requester, target, &identity, status).await?;
     append_stamped(transaction, event, audit.event_id, audit.now, SUCCESS).await?;
     Ok(version)
 }
@@ -1346,18 +1368,22 @@ pub(crate) async fn read_version_identity(
     })
 }
 
-/// Steps 3 to 5 of a status change of the version `id` of `tenant_id` in
-/// `keyset_id`, through the checks: the parent lock, then the target in a
-/// new statement (an enable reads the row with its keys, a disable its
-/// revision only) against `expected_revision`, then, for an enable, the
-/// count and the overlap check. Returns the stored revision. A gated
-/// enable's pending request runs exactly these (D7).
+/// Steps 3 to 5 of a status change of the version `id` of `tenant_id`
+/// whose immutable keyset and fingerprint are `identity` (step 2), through
+/// the checks: the parent lock, then the target in a new statement (an
+/// enable reads the row with its keys, a disable its revision only)
+/// against `expected_revision`, then, for an enable, the count, the parse,
+/// the target's keys against its stored fingerprint and the overlap check.
+/// Returns the stored revision. A gated enable's pending request and its
+/// approval run exactly these (D7, D26), so the fingerprint a plan names
+/// is the one of the keys that go live.
 async fn check_status(
     transaction: &mut Transaction<'_, Postgres>,
     (tenant_id, id, expected_revision): (&str, &str, i64),
-    keyset_id: &str,
+    identity: &VersionIdentity,
     status: Status,
 ) -> Result<i64, KeysetWriteError> {
+    let keyset_id = identity.keyset_id.as_str();
     lock_keyset(transaction, tenant_id, keyset_id).await?;
     match status {
         Status::Enabled => {
@@ -1374,6 +1400,13 @@ async fn check_status(
             // The target and its compared versions in one parse step: one
             // permit, one wait, per write.
             let ((row, keys), compared) = parse_enable(stored, rows).await?;
+            // The keys that go live are the ones the stored fingerprint
+            // names: a row whose keys and fingerprint disagree was written
+            // outside this module (the bare writer, or past the `0004`
+            // immutability trigger).
+            if keys.fingerprint().as_str() != identity.fingerprint {
+                return Err(KeysetWriteError::StoredFingerprintMismatch);
+            }
             check_against(&enabled(&row, keys.set()), &compared)?;
             Ok(previous_revision)
         }
@@ -1398,10 +1431,10 @@ async fn apply_status(
     transaction: &mut Transaction<'_, Postgres>,
     requester: &Requester,
     target: (&str, &str, i64),
-    keyset_id: &str,
+    identity: &VersionIdentity,
     status: Status,
 ) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError> {
-    let previous_revision = check_status(transaction, target, keyset_id, status).await?;
+    let previous_revision = check_status(transaction, target, identity, status).await?;
     let (tenant_id, id, expected_revision) = target;
     let version =
         update_trust_keyset_version(&mut **transaction, tenant_id, id, expected_revision, status)
@@ -1430,14 +1463,7 @@ pub(crate) async fn apply_enable_version(
 ) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError> {
     let identity = read_version_identity(transaction, tenant_id, id).await?;
     let target = (tenant_id, id, expected_revision);
-    apply_status(
-        transaction,
-        requester,
-        target,
-        &identity.keyset_id,
-        Status::Enabled,
-    )
-    .await
+    apply_status(transaction, requester, target, &identity, Status::Enabled).await
 }
 
 /// Requests the enable of the keyset version `id` of `tenant_id` at
@@ -1484,14 +1510,8 @@ async fn submit_enable_steps(
     let identity = read_version_identity(transaction, tenant_id, id).await?;
     match mode {
         Mode::Apply(outcome) => {
-            let (version, event) = apply_status(
-                transaction,
-                &requester,
-                target,
-                &identity.keyset_id,
-                Status::Enabled,
-            )
-            .await?;
+            let (version, event) =
+                apply_status(transaction, &requester, target, &identity, Status::Enabled).await?;
             append_stamped(
                 transaction,
                 event,
@@ -1503,7 +1523,7 @@ async fn submit_enable_steps(
             Ok(Gated::Applied(version))
         }
         Mode::Pending => {
-            check_status(transaction, target, &identity.keyset_id, Status::Enabled).await?;
+            check_status(transaction, target, &identity, Status::Enabled).await?;
             let plan = EnablePlan {
                 requester_credential_id: requester.credential_id.clone(),
                 version_id: id.into(),
@@ -1640,6 +1660,11 @@ mod tests {
                 },
                 "a stored version of the keyset breaks the JWK set rules",
                 "StoredVersion { .. }",
+            ),
+            (
+                KeysetWriteError::StoredFingerprintMismatch,
+                "the stored keys of the keyset version do not match its stored fingerprint",
+                "StoredFingerprintMismatch",
             ),
             (
                 KeysetWriteError::TooManyEnabledVersions,

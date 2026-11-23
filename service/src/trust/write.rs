@@ -103,12 +103,18 @@ pub(super) async fn authorize_trust_admin<E: WriteError>(
 ///    `trust_admin`, authorizes the write, and anything else is
 ///    `UNAUTHORIZED`. The instance binding is always asked for, before the
 ///    policy row says whether `single_actor_mode` needs it (inferred: the
-///    operator rows come before the policy row in the lock order);
+///    operator rows come before the policy row in the lock order). Because
+///    the instance binding is always asked for and the whole [`RolesHeld`]
+///    is compared before and after the locks, an instance
+///    `security_admin` binding granted or disabled in that window makes
+///    even a pure `trust_admin` request `UNAUTHORIZED`, although the mode
+///    would not have needed it: this fails closed, and a retry works;
 /// 3. without `acknowledge_widening`, `WIDENING_NOT_ACKNOWLEDGED`: every
 ///    write that calls this is widening, a class fixed by its kind;
 /// 4. the `instance_security_policy` row `FOR SHARE` (D10); a missing row is
 ///    `POLICY_UNAVAILABLE` (D18). The mode follows from it (section 1).
 ///
+/// [`RolesHeld`]: crate::persistence::registry::RolesHeld
 /// [`RolesHeld::holds`]: crate::persistence::registry::RolesHeld::holds
 pub(crate) async fn authorize_widening_write<E: GatedWriteError>(
     transaction: &mut Transaction<'_, Postgres>,

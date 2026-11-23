@@ -3283,8 +3283,13 @@ provisional until Gate M0:
   `docs/proposals/second-approver-gated-writes.md` (accepted, 2026-11-23);
   no task ID names it (the nearest owners are T13.3, T13.2, T13.8, T11.6,
   T10.4 and T10.2). `submit_create_version` and `submit_enable_version`
-  put these writes through it (its PR 4): pending while the toggle is on,
-  applied at once with outcome `success_widening` while it is off.
+  put these writes through it (its PR 4): applied at once with outcome
+  `success_widening` while the toggle is off; with it on, applied at once
+  with outcome `success_single_actor` under `single_actor_mode` for a
+  requester who also holds instance `security_admin` (Q4), and pending
+  otherwise. An enable whose stored keys do not recompute to its stored
+  fingerprint is refused (`StoredFingerprintMismatch`), at the request and
+  at the approval.
   `create_version` and `enable_version` stay ungated, and test-only, until
   its PR 7 makes them crate-private. Nothing may be wired to an endpoint
   before the request layer exists (generated IDs, T10.2; the role of each
@@ -3376,7 +3381,8 @@ provisional until Gate M0:
   event should carry the fingerprint is an open ADR question. No error's
   `Display` or `Debug` names a `kid`, key material or an ID.
 
-Lock order, extending the orders above for this write, which creates no
+Lock order, extending the orders above for this write. A direct write
+(`create_version`, `enable_version`, `disable_version`) creates no
 operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`);
 for a status change, the version's `keyset_id`, read without a lock; the
 parent `trust_keyset` row `FOR NO KEY UPDATE`, which serializes the writes
@@ -3390,6 +3396,16 @@ update); then the audit head last. `FOR NO KEY UPDATE` on the keyset does
 not block the `FOR KEY SHARE` of a trust source insert's or update's
 foreign-key check; a trust source update holds its own source row
 `FOR UPDATE`, which this write never locks.
+
+A gated request (`submit_create_version`, `submit_enable_version`) takes
+its operator rows through `authorize_roles_locked`, `FOR SHARE`, with the
+instance `security_admin` binding in the same ordered statement as the
+tenant `trust_admin` one, then the `instance_security_policy` row
+`FOR SHARE`, between the operator rows and the `trust_keyset` row. Applied
+at once, it goes on as a direct write. Pending, it takes the same
+`trust_keyset` lock and reads for its checks, writes no version, appends
+its `administrative_operation.create` event (the audit head) and then
+inserts the pending operation, after the audit head.
 
 One keyset per transaction: the audit head a write takes last stays held
 until the caller's transaction ends, so a second keyset's write in the same
