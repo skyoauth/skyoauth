@@ -129,11 +129,14 @@
 //! **Ruled, provisional (the ADRs are unratified).** Whether adding a
 //! keyset version is a widening change was open (OQ-ADR008-3's original
 //! question names "a new keyset version"); the user ruled on 2026-11-22
-//! (relayed by the lead; ADR-008 item 12) that a keyset version write (a
+//! (relayed by the lead; recorded in the OQ-ADR008-3 entry of ADR-008, whose
+//! item 12 carries the 2026-11-19 decision only) that a keyset version write (a
 //! create, an enable, a re-enable) and a trust source write count as
 //! widening and need an IR-054 second-approver approval while
 //! `widening_second_approver` is on. The registry does not enforce it and
-//! the second-approver flow (T14.1, T14.2) is not built, so no test here
+//! the second-approver flow is not built (no task ID names it; nearest
+//! owners T13.3, which names OQ-API-14, T13.2, T13.8, T11.6, T10.4 and T10.2;
+//! docs/proposals/second-approver-gated-writes.md), so no test here
 //! claims it: the positive tests create, enable and re-enable versions
 //! with no approval because the registry has none to ask for.
 //!
