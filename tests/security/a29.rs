@@ -3,7 +3,8 @@
 //! IR-031, IR-032; ADR-014).
 //!
 //! Stage M1a, "registry and references": the registry writes of the
-//! tenant-owned `0004` records through the typed registry API
+//! tenant-owned `0004` records, and the approve and revocation writes of
+//! the `0005` operation table, through the typed registry API
 //! (`skyoauth_service::persistence::registry`) against a real PostgreSQL.
 //!
 //! - **Positive.** Two tenants register sources with the same exact issuer
@@ -29,11 +30,36 @@
 //!   foreign key, reported as `Invariant { ForeignKey, <constraint> }`, and
 //!   writes nothing; and a write that names another tenant's record finds
 //!   nothing. Every case runs in both directions (A into B, B into A).
+//! - **Negative, operations.** An `approve` that names an operation of
+//!   another scope, and a revocation (a cancel) of an operation by a
+//!   revoking operation of another scope, are refused by the `0005` guards
+//!   `administrative_operation_approves_same_tenant` and
+//!   `administrative_operation_revokes_same_tenant`, `check_violation`
+//!   (`23514`) reported as `Invariant { SameTenantOperation, <constraint> }`,
+//!   and write nothing: no approve, no cancel, no revocation and no audit
+//!   event, the chain intact. The guards compare `tenant_id` with
+//!   `IS DISTINCT FROM`, so the instance (`tenant_id` `NULL`) is a scope of
+//!   its own: each guard runs between the two tenants in both directions
+//!   (`a29_neg_approve_of_other_tenants_operation`,
+//!   `a29_neg_revocation_by_other_tenants_operation`) and between the
+//!   instance and each tenant in both directions
+//!   (`a29_neg_approve_across_instance_and_tenant`,
+//!   `a29_neg_revocation_across_instance_and_tenant`). The approver is never
+//!   the requester, so `administrative_operation_approver_distinct` never
+//!   decides; the control, an approve and a cancel within each tenant and
+//!   the instance, is written
+//!   (`a29_pos_same_scope_approve_and_revocation_are_written`). The registry
+//!   inserts no revocation with a new row, so the revocation guard is
+//!   reached by its `UPDATE` leg (`revoke_administrative_operation`) only;
+//!   its `INSERT` leg has no public writer.
 //!
 //! Not covered here: the M2 stage (a proof from one tenant's source with
 //! another tenant's grant at exchange); checker tenant sets (instance
 //! records, A31/A45); records of later milestones (clients, origins, human
-//! policies); authorization, the enabled-assignment check (since `0010` a
+//! policies); the second-approver flow above the registry
+//! (`skyoauth_service::operation`), whose own scope check refuses another
+//! scope's operation as not found before a guard is reached (its service
+//! tests); authorization, the enabled-assignment check (since `0010` a
 //! database guard at insert, tested in
 //! `service/tests/schema_assignment_write_guard.rs`), and the service rules
 //! the database does not enforce (scope ceilings; T14.1, T14.2). Principal
@@ -45,8 +71,11 @@
 //! key when a migration adds it.
 //!
 //! The crossings are a closed list, one per composite foreign key of
-//! `0004` that a tenant-owned write can name across tenants, so each is
-//! enumerated in both directions instead of sampled. Three list-to-parent
+//! `0004` that a tenant-owned write can name across tenants, and the two
+//! `0005` guards above, so each is enumerated in both directions instead of
+//! sampled. The two guards are `AFTER` triggers, not composite foreign
+//! keys: `administrative_operation` references an operation by `id` alone,
+//! and the triggers compare the two rows' tenants. Three list-to-parent
 //! keys have no foreign-key negative, because no write can name a parent of
 //! another tenant through them: `service_identity_resource_server_service_id_fkey`,
 //! `service_grant_binding_grant_id_fkey` and
@@ -58,15 +87,30 @@
 //! which find nothing for another tenant's owner
 //! (`a29_neg_writes_to_other_tenants_records_find_nothing`).
 //!
-//! The list covers `0004` only. One tenant-owned crossing of a later
-//! migration is covered outside A29: `consumed_assertion_trust_source_id_fkey`
-//! (`0005`), a consumed proof naming another tenant's source, is refused in
-//! both directions by `a24_neg_consume_names_other_tenants_source` (A24,
-//! `tests/security/a24.rs`), not here.
+//! The list covers `0004` and these two `0005` guards only; it does not
+//! enumerate every cross-scope reference of `0005`.
+//! `consumed_assertion_trust_source_id_fkey` (`0005`), a consumed proof
+//! naming another tenant's source, is refused in both directions by
+//! `a24_neg_consume_names_other_tenants_source` (A24,
+//! `tests/security/a24.rs`), not here. Two cross-scope references of
+//! `administrative_operation` are refused by nothing, are accepted through
+//! the public registry API (`insert_administrative_operation`), and are not
+//! on the list:
+//!
+//! - (a) an operation whose `audit_id` names an audit event of another
+//!   tenant: `administrative_operation_audit_id_fkey` references
+//!   `audit_event (id)` alone and no trigger compares the tenants. It has no
+//!   owner yet; the lead or the user is to rule on it.
+//! - (b) an operation of a kind other than `approve`, such as a
+//!   `route_bundle_approval`, whose `approves_operation_id` names an
+//!   operation of another tenant: the approval guard runs only for kind
+//!   `approve`, and the registry leaves "the tenant of the operation any
+//!   other kind names" to the caller by design
+//!   (`persistence::registry::operation`, module docs).
 
 use std::{
     fmt::Debug,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
@@ -74,14 +118,16 @@ use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
-        self, ActivationState, AssertionProfile, BindingProfile, GrantMode, InvariantKind,
-        JsonObject, MAX_PAGE_SIZE, NewAudienceTenantAssignment, NewPrincipal, NewPrincipalBinding,
-        NewResourceServer, NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustKeyset,
-        NewTrustKeysetVersion, NewTrustSource, Page, PrincipalBindingChanges, PrincipalKind,
-        Profile, RegistryError, ReplayMode, ServiceGrantChanges, ServiceIdentityChanges, Status,
-        TrustKeysetChanges, TrustSourceChanges, TrustSourceKind,
+        self, ActivationState, AdministrativeOperation, AssertionProfile, AuditActor,
+        BindingProfile, ChainVerdict, GrantMode, InvariantKind, JsonObject, MAX_PAGE_SIZE,
+        NewAdministrativeOperation, NewAudienceTenantAssignment, NewAuditEvent, NewPrincipal,
+        NewPrincipalBinding, NewResourceServer, NewServiceGrant, NewServiceIdentity, NewTenant,
+        NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, PrincipalBindingChanges,
+        PrincipalKind, Profile, RegistryError, ReplayMode, ServiceGrantChanges,
+        ServiceIdentityChanges, Status, TrustKeysetChanges, TrustSourceChanges, TrustSourceKind,
     },
 };
+use sqlx::{Postgres, Transaction};
 
 const GITHUB_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const PARTNER_ISSUER: &str = "https://ci.partner.example";
@@ -1113,5 +1159,386 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
         );
     }
     assert_eq!(snapshots(&pool).await, before);
+    db.drop([pool]).await;
+}
+
+// The `0005` approval and revocation guards: the crossings of
+// `administrative_operation`.
+
+/// The scope of an operation: a tenant, or the instance (`tenant_id`
+/// `NULL`), which the guards compare `IS DISTINCT FROM` as a scope of its
+/// own.
+#[derive(Clone, Copy, Debug)]
+struct Scope {
+    tenant: Option<&'static str>,
+    suffix: &'static str,
+}
+
+const OP_A: Scope = Scope {
+    tenant: Some(A.tenant),
+    suffix: A.suffix,
+};
+const OP_B: Scope = Scope {
+    tenant: Some(B.tenant),
+    suffix: B.suffix,
+};
+const INSTANCE: Scope = Scope {
+    tenant: None,
+    suffix: "i",
+};
+
+/// (owner, intruder) between the two tenants: the intruder's approve or
+/// revocation names the owner's operation.
+const TENANT_CROSSINGS: [(Scope, Scope); 2] = [(OP_A, OP_B), (OP_B, OP_A)];
+
+/// (owner, intruder) between the instance and each tenant, both ways.
+const INSTANCE_CROSSINGS: [(Scope, Scope); 4] = [
+    (OP_A, INSTANCE),
+    (INSTANCE, OP_A),
+    (OP_B, INSTANCE),
+    (INSTANCE, OP_B),
+];
+
+/// The actor of every approve: never the actor of the operation it
+/// approves, so the `0005` guard `administrative_operation_approver_distinct`
+/// never decides here and only the scope is wrong.
+const APPROVER: &str = "adm_sec";
+
+/// A fixed time: the guards read no clock.
+fn op_time() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(1_790_000_000)
+}
+
+impl Scope {
+    fn id(self, base: &str) -> String {
+        format!("{base}_{}", self.suffix)
+    }
+    /// The scope's pending operation, the target of every approve and
+    /// revocation.
+    fn pending(self) -> String {
+        self.id("op")
+    }
+    /// The scope's requester, the actor of its pending operation and of its
+    /// cancels.
+    fn requester(self) -> String {
+        self.id("adm_req")
+    }
+}
+
+/// A new operation `id` of `kind` in `scope` by `actor`, recorded by the
+/// event `evt_<id>`: a pending one (an hour to expiry) unless it is an
+/// `approve` or a `cancel`, which has no expiry (proposal section 2).
+fn new_operation(
+    scope: Scope,
+    id: String,
+    actor: String,
+    kind: &str,
+    approves: Option<String>,
+) -> NewAdministrativeOperation {
+    let pending = !["approve", "cancel"].contains(&kind);
+    NewAdministrativeOperation {
+        audit_id: format!("evt_{id}"),
+        immutable_plan: object(json!({"id": id, "status": "enabled"})),
+        id,
+        tenant_id: scope.tenant.map(Into::into),
+        actor_id: actor,
+        kind: kind.into(),
+        request_digest: vec![0xd1; 32],
+        expected_revision: 1,
+        expires_at: pending.then(|| op_time() + Duration::from_secs(3600)),
+        approves_operation_id: approves,
+        outcome: if pending { "pending" } else { "applied" }.into(),
+    }
+}
+
+/// Appends the operation's event (in its scope, by its actor, with
+/// `action` on `object_id`) and inserts the operation, in the order the
+/// migrations README prescribes, in one transaction.
+async fn append_and_insert(
+    transaction: &mut Transaction<'_, Postgres>,
+    new: &NewAdministrativeOperation,
+    action: &str,
+    object_id: &str,
+) -> Result<AdministrativeOperation, RegistryError> {
+    registry::append_audit_event(
+        transaction,
+        &NewAuditEvent {
+            id: new.audit_id.clone(),
+            tenant_id: new.tenant_id.clone(),
+            timestamp: op_time(),
+            actor: AuditActor::Operator(new.actor_id.clone()),
+            action: action.into(),
+            object_id: object_id.into(),
+            previous_revision: None,
+            new_revision: None,
+            outcome: "success".into(),
+        },
+    )
+    .await
+    .unwrap();
+    registry::insert_administrative_operation(transaction, new).await
+}
+
+/// `intruder`'s approve `id` by [`APPROVER`] of `owner`'s pending operation,
+/// in a transaction committed whatever the insert returned: a refused
+/// statement leaves the transaction aborted, so its event goes too.
+async fn approve(
+    pool: &PgPool,
+    owner: Scope,
+    intruder: Scope,
+    id: &str,
+) -> Result<AdministrativeOperation, RegistryError> {
+    let new = new_operation(
+        intruder,
+        id.into(),
+        APPROVER.into(),
+        "approve",
+        Some(owner.pending()),
+    );
+    let mut transaction = pool.begin().await.unwrap();
+    let result = append_and_insert(
+        &mut transaction,
+        &new,
+        "administrative_operation.approve",
+        &owner.pending(),
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    result
+}
+
+/// `intruder`'s cancel of `owner`'s pending operation, as a cancel is
+/// written: in one transaction, the cancel's event, its operation `id` by
+/// `intruder`'s requester, then the revocation of `owner`'s operation that
+/// names it ([`registry::revoke_administrative_operation`]), committed
+/// whatever the revocation returned. The registry inserts no revocation
+/// with a new row, so the guard's `UPDATE` leg is the one reached.
+async fn cancel(
+    pool: &PgPool,
+    owner: Scope,
+    intruder: Scope,
+    id: &str,
+) -> Result<i64, RegistryError> {
+    let new = new_operation(intruder, id.into(), intruder.requester(), "cancel", None);
+    let mut transaction = pool.begin().await.unwrap();
+    append_and_insert(
+        &mut transaction,
+        &new,
+        "administrative_operation.cancel",
+        &owner.pending(),
+    )
+    .await
+    .unwrap();
+    let result = registry::revoke_administrative_operation(
+        &mut transaction,
+        &owner.pending(),
+        id,
+        op_time() + Duration::from_secs(60),
+        "cancelled",
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    result
+}
+
+/// [`two_tenants`] and a pending operation in each tenant and in the
+/// instance, each by its scope's requester.
+async fn two_tenants_with_operations() -> (TestDb, PgPool) {
+    let (db, pool) = two_tenants().await;
+    for scope in [OP_A, OP_B, INSTANCE] {
+        let new = new_operation(
+            scope,
+            scope.pending(),
+            scope.requester(),
+            "service_grant.update",
+            None,
+        );
+        let mut transaction = pool.begin().await.unwrap();
+        append_and_insert(
+            &mut transaction,
+            &new,
+            "administrative_operation.create",
+            &scope.pending(),
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+    }
+    (db, pool)
+}
+
+/// The operation `id`, read under its lock in a transaction rolled back,
+/// or `None`.
+async fn find_operation(pool: &PgPool, id: &str) -> Option<AdministrativeOperation> {
+    let mut transaction = pool.begin().await.unwrap();
+    let row = registry::lock_administrative_operation(&mut transaction, id)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    row
+}
+
+/// Everything a refused approve or revocation could have written: the
+/// registry snapshots of both tenants, every operation `ids` names (the
+/// pending ones and the refused writes' own), and the audit chain's
+/// verdict, whose head sequence counts the events. Equal before and after,
+/// nothing was written and the chain is intact.
+async fn operation_state(
+    pool: &PgPool,
+    ids: &[String],
+) -> (
+    [Vec<String>; 2],
+    Vec<Option<AdministrativeOperation>>,
+    ChainVerdict,
+) {
+    let mut operations = Vec::new();
+    for id in ids {
+        operations.push(find_operation(pool, id).await);
+    }
+    let mut connection = pool.acquire().await.unwrap();
+    let chain = registry::verify_audit_chain(&mut connection).await.unwrap();
+    assert!(matches!(chain, ChainVerdict::Intact { .. }), "{chain:?}");
+    (snapshots(pool).await, operations, chain)
+}
+
+/// The refusal of a crossed operation reference: the `0005` guard named
+/// `constraint`, a `check_violation` (`23514`) that the registry maps to
+/// `Invariant { SameTenantOperation, <constraint> }` (`SAME_TENANT_OPERATION`).
+#[track_caller]
+fn assert_scope_refused<T: Debug>(
+    result: Result<T, RegistryError>,
+    constraint: &str,
+    (owner, intruder): (Scope, Scope),
+) {
+    match result {
+        Err(RegistryError::Invariant {
+            kind: InvariantKind::SameTenantOperation,
+            constraint: Some(actual),
+        }) => assert_eq!(actual, constraint, "{intruder:?} naming {owner:?}"),
+        other => panic!(
+            "{intruder:?} naming {owner:?}: expected Invariant {{ SameTenantOperation, {constraint} }}: {other:?}"
+        ),
+    }
+}
+
+/// Approves each crossing's owner operation from the intruder's scope:
+/// each is refused by `administrative_operation_approves_same_tenant` and
+/// writes nothing, neither the approve nor its event.
+async fn assert_approves_refused(crossings: &[(Scope, Scope)]) {
+    let (db, pool) = two_tenants_with_operations().await;
+    let mut ids: Vec<String> = [OP_A, OP_B, INSTANCE].map(Scope::pending).into();
+    let attempts: Vec<String> = crossings
+        .iter()
+        .map(|(owner, intruder)| format!("op_appr_{}_{}", intruder.suffix, owner.suffix))
+        .collect();
+    ids.extend(attempts.iter().cloned());
+    let before = operation_state(&pool, &ids).await;
+    for (&(owner, intruder), id) in crossings.iter().zip(&attempts) {
+        assert_scope_refused(
+            approve(&pool, owner, intruder, id).await,
+            "administrative_operation_approves_same_tenant",
+            (owner, intruder),
+        );
+        assert_eq!(
+            find_operation(&pool, id).await,
+            None,
+            "{owner:?} {intruder:?}"
+        );
+    }
+    assert_eq!(operation_state(&pool, &ids).await, before);
+    db.drop([pool]).await;
+}
+
+/// Revokes each crossing's owner operation by a cancel of the intruder's
+/// scope: each is refused by `administrative_operation_revokes_same_tenant`
+/// and writes nothing, neither the revocation, nor the cancel, nor its
+/// event.
+async fn assert_revocations_refused(crossings: &[(Scope, Scope)]) {
+    let (db, pool) = two_tenants_with_operations().await;
+    let mut ids: Vec<String> = [OP_A, OP_B, INSTANCE].map(Scope::pending).into();
+    let attempts: Vec<String> = crossings
+        .iter()
+        .map(|(owner, intruder)| format!("op_cncl_{}_{}", intruder.suffix, owner.suffix))
+        .collect();
+    ids.extend(attempts.iter().cloned());
+    let before = operation_state(&pool, &ids).await;
+    for (&(owner, intruder), id) in crossings.iter().zip(&attempts) {
+        assert_scope_refused(
+            cancel(&pool, owner, intruder, id).await,
+            "administrative_operation_revokes_same_tenant",
+            (owner, intruder),
+        );
+        assert_eq!(
+            find_operation(&pool, id).await,
+            None,
+            "{owner:?} {intruder:?}"
+        );
+    }
+    assert_eq!(operation_state(&pool, &ids).await, before);
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a29_neg_approve_of_other_tenants_operation() {
+    assert_approves_refused(&TENANT_CROSSINGS).await;
+}
+
+#[tokio::test]
+async fn a29_neg_approve_across_instance_and_tenant() {
+    assert_approves_refused(&INSTANCE_CROSSINGS).await;
+}
+
+#[tokio::test]
+async fn a29_neg_revocation_by_other_tenants_operation() {
+    assert_revocations_refused(&TENANT_CROSSINGS).await;
+}
+
+#[tokio::test]
+async fn a29_neg_revocation_across_instance_and_tenant() {
+    assert_revocations_refused(&INSTANCE_CROSSINGS).await;
+}
+
+/// The control of the four tests above: in each tenant and in the
+/// instance, an approve of the scope's own pending operation by another
+/// actor, and then a cancel by the scope's requester that revokes it, are
+/// written, each with its event, the chain intact. The approve's actor is
+/// not the requester, so the result does not depend on
+/// `administrative_operation_approver_distinct`.
+#[tokio::test]
+async fn a29_pos_same_scope_approve_and_revocation_are_written() {
+    let (db, pool) = two_tenants_with_operations().await;
+    let mut connection = pool.acquire().await.unwrap();
+    let ChainVerdict::Intact { last_sequence } =
+        registry::verify_audit_chain(&mut connection).await.unwrap()
+    else {
+        panic!("broken chain");
+    };
+    drop(connection);
+    for scope in [OP_A, OP_B, INSTANCE] {
+        let (approval, revoking) = (scope.id("op_appr"), scope.id("op_cncl"));
+        let approved = approve(&pool, scope, scope, &approval).await.unwrap();
+        assert_eq!(approved.tenant_id.as_deref(), scope.tenant);
+        assert_eq!(approved.approves_operation_id, Some(scope.pending()));
+        assert_eq!(cancel(&pool, scope, scope, &revoking).await.unwrap(), 2);
+        let pending = find_operation(&pool, &scope.pending()).await.unwrap();
+        assert_eq!(pending.tenant_id.as_deref(), scope.tenant);
+        assert_eq!(pending.revocation_operation_id, Some(revoking.clone()));
+        assert_eq!(
+            find_operation(&pool, &revoking)
+                .await
+                .unwrap()
+                .tenant_id
+                .as_deref(),
+            scope.tenant
+        );
+    }
+    let mut connection = pool.acquire().await.unwrap();
+    assert_eq!(
+        registry::verify_audit_chain(&mut connection).await.unwrap(),
+        ChainVerdict::Intact {
+            last_sequence: last_sequence + 6
+        }
+    );
+    drop(connection);
     db.drop([pool]).await;
 }

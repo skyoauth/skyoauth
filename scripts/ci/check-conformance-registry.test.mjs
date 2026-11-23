@@ -1595,10 +1595,10 @@ describe('resolution part', () => {
     for (const [rule, re] of res2) expectError(res, rule, re);
   };
 
-  test('the golden list is the real list of the A29 M1a tests: 13 tests, 2 pos and 11 neg, none ignored', () => {
-    assert.equal(A29_IDS.length, 13);
-    assert.equal(POS.length, 2);
-    assert.equal(NEG.length, 11);
+  test('the golden list is the real list of the A29 M1a tests: 18 tests, 3 pos and 15 neg, none ignored', () => {
+    assert.equal(A29_IDS.length, 18);
+    assert.equal(POS.length, 3);
+    assert.equal(NEG.length, 15);
     assert.ok(Object.values(golden()['rust-suites'][PG].testcases).every((c) => c.ignored === false && c['filter-match'].status === 'matches'));
     assert.deepEqual(Object.keys(golden()['rust-suites']), ['skyoauth-scenarios', PG]);
   });
@@ -1607,7 +1607,7 @@ describe('resolution part', () => {
     const res = resolve(a29(), list());
     expectOk(res);
     assert.deepEqual(res.notes, []);
-    assert.equal(res.summary, '64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 13 tests of 1 implemented stages against 13 listed tests');
+    assert.equal(res.summary, '64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 18 tests of 1 implemented stages against 18 listed tests');
   });
 
   test('without a list the resolution part does not run: an unlisted test passes the static part', () => {
@@ -1650,7 +1650,7 @@ describe('resolution part', () => {
 
   test('a binary that nextest skipped', () => {
     const res = resolve(a29(), list((d) => (d['rust-suites'][PG].status = 'skipped')));
-    assert.equal(res.errors.length, 13, dump(res));
+    assert.equal(res.errors.length, 18, dump(res));
     expectError(res, 'resolve', /its binary "skyoauth-scenarios::pg" was not listed \(status skipped\)$/);
   });
 
@@ -1665,7 +1665,7 @@ describe('resolution part', () => {
         d['rust-suites'][PG].testcases = {};
       }),
     );
-    assert.equal(res.errors.length, 13, dump(res));
+    assert.equal(res.errors.length, 18, dump(res));
     for (const e of res.errors) assert.match(formatError(e), /error \[resolve\] A29 M1a: "[^"]+": its binary "skyoauth-scenarios::pg" was not listed \(status skipped-default-filter\)$/);
   });
 
@@ -1686,7 +1686,7 @@ describe('resolution part', () => {
   test('dropping the neg tests from the stage leaves them orphans and the job without a neg test', () => {
     const res = resolve(a29(POS), list());
     expectErrors(res, ['pos-neg', 'orphans'], ['pos-neg', /job scenarios-pg produces no neg test/]);
-    assert.equal(res.errors.filter((e) => e.rule === 'orphans').length, 11, dump(res));
+    assert.equal(res.errors.filter((e) => e.rule === 'orphans').length, 15, dump(res));
   });
 
   test('every job among the legs needs a pos and a neg test of its own (A12 M2: scenarios-pg and scenarios-envoy-k3s)', () => {
@@ -1785,7 +1785,7 @@ describe('resolution part', () => {
     const lists = [{ kind: 'nextest', file: LIST, text: list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, names).testcases)) }];
     const ok = check(fixture({ [SCENARIOS]: a29(), [SUBCASES]: sub(names.map((n) => ID(n))) }), { lists });
     expectOk(ok);
-    assert.match(ok.summary, /resolution: 15 tests of 2 implemented stages against 15 listed tests$/);
+    assert.match(ok.summary, /resolution: 20 tests of 2 implemented stages against 20 listed tests$/);
     const root = fixture({ [SCENARIOS]: a29(), [SUBCASES]: sub([ID(names[0])]) });
     const res = check(root, { lists });
     expectErrors(res, ['pos-neg', 'orphans'], ['pos-neg', new RegExp(`^tests/conformance/subcases\\.toml:${stageLine(read(root, SUBCASES), 'subcase', 'A58.01', 'M1b')}: error \\[pos-neg\\] A58\\.01 M1b: job scenarios-pg produces no neg test of this stage$`)], ['orphans', /a58_01_neg_stale" is a listed/]);
@@ -1804,13 +1804,13 @@ describe('resolution part', () => {
     test('a partial test that resolves passes, and the summary counts it apart from the implemented stages', () => {
       const res = resolve(edits(a29(), partial([ID(PARTIAL)])), list(withPartial));
       expectOk(res);
-      assert.equal(res.summary, '64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 13 tests of 1 implemented stages and 1 partial tests of 1 planned stages against 14 listed tests');
+      assert.equal(res.summary, '64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 18 tests of 1 implemented stages and 1 partial tests of 1 planned stages against 19 listed tests');
     });
 
     test('a planned stage with tests = [] is not resolved, whatever its legs (A40 M3: typescript, typescript-browser)', () => {
       const res = resolve(a29(), list());
       expectOk(res);
-      assert.match(res.summary, /resolution: 13 tests of 1 implemented stages against 13 listed tests$/);
+      assert.match(res.summary, /resolution: 18 tests of 1 implemented stages against 18 listed tests$/);
     });
 
     test('only the listed tests are checked: no pos and neg per job, and no runner check of legs without tests (A60 M3: scenarios-pg, typescript-browser)', () => {
@@ -1839,7 +1839,7 @@ describe('resolution part', () => {
       const lists = (have) => [{ kind: 'nextest', file: LIST, text: list((d) => Object.assign(d['rust-suites'][PG].testcases, suite(PG, have).testcases)) }];
       const ok = check(root, { lists: lists(names) });
       expectOk(ok);
-      assert.match(ok.summary, / and 2 partial tests of 1 planned stages against 15 listed tests$/);
+      assert.match(ok.summary, / and 2 partial tests of 1 planned stages against 20 listed tests$/);
       const res = check(root, { lists: lists(names.slice(0, 1)) });
       expectOnly(res, 'resolve', new RegExp(`^tests/conformance/subcases\\.toml:${stageLine(read(root, SUBCASES), 'subcase', 'A58.90', 'M3')}: error \\[resolve\\] A58\\.90 M3 \\(planned stage, partial test\\): "nextest:skyoauth-scenarios/pg/security::a58::a58_90_neg_not_written": it is not in the test list of "skyoauth-scenarios::pg" \\(list\\.json\\)$`));
     });
@@ -1956,7 +1956,7 @@ describe('resolution part', () => {
       const res = libtest(GOLDEN_TEXT);
       expectOk(res);
       assert.deepEqual(res.notes, ['resolution: the libtest list pg.txt cannot show #[ignore], so its tests are not checked for it (CI uses --nextest-list)']);
-      assert.match(res.summary, /resolution: 13 tests of 1 implemented stages against 13 listed tests$/);
+      assert.match(res.summary, /resolution: 18 tests of 1 implemented stages against 18 listed tests$/);
     });
 
     test('CRLF line ends, no footer and benchmark lines are accepted', () => {
@@ -1971,7 +1971,7 @@ describe('resolution part', () => {
     });
 
     test('a line that is not a test', () => {
-      expectOnly(libtest(`${GOLDEN_TEXT}running 13 tests\n`), 'list', /^pg\.txt: error \[list\] libtest list: line 16 is not "<test name>: test": "running 13 tests"$/);
+      expectOnly(libtest(`${GOLDEN_TEXT}running 18 tests\n`), 'list', /^pg\.txt: error \[list\] libtest list: line 21 is not "<test name>: test": "running 18 tests"$/);
     });
 
     test('an empty list', () => {
@@ -1992,7 +1992,7 @@ describe('resolution part', () => {
       const root = fixture({ [SCENARIOS]: a29() });
       const ok = cli('--root', root, '--nextest-list', GOLDEN);
       assert.equal(ok.status, 0, ok.stderr);
-      assert.equal(ok.stdout, 'check-conformance-registry: OK (64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 13 tests of 1 implemented stages against 13 listed tests)\n');
+      assert.equal(ok.stdout, 'check-conformance-registry: OK (64 scenarios, 10 contracts, 4 subcases, 0 fixtures, 0 waivers; resolution: 18 tests of 1 implemented stages against 18 listed tests)\n');
       const missing = file('l.json', list((d) => delete d['rust-suites'][PG].testcases[NAMES[0]]));
       const bad = cli('--root', root, '--nextest-list', missing);
       assert.equal(bad.status, 1);

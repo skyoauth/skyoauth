@@ -1,3 +1,5 @@
+security::a29::a29_neg_approve_across_instance_and_tenant: test
+security::a29::a29_neg_approve_of_other_tenants_operation: test
 security::a29::a29_neg_binding_of_other_tenants_workload: test
 security::a29::a29_neg_binding_on_other_tenants_source: test
 security::a29::a29_neg_grant_allowing_other_tenants_binding: test
@@ -5,11 +7,14 @@ security::a29::a29_neg_grant_audience_of_other_tenant: test
 security::a29::a29_neg_grant_for_other_tenants_actor: test
 security::a29::a29_neg_grant_targeting_other_tenants_service: test
 security::a29::a29_neg_keyset_version_on_other_tenants_keyset: test
+security::a29::a29_neg_revocation_across_instance_and_tenant: test
+security::a29::a29_neg_revocation_by_other_tenants_operation: test
 security::a29::a29_neg_service_identity_audience_of_other_tenant: test
 security::a29::a29_neg_service_identity_of_other_tenants_principal: test
 security::a29::a29_neg_uploaded_source_on_other_tenants_keyset: test
 security::a29::a29_neg_writes_to_other_tenants_records_find_nothing: test
+security::a29::a29_pos_same_scope_approve_and_revocation_are_written: test
 security::a29::a29_pos_tenants_reuse_object_names: test
 security::a29::a29_pos_tenants_share_an_issuer: test
 
-13 tests, 0 benchmarks
+18 tests, 0 benchmarks

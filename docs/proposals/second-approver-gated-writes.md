@@ -2140,18 +2140,25 @@ correct; neither session edits it.
   for wiring.
 - A05 M1a (conformance-layout:117; T11.2): the entry disabled between
   request and approve. PR 5.
-- A29 M1a (conformance-layout:141; T10.8): that stage is `implemented`
-  (`tests/conformance/README.md:7`), and its closed list covers the
-  composite foreign keys of `0004` only (`tests/security/a29.rs:47-65`).
-  With the guard accepted and folded into `0005` (D15), the database
-  refuses an approval, cancel or reject of another tenant's operation, so
-  it becomes a tenant-owned crossing for A29's closed list (T10.8). The
-  list says it covers `0004` only and puts later crossings outside A29, as
-  A24 covers `consumed_assertion_trust_source_id_fkey` of `0005`; whether
-  the new crossing joins A29's list or is covered outside A29 in the same
-  way is the test session's change to the layout and the list (PR 8), and
-  its test lands with that change (PR 6). Until then the service tests of
-  the scope check cover it (section "Tests").
+- A29 M1a (conformance-layout:142 and the A29 row of "Second-approver flow
+  coverage", :204; T10.8): that stage is `implemented`. Its closed list in
+  `tests/security/a29.rs` covers the composite foreign keys of `0004` and,
+  since PR #121, the two `0005` guards
+  `administrative_operation_approves_same_tenant` and
+  `administrative_operation_revokes_same_tenant` (D15). An approve, or a
+  revocation by a cancel, that names an operation of another scope is
+  refused, tenant A↔B and instance↔tenant in both directions, by
+  `a29_neg_approve_of_other_tenants_operation`,
+  `a29_neg_approve_across_instance_and_tenant`,
+  `a29_neg_revocation_by_other_tenants_operation` and
+  `a29_neg_revocation_across_instance_and_tenant`, with the control
+  `a29_pos_same_scope_approve_and_revocation_are_written`. The stage keeps
+  its status and stamp. The revocation guard's INSERT leg (no public
+  writer), `administrative_operation_approver_distinct` and the flow's own
+  scope check (`NotFound` before a guard is reached) stay service tests.
+  `consumed_assertion_trust_source_id_fkey` stays with A24. Open: (a) and
+  (b) of the review (an operation naming another tenant's audit event; a
+  non-approve kind naming another tenant's operation), not on the list.
 - A37 M1a (conformance-layout:149; T12.2): predicate removal through the
   same machinery, once binding writes have a service path (not here).
 - A47 M1b (conformance-layout:159): out of scope; the approve endpoint's
