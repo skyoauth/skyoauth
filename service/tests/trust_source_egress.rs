@@ -689,12 +689,14 @@ async fn the_database_guard_refuses_what_the_bare_writers_skip() {
         }) if constraint == guard(member) => {}
         other => panic!("{member}: expected the guard's Invariant, got {other:?}"),
     };
-    let base_oidc = registry::create_trust_source(&pool, &oidc("src_base_o", DISCOVERY))
-        .await
-        .unwrap();
-    let base_k8s = registry::create_trust_source(&pool, &k8s("src_base_k", TOKEN_REVIEW))
-        .await
-        .unwrap();
+    let base_oidc =
+        registry::test_support::create_trust_source(&pool, &oidc("src_base_o", DISCOVERY))
+            .await
+            .unwrap();
+    let base_k8s =
+        registry::test_support::create_trust_source(&pool, &k8s("src_base_k", TOKEN_REVIEW))
+            .await
+            .unwrap();
     for (member, value) in [
         (DISCOVERY_URL, DISCOVERY_OFF),
         (DISCOVERY_URL, JWKS_ONLY),
@@ -720,14 +722,17 @@ async fn the_database_guard_refuses_what_the_bare_writers_skip() {
             member,
             value,
         );
-        assert_guard(registry::create_trust_source(&pool, &new).await, member);
         assert_guard(
-            registry::update_trust_source(&pool, "ten_a", base, 1, &changed).await,
+            registry::test_support::create_trust_source(&pool, &new).await,
+            member,
+        );
+        assert_guard(
+            registry::test_support::update_trust_source(&pool, "ten_a", base, 1, &changed).await,
             member,
         );
         changed.status = Status::Disabled;
         assert_guard(
-            registry::update_trust_source(&pool, "ten_a", base, 1, &changed).await,
+            registry::test_support::update_trust_source(&pool, "ten_a", base, 1, &changed).await,
             member,
         );
     }
@@ -738,7 +743,7 @@ async fn the_database_guard_refuses_what_the_bare_writers_skip() {
             DISCOVERY_URL,
             value,
         );
-        registry::create_trust_source(&pool, &oidc(&id, value))
+        registry::test_support::create_trust_source(&pool, &oidc(&id, value))
             .await
             .unwrap_or_else(|err| panic!("{value}: {err:?}"));
     }
@@ -995,9 +1000,10 @@ async fn an_update_rechecks_only_a_changed_destination() {
         "enabled",
     )
     .await;
-    let legacy = registry::create_trust_source(&pool, &oidc("src_legacy", "https://legacy"))
-        .await
-        .unwrap();
+    let legacy =
+        registry::test_support::create_trust_source(&pool, &oidc("src_legacy", "https://legacy"))
+            .await
+            .unwrap();
     disable_entry(&pool, "egr_legacy").await;
     let mut next = changes(&legacy);
     next.name = "legacy-renamed".into();

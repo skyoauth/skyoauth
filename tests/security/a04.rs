@@ -22,7 +22,7 @@
 //! direct grant with that binding. A rotation is what the registry offers
 //! for it: a new version of the same keyset, uploaded with its own explicit
 //! window, and status changes of versions, each a compare-and-set on the
-//! version's own revision ([`registry::update_trust_keyset_version`]).
+//! version's own revision ([`registry::test_support::update_trust_keyset_version`]).
 //!
 //! - **Positive, overlap.** In each tenant, a new version `kv_new_<t>` is
 //!   uploaded disabled with a window from `T1` to `T3` that overlaps the old
@@ -832,11 +832,11 @@ async fn fixture() -> (TestDb, PgPool) {
                 .unwrap();
         }
         for new in [side.old(), side.other()] {
-            registry::create_trust_keyset_version(&pool, &new)
+            registry::test_support::create_trust_keyset_version(&pool, &new)
                 .await
                 .unwrap();
         }
-        registry::create_trust_source(&pool, &uploaded_source(side))
+        registry::test_support::create_trust_source(&pool, &uploaded_source(side))
             .await
             .unwrap();
         registry::create_principal_binding(
@@ -1047,11 +1047,11 @@ async fn a04_pos_rotation_overlaps_versions_and_keeps_every_id() {
         // The new version, staged disabled, then enabled: two versions of
         // one parent enabled at once, listed by ID, each exactly as
         // uploaded, windows included.
-        let staged = registry::create_trust_keyset_version(&pool, &side.incoming())
+        let staged = registry::test_support::create_trust_keyset_version(&pool, &side.incoming())
             .await
             .unwrap();
         assert_eq!(staged, stored(&side.incoming(), Status::Disabled, 1));
-        let new = registry::update_trust_keyset_version(
+        let new = registry::test_support::update_trust_keyset_version(
             &pool,
             t,
             &side.incoming().id,
@@ -1081,11 +1081,17 @@ async fn a04_pos_rotation_overlaps_versions_and_keeps_every_id() {
         assert_eq!(lineage(&pool, side).await, before);
 
         // The old version retired, and an open-ended one after the new.
-        let retired = registry::update_trust_keyset_version(&pool, t, &old.id, 1, Status::Disabled)
-            .await
-            .unwrap();
+        let retired = registry::test_support::update_trust_keyset_version(
+            &pool,
+            t,
+            &old.id,
+            1,
+            Status::Disabled,
+        )
+        .await
+        .unwrap();
         assert_eq!(retired, stored(&side.old(), Status::Disabled, 2));
-        let next = registry::create_trust_keyset_version(&pool, &side.next())
+        let next = registry::test_support::create_trust_keyset_version(&pool, &side.next())
             .await
             .unwrap();
         assert_eq!(next, stored(&side.next(), Status::Enabled, 1));
@@ -1177,7 +1183,8 @@ async fn a04_pos_concurrent_uploads_add_overlapping_versions_under_one_parent() 
         let replicas = Replicas::start(&db, REPLICAS).await;
         let outcomes = replicas
             .race(move |replica, mut conn| async move {
-                registry::create_trust_keyset_version(&mut *conn, &request(replica)).await
+                registry::test_support::create_trust_keyset_version(&mut *conn, &request(replica))
+                    .await
             })
             .await;
         let mut expected = vec![stored(&A.old(), Status::Enabled, 1)];
@@ -1482,7 +1489,7 @@ async fn a04_neg_empty_or_inverted_windows_are_refused() {
                     ..side.incoming()
                 };
                 assert_eq!(
-                    refusal(registry::create_trust_keyset_version(&pool, &new).await),
+                    refusal(registry::test_support::create_trust_keyset_version(&pool, &new).await),
                     VALIDITY_CHECK,
                     "{side:?}, {label}, {status:?}"
                 );
@@ -1516,7 +1523,7 @@ async fn a04_neg_empty_or_inverted_windows_are_refused() {
                 expires_at,
                 ..side.incoming()
             };
-            let row = registry::create_trust_keyset_version(&pool, &new)
+            let row = registry::test_support::create_trust_keyset_version(&pool, &new)
                 .await
                 .unwrap_or_else(|err| panic!("{side:?}, {label}: {err:?}"));
             let expected = NewTrustKeysetVersion {
@@ -1545,7 +1552,7 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
         for expected in [0, 2, -1, i64::MIN, i64::MAX] {
             for status in [Status::Disabled, Status::Enabled] {
                 assert_stale(
-                    registry::update_trust_keyset_version(
+                    registry::test_support::update_trust_keyset_version(
                         &pool,
                         owner.tenant,
                         &old,
@@ -1560,7 +1567,7 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
         // current one included.
         for expected in [1, 2, i64::MAX] {
             assert_not_found(
-                registry::update_trust_keyset_version(
+                registry::test_support::update_trust_keyset_version(
                     &pool,
                     intruder.tenant,
                     &old,
@@ -1576,7 +1583,7 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
             "{label}"
         );
         assert_not_found(
-            registry::update_trust_keyset_version(
+            registry::test_support::update_trust_keyset_version(
                 &pool,
                 owner.tenant,
                 &owner.id("kv_missing"),
@@ -1593,7 +1600,7 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
                 ..intruder.incoming()
             };
             assert_eq!(
-                refusal(registry::create_trust_keyset_version(&pool, &foreign).await),
+                refusal(registry::test_support::create_trust_keyset_version(&pool, &foreign).await),
                 KEYSET_KEY,
                 "{label}"
             );
@@ -1606,7 +1613,9 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
                 ..uploader.incoming()
             };
             assert_eq!(
-                already_exists(registry::create_trust_keyset_version(&pool, &reuse).await),
+                already_exists(
+                    registry::test_support::create_trust_keyset_version(&pool, &reuse).await
+                ),
                 VERSION_PKEY,
                 "{label}"
             );
@@ -1634,14 +1643,30 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
         assert_eq!(parent.revision, 2);
         let old = side.old().id;
         assert_stale(
-            registry::update_trust_keyset_version(&pool, t, &old, 2, Status::Disabled).await,
+            registry::test_support::update_trust_keyset_version(
+                &pool,
+                t,
+                &old,
+                2,
+                Status::Disabled,
+            )
+            .await,
         );
-        let step = registry::update_trust_keyset_version(&pool, t, &old, 1, Status::Disabled)
-            .await
-            .unwrap();
+        let step = registry::test_support::update_trust_keyset_version(
+            &pool,
+            t,
+            &old,
+            1,
+            Status::Disabled,
+        )
+        .await
+        .unwrap();
         assert_eq!(step, stored(&side.old(), Status::Disabled, 2));
         for status in [Status::Disabled, Status::Enabled] {
-            assert_stale(registry::update_trust_keyset_version(&pool, t, &old, 1, status).await);
+            assert_stale(
+                registry::test_support::update_trust_keyset_version(&pool, t, &old, 1, status)
+                    .await,
+            );
         }
         assert_eq!(
             registry::get_trust_keyset_version(&pool, t, &old)
@@ -1669,7 +1694,7 @@ async fn a04_neg_concurrent_rotation_steps_have_one_winner() {
         // half (re-)enable it.
         let outcomes = replicas
             .race(|replica, mut conn| async move {
-                registry::update_trust_keyset_version(
+                registry::test_support::update_trust_keyset_version(
                     &mut *conn,
                     A.tenant,
                     &A.old().id,
@@ -1710,7 +1735,8 @@ async fn a04_neg_concurrent_rotation_steps_have_one_winner() {
         };
         let outcomes = replicas
             .race(move |replica, mut conn| async move {
-                registry::create_trust_keyset_version(&mut *conn, &request(replica)).await
+                registry::test_support::create_trust_keyset_version(&mut *conn, &request(replica))
+                    .await
             })
             .await;
         let winners: Vec<usize> = (0..REPLICAS).filter(|&r| outcomes[r].is_ok()).collect();
@@ -1778,10 +1804,17 @@ impl Contested {
                 } else {
                     status_of(n)
                 };
-                registry::update_trust_keyset_version(conn, A.tenant, &A.old().id, 1, status).await
+                registry::test_support::update_trust_keyset_version(
+                    conn,
+                    A.tenant,
+                    &A.old().id,
+                    1,
+                    status,
+                )
+                .await
             }
             Contested::Upload => {
-                registry::create_trust_keyset_version(conn, &Self::upload(n)).await
+                registry::test_support::create_trust_keyset_version(conn, &Self::upload(n)).await
             }
         }
     }

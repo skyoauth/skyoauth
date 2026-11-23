@@ -120,18 +120,23 @@ pub async fn update_trust_keyset<'e>(
 /// immutable but for `status`, which [`update_trust_keyset_version`]
 /// changes.
 ///
-/// **Test-only: the unchecked floor.** This writer stores whatever
+/// **The unchecked floor, crate-private.** This writer stores whatever
 /// `public_jwks` and `fingerprint` it is given: no JWK rule, no point
 /// check, no overlap check, no authorization and no audit event; only the
-/// `0004` `CHECK`s apply. It stays public for the integration and scenario
-/// tests (provisional lead pick, 2026-11-22: they call it from other
-/// crates, so it cannot be crate-private), and it must stay unreachable
-/// from any endpoint. The write path is the gated
+/// `0004` `CHECK`s apply. Within the crate only the keyset write path
+/// ([`crate::trust::keyset`]) calls it, after its own checks, the gate and
+/// with the audit event; it must stay unreachable from any endpoint. It was
+/// public for the integration and scenario tests until the second-approver
+/// proposal's PR 9 made it `pub(crate)`: those crates now reach it through
+/// the `#[doc(hidden)]` `test_support` module of this registry, compiled
+/// only with the `test-support` feature, which only their test targets
+/// turn on (inferred: the mechanism, as PR 7's). The write path is the
+/// gated
 /// [`trust::keyset::submit_create_version`](crate::trust::keyset::submit_create_version),
 /// which validates the upload, stores its canonical projection and
 /// fingerprint, checks the overlap and appends the audit event; it must be
 /// the only path that writes a keyset version outside tests.
-pub async fn create_trust_keyset_version<'e>(
+pub(crate) async fn create_trust_keyset_version<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTrustKeysetVersion,
 ) -> Result<TrustKeysetVersion, RegistryError> {
@@ -284,14 +289,16 @@ pub(crate) async fn read_keyset_version<'e>(
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
 ///
-/// **Test-only: the unchecked floor**, like
+/// **The unchecked floor, crate-private**, like
 /// [`create_trust_keyset_version`]: a re-enable here runs no overlap check,
-/// no authorization and no audit event. It stays public for the tests and
-/// must stay unreachable from any endpoint; the write path is the gated
+/// no authorization and no audit event. Within the crate only the keyset
+/// write path calls it, and tests reach it through the registry's
+/// `test_support` module (PR 9); it must stay unreachable from any
+/// endpoint. The write path is the gated
 /// [`trust::keyset::submit_enable_version`](crate::trust::keyset::submit_enable_version)
 /// and [`trust::keyset::disable_version`](crate::trust::keyset::disable_version)
 /// (provisional lead pick, 2026-11-22).
-pub async fn update_trust_keyset_version<'e>(
+pub(crate) async fn update_trust_keyset_version<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,
@@ -325,7 +332,15 @@ pub async fn update_trust_keyset_version<'e>(
 /// with the caller's privileges: a role that writes a destination needs
 /// `SELECT` on `egress_allowlist_entry` and `UPDATE` on one of its columns,
 /// granted on `id` only (migrations README, "What 0011 adds").
-pub async fn create_trust_source<'e>(
+///
+/// **The unchecked floor, crate-private**: no syntax rule, no
+/// authorization, no gate and no audit event; only the database's checks
+/// apply. Within the crate only the trust source write path
+/// ([`crate::trust::source`]) calls it, and tests reach it through the
+/// registry's `test_support` module (second-approver proposal, PR 9); it
+/// must stay unreachable from any endpoint. The write path is the gated
+/// [`trust::source::submit_create_source`](crate::trust::source::submit_create_source).
+pub(crate) async fn create_trust_source<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTrustSource,
 ) -> Result<TrustSource, RegistryError> {
@@ -404,7 +419,13 @@ pub async fn list_trust_sources<'e>(
 /// egress guard and needs the privileges, as in [`create_trust_source`]; an
 /// unchanged one is not checked, so a source whose entry was disabled
 /// still takes this write.
-pub async fn update_trust_source<'e>(
+///
+/// **The unchecked floor, crate-private**, like [`create_trust_source`]:
+/// within the crate only the trust source write path calls it, and tests
+/// reach it through the registry's `test_support` module (PR 9). The write
+/// path is the gated
+/// [`trust::source::submit_update_source`](crate::trust::source::submit_update_source).
+pub(crate) async fn update_trust_source<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,

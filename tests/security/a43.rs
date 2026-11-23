@@ -528,7 +528,7 @@ async fn fixture() -> (TestDb, PgPool) {
                 .unwrap();
         }
         egress::allow_destinations(&pool, &github_source(side)).await;
-        registry::create_trust_source(&pool, &github_source(side))
+        registry::test_support::create_trust_source(&pool, &github_source(side))
             .await
             .unwrap();
         registry::create_principal_binding(

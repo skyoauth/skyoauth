@@ -133,9 +133,12 @@ async fn seeded() -> (TestDb, PgPool) {
         )
         .await
         .unwrap();
-        registry::create_trust_keyset_version(&pool, &new_version(tenant, version, keyset))
-            .await
-            .unwrap();
+        registry::test_support::create_trust_keyset_version(
+            &pool,
+            &new_version(tenant, version, keyset),
+        )
+        .await
+        .unwrap();
     }
     (db, pool)
 }
@@ -475,24 +478,40 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
         .unwrap();
     assert_eq!((created.status, created.revision), (Status::Enabled, 1));
 
-    let disabled =
-        registry::update_trust_keyset_version(&pool, "ten_a", "kv_1", 1, Status::Disabled)
-            .await
-            .unwrap();
+    let disabled = registry::test_support::update_trust_keyset_version(
+        &pool,
+        "ten_a",
+        "kv_1",
+        1,
+        Status::Disabled,
+    )
+    .await
+    .unwrap();
     // Every column but status and revision keeps its value.
     let mut expected = created.clone();
     expected.status = Status::Disabled;
     expected.revision = 2;
     assert_eq!(disabled, expected);
-    let reenabled =
-        registry::update_trust_keyset_version(&pool, "ten_a", "kv_1", 2, Status::Enabled)
-            .await
-            .unwrap();
+    let reenabled = registry::test_support::update_trust_keyset_version(
+        &pool,
+        "ten_a",
+        "kv_1",
+        2,
+        Status::Enabled,
+    )
+    .await
+    .unwrap();
     assert_eq!((reenabled.status, reenabled.revision), (Status::Enabled, 3));
     // An unchanged status still advances the revision.
-    let same = registry::update_trust_keyset_version(&pool, "ten_a", "kv_1", 3, Status::Enabled)
-        .await
-        .unwrap();
+    let same = registry::test_support::update_trust_keyset_version(
+        &pool,
+        "ten_a",
+        "kv_1",
+        3,
+        Status::Enabled,
+    )
+    .await
+    .unwrap();
     assert_eq!(same.revision, 4);
     assert_eq!(
         registry::get_trust_keyset_version(&pool, "ten_a", "kv_1")
@@ -531,12 +550,19 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
         same
     );
     assert_stale(
-        registry::update_trust_keyset_version(&pool, "ten_a", "kv_1", 2, Status::Disabled).await,
+        registry::test_support::update_trust_keyset_version(
+            &pool,
+            "ten_a",
+            "kv_1",
+            2,
+            Status::Disabled,
+        )
+        .await,
     );
 
     for expected in [1, 4, 5, i64::MAX] {
         assert_not_found(
-            registry::update_trust_keyset_version(
+            registry::test_support::update_trust_keyset_version(
                 &pool,
                 "ten_b",
                 "kv_1",
@@ -546,7 +572,7 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
             .await,
         );
         assert_not_found(
-            registry::update_trust_keyset_version(
+            registry::test_support::update_trust_keyset_version(
                 &pool,
                 "ten_a",
                 "kv_b",
@@ -557,11 +583,18 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
         );
     }
     assert_not_found(
-        registry::update_trust_keyset_version(&pool, "ten_a", "kv_x", 1, Status::Disabled).await,
+        registry::test_support::update_trust_keyset_version(
+            &pool,
+            "ten_a",
+            "kv_x",
+            1,
+            Status::Disabled,
+        )
+        .await,
     );
     for expected in [1, 3, 5, i64::MAX, i64::MIN] {
         assert_stale(
-            registry::update_trust_keyset_version(
+            registry::test_support::update_trust_keyset_version(
                 &pool,
                 "ten_a",
                 "kv_1",
@@ -741,11 +774,11 @@ impl Target {
             )
             .await
             .map(|row| (row.status, row.revision)),
-            Self::Version => {
-                registry::update_trust_keyset_version(executor, "ten_a", "kv_1", 1, to)
-                    .await
-                    .map(|row| (row.status, row.revision))
-            }
+            Self::Version => registry::test_support::update_trust_keyset_version(
+                executor, "ten_a", "kv_1", 1, to,
+            )
+            .await
+            .map(|row| (row.status, row.revision)),
         }
     }
 

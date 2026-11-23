@@ -10,7 +10,10 @@
 //! results as not counted, and they are no claim. They run through the
 //! public API of `skyoauth_service` against a real PostgreSQL, one fresh
 //! database per test, with no SQL of their own: the registry writes and
-//! reads (`skyoauth_service::persistence::registry`), the ceiling loader
+//! reads (`skyoauth_service::persistence::registry`; the trust source
+//! setup goes through its `#[doc(hidden)]` `test_support` module, which
+//! only the `test-support` feature compiles and this package's test
+//! targets turn on), the ceiling loader
 //! [`load_scope_ceilings`] and the pure scope decision
 //! [`resolve_scopes`] (`skyoauth_service::policy`), which the loader feeds
 //! through [`LoadedCeilings::default_scopes`] and
@@ -402,7 +405,9 @@ async fn fixture() -> (TestDb, PgPool) {
     ] {
         let new = github_source(tenant, source);
         egress::allow_destinations(&pool, &new).await;
-        registry::create_trust_source(&pool, &new).await.unwrap();
+        registry::test_support::create_trust_source(&pool, &new)
+            .await
+            .unwrap();
         registry::create_principal_binding(&pool, &binding(tenant, binding_id, source, workload))
             .await
             .unwrap();

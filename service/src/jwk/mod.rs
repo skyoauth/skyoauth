@@ -282,8 +282,9 @@
 //!   writer `persistence::registry::create_trust_keyset_version` stores
 //!   whatever `public_jwks` and `fingerprint` it is given, unchecked.
 //!   [`crate::trust::keyset`] must be the only write path; the raw writer
-//!   stays public as the test-only floor (the scenario crate calls it),
-//!   unreachable from any endpoint.
+//!   is crate-private (second-approver proposal, PR 9): only that module
+//!   calls it in the crate, tests reach it through the `test-support`
+//!   feature, and it stays unreachable from any endpoint.
 //! - The verifier's keys (T11.7; provisional lead pick, 2026-11-22). The
 //!   verifier's key cache is built from a full
 //!   `validate_keyset(&stored, &KNOWN_ALGORITHMS)` pass per version (on

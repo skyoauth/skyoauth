@@ -280,7 +280,9 @@ async fn fixture() -> (TestDb, PgPool) {
             status: Status::Enabled,
         };
         egress::allow_destinations(&pool, &new).await;
-        registry::create_trust_source(&pool, &new).await.unwrap();
+        registry::test_support::create_trust_source(&pool, &new)
+            .await
+            .unwrap();
     }
     (db, pool)
 }

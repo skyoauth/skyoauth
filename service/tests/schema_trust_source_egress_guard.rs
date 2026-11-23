@@ -790,22 +790,22 @@ async fn an_update_checks_only_a_changed_member() {
             .unwrap();
         let mut next = changes(&stored);
         next.status = Status::Disabled;
-        let disabled = registry::update_trust_source(&pool, "ten_a", &id, 1, &next)
+        let disabled = registry::test_support::update_trust_source(&pool, "ten_a", &id, 1, &next)
             .await
             .unwrap();
         assert_eq!((disabled.revision, disabled.status), (2, Status::Disabled));
         next.name = format!("{id}-renamed");
         next.status = Status::Enabled;
-        let stored = registry::update_trust_source(&pool, "ten_a", &id, 2, &next)
+        let stored = registry::test_support::update_trust_source(&pool, "ten_a", &id, 2, &next)
             .await
             .unwrap();
         assert_eq!((stored.revision, stored.status), (3, Status::Enabled));
         let moved = with_member(changes(&stored), member, member.enabled_2());
-        let stored = registry::update_trust_source(&pool, "ten_a", &id, 3, &moved)
+        let stored = registry::test_support::update_trust_source(&pool, "ten_a", &id, 3, &moved)
             .await
             .unwrap();
         assert_registry_refusal(
-            registry::update_trust_source(
+            registry::test_support::update_trust_source(
                 &pool,
                 "ten_a",
                 &id,
@@ -912,17 +912,23 @@ async fn the_registry_writers_get_the_guards_invariant() {
     for member in Member::ALL {
         for value in [UNLISTED, member.disabled(), member.other_purposes()[1]] {
             assert_registry_refusal(
-                registry::create_trust_source(&pool, &new_source(member, "src_x", value)).await,
+                registry::test_support::create_trust_source(
+                    &pool,
+                    &new_source(member, "src_x", value),
+                )
+                .await,
                 member,
             );
         }
         let id = format!("src_{}", member.column());
-        let stored =
-            registry::create_trust_source(&pool, &new_source(member, &id, member.enabled()))
-                .await
-                .unwrap();
+        let stored = registry::test_support::create_trust_source(
+            &pool,
+            &new_source(member, &id, member.enabled()),
+        )
+        .await
+        .unwrap();
         assert_registry_refusal(
-            registry::update_trust_source(
+            registry::test_support::update_trust_source(
                 &pool,
                 "ten_a",
                 &id,
@@ -1457,7 +1463,7 @@ async fn a_disable_after_the_snapshot_is_a_retry_under_repeatable_read() {
                 ),
             )
             .await;
-            let result = registry::create_trust_source(
+            let result = registry::test_support::create_trust_source(
                 &mut *tx,
                 &new_source(member, "src_x", member.enabled()),
             )
@@ -1538,7 +1544,7 @@ async fn race_entry(pool: &PgPool, member: Member, n: usize) -> (String, String)
 /// entry, which no race disables.
 async fn prepare(pool: &PgPool, case: Case, n: usize) {
     if case.op == Op::Update {
-        registry::create_trust_source(
+        registry::test_support::create_trust_source(
             pool,
             &new_source(case.member, &format!("src_{n}"), case.member.enabled()),
         )
@@ -1606,9 +1612,14 @@ async fn write(tx: &mut Transaction<'_, Postgres>, case: Case, n: usize, value: 
         Err(err) => Outcome::Failed(format!("{err:?}: {err}")),
     };
     match (case.path, case.op) {
-        (Path::Raw, Op::Create) => raw(registry::create_trust_source(&mut **tx, &new).await),
+        (Path::Raw, Op::Create) => {
+            raw(registry::test_support::create_trust_source(&mut **tx, &new).await)
+        }
         (Path::Raw, Op::Update) => {
-            raw(registry::update_trust_source(&mut **tx, "ten_a", &id, 1, &update()).await)
+            raw(
+                registry::test_support::update_trust_source(&mut **tx, "ten_a", &id, 1, &update())
+                    .await,
+            )
         }
         (Path::Service, Op::Create) => service(create_source(tx, KEY, &new, &audit).await),
         (Path::Service, Op::Update) => {

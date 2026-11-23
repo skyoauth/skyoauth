@@ -1659,7 +1659,7 @@ async fn the_clock_is_sampled_after_the_insert_waits_for_a_version_id() {
         let mut held = holder.begin().await.unwrap();
         // The same ID in another tenant's keyset: the parent lock does not
         // conflict, only the primary key does.
-        registry::create_trust_keyset_version(
+        registry::test_support::create_trust_keyset_version(
             &mut *held,
             &NewTrustKeysetVersion {
                 id: "ver_1".into(),
@@ -2230,7 +2230,7 @@ async fn an_enable_request_refuses_keys_that_do_not_match_the_stored_fingerprint
     let key_a = upload(key_a("k1")).await;
     let key_b = upload(key_b("k2")).await;
     // The bare writer stores any fingerprint the `0004` checks allow.
-    registry::create_trust_keyset_version(
+    registry::test_support::create_trust_keyset_version(
         &pool,
         &NewTrustKeysetVersion {
             id: "ver_x".into(),
