@@ -71,8 +71,8 @@
 //! key when a migration adds it.
 //!
 //! The crossings are a closed list, one per composite foreign key of
-//! `0004` that a tenant-owned write can name across tenants and one per
-//! `0005` guard above, so each is enumerated in both directions instead of
+//! `0004` that a tenant-owned write can name across tenants, and the two
+//! `0005` guards above, so each is enumerated in both directions instead of
 //! sampled. The two guards are `AFTER` triggers, not composite foreign
 //! keys: `administrative_operation` references an operation by `id` alone,
 //! and the triggers compare the two rows' tenants. Three list-to-parent
@@ -87,12 +87,26 @@
 //! which find nothing for another tenant's owner
 //! (`a29_neg_writes_to_other_tenants_records_find_nothing`).
 //!
-//! The list covers `0004` and these two `0005` guards. One other
-//! tenant-owned crossing of `0005` is covered outside A29:
-//! `consumed_assertion_trust_source_id_fkey`, a consumed proof naming
-//! another tenant's source, is refused in both directions by
+//! The list covers `0004` and these two `0005` guards only; it does not
+//! enumerate every cross-scope reference of `0005`.
+//! `consumed_assertion_trust_source_id_fkey` (`0005`), a consumed proof
+//! naming another tenant's source, is refused in both directions by
 //! `a24_neg_consume_names_other_tenants_source` (A24,
-//! `tests/security/a24.rs`), not here.
+//! `tests/security/a24.rs`), not here. Two cross-scope references of
+//! `administrative_operation` are refused by nothing, are accepted through
+//! the public registry API (`insert_administrative_operation`), and are not
+//! on the list:
+//!
+//! - (a) an operation whose `audit_id` names an audit event of another
+//!   tenant: `administrative_operation_audit_id_fkey` references
+//!   `audit_event (id)` alone and no trigger compares the tenants. It has no
+//!   owner yet; the lead or the user is to rule on it.
+//! - (b) an operation of a kind other than `approve`, such as a
+//!   `route_bundle_approval`, whose `approves_operation_id` names an
+//!   operation of another tenant: the approval guard runs only for kind
+//!   `approve`, and the registry leaves "the tenant of the operation any
+//!   other kind names" to the caller by design
+//!   (`persistence::registry::operation`, module docs).
 
 use std::{
     fmt::Debug,
