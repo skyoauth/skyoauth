@@ -121,10 +121,15 @@
 //!
 //! - every create, enabled or disabled, is widening;
 //! - an update is disable-only when it sets `status` to `disabled` and its
-//!   other fourteen members equal the stored row's (`proof_bounds` compared
-//!   as JSON values, so `1` and `1.0` differ: a respelling counts as a
-//!   change and fails closed as widening). A disabled source written with
-//!   its stored members is disable-only too (inferred: it widens nothing).
+//!   other fourteen members equal the stored row's. `proof_bounds` is
+//!   compared by the database's `jsonb` equality on the locked row
+//!   (`proof_bounds_equal`): key order does not count, numbers compare by
+//!   value (`1` equals `1.0`), and a stored number beyond `f64` precision
+//!   (only a row written outside the service, by raw SQL or a future
+//!   importer, can hold one) is compared exactly, so a caller's echo of the
+//!   row, which rounds it, is a change and widening (inferred). A disabled
+//!   source written with its stored members is disable-only too (inferred:
+//!   it widens nothing).
 //!   A disable-only update is not widening: it is applied at once with
 //!   outcome `success`, without the acknowledgement, whatever the policy,
 //!   and never goes pending;
@@ -386,7 +391,7 @@
 
 use std::{fmt, time::SystemTime};
 
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction, types::Json};
 use url::Url;
 
 use super::write::{
@@ -400,8 +405,8 @@ use crate::operation::{
     source_plan::{CreateSourcePlan, UpdateSourcePlan, changed_members},
 };
 use crate::persistence::registry::{
-    AuditActor, EgressPurpose, InvariantKind, NewTrustSource, RegistryError, Status, TrustSource,
-    TrustSourceChanges, append_audit_event, create_trust_source, update_trust_source,
+    AuditActor, EgressPurpose, InvariantKind, JsonObject, NewTrustSource, RegistryError, Status,
+    TrustSource, TrustSourceChanges, append_audit_event, create_trust_source, update_trust_source,
 };
 
 /// The member name of a trust source's discovery URL, as errors name it.
@@ -441,6 +446,11 @@ const LOCK_SOURCE: &str = "SELECT id, tenant_id, name, kind, exact_issuer, disco
      reviewer_credential_ref, review_timeout_ms, audiences, algorithms, proof_bounds, \
      assertion_profile, stale_revocation_acknowledged, replay_mode, status, revision \
      FROM trust_source WHERE tenant_id = $1 AND id = $2 FOR NO KEY UPDATE";
+
+/// The `jsonb` equality of a locked source's `proof_bounds` with the
+/// changes' (Q2; see [`proof_bounds_equal`]).
+const PROOF_BOUNDS_EQUAL: &str =
+    "SELECT proof_bounds = $3 FROM trust_source WHERE tenant_id = $1 AND id = $2";
 
 /// Step 3: the entry of one purpose with exactly this destination.
 const LOCK_ENTRY: &str = "SELECT id, status FROM egress_allowlist_entry \
@@ -1060,16 +1070,37 @@ pub(crate) enum UpdateClass {
     Widening,
 }
 
+/// Whether the `proof_bounds` of the source `stored`, which this
+/// transaction has locked, equals `proof_bounds` under the database's
+/// `jsonb` equality: exact for every stored number, also one beyond `f64`
+/// precision that the row read into [`TrustSource`] has rounded; key order
+/// does not count, and numbers compare by value (`1` equals `1.0`).
+pub(crate) async fn proof_bounds_equal(
+    transaction: &mut Transaction<'_, Postgres>,
+    stored: &TrustSource,
+    proof_bounds: &JsonObject,
+) -> Result<bool, SourceWriteError> {
+    let equal = sqlx::query_scalar(PROOF_BOUNDS_EQUAL)
+        .bind(&stored.tenant_id)
+        .bind(&stored.id)
+        .bind(Json(proof_bounds))
+        .fetch_one(&mut **transaction)
+        .await?;
+    Ok(equal)
+}
+
 /// The class of an update of `stored` to `changes` (Q2), decided by the
 /// server from the stored row, never by the caller: disable-only when
 /// `changes.status` is `disabled` and [`changed_members`] names no other
-/// member. A source already disabled and written with the same members is
+/// member, `proof_bounds_equal` being [`proof_bounds_equal`]'s answer. A
+/// source already disabled and written with the same members is
 /// disable-only too (inferred: it widens nothing).
 pub(crate) fn classify_source_update(
     stored: &TrustSource,
     changes: &TrustSourceChanges,
+    proof_bounds_equal: bool,
 ) -> UpdateClass {
-    let others_unchanged = changed_members(stored, changes)
+    let others_unchanged = changed_members(stored, changes, proof_bounds_equal)
         .into_iter()
         .all(|member| member == STATUS_MEMBER);
     if changes.status == Status::Disabled && others_unchanged {
@@ -1179,7 +1210,8 @@ async fn submit_update_steps(
     // whatever the class, which only the stored row decides).
     let policy = lock_policy_shared::<SourceWriteError>(transaction).await?;
     let stored = lock_source(transaction, tenant_id, id, expected_revision).await?;
-    let mode = match classify_source_update(&stored, changes) {
+    let equal = proof_bounds_equal(transaction, &stored, &changes.proof_bounds).await?;
+    let mode = match classify_source_update(&stored, changes, equal) {
         UpdateClass::DisableOnly => Mode::Apply(OUTCOME_SUCCESS),
         UpdateClass::Widening => {
             require_acknowledged::<SourceWriteError>(submission)?;
@@ -1203,7 +1235,7 @@ async fn submit_update_steps(
         }
         Mode::Pending => {
             check_update(transaction, &stored, changes).await?;
-            let plan = UpdateSourcePlan::new(&requester.credential_id, &stored, changes);
+            let plan = UpdateSourcePlan::new(&requester.credential_id, &stored, changes, equal);
             let request = PendingRequest {
                 kind: OperationKind::TrustSourceUpdate,
                 tenant_id: Some(tenant_id),
@@ -1494,6 +1526,13 @@ mod tests {
         }
     }
 
+    /// [`classify_source_update`] with `serde_json`'s equality of the proof
+    /// bounds standing in for the database's `jsonb` equality, which agrees
+    /// with it on every value here.
+    fn classify(stored: &TrustSource, changes: &TrustSourceChanges) -> UpdateClass {
+        classify_source_update(stored, changes, stored.proof_bounds == changes.proof_bounds)
+    }
+
     /// Q2: a disable that changes nothing else is not widening; an enable,
     /// a re-enable, a write that changes nothing on an enabled source and a
     /// disable that changes any other member are.
@@ -1503,31 +1542,19 @@ mod tests {
         let disabled = stored(Status::Disabled);
         let mut disable = same(&enabled);
         disable.status = Status::Disabled;
+        assert_eq!(classify(&enabled, &disable), UpdateClass::DisableOnly);
         assert_eq!(
-            classify_source_update(&enabled, &disable),
-            UpdateClass::DisableOnly
-        );
-        assert_eq!(
-            classify_source_update(&disabled, &same(&disabled)),
+            classify(&disabled, &same(&disabled)),
             UpdateClass::DisableOnly
         );
         // The key order of the proof bounds is no change.
         let mut reordered = disable.clone();
         reordered.proof_bounds = object(serde_json::json!({"b": [true], "a": 1}));
-        assert_eq!(
-            classify_source_update(&enabled, &reordered),
-            UpdateClass::DisableOnly
-        );
-        assert_eq!(
-            classify_source_update(&enabled, &same(&enabled)),
-            UpdateClass::Widening
-        );
+        assert_eq!(classify(&enabled, &reordered), UpdateClass::DisableOnly);
+        assert_eq!(classify(&enabled, &same(&enabled)), UpdateClass::Widening);
         let mut enable = same(&disabled);
         enable.status = Status::Enabled;
-        assert_eq!(
-            classify_source_update(&disabled, &enable),
-            UpdateClass::Widening
-        );
+        assert_eq!(classify(&disabled, &enable), UpdateClass::Widening);
         type Change = fn(&mut TrustSourceChanges);
         let others: [Change; 14] = [
             |c| c.name.push('x'),
@@ -1540,7 +1567,7 @@ mod tests {
             |c| c.review_timeout_ms = Some(1000),
             |c| c.audiences.push("aud_b".into()),
             |c| c.algorithms = None,
-            |c| c.proof_bounds = object(serde_json::json!({"a": 1.0, "b": [true]})),
+            |c| c.proof_bounds = object(serde_json::json!({"a": 2, "b": [true]})),
             |c| c.assertion_profile = AssertionProfile::ReusableJwt,
             |c| c.stale_revocation_acknowledged = Some(true),
             |c| c.replay_mode = ReplayMode::SingleUse,
@@ -1550,7 +1577,7 @@ mod tests {
                 let mut changes = base.clone();
                 change(&mut changes);
                 assert_eq!(
-                    classify_source_update(row, &changes),
+                    classify(row, &changes),
                     UpdateClass::Widening,
                     "change {index} of a {:?} source",
                     row.status

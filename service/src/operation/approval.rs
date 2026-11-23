@@ -32,7 +32,7 @@ use crate::persistence::registry::{
 use crate::trust::{
     NewKeysetVersion,
     keyset::{apply_create_version, apply_enable_version, check_provenance, read_version_identity},
-    source::{apply_create_source, apply_locked_update, lock_source},
+    source::{apply_create_source, apply_locked_update, lock_source, proof_bounds_equal},
     validate_upload,
     write::{in_savepoint, require_read_committed},
 };
@@ -696,7 +696,8 @@ async fn apply_source_update(
         locked.expected_revision,
     )
     .await?;
-    if changed_members(&stored, &changes) != plan.changed {
+    let equal = proof_bounds_equal(transaction, &stored, &changes.proof_bounds).await?;
+    if changed_members(&stored, &changes, equal) != plan.changed {
         return Err(ApprovalError::PlanIntegrity);
     }
     let (row, event) = apply_locked_update(transaction, requester, &stored, &changes).await?;

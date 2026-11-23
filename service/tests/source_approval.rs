@@ -1484,7 +1484,7 @@ async fn a_disable_only_update_is_not_widening_and_lands_at_once() {
                 disable_and_move,
                 changes(&source),
                 TrustSourceChanges {
-                    proof_bounds: object(json!({"max_ttl_s": 600.0, "skew": 1.5})),
+                    proof_bounds: object(json!({"max_ttl_s": 600.5, "skew": 1.5})),
                     status: Status::Disabled,
                     ..changes(&source)
                 },
@@ -2575,6 +2575,140 @@ async fn a_name_taken_before_the_approval_refuses_it() {
         );
     }
     tx.rollback().await.unwrap();
+    db.drop([pool]).await;
+}
+
+/// Proof bounds whose floats need the shortest round-trip parse survive
+/// the plan's text: a gated rename's plan names only `name` as changed, its
+/// approval recomputes the same list from the stored row and applies it;
+/// and a disable whose changes went through JSON text (as a request body
+/// does) is still disable-only. Each value is stored by `jsonb` in its own
+/// decimal spelling (`1.132605069600529e-13` as
+/// `0.0000000000001132605069600529`).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn proof_bound_floats_survive_the_plan_and_the_request_text() {
+    let (db, pool) = seeded().await;
+    set_policy(&pool, true, false).await;
+    let clock = TestClock::new(at(10));
+    let values = [
+        1.132605069600529e-13,
+        1.979_602_974_600_842_2e21,
+        1.436992062783981e-8,
+        1.764_183_169_287_183_1e-13,
+        0.25,
+    ];
+    for (n, value) in values.into_iter().enumerate() {
+        let id = format!("src_{n}");
+        let new = NewTrustSource {
+            proof_bounds: object(json!({ "x": value })),
+            ..uploaded(&id)
+        };
+        let source = direct_create(&pool, &new).await;
+        let op = format!("op_{n}");
+        let pending = pending(
+            submit_update(
+                &pool,
+                "key_trust",
+                &op,
+                true,
+                (&id, 1),
+                &renamed(&source, &format!("renamed-{n}")),
+            )
+            .await,
+        );
+        let plan = operation(&pool, &op).await.immutable_plan;
+        assert_eq!(plan["changed"], json!(["name"]), "{value}");
+        let prepared = prepare(&pool, "key_sec1", &op).await.unwrap();
+        let row =
+            applied_source(approve(&pool, "key_sec1", &prepared, &echo(&pending), &*clock).await);
+        assert_eq!(row.revision, 2, "{value}");
+        // A disable whose changes went through JSON text.
+        let text =
+            serde_json::to_string(&with_status(&row, Status::Disabled).proof_bounds).unwrap();
+        let disable = TrustSourceChanges {
+            proof_bounds: serde_json::from_str(&text).unwrap(),
+            ..with_status(&row, Status::Disabled)
+        };
+        let disabled = applied(
+            submit_update(
+                &pool,
+                "key_trust",
+                &format!("op_d{n}"),
+                false,
+                (&id, 2),
+                &disable,
+            )
+            .await,
+        );
+        assert_eq!(
+            (disabled.status, disabled.revision),
+            (Status::Disabled, 3),
+            "{value}"
+        );
+        assert_eq!(last_event(&pool).await.7, "success", "{value}");
+    }
+    db.drop([pool]).await;
+}
+
+/// The class and `changed` compare `proof_bounds` with the database's
+/// `jsonb` equality, exact for the stored numbers: on a row whose numbers
+/// are beyond `f64` precision (written by raw SQL; the service cannot write
+/// them), a disable that echoes the row as read is widening, since the echo
+/// rounds them, and a gated rename names `proof_bounds` as changed at the
+/// request and at the approval alike. Key order and a number's spelling
+/// (`600` and `600.0`) are no change.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn proof_bounds_compare_exactly_with_the_stored_jsonb() {
+    let (db, pool) = seeded().await;
+    set_policy(&pool, true, false).await;
+    let clock = TestClock::new(at(10));
+    direct_create(&pool, &uploaded("src_1")).await;
+    sqlx::query(
+        "UPDATE trust_source SET proof_bounds = \
+         '{\"max_ttl_s\": 18446744073709551617, \"skew\": 0.10000000000000000001}', \
+         revision = revision + 1 WHERE id = 'src_1'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let row = source_row(&pool, "src_1").await.unwrap();
+    assert_eq!(row.revision, 2);
+    let before = snapshot(&pool).await;
+    refused(
+        submit_update(
+            &pool,
+            "key_trust",
+            "op_x",
+            false,
+            ("src_1", 2),
+            &with_status(&row, Status::Disabled),
+        )
+        .await,
+        "WideningNotAcknowledged",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    let rename = renamed(&row, "renamed");
+    let op = pending(submit_update(&pool, "key_trust", "op_1", true, ("src_1", 2), &rename).await);
+    assert_eq!(
+        operation(&pool, "op_1").await.immutable_plan["changed"],
+        json!(["name", "proof_bounds"])
+    );
+    let prepared = prepare(&pool, "key_sec1", "op_1").await.unwrap();
+    let row = applied_source(approve(&pool, "key_sec1", &prepared, &echo(&op), &*clock).await);
+    assert_eq!(row.revision, 3);
+
+    // Key order and a number's spelling are no change: a disable-only update.
+    let source = direct_create(&pool, &oidc("src_2", DISCOVERY)).await;
+    let disable = TrustSourceChanges {
+        proof_bounds: object(json!({"skew": 1.5, "max_ttl_s": 600.0})),
+        ..with_status(&source, Status::Disabled)
+    };
+    let disabled =
+        applied(submit_update(&pool, "key_trust", "op_2", false, ("src_2", 1), &disable).await);
+    assert_eq!(disabled.status, Status::Disabled);
+    assert_eq!(last_event(&pool).await.7, "success");
     db.drop([pool]).await;
 }
 

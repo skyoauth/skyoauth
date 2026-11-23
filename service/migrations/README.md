@@ -1195,9 +1195,10 @@ The database does not enforce these rules; the service must:
   the operation and the remaining updates of step 3. `audit_id` stays an
   immediate, not deferrable foreign key, so the event is inserted first.
   Writes that create no operation (consume, outcome) update their rows
-  before the head, in the `0002` order. A trust source write (T11.2)
-  creates no operation either; its order is in "Trust source writes" under
-  "Rust registry surface".
+  before the head, in the `0002` order. A trust source write (T11.2) that
+  is applied at once creates no operation either, and a pending gated
+  request writes no source row; both orders are in "Trust source writes"
+  under "Rust registry surface".
 
 - `0005` makes two `0002` tables foreign-key targets, so a bare `TRUNCATE`
   of them now fails with `0A000` (a table referenced in a foreign key) before
@@ -3470,7 +3471,8 @@ unless marked inferred:
 - The gate (`docs/proposals/second-approver-gated-writes.md`, its PR 5):
   every create is widening, and so is every update except a disable-only
   one, whose new `status` is `disabled` and whose other fourteen members
-  equal the stored row's (Q2, ruled by the user, 2026-11-23). The server
+  equal the stored row's, `proof_bounds` by `jsonb` equality on the locked
+  row (Q2, ruled by the user, 2026-11-23). The server
   decides the class from the stored row. A disable-only update is applied
   at once with outcome `success`, without `acknowledge_widening`, whatever
   the policy row says; a widening write without the flag is

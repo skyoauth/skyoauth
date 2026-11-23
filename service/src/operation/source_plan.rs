@@ -9,8 +9,13 @@
 //! [`TrustSourceChanges`] (inferred). `proof_bounds`, free-form operator
 //! JSON, is stored as its JSON text (`serde_json`'s compact form, members
 //! sorted byte-wise since its map is ordered; inferred, as a keyset create's
-//! provenance), so the `jsonb` column returns it exactly, whatever numbers
-//! it holds. An optional member that is not set is JSON `null`;
+//! provenance), so the `jsonb` column returns the text the request wrote. A
+//! number in it is an `f64` (`serde_json` parses with `float_roundtrip`, so
+//! the plan's text reads back to the same value); a number beyond `f64`
+//! precision, which only a row written outside the service can hold (raw SQL,
+//! a future importer or restore), is rounded in the changes a caller echoes,
+//! and the exact `jsonb` comparison of [`changed_members`]'s caller then
+//! counts it as a change. An optional member that is not set is JSON `null`;
 //! `review_timeout_ms` is an integer in the `i32` range.
 //!
 //! No member holds a secret: `ca_bundle_ref` and `reviewer_credential_ref`
@@ -70,12 +75,16 @@ pub(crate) const CHANGE_MEMBERS: [&str; 15] = [
 ];
 
 /// The members of `changes` whose value differs from `stored`'s, sorted
-/// byte-wise: an update plan's `changed` (section 2). `proof_bounds` is
-/// compared as JSON values (`serde_json`'s equality: a key order does not
-/// count, a number spelled as an integer and as a float does).
+/// byte-wise: an update plan's `changed` (section 2). `proof_bounds` is not
+/// compared here: `proof_bounds_equal` is the database's `jsonb` equality
+/// of the stored column with `changes.proof_bounds`
+/// ([`crate::trust::source`]'s `proof_bounds_equal`), which is exact for the
+/// stored numbers, ignores key order and compares numbers by value (`1` and
+/// `1.0` are equal).
 pub(crate) fn changed_members(
     stored: &TrustSource,
     changes: &TrustSourceChanges,
+    proof_bounds_equal: bool,
 ) -> Vec<&'static str> {
     let differs = [
         (ALGORITHMS, stored.algorithms != changes.algorithms),
@@ -92,7 +101,7 @@ pub(crate) fn changed_members(
         (DISCOVERY_URL, stored.discovery_url != changes.discovery_url),
         (EXACT_ISSUER, stored.exact_issuer != changes.exact_issuer),
         (NAME, stored.name != changes.name),
-        (PROOF_BOUNDS, stored.proof_bounds != changes.proof_bounds),
+        (PROOF_BOUNDS, !proof_bounds_equal),
         (REPLAY_MODE, stored.replay_mode != changes.replay_mode),
         (
             REVIEW_TIMEOUT_MS,
@@ -383,11 +392,13 @@ impl CreateSourcePlan {
 
 impl UpdateSourcePlan {
     /// The plan of an update of the source `source_id`, whose stored row is
-    /// `stored`, to `changes`, by the credential `requester_credential_id`.
+    /// `stored`, to `changes`, by the credential `requester_credential_id`;
+    /// `proof_bounds_equal` as for [`changed_members`].
     pub(crate) fn new(
         requester_credential_id: &str,
         stored: &TrustSource,
         changes: &TrustSourceChanges,
+        proof_bounds_equal: bool,
     ) -> Self {
         Self {
             requester_credential_id: requester_credential_id.into(),
@@ -409,7 +420,7 @@ impl UpdateSourcePlan {
                 replay_mode: changes.replay_mode,
                 status: changes.status,
             },
-            changed: changed_members(stored, changes)
+            changed: changed_members(stored, changes, proof_bounds_equal)
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
@@ -647,7 +658,7 @@ mod tests {
         changes.status = Status::Disabled;
         changes.name = "renamed".into();
         changes.proof_bounds = object(json!({"a": {"n": 1.5}, "z": 2}));
-        let plan = UpdateSourcePlan::new("crd_1", &stored, &changes);
+        let plan = UpdateSourcePlan::new("crd_1", &stored, &changes, false);
         assert_eq!(plan.changed, ["name", "proof_bounds", "status"]);
         let written = plan.to_plan();
         assert_eq!(written.len(), 18);
@@ -683,7 +694,7 @@ mod tests {
     #[test]
     fn every_changed_member_is_named() {
         let stored = stored(&k8s());
-        assert!(changed_members(&stored, &unchanged(&stored)).is_empty());
+        assert!(changed_members(&stored, &unchanged(&stored), true).is_empty());
         let mut sorted = CHANGE_MEMBERS;
         sorted.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
         assert_eq!(sorted, CHANGE_MEMBERS);
@@ -714,13 +725,11 @@ mod tests {
         for (name, change) in cases {
             let mut changes = unchanged(&stored);
             change(&mut changes);
-            assert_eq!(changed_members(&stored, &changes), [name], "{name}");
+            let equal = name != "proof_bounds";
+            assert_eq!(changed_members(&stored, &changes, equal), [name], "{name}");
         }
-        // Key order does not count; a number's spelling does.
-        let mut changes = unchanged(&stored);
-        changes.proof_bounds = object(json!({"a": {"n": 1.5}, "z": 1}));
-        assert!(changed_members(&stored, &changes).is_empty());
-        changes.proof_bounds = object(json!({"a": {"n": 1.5}, "z": 1.0}));
-        assert_eq!(changed_members(&stored, &changes), ["proof_bounds"]);
+        // `proof_bounds` is the caller's comparison, never the values here.
+        let changes = unchanged(&stored);
+        assert_eq!(changed_members(&stored, &changes, false), ["proof_bounds"]);
     }
 }
