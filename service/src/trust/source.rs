@@ -5,14 +5,18 @@
 //!
 //! [`create_source`] and [`update_source`] wrap the registry's bare
 //! [`create_trust_source`] and [`update_trust_source`], which check nothing
-//! the database does not. They run in the caller's
-//! transaction and neither commit nor roll it back. The picks below are
-//! the lead's (provisional lead pick, 2026-11-22) unless marked (inferred);
+//! the database does not. [`submit_create_source`] and
+//! [`submit_update_source`] are the gated create and update of the
+//! second-approver flow (`docs/proposals/second-approver-gated-writes.md`,
+//! PR 5; see "The gate"). They run in the caller's transaction and neither
+//! commit nor roll it back. The picks below are the lead's (provisional
+//! lead pick, 2026-11-22; the gate's, 2026-11-23) unless marked (inferred);
 //! all are provisional until the maintainer ratifies the ADRs (T00.8 to
-//! T00.17, Gate M0). Three rulings below are the user's (2026-11-22,
-//! relayed by the lead), not provisional picks: canonical-form
-//! destinations as the convention (end of "Rules"), source writes as
-//! widening, and the database backstop (both under "Not done here").
+//! T00.17, Gate M0). Four rulings below are the user's, not provisional
+//! picks: canonical-form destinations as the convention (end of "Rules"),
+//! source writes as widening and the database backstop (both under "Not
+//! done here"; 2026-11-22, relayed by the lead), and the class of an update
+//! (Q2, 2026-11-23; "The gate").
 //!
 //! # Rules
 //!
@@ -109,6 +113,95 @@
 //! No error's `Display` or `Debug` contains a destination: errors name the
 //! member, never its value.
 //!
+//! # The gate
+//!
+//! [`submit_create_source`] and [`submit_update_source`] (proposal sections
+//! 1 to 3). The server decides the class of a write from the stored row,
+//! never the caller (Q2, ruled by the user, 2026-11-23):
+//!
+//! - every create, enabled or disabled, is widening;
+//! - an update is disable-only when it sets `status` to `disabled` and its
+//!   other fourteen members equal the stored row's (`proof_bounds` compared
+//!   as JSON values, so `1` and `1.0` differ: a respelling counts as a
+//!   change and fails closed as widening). A disabled source written with
+//!   its stored members is disable-only too (inferred: it widens nothing).
+//!   A disable-only update is not widening: it is applied at once with
+//!   outcome `success`, without the acknowledgement, whatever the policy,
+//!   and never goes pending;
+//! - every other update is widening: an enable, a re-enable, a disable that
+//!   also changes another member, any other change, and a write that
+//!   changes nothing on an enabled source.
+//!
+//! Before any statement a request refuses what D27 pre-validates: the
+//! syntax of a create's destinations, then the plainly typed `CHECK`s of
+//! `0003` and `0004` (a non-empty `id`, `name`, `exact_issuer`,
+//! `cluster_id`, `ca_bundle_ref`, `ca_fingerprint` and
+//! `reviewer_credential_ref`; non-empty `audiences` and `algorithms` of
+//! non-empty strings; a positive `review_timeout_ms`;
+//! `stale_revocation_acknowledged` true when set), each with the
+//! [`RegistryError::Invariant`] the database gives, the
+//! `skyoauth_string_list` domain first and then the checks by name
+//! (inferred: this scope and order). So an unauthorized caller gets these
+//! refusals too; they name a constraint, never a value. The kind, profile,
+//! replay, length, character, unique and foreign-key checks stay the
+//! database's. A source parses nothing in the transaction, so no request
+//! waits for a validation permit and none is `ValidationBusy`.
+//!
+//! Then, in its savepoint:
+//!
+//! 0. `READ COMMITTED` only;
+//! 1. the requester, a `trust_admin` of the source's tenant: its identity,
+//!    its credential, its `trust_admin` binding and its instance
+//!    `security_admin` binding, if any, `FOR SHARE` in one lookup (Q4). A
+//!    `security_admin` without the tenant role is
+//!    [`SourceWriteError::Unauthorized`] like any other miss, and learns
+//!    nothing of the source;
+//! 2. a create: `acknowledge_widening`
+//!    ([`SourceWriteError::WideningNotAcknowledged`]), then the policy row
+//!    `FOR SHARE`, which must exist ([`SourceWriteError::PolicyUnavailable`]
+//!    before bootstrap, D18). An update: the policy row `FOR SHARE`, if
+//!    any, then the stored row `FOR NO KEY UPDATE` (`NotFound`,
+//!    `StaleRevision`) and its class; a widening update then needs the
+//!    acknowledgement and the policy row, in that order, and a disable-only
+//!    one needs neither (inferred: the policy row is locked before the
+//!    source row for every update, a disable-only one included, so one lock
+//!    order holds whatever the class the stored row later gives);
+//! 3. the mode. Disable-only: applied at once, outcome `success`.
+//!    `widening_second_approver` off: applied at once, outcome
+//!    `success_widening` (D23). `single_actor_mode` on and the requester
+//!    also an instance `security_admin`: applied at once, outcome
+//!    `success_single_actor` (Q4). Otherwise the write's own checks run
+//!    under its locks (D7: the syntax and the enabled entry `FOR SHARE` of
+//!    each destination a create sets or an update changes), and a pending
+//!    operation is written with its `administrative_operation.create`
+//!    event; no source is written.
+//!
+//! A create's plan (`trust_source_create`, expected revision 0) holds every
+//! member of the new source; an update's (`trust_source_update`, at the
+//! stored revision) holds the source's ID, its fifteen mutable members as
+//! the request gave them and `changed`, the sorted names of the members that
+//! differ from the stored row. Both hold the requester's credential ID.
+//! Every member is public: the CA bundle and the reviewer credential are
+//! named by reference (`ca_bundle_ref`, `reviewer_credential_ref`), never
+//! held, and a plan holds no secret. Destinations are in canonical form, as
+//! the syntax rules require. `proof_bounds` is held as its compact JSON
+//! text (inferred).
+//!
+//! The approval ([`crate::operation::approve_operation`]) reruns the write
+//! from the locked plan under the approval's locks: for a create, the
+//! syntax, the entries and the insert; for an update, the stored row
+//! `FOR NO KEY UPDATE` at the operation's expected revision, then the
+//! changed destinations, their entries and the compare-and-set. It refuses
+//! with `PlanIntegrity` a create plan whose tenant is not the operation's,
+//! and an update plan whose `changed` is not what its changes change on the
+//! stored row (both inferred). It does not classify again: the expected
+//! revision pins the stored row the class was read from (inferred). The
+//! steps are split for it (D26): `apply_create_source` and
+//! `apply_locked_update` return the row and its event unstamped, and the
+//! caller stamps and appends it. The approval samples the clock once, after
+//! the registry write (D28), so a compare-and-set that waited for a token
+//! exchange's `FOR KEY SHARE` is judged at the time it finished.
+//!
 //! # Order and locks
 //!
 //! Each function, after the pure checks, runs these steps in a savepoint of
@@ -157,16 +250,22 @@
 //!    consumer's `FOR KEY SHARE` would deadlock with that consumer's own
 //!    audit append;
 //!
-//! So the lock order is: operator rows, then the source row
-//! (`FOR NO KEY UPDATE`, update only; `FOR UPDATE` from step 4 on), then
-//! the egress entry rows
+//! So the lock order is: operator rows, then the policy row (`FOR SHARE`,
+//! a gated request only), then the source row (`FOR NO KEY UPDATE`, update
+//! only; `FOR UPDATE` from step 4 on), then the egress entry rows
 //! (`FOR SHARE`, discovery before TokenReview), then the write's own locks,
-//! then the audit head. This differs from step 1 of "What 0005 adds" in the
-//! migrations README, which orders the `0002` to `0004` tables by name
-//! (`egress_allowlist_entry` before `trust_source`): that order is for a
-//! write that creates an `administrative_operation`, which this one does
-//! not, and an update must read the stored row before it knows which entry
-//! to lock. An egress entry writer that locked a trust source row after an
+//! then the audit head. A pending request writes no source: after its
+//! entries it appends its `administrative_operation.create` event (the
+//! audit head) and then inserts the operation. An approval takes its
+//! operator rows, then the operation row `FOR NO KEY UPDATE`, then the
+//! source row, the entries and the write as above, then samples the clock,
+//! then takes the audit head; it takes no policy row. This differs from
+//! step 1 of "What 0005 adds" in the migrations README, which orders the
+//! `0002` to `0004` tables by name (`egress_allowlist_entry` before
+//! `instance_security_policy` and `trust_source`) for a write that creates
+//! an `administrative_operation`: an update must read the stored row before
+//! it knows which entry to lock, and the policy row, which every gated
+//! request reads first, comes before both (inferred). An egress entry writer that locked a trust source row after an
 //! entry row would deadlock with an update here; PostgreSQL fails one of
 //! them with `40P01` ([`RegistryError::Retry`]), a refusal for this write.
 //! No egress entry writer exists yet. One that creates an operation must
@@ -208,7 +307,11 @@
 //!
 //! One event, last, in the source's tenant: actor the authorized operator
 //! (`{"type": "operator", "id": <admin_id>}`), `object_id` the source's ID,
-//! outcome `success` (inferred, as for bootstrap and restore). A create is
+//! outcome `success` (inferred, as for bootstrap and restore; a gated
+//! write applied at once has `success_widening` or `success_single_actor`,
+//! a disable-only update `success`, and an approved write `success` with
+//! the requester as actor, after the approval's own event, at the
+//! approval's clock sample: see "The gate"). A create is
 //! `trust_source.create` with no previous revision and the new row's
 //! revision; an update is `trust_source.update` with the stored and the new
 //! revision, for every update, a status-only one included (provisional
@@ -228,26 +331,28 @@
 //! commits none of the function's rows, and its transaction stays usable.
 //! Rolling the savepoint back releases the locks taken in it. The caller
 //! still rolls back on `Err`, since a failed savepoint rollback leaves the
-//! rows in place. A refusal before step 0 (the syntax of a create) runs no
-//! statement and takes no savepoint.
+//! rows in place. A refusal before step 0 (the syntax of a create, or D27
+//! of a gated request) runs no statement and takes no savepoint.
 //!
 //! # Not done here
 //!
 //! - No endpoint and no HTTP: nothing calls these functions yet. They must
 //!   not be wired to a request path before the request layer exists
 //!   (generated IDs, T10.2; NUL rejection; the role of each endpoint,
-//!   T13.2, T13.3) and before the source kinds of the second-approver flow
-//!   land (`docs/proposals/second-approver-gated-writes.md`, PR 5), since a
-//!   wired write would apply a widening source write without the approval
-//!   IR-052 requires.
+//!   T13.2, T13.3). An endpoint calls [`submit_create_source`] and
+//!   [`submit_update_source`], never the ungated writes.
 //! - Widening: a trust source write counts as widening and needs an IR-054
 //!   approval by a second approver while `widening_second_approver` is on
 //!   (ruled by the user, 2026-11-22, relayed by the lead; this decides the
-//!   IR-052 widening question for this write). The second-approver flow is
+//!   IR-052 widening question for this write), except a disable-only update
+//!   (Q2, ruled by the user, 2026-11-23). The second-approver flow is
 //!   designed in that proposal (accepted, 2026-11-23); no task ID names it
 //!   (the nearest owners are T13.3, T13.2, T13.8, T11.6, T10.4 and T10.2).
-//!   Its source kinds are PR 5's; until then no write here waits for an
-//!   approval.
+//!   The gated writes put source writes through it (see "The gate").
+//!   [`create_source`] and [`update_source`] stay ungated: with
+//!   `widening_second_approver` on they would apply a widening write on one
+//!   operator's authority. They stay public for the tests until the
+//!   proposal's PR 7 makes them crate-private.
 //! - The fetch-time match of a discovered `jwks_uri` against an enabled
 //!   `jwks` entry, the degraded health signal and the fetches themselves
 //!   (IR-152; T11.2, T11.8).
@@ -284,9 +389,18 @@ use std::{fmt, time::SystemTime};
 use sqlx::{Postgres, Row, Transaction};
 use url::Url;
 
-use super::write::{WriteError, authorize_trust_admin, in_savepoint, require_read_committed};
+use super::write::{
+    GatedWriteError, Mode, WriteError, authorize_gated_requester, authorize_trust_admin,
+    authorize_widening_write, in_savepoint, lock_policy_shared, require_acknowledged,
+    require_read_committed, widening_mode,
+};
+use crate::operation::{
+    Gated, OUTCOME_SUCCESS, OperationKind, PendingRequest, Requester, Submission, UnstampedEvent,
+    insert_pending,
+    source_plan::{CreateSourcePlan, UpdateSourcePlan, changed_members},
+};
 use crate::persistence::registry::{
-    AuditActor, EgressPurpose, NewAuditEvent, NewTrustSource, RegistryError, Status, TrustSource,
+    AuditActor, EgressPurpose, InvariantKind, NewTrustSource, RegistryError, Status, TrustSource,
     TrustSourceChanges, append_audit_event, create_trust_source, update_trust_source,
 };
 
@@ -303,15 +417,29 @@ const CREATE_ACTION: &str = "trust_source.create";
 /// The audit action of [`update_source`] (identity-registry IR-059).
 const UPDATE_ACTION: &str = "trust_source.update";
 
-/// The outcome of the event (inferred, as for bootstrap).
+/// The outcome of the event of an ungated write (inferred, as for
+/// bootstrap).
 const SUCCESS: &str = "success";
 
-/// Step 2 of an update: the stored row, locked before any entry so that a
-/// concurrent update of the source waits here and holds no entry lock. Its
-/// compare-and-set (step 4) then takes the row `FOR UPDATE`, which blocks
-/// foreign-key inserts that reference the source until the commit (see the
-/// module docs, "Order and locks").
-const LOCK_SOURCE: &str = "SELECT discovery_url, token_review_endpoint, revision \
+/// The member name of a source's status, as an update plan's `changed`
+/// names it.
+const STATUS_MEMBER: &str = "status";
+
+/// The `0003` domain check of a list of names: a JSON array of non-empty
+/// strings.
+const STRING_LIST_CHECK: &str = "skyoauth_string_list_check";
+
+/// Step 2 of an update: the stored row, every column, locked before any
+/// entry so that a concurrent update of the source waits here and holds no
+/// entry lock. Its compare-and-set (step 4) then takes the row
+/// `FOR UPDATE`, which blocks foreign-key inserts that reference the source
+/// until the commit (see the module docs, "Order and locks"). The gate
+/// reads the whole row: the class of an update (Q2) and its plan's
+/// `changed` compare every mutable member.
+const LOCK_SOURCE: &str = "SELECT id, tenant_id, name, kind, exact_issuer, discovery_url, \
+     jwks_keyset_id, cluster_id, token_review_endpoint, ca_bundle_ref, ca_fingerprint, \
+     reviewer_credential_ref, review_timeout_ms, audiences, algorithms, proof_bounds, \
+     assertion_profile, stale_revocation_acknowledged, replay_mode, status, revision \
      FROM trust_source WHERE tenant_id = $1 AND id = $2 FOR NO KEY UPDATE";
 
 /// Step 3: the entry of one purpose with exactly this destination.
@@ -355,6 +483,14 @@ pub enum SourceWriteError {
     /// module docs, "Isolation"). Not retryable as is: the caller retries
     /// in a `READ COMMITTED` transaction.
     UnsupportedIsolation,
+    /// A gated write that is widening was submitted without
+    /// `acknowledge_widening` (proposal section 3, request step 3). Whether
+    /// a write is widening is the server's decision (see the module docs,
+    /// "The gate").
+    WideningNotAcknowledged,
+    /// A gated widening write found no `instance_security_policy` row
+    /// (before bootstrap; D18).
+    PolicyUnavailable,
     /// A registry error: a store failure, [`RegistryError::Retry`] (retry
     /// the whole transaction), or the write's own outcome, such as
     /// [`RegistryError::NotFound`], [`RegistryError::StaleRevision`] or a
@@ -380,6 +516,10 @@ impl fmt::Display for SourceWriteError {
             Self::UnsupportedIsolation => {
                 f.write_str("trust source writes run only at READ COMMITTED")
             }
+            Self::WideningNotAcknowledged => {
+                f.write_str("the trust source write is widening and was not acknowledged")
+            }
+            Self::PolicyUnavailable => f.write_str("the instance security policy is unavailable"),
             Self::Registry(err) => write!(f, "trust source write failed: {err}"),
         }
     }
@@ -409,6 +549,11 @@ impl From<sqlx::Error> for SourceWriteError {
 impl WriteError for SourceWriteError {
     const UNSUPPORTED_ISOLATION: Self = Self::UnsupportedIsolation;
     const UNAUTHORIZED: Self = Self::Unauthorized;
+}
+
+impl GatedWriteError for SourceWriteError {
+    const WIDENING_NOT_ACKNOWLEDGED: Self = Self::WideningNotAcknowledged;
+    const POLICY_UNAVAILABLE: Self = Self::PolicyUnavailable;
 }
 
 /// A member to check: its name, the purpose of the entries that may match
@@ -534,18 +679,40 @@ async fn check_egress(
     Ok(())
 }
 
-/// Creates the trust source `new` at revision 1 for the operator whose
-/// credential has `public_identity`, after the IR-152 egress check of its
-/// `discovery_url` and `token_review_endpoint`, and appends its
-/// `trust_source.create` event last, in `transaction` (see the module docs
-/// for the rules, the order and the locks). Runs only under
-/// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
-pub async fn create_source(
+/// A step function's event of a write by `requester` of `source`,
+/// unstamped (D26): the caller stamps it with its ID, time and outcome.
+fn unstamped(
+    requester: &Requester,
+    action: &'static str,
+    previous_revision: Option<i64>,
+    source: &TrustSource,
+) -> UnstampedEvent {
+    UnstampedEvent {
+        tenant_id: Some(source.tenant_id.clone()),
+        actor: AuditActor::Operator(requester.admin_id.clone()),
+        action,
+        object_id: source.id.clone(),
+        previous_revision,
+        new_revision: Some(source.revision),
+    }
+}
+
+/// Step 5: `event` stamped with the caller's ID, `now` and `outcome`,
+/// through the audit head.
+async fn append_stamped(
     transaction: &mut Transaction<'_, Postgres>,
-    public_identity: &str,
-    new: &NewTrustSource,
-    audit: &SourceAudit<'_>,
-) -> Result<TrustSource, SourceWriteError> {
+    event: UnstampedEvent,
+    event_id: &str,
+    now: SystemTime,
+    outcome: &str,
+) -> Result<(), SourceWriteError> {
+    append_audit_event(transaction, &event.stamp(event_id, now, outcome)).await?;
+    Ok(())
+}
+
+/// The syntax of each member of a create that is set (see the module docs,
+/// "Rules"), before any statement.
+fn check_create_syntax(new: &NewTrustSource) -> Result<(), SourceWriteError> {
     let destinations = destinations(
         new.discovery_url.as_deref(),
         new.token_review_endpoint.as_deref(),
@@ -553,8 +720,166 @@ pub async fn create_source(
     for destination in &destinations {
         check_syntax(*destination)?;
     }
+    Ok(())
+}
+
+/// A refusal of the `0003`/`0004` `CHECK` named `constraint`, as the
+/// registry maps the database's.
+fn check_violation(constraint: &'static str) -> SourceWriteError {
+    RegistryError::Invariant {
+        kind: InvariantKind::Check,
+        constraint: Some(constraint),
+    }
+    .into()
+}
+
+/// The members of a write that D27 pre-validates (see the module docs,
+/// "The gate"), as a create and an update share them.
+struct TypedMembers<'a> {
+    id: Option<&'a str>,
+    name: &'a str,
+    exact_issuer: &'a str,
+    cluster_id: Option<&'a str>,
+    ca_bundle_ref: Option<&'a str>,
+    ca_fingerprint: Option<&'a str>,
+    reviewer_credential_ref: Option<&'a str>,
+    review_timeout_ms: Option<i32>,
+    audiences: &'a [String],
+    algorithms: Option<&'a [String]>,
+    stale_revocation_acknowledged: Option<bool>,
+}
+
+/// D27: the plainly typed `CHECK`s of a source, with the refusal the
+/// database gives (inferred order: the `skyoauth_string_list` domain
+/// first, as PostgreSQL coerces a value to the column's domain before it
+/// runs the table's checks, then the table's checks by name, as PostgreSQL
+/// runs them). The kind, replay, profile, length, character, unique and
+/// foreign-key checks stay the database's.
+fn check_typed(members: &TypedMembers<'_>) -> Result<(), SourceWriteError> {
+    let empty = |value: Option<&str>| value.is_some_and(str::is_empty);
+    let lists = std::iter::once(members.audiences).chain(members.algorithms);
+    if lists.flatten().any(String::is_empty) {
+        return Err(check_violation(STRING_LIST_CHECK));
+    }
+    let checks = [
+        (
+            members.algorithms.is_some_and(<[String]>::is_empty),
+            "trust_source_algorithms_check",
+        ),
+        (members.audiences.is_empty(), "trust_source_audiences_check"),
+        (
+            empty(members.ca_bundle_ref),
+            "trust_source_ca_bundle_ref_check",
+        ),
+        (
+            empty(members.ca_fingerprint),
+            "trust_source_ca_fingerprint_check",
+        ),
+        (empty(members.cluster_id), "trust_source_cluster_id_check"),
+        (
+            members.exact_issuer.is_empty(),
+            "trust_source_exact_issuer_check",
+        ),
+        (empty(members.id), "trust_source_id_check"),
+        (members.name.is_empty(), "trust_source_name_check"),
+        (
+            members.review_timeout_ms.is_some_and(|ms| ms <= 0),
+            "trust_source_review_timeout_ms_check",
+        ),
+        (
+            empty(members.reviewer_credential_ref),
+            "trust_source_reviewer_credential_ref_check",
+        ),
+        (
+            members.stale_revocation_acknowledged == Some(false),
+            "trust_source_stale_revocation_acknowledged_check",
+        ),
+    ];
+    match checks.into_iter().find(|(fails, _)| *fails) {
+        Some((_, constraint)) => Err(check_violation(constraint)),
+        None => Ok(()),
+    }
+}
+
+/// The pure checks of a gated create, before any statement: the syntax of
+/// its destinations, then D27 ([`check_typed`]). A destination is left to
+/// the syntax rules, which refuse an empty one (inferred).
+fn check_create_request(new: &NewTrustSource) -> Result<(), SourceWriteError> {
+    check_create_syntax(new)?;
+    check_typed(&TypedMembers {
+        id: Some(&new.id),
+        name: &new.name,
+        exact_issuer: &new.exact_issuer,
+        cluster_id: new.cluster_id.as_deref(),
+        ca_bundle_ref: new.ca_bundle_ref.as_deref(),
+        ca_fingerprint: new.ca_fingerprint.as_deref(),
+        reviewer_credential_ref: new.reviewer_credential_ref.as_deref(),
+        review_timeout_ms: new.review_timeout_ms,
+        audiences: &new.audiences,
+        algorithms: new.algorithms.as_deref(),
+        stale_revocation_acknowledged: new.stale_revocation_acknowledged,
+    })
+}
+
+/// The pure checks of a gated update, before any statement: D27
+/// ([`check_typed`]) on its changes. The destinations are checked once the
+/// stored row says which changed (see the module docs, "Rules").
+fn check_update_request(changes: &TrustSourceChanges) -> Result<(), SourceWriteError> {
+    check_typed(&TypedMembers {
+        id: None,
+        name: &changes.name,
+        exact_issuer: &changes.exact_issuer,
+        cluster_id: None,
+        ca_bundle_ref: changes.ca_bundle_ref.as_deref(),
+        ca_fingerprint: changes.ca_fingerprint.as_deref(),
+        reviewer_credential_ref: changes.reviewer_credential_ref.as_deref(),
+        review_timeout_ms: changes.review_timeout_ms,
+        audiences: &changes.audiences,
+        algorithms: changes.algorithms.as_deref(),
+        stale_revocation_acknowledged: changes.stale_revocation_acknowledged,
+    })
+}
+
+/// The post-authorization steps of a create (D26): steps 3 and 4, by
+/// `requester`, whom the caller authorized: the syntax of the destinations
+/// (again, for the approve, whose plan no request checked in this
+/// transaction), each entry `FOR SHARE` and the insert. Returns the row and
+/// its `trust_source.create` event, unstamped; the caller appends it.
+pub(crate) async fn apply_create_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    requester: &Requester,
+    new: &NewTrustSource,
+) -> Result<(TrustSource, UnstampedEvent), SourceWriteError> {
+    check_create_syntax(new)?;
+    let destinations = destinations(
+        new.discovery_url.as_deref(),
+        new.token_review_endpoint.as_deref(),
+    );
+    check_egress(transaction, &destinations).await?;
+    let source = create_trust_source(&mut **transaction, new).await?;
+    let event = unstamped(requester, CREATE_ACTION, None, &source);
+    Ok((source, event))
+}
+
+/// Creates the trust source `new` at revision 1 for the operator whose
+/// credential has `public_identity`, after the IR-152 egress check of its
+/// `discovery_url` and `token_review_endpoint`, and appends its
+/// `trust_source.create` event last, in `transaction` (see the module docs
+/// for the rules, the order and the locks). Runs only under
+/// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
+///
+/// Ungated: it applies a widening write on one operator's authority, so it
+/// stays test-only until it becomes crate-private (see the module docs,
+/// "The gate"); [`submit_create_source`] is the gated write.
+pub async fn create_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    public_identity: &str,
+    new: &NewTrustSource,
+    audit: &SourceAudit<'_>,
+) -> Result<TrustSource, SourceWriteError> {
+    check_create_syntax(new)?;
     in_savepoint(transaction, async |savepoint| {
-        create_steps(savepoint, public_identity, new, &destinations, audit).await
+        create_steps(savepoint, public_identity, new, audit).await
     })
     .await
 }
@@ -564,32 +889,194 @@ async fn create_steps(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     new: &NewTrustSource,
-    destinations: &[Destination<'_>],
     audit: &SourceAudit<'_>,
 ) -> Result<TrustSource, SourceWriteError> {
     require_read_committed::<SourceWriteError>(transaction).await?;
-    let admin_id =
+    let requester =
         authorize_trust_admin::<SourceWriteError>(transaction, public_identity, &new.tenant_id)
-            .await?
-            .admin_id;
-    check_egress(transaction, destinations).await?;
-    let source = create_trust_source(&mut **transaction, new).await?;
-    append_audit_event(
-        transaction,
-        &NewAuditEvent {
-            id: audit.event_id.into(),
-            tenant_id: Some(source.tenant_id.clone()),
-            timestamp: audit.now,
-            actor: AuditActor::Operator(admin_id),
-            action: CREATE_ACTION.into(),
-            object_id: source.id.clone(),
-            previous_revision: None,
-            new_revision: Some(source.revision),
-            outcome: SUCCESS.into(),
-        },
+            .await?;
+    let (source, event) = apply_create_source(transaction, &requester, new).await?;
+    append_stamped(transaction, event, audit.event_id, audit.now, SUCCESS).await?;
+    Ok(source)
+}
+
+/// Requests the create of the trust source `new` (proposal section 3,
+/// "Request"): a widening write, enabled or disabled, for the `trust_admin`
+/// of `new.tenant_id` whose credential has `submission.public_identity`.
+///
+/// Before any statement: the syntax of its destinations and D27. Then, in
+/// a savepoint, only under `READ COMMITTED`: the requester's rows
+/// `FOR SHARE` (with its instance `security_admin` binding, if any; Q4),
+/// `acknowledge_widening` ([`SourceWriteError::WideningNotAcknowledged`]),
+/// the policy row `FOR SHARE` ([`SourceWriteError::PolicyUnavailable`]),
+/// and the mode:
+///
+/// - `widening_second_approver` off: applied at once, as
+///   [`create_source`], with the event's outcome `success_widening` (D23);
+/// - on, `single_actor_mode` on and the requester also an instance
+///   `security_admin`: applied at once, outcome `success_single_actor`
+///   (Q4);
+/// - otherwise the create's checks (each destination's entry `FOR SHARE`,
+///   enabled), then a pending `trust_source_create` operation at expected
+///   revision 0, whose plan holds the source's members. No source is
+///   written.
+///
+/// The caller commits on `Ok` and rolls back on `Err`.
+pub async fn submit_create_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    new: &NewTrustSource,
+) -> Result<Gated<TrustSource>, SourceWriteError> {
+    check_create_request(new)?;
+    in_savepoint(transaction, async |savepoint| {
+        submit_create_steps(savepoint, submission, new).await
+    })
+    .await
+}
+
+/// Request steps 0 to 8 of [`submit_create_source`], in its savepoint.
+async fn submit_create_steps(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    new: &NewTrustSource,
+) -> Result<Gated<TrustSource>, SourceWriteError> {
+    require_read_committed::<SourceWriteError>(transaction).await?;
+    let (requester, mode) =
+        authorize_widening_write::<SourceWriteError>(transaction, submission, &new.tenant_id)
+            .await?;
+    match mode {
+        Mode::Apply(outcome) => {
+            let (source, event) = apply_create_source(transaction, &requester, new).await?;
+            append_stamped(
+                transaction,
+                event,
+                submission.event_id,
+                submission.now,
+                outcome,
+            )
+            .await?;
+            Ok(Gated::Applied(source))
+        }
+        Mode::Pending => {
+            let destinations = destinations(
+                new.discovery_url.as_deref(),
+                new.token_review_endpoint.as_deref(),
+            );
+            check_egress(transaction, &destinations).await?;
+            let plan = CreateSourcePlan::new(&requester.credential_id, new);
+            let request = PendingRequest {
+                kind: OperationKind::TrustSourceCreate,
+                tenant_id: Some(&new.tenant_id),
+                // A create has no target revision (README:946).
+                expected_revision: 0,
+                plan: plan.to_plan(),
+            };
+            let pending =
+                insert_pending::<SourceWriteError>(transaction, submission, &requester, request)
+                    .await?;
+            Ok(Gated::Pending(pending))
+        }
+    }
+}
+
+/// Step 2 of an update: the stored row of the source `id` of `tenant_id`,
+/// every column, `FOR NO KEY UPDATE`, before any entry lock, so that a
+/// concurrent update of the source waits here and holds no entry lock. A
+/// missing row is [`RegistryError::NotFound`] and another revision than
+/// `expected_revision` [`RegistryError::StaleRevision`].
+pub(crate) async fn lock_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+) -> Result<TrustSource, SourceWriteError> {
+    let stored: TrustSource = sqlx::query_as(LOCK_SOURCE)
+        .bind(tenant_id)
+        .bind(id)
+        .fetch_optional(&mut **transaction)
+        .await?
+        .ok_or(RegistryError::NotFound)?;
+    if stored.revision != expected_revision {
+        return Err(RegistryError::StaleRevision.into());
+    }
+    Ok(stored)
+}
+
+/// Step 3 of an update of `stored`: each destination of `changes` that
+/// differs byte-wise from the stored one, its syntax and then its entry
+/// `FOR SHARE`, enabled. A gated update's pending request runs exactly
+/// this (D7).
+async fn check_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    stored: &TrustSource,
+    changes: &TrustSourceChanges,
+) -> Result<(), SourceWriteError> {
+    let destinations = destinations(
+        changed(&changes.discovery_url, stored.discovery_url.as_deref()),
+        changed(
+            &changes.token_review_endpoint,
+            stored.token_review_endpoint.as_deref(),
+        ),
+    );
+    for destination in &destinations {
+        check_syntax(*destination)?;
+    }
+    check_egress(transaction, &destinations).await
+}
+
+/// Steps 3 and 4 of an update of `stored`, the row [`lock_source`]
+/// locked, by `requester`: [`check_update`], then the compare-and-set at
+/// the stored revision. Returns the row and its `trust_source.update`
+/// event, unstamped (D26).
+pub(crate) async fn apply_locked_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    requester: &Requester,
+    stored: &TrustSource,
+    changes: &TrustSourceChanges,
+) -> Result<(TrustSource, UnstampedEvent), SourceWriteError> {
+    check_update(transaction, stored, changes).await?;
+    let source = update_trust_source(
+        &mut **transaction,
+        &stored.tenant_id,
+        &stored.id,
+        stored.revision,
+        changes,
     )
     .await?;
-    Ok(source)
+    let event = unstamped(requester, UPDATE_ACTION, Some(stored.revision), &source);
+    Ok((source, event))
+}
+
+/// What a source update is (Q2, ruled by the user, 2026-11-23).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateClass {
+    /// `status` set to `disabled` and every other member equal to the
+    /// stored one: not widening, so it lands at once with outcome
+    /// `success`, whatever the policy.
+    DisableOnly,
+    /// Anything else: an enable or re-enable, a disable that also changes
+    /// another member, any other change, and a write that changes nothing
+    /// on an enabled source.
+    Widening,
+}
+
+/// The class of an update of `stored` to `changes` (Q2), decided by the
+/// server from the stored row, never by the caller: disable-only when
+/// `changes.status` is `disabled` and [`changed_members`] names no other
+/// member. A source already disabled and written with the same members is
+/// disable-only too (inferred: it widens nothing).
+pub(crate) fn classify_source_update(
+    stored: &TrustSource,
+    changes: &TrustSourceChanges,
+) -> UpdateClass {
+    let others_unchanged = changed_members(stored, changes)
+        .into_iter()
+        .all(|member| member == STATUS_MEMBER);
+    if changes.status == Status::Disabled && others_unchanged {
+        UpdateClass::DisableOnly
+    } else {
+        UpdateClass::Widening
+    }
 }
 
 /// Replaces the mutable columns of the trust source `id` of `tenant_id` at
@@ -602,6 +1089,9 @@ async fn create_steps(
 /// promptly: until then the source row is locked `FOR UPDATE`, and every
 /// `principal_binding` or `consumed_assertion` insert that references the
 /// source waits.
+///
+/// Ungated, as [`create_source`]; [`submit_update_source`] is the gated
+/// write.
 pub async fn update_source(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
@@ -628,61 +1118,110 @@ async fn update_steps(
     audit: &SourceAudit<'_>,
 ) -> Result<TrustSource, SourceWriteError> {
     require_read_committed::<SourceWriteError>(transaction).await?;
-    let admin_id =
-        authorize_trust_admin::<SourceWriteError>(transaction, public_identity, tenant_id)
-            .await?
-            .admin_id;
-    let Some(stored) = sqlx::query(LOCK_SOURCE)
-        .bind(tenant_id)
-        .bind(id)
-        .fetch_optional(&mut **transaction)
-        .await?
-    else {
-        return Err(RegistryError::NotFound.into());
-    };
-    let stored_revision: i64 = stored.try_get("revision")?;
-    if stored_revision != expected_revision {
-        return Err(RegistryError::StaleRevision.into());
-    }
-    let stored_discovery: Option<&str> = stored.try_get("discovery_url")?;
-    let stored_token_review: Option<&str> = stored.try_get("token_review_endpoint")?;
-    let destinations = destinations(
-        changed(&changes.discovery_url, stored_discovery),
-        changed(&changes.token_review_endpoint, stored_token_review),
-    );
-    for destination in &destinations {
-        check_syntax(*destination)?;
-    }
-    check_egress(transaction, &destinations).await?;
-    let source = update_trust_source(
-        &mut **transaction,
-        tenant_id,
-        id,
-        expected_revision,
-        changes,
-    )
-    .await?;
-    append_audit_event(
-        transaction,
-        &NewAuditEvent {
-            id: audit.event_id.into(),
-            tenant_id: Some(source.tenant_id.clone()),
-            timestamp: audit.now,
-            actor: AuditActor::Operator(admin_id),
-            action: UPDATE_ACTION.into(),
-            object_id: source.id.clone(),
-            previous_revision: Some(stored_revision),
-            new_revision: Some(source.revision),
-            outcome: SUCCESS.into(),
-        },
-    )
-    .await?;
+    let requester =
+        authorize_trust_admin::<SourceWriteError>(transaction, public_identity, tenant_id).await?;
+    let stored = lock_source(transaction, tenant_id, id, expected_revision).await?;
+    let (source, event) = apply_locked_update(transaction, &requester, &stored, changes).await?;
+    append_stamped(transaction, event, audit.event_id, audit.now, SUCCESS).await?;
     Ok(source)
+}
+
+/// Requests the update of the trust source `id` of `tenant_id` at
+/// `expected_revision` to `changes` (proposal section 3, "Request"), for
+/// the `trust_admin` whose credential has `submission.public_identity`.
+///
+/// Before any statement: D27 on `changes`. Then, in a savepoint, only
+/// under `READ COMMITTED`: the requester's rows `FOR SHARE` (with its
+/// instance `security_admin` binding, if any; Q4), the policy row
+/// `FOR SHARE`, the stored row ([`RegistryError::NotFound`],
+/// [`RegistryError::StaleRevision`]), and the class (Q2):
+///
+/// - disable-only: applied at once, as [`update_source`], outcome
+///   `success`, whatever the policy and the flag;
+/// - widening: without `acknowledge_widening`,
+///   [`SourceWriteError::WideningNotAcknowledged`]; with no policy row,
+///   [`SourceWriteError::PolicyUnavailable`]; then the mode, as
+///   [`submit_create_source`]'s: applied at once with `success_widening` or
+///   `success_single_actor`, or the update's checks (each changed
+///   destination's syntax and entry) and a pending `trust_source_update`
+///   operation at the stored revision, whose plan holds the changes and
+///   the names of the members they change. The source is not written.
+///
+/// The caller commits on `Ok` and rolls back on `Err`.
+pub async fn submit_update_source(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    changes: &TrustSourceChanges,
+) -> Result<Gated<TrustSource>, SourceWriteError> {
+    check_update_request(changes)?;
+    let target = (tenant_id, id, expected_revision);
+    in_savepoint(transaction, async |savepoint| {
+        submit_update_steps(savepoint, submission, target, changes).await
+    })
+    .await
+}
+
+/// Request steps 0 to 8 of [`submit_update_source`], in its savepoint.
+async fn submit_update_steps(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    (tenant_id, id, expected_revision): (&str, &str, i64),
+    changes: &TrustSourceChanges,
+) -> Result<Gated<TrustSource>, SourceWriteError> {
+    require_read_committed::<SourceWriteError>(transaction).await?;
+    let gated =
+        authorize_gated_requester::<SourceWriteError>(transaction, submission, tenant_id).await?;
+    // The policy row before the source row, in the lock order, for every
+    // update, a disable-only one included (inferred: one lock order
+    // whatever the class, which only the stored row decides).
+    let policy = lock_policy_shared::<SourceWriteError>(transaction).await?;
+    let stored = lock_source(transaction, tenant_id, id, expected_revision).await?;
+    let mode = match classify_source_update(&stored, changes) {
+        UpdateClass::DisableOnly => Mode::Apply(OUTCOME_SUCCESS),
+        UpdateClass::Widening => {
+            require_acknowledged::<SourceWriteError>(submission)?;
+            widening_mode::<SourceWriteError>(&gated, policy.as_ref())?
+        }
+    };
+    let requester = gated.requester;
+    match mode {
+        Mode::Apply(outcome) => {
+            let (source, event) =
+                apply_locked_update(transaction, &requester, &stored, changes).await?;
+            append_stamped(
+                transaction,
+                event,
+                submission.event_id,
+                submission.now,
+                outcome,
+            )
+            .await?;
+            Ok(Gated::Applied(source))
+        }
+        Mode::Pending => {
+            check_update(transaction, &stored, changes).await?;
+            let plan = UpdateSourcePlan::new(&requester.credential_id, &stored, changes);
+            let request = PendingRequest {
+                kind: OperationKind::TrustSourceUpdate,
+                tenant_id: Some(tenant_id),
+                expected_revision: stored.revision,
+                plan: plan.to_plan(),
+            };
+            let pending =
+                insert_pending::<SourceWriteError>(transaction, submission, &requester, request)
+                    .await?;
+            Ok(Gated::Pending(pending))
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::registry::{AssertionProfile, ReplayMode, TrustSourceKind};
 
     fn check(member: &'static str, value: &str) -> Result<(), SourceWriteError> {
         let purpose = EgressPurpose::OidcDiscovery;
@@ -892,6 +1431,273 @@ mod tests {
              WHERE purpose = $1 AND exact_destination = $2 FOR SHARE"
         );
         assert!(LOCK_SOURCE.ends_with("WHERE tenant_id = $1 AND id = $2 FOR NO KEY UPDATE"));
+        // The full stored row: every column `TrustSource` reads.
+        assert!(LOCK_SOURCE.starts_with(
+            "SELECT id, tenant_id, name, kind, exact_issuer, discovery_url, jwks_keyset_id, \
+             cluster_id, token_review_endpoint, ca_bundle_ref, ca_fingerprint, \
+             reviewer_credential_ref, review_timeout_ms, audiences, algorithms, proof_bounds, \
+             assertion_profile, stale_revocation_acknowledged, replay_mode, status, revision \
+             FROM trust_source "
+        ));
+    }
+
+    fn object(value: serde_json::Value) -> crate::persistence::registry::JsonObject {
+        match value {
+            serde_json::Value::Object(members) => members,
+            other => panic!("not an object: {other}"),
+        }
+    }
+
+    fn stored(status: Status) -> TrustSource {
+        TrustSource {
+            id: "src_1".into(),
+            tenant_id: "ten_a".into(),
+            name: "source-1".into(),
+            kind: TrustSourceKind::OidcDiscovery,
+            exact_issuer: "https://issuer.example".into(),
+            discovery_url: Some("https://issuer.example/.well-known/openid-configuration".into()),
+            jwks_keyset_id: None,
+            cluster_id: None,
+            token_review_endpoint: None,
+            ca_bundle_ref: None,
+            ca_fingerprint: None,
+            reviewer_credential_ref: None,
+            review_timeout_ms: None,
+            audiences: vec!["aud_a".into()],
+            algorithms: Some(vec!["ES256".into()]),
+            proof_bounds: object(serde_json::json!({"a": 1, "b": [true]})),
+            assertion_profile: AssertionProfile::OnDemandJwt,
+            stale_revocation_acknowledged: None,
+            replay_mode: ReplayMode::Reusable,
+            status,
+            revision: 4,
+        }
+    }
+
+    fn same(stored: &TrustSource) -> TrustSourceChanges {
+        TrustSourceChanges {
+            name: stored.name.clone(),
+            exact_issuer: stored.exact_issuer.clone(),
+            discovery_url: stored.discovery_url.clone(),
+            token_review_endpoint: stored.token_review_endpoint.clone(),
+            ca_bundle_ref: stored.ca_bundle_ref.clone(),
+            ca_fingerprint: stored.ca_fingerprint.clone(),
+            reviewer_credential_ref: stored.reviewer_credential_ref.clone(),
+            review_timeout_ms: stored.review_timeout_ms,
+            audiences: stored.audiences.clone(),
+            algorithms: stored.algorithms.clone(),
+            proof_bounds: stored.proof_bounds.clone(),
+            assertion_profile: stored.assertion_profile,
+            stale_revocation_acknowledged: stored.stale_revocation_acknowledged,
+            replay_mode: stored.replay_mode,
+            status: stored.status,
+        }
+    }
+
+    /// Q2: a disable that changes nothing else is not widening; an enable,
+    /// a re-enable, a write that changes nothing on an enabled source and a
+    /// disable that changes any other member are.
+    #[test]
+    fn only_a_disable_that_changes_nothing_else_is_disable_only() {
+        let enabled = stored(Status::Enabled);
+        let disabled = stored(Status::Disabled);
+        let mut disable = same(&enabled);
+        disable.status = Status::Disabled;
+        assert_eq!(
+            classify_source_update(&enabled, &disable),
+            UpdateClass::DisableOnly
+        );
+        assert_eq!(
+            classify_source_update(&disabled, &same(&disabled)),
+            UpdateClass::DisableOnly
+        );
+        // The key order of the proof bounds is no change.
+        let mut reordered = disable.clone();
+        reordered.proof_bounds = object(serde_json::json!({"b": [true], "a": 1}));
+        assert_eq!(
+            classify_source_update(&enabled, &reordered),
+            UpdateClass::DisableOnly
+        );
+        assert_eq!(
+            classify_source_update(&enabled, &same(&enabled)),
+            UpdateClass::Widening
+        );
+        let mut enable = same(&disabled);
+        enable.status = Status::Enabled;
+        assert_eq!(
+            classify_source_update(&disabled, &enable),
+            UpdateClass::Widening
+        );
+        type Change = fn(&mut TrustSourceChanges);
+        let others: [Change; 14] = [
+            |c| c.name.push('x'),
+            |c| c.exact_issuer.push('x'),
+            |c| c.discovery_url = Some("https://other.example/".into()),
+            |c| c.token_review_endpoint = Some("https://other.example/".into()),
+            |c| c.ca_bundle_ref = Some("ca".into()),
+            |c| c.ca_fingerprint = Some("sha256:ca".into()),
+            |c| c.reviewer_credential_ref = Some("reviewer".into()),
+            |c| c.review_timeout_ms = Some(1000),
+            |c| c.audiences.push("aud_b".into()),
+            |c| c.algorithms = None,
+            |c| c.proof_bounds = object(serde_json::json!({"a": 1.0, "b": [true]})),
+            |c| c.assertion_profile = AssertionProfile::ReusableJwt,
+            |c| c.stale_revocation_acknowledged = Some(true),
+            |c| c.replay_mode = ReplayMode::SingleUse,
+        ];
+        for (index, change) in others.into_iter().enumerate() {
+            for (row, base) in [(&enabled, &disable), (&disabled, &same(&disabled))] {
+                let mut changes = base.clone();
+                change(&mut changes);
+                assert_eq!(
+                    classify_source_update(row, &changes),
+                    UpdateClass::Widening,
+                    "change {index} of a {:?} source",
+                    row.status
+                );
+            }
+        }
+    }
+
+    fn constraint(result: Result<(), SourceWriteError>) -> Option<&'static str> {
+        match result {
+            Ok(()) => None,
+            Err(SourceWriteError::Registry(RegistryError::Invariant {
+                kind: InvariantKind::Check,
+                constraint,
+            })) => constraint,
+            Err(other) => panic!("not a check: {other:?}"),
+        }
+    }
+
+    fn k8s_new() -> NewTrustSource {
+        NewTrustSource {
+            id: "src_2".into(),
+            tenant_id: "ten_a".into(),
+            name: "k8s".into(),
+            kind: TrustSourceKind::KubernetesTokenReview,
+            exact_issuer: "https://kubernetes.default.svc".into(),
+            discovery_url: None,
+            jwks_keyset_id: None,
+            cluster_id: Some("cluster_1".into()),
+            token_review_endpoint: Some("https://k3s.internal.example:6443/".into()),
+            ca_bundle_ref: Some("ca".into()),
+            ca_fingerprint: Some("sha256:ca".into()),
+            reviewer_credential_ref: Some("reviewer".into()),
+            review_timeout_ms: Some(5000),
+            audiences: vec!["aud_a".into()],
+            algorithms: None,
+            proof_bounds: object(serde_json::json!({})),
+            assertion_profile: AssertionProfile::ProjectedServiceAccount,
+            stale_revocation_acknowledged: None,
+            replay_mode: ReplayMode::Reusable,
+            status: Status::Enabled,
+        }
+    }
+
+    /// D27: each plainly typed check is refused as the database refuses
+    /// it, the domain first and then the table's checks by name; the
+    /// destinations are the syntax rules'.
+    #[test]
+    fn the_typed_checks_refuse_as_the_database_does() {
+        assert_eq!(constraint(check_create_request(&k8s_new())), None);
+        type Change = fn(&mut NewTrustSource);
+        let cases: [(Change, &str); 14] = [
+            (|n| n.id.clear(), "trust_source_id_check"),
+            (|n| n.name.clear(), "trust_source_name_check"),
+            (
+                |n| n.exact_issuer.clear(),
+                "trust_source_exact_issuer_check",
+            ),
+            (
+                |n| n.cluster_id = Some(String::new()),
+                "trust_source_cluster_id_check",
+            ),
+            (
+                |n| n.ca_bundle_ref = Some(String::new()),
+                "trust_source_ca_bundle_ref_check",
+            ),
+            (
+                |n| n.ca_fingerprint = Some(String::new()),
+                "trust_source_ca_fingerprint_check",
+            ),
+            (
+                |n| n.reviewer_credential_ref = Some(String::new()),
+                "trust_source_reviewer_credential_ref_check",
+            ),
+            (
+                |n| n.review_timeout_ms = Some(0),
+                "trust_source_review_timeout_ms_check",
+            ),
+            (
+                |n| n.review_timeout_ms = Some(-1),
+                "trust_source_review_timeout_ms_check",
+            ),
+            (|n| n.audiences.clear(), "trust_source_audiences_check"),
+            (|n| n.audiences.push(String::new()), STRING_LIST_CHECK),
+            (
+                |n| n.algorithms = Some(Vec::new()),
+                "trust_source_algorithms_check",
+            ),
+            (
+                |n| n.algorithms = Some(vec!["ES256".into(), String::new()]),
+                STRING_LIST_CHECK,
+            ),
+            (
+                |n| n.stale_revocation_acknowledged = Some(false),
+                "trust_source_stale_revocation_acknowledged_check",
+            ),
+        ];
+        for (change, expected) in cases {
+            let mut new = k8s_new();
+            change(&mut new);
+            assert_eq!(constraint(check_create_request(&new)), Some(expected));
+        }
+        // Values the checks accept.
+        let mut fine = k8s_new();
+        fine.review_timeout_ms = Some(1);
+        fine.stale_revocation_acknowledged = Some(true);
+        fine.algorithms = Some(vec!["ES256".into()]);
+        assert_eq!(constraint(check_create_request(&fine)), None);
+        // Several at once: the domain, then by name.
+        let mut several = k8s_new();
+        several.name.clear();
+        several.audiences.clear();
+        several.algorithms = Some(vec![String::new()]);
+        assert_eq!(
+            constraint(check_create_request(&several)),
+            Some(STRING_LIST_CHECK)
+        );
+        several.algorithms = None;
+        assert_eq!(
+            constraint(check_create_request(&several)),
+            Some("trust_source_audiences_check")
+        );
+        // A destination is the syntax rules', first.
+        let mut empty_destination = k8s_new();
+        empty_destination.token_review_endpoint = Some(String::new());
+        empty_destination.name.clear();
+        assert!(matches!(
+            check_create_request(&empty_destination),
+            Err(SourceWriteError::InvalidDestination {
+                member: TOKEN_REVIEW_ENDPOINT
+            })
+        ));
+        // An update checks its changes, never an ID.
+        let source = stored(Status::Enabled);
+        assert_eq!(constraint(check_update_request(&same(&source))), None);
+        let mut changes = same(&source);
+        changes.exact_issuer.clear();
+        assert_eq!(
+            constraint(check_update_request(&changes)),
+            Some("trust_source_exact_issuer_check")
+        );
+        changes = same(&source);
+        changes.stale_revocation_acknowledged = Some(false);
+        assert_eq!(
+            constraint(check_update_request(&changes)),
+            Some("trust_source_stale_revocation_acknowledged_check")
+        );
     }
 
     #[test]
@@ -911,6 +1717,14 @@ mod tests {
             (
                 SourceWriteError::UnsupportedIsolation,
                 "trust source writes run only at READ COMMITTED",
+            ),
+            (
+                SourceWriteError::WideningNotAcknowledged,
+                "the trust source write is widening and was not acknowledged",
+            ),
+            (
+                SourceWriteError::PolicyUnavailable,
+                "the instance security policy is unavailable",
             ),
             (
                 SourceWriteError::Registry(RegistryError::StaleRevision),

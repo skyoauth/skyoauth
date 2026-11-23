@@ -15,8 +15,12 @@
 //!   and [`update_source`] are the audited write path of a trust source:
 //!   they authorize the operator, check the source's egress destinations
 //!   against the egress allowlist, write the row and append its audit event,
-//!   in the caller's transaction. See the [`source`] module for the rules,
-//!   the lock order and what is not done here.
+//!   in the caller's transaction. [`submit_create_source`] and
+//!   [`submit_update_source`] are the same writes through the
+//!   second-approver gate: a create and a widening update applied at once or
+//!   pending, a disable-only update applied at once as not widening. See the
+//!   [`source`] module for the rules, the lock order and what is not done
+//!   here.
 //!
 //! The module is library-level only: no endpoint calls it yet, and nothing
 //! wires it at startup (provisional lead pick, 2026-11-22).
@@ -32,5 +36,5 @@ pub use keyset::{
 };
 pub use source::{
     DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT, create_source,
-    update_source,
+    submit_create_source, submit_update_source, update_source,
 };
