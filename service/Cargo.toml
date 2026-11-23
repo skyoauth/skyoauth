@@ -33,11 +33,16 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # `persistence::registry::test_support`, which exposes the bare registry
 # trust writers (`create_trust_keyset_version`,
 # `update_trust_keyset_version`, `create_trust_source`,
-# `update_trust_source`) to those tests and to the scenario tests of
-# `skyoauth-scenarios`. Off in a normal build, where those writes are
-# crate-private; the dev-dependency on this package below, and the one in
-# `tests/Cargo.toml`, turn it on for test targets only (inferred: the
-# mechanism; second-approver proposal, "PR 7 as implemented" and "PR 9 as
+# `update_trust_source`), the operator writers (`create_admin_identity`,
+# `create_admin_credential`, `create_admin_role_binding`,
+# `update_admin_role_binding`), `append_audit_event` and the operation-row
+# writers (`insert_administrative_operation`,
+# `consume_administrative_operation`, `revoke_administrative_operation`)
+# to those tests and to the scenario tests of `skyoauth-scenarios`. Off in
+# a normal build, where those writes are crate-private; the dev-dependency
+# on this package below, and the one in `tests/Cargo.toml`, turn it on for
+# test targets only (inferred: the mechanism; second-approver proposal,
+# "PR 7 as implemented", "PR 9 as implemented" and "PR 10 as
 # implemented"). Only a `[dev-dependencies]` entry may name it.
 test-support = []
 

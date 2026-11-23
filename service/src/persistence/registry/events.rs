@@ -4,15 +4,20 @@
 //!
 //! # Appending
 //!
-//! [`append_audit_event`] is the last step of the audited transaction: the
-//! caller writes the domain rows first, then appends the event, then
-//! commits. The exception is a write that creates an
-//! `administrative_operation`, which follows steps 1 to 3 of the migrations
-//! README for it: lock the rows it references or updates
-//! `FOR NO KEY UPDATE`, append the event, insert the operation, then make
-//! the other updates. The event precedes the operation because
-//! `administrative_operation.audit_id` is an immediate (not deferrable)
-//! foreign key to it.
+//! [`append_audit_event`] is crate-private (`pub(crate)`; second-approver
+//! proposal, PR 10): it appends a well-chained event of its caller's
+//! choosing, so only the audited writes of the registry, `crate::trust` and
+//! `crate::operation` call it, and tests reach it through the registry's
+//! `test_support` module, compiled only with the `test-support` feature.
+//!
+//! It is the last step of the audited transaction: the caller writes the
+//! domain rows first, then appends the event, then commits. The exception
+//! is a write that creates an `administrative_operation`, which follows
+//! steps 1 to 3 of the migrations README for it: lock the rows it
+//! references or updates `FOR NO KEY UPDATE`, append the event, insert the
+//! operation, then make the other updates. The event precedes the operation
+//! because `administrative_operation.audit_id` is an immediate (not
+//! deferrable) foreign key to it.
 //!
 //! The append locks the event's `tenant` row first, for a tenant-scope
 //! event, with `SELECT … FOR KEY SHARE`, the lock the insert's foreign-key
@@ -277,7 +282,8 @@ impl AuditActor {
     }
 }
 
-/// The input of [`append_audit_event`]. The chain assigns `sequence` and
+/// The input of the crate-private `append_audit_event` (tests reach it
+/// through the `test-support` feature). The chain assigns `sequence` and
 /// `prev_hash`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAuditEvent {
@@ -328,7 +334,7 @@ impl AuditEvent {
     }
 
     /// The event's hash recomputed from its fields and `prev_hash`, as
-    /// [`append_audit_event`] and [`verify_audit_chain`] compute it. It
+    /// `append_audit_event` and [`verify_audit_chain`] compute it. It
     /// ignores [`hash`](Self::hash).
     pub fn compute_hash(&self) -> Result<[u8; 32], RegistryError> {
         Ok(event_hash(self.prev_hash.as_ref(), &self.envelope()?))
@@ -538,7 +544,7 @@ fn digest(bytes: Vec<u8>) -> Option<[u8; 32]> {
 /// Appends `event` to the chain in `transaction`, after the domain rows (see
 /// the module docs for the order and the `administrative_operation`
 /// exception), and returns the stored event with its hash.
-pub async fn append_audit_event(
+pub(crate) async fn append_audit_event(
     transaction: &mut Transaction<'_, Postgres>,
     event: &NewAuditEvent,
 ) -> Result<AuditEvent, RegistryError> {

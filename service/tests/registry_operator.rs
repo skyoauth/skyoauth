@@ -169,16 +169,16 @@ async fn operator(
     tenant_id: Option<&str>,
     binding_status: Status,
 ) {
-    registry::create_admin_identity(pool, &identity(admin, admin_status))
+    registry::test_support::create_admin_identity(pool, &identity(admin, admin_status))
         .await
         .unwrap();
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &credential(&format!("crd_{admin}"), admin, key, key_status),
     )
     .await
     .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         pool,
         &binding(
             &format!("rb_{admin}"),
@@ -287,10 +287,10 @@ async fn seeded() -> (TestDb, PgPool) {
         E,
     )
     .await;
-    registry::create_admin_identity(&pool, &identity("adm_nobind", E))
+    registry::test_support::create_admin_identity(&pool, &identity("adm_nobind", E))
         .await
         .unwrap();
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         &pool,
         &credential("crd_adm_nobind", "adm_nobind", "key_nobind", E),
     )
@@ -335,7 +335,7 @@ async fn operator_rows_are_created_read_and_keyed() {
     let (db, pool) = migrated().await;
     tenants(&pool).await;
 
-    let created = registry::create_admin_identity(
+    let created = registry::test_support::create_admin_identity(
         &pool,
         &NewAdminIdentity {
             id: "adm_1".into(),
@@ -356,11 +356,12 @@ async fn operator_rows_are_created_read_and_keyed() {
     );
     assert_not_found(registry::get_admin_identity(&pool, "adm_x").await);
     assert_exists(
-        registry::create_admin_identity(&pool, &identity("adm_1", Status::Disabled)).await,
+        registry::test_support::create_admin_identity(&pool, &identity("adm_1", Status::Disabled))
+            .await,
         "admin_identity_pkey",
     );
     // The time is the caller's, also far from the database's clock.
-    let old = registry::create_admin_identity(
+    let old = registry::test_support::create_admin_identity(
         &pool,
         &NewAdminIdentity {
             id: "adm_old".into(),
@@ -374,7 +375,7 @@ async fn operator_rows_are_created_read_and_keyed() {
     assert_eq!(old.status, Status::Disabled);
     // A time outside the 0007 range fails before any statement.
     let far = UNIX_EPOCH + Duration::from_micros(u64::try_from(i64::MAX).unwrap());
-    let err = registry::create_admin_identity(
+    let err = registry::test_support::create_admin_identity(
         &pool,
         &NewAdminIdentity {
             id: "adm_far".into(),
@@ -390,17 +391,21 @@ async fn operator_rows_are_created_read_and_keyed() {
     );
     assert_not_found(registry::get_admin_identity(&pool, "adm_far").await);
     assert_invariant(
-        registry::create_admin_identity(&pool, &identity("", Status::Enabled)).await,
+        registry::test_support::create_admin_identity(&pool, &identity("", Status::Enabled)).await,
         InvariantKind::Check,
         "admin_identity_id_check",
     );
     assert_invariant(
-        registry::create_admin_identity(&pool, &identity(&"a".repeat(256), Status::Enabled)).await,
+        registry::test_support::create_admin_identity(
+            &pool,
+            &identity(&"a".repeat(256), Status::Enabled),
+        )
+        .await,
         InvariantKind::Check,
         "admin_identity_id_octet_length_check",
     );
 
-    let key = registry::create_admin_credential(
+    let key = registry::test_support::create_admin_credential(
         &pool,
         &credential("crd_1", "adm_1", "key_1", Status::Enabled),
     )
@@ -425,7 +430,7 @@ async fn operator_rows_are_created_read_and_keyed() {
     );
     assert_not_found(registry::get_admin_credential(&pool, "crd_x").await);
     assert_exists(
-        registry::create_admin_credential(
+        registry::test_support::create_admin_credential(
             &pool,
             &credential("crd_1", "adm_1", "key_2", Status::Enabled),
         )
@@ -435,7 +440,7 @@ async fn operator_rows_are_created_read_and_keyed() {
     // The same key for another operator, or for the same one.
     for admin in ["adm_old", "adm_1"] {
         assert_exists(
-            registry::create_admin_credential(
+            registry::test_support::create_admin_credential(
                 &pool,
                 &credential("crd_2", admin, "key_1", Status::Enabled),
             )
@@ -444,7 +449,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         );
     }
     assert_invariant(
-        registry::create_admin_credential(
+        registry::test_support::create_admin_credential(
             &pool,
             &credential("crd_2", "adm_x", "key_2", Status::Enabled),
         )
@@ -453,7 +458,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         "admin_credential_admin_id_fkey",
     );
     assert_invariant(
-        registry::create_admin_credential(
+        registry::test_support::create_admin_credential(
             &pool,
             &credential("crd_2", "adm_1", "", Status::Enabled),
         )
@@ -462,7 +467,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         "admin_credential_public_identity_check",
     );
     assert_invariant(
-        registry::create_admin_credential(
+        registry::test_support::create_admin_credential(
             &pool,
             &credential("crd_2", "adm_1", &"k".repeat(2049), Status::Enabled),
         )
@@ -473,12 +478,12 @@ async fn operator_rows_are_created_read_and_keyed() {
     let mut spaced = credential("crd_2", "adm_1", "key_2", Status::Enabled);
     spaced.trust_anchor_ref = "operator ca".into();
     assert_invariant(
-        registry::create_admin_credential(&pool, &spaced).await,
+        registry::test_support::create_admin_credential(&pool, &spaced).await,
         InvariantKind::Check,
         "admin_credential_trust_anchor_ref_no_space_check",
     );
 
-    let sec = registry::create_admin_role_binding(
+    let sec = registry::test_support::create_admin_role_binding(
         &pool,
         &binding(
             "rb_1",
@@ -517,7 +522,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         ("rb_6", AdminRole::Auditor, None),
         ("rb_7", AdminRole::TrustAdmin, Some("ten_b")),
     ] {
-        let created = registry::create_admin_role_binding(
+        let created = registry::test_support::create_admin_role_binding(
             &pool,
             &binding(id, "adm_1", role, tenant, Status::Disabled),
         )
@@ -529,7 +534,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         );
     }
     assert_exists(
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             &pool,
             &binding("rb_1", "adm_old", AdminRole::Auditor, None, Status::Enabled),
         )
@@ -544,7 +549,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         (AdminRole::TrustAdmin, Some("ten_a")),
     ] {
         assert_exists(
-            registry::create_admin_role_binding(
+            registry::test_support::create_admin_role_binding(
                 &pool,
                 &binding("rb_9", "adm_1", role, tenant, Status::Enabled),
             )
@@ -559,7 +564,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         (AdminRole::ProviderAdmin, None),
     ] {
         assert_invariant(
-            registry::create_admin_role_binding(
+            registry::test_support::create_admin_role_binding(
                 &pool,
                 &binding("rb_9", "adm_old", role, tenant, Status::Enabled),
             )
@@ -569,7 +574,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         );
     }
     assert_invariant(
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             &pool,
             &binding(
                 "rb_9",
@@ -584,7 +589,7 @@ async fn operator_rows_are_created_read_and_keyed() {
         "admin_role_binding_tenant_id_fkey",
     );
     assert_invariant(
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             &pool,
             &binding("rb_9", "adm_x", AdminRole::Auditor, None, Status::Enabled),
         )
@@ -617,9 +622,10 @@ async fn role_binding_updates_are_revision_checked() {
     let enable = AdminRoleBindingChanges {
         status: Status::Enabled,
     };
-    let disabled = registry::update_admin_role_binding(&pool, "rb_adm_1", 1, &disable)
-        .await
-        .unwrap();
+    let disabled =
+        registry::test_support::update_admin_role_binding(&pool, "rb_adm_1", 1, &disable)
+            .await
+            .unwrap();
     assert_eq!((disabled.status, disabled.revision), (Status::Disabled, 2));
     assert_eq!(
         (
@@ -630,16 +636,19 @@ async fn role_binding_updates_are_revision_checked() {
         ("adm_1", AdminRole::TrustAdmin, Some("ten_a"))
     );
     assert!(matches!(
-        registry::update_admin_role_binding(&pool, "rb_adm_1", 1, &enable).await,
+        registry::test_support::update_admin_role_binding(&pool, "rb_adm_1", 1, &enable).await,
         Err(RegistryError::StaleRevision)
     ));
     assert!(matches!(
-        registry::update_admin_role_binding(&pool, "rb_adm_1", i64::MAX, &enable).await,
+        registry::test_support::update_admin_role_binding(&pool, "rb_adm_1", i64::MAX, &enable)
+            .await,
         Err(RegistryError::StaleRevision)
     ));
-    assert_not_found(registry::update_admin_role_binding(&pool, "rb_x", 1, &enable).await);
+    assert_not_found(
+        registry::test_support::update_admin_role_binding(&pool, "rb_x", 1, &enable).await,
+    );
     // A binding is re-enabled rather than assigned twice (0005).
-    let enabled = registry::update_admin_role_binding(&pool, "rb_adm_1", 2, &enable)
+    let enabled = registry::test_support::update_admin_role_binding(&pool, "rb_adm_1", 2, &enable)
         .await
         .unwrap();
     assert_eq!((enabled.status, enabled.revision), (Status::Enabled, 3));
@@ -673,7 +682,7 @@ async fn role_binding_updates_are_revision_checked() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn disabling_an_identity_is_idempotent() {
     let (db, pool) = migrated().await;
-    registry::create_admin_identity(&pool, &identity("adm_1", E))
+    registry::test_support::create_admin_identity(&pool, &identity("adm_1", E))
         .await
         .unwrap();
     for _ in 0..2 {
@@ -693,13 +702,16 @@ async fn disabling_an_identity_is_idempotent() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn revocation_sets_revoked_at_once_and_disables() {
     let (db, pool) = migrated().await;
-    registry::create_admin_identity(&pool, &identity("adm_1", E))
+    registry::test_support::create_admin_identity(&pool, &identity("adm_1", E))
         .await
         .unwrap();
     for (id, key, status) in [("crd_1", "key_1", E), ("crd_2", "key_2", D)] {
-        registry::create_admin_credential(&pool, &credential(id, "adm_1", key, status))
-            .await
-            .unwrap();
+        registry::test_support::create_admin_credential(
+            &pool,
+            &credential(id, "adm_1", key, status),
+        )
+        .await
+        .unwrap();
     }
     let first = at(T0 + 10) + Duration::from_nanos(999);
     let revoked = registry::revoke_admin_credential(&pool, "crd_1", first)
@@ -742,12 +754,15 @@ async fn revocation_sets_revoked_at_once_and_disables() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn revocation_is_one_way_in_the_database() {
     let (db, pool) = migrated().await;
-    registry::create_admin_identity(&pool, &identity("adm_1", E))
+    registry::test_support::create_admin_identity(&pool, &identity("adm_1", E))
         .await
         .unwrap();
-    registry::create_admin_credential(&pool, &credential("crd_1", "adm_1", "key_1", E))
-        .await
-        .unwrap();
+    registry::test_support::create_admin_credential(
+        &pool,
+        &credential("crd_1", "adm_1", "key_1", E),
+    )
+    .await
+    .unwrap();
     let revoked = registry::revoke_admin_credential(&pool, "crd_1", at(T0))
         .await
         .unwrap();
@@ -831,7 +846,7 @@ async fn a_revoked_public_identity_is_never_registered_again() {
         E,
     )
     .await;
-    registry::create_admin_identity(&pool, &identity("adm_2", E))
+    registry::test_support::create_admin_identity(&pool, &identity("adm_2", E))
         .await
         .unwrap();
     assert_eq!(
@@ -847,7 +862,7 @@ async fn a_revoked_public_identity_is_never_registered_again() {
         // For the same operator or another, enabled or disabled.
         for (admin, status) in [("adm_1", E), ("adm_2", E), ("adm_2", D)] {
             assert_exists(
-                registry::create_admin_credential(
+                registry::test_support::create_admin_credential(
                     &pool,
                     &credential("crd_new", admin, "key_1", status),
                 )
@@ -867,9 +882,12 @@ async fn a_revoked_public_identity_is_never_registered_again() {
         None
     );
     // Only a different key may be registered.
-    registry::create_admin_credential(&pool, &credential("crd_new", "adm_1", "key_1b", E))
-        .await
-        .unwrap();
+    registry::test_support::create_admin_credential(
+        &pool,
+        &credential("crd_new", "adm_1", "key_1b", E),
+    )
+    .await
+    .unwrap();
     db.drop([pool]).await;
 }
 
@@ -922,7 +940,7 @@ async fn re_registering_a_revoked_key_in_a_transaction_is_refused_and_rolled_bac
         E,
     )
     .await;
-    registry::create_admin_identity(&pool, &identity("adm_2", E))
+    registry::test_support::create_admin_identity(&pool, &identity("adm_2", E))
         .await
         .unwrap();
     let revoked = registry::revoke_admin_credential(&pool, "crd_adm_1", at(T0))
@@ -1071,13 +1089,16 @@ async fn re_registering_a_revoked_key_in_a_transaction_is_refused_and_rolled_bac
     for (name, sql, refusal) in cases {
         let mut tx = pool.begin().await.unwrap();
         // The surrounding transaction has written rows of its own first.
-        registry::create_admin_identity(&mut *tx, &identity("adm_tx", E))
+        registry::test_support::create_admin_identity(&mut *tx, &identity("adm_tx", E))
             .await
             .unwrap();
-        registry::create_admin_credential(&mut *tx, &credential("crd_tx", "adm_tx", "key_tx", E))
-            .await
-            .unwrap();
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_credential(
+            &mut *tx,
+            &credential("crd_tx", "adm_tx", "key_tx", E),
+        )
+        .await
+        .unwrap();
+        registry::test_support::create_admin_role_binding(
             &mut *tx,
             &binding("rb_tx", "adm_tx", AdminRole::Auditor, None, E),
         )
@@ -1089,7 +1110,7 @@ async fn re_registering_a_revoked_key_in_a_transaction_is_refused_and_rolled_bac
                 assert_eq!(result.unwrap().rows_affected(), 0, "{name}");
                 // The key is still refused in the same transaction.
                 assert_exists(
-                    registry::create_admin_credential(
+                    registry::test_support::create_admin_credential(
                         &mut *tx,
                         &credential("crd_new", "adm_tx", "key_1", E),
                     )
@@ -1137,8 +1158,11 @@ async fn re_registering_a_revoked_key_in_a_transaction_is_refused_and_rolled_bac
         assert_not_found(registry::get_admin_role_binding(&pool, "rb_tx").await);
         // The key is still refused and still authorizes nothing.
         assert_exists(
-            registry::create_admin_credential(&pool, &credential("crd_new", "adm_2", "key_1", E))
-                .await,
+            registry::test_support::create_admin_credential(
+                &pool,
+                &credential("crd_new", "adm_2", "key_1", E),
+            )
+            .await,
             KEY,
         );
         assert_eq!(
@@ -1171,7 +1195,7 @@ async fn reserved_actor_ids_fail_before_any_statement() {
         recovery_key_actor(7),
         "recovery_key:x".to_owned(),
     ] {
-        let err = registry::create_admin_identity(&pool, &identity(&id, E))
+        let err = registry::test_support::create_admin_identity(&pool, &identity(&id, E))
             .await
             .unwrap_err();
         assert!(matches!(err, RegistryError::ReservedActorId), "{err:?}");
@@ -1181,14 +1205,15 @@ async fn reserved_actor_ids_fail_before_any_statement() {
         let mut far = identity(&id, E);
         far.created_at = UNIX_EPOCH + Duration::from_micros(u64::try_from(i64::MAX).unwrap());
         assert!(matches!(
-            registry::create_admin_identity(&pool, &far).await,
+            registry::test_support::create_admin_identity(&pool, &far).await,
             Err(RegistryError::ReservedActorId)
         ));
     }
     // A look-alike reaches the pool.
-    let err = registry::create_admin_identity(&pool, &identity("Deployment_Operator", E))
-        .await
-        .unwrap_err();
+    let err =
+        registry::test_support::create_admin_identity(&pool, &identity("Deployment_Operator", E))
+            .await
+            .unwrap_err();
     assert!(
         matches!(err, RegistryError::Other(sqlx::Error::PoolClosed)),
         "{err:?}"
@@ -1205,7 +1230,7 @@ async fn reserved_actor_ids_are_never_written_and_look_alikes_are() {
         "recovery_key:".to_owned(),
     ] {
         assert!(matches!(
-            registry::create_admin_identity(&pool, &identity(&id, E)).await,
+            registry::test_support::create_admin_identity(&pool, &identity(&id, E)).await,
             Err(RegistryError::ReservedActorId)
         ));
         assert_not_found(registry::get_admin_identity(&pool, &id).await);
@@ -1218,7 +1243,7 @@ async fn reserved_actor_ids_are_never_written_and_look_alikes_are() {
         "recovery-key:1",
         "adm_recovery_key:1",
     ] {
-        registry::create_admin_identity(&pool, &identity(id, E))
+        registry::test_support::create_admin_identity(&pool, &identity(id, E))
             .await
             .unwrap();
     }
@@ -1646,16 +1671,16 @@ async fn the_lookup_follows_the_rows_and_writes_nothing() {
     let on = AdminRoleBindingChanges {
         status: Status::Enabled,
     };
-    registry::update_admin_role_binding(&pool, "rb_adm_trust", 1, &off)
+    registry::test_support::update_admin_role_binding(&pool, "rb_adm_trust", 1, &off)
         .await
         .unwrap();
     assert_eq!(trust().await.unwrap(), None);
-    registry::update_admin_role_binding(&pool, "rb_adm_trust", 2, &on)
+    registry::test_support::update_admin_role_binding(&pool, "rb_adm_trust", 2, &on)
         .await
         .unwrap();
     assert_eq!(trust().await.unwrap(), expected);
     // A second credential of the same operator authorizes on its own.
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         &pool,
         &credential("crd_trust_2", "adm_trust", "key_trust_2", E),
     )
@@ -1701,9 +1726,12 @@ async fn an_operator_with_several_bindings_gets_the_one_requested() {
         ("rb_m_aa", AdminRole::Auditor, Some("ten_a"), E),
         ("rb_m_sec", AdminRole::SecurityAdmin, None, D),
     ] {
-        registry::create_admin_role_binding(&pool, &binding(id, "adm_m", role, tenant, status))
-            .await
-            .unwrap();
+        registry::test_support::create_admin_role_binding(
+            &pool,
+            &binding(id, "adm_m", role, tenant, status),
+        )
+        .await
+        .unwrap();
     }
     for (role, scope, binding_id) in [
         (AdminRole::Auditor, INSTANCE, Some("rb_adm_m")),
@@ -1847,7 +1875,7 @@ impl Change {
                     .unwrap();
             }
             Change::DisableBinding => {
-                registry::update_admin_role_binding(
+                registry::test_support::update_admin_role_binding(
                     &mut *conn,
                     &format!("rb_{admin}"),
                     1,
@@ -2209,7 +2237,7 @@ async fn locked_authorizations_of_one_operator_do_not_wait_for_each_other() {
         .execute(&mut *inserting)
         .await
         .unwrap();
-    let created = registry::create_admin_credential(
+    let created = registry::test_support::create_admin_credential(
         &mut *inserting,
         &credential("crd_adm_0_2", "adm_0", "key_0_2", E),
     )
@@ -2256,7 +2284,7 @@ async fn a_binding_replaced_between_the_lookup_and_its_lock_is_a_miss() {
         .execute(&mut *changing)
         .await
         .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         &mut *changing,
         &binding("rb_new", "adm_0", AdminRole::TrustAdmin, Some("ten_a"), E),
     )

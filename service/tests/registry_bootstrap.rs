@@ -30,8 +30,8 @@ use skyoauth_service::persistence::{
         self, AdminRole, AdminRoleBinding, AuditActor, AuthorizedOperator, BootstrapError,
         BootstrapOutcome, BootstrapRequest, ChainVerdict, DEPLOYMENT_OPERATOR_ACTOR,
         InstanceSecurityPolicy, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
-        NewAuditEvent, OperatorRequest, OperatorScope, RegistryError, Status, append_audit_event,
-        authorize_operator, bootstrap_instance, verify_audit_chain,
+        NewAuditEvent, OperatorRequest, OperatorScope, RegistryError, Status, authorize_operator,
+        bootstrap_instance, test_support::append_audit_event, verify_audit_chain,
     },
 };
 use sqlx::{Connection, PgConnection, Row};
@@ -1159,7 +1159,7 @@ async fn bad_input_is_refused_before_any_statement() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn collisions_of_caller_ids_stay_already_exists() {
     let (db, pool) = migrated().await;
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         &pool,
         &NewAdminIdentity {
             id: "adm_old".into(),
@@ -1169,7 +1169,7 @@ async fn collisions_of_caller_ids_stay_already_exists() {
     )
     .await
     .unwrap();
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         &pool,
         &NewAdminCredential {
             id: "crd_old".into(),
@@ -1181,7 +1181,7 @@ async fn collisions_of_caller_ids_stay_already_exists() {
     )
     .await
     .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         &pool,
         &NewAdminRoleBinding {
             id: "rb_old".into(),

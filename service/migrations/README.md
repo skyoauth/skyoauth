@@ -2732,6 +2732,9 @@ exactly one attempt consumes holds under `READ COMMITTED`; under
 
 Audit events (IR-055 to IR-059; OQ-IR-14; OQ-IR-15, decided provisionally
 by the lead decision 2026-11-21; T10.1; design §7): `append_audit_event`
+(crate-private since the second-approver proposal's PR 10: the audited
+writes of the registry, `crate::trust` and `crate::operation` call it, and
+tests reach it through `persistence::registry::test_support`)
 appends one event in a caller transaction after the domain rows, in the
 order of "append audit events in this order" above (a write that creates an
 `administrative_operation` inserts it after the event, steps 1 to 3 of
@@ -2862,7 +2865,16 @@ and 2; T13.1, T13.2): `create_admin_identity`, `get_admin_identity` and
 `get_admin_credential` and `revoke_admin_credential`; and
 `create_admin_role_binding`, `get_admin_role_binding` and the
 revision-checked `update_admin_role_binding`, which changes only `status`;
-and the lookups `authorize_operator` and `authorize_operator_locked`. Rows
+and the lookups `authorize_operator` and `authorize_operator_locked`. Since
+the second-approver proposal's PR 10 the three creates and the binding
+update are private to the registry (`pub(super)`): bootstrap and the
+break-glass restoration (below) call the creates, nothing in the crate
+calls the update, and tests reach all four through the `#[doc(hidden)]`
+`persistence::registry::test_support`, compiled only with the
+`test-support` feature. `bootstrap_instance`, `issue_recovery_challenge`
+and `restore_operator` stay public, so that alone does not keep a caller
+outside the crate from enrolling a `security_admin`; the identity disable
+and the credential revocation, which only narrow, stay public too. Rows
 are read by their own ID. Identities and credentials have no revision
 (identity-registry OQ-IR-16). Time is always the caller's: `created_at`
 and the `now` of a revocation are arguments, never the database's `now()`
@@ -2948,7 +2960,9 @@ tests the surface.
 
 Operations and approvals (`docs/proposals/second-approver-gated-writes.md`
 sections 2, 3 and 9; IR-052 to IR-054; `crate::operation` calls them,
-and no endpoint or startup path calls that yet). `insert_administrative_operation` inserts an
+and no endpoint or startup path calls that yet). The three writers below
+are crate-private since that proposal's PR 10, reached by tests through
+`persistence::registry::test_support`. `insert_administrative_operation` inserts an
 unconsumed, unrevoked operation with no challenge and returns the row;
 `lock_administrative_operation` reads one `FOR NO KEY UPDATE`, or `None`.
 `consume_administrative_operation` sets `consumed_at` and the `outcome`,

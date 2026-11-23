@@ -153,7 +153,7 @@ fn disabled<'a>(id: &'a str, keys: &'a ValidatedKeyset) -> NewKeysetVersion<'a> 
 }
 
 async fn operator(pool: &PgPool, admin: &str, role: AdminRole, tenant_id: Option<&str>) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -163,7 +163,7 @@ async fn operator(pool: &PgPool, admin: &str, role: AdminRole, tenant_id: Option
     )
     .await
     .unwrap();
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: format!("crd_{admin}"),
@@ -175,7 +175,7 @@ async fn operator(pool: &PgPool, admin: &str, role: AdminRole, tenant_id: Option
     )
     .await
     .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         pool,
         &NewAdminRoleBinding {
             id: format!("rb_{admin}"),
@@ -1397,7 +1397,7 @@ async fn the_audit_event_comes_after_the_write() {
             .execute(&mut *other)
             .await
             .unwrap();
-        registry::append_audit_event(
+        registry::test_support::append_audit_event(
             &mut other,
             &NewAuditEvent {
                 id: format!("aud_other_{n}"),

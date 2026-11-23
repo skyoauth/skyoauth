@@ -330,7 +330,7 @@ async fn operator(
     key: &str,
     bindings: &[(&str, AdminRole, Option<&str>)],
 ) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -342,7 +342,7 @@ async fn operator(
     .unwrap();
     credential(pool, &format!("crd_{admin}"), admin, key).await;
     for &(id, role, tenant_id) in bindings {
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             pool,
             &NewAdminRoleBinding {
                 id: id.into(),
@@ -358,7 +358,7 @@ async fn operator(
 }
 
 async fn credential(pool: &PgPool, id: &str, admin: &str, key: &str) {
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: id.into(),
@@ -1047,7 +1047,7 @@ async fn a48_neg_an_approver_without_security_admin_is_refused() {
     let binding = registry::get_admin_role_binding(&pool, "rb_lapsed")
         .await
         .unwrap();
-    registry::update_admin_role_binding(
+    registry::test_support::update_admin_role_binding(
         &pool,
         "rb_lapsed",
         binding.revision,
@@ -1136,7 +1136,7 @@ async fn a48_neg_each_toggle_step_without_its_role_is_refused() {
     let binding = registry::get_admin_role_binding(&pool, "rb_req")
         .await
         .unwrap();
-    registry::update_admin_role_binding(
+    registry::test_support::update_admin_role_binding(
         &pool,
         "rb_req",
         binding.revision,

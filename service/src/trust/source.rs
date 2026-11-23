@@ -249,7 +249,7 @@
 //!    the source. The steps before it (the `FOR NO KEY UPDATE` of step 2
 //!    and the operator locks) do not block those inserts. Callers must
 //!    commit promptly after an update;
-//! 5. [`append_audit_event`] last, which locks the tenant row
+//! 5. `append_audit_event` last, which locks the tenant row
 //!    `FOR KEY SHARE` and then the chain head (migrations README, "append
 //!    audit events in this order"). It must stay after the compare-and-set.
 //!    An update that held the head while its compare-and-set waited for a

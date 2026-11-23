@@ -336,7 +336,7 @@
 //! [`authorize_operator`]: registry::authorize_operator
 //! [`get_instance_security_policy`]: registry::get_instance_security_policy
 //! [`verify_audit_chain`]: registry::verify_audit_chain
-//! [`append_audit_event`]: registry::append_audit_event
+//! [`append_audit_event`]: registry::test_support::append_audit_event
 
 use std::{
     future::Future,
@@ -1005,7 +1005,7 @@ impl Lever {
                 );
             }
             Lever::DisableBinding => {
-                operator.binding = registry::update_admin_role_binding(
+                operator.binding = registry::test_support::update_admin_role_binding(
                     pool,
                     &operator.binding.id,
                     operator.binding.revision,
@@ -1134,7 +1134,7 @@ async fn a32_neg_a_closed_bootstrap_is_never_reopened() {
     // The revoked key cannot be registered for another operator: the
     // inferred `0005` rule (see the module docs), not a spec requirement.
     let mut tx = pool.begin().await.unwrap();
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         &mut *tx,
         &NewAdminIdentity {
             id: "adm_a32_other".into(),
@@ -1144,7 +1144,7 @@ async fn a32_neg_a_closed_bootstrap_is_never_reopened() {
     )
     .await
     .unwrap();
-    let again = registry::create_admin_credential(
+    let again = registry::test_support::create_admin_credential(
         &mut *tx,
         &NewAdminCredential {
             id: "crd_a32_other".into(),
@@ -1303,7 +1303,7 @@ where
     let pids = replicas.backend_pids().await;
 
     let mut head = Connection::begin(&mut *head_conn).await.unwrap();
-    let held = registry::append_audit_event(&mut head, &held_event())
+    let held = registry::test_support::append_audit_event(&mut head, &held_event())
         .await
         .unwrap();
     let (raced, raced_rx) = oneshot::channel();
@@ -1970,7 +1970,7 @@ async fn a32_pos_signed_recovery_restores_a_replacement_operator() {
             trust_anchor_ref: first.trust_anchor_ref.clone(),
             status: Status::Enabled,
         };
-        registry::create_admin_credential(&pool, &second)
+        registry::test_support::create_admin_credential(&pool, &second)
             .await
             .unwrap();
         let mut operator = read_operator(&pool, &first).await;

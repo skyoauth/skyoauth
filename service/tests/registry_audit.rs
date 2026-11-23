@@ -1,15 +1,15 @@
-//! The audit event writer and chain verifier
-//! (`persistence::registry::append_audit_event` and `verify_audit_chain`;
-//! identity-registry IR-055 to IR-059, OQ-IR-15). The tests without a
-//! database check the envelope and hash against known answers computed
-//! independently (with Python's `hashlib` and `json`), and that every absent
-//! value hashes apart from a present one. The database tests append events
-//! in chains, concurrently and in rolled-back transactions, reject bad input
-//! before any statement, check the lock order (a tenant-scope event's
-//! tenant row before the head, no tenant lock for an instance-scope event)
-//! and that the deferred head check stays deferred, and edit stored rows in
-//! rolled-back transactions with the guard triggers off to show that
-//! verification finds each edit.
+//! The audit event writer and chain verifier (the crate-private
+//! `persistence::registry::append_audit_event`, through `test_support`, and
+//! `verify_audit_chain`; identity-registry IR-055 to IR-059, OQ-IR-15). The
+//! tests without a database check the envelope and hash against known
+//! answers computed independently (with Python's `hashlib` and `json`), and
+//! that every absent value hashes apart from a present one. The database
+//! tests append events in chains, concurrently and in rolled-back
+//! transactions, reject bad input before any statement, check the lock
+//! order (a tenant-scope event's tenant row before the head, no tenant lock
+//! for an instance-scope event) and that the deferred head check stays
+//! deferred, and edit stored rows in rolled-back transactions with the
+//! guard triggers off to show that verification finds each edit.
 //!
 //! Unit tests may assert hash values; conformance scenarios must not
 //! (IR-056).
@@ -30,7 +30,7 @@ use skyoauth_service::persistence::{
     self, PgPool,
     registry::{
         self, AuditActor, AuditEvent, ChainBreak, ChainVerdict, InvariantKind, NewAuditEvent,
-        RegistryError, append_audit_event, verify_audit_chain,
+        RegistryError, test_support::append_audit_event, verify_audit_chain,
     },
 };
 use sqlx::{Connection, PgConnection};

@@ -211,7 +211,7 @@ fn changes(source: &TrustSource) -> TrustSourceChanges {
 }
 
 async fn operator(pool: &PgPool, admin: &str, role: AdminRole, tenant_id: Option<&str>) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -221,7 +221,7 @@ async fn operator(pool: &PgPool, admin: &str, role: AdminRole, tenant_id: Option
     )
     .await
     .unwrap();
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: format!("crd_{admin}"),
@@ -233,7 +233,7 @@ async fn operator(pool: &PgPool, admin: &str, role: AdminRole, tenant_id: Option
     )
     .await
     .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         pool,
         &NewAdminRoleBinding {
             id: format!("rb_{admin}"),
@@ -1296,7 +1296,7 @@ async fn the_audit_event_comes_after_the_write() {
         .execute(&mut *other)
         .await
         .unwrap();
-    registry::append_audit_event(
+    registry::test_support::append_audit_event(
         &mut other,
         &NewAuditEvent {
             id: "aud_other".into(),
@@ -2138,7 +2138,7 @@ async fn an_update_waiting_for_a_consumer_holds_no_audit_head() {
     });
     wait_until_blocked(&pool, writer_pid, consumer_pid, &task).await;
     // The consumer's own event (this action stands in for it).
-    registry::append_audit_event(
+    registry::test_support::append_audit_event(
         &mut consumer,
         &NewAuditEvent {
             id: "aud_2".into(),

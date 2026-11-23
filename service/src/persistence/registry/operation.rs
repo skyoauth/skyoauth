@@ -12,11 +12,17 @@
 //!
 //! The writers are bare, like the other registry writers: they check
 //! nothing the database does not, write no audit event and read no clock.
-//! The caller supplies every ID and time (T10.2) and orders the statements
-//! as the migrations README prescribes for a write that creates an
-//! operation ("What 0005 adds": the rows it references or updates locked
-//! first, then the audit head and the event, then the operation, then the
-//! remaining updates).
+//! So [`insert_administrative_operation`],
+//! [`consume_administrative_operation`] and
+//! [`revoke_administrative_operation`] are crate-private (`pub(crate)`;
+//! second-approver proposal, PR 10): [`crate::operation`], a sibling of
+//! `crate::persistence`, calls them, so they cannot be narrower, and tests
+//! reach them through the registry's `test_support` module, compiled only
+//! with the `test-support` feature. The caller supplies every ID and time
+//! (T10.2) and orders the statements as the migrations README prescribes
+//! for a write that creates an operation ("What 0005 adds": the rows it
+//! references or updates locked first, then the audit head and the event,
+//! then the operation, then the remaining updates).
 //!
 //! - [`insert_administrative_operation`] inserts a new operation, unconsumed
 //!   and unrevoked, with no challenge (a recovery challenge has its own
@@ -74,9 +80,9 @@
 //! `set_widening_second_approver` (crate-private) is the toggle's
 //! compare-and-set of `widening_second_approver` on the revision, the one
 //! online write of the row (IR-052): `single_actor_mode` and the sink fields
-//! stay unwritable online (IR-053). It is crate-private, not a public bare
-//! writer like the others, so that nothing outside the crate can change the
-//! flag without the gate of [`crate::operation`] (inferred). A row at
+//! stay unwritable online (IR-053). It is crate-private, like the operation
+//! row writers since PR 10, so that nothing outside the crate can change
+//! the flag without the gate of [`crate::operation`] (inferred). A row at
 //! another revision is [`RegistryError::StaleRevision`], a missing one
 //! [`RegistryError::NotFound`].
 //!
@@ -160,10 +166,10 @@ pub struct AdministrativeOperation {
     pub immutable_plan: JsonObject,
     pub challenge_hash: Option<Vec<u8>>,
     pub expires_at: Option<SystemTime>,
-    /// Set once, by [`consume_administrative_operation`].
+    /// Set once, by the crate-private `consume_administrative_operation`.
     pub consumed_at: Option<SystemTime>,
-    /// Set once, with `revocation_operation_id`, by
-    /// [`revoke_administrative_operation`].
+    /// Set once, with `revocation_operation_id`, by the crate-private
+    /// `revoke_administrative_operation`.
     pub revoked_at: Option<SystemTime>,
     pub revocation_operation_id: Option<String>,
     pub approves_operation_id: Option<String>,
@@ -196,7 +202,8 @@ impl FromRow<'_, PgRow> for AdministrativeOperation {
     }
 }
 
-/// The input of [`insert_administrative_operation`]: every column a new
+/// The input of the crate-private `insert_administrative_operation`
+/// (tests reach it through the `test-support` feature): every column a new
 /// operation of the second-approver flow sets. It starts unconsumed and
 /// unrevoked, at revision 1, with no challenge (inferred: section 2 sets
 /// `consumed_at` and the revocation only by an update, and a recovery
@@ -341,7 +348,7 @@ const LOCK_BINDINGS: &str =
 /// rows") and returns it. A time outside the `0007` range is
 /// [`RegistryError::Other`] before any statement runs; the database's
 /// refusals map as everywhere in the registry.
-pub async fn insert_administrative_operation(
+pub(crate) async fn insert_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     new: &NewAdministrativeOperation,
 ) -> Result<AdministrativeOperation, RegistryError> {
@@ -379,7 +386,7 @@ pub async fn lock_administrative_operation(
 /// not: a repeat with the same `now` succeeds again (see the module
 /// documentation, "Operation rows"), so check `consumed_at` under
 /// [`lock_administrative_operation`] first.
-pub async fn consume_administrative_operation(
+pub(crate) async fn consume_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
     now: SystemTime,
@@ -403,7 +410,7 @@ pub async fn consume_administrative_operation(
 /// `revoking_operation_id` succeeds again (see the module documentation,
 /// "Operation rows"), so check `revoked_at` under
 /// [`lock_administrative_operation`] first.
-pub async fn revoke_administrative_operation(
+pub(crate) async fn revoke_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
     revoking_operation_id: &str,

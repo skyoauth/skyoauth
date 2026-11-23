@@ -50,9 +50,10 @@ use skyoauth_service::{
             NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent,
             NewConsumedAssertion, NewTenant, NewTrustKeyset, NewTrustSource, OPERATOR_RESTORATION,
             RegistryError, ReplayMode, RestoreRequest, Restored, Status, TrustSource,
-            TrustSourceChanges, TrustSourceKind, append_audit_event, bootstrap_instance,
-            get_recovery_state, insert_administrative_operation, issue_recovery_challenge,
-            lock_administrative_operation, restore_operator, verify_audit_chain,
+            TrustSourceChanges, TrustSourceKind, bootstrap_instance, get_recovery_state,
+            issue_recovery_challenge, lock_administrative_operation, restore_operator,
+            test_support::{append_audit_event, insert_administrative_operation},
+            verify_audit_chain,
         },
     },
     trust::{
@@ -264,7 +265,7 @@ async fn operator(
     key: &str,
     bindings: &[(&str, AdminRole, Option<&str>)],
 ) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -276,7 +277,7 @@ async fn operator(
     .unwrap();
     credential(pool, &format!("crd_{admin}"), admin, key).await;
     for &(id, role, tenant_id) in bindings {
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             pool,
             &NewAdminRoleBinding {
                 id: id.into(),
@@ -292,7 +293,7 @@ async fn operator(
 }
 
 async fn credential(pool: &PgPool, id: &str, admin: &str, key: &str) {
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: id.into(),
@@ -2817,7 +2818,7 @@ async fn the_requester_must_still_be_a_trust_admin_with_its_credential() {
         let prepared = prepare(&pool, "key_sec1", &op_id).await.unwrap();
         ops.push((op, prepared));
     }
-    registry::update_admin_role_binding(
+    registry::test_support::update_admin_role_binding(
         &pool,
         "rb_trust",
         1,

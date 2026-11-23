@@ -33,10 +33,13 @@ use skyoauth_service::persistence::{
         AuditActor, AuthorizedOperator, BootstrapRequest, InvariantKind, JsonObject,
         NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation,
         NewAuditEvent, NewTenant, OperatorScope, RegistryError, RolesHeld, Status,
-        append_audit_event, authorize_approval_locked, authorize_roles_locked, bootstrap_instance,
-        consume_administrative_operation, insert_administrative_operation,
+        authorize_approval_locked, authorize_roles_locked, bootstrap_instance,
         lock_administrative_operation, lock_instance_security_policy,
-        lock_instance_security_policy_shared, revoke_administrative_operation,
+        lock_instance_security_policy_shared,
+        test_support::{
+            append_audit_event, consume_administrative_operation, insert_administrative_operation,
+            revoke_administrative_operation,
+        },
     },
 };
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres, Transaction};
@@ -79,7 +82,7 @@ async fn operator(
     key: &str,
     bindings: &[(&str, AdminRole, Option<&str>)],
 ) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -91,7 +94,7 @@ async fn operator(
     .unwrap();
     credential(pool, &format!("crd_{admin}"), admin, key).await;
     for &(id, role, tenant_id) in bindings {
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             pool,
             &NewAdminRoleBinding {
                 id: id.into(),
@@ -107,7 +110,7 @@ async fn operator(
 }
 
 async fn credential(pool: &PgPool, id: &str, admin: &str, key: &str) {
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: id.into(),
@@ -188,7 +191,7 @@ async fn seeded() -> (TestDb, PgPool) {
         ],
     )
     .await;
-    registry::update_admin_role_binding(
+    registry::test_support::update_admin_role_binding(
         &pool,
         "rb_multi_c",
         1,

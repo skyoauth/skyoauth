@@ -118,7 +118,7 @@
 //!    the write, so nothing is written. Every lock wait comes before the
 //!    sample; only the append's own waits (the tenant row
 //!    `FOR KEY SHARE` and the audit head) come after it (Limits);
-//! 7. through [`append_audit_event`]: `administrative_operation.approve`
+//! 7. through `append_audit_event`: `administrative_operation.approve`
 //!    (the approver as actor, the pending operation as `object_id`, its
 //!    revision and the next), the `approve` operation (the approver, the
 //!    pending operation as `approves_operation_id`, its tenant, digest and
@@ -210,7 +210,6 @@
 //!
 //! [`authorize_approval_locked`]: crate::persistence::registry::authorize_approval_locked
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
-//! [`append_audit_event`]: crate::persistence::registry::append_audit_event
 //! [`RegistryError::Retry`]: crate::persistence::registry::RegistryError::Retry
 
 mod approval;
