@@ -393,7 +393,7 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
 1. Outside any transaction, `prepare_approval` first authorizes, without a
    lock and exactly as step 2 below: the approver's lookup (a miss is
    `Unauthorized`), the scope check (`NotFound`), `SelfApproval`, and the
-   unlocked state check (consumed, revoked, expired or a wrong kind is
+   unlocked state check (a wrong kind, then consumed, revoked or expired, is
    `NotApprovable`). Only then does it read the plan. For
    `trust_keyset_version_create` it parses the plan's `public_jwks` in
    full on the Stage A pool (`validate_keyset` against the plan's
@@ -408,7 +408,12 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    `actor_id` and `kind`. An operation outside the path's scope (another
    tenant, a tenant operation on the instance path or the reverse) is
    `NotFound`; an approver whose `admin_id` is the `actor_id` is
-   `SelfApproval`.
+   `SelfApproval`; a kind outside the flow, or not of the path's scope, is
+   `NotApprovable(WrongKind)`, since the kind decides the requester's role
+   that step 3 locks. Then, still without a lock, the plan's
+   `requester_credential_id`, which step 3 locks (a plan without it is
+   `PlanIntegrity`). The kind and the plan are immutable (`0005`), so step
+   4 reads the same values under the lock.
 3. The operator rows of both actors `FOR SHARE`, in the `0005` order
    (`authorize_approval_locked`, section 9): the two `admin_identity` rows
    by ID, the two `admin_credential` rows by ID (the approver's, and the
@@ -421,9 +426,9 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    requester whose identity is disabled, whose submitting credential is
    disabled or revoked, or who lost the role is `RequesterNotAuthorized`
    (Q5; D21).
-4. The operation row `FOR NO KEY UPDATE`, read again: consumed, revoked or not
-   an approvable kind is `NotApprovable` with its reason (expiry is checked in
-   step 6, after the registry write); a digest or expected revision unequal to
+4. The operation row `FOR NO KEY UPDATE`, read again: consumed or revoked is
+   `NotApprovable` with its reason (the kind was checked in step 2; expiry is
+   checked in step 6, after the registry write); a digest or expected revision unequal to
    the echo, or a digest unequal to the one `prepare_approval` read, is
    `EchoMismatch`; a recomputed digest unequal to the stored one, or (a keyset
    create) a prepared `ValidatedKeyset::public_json` not byte for byte equal to
@@ -1518,6 +1523,25 @@ every pending toggle stale; and whether each coding PR is paired with its
 test PR or the test PR follows.
 
 ## Implementation notes
+
+**PR 3 as implemented** (`service/src/operation/`; picks marked inferred
+in its module docs). The kinds, `Applied` and `ApprovalError` hold the
+toggle's only: the trust kinds, `Applied::KeysetVersion` and
+`Applied::Source`, and `ApprovalError::Keyset` and `ApprovalError::Source`
+come with PRs 4 and 5, as does the `allowed` parameter of
+`prepare_approval`. `SystemClock` is the production `Clock`. The toggle's
+compare-and-set is the crate-private registry writer
+`set_widening_second_approver`, so no ungated setter is public. The
+toggle's plan is exactly `requester_credential_id` and
+`widening_second_approver`, with no version member; any other shape is
+`PlanIntegrity`. The approve applies D24 to the toggle too: the prepared
+plan must equal the locked plan. `acknowledge_widening` is ignored by the
+toggle, which is always gated (see "Open"). The toggle authorizes with the
+local instance `security_admin` lookup, not PR 4's `authorize_trust_admin`.
+A cancel looks up the path's role (instance `security_admin`, tenant
+`trust_admin`, the role of every kind of the flow on that path) before it
+reads the operation; another operator is `Unauthorized`. The operations a
+cancel, a reject and an approve insert have outcome `success`.
 
 **Line numbers.** Line numbers into the code and the migrations README
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed

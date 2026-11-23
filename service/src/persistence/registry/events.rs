@@ -428,8 +428,10 @@ fn push_integer(out: &mut String, value: Option<i64>) -> Result<(), sqlx::Error>
     Ok(())
 }
 
-/// Appends `value` as a JCS string (RFC 8785 section 3.2.2.2).
-fn push_string(out: &mut String, value: &str) {
+/// Appends `value` as a JCS string (RFC 8785 section 3.2.2.2). The request
+/// digest of a pending operation escapes its strings the same way
+/// ([`crate::operation`]).
+pub(crate) fn push_string(out: &mut String, value: &str) {
     out.push('"');
     for character in value.chars() {
         match character {

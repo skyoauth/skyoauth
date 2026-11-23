@@ -20,7 +20,7 @@
 
 pub mod keyset;
 pub mod source;
-mod write;
+pub(crate) mod write;
 
 pub use keyset::{
     IN_TRANSACTION_WAIT, IN_TRANSACTION_WORKERS, KeysetAudit, KeysetWriteError,
