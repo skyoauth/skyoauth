@@ -4,7 +4,7 @@ Status: proposal only, drafted 2026-11-23 for the lead's review agent and
 then the user's acceptance. Nothing here is implemented: no migration, no
 production code, no endpoint, and no T00.x box is ticked. Every choice below
 that goes beyond the written spec is a "provisional lead pick, 2026-11-23"
-(the Decisions list numbers them D1 to D26); "(inferred)" marks a point
+(the Decisions list numbers them D1 to D29); "(inferred)" marks a point
 where the spec is silent. All of them, and the lead decisions the spec
 records, stay provisional until the maintainer ratifies the ADRs
 (T00.8–T00.17, Gate M0); this text ratifies no ADR. The widening ruling it
@@ -199,7 +199,8 @@ column (D3):
 **The plan** (version 1, every member written by the server from typed
 input, so it carries no member the caller chose). Every kind's plan holds
 `requester_credential_id`, the ID of the `admin_credential` the request
-was authorized with, which the approve requires still unrevoked (D21).
+was authorized with, which the approve requires still enabled and
+unrevoked (D21).
 
 - `trust_keyset_version_create`: `version_id`, `keyset_id`, `public_jwks`
   (the text of `ValidatedKeyset::public_json`, the canonical public
@@ -234,12 +235,17 @@ C = canonical JSON of {"actor_id": <id>, "expected_revision": <i64>,
                        "plan": <plan>, "tenant_id": <id> | null}
 ```
 
-`expires_at` is whole microseconds since the epoch (inferred). With `id`,
-`actor_id` and `expires_at` in `C`, a digest names one operation of one
-requester with one expiry, so an echo copied from another operation with
-the same plan never matches.
+`expires_at` is `floor_to_microsecond(now + 24 h)` (`model.rs:265`) as
+whole microseconds since the epoch (inferred): the same value is bound
+for the insert, so the `timestamptz` column returns it exactly and the
+approve reads back what the digest covered. With `id`, `actor_id` and
+`expires_at` in `C`, a digest names one operation of one requester with
+one expiry, so an echo copied from another operation with the same plan
+never matches.
 
-`C` has its members sorted byte-wise, no insignificant whitespace,
+`C` has its members sorted byte-wise at every level, the nested plan
+included (`jsonb` returns object keys shortest first, so the reader
+re-sorts), no insignificant whitespace,
 strings escaped as the IR-056 event hash escapes them (`push_string` in
 `service/src/persistence/registry/events.rs`), integers in decimal. The
 plan holds only strings, integers, booleans, `null`, arrays and objects
@@ -337,18 +343,40 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
 So a request runs every service check the direct write runs (D7): the
 requester learns of those refusals at once, and an approver never reviews
 a request the service would refuse as it stands. The database constraints
-run only when the row is written, at approve, so an approver can see a
-request approved and then refused by them: the `0004` kind, replay and
-profile checks (`trust_source_*_kind_check`,
-`trust_source_single_use_replay_check`,
-`trust_source_token_review_profile_check`), the unique keys (the version
-and source IDs, a source's `(tenant_id, name)` and `cluster_id`),
-`trust_source_jwks_keyset_id_fkey`, the length and no-space checks,
-`trust_keyset_version_validity_check`, and the `0011` trigger
-`trust_source_egress_enabled`. Each refuses the approve as it refuses the
-direct write (`AlreadyExists`, `Invariant`), writes nothing and leaves the
-operation pending (D14). A savepoint dry run of the write at the request
-is rejected (D7).
+run only when the row is written, at approve: every `0004` and `0007`
+CHECK, unique key and foreign key of the target table, and the `0011`
+trigger `trust_source_egress_enabled`. For example:
+
+- the non-empty checks `trust_source_id_check`, `trust_source_name_check`,
+  `trust_source_exact_issuer_check`, `trust_source_discovery_url_check`,
+  `trust_source_cluster_id_check`,
+  `trust_source_token_review_endpoint_check`,
+  `trust_source_ca_bundle_ref_check`, `trust_source_ca_fingerprint_check`,
+  `trust_source_reviewer_credential_ref_check` and
+  `trust_keyset_version_id_check`;
+- `trust_source_audiences_check` and `trust_source_algorithms_check`
+  (non-empty arrays), `trust_source_review_timeout_ms_check` (`> 0`) and
+  `trust_source_stale_revocation_acknowledged_check` (must be true);
+- the kind, replay and profile checks (`trust_source_*_kind_check`,
+  `trust_source_single_use_replay_check`,
+  `trust_source_token_review_profile_check`), the length and no-space
+  checks, and `trust_keyset_version_validity_check`;
+- the `0007` checks `trust_keyset_version_effective_at_range_check` and
+  `trust_keyset_version_expires_at_range_check`;
+- the unique keys (the version and source IDs, a source's
+  `(tenant_id, name)` and `cluster_id`) and
+  `trust_source_jwks_keyset_id_fkey`.
+
+The unnamed `0004` checks carry PostgreSQL's default names, as
+`KNOWN_CONSTRAINTS` lists them (`service/src/persistence/registry/error.rs`,
+lines 329-394). These values come from the typed input (`NewTrustSource`,
+`TrustSourceChanges`, `model.rs:909-953`, and the version's window), so a
+request the service accepts can be approved and then refused at every approve.
+Each refuses the approve as it refuses the direct write (`AlreadyExists`,
+`Invariant`), writes nothing and leaves the operation pending (D14). PRs 4 and 5
+may pre-validate the plainly typed ones (non-empty, `> 0`, `true`) at the
+request where that is cheap (D27, a pick, not a promise); the others stay
+approve-time. A savepoint dry run of the write at the request is rejected (D7).
 
 **Approve** (`prepare_approval`, then `approve_operation`):
 
@@ -378,20 +406,22 @@ is rejected (D7).
    approver's `security_admin` binding and the requester's role binding
    for the kind (tenant `trust_admin`, or instance `security_admin` for the
    toggle) by ID, then the lookups repeated as `authorize_operator_locked`
-   does (`operator.rs:160-172`). A requester whose identity is disabled,
-   whose submitting credential is revoked or who lost the role is
-   `RequesterNotAuthorized` (Q5; D21).
-4. The operation row `FOR NO KEY UPDATE`, read again: consumed, revoked,
-   expired (`now >= expires_at`) or not an approvable kind is
-   `NotApprovable` with its reason; a digest or expected revision unequal
-   to the echo, or a digest unequal to the one `prepare_approval` read, is
-   `EchoMismatch`; a recomputed digest unequal to the stored one, or (a
-   keyset create) a prepared `ValidatedKeyset::public_json` not byte for
-   byte equal to the locked plan's `public_jwks`, is `PlanIntegrity`
-   (D24).
+   does (`operator.rs:160-172`; the lookup requires an enabled and
+   unrevoked credential, `operator.rs:504-516`, README:970-971). A
+   requester whose identity is disabled, whose submitting credential is
+   disabled or revoked, or who lost the role is `RequesterNotAuthorized`
+   (Q5; D21).
+4. The operation row `FOR NO KEY UPDATE`, read again: consumed, revoked or not
+   an approvable kind is `NotApprovable` with its reason (expiry is checked in
+   step 5, after the last row lock); a digest or expected revision unequal to
+   the echo, or a digest unequal to the one `prepare_approval` read, is
+   `EchoMismatch`; a recomputed digest unequal to the stored one, or (a keyset
+   create) a prepared `ValidatedKeyset::public_json` not byte for byte equal to
+   the locked plan's `public_jwks`, is `PlanIntegrity` (D24).
 5. The write's own steps for the kind, from the plan, through the same
-   post-authorization step functions as the request, with the requester's
-   `admin_id` (D26): steps 2 to 6 of
+   post-authorization step functions as the request, with the
+   `Requester { admin_id, credential_id }` that step 3 checked (D26):
+   steps 2 to 6 of
    `keyset.rs:178-202` (the parent lock, the target read and revision, the
    cap, the overlap check of the stored versions on the in-transaction
    pool, the insert or compare-and-set), or steps 2 to 4 of
@@ -400,11 +430,22 @@ is rejected (D7).
    compare-and-set). For the toggle: the policy row `FOR NO KEY UPDATE`
    and its compare-and-set. The policy row is not read for a trust kind:
    an approval stays valid if the toggle went off meanwhile (inferred).
+   **The clock** (D28): the step function takes the operation's
+   `expires_at` as a deadline and samples the injected clock once, after
+   its last row lock and before the registry write. `now >= expires_at` is
+   `NotApprovable(Expired)`; otherwise that one sample is the write's time,
+   both events' time and `consumed_at`. An approve that waited on the
+   operator, operation or target locks past the expiry is therefore
+   refused, instead of recording a `consumed_at` taken before it waited,
+   which the `0005` check (`consumed_at < expires_at`, `0005:328-329`),
+   comparing the two stored values only, would accept.
 6. Last, through `append_audit_event` (so the head is taken here):
    `administrative_operation.approve`, the approve operation insert, the
-   domain event, and the update of the pending row (`consumed_at = now`,
-   `outcome = 'applied'`, revision + 1), whose row step 4 already holds,
-   so it does not wait (README:1042-1046).
+   domain event, and the update of the pending row (`consumed_at` the
+   step 5 sample, `outcome = 'applied'`, revision + 1), whose row step 4
+   already holds, so it does not wait (README:1042-1046). The wait for the
+   head comes after the sample; it is held only for appends and is not
+   covered (Limits).
 
 A failure anywhere rolls the savepoint back: the target is unchanged and
 the operation stays pending until it expires, so an approval refused for
@@ -417,16 +458,36 @@ check as in approve; the operator rows `FOR SHARE`; the operation row
 `FOR NO KEY UPDATE` (consumed or already revoked: `NotApprovable`); then
 the head: `administrative_operation.cancel` or `.reject`, the revoking
 operation insert, the update of the pending row. This is the `0005`
-revocation order exactly (README:1042-1046).
+revocation order exactly (README:1042-1046). A cancel authorizes the
+operation's `actor_id` through any enabled, unrevoked credential of that
+identity, not only the submitting one.
+
+**Credential rotation and restoration** (D21; inferred consequences). A
+requester who rotates their credential strands their own pending
+operations: each is `RequesterNotAuthorized` at approve until it expires.
+They cancel with the new credential (the cancel authorizes by `actor_id`)
+and submit again. A restoration revokes every credential still unrevoked
+(`recovery.rs:146-151`), so after it every pending operation is
+`RequesterNotAuthorized` until it expires. The replacement operator is a
+new identity (`recovery.rs:152-158`), so the replaced requester cannot
+cancel; a `security_admin` rejects the operations, or they expire. Another
+requester can cancel only once a new credential is enrolled for their
+identity.
 
 **The toggle** (`submit_widening_toggle`) follows the request steps with
 the policy row as target: instance `security_admin`; then the policy row
 `FOR NO KEY UPDATE`, never `FOR SHARE`, and its revision checked against
 the request's `expected_revision` (`StaleRevision` if it moved), in both
 branches; then either the compare-and-set and
-`instance_security_policy.update` (`single_actor_mode` on) or a pending
-`instance_security_policy_update` operation, approved on the instance path
-by a distinct `security_admin` (API-156). A write locks the rows it
+`instance_security_policy.update` (`single_actor_mode` on, outcome
+`success_single_actor`) or a pending `instance_security_policy_update`
+operation, approved on the instance path by a distinct `security_admin`
+(API-156). With `single_actor_mode` on, two concurrent toggles serialize
+on the row and the second gets `StaleRevision` at its request. With it
+off, neither updates the row at the request: both pass the revision
+check, both go pending, and the second to be approved gets
+`StaleRevision` at its approval, since the first approval moved the
+revision. A write locks the rows it
 updates `FOR NO KEY UPDATE` (README:1025-1026); a toggle that took
 `FOR SHARE` and then updated would upgrade its lock, and two concurrent
 toggles would each wait for the other's share lock and end in `40P01`, as
@@ -440,7 +501,7 @@ is always gated, whatever its current value (ADR-008:100-105).
 | Checked again at approve                                                                                                                                     | Taken from the request, bound by the digest                                            |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
 | the approver's `security_admin` role, enabled identity and credential (tasks:149: "rechecking revision and role")                                            | the payload itself: the projection, window, status and provenance; the source members  |
-| the approver is not the requester; the requester's identity is enabled, its submitting credential unrevoked and its role held (Q5; D21)                      | the raw upload's Stage A validation (`keyset.rs:550-563`); only its projection is kept |
+| the approver is not the requester; the requester's identity is enabled, its submitting credential enabled and unrevoked, and its role held (Q5; D21)         | the raw upload's Stage A validation (`keyset.rs:550-563`); only its projection is kept |
 | the operation is pending, unexpired, unrevoked, of an approvable kind; the echo; the recomputed digest                                                       | the class: recomputed, and at an unchanged revision it is the same                     |
 | the projection, parsed in full again before the transaction against the plan's `allowed_algorithms` and the current `allowed` set, and its fingerprint (D25) |                                                                                        |
 | the parsed projection equal byte for byte to the locked plan's (D24)                                                                                         |                                                                                        |
@@ -451,26 +512,26 @@ is always gated, whatever its current value (ADR-008:100-105).
 
 ### 5. Races and failures
 
-| Between request and approve                                            | At approve                                                                                                                                                                                                                                                              |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a direct write (a disable, another update) moves the target's revision | `StaleRevision`; the operation stays pending and can never apply; the requester cancels it or it expires                                                                                                                                                                |
-| a concurrent disable runs while the approve holds the target           | they serialize on the `trust_keyset` or `trust_source` row; the second sees the first's revision                                                                                                                                                                        |
-| an egress entry the change needs is disabled                           | `EgressNotAllowed` (the service's entry check, `source.rs:509-532`). If the service check were skipped, the `0011` trigger `trust_source_egress_enabled` refuses the write with `23514`, `Invariant { kind: EgressEntryEnabled }` (README "What 0011 adds", :2136-2150) |
-| an entry disable starts while the approve holds the entry `FOR SHARE`  | the disable waits for the approve's commit; the source is then degraded at fetch (`source.rs:178-188`)                                                                                                                                                                  |
-| another version was enabled and now overlaps                           | `Overlap`; after that version is disabled, a new approve of the same operation passes                                                                                                                                                                                   |
-| the keyset reached 8 enabled versions                                  | `TooManyEnabledVersions`                                                                                                                                                                                                                                                |
-| a version with the plan's `version_id` now exists                      | `AlreadyExists` (the insert's `23505`)                                                                                                                                                                                                                                  |
-| the parent keyset was disabled                                         | written like any other (`keyset.rs:269-270`, inferred: the verifier reads the keyset's status)                                                                                                                                                                          |
-| two approvers approve at once                                          | they serialize on the operation row; the second reads it consumed: `NotApprovable(Consumed)`                                                                                                                                                                            |
-| a cancel and an approve race                                           | the same row lock; whichever is second gets `NotApprovable`                                                                                                                                                                                                             |
-| the toggle went off                                                    | the approve still applies (an approval is never less safe); the requester may cancel and submit again                                                                                                                                                                   |
-| the toggle went on while a direct widening write was in flight         | the write holds the policy row `FOR SHARE` from step 4 to its commit, so the toggle's `FOR NO KEY UPDATE` waits; a write that reaches step 4 after the toggle committed reads it on and goes pending                                                                    |
-| two toggles at once                                                    | they serialize on the policy row `FOR NO KEY UPDATE`; the second reads the first's revision: `StaleRevision`, never `40P01` (D19)                                                                                                                                       |
-| a database constraint refuses the row (section 3)                      | `AlreadyExists` or `Invariant`, as for the direct write; the operation stays pending                                                                                                                                                                                    |
-| the approver's credential was revoked                                  | `Unauthorized`                                                                                                                                                                                                                                                          |
-| the requester's identity disabled, credential revoked or role disabled | `RequesterNotAuthorized` (D21)                                                                                                                                                                                                                                          |
-| the operation expired                                                  | `NotApprovable(Expired)`; the `0005` check refuses a consume at or after `expires_at` even if the service check were skipped                                                                                                                                            |
-| the commit outcome is unknown to the approver's client                 | a retried approve reads the operation consumed; the client reads the target                                                                                                                                                                                             |
+| Between request and approve                                                                                                | At approve                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a direct write (a disable, another update) moves the target's revision                                                     | `StaleRevision`; the operation stays pending and can never apply; the requester cancels it or it expires                                                                                                                                                                |
+| a concurrent disable runs while the approve holds the target                                                               | they serialize on the `trust_keyset` or `trust_source` row; the second sees the first's revision                                                                                                                                                                        |
+| an egress entry the change needs is disabled                                                                               | `EgressNotAllowed` (the service's entry check, `source.rs:509-532`). If the service check were skipped, the `0011` trigger `trust_source_egress_enabled` refuses the write with `23514`, `Invariant { kind: EgressEntryEnabled }` (README "What 0011 adds", :2136-2150) |
+| an entry disable starts while the approve holds the entry `FOR SHARE`                                                      | the disable waits for the approve's commit; the source is then degraded at fetch (`source.rs:178-188`)                                                                                                                                                                  |
+| another version was enabled and now overlaps                                                                               | `Overlap`; after that version is disabled, a new approve of the same operation passes                                                                                                                                                                                   |
+| the keyset reached 8 enabled versions                                                                                      | `TooManyEnabledVersions`                                                                                                                                                                                                                                                |
+| a version with the plan's `version_id` now exists                                                                          | `AlreadyExists` (the insert's `23505`)                                                                                                                                                                                                                                  |
+| the parent keyset was disabled                                                                                             | written like any other (`keyset.rs:269-270`, inferred: the verifier reads the keyset's status)                                                                                                                                                                          |
+| two approvers approve at once                                                                                              | they serialize on the operation row; the second reads it consumed: `NotApprovable(Consumed)`                                                                                                                                                                            |
+| a cancel and an approve race                                                                                               | the same row lock; whichever is second gets `NotApprovable`                                                                                                                                                                                                             |
+| the toggle went off                                                                                                        | the approve still applies (an approval is never less safe); the requester may cancel and submit again                                                                                                                                                                   |
+| the toggle went on while a direct widening write was in flight                                                             | the write holds the policy row `FOR SHARE` from step 4 to its commit, so the toggle's `FOR NO KEY UPDATE` waits; a write that reaches step 4 after the toggle committed reads it on and goes pending                                                                    |
+| two toggles at once                                                                                                        | `single_actor_mode` on: they serialize on the policy row `FOR NO KEY UPDATE` and the second gets `StaleRevision` at its request; off: both go pending and the second approved gets `StaleRevision` at its approval; never `40P01` (D19)                                 |
+| a database constraint refuses the row (section 3)                                                                          | `AlreadyExists` or `Invariant`, as for the direct write; the operation stays pending                                                                                                                                                                                    |
+| the approver's credential was revoked                                                                                      | `Unauthorized`                                                                                                                                                                                                                                                          |
+| the requester's identity disabled, submitting credential disabled or revoked (a rotation, a restoration), or role disabled | `RequesterNotAuthorized` until it expires (D21; section 3)                                                                                                                                                                                                              |
+| the operation expired                                                                                                      | `NotApprovable(Expired)`; the `0005` check refuses a consume at or after `expires_at` even if the service check were skipped                                                                                                                                            |
+| the commit outcome is unknown to the approver's client                                                                     | a retried approve reads the operation consumed; the client reads the target                                                                                                                                                                                             |
 
 ### 6. Roles
 
@@ -500,13 +561,13 @@ is always gated, whatever its current value (ADR-008:100-105).
 
 ### 7. Audit trail
 
-| Step                     | Events, in chain order                                                                                                                                                 | Outcome                                                                                               |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| request, pending         | `administrative_operation.create`, actor the requester, `object_id` the operation, new revision 1                                                                      | `success`                                                                                             |
-| request, applied at once | the module's event as today (`trust_keyset_version.create`, `.enable`, `trust_source.create`, `.update`, `instance_security_policy.update`)                            | `success` (not widening); `success_widening` (widening, toggle off; D23); `success_single_actor` (Q4) |
-| approve                  | `administrative_operation.approve` (actor the approver, `object_id` the pending operation, revisions 1 and 2), then the module's event (actor the requester, as today) | `success`                                                                                             |
-| cancel, reject           | `administrative_operation.cancel` or `administrative_operation.reject` (actor the canceller or rejecter, `object_id` the pending operation, revisions 1 and 2)         | `success`                                                                                             |
-| expiry                   | none (derived)                                                                                                                                                         |                                                                                                       |
+| Step                     | Events, in chain order                                                                                                                                                 | Outcome                                                                                                                                                                                                      |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| request, pending         | `administrative_operation.create`, actor the requester, `object_id` the operation, new revision 1                                                                      | `success`                                                                                                                                                                                                    |
+| request, applied at once | the module's event as today (`trust_keyset_version.create`, `.enable`, `trust_source.create`, `.update`, `instance_security_policy.update`)                            | `success` (not widening); `success_widening` (widening, toggle off; D23); `success_single_actor` (widening with the toggle on, row 3 of the mode table; Q4; and the toggle itself under `single_actor_mode`) |
+| approve                  | `administrative_operation.approve` (actor the approver, `object_id` the pending operation, revisions 1 and 2), then the module's event (actor the requester, as today) | `success`                                                                                                                                                                                                    |
+| cancel, reject           | `administrative_operation.cancel` or `administrative_operation.reject` (actor the canceller or rejecter, `object_id` the pending operation, revisions 1 and 2)         | `success`                                                                                                                                                                                                    |
+| expiry                   | none (derived)                                                                                                                                                         |                                                                                                                                                                                                              |
 
 `administrative_operation.create` and `.approve` are in `AUDIT_ACTIONS`
 already (`event_actions.rs:24-31`, `:71-72`); `.cancel` and `.reject` are
@@ -518,8 +579,11 @@ the change is the requester's, and the approval is the adjacent event.
 **Outcomes.** A widening write applied at once with the flag while
 `widening_second_approver` is off records `success_widening`, so an
 auditor can tell an acknowledged widening from an ordinary write without
-reclassifying it (D23); under `single_actor_mode` it records
-`success_single_actor`. Both are new values of the existing `outcome`
+reclassifying it (D23), whatever `single_actor_mode` is. A widening write
+applied at once with the toggle on (row 3 of the mode table) records
+`success_single_actor`, as does the toggle itself when applied at once
+under `single_actor_mode`, whatever its current value. Both are new
+values of the existing `outcome`
 string (`events.rs:401-402`: the IR-056 hash input holds it), not a new
 member; the value set is inferred, since no contract lists outcome
 values. Any change to the IR-056 envelope itself (a new member) is
@@ -627,9 +691,24 @@ pub struct PreparedApproval { /* operation ID, digest read, kind, payload */ }
 
 /// The requester as step 1 authorized it (request) or as the plan names
 /// it (approve); the post-authorization step functions take this.
+/// `authorize_trust_admin` (`write.rs:43-59`) returns it in place of the
+/// bare `admin_id` (PRs 4 and 5).
 pub(crate) struct Requester {
     pub admin_id: String,
     pub credential_id: String,
+}
+
+/// The server clock, sampled by the approve after its last row lock
+/// (D28). Production reads `SystemTime::now()`; tests inject their own.
+pub trait Clock: Sync {
+    fn now(&self) -> SystemTime;
+}
+
+/// When the step function samples the clock: a request passes its `now`
+/// unchecked; an approve passes the clock and the operation's expiry.
+pub(crate) enum WriteTime<'a> {
+    Request(SystemTime),
+    Approve { clock: &'a dyn Clock, deadline: SystemTime },
 }
 
 #[non_exhaustive]
@@ -657,7 +736,7 @@ pub async fn approve_operation(
     prepared: &PreparedApproval,
     echo: &ApprovalEcho,
     ids: &ApprovalIds<'_>,
-    now: SystemTime,
+    clock: &dyn Clock,
 ) -> Result<Applied, ApprovalError>;
 
 pub async fn cancel_operation(
@@ -711,11 +790,13 @@ pub(crate) async fn apply_create_version(
     transaction: &mut Transaction<'_, Postgres>,
     requester: &Requester,
     new: &NewKeysetVersion<'_>,
+    time: WriteTime<'_>,
     event_id: &str,
     outcome: &str,
-) -> Result<TrustKeysetVersion, KeysetWriteError>;
+) -> Result<(TrustKeysetVersion, SystemTime), KeysetWriteError>; // + time
 pub(crate) async fn apply_enable_version(/* as above, with tenant_id, id,
-    expected_revision */) -> Result<TrustKeysetVersion, KeysetWriteError>;
+    expected_revision */) -> Result<(TrustKeysetVersion, SystemTime),
+    KeysetWriteError>;
 
 // service/src/trust/source.rs
 pub async fn submit_create_source(
@@ -735,10 +816,11 @@ pub async fn submit_update_source(
 
 // Post-authorization steps (D26), as for keysets.
 pub(crate) async fn apply_create_source(/* transaction, requester, new,
-    event_id, outcome */) -> Result<TrustSource, SourceWriteError>;
+    time, event_id, outcome */)
+    -> Result<(TrustSource, SystemTime), SourceWriteError>;
 pub(crate) async fn apply_update_source(/* transaction, requester,
-    tenant_id, id, expected_revision, changes, event_id, outcome */)
-    -> Result<TrustSource, SourceWriteError>;
+    tenant_id, id, expected_revision, changes, time, event_id, outcome */)
+    -> Result<(TrustSource, SystemTime), SourceWriteError>;
 // service/src/operation/mod.rs: apply_policy_toggle, likewise.
 
 // service/src/persistence/registry/operation.rs (new): bare, check nothing
@@ -775,7 +857,7 @@ pub async fn lock_instance_security_policy(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<InstanceSecurityPolicy, RegistryError>;
 /// Both actors' rows `FOR SHARE`; the requester's credential must be the
-/// plan's and unrevoked (D21).
+/// plan's, enabled and unrevoked (D21).
 pub async fn authorize_approval_locked(
     transaction: &mut Transaction<'_, Postgres>,
     approver_public_identity: &str,
@@ -880,7 +962,7 @@ CREATE INDEX administrative_operation_open_by_tenant
 -- The read query (D22): the index predicate, then the caller's clock and
 -- the five approvable kinds. Outcome stays 'pending' after expiry.
 SELECT ... FROM administrative_operation
- WHERE tenant_id = $1               -- the instance twin: tenant_id IS NULL
+ WHERE tenant_id = $1  -- a second statement for the instance: IS NULL
    AND consumed_at IS NULL AND revoked_at IS NULL
    AND expires_at IS NOT NULL AND expires_at > $2
    AND kind IN ('trust_keyset_version_create', 'trust_keyset_version_enable',
@@ -925,7 +1007,8 @@ The `0005` order puts the operator rows first and the audit head last
 2. the pending operation row `FOR NO KEY UPDATE` (`administrative_operation`
    is the fifth `0005` table, README:1030-1032);
 3. the module's rows, as request step 3 (for the toggle, the policy row
-   `FOR NO KEY UPDATE`);
+   `FOR NO KEY UPDATE`); then, with every row lock held, the one clock
+   sample and the expiry check (D28);
 4. the registry write;
 5. the audit head, last: the approve event, the approve operation insert,
    the domain event, then the update of the pending row, locked in step 2.
@@ -944,19 +1027,21 @@ to lock, an egress entry writer must lock no `trust_source` row, and
 before the head, as in the direct writes, because it references no new
 operation and because a source compare-and-set waiting while holding the
 head would deadlock with a consumer's own audit append
-(`source.rs:153-158`); only the inserts that need the head and the update of
-the already locked pending row come after it.
+(`source.rs:153-158`); only the inserts that need the head and the update
+of the already locked pending row come after it.
 
-No new cycle: the toggle locks no trust row and takes the policy row before
-the head, and takes it `FOR NO KEY UPDATE` from the start, never
-`FOR SHARE` and then an upgrade, so two toggles serialize on it (the
-second gets `StaleRevision`) instead of each holding a share lock the
-other's update waits for (`40P01`, D19); a trust write's `FOR SHARE` and
-a toggle's `FOR NO KEY UPDATE` conflict, so they serialize too, and
-neither holds a lock the other takes later; two approvals of one
-operation serialize on its row; an approval
-and a direct write of one target serialize on the target row; an approval
-and an entry disable behave as a direct update does (`source.rs:178-188`).
+No new cycle: the toggle locks no trust row and takes the policy row
+before the head, and takes it `FOR NO KEY UPDATE` from the start, never
+`FOR SHARE` and then an upgrade, so two toggles serialize on it instead of
+each holding a share lock the other's update waits for (`40P01`, D19).
+With `single_actor_mode` on, the second gets `StaleRevision` at its
+request; with it off, neither request updates the row, both go pending,
+and the second gets `StaleRevision` at its approval. A trust write's
+`FOR SHARE` and a toggle's `FOR NO KEY UPDATE` conflict, so they
+serialize too, and neither holds a lock the other takes later; two
+approvals of one operation serialize on its row; an approval and a direct
+write of one target serialize on the target row; an approval and an entry
+disable behave as a direct update does (`source.rs:178-188`).
 The restoration's credential locks meet the approve's `FOR SHARE` as they
 meet any operator write (`recovery.rs`, "A deadlock that fails closed").
 One operation is applied per transaction, and the caller's transaction
@@ -971,9 +1056,12 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
 - The overlap check runs twice, at the request and at the approve.
 - Refusals are not audited, and a failed approve leaves no trace in the
   database (D14).
-- `now` is the caller's clock, as for every write here; the table has no
+- `now` is the service's clock, as for every write here; the table has no
   creation time, so the 24-hour bound is the service's rule, not the
-  database's (README:958-959 asks only for an expiry).
+  database's (README:958-959 asks only for an expiry). The approve samples
+  it after its last row lock (D28); the wait for the audit head comes
+  after the sample, so an approve can commit slightly after `expires_at`
+  with a `consumed_at` before it. The head is held only for appends.
 - The `0012` guard, if accepted, is a tripwire against application DML,
   not a security boundary (README "Limits"); it cannot check roles or the
   digest.
@@ -1004,22 +1092,29 @@ The implementation PRs must have (owned by the test session; section
   its recomputation from the stored row; an approve by a distinct
   `security_admin` writes the approve operation, the events in the order
   above, `consumed_at` and outcome `applied`.
-- **Refusals.** Self-approval by an operator holding both roles; an
-  approver with only `trust_admin`; a revoked approver credential; a digest
-  one byte off, of another length, and an expected revision off by one; a
-  digest copied from another operation with the same plan;
-  `prepare_approval` by a caller who may not approve (no parse runs:
-  `Unauthorized` or `NotFound` as from `approve_operation`); a requester
-  whose submitting credential was revoked or whose identity was disabled
-  (D21); a prepared projection that differs from the locked plan's (D24);
-  expiry at exactly `expires_at` and one microsecond before (injected
-  clock); consumed, revoked, wrong kind (a recovery challenge's ID);
-  another tenant's operation on a tenant path, a tenant operation on the
-  instance path and the reverse (`NotFound`); a requester whose role was
-  disabled (Q5); a cancel by another `trust_admin`; a cancel after consume.
+- **Refusals.** Self-approval by an operator holding both roles; an approver
+  with only `trust_admin`; a revoked approver credential; a digest one byte off,
+  of another length, and an expected revision off by one; a digest copied from
+  another operation with the same plan; `prepare_approval` by a caller who may
+  not approve (no parse runs: `Unauthorized` or `NotFound` as from
+  `approve_operation`); a requester whose submitting credential was disabled
+  (status `disabled`, `revoked_at` null), revoked, rotated away or revoked by a
+  restoration, or whose identity was disabled (D21), and the requester's cancel
+  with a new credential after a rotation; a prepared projection that differs
+  from the locked plan's (D24); expiry at exactly `expires_at` and one
+  microsecond before (injected clock); an approve that waits on a lock (the
+  target row held by another connection) while the injected clock is advanced
+  past `expires_at` is `NotApprovable(Expired)` and writes nothing, and with the
+  clock left before it, records the post-lock sample as `consumed_at` (D28);
+  consumed, revoked, wrong kind (a recovery challenge's ID); another tenant's
+  operation on a tenant path, a tenant operation on the instance path and the
+  reverse (`NotFound`); a requester whose role was disabled (Q5); a cancel by
+  another `trust_admin`; a cancel after consume.
 - **Races** (two connections, both commit orders): two approves; approve
-  and cancel; approve and a direct write of the target; two toggles (the
-  second `StaleRevision`); the toggle and a direct widening write (the
+  and cancel; approve and a direct write of the target; two toggles with
+  `single_actor_mode` on (the second `StaleRevision` at its request) and
+  off (both pending; the second `StaleRevision` at its approval); the
+  toggle and a direct widening write (the
   write's `FOR SHARE` against the toggle's `FOR NO KEY UPDATE`); approve
   and an entry disable; none ends in `40P01`.
 - **Classification.** Every row of the table in section 1, both values of
@@ -1031,10 +1126,16 @@ The implementation PRs must have (owned by the test session; section
   request and approve) is approved and refused, writes nothing and stays
   pending.
 - **Audit outcomes.** `success_widening` for an acknowledged widening
-  write with the toggle off, `success_single_actor` under
-  `single_actor_mode`, `success` otherwise (D23).
+  write with the toggle off, whatever `single_actor_mode` is;
+  `success_single_actor` for one applied with the toggle on under
+  `single_actor_mode`, and for the toggle itself applied at once;
+  `success` otherwise (D23).
 - **Read path.** The open-operations query returns no expired, consumed,
-  revoked or approve, cancel or reject row (D22).
+  revoked or approve, cancel or reject row (D22). A positive instance
+  case: a pending toggle is listed on the instance path (`tenant_id = $1`
+  bound to `NULL` matches nothing, so a single-statement implementation
+  would silently list nothing there). The digest recomputed from a read
+  response alone, with no other input, equals the stored one (D29).
 - **Keysets.** A gated create writes no `trust_keyset_version` row until
   approved; an overlap introduced between request and approve refuses, and
   passes after the conflict is disabled; the cap reached meanwhile;
@@ -1067,7 +1168,9 @@ Mutants: the actor comparison dropped; the digest echo or the recompute
 dropped; the expiry predicate dropped; the policy row read without
 `FOR SHARE` (the toggle race); the toggle's policy row taken `FOR SHARE`
 (two toggles); `prepare_approval` parsing before it authorizes; the
-requester's credential check dropped; a create classified as not widening; the
+requester's credential check dropped, or its `status` check dropped;
+the clock sampled before the locks; a member left out of the read
+response's digest envelope; a create classified as not widening; the
 approve's overlap check skipped; the in-transaction parse moved back to
 the Stage A pool.
 
@@ -1114,7 +1217,8 @@ the Stage A pool.
    and its verdict would still be stale at approve).
 8. **D8.** **No hold on the target** between request and approve. Rejected: a
    pending marker that blocks other writes (a requester could freeze a
-   source, and a disable must stay immediate).
+   source; a `disable_version` must stay immediate, and no request may
+   block another's).
 9. **D9.** **Registry write before the head** in the approve; the declared lock
    order. Rejected: the README's by-name order for the egress entry (it
    would differ from the direct update of the same source).
@@ -1150,7 +1254,11 @@ the Stage A pool.
     4: store failures never expand privilege).
 19. **D19.** **The toggle takes the policy row `FOR NO KEY UPDATE`** and
     checks its revision, in both branches; a trust write takes it
-    `FOR SHARE`. Rejected: `FOR SHARE` then a compare-and-set (two
+    `FOR SHARE`. A concurrent toggle can cause a request-time
+    `StaleRevision` only in the direct (`single_actor_mode`) branch; in
+    the gated branch the request leaves the revision unchanged, so two
+    requests on one revision both go pending and the revision check refuses
+    the second application. Rejected: `FOR SHARE` then a compare-and-set (two
     concurrent toggles deadlock, `40P01`, as the review reproduced on
     PostgreSQL 17.12; README:1025-1026 asks for `FOR NO KEY UPDATE` on a
     row the write updates, never `FOR UPDATE`).
@@ -1162,9 +1270,13 @@ the Stage A pool.
     operation's payload, and the refusal order would tell an outsider that
     an operation exists).
 21. **D21.** **The plan stores the requester's submitting credential ID**;
-    at approve that credential must be unrevoked, the requester's identity
+    at approve that credential must be enabled and unrevoked (a credential
+    may be `disabled` with `revoked_at` null, `0005:139-144`; the lookup
+    requires both, `operator.rs:504-516`), the requester's identity
     enabled and the kind's role held, or the approve is
-    `RequesterNotAuthorized`. Rejected: the role check alone (a revoked
+    `RequesterNotAuthorized`. A rotation or a restoration therefore strands
+    pending operations until they expire (section 3). Rejected: the role
+    check alone (a revoked
     credential, the usual response to a compromised key, would not stop a
     request it submitted); revoking pending operations when a credential
     is revoked (a write into another subsystem's path).
@@ -1191,11 +1303,36 @@ the Stage A pool.
     request was validated against).
 26. **D26.** **Post-authorization step functions** (`apply_create_version`,
     `apply_enable_version`, `apply_create_source`, `apply_update_source`,
-    `apply_policy_toggle`) take the authorized requester's `admin_id`; both
-    `submit_*` and `approve_operation` call them. Rejected: calling the
-    existing writers from the approve (they authorize by
-    `public_identity`, `write.rs:43-59`, which the approve does not have
+    `apply_policy_toggle`) take the authorized
+    `Requester { admin_id, credential_id }`, which `authorize_trust_admin`
+    returns in place of the bare `admin_id` (PRs 4 and 5), and a
+    `WriteTime`; both `submit_*` and `approve_operation` call them.
+    Rejected: calling the existing writers from the approve (they authorize
+    by `public_identity`, `write.rs:43-59`, which the approve does not have
     for the requester); duplicating the steps in `crate::operation`.
+27. **D27.** **PRs 4 and 5 may pre-validate the plainly typed database
+    constraints** at the request where it is cheap: the non-empty strings
+    and arrays, `review_timeout_ms > 0`, `stale_revocation_acknowledged`
+    true, with the same refusal the database gives. A pick, not a promise:
+    the constraints stay the authority, and the kind, replay, profile,
+    range, unique and foreign-key checks stay approve-time. Rejected:
+    duplicating every constraint in the service (drift); none (a request
+    the service accepts is refused at every approve for a typo).
+28. **D28.** **The approve samples a fresh server clock after its last row
+    lock**, through an injected `Clock`, and uses that one sample for the
+    expiry check, the write, the events and `consumed_at`. Rejected: one
+    `now` passed in before the locks (an approve that waited past the
+    expiry would be recorded as consumed before it); a database clock
+    (`clock_timestamp()`; every other write here takes the caller's clock,
+    and tests could not inject it).
+29. **D29.** **The read response returns the whole digest envelope**: the
+    operation `id`, the requester's `actor_id`, `kind`, `tenant_id`,
+    `expected_revision`, `expires_at` as the integer microseconds the
+    preimage uses (beside any display form) and the plan exactly as the
+    preimage holds it, so the operator client can recompute the digest
+    from the response alone (Q1). Rejected: returning the digest without
+    its inputs (the approver, a different operator, cannot know the
+    requester's `actor_id`).
 
 ## Resolved (provisional; ADRs unratified)
 
@@ -1215,10 +1352,12 @@ Questions for the user, each with the recommended answer:
    `expires_at`; `GET /admin/v1/tenants/{tenant}/operations/{operation}`
    and a list of open operations (and the instance twins), readable by
    instance `security_admin`, the requester and the tenant `auditor`,
-   returning the plan, digest, expected revision and expiry. The operator
-   client recomputes the digest from the returned plan before echoing it,
-   so an approver never echoes a digest it has not checked against what it
-   read.
+   returning the digest and the whole digest envelope: the operation `id`,
+   the requester's `actor_id`, `kind`, `tenant_id`, `expected_revision`,
+   `expires_at` as the integer microseconds the preimage uses, and the
+   plan (D29). The operator client recomputes the digest from that
+   response alone before echoing it, so an approver never echoes a digest
+   it has not checked against what it read.
 2. **Q2.** **Is a disable-only source update widening?** The ruling says "a
    trust source write", so until the user answers, it is (D1). Recommended:
    accept the exception, not widening, like a soft disable of a binding or
@@ -1274,16 +1413,16 @@ read path of Q1 is decided. `disable_version` stays unwired with the rest.
 and code comments; the test session owns tests, security scenarios, CI,
 the harness and `docs/testing/conformance-layout.md`):
 
-| PR  | Session | Content                                                                                                                                                                                                                                                                                                                   | After   |
-| --- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                          | —       |
-| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; `0012` and its README section if accepted                                                                                                           | —       |
-| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                            | 2       |
-| 4   | coding  | keyset kinds: `apply_*` split, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3114-3116, :3333-3334)                      | 1, 3    |
-| 5   | coding  | source kinds: `apply_*` split, `submit_create_source`, `submit_update_source` (every source write widening), the full stored-row read; the disable-only classification only as an add-on after the user accepts Q2                                                                                                        | 3       |
-| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                   | each PR |
-| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                               | 6       |
-| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it | 6       |
+| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                      | After   |
+| --- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                             | —       |
+| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; `0012` and its README section if accepted                                                                                                                                                                                              | —       |
+| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                               | 2       |
+| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3114-3116, :3333-3334) | 1, 3    |
+| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source` (every source write widening), the full stored-row read; the disable-only classification only as an add-on after the user accepts Q2                                                                          | 3       |
+| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                                                                                      | each PR |
+| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                  | 6       |
+| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                    | 6       |
 
 ADR-008:220, which repeats the T14.1/T14.2 attribution, is the lead's to
 correct; neither session edits it.
