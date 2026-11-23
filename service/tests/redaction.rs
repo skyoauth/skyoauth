@@ -155,6 +155,8 @@ const SEC_ADMIN: &str = "adm_redact_sec_7e15";
 const SEC_KEY: &str = "spki-sha256:redact-sec-0f5a";
 const UNKNOWN_KEY: &str = "spki-sha256:redact-unknown-b8e0";
 const CREATE_EVENT: &str = "evt_redact_create_19af";
+/// The approve event ID that the unlisted check constraint refuses.
+const UNLISTED_EVENT: &str = "evt_redact_unlisted_5c3b";
 
 fn at(micros: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_micros(T0 + micros)
@@ -375,11 +377,14 @@ async fn approve(
     result
 }
 
-/// The second-approver flow's refusals on real paths, a refusal of the
-/// database (a taken event ID) and a row the registry cannot read (an
-/// infinite expiry, the ID of the row in its `RegistryError`) included:
-/// no `Display` or `Debug` of the error or of its `RegistryError` holds an
-/// ID, a public identity, the plan or the digest of the request. The
+/// The second-approver flow's refusals on real paths, included: a refusal
+/// of the database the registry maps (a taken event ID), one it does not
+/// (`RegistryError::Other`, from a check constraint unknown to the registry,
+/// whose raw `sqlx::Error` quotes the failing row), and a row the registry
+/// cannot read (an infinite expiry, the ID of the row in its
+/// `RegistryError`). No `Display` or `Debug` of the error or of its
+/// `RegistryError` holds an ID, a public identity, the plan or the digest
+/// of the request. The
 /// `Debug` of a prepared approval holds none of them either, and that of a
 /// pending operation or an echo not the digest.
 #[tokio::test]
@@ -431,6 +436,7 @@ async fn approval_errors_omit_the_requests_values() {
         SEC_KEY,
         UNKNOWN_KEY,
         CREATE_EVENT,
+        UNLISTED_EVENT,
         "widening_second_approver",
     ]
     .map(String::from)
@@ -498,6 +504,69 @@ async fn approval_errors_omit_the_requests_values() {
         "Registry(AlreadyExists { constraint: \"audit_event_pkey\" })",
         &markers,
     );
+    // A refusal the registry does not map: a check constraint missing from
+    // KNOWN_CONSTRAINTS refuses the approve event. The constraint is added
+    // in the approval's own transaction, which is rolled back, so it is
+    // gone afterwards even when the approval panics (DDL is transactional).
+    let unlisted = {
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE audit_event ADD CONSTRAINT zz_unlisted CHECK (id <> '{UNLISTED_EVENT}')"
+        )))
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+        let result = approve_operation(
+            &mut transaction,
+            SEC_KEY,
+            ApprovalScope::Instance,
+            &prepared,
+            &echo,
+            &ApprovalIds {
+                approve_operation_id: "appr_redact_unlisted",
+                approve_event_id: UNLISTED_EVENT,
+                write_event_id: "evt_write_redact_unlisted",
+            },
+            &Fixed,
+        )
+        .await;
+        transaction.rollback().await.unwrap();
+        result
+    };
+    let constraints: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_constraint WHERE conname = 'zz_unlisted'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(constraints, 0, "zz_unlisted left behind");
+    let err = unlisted.expect_err("the unlisted constraint refuses the approve event");
+    assert_error_omits(&err, &markers);
+    assert_eq!(
+        format!("{err:?}"),
+        "Registry(Other { sqlstate: Some(\"23514\"), .. })"
+    );
+    assert_eq!(
+        err.to_string(),
+        "operation write failed: registry database error (SQLSTATE 23514)"
+    );
+    // The raw error under it is the one that quotes the row: the redaction,
+    // not the database, keeps the markers out above.
+    let registry_err = err
+        .source()
+        .and_then(|source| source.downcast_ref::<registry::RegistryError>())
+        .expect("a RegistryError source");
+    let raw = registry_err
+        .source()
+        .and_then(|source| source.downcast_ref::<sqlx::Error>())
+        .and_then(|raw| raw.as_database_error())
+        .expect("a database error source");
+    assert_eq!(raw.code().as_deref(), Some("23514"));
+    assert_eq!(raw.constraint(), Some("zz_unlisted"));
+    assert!(
+        format!("{:?}", registry_err.source().unwrap()).contains(UNLISTED_EVENT),
+        "the raw error does not quote the event ID, so this case proves nothing"
+    );
+
     // A stored digest of another length (33 bytes: the column allows 32 to
     // 64, the flow writes 32).
     insert_raw(&pool, OP_LONG, [&digest[..], &[0]].concat()).await;
