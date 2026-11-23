@@ -138,24 +138,36 @@
 //!   runs it holds the parent keyset row, the operator rows `FOR SHARE`, a
 //!   database connection and one of the [`IN_TRANSACTION_WORKERS`]
 //!   process-wide workers (2, inferred), a pool of its own, separate from
-//!   Stage A's [`VALIDATION_WORKERS`]: an upload being validated never
-//!   delays a lock-holding parse, and a parse never takes a Stage A worker
-//!   (second-approver proposal, section 8, D13). Each parse step (an
-//!   enable's own target first, then the compared versions, even when
-//!   none intersects) waits at most [`IN_TRANSACTION_WAIT`]
-//!   (2 s, inferred) for a worker, under the locks above; a worker not
-//!   granted in time is [`KeysetWriteError::ValidationBusy`], retryable, and
-//!   the write's savepoint rollback releases the parent lock and the
-//!   operator rows. The bound is on the wait only, not on the parse; it is
-//!   tokio's `timeout`, so the manifest names tokio's `time` feature, which
-//!   `sqlx` and `axum` already compiled in (the lockfile did not change).
-//!   The estimate is about 0.18 s per compared 20-key set in release, plus that
-//!   wait; debug builds measured 0.30 s for 1 and 1.31 s for 8 compared
-//!   versions, the most the cap allows. It is a known cost, not a design
-//!   goal. **Wiring precondition** (done): before any endpoint calls this
-//!   module, the in-transaction parses needed a permit or priority of their
-//!   own, separate from Stage A's; they now have the pool, the bounded wait
-//!   and [`KeysetWriteError::ValidationBusy`] above. Follow-up: a change of
+//!   Stage A's [`VALIDATION_WORKERS`] (second-approver proposal, section 8,
+//!   D13): a parse never waits for a Stage A permit, and an upload never
+//!   waits for an in-transaction one. Both pools share tokio's blocking pool
+//!   (512 threads by default; this module is the service's only direct
+//!   `spawn_blocking` caller, though tokio itself uses that pool too, for
+//!   example for a DNS lookup when a connection is opened by host name) and
+//!   the CPU. A write waits at most once, [`IN_TRANSACTION_WAIT`] (2 s,
+//!   inferred), for a worker, under the locks above: an enable parses its
+//!   target and its compared versions in one blocking task, and a write
+//!   that compares no stored version (a create whose window intersects no
+//!   enabled version) takes no permit at all. A worker not granted in time
+//!   is [`KeysetWriteError::ValidationBusy`], retryable: the write's
+//!   savepoint rollback releases the parent lock and the operator rows;
+//!   retry after a back-off (proposal section 10: 503 with `Retry-After`).
+//!   A retry in the same transaction waits again under any locks the caller
+//!   holds outside the write. The bound is on the wait only, not on the
+//!   parse; it is tokio's `timeout`, so the manifest names tokio's `time`
+//!   feature, which `sqlx` and `axum` already compiled in (the lockfile did
+//!   not change). A permit is held only by the blocking task's CPU work,
+//!   never across a statement, so a permit wait cannot form a cycle with
+//!   row locks. The estimate is about 0.18 s per compared 20-key set in
+//!   release, plus that wait; debug builds measured 0.30 s for 1 and 1.31 s
+//!   for 8 compared versions, the most the cap allows. It is a known cost,
+//!   not a design goal. **Wiring precondition** (done): before any endpoint
+//!   calls this module, the in-transaction parses needed a permit or
+//!   priority of their own, separate from Stage A's; they now have the
+//!   pool, the bounded wait and [`KeysetWriteError::ValidationBusy`] above.
+//!   A runtime built with `max_blocking_threads` must leave room for both
+//!   pools ([`VALIDATION_WORKERS`] plus [`IN_TRANSACTION_WORKERS`]) and
+//!   headroom for tokio's own blocking work. Follow-up: a change of
 //!   [`KeysetVersion`] to take stored keys, or a stored marker that a
 //!   projection passed the point checks, would remove the parse.
 //! - **The verifier.** The T11.7 verifier's key cache is built the same
@@ -206,8 +218,9 @@
 //!    so its size or content costs the write nothing;
 //! 5. when the version becomes enabled: the count of the other enabled
 //!    versions against [`MAX_ENABLED_VERSIONS_PER_KEYSET`], then the full
-//!    parse of the compared stored versions on the in-transaction pool
-//!    (see "Cost") and [`check_version_overlap`];
+//!    parse of the compared stored versions (and an enable's target, in
+//!    the same blocking task) on the in-transaction pool (see "Cost") and
+//!    [`check_version_overlap`];
 //! 6. the registry write: the insert (whose foreign-key checks take
 //!    `FOR KEY SHARE` on the tenant and the keyset, already held more
 //!    strongly by step 3) or the compare-and-set status update (which
@@ -452,11 +465,14 @@ pub enum KeysetWriteError {
     WorkerUnavailable,
     /// No in-transaction parse worker ([`IN_TRANSACTION_WORKERS`]) was free
     /// within [`IN_TRANSACTION_WAIT`], so the stored versions were not
-    /// parsed and the version was not enabled (see the module docs,
-    /// "Cost"). Retryable: the write's savepoint is rolled back, which
-    /// releases the parent keyset lock and the operator rows. Only a write
-    /// that makes a version enabled returns it; [`validate_upload`] waits
-    /// for its own workers without a bound.
+    /// parsed, the overlap check did not run and the write wrote nothing
+    /// (see the module docs, "Cost"). Retryable: the write's savepoint is
+    /// rolled back, which releases the parent keyset lock and the operator
+    /// rows; retry after a back-off (proposal section 10: 503 with
+    /// `Retry-After`). A retry in the same transaction waits again under
+    /// any locks the caller holds outside the write. Only a write that
+    /// makes a version enabled and compares a stored version returns it;
+    /// [`validate_upload`] waits for its own workers without a bound.
     ValidationBusy,
     /// A registry error: a store failure, [`RegistryError::Retry`] (retry
     /// the whole transaction), or the write's own outcome, such as
@@ -614,6 +630,8 @@ async fn on_pool_within<T: Send + 'static>(
 /// Runs `work` on tokio's blocking pool, `permit` moved into the blocking
 /// task so that it is released when `work` returns or unwinds, not when the
 /// caller's future is dropped. A panic in `work` is resumed in the caller.
+/// `work` is CPU work only: a permit is never held across a statement, so
+/// a permit wait cannot form a cycle with row locks.
 async fn run_holding<T: Send + 'static>(
     permit: SemaphorePermit<'static>,
     work: impl FnOnce() -> T + Send + 'static,
@@ -652,23 +670,80 @@ fn parse_in_full(stored: &str) -> Result<ValidatedKeyset, JwkSetError> {
     validate_keyset(&value, &KNOWN_ALGORITHMS)
 }
 
+/// How a stored set is parsed: [`parse_in_full`] (the tests pass a parse
+/// of their own to [`parse_enable_on`]).
+type Parse = fn(&str) -> Result<ValidatedKeyset, JwkSetError>;
+
+/// A stored version with its keys, parsed in full.
+type Parsed = (KeysetVersionText, ValidatedKeyset);
+
+/// `parse` of the stored version `row`; a failure names it.
+fn parse_one(parse: Parse, row: KeysetVersionText) -> Result<Parsed, KeysetWriteError> {
+    match parse(&row.public_jwks) {
+        Ok(keys) => Ok((row, keys)),
+        Err(error) => Err(KeysetWriteError::StoredVersion {
+            version_id: row.id,
+            error,
+        }),
+    }
+}
+
+/// `parse` of each stored version, in order; the first failure names its
+/// version.
+fn parse_rows(parse: Parse, rows: Vec<KeysetVersionText>) -> Result<Vec<Parsed>, KeysetWriteError> {
+    rows.into_iter().map(|row| parse_one(parse, row)).collect()
+}
+
 /// [`parse_in_full`] of each stored version, in order, on one of the
 /// [`IN_TRANSACTION_WORKERS`] (not Stage A's pool); the first failure names
 /// its version. No permit within [`IN_TRANSACTION_WAIT`] is
-/// [`KeysetWriteError::ValidationBusy`].
+/// [`KeysetWriteError::ValidationBusy`]. An empty `rows` takes no permit
+/// and cannot be busy.
 async fn parse_stored_versions(
     rows: Vec<KeysetVersionText>,
-) -> Result<Vec<(KeysetVersionText, ValidatedKeyset)>, KeysetWriteError> {
-    on_in_transaction_worker(move || {
-        rows.into_iter()
-            .map(|row| match parse_in_full(&row.public_jwks) {
-                Ok(keys) => Ok((row, keys)),
-                Err(error) => Err(KeysetWriteError::StoredVersion {
-                    version_id: row.id,
-                    error,
-                }),
-            })
-            .collect()
+) -> Result<Vec<Parsed>, KeysetWriteError> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    on_in_transaction_worker(move || parse_rows(parse_in_full, rows)).await?
+}
+
+/// An enable's one parse step: [`parse_in_full`] of its stored `target`,
+/// then of the keyset's enabled versions `rows` that
+/// [`compared_rows`] keeps against it, all in one blocking task on one of
+/// the [`IN_TRANSACTION_WORKERS`], so the write waits for a permit once
+/// (at most [`IN_TRANSACTION_WAIT`]). A failure of the target names the
+/// target, before any other version is parsed.
+async fn parse_enable(
+    target: KeysetVersionText,
+    rows: Vec<KeysetVersionText>,
+) -> Result<(Parsed, Vec<Parsed>), KeysetWriteError> {
+    parse_enable_on(
+        &IN_TRANSACTION,
+        IN_TRANSACTION_WAIT,
+        parse_in_full,
+        target,
+        rows,
+    )
+    .await
+}
+
+/// [`parse_enable`] on the pool `pool`, waiting at most `wait`, with
+/// `parse` (the tests use pools, waits and parses of their own). The
+/// window filter runs in the blocking task too: it needs the target's
+/// window only, which is known once the target is parsed.
+async fn parse_enable_on(
+    pool: &'static Semaphore,
+    wait: Duration,
+    parse: Parse,
+    target: KeysetVersionText,
+    rows: Vec<KeysetVersionText>,
+) -> Result<(Parsed, Vec<Parsed>), KeysetWriteError> {
+    on_pool_within(pool, wait, move || {
+        let (target, keys) = parse_one(parse, target)?;
+        let compared = compared_rows(&enabled(&target, keys.set()), rows);
+        let parsed = parse_rows(parse, compared)?;
+        Ok(((target, keys), parsed))
     })
     .await?
 }
@@ -687,15 +762,22 @@ fn as_version<'a>(row: &'a KeysetVersionText, keys: &'a JwkSet) -> KeysetVersion
     }
 }
 
-/// Step 5: `version`, becoming enabled, against the keyset's enabled
-/// versions `rows` (as [`read_enabled_keyset_versions`] reads them) but its
-/// own ID, those whose windows intersect its own, each parsed in full first.
-async fn check_overlap(
+/// The stored version `row` with `keys`, as it is once enabled.
+fn enabled<'a>(row: &'a KeysetVersionText, keys: &'a JwkSet) -> KeysetVersion<'a> {
+    KeysetVersion {
+        status: VersionStatus::Enabled,
+        ..as_version(row, keys)
+    }
+}
+
+/// The versions of `rows` (the keyset's enabled versions, as
+/// [`read_enabled_keyset_versions`] reads them) that the overlap check of
+/// `version` compares: all but its own ID whose windows intersect its own.
+fn compared_rows(
     version: &KeysetVersion<'_>,
     rows: Vec<KeysetVersionText>,
-) -> Result<(), KeysetWriteError> {
-    let compared: Vec<KeysetVersionText> = rows
-        .into_iter()
+) -> Vec<KeysetVersionText> {
+    rows.into_iter()
         // Excluding the version's own ID is not only a saving: the check
         // skips it anyway, but a create that reuses the ID of a stored
         // version would parse that row and could fail as `StoredVersion`
@@ -703,13 +785,28 @@ async fn check_overlap(
         .filter(|row| row.id != version.id)
         // The window only: `version`'s keys stand in for the unparsed ones.
         .filter(|row| version.windows_intersect(&as_version(row, version.keys)))
-        .collect();
-    let parsed = parse_stored_versions(compared).await?;
-    let existing: Vec<KeysetVersion<'_>> = parsed
+        .collect()
+}
+
+/// [`check_version_overlap`] of `version` against the `compared` versions,
+/// parsed in full.
+fn check_against(version: &KeysetVersion<'_>, compared: &[Parsed]) -> Result<(), KeysetWriteError> {
+    let existing: Vec<KeysetVersion<'_>> = compared
         .iter()
         .map(|(row, keys)| as_version(row, keys.set()))
         .collect();
     check_version_overlap(version, &existing).map_err(KeysetWriteError::Overlap)
+}
+
+/// Step 5 of a create: `version`, becoming enabled, against the keyset's
+/// enabled versions `rows` that [`compared_rows`] keeps, each parsed in
+/// full first (no permit when none is kept).
+async fn check_overlap(
+    version: &KeysetVersion<'_>,
+    rows: Vec<KeysetVersionText>,
+) -> Result<(), KeysetWriteError> {
+    let parsed = parse_stored_versions(compared_rows(version, rows)).await?;
+    check_against(version, &parsed)
 }
 
 /// Step 5, first: refuses a version becoming enabled when the keyset
@@ -964,13 +1061,10 @@ async fn status_steps(
             let rows =
                 read_enabled_keyset_versions(&mut **transaction, tenant_id, &keyset_id).await?;
             check_enabled_count(&rows, id)?;
-            let mut own = parse_stored_versions(vec![stored]).await?;
-            let (row, keys) = own.remove(0);
-            let version = KeysetVersion {
-                status: VersionStatus::Enabled,
-                ..as_version(&row, keys.set())
-            };
-            check_overlap(&version, rows).await?;
+            // The target and its compared versions in one parse step: one
+            // permit, one wait, per write.
+            let ((row, keys), compared) = parse_enable(stored, rows).await?;
+            check_against(&enabled(&row, keys.set()), &compared)?;
             (previous_revision, ENABLE_ACTION)
         }
         Status::Disabled => {
@@ -1290,7 +1384,20 @@ mod tests {
     /// Serializes the tests that hold permits of the process-wide pools, so
     /// that, run in one process (`cargo test`), they cannot take each
     /// other's workers. The other tests never hold those permits.
+    ///
+    /// Hazard: any lib test that runs [`create_version`] or
+    /// [`enable_version`] of an enabled version, or
+    /// [`parse_stored_versions`], must take `STATICS` too. Otherwise it gets
+    /// [`KeysetWriteError::ValidationBusy`] while a test below holds every
+    /// in-transaction permit (the upload test for about 2.3 s, the
+    /// database test for about 5 s, in a debug build). A test that only
+    /// runs [`validate_upload`] waits while Stage A's permits are held, and
+    /// does not fail.
     static STATICS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// tokio's default `max_blocking_threads` (the runtime of `main` and of
+    /// `#[tokio::test]` keeps it).
+    const TOKIO_DEFAULT_MAX_BLOCKING_THREADS: usize = 512;
 
     /// A bound on every wait of these tests, so a hang fails instead.
     const HANG: Duration = Duration::from_secs(10);
@@ -1299,8 +1406,14 @@ mod tests {
     /// [`IN_TRANSACTION_WAIT`].
     const SHORT_WAIT: Duration = Duration::from_millis(150);
 
-    fn all_permits() -> u32 {
-        u32::try_from(IN_TRANSACTION_WORKERS).unwrap()
+    /// `permits` permits of `pool`, or a failure (not a hang) when the pool
+    /// has fewer than the test expects.
+    async fn hold(pool: &'static Semaphore, permits: usize) -> SemaphorePermit<'static> {
+        let permits = u32::try_from(permits).unwrap();
+        tokio::time::timeout(HANG, pool.acquire_many(permits))
+            .await
+            .expect("the pool has fewer permits than its workers")
+            .unwrap()
     }
 
     /// Polls until `pool` has all of its permits back.
@@ -1332,6 +1445,17 @@ mod tests {
         assert_eq!(IN_TRANSACTION_WAIT, Duration::from_secs(2));
         // A pool of its own, not a share of Stage A's.
         assert!(!std::ptr::eq(&IN_TRANSACTION, &VALIDATION));
+    }
+
+    /// Both pools fit far inside tokio's blocking pool, which they share
+    /// with tokio's own blocking work (see the module docs, "Cost").
+    #[test]
+    fn both_pools_fit_far_inside_the_blocking_pool() {
+        let workers = VALIDATION_WORKERS + IN_TRANSACTION_WORKERS;
+        assert!(
+            workers <= TOKIO_DEFAULT_MAX_BLOCKING_THREADS / 64,
+            "{workers}"
+        );
     }
 
     /// At most [`IN_TRANSACTION_WORKERS`] parses run at once; a third
@@ -1389,7 +1513,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         static POOL: Semaphore = Semaphore::const_new(IN_TRANSACTION_WORKERS);
         static RAN: AtomicBool = AtomicBool::new(false);
-        let held = POOL.acquire_many(all_permits()).await.unwrap();
+        let held = hold(&POOL, IN_TRANSACTION_WORKERS).await;
         let start = std::time::Instant::now();
         let result = tokio::time::timeout(
             HANG,
@@ -1431,7 +1555,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_timed_out_waiter_takes_no_permit_from_the_next() {
         static POOL: Semaphore = Semaphore::const_new(IN_TRANSACTION_WORKERS);
-        let mut held = POOL.acquire_many(all_permits()).await.unwrap();
+        let mut held = hold(&POOL, IN_TRANSACTION_WORKERS).await;
         let early = tokio::spawn(on_pool_within(&POOL, SHORT_WAIT, || 1_u8));
         tokio::time::sleep(Duration::from_millis(30)).await;
         let (release, wait) = std::sync::mpsc::channel::<()>();
@@ -1473,7 +1597,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         static POOL: Semaphore = Semaphore::const_new(IN_TRANSACTION_WORKERS);
         static RAN: AtomicBool = AtomicBool::new(false);
-        let held = POOL.acquire_many(all_permits()).await.unwrap();
+        let held = hold(&POOL, IN_TRANSACTION_WORKERS).await;
         let task = tokio::spawn(on_pool_within(&POOL, HANG, || {
             RAN.store(true, Ordering::SeqCst);
         }));
@@ -1573,10 +1697,7 @@ mod tests {
     #[tokio::test]
     async fn a_stored_version_is_parsed_while_stage_a_is_saturated() {
         let _statics = STATICS.lock().await;
-        let held = VALIDATION
-            .acquire_many(u32::try_from(VALIDATION_WORKERS).unwrap())
-            .await
-            .unwrap();
+        let held = hold(&VALIDATION, VALIDATION_WORKERS).await;
         let parsed = tokio::time::timeout(
             IN_TRANSACTION_WAIT / 2,
             parse_stored_versions(vec![stored("ver_1", &p256("k"))]),
@@ -1591,11 +1712,14 @@ mod tests {
 
     /// Stage A runs on its own pool: with every in-transaction worker taken,
     /// an upload is still validated, while a stored version waits
-    /// [`IN_TRANSACTION_WAIT`] and is `ValidationBusy`.
-    #[tokio::test]
+    /// [`IN_TRANSACTION_WAIT`] and is `ValidationBusy`. And Stage A's wait
+    /// has no bound: with every Stage A worker taken too, an upload still
+    /// waits after more than [`IN_TRANSACTION_WAIT`], and is validated once
+    /// a worker is free.
+    #[tokio::test(flavor = "multi_thread")]
     async fn an_upload_is_validated_while_the_in_transaction_pool_is_saturated() {
         let _statics = STATICS.lock().await;
-        let held = IN_TRANSACTION.acquire_many(all_permits()).await.unwrap();
+        let held = hold(&IN_TRANSACTION, IN_TRANSACTION_WORKERS).await;
         let keys = tokio::time::timeout(
             IN_TRANSACTION_WAIT / 2,
             validate_upload(p256("k"), DEFAULT_ALLOWED_ALGORITHMS),
@@ -1604,6 +1728,8 @@ mod tests {
         .expect("Stage A waits for no in-transaction worker")
         .unwrap();
         assert_eq!(keys.keys().len(), 1);
+        let stage_a = hold(&VALIDATION, VALIDATION_WORKERS).await;
+        let pending = tokio::spawn(validate_upload(p256("k"), DEFAULT_ALLOWED_ALGORITHMS));
         let start = std::time::Instant::now();
         let result = tokio::time::timeout(
             HANG,
@@ -1613,6 +1739,106 @@ mod tests {
         .expect("the wait is bounded");
         assert!(matches!(result, Err(KeysetWriteError::ValidationBusy)));
         assert!(start.elapsed() >= IN_TRANSACTION_WAIT);
+        // Past the in-transaction bound, and some margin, the upload waits on.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!pending.is_finished(), "Stage A's wait has a bound");
+        drop(stage_a);
+        let keys = tokio::time::timeout(HANG, pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(keys.keys().len(), 1);
+        drop(held);
+    }
+
+    /// An enable's parse step on a pool of its own, with a parse that waits
+    /// for the test: the target and its compared versions are parsed in one
+    /// blocking task on one permit, which that task holds until it returns,
+    /// even after its caller is dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_enable_parses_on_one_permit_held_by_its_blocking_task() {
+        use std::sync::Mutex;
+        use std::sync::mpsc::{Receiver, channel};
+        use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+        static POOL: Semaphore = Semaphore::const_new(IN_TRANSACTION_WORKERS);
+        static STARTED: Mutex<Option<UnboundedSender<String>>> = Mutex::new(None);
+        static RELEASE: Mutex<Option<Receiver<()>>> = Mutex::new(None);
+        /// Reports the set it parses, waits for the test, then parses it.
+        fn gated(stored: &str) -> Result<ValidatedKeyset, JwkSetError> {
+            let started = STARTED.lock().unwrap().clone().unwrap();
+            started.send(stored.to_owned()).unwrap();
+            RELEASE.lock().unwrap().as_ref().unwrap().recv().unwrap();
+            parse_in_full(stored)
+        }
+        let (started_tx, mut started) = unbounded_channel();
+        *STARTED.lock().unwrap() = Some(started_tx);
+        let (release, release_rx) = channel::<()>();
+        *RELEASE.lock().unwrap() = Some(release_rx);
+        let next = async |started: &mut tokio::sync::mpsc::UnboundedReceiver<String>| {
+            tokio::time::timeout(HANG, started.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let target = || stored("ver_t", &p256("k"));
+        let compared = || stored("ver_c", &p256("other"));
+        let rows = || {
+            let mut outside = stored("ver_x", &p256("x"));
+            outside.expires_at = Some(SystemTime::UNIX_EPOCH);
+            outside.effective_at = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+            // The target's own row, a version whose window does not
+            // intersect, and one that does: only the last is compared.
+            vec![target(), outside, compared()]
+        };
+
+        let task = tokio::spawn(parse_enable_on(&POOL, HANG, gated, target(), rows()));
+        assert_eq!(next(&mut started).await, target().public_jwks);
+        assert_eq!(POOL.available_permits(), IN_TRANSACTION_WORKERS - 1);
+        release.send(()).unwrap();
+        assert_eq!(next(&mut started).await, compared().public_jwks);
+        // Still the one permit, held across both parses.
+        assert_eq!(POOL.available_permits(), IN_TRANSACTION_WORKERS - 1);
+        release.send(()).unwrap();
+        let ((row, _), parsed) = tokio::time::timeout(HANG, task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.id, "ver_t");
+        let ids: Vec<&str> = parsed.iter().map(|(row, _)| row.id.as_str()).collect();
+        assert_eq!(ids, ["ver_c"]);
+        assert!(started.try_recv().is_err());
+        assert_eq!(POOL.available_permits(), IN_TRANSACTION_WORKERS);
+
+        // The caller dropped while the target is parsed: the blocking task
+        // keeps the permit through both parses, then gives it back.
+        let task = tokio::spawn(parse_enable_on(&POOL, HANG, gated, target(), rows()));
+        assert_eq!(next(&mut started).await, target().public_jwks);
+        task.abort();
+        let joined = tokio::time::timeout(HANG, task).await.unwrap();
+        assert!(joined.is_err_and(|err| err.is_cancelled()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(POOL.available_permits(), IN_TRANSACTION_WORKERS - 1);
+        release.send(()).unwrap();
+        assert_eq!(next(&mut started).await, compared().public_jwks);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(POOL.available_permits(), IN_TRANSACTION_WORKERS - 1);
+        release.send(()).unwrap();
+        until_all_free(&POOL).await;
+    }
+
+    /// An empty list of stored versions takes no permit, so it cannot be
+    /// busy.
+    #[tokio::test]
+    async fn no_stored_version_to_parse_takes_no_permit() {
+        let _statics = STATICS.lock().await;
+        let held = hold(&IN_TRANSACTION, IN_TRANSACTION_WORKERS).await;
+        let parsed = tokio::time::timeout(IN_TRANSACTION_WAIT / 2, parse_stored_versions(vec![]))
+            .await
+            .expect("no wait for a worker")
+            .unwrap();
+        assert!(parsed.is_empty());
         drop(held);
     }
 
@@ -1920,12 +2146,32 @@ mod tests {
                 matches!(result, Err(KeysetWriteError::ValidationBusy)),
                 "{result:?}"
             );
-            assert!(start.elapsed() >= IN_TRANSACTION_WAIT);
+            // One wait per write, not one per parse.
+            let waited = start.elapsed();
+            assert!(waited >= IN_TRANSACTION_WAIT, "{waited:?}");
+            assert!(waited < 2 * IN_TRANSACTION_WAIT, "{waited:?}");
             // The savepoint is rolled back: the locks are free while the
             // caller's transaction is still open, and it is usable.
             assert_eq!(lock_refusal(pool).await, None);
             sqlx::query("SELECT 1").execute(&mut *tx).await.unwrap();
             // A caller that commits after the error commits nothing.
+            tx.commit().await.unwrap();
+        }
+
+        /// `write` in its own transaction, committed: it needs no worker,
+        /// so it succeeds at once while every in-transaction worker is
+        /// taken.
+        async fn at_once(
+            pool: &PgPool,
+            write: impl AsyncFnOnce(
+                &mut Transaction<'static, Postgres>,
+            ) -> Result<TrustKeysetVersion, KeysetWriteError>,
+        ) {
+            let mut tx = pool.begin().await.unwrap();
+            let result = tokio::time::timeout(IN_TRANSACTION_WAIT / 2, write(&mut tx))
+                .await
+                .expect("the write waited for a worker");
+            result.unwrap_or_else(|err| panic!("{err:?}"));
             tx.commit().await.unwrap();
         }
 
@@ -1942,51 +2188,88 @@ mod tests {
             let key_2 = validate_upload(p256_b("k2"), DEFAULT_ALLOWED_ALGORITHMS)
                 .await
                 .unwrap();
-            let mut tx = pool.begin().await.unwrap();
-            let enabled_1 = version("ver_1", &key_1, Status::Enabled, &provenance);
-            create_version(&mut tx, TRUST, &enabled_1, &audit("aud_1"))
-                .await
-                .unwrap();
-            tx.commit().await.unwrap();
-            let one = || vec![("ver_1".to_string(), "enabled".to_string(), 1_i64)];
-            assert_eq!(stored_state(pool).await, (one(), 1));
+            let mut held = hold(&IN_TRANSACTION, IN_TRANSACTION_WORKERS).await;
 
-            let held = IN_TRANSACTION.acquire_many(all_permits()).await.unwrap();
+            // A write that compares no stored version takes no permit: an
+            // enabled create in the empty keyset, and one whose window
+            // intersects no enabled version.
+            let enabled_1 = version("ver_1", &key_1, Status::Enabled, &provenance);
+            at_once(pool, async |tx| {
+                create_version(tx, TRUST, &enabled_1, &audit("aud_1")).await
+            })
+            .await;
+            let enabled_3 = NewKeysetVersion {
+                effective_at: now() - Duration::from_secs(1000),
+                expires_at: Some(now() - Duration::from_secs(500)),
+                ..version("ver_3", &key_1, Status::Enabled, &provenance)
+            };
+            at_once(pool, async |tx| {
+                create_version(tx, TRUST, &enabled_3, &audit("aud_2")).await
+            })
+            .await;
+            let rows = |ver_2: Option<(&str, i64)>| {
+                let mut rows = vec![("ver_1".to_string(), "enabled".to_string(), 1_i64)];
+                if let Some((status, revision)) = ver_2 {
+                    rows.push(("ver_2".into(), status.into(), revision));
+                }
+                rows.push(("ver_3".into(), "enabled".into(), 1));
+                rows
+            };
+            assert_eq!(stored_state(pool).await, (rows(None), 2));
+
             // A create of an enabled version, which compares `ver_1`.
             let enabled_2 = version("ver_2", &key_2, Status::Enabled, &provenance);
             busy(pool, async |tx| {
-                create_version(tx, TRUST, &enabled_2, &audit("aud_2")).await
+                create_version(tx, TRUST, &enabled_2, &audit("aud_3")).await
             })
             .await;
-            assert_eq!(stored_state(pool).await, (one(), 1));
+            assert_eq!(stored_state(pool).await, (rows(None), 2));
             // A disabled create parses nothing and needs no worker.
             let disabled_2 = version("ver_2", &key_2, Status::Disabled, &provenance);
-            let mut tx = pool.begin().await.unwrap();
-            create_version(&mut tx, TRUST, &disabled_2, &audit("aud_2"))
-                .await
-                .unwrap();
-            tx.commit().await.unwrap();
-            let two = |status: &str, revision: i64| {
-                let mut rows = one();
-                rows.push(("ver_2".into(), status.into(), revision));
-                rows
-            };
-            assert_eq!(stored_state(pool).await, (two("disabled", 1), 2));
-            // An enable, which parses its target.
-            busy(pool, async |tx| {
-                enable_version(tx, TRUST, "ten_a", "ver_2", 1, &audit("aud_3")).await
+            at_once(pool, async |tx| {
+                create_version(tx, TRUST, &disabled_2, &audit("aud_3")).await
             })
             .await;
-            assert_eq!(stored_state(pool).await, (two("disabled", 1), 2));
+            assert_eq!(stored_state(pool).await, (rows(Some(("disabled", 1))), 3));
+            // An enable, which parses its target and `ver_1`.
+            busy(pool, async |tx| {
+                enable_version(tx, TRUST, "ten_a", "ver_2", 1, &audit("aud_4")).await
+            })
+            .await;
+            assert_eq!(stored_state(pool).await, (rows(Some(("disabled", 1))), 3));
 
-            // With the workers free again, the same enable goes through.
-            drop(held);
-            let mut tx = pool.begin().await.unwrap();
-            enable_version(&mut tx, TRUST, "ten_a", "ver_2", 1, &audit("aud_3"))
+            // One wait per write: an enable granted a worker after waiting
+            // most of its wait parses its target and `ver_1` on that one
+            // worker. Another waiter, queued behind it, takes the worker as
+            // soon as the enable gives it back, so an enable that waited a
+            // second time would be `ValidationBusy`.
+            let task_pool = pool.clone();
+            let start = std::time::Instant::now();
+            let enable = tokio::spawn(async move {
+                let mut tx = task_pool.begin().await.unwrap();
+                let audit = audit("aud_4");
+                let result = enable_version(&mut tx, TRUST, "ten_a", "ver_2", 1, &audit).await;
+                if result.is_ok() {
+                    tx.commit().await.unwrap();
+                }
+                result
+            });
+            until_locked(pool).await;
+            tokio::time::sleep(IN_TRANSACTION_WAIT / 4).await;
+            assert!(!enable.is_finished());
+            let behind = tokio::spawn(async { IN_TRANSACTION.acquire().await.unwrap() });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(held.split(1).unwrap());
+            let version = tokio::time::timeout(HANG, enable)
                 .await
-                .unwrap();
-            tx.commit().await.unwrap();
-            assert_eq!(stored_state(pool).await, (two("enabled", 2), 3));
+                .unwrap()
+                .unwrap()
+                .unwrap_or_else(|err| panic!("{err:?}"));
+            assert_eq!((version.status, version.revision), (Status::Enabled, 2));
+            assert!(start.elapsed() < 2 * IN_TRANSACTION_WAIT);
+            let behind = tokio::time::timeout(HANG, behind).await.unwrap().unwrap();
+            drop((behind, held));
+            assert_eq!(stored_state(pool).await, (rows(Some(("enabled", 2))), 4));
             db.drop().await;
         }
     }

@@ -3186,17 +3186,23 @@ stay provisional until Gate M0:
   cap (an enable's target and at most 7 others). It holds the parent
   keyset row, the operator rows `FOR SHARE`, a database connection and one
   of the `IN_TRANSACTION_WORKERS` (2, inferred) workers of a pool of its
-  own, separate from Stage A's `VALIDATION_WORKERS`: a stored-version parse
-  never waits behind an upload's validation, and an upload never waits
-  behind a parse. A permit not granted within `IN_TRANSACTION_WAIT` (2 s,
-  inferred; per acquisition, and an enable acquires twice) is
-  `KeysetWriteError::ValidationBusy`, retryable, and the savepoint
-  rollback releases the parent row. Estimated at about 0.18 s per compared
-  20-key set in release; debug builds measured 0.30 s for 1 and 1.31 s for
-  8 compared versions, the most the cap allows. The wiring precondition
-  (a permit of its own) is done; the stored marker that a projection
-  passed the point checks (or a change of `KeysetVersion`) remains the
-  follow-up that removes the parse.
+  own, separate from Stage A's `VALIDATION_WORKERS`: a parse never waits
+  for a Stage A permit, and an upload never waits for an in-transaction
+  one. Both pools share tokio's blocking pool (512 threads by default) and
+  the CPU. A write waits at most once, `IN_TRANSACTION_WAIT` (2 s,
+  inferred), for a permit (an enable parses its target and the compared
+  versions in one blocking task; a write that compares no stored version
+  takes none); a permit not granted in time is
+  `KeysetWriteError::ValidationBusy`, retryable after a back-off, and the
+  savepoint rollback releases the parent row. A permit is held only by the
+  blocking task's CPU work, never across a statement. Estimated at about
+  0.18 s per compared 20-key set in release; debug builds measured 0.30 s
+  for 1 and 1.31 s for 8 compared versions, the most the cap allows. The
+  wiring precondition (a permit of its own) is done; a runtime built with
+  `max_blocking_threads` must leave room for both pools plus headroom for
+  tokio's own blocking work. The stored marker that a projection passed
+  the point checks (or a change of `KeysetVersion`) remains the follow-up
+  that removes the parse.
 - Rotation (inferred): validity windows are immutable in the registry
   (whether they should stay so is open), so disabling is the only
   retirement. Disable the open-ended old version, then create the
