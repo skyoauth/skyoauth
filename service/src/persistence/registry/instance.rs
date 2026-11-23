@@ -8,6 +8,23 @@ use sqlx::PgExecutor;
 
 use super::{EgressAllowlistEntry, InstanceSecurityPolicy, Page, RegistryError, list_page, micros};
 
+/// The columns of the instance security policy row, as
+/// [`InstanceSecurityPolicy`] reads them; shared with the row locks of
+/// [`lock_instance_security_policy`](super::lock_instance_security_policy)
+/// and
+/// [`lock_instance_security_policy_shared`](super::lock_instance_security_policy_shared).
+macro_rules! policy_columns {
+    () => {
+        concat!(
+            "instance_id, widening_second_approver, single_actor_mode, \
+             audit_sink_config_digest, ",
+            micros!("audit_sink_validated_at"),
+            ", revision"
+        )
+    };
+}
+pub(super) use policy_columns;
+
 macro_rules! egress_columns {
     () => {
         "id, purpose, exact_destination, status, revision"
@@ -20,10 +37,9 @@ pub async fn get_instance_security_policy<'e>(
     executor: impl PgExecutor<'e>,
 ) -> Result<InstanceSecurityPolicy, RegistryError> {
     sqlx::query_as(concat!(
-        "SELECT instance_id, widening_second_approver, single_actor_mode, \
-         audit_sink_config_digest, ",
-        micros!("audit_sink_validated_at"),
-        ", revision FROM instance_security_policy"
+        "SELECT ",
+        policy_columns!(),
+        " FROM instance_security_policy"
     ))
     .fetch_optional(executor)
     .await?
