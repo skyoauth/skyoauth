@@ -359,11 +359,13 @@ fn assert_not_found<T: Debug>(result: Result<T, RegistryError>) {
 
 /// An operation is inserted as given and read back locked; an `approve`
 /// names the operation it approves; a consume sets `consumed_at`
-/// (truncated) and the outcome and advances the revision, once; a cancel
-/// and a reject each insert their revoking operation, recorded by the
-/// `cancel` and `reject` audit actions, and revoke the pending one, once,
-/// after which it is not consumed. A missing row is `None` to the lock and
-/// `NotFound` to the writers.
+/// (truncated) and the outcome and advances the revision; a cancel and a
+/// reject each insert their revoking operation, recorded by the `cancel`
+/// and `reject` audit actions, and revoke the pending one, after which it
+/// is not consumed. The writers are not idempotency guards: a repeat with
+/// the same values succeeds, advances the revision and overwrites the
+/// outcome; only a repeat with a changed value is the set-once guard's. A
+/// missing row is `None` to the lock and `NotFound` to the writers.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn operations_are_inserted_locked_consumed_and_revoked() {
@@ -400,6 +402,25 @@ async fn operations_are_inserted_locked_consumed_and_revoked() {
             ..row_of(&pending)
         }
     );
+    // The same consume again succeeds: the set-once guard sees no change.
+    let mut transaction = pool.begin().await.unwrap();
+    assert_eq!(
+        consume_administrative_operation(&mut transaction, "op_1", at(10), "repeated")
+            .await
+            .unwrap(),
+        3
+    );
+    transaction.commit().await.unwrap();
+    assert_eq!(
+        locked_row(&pool, "op_1").await.unwrap(),
+        AdministrativeOperation {
+            consumed_at: Some(stored(10)),
+            outcome: "repeated".into(),
+            revision: 3,
+            ..row_of(&pending)
+        }
+    );
+    // A changed consumed_at is refused.
     assert_guard(consume(&pool, "op_1", at(11)).await);
 
     for (n, verb, actor, outcome) in [
@@ -433,9 +454,26 @@ async fn operations_are_inserted_locked_consumed_and_revoked() {
             },
             "{verb}"
         );
-        // Another revoking operation: the set-once guard (the same values
-        // again would change nothing it guards).
+        // The same revocation again succeeds and overwrites the outcome.
+        assert_eq!(revoke(&pool, &id, &by, "repeated").await.unwrap(), 3);
+        assert_eq!(
+            locked_row(&pool, &id).await.unwrap(),
+            AdministrativeOperation {
+                revoked_at: Some(stored(2)),
+                revocation_operation_id: Some(by.clone()),
+                outcome: "repeated".into(),
+                revision: 3,
+                ..row_of(&pending)
+            },
+            "{verb}"
+        );
+        // Another revoking operation, or another time: the set-once guard.
         assert_guard(revoke(&pool, &id, "op_2", "again").await);
+        let mut transaction = pool.begin().await.unwrap();
+        assert_guard(
+            revoke_administrative_operation(&mut transaction, &id, &by, at(3), "again").await,
+        );
+        transaction.rollback().await.unwrap();
         assert_guard(consume(&pool, &id, at(10)).await);
     }
     // The events of the cancel and the reject.
@@ -1337,6 +1375,43 @@ async fn the_requesters_lookup_reports_and_locks_the_roles_held() {
         }
         transaction.rollback().await.unwrap();
     }
+    db.drop([pool]).await;
+}
+
+/// The trap of the requester's lookup: `Some` when only an optional role is
+/// held. `adm_sec1` holds only the instance `security_admin`; asked for the
+/// kind's role (`trust_admin` of `ten_a`) and the `single_actor_mode` role
+/// (instance `security_admin`), it gets `Some` with the required role
+/// missing, so the caller refuses only by checking `holds(0)`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn some_without_the_required_role_is_the_callers_refusal() {
+    let (db, pool) = seeded().await;
+    let mut transaction = pool.begin().await.unwrap();
+    let found = authorize_roles_locked(
+        &mut transaction,
+        "key_sec1",
+        &[(TEN_A, TRUST), (INSTANCE, SEC)],
+    )
+    .await
+    .unwrap()
+    .expect("an optional role held is Some");
+    assert_eq!(found, held("adm_sec1", &[None, Some("rb_sec1")]));
+    assert!(!found.holds(0), "the required role is not held");
+    assert!(found.holds(1));
+    assert!(!found.holds(2));
+    // The held binding is locked, as for any hit.
+    assert!(
+        conflicts(
+            &pool,
+            "admin_role_binding",
+            "id",
+            "rb_sec1",
+            "FOR NO KEY UPDATE"
+        )
+        .await
+    );
+    transaction.rollback().await.unwrap();
     db.drop([pool]).await;
 }
 

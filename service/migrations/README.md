@@ -991,7 +991,8 @@ database created from the earlier `0005` is recreated.
   - **Replica mode.** The guards fire under
     `session_replication_role = replica`; the foreign keys do not. A guard
     that finds no referenced row passes the row (inferred, as `0010`
-    does), so replica mode accepts a missing reference.
+    does), so replica mode accepts a missing reference, and a referenced
+    row inserted later is never checked.
   - **Functions and privileges.** The functions are created as the `0010`
     and `0011` readers are: the schema is resolved by `current_schema()` at
     migrate time and the table named with it, `search_path` is pinned to
@@ -1062,6 +1063,10 @@ The database does not enforce these rules; the service must:
   revocation by an operation of another tenant fail with `23514`. The
   service still checks them first, and still checks the approver's role
   and the approved operation's state, which the database does not;
+- give an operation of a kind other than `approve` that names an
+  operation (a `route_bundle_approval` names its preparation) one of its
+  own tenant; the database does not check it, since the guard checks only
+  kind `approve`;
 - give an operation the `tenant_id` of the audit event that records it; the
   database checks neither against the other;
 - give every pending gated write, `route_bundle_approval` and recovery
@@ -2915,11 +2920,20 @@ in the caller's transaction itself: locks taken inside a savepoint are
 released when that savepoint is rolled back. `FOR SHARE` and the deny on any change are
 inferred: the lock order prescribes `FOR NO KEY UPDATE` only for rows a
 write updates or an operation references. Every locker takes these rows in
-the same table order, the lookup one row per table, and the single-row
-writers lock only the row they change, so the lookup does not deadlock with
-them; a caller that afterwards locks other operator rows, or updates a row
-it holds `FOR SHARE`, is outside that order and can fail with `40P01`, a
-deny, so T13.3 must order those locks. The creates and the binding update
+the same table order, and a table's rows in one statement ordered by ID
+byte-wise: the lookup one row per table, `authorize_roles_locked` one
+identity, one credential and up to one binding per listed role, and
+`authorize_approval_locked` up to two rows per table (both below). A
+deadlock needs two transactions that each wait for a row the other holds.
+These lockers take only `FOR SHARE`, which does not conflict with another
+`FOR SHARE`, so they never wait for each other; and the single-row writers
+lock only the row they change, so a writer that holds a row a locker waits
+for waits for no other operator row, and a writer that waits for a row a
+locker holds holds no row the locker still needs. So the lookups do not
+deadlock with each other or with those writers; a caller that afterwards
+locks other operator rows, or updates a row it holds `FOR SHARE`, is
+outside that order and can fail with `40P01`, a deny, so T13.3 must order
+those locks. The creates and the binding update
 also take the `recovery_state` row `FOR SHARE`, which serializes them with
 a break-glass restoration (see "Recovery" below). Neither lookup reads tenant status:
 ADR-014 item 11 lists issuance, live checks, admission and refresh as what
@@ -2927,6 +2941,38 @@ a disabled tenant denies, not operator writes, and T14 must check it. No
 migration is added. The operator constraint
 names are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_operator.rs`
 tests the surface.
+
+Operations and approvals (`docs/proposals/second-approver-gated-writes.md`
+sections 2, 3 and 9; IR-052 to IR-054; nothing calls these functions yet
+and no endpoint is wired). `insert_administrative_operation` inserts an
+unconsumed, unrevoked operation with no challenge and returns the row;
+`lock_administrative_operation` reads one `FOR NO KEY UPDATE`, or `None`.
+`consume_administrative_operation` sets `consumed_at` and the `outcome`,
+and `revoke_administrative_operation` sets `revoked_at` and
+`revocation_operation_id` together with the `outcome`; both advance the
+revision and return it, and are `NotFound` for a missing row. They are not
+idempotency guards: they compare no state, and the `0005` set-once trigger
+refuses only a changed value, so a repeat with the same `consumed_at`, or
+the same `revoked_at` and `revocation_operation_id`, succeeds again,
+advances the revision and may overwrite the `outcome`. The caller locks the
+row with `lock_administrative_operation` first and checks `consumed_at`,
+`revoked_at` and `expires_at` under that lock.
+`lock_instance_security_policy_shared` takes the policy row `FOR SHARE` (a widening trust write; D10) and
+`lock_instance_security_policy` `FOR NO KEY UPDATE` (the toggle; D19);
+before bootstrap both are `NotFound` (D18). `authorize_roles_locked` and
+`authorize_approval_locked` lock the operator rows they found `FOR SHARE`
+and repeat the lookup, as `authorize_operator_locked` does.
+`authorize_roles_locked` returns the operator of one credential and, for
+each listed role, its binding or none; it returns `Some` when any listed
+role is held, so `Some` is not an authorization: the caller checks
+`RolesHeld::holds` for every role it requires, as an operator that holds
+only the optional instance `security_admin` gets `Some` with the kind's
+role missing. `authorize_approval_locked` checks that the approver holds
+instance `security_admin` and is not the requester (byte-wise `admin_id`),
+and that the requester's credential, identity and binding of the plan
+are still enabled, and locks both operators' rows; it returns
+`ApproverNotAuthorized`, `SelfApproval` or `RequesterNotAuthorized`, in that
+order, or `Authorized`. `service/tests/registry_operation.rs` tests them.
 
 Bootstrap (T13.4, T13.6; design §7.2; ADR-013 item 5; identity-registry
 §5.2): `bootstrap_instance(transaction, request)` runs in the caller's

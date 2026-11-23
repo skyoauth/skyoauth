@@ -29,20 +29,30 @@
 //!   sets `revoked_at` and `revocation_operation_id` together, as the `0005`
 //!   check `administrative_operation_revocation_check` requires, with the
 //!   `outcome`, and advances the revision. Both return the new revision and
-//!   are [`RegistryError::NotFound`] for a missing row. Neither compares the
-//!   operation's state: a second consume or revocation is the set-once
-//!   guard's [`RegistryError::Guard`], a consume of a revoked operation the
-//!   consume-after-revoke guard's, and a consume at or after `expires_at`
-//!   `administrative_operation_consumed_before_expiry_check`
-//!   ([`RegistryError::Invariant`]).
+//!   are [`RegistryError::NotFound`] for a missing row.
+//!
+//! **The consume and revoke writers are not idempotency guards.** They do
+//! not compare the operation's state, and the set-once guard rejects only a
+//! *changed* value: a repeat with the same `consumed_at`, or the same
+//! `revoked_at` and `revocation_operation_id`, succeeds, advances the
+//! revision and may overwrite the `outcome`. The caller must lock the row
+//! with [`lock_administrative_operation`] (`FOR NO KEY UPDATE`) first and
+//! check `consumed_at`, `revoked_at` and `expires_at` under that lock. What
+//! the database does refuse: a repeat with a different value is the
+//! set-once guard's [`RegistryError::Guard`], a consume of a revoked,
+//! unconsumed operation the consume-after-revoke guard's
+//! [`RegistryError::Guard`], and a consume at or after `expires_at`
+//! `administrative_operation_consumed_before_expiry_check`
+//! ([`RegistryError::Invariant`]).
 //!
 //! Since the amended `0005` the database also refuses, with `23514`, an
 //! `approve` that names an operation of another tenant or of its own actor,
 //! and a revocation whose revoking operation is of another tenant
 //! ([`InvariantKind::SameTenantOperation`](super::InvariantKind::SameTenantOperation)
 //! and [`InvariantKind::DistinctApprover`](super::InvariantKind::DistinctApprover);
-//! migrations README, "What 0005 adds"). A `route_bundle_approval` by the
-//! same actor stays allowed.
+//! migrations README, "What 0005 adds"). Only kind `approve` is checked: a
+//! `route_bundle_approval` by the same actor stays allowed, and the tenant of
+//! the operation any other kind names is the caller's to check.
 //!
 //! # The policy row
 //!
@@ -82,7 +92,12 @@
 //!   which is locked in the same ordered statement (section 3, request step
 //!   2; Q4). `None` when the credential or its operator fails, when no
 //!   listed role is held, or when the repeat differs (inferred: the
-//!   operator is known only through a held binding).
+//!   operator is known only through a held binding). **`Some` does not mean
+//!   authorized:** it is returned when *any* listed role is held, so an
+//!   operator that holds only the optional instance `security_admin` gets
+//!   `Some` with the required role missing. The caller must check
+//!   [`RolesHeld::holds`] for each role it requires (`holds(0)` for the
+//!   kind's role when it is listed first).
 //! - [`authorize_approval_locked`] is the approve's: the approver, by the
 //!   presented credential, must hold instance `security_admin` (IR-054) and
 //!   be another operator than the requester (byte-wise `admin_id`), and the
@@ -221,6 +236,8 @@ pub enum ApprovalAuthority {
 
 /// What [`authorize_roles_locked`] found: the operator of the presented
 /// credential and, for each requested role, the binding that grants it.
+/// Holding one role is enough to get a `RolesHeld`: check [`Self::holds`]
+/// for every role the request requires.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RolesHeld {
     pub admin_id: String,
@@ -336,7 +353,9 @@ pub async fn lock_administrative_operation(
 
 /// Sets the operation's `consumed_at` to `now` and its `outcome`, advances
 /// its revision and returns the new one. Checks nothing the database does
-/// not (see the module documentation).
+/// not: a repeat with the same `now` succeeds again (see the module
+/// documentation, "Operation rows"), so check `consumed_at` under
+/// [`lock_administrative_operation`] first.
 pub async fn consume_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -357,7 +376,10 @@ pub async fn consume_administrative_operation(
 /// Sets the operation's `revoked_at` to `now` and its
 /// `revocation_operation_id` to `revoking_operation_id`, in one statement,
 /// and its `outcome`; advances its revision and returns the new one. Checks
-/// nothing the database does not (see the module documentation).
+/// nothing the database does not: a repeat with the same `now` and
+/// `revoking_operation_id` succeeds again (see the module documentation,
+/// "Operation rows"), so check `revoked_at` under
+/// [`lock_administrative_operation`] first.
 pub async fn revoke_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
@@ -530,6 +552,14 @@ async fn roles_held(
 /// statement; the lookup is repeated after the locks and kept only if
 /// unchanged (see the module documentation, "Locked operator lookups").
 /// `None` when no listed role is held. Reads no clock and writes nothing.
+///
+/// # A `Some` is not an authorization
+///
+/// `Some` means that *at least one* listed role is held, not all of them:
+/// asked for `[(tenant, trust_admin), (Instance, security_admin)]`, an
+/// operator holding only the instance `security_admin` gets `Some` with
+/// `bindings == [None, Some(_)]`. Check [`RolesHeld::holds`] for every
+/// required role (here `holds(0)`) and refuse when one is missing.
 pub async fn authorize_roles_locked(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,

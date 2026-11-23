@@ -103,7 +103,7 @@ What the spec fixes:
 - The table: `administrative_operation` exists (`0005_operator.sql:236-330`)
   with immutable plan, digest, kind, actor, tenant, expected revision,
   expiry and approved operation (`:425-431`), set-once consumption and
-  revocation (`:453-457`), no consume after revoke (`:459-464`) and
+  revocation (`:453-457`; a repeat with the same value is not refused), no consume after revoke (`:459-464`) and
   `consumed_at < expires_at` (`:328-329`). The service rules the database
   leaves open are in `service/migrations/README.md:960-975` (a distinct
   approver, the digest echo, the tenant, an expiry, no secrets in the
@@ -316,7 +316,9 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
    (`write.rs:43-59`; for the toggle, instance `security_admin`). When Q4
    is accepted, the requester's instance `security_admin` binding, if any,
    is locked in the same ordered statement as the tenant binding
-   (`authorize_roles_locked`, section 9). This step yields the requester's
+   (`authorize_roles_locked`, section 9; it returns `Some` when any listed
+   role is held, so the caller checks `holds(0)` for the required one, a
+   required test of PRs 4 and 5). This step yields the requester's
    `admin_id` and credential ID; every later step is a post-authorization
    step function that takes them, shared with the approve (D26).
 3. A widening write with the flag unset is refused here
