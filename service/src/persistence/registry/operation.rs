@@ -2,9 +2,11 @@
 //! (`docs/proposals/second-approver-gated-writes.md` sections 2, 3 and 9;
 //! IR-052 to IR-054): the `administrative_operation` row of a pending gated
 //! write, an approval or a revocation, the `instance_security_policy` row
-//! locks, and the two locked operator lookups of a request and an approval.
-//! Nothing calls these functions yet: the service flow (`crate::operation`,
-//! the gated `submit_*` writes) comes later, and no endpoint is wired.
+//! locks and the toggle's compare-and-set, and the two locked operator
+//! lookups of a request and an approval. The service flow
+//! ([`crate::operation`]: the digest, the approve, cancel and reject, and
+//! the toggle of `widening_second_approver`) calls them; the gated trust
+//! writes (`submit_*`) come later, and no endpoint is wired.
 //!
 //! # Operation rows
 //!
@@ -68,6 +70,15 @@
 //! columns; the proposal's grant is `UPDATE (instance_id)`, a column
 //! `instance_security_policy_immutable` keeps unchangeable (migrations
 //! README, "What 0005 adds", "Privileges").
+//!
+//! `set_widening_second_approver` (crate-private) is the toggle's
+//! compare-and-set of `widening_second_approver` on the revision, the one
+//! online write of the row (IR-052): `single_actor_mode` and the sink fields
+//! stay unwritable online (IR-053). It is crate-private, not a public bare
+//! writer like the others, so that nothing outside the crate can change the
+//! flag without the gate of [`crate::operation`] (inferred). A row at
+//! another revision is [`RegistryError::StaleRevision`], a missing one
+//! [`RegistryError::NotFound`].
 //!
 //! # Locked operator lookups
 //!
@@ -305,6 +316,18 @@ const LOCK_POLICY: &str = concat!(
     " FROM instance_security_policy FOR NO KEY UPDATE"
 );
 
+/// The toggle's compare-and-set: `$1` the `instance_id`, `$2` the expected
+/// revision, `$3` the new flag. One row: the updated columns, or `NULL`s
+/// when nothing matched, and `found`, whether the row exists (as the
+/// registry's `compare_and_set!`, which needs an `id` column).
+const SET_WIDENING: &str = concat!(
+    "WITH updated AS (UPDATE instance_security_policy SET widening_second_approver = $3, \
+     revision = revision + 1 WHERE instance_id = $1 AND revision = $2 RETURNING ",
+    policy_columns!(),
+    ") SELECT updated.*, EXISTS (SELECT FROM instance_security_policy WHERE instance_id = $1) \
+     AS found FROM (SELECT) AS one LEFT JOIN updated ON true"
+);
+
 /// The operator row locks, in the `0005` table order, each table's rows in
 /// one statement in key order. `$1` is the array of IDs.
 const LOCK_IDENTITIES: &str =
@@ -419,6 +442,32 @@ pub async fn lock_instance_security_policy(
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(RegistryError::NotFound)
+}
+
+/// Sets the policy row's `widening_second_approver` to `value` where its
+/// revision is `expected_revision`, advances the revision and returns the
+/// row (see the module documentation, "The policy row"). Checks nothing the
+/// database does not and writes no audit event: [`crate::operation`] locks
+/// the row `FOR NO KEY UPDATE` first (D19) and appends the event.
+pub(crate) async fn set_widening_second_approver(
+    transaction: &mut Transaction<'_, Postgres>,
+    instance_id: &str,
+    expected_revision: i64,
+    value: bool,
+) -> Result<InstanceSecurityPolicy, RegistryError> {
+    let row = sqlx::query(SET_WIDENING)
+        .bind(instance_id)
+        .bind(expected_revision)
+        .bind(value)
+        .fetch_one(&mut **transaction)
+        .await?;
+    if row.try_get::<Option<&str>, _>("instance_id")?.is_some() {
+        Ok(InstanceSecurityPolicy::from_row(&row)?)
+    } else if row.try_get("found")? {
+        Err(RegistryError::StaleRevision)
+    } else {
+        Err(RegistryError::NotFound)
+    }
 }
 
 /// Locks the operator rows `FOR SHARE` in the `0005` order: identities,
@@ -597,6 +646,11 @@ mod tests {
         );
         assert!(SHARE_POLICY.ends_with(" FROM instance_security_policy FOR SHARE"));
         assert!(LOCK_POLICY.ends_with(" FROM instance_security_policy FOR NO KEY UPDATE"));
+        // The toggle's write sets the flag only, on the revision.
+        assert!(SET_WIDENING.starts_with(
+            "WITH updated AS (UPDATE instance_security_policy SET widening_second_approver = $3, \
+             revision = revision + 1 WHERE instance_id = $1 AND revision = $2 RETURNING "
+        ));
         for (lock, table) in [
             (LOCK_IDENTITIES, "admin_identity"),
             (LOCK_CREDENTIALS, "admin_credential"),

@@ -370,6 +370,7 @@ pub use error::{
     PredicateProblem, RegistryError, SAME_TENANT_OPERATION,
 };
 pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
+pub(crate) use events::push_string;
 pub use events::{
     AUDIT_HASH_PREFIX, AuditActor, AuditEvent, ChainBreak, ChainVerdict, MAX_ENVELOPE_INTEGER,
     NewAuditEvent, append_audit_event, verify_audit_chain,
@@ -400,6 +401,7 @@ pub use model::{
     TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges,
     TrustSourceKind, UnknownValue,
 };
+pub(crate) use operation::set_widening_second_approver;
 pub use operation::{
     AdministrativeOperation, ApprovalAuthority, NewAdministrativeOperation, RolesHeld,
     authorize_approval_locked, authorize_roles_locked, consume_administrative_operation,
