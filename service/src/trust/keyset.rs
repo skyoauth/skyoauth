@@ -289,7 +289,7 @@
 //!    `FOR KEY SHARE` on the tenant and the keyset, already held more
 //!    strongly by step 3) or the compare-and-set status update (which
 //!    locks the version row);
-//! 7. [`append_audit_event`] last, which locks the tenant row
+//! 7. `append_audit_event` last, which locks the tenant row
 //!    `FOR KEY SHARE` and then the chain head (migrations README, "append
 //!    audit events in this order").
 //!
@@ -2479,7 +2479,7 @@ mod tests {
             )
             .await
             .unwrap();
-            registry::create_admin_identity(
+            registry::test_support::create_admin_identity(
                 pool,
                 &NewAdminIdentity {
                     id: "adm_trust".into(),
@@ -2489,7 +2489,7 @@ mod tests {
             )
             .await
             .unwrap();
-            registry::create_admin_credential(
+            registry::test_support::create_admin_credential(
                 pool,
                 &NewAdminCredential {
                     id: "crd_adm_trust".into(),
@@ -2501,7 +2501,7 @@ mod tests {
             )
             .await
             .unwrap();
-            registry::create_admin_role_binding(
+            registry::test_support::create_admin_role_binding(
                 pool,
                 &NewAdminRoleBinding {
                     id: "rb_adm_trust".into(),

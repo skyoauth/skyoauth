@@ -24,6 +24,21 @@
 //!   operator, role and tenant are immutable (`admin_role_binding_immutable`),
 //!   so another scope is another binding.
 //!
+//! The writers that add operator access, [`create_admin_identity`],
+//! [`create_admin_credential`], [`create_admin_role_binding`] and
+//! [`update_admin_role_binding`], authorize no one and write no audit event,
+//! so they are visible only within the registry (`pub(super)`;
+//! second-approver proposal, PR 10): the three creates are called by
+//! [`bootstrap_instance`](super::bootstrap_instance) and
+//! [`restore_operator`](super::restore_operator), which audit the
+//! enrollment, and the update by nothing in the crate (without the
+//! `test-support` feature it is dead code, which its `expect(dead_code)`
+//! states). Tests reach them through the registry's `test_support` module.
+//! That does not stop a caller outside the crate from enrolling a
+//! `security_admin` while `bootstrap_instance`, `issue_recovery_challenge`
+//! and `restore_operator` stay public. [`disable_admin_identity`] and
+//! [`revoke_admin_credential`] only narrow and stay public.
+//!
 //! A second row with the same ID, or a credential whose `public_identity`
 //! is already registered, is [`RegistryError::AlreadyExists`] naming only
 //! the constraint (`admin_identity_pkey`, `admin_credential_pkey`,
@@ -335,7 +350,8 @@ impl FromRow<'_, PgRow> for AdminIdentity {
     }
 }
 
-/// The input of [`create_admin_identity`]. `created_at` is the caller's
+/// The input of the registry-private `create_admin_identity` (tests reach
+/// it through the `test-support` feature). `created_at` is the caller's
 /// `now`, not the database's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAdminIdentity {
@@ -376,7 +392,8 @@ impl FromRow<'_, PgRow> for AdminCredential {
     }
 }
 
-/// The input of [`create_admin_credential`]. The credential starts
+/// The input of the registry-private `create_admin_credential` (tests
+/// reach it through the `test-support` feature). The credential starts
 /// unrevoked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAdminCredential {
@@ -416,7 +433,8 @@ impl FromRow<'_, PgRow> for AdminRoleBinding {
     }
 }
 
-/// The input of [`create_admin_role_binding`].
+/// The input of the registry-private `create_admin_role_binding` (tests
+/// reach it through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAdminRoleBinding {
     pub id: String,
@@ -426,8 +444,9 @@ pub struct NewAdminRoleBinding {
     pub status: Status,
 }
 
-/// The mutable columns of a role binding, replaced by
-/// [`update_admin_role_binding`].
+/// The mutable columns of a role binding, replaced by the registry-private
+/// `update_admin_role_binding` (tests only, through the `test-support`
+/// feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdminRoleBindingChanges {
     pub status: Status,
@@ -583,7 +602,7 @@ fn reserved(id: &str) -> Result<(), RegistryError> {
 /// [`RegistryError::Other`], both before any statement runs. Locks the
 /// `recovery_state` row `FOR SHARE` before it inserts (see the module
 /// documentation, "Writes and a restoration").
-pub async fn create_admin_identity<'e>(
+pub(super) async fn create_admin_identity<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAdminIdentity,
 ) -> Result<AdminIdentity, RegistryError> {
@@ -643,7 +662,7 @@ pub async fn disable_admin_identity<'e>(
 /// `admin_credential_public_identity_key`. Locks the `recovery_state` row
 /// `FOR SHARE` before it inserts (see the module documentation, "Writes and
 /// a restoration").
-pub async fn create_admin_credential<'e>(
+pub(super) async fn create_admin_credential<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAdminCredential,
 ) -> Result<AdminCredential, RegistryError> {
@@ -713,7 +732,7 @@ pub async fn revoke_admin_credential<'e>(
 /// `admin_role_binding_admin_id_role_tenant_id_key`. Locks the
 /// `recovery_state` row `FOR SHARE` before it inserts (see the module
 /// documentation, "Writes and a restoration").
-pub async fn create_admin_role_binding<'e>(
+pub(super) async fn create_admin_role_binding<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAdminRoleBinding,
 ) -> Result<AdminRoleBinding, RegistryError> {
@@ -756,7 +775,11 @@ pub async fn get_admin_role_binding<'e>(
 /// whether it needs an approval belongs to the service layer. Locks the
 /// `recovery_state` row `FOR SHARE` after the binding row, when it updates
 /// one (see the module documentation, "Writes and a restoration").
-pub async fn update_admin_role_binding<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_admin_role_binding<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,

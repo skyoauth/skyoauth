@@ -37,7 +37,8 @@ use skyoauth_service::{
         registry::{
             self, AdminRole, AuditActor, BootstrapRequest, NewAdminCredential, NewAdminIdentity,
             NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent, Status,
-            append_audit_event, bootstrap_instance, insert_administrative_operation,
+            bootstrap_instance,
+            test_support::{append_audit_event, insert_administrative_operation},
         },
     },
 };
@@ -227,7 +228,7 @@ fn refused<T: Debug>(result: Result<T, ApprovalError>, expected: &str, markers: 
 }
 
 async fn operator(pool: &PgPool, admin: &str, credential: &str, key: &str, binding: &str) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -237,7 +238,7 @@ async fn operator(pool: &PgPool, admin: &str, credential: &str, key: &str, bindi
     )
     .await
     .unwrap();
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: credential.into(),
@@ -249,7 +250,7 @@ async fn operator(pool: &PgPool, admin: &str, credential: &str, key: &str, bindi
     )
     .await
     .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         pool,
         &NewAdminRoleBinding {
             id: binding.into(),

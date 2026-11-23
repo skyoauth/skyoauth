@@ -230,7 +230,7 @@ async fn enroll_with_credential(
     tenant: Option<&str>,
     credential_status: Status,
 ) -> Operator {
-    let identity = registry::create_admin_identity(
+    let identity = registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: format!("adm_{name}"),
@@ -240,7 +240,7 @@ async fn enroll_with_credential(
     )
     .await
     .unwrap();
-    let credential = registry::create_admin_credential(
+    let credential = registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: format!("crd_{name}"),
@@ -252,7 +252,7 @@ async fn enroll_with_credential(
     )
     .await
     .unwrap();
-    let binding = registry::create_admin_role_binding(
+    let binding = registry::test_support::create_admin_role_binding(
         pool,
         &NewAdminRoleBinding {
             id: format!("rb_{name}"),
@@ -378,7 +378,7 @@ impl Lever {
                 );
             }
             Lever::DisableBinding => {
-                let binding = registry::update_admin_role_binding(
+                let binding = registry::test_support::update_admin_role_binding(
                     &mut *conn,
                     &operator.binding.id,
                     operator.binding.revision,

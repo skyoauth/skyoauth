@@ -1,58 +1,82 @@
 //! A normal build of the workspace, without the `test-support` feature,
 //! neither exposes nor calls the ungated trust writes, and exposes none of
-//! the bare registry trust writers (second-approver proposal,
-//! `docs/proposals/second-approver-gated-writes.md`, PRs 7 and 9).
+//! the bare registry trust writers, operator writers, audit append or
+//! operation-row writers (second-approver proposal,
+//! `docs/proposals/second-approver-gated-writes.md`, PRs 7, 9 and 10).
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
-//! apply a write without the second-approver gate, so they are visible
-//! only within `trust` (`pub(super)`, PR 7). The registry's
+//! apply a write without the second-approver gate, so they are visible only
+//! within `trust` (`pub(super)`, PR 7). The registry's
 //! `create_trust_keyset_version`, `update_trust_keyset_version`,
 //! `create_trust_source` and `update_trust_source` write a keyset version
 //! or a trust source with no authorization, no gate and no audit event, so
 //! they are crate-private (`pub(crate)`, PR 9): the trust write path in
 //! `crate::trust` calls them, gated paths included, so they cannot be
-//! narrower. Only the `#[doc(hidden)]` modules `trust::test_support` and
-//! `persistence::registry::test_support`, compiled with the feature, expose
-//! them to tests. Every test target of this package is built with the
-//! feature (the package's dev-dependency on itself), and so is every test
-//! target of `skyoauth-scenarios` (its dev-dependency on this package), so a
-//! test cannot simply name the writers and expect a compile error. This
-//! test therefore checks the library without the feature, as a dependent
-//! crate would see it: it runs `cargo check` on the workspace's libraries
-//! and binaries (a build that turns no dev-dependency feature on, and that
-//! a workspace member enabling the feature through a normal or build
-//! dependency would change), in a target directory of its own, and then:
+//! narrower. PR 10 does the same for the registry's operator writers, audit
+//! append and operation-row writers: `create_admin_identity`,
+//! `create_admin_credential` and `create_admin_role_binding` are visible
+//! only within the registry (`pub(super)`), whose `bootstrap_instance` and
+//! `restore_operator` call them; `update_admin_role_binding` is
+//! `pub(super)` too and has no caller in the crate, so it carries PR 7's
+//! `expect(dead_code)`; `append_audit_event` and the operation-row writers
+//! `insert_administrative_operation`, `consume_administrative_operation`
+//! and `revoke_administrative_operation` are `pub(crate)`, called by
+//! `crate::operation` and `crate::trust` as well. Only the `#[doc(hidden)]`
+//! modules `trust::test_support` and `persistence::registry::test_support`,
+//! compiled with the feature, expose them to tests. Every test target of
+//! this package is built with the feature (the package's dev-dependency on
+//! itself), and so is every test target of `skyoauth-scenarios` (its
+//! dev-dependency on this package), so a test cannot simply name the
+//! writers and expect a compile error. This test therefore checks the
+//! library without the feature, as a dependent crate would see it: it runs
+//! `cargo check` on the workspace's libraries and binaries (a build that
+//! turns no dev-dependency feature on, and that a workspace member enabling
+//! the feature through a normal or build dependency would change), in a
+//! target directory of its own, and then:
 //!
 //! - asserts that `skyoauth-service`'s library was built with no feature;
 //! - asserts that the library emitted no warning. Without the feature each
-//!   `trust` writer carries `expect(dead_code)`, so a caller in `trust`, a
-//!   public forwarder included, makes the expectation unfulfilled, which is
-//!   a warning (a caller outside `trust` is a privacy error in every build);
+//!   `trust` writer and `update_admin_role_binding` carry
+//!   `expect(dead_code)`, so a caller in their visibility, a public
+//!   forwarder included, makes the expectation unfulfilled, which is a
+//!   warning (a caller outside it is a privacy error in every build);
 //! - compiles small probe crates against the library's metadata with
-//!   `rustc`. A probe that names an ungated writer, a bare registry writer
-//!   or one of the crate-private steps below at any of its paths
-//!   must fail as a private (E0603) or unresolved (E0432) path, and a probe
-//!   that names the public writes and registry items must compile, so a
-//!   probe that fails for an unrelated reason (a toolchain mismatch, a
-//!   missing crate) fails this test instead of passing it.
+//!   `rustc`. A probe that names an ungated writer, a bare registry writer,
+//!   a registry writer that PR 10 made crate-private or one of the
+//!   crate-private steps below at any of its paths must fail as a private
+//!   (E0603) or unresolved (E0432) path, and a probe that names the public
+//!   writes and registry items, the registry writers that deliberately stay
+//!   public included, must compile, so a probe that fails for an unrelated
+//!   reason (a toolchain mismatch, a missing crate) or a narrowing of what
+//!   must stay public fails this test instead of passing it.
 //!
-//! The registry writers are called in every build, and so are the six
-//! crate-private steps of `trust` that apply a write without authorizing,
-//! gating or auditing it themselves (`insert_create_version`,
-//! `apply_create_version`, `apply_enable_version`, `apply_status`,
-//! `apply_create_source`, `apply_locked_update`; PR 7's
-//! `expect(dead_code)` covers only the four `pub(super)` writers, not
-//! these), so no dead-code guard fits them. A source check stands in for
-//! it: outside comments, the library names each writer and each step only
-//! at the places a table lists (the definition, the crate-private
-//! re-export, the test-support wrapper, the `use`s, and the callers in
-//! `trust::keyset`, `trust::source` and `crate::operation`'s approval),
-//! each keyed by the item that holds it with that item's visibility and
-//! counted, so a forwarder of another name, a new caller and a widened
-//! definition or caller each fail it, and so does source that could hide
-//! an item from those keys (`rustfmt::skip`, `#[path]`, `include!`;
-//! inferred). The probes also require each step to be unreachable from
-//! outside the crate.
+//! The registry writers but `update_admin_role_binding` are called in every
+//! build, and so are the six crate-private steps of `trust` that apply a
+//! write without authorizing, gating or auditing it themselves
+//! (`insert_create_version`, `apply_create_version`,
+//! `apply_enable_version`, `apply_status`, `apply_create_source`,
+//! `apply_locked_update`; PR 7's `expect(dead_code)` covers only the four
+//! `pub(super)` writers, not these), so no dead-code guard fits them. A
+//! source check stands in for it: outside comments and string and
+//! character literals, the library names each writer and each step only at
+//! the places a table lists (the definition, the crate-private re-export,
+//! the test-support wrapper, the `use`s, and the callers in
+//! `trust::keyset`, `trust::source`, `crate::operation` and the registry's
+//! bootstrap and recovery), each keyed by the item that holds it (a
+//! top-level item, or an `impl` block at any depth) with that item's
+//! visibility and counted. So a forwarder of another name, a new caller, a
+//! widened definition or caller and a public method of an `impl` nested in
+//! a function body each change a key or a count. The check also refuses
+//! source that could hide an item from those keys (`rustfmt::skip`,
+//! `#[path]`, `include!`, and a level set for `non_local_definitions`, the
+//! warning a nested `impl` draws, or for `warnings`, in the source, the
+//! manifests or the workspace's cargo configuration) and a writer or step
+//! imported or cast under another name (`<name> as`; inferred). The probes also require each step to be
+//! unreachable from outside the crate, and each PR 10 writer's path through
+//! its defining module to be private (E0603), not missing. The source check
+//! reads text, not the compiled crate, and does not see everything: the
+//! second-approver proposal, "PR 10 as implemented", records the mutants it
+//! was run against and what still escapes it.
 //!
 //! It needs no database, so it is not `#[ignore]`d (inferred), and runs
 //! offline from the crates the outer build has already fetched. The first
@@ -98,6 +122,23 @@ const REGISTRY_UNGATED: [&str; 4] = [
     "update_trust_source",
 ];
 
+/// The registry writers that PR 10 made crate-private, by the private
+/// module of `persistence::registry` that defines them: the operator
+/// writers (`pub(super)`: the three creates are called only by the
+/// registry's `bootstrap` and `recovery`, the update by nothing in the
+/// crate), the audit append and the operation-row writers (`pub(crate)`:
+/// `crate::operation` and `crate::trust` call them too).
+const REGISTRY_PRIVATE: [(&str, &str); 8] = [
+    ("operator", "create_admin_identity"),
+    ("operator", "create_admin_credential"),
+    ("operator", "create_admin_role_binding"),
+    ("operator", "update_admin_role_binding"),
+    ("events", "append_audit_event"),
+    ("operation", "insert_administrative_operation"),
+    ("operation", "consume_administrative_operation"),
+    ("operation", "revoke_administrative_operation"),
+];
+
 /// The crate-private steps of the trust write path that apply a write
 /// without authorizing, gating or auditing it themselves: the four that
 /// call a bare registry writer (`insert_create_version`, `apply_status`,
@@ -118,7 +159,7 @@ const STEPS: [(&str, &str); 6] = [
 
 /// The registry items of the same tables that stay public: the readers,
 /// and the row and input types the test-support wrappers take and return.
-const REGISTRY_PUBLIC: [&str; 9] = [
+const REGISTRY_PUBLIC: [&str; 25] = [
     "get_trust_keyset_version",
     "list_trust_keyset_versions",
     "get_trust_source",
@@ -128,15 +169,58 @@ const REGISTRY_PUBLIC: [&str; 9] = [
     "NewTrustSource",
     "TrustSourceChanges",
     "TrustSource",
+    "get_admin_identity",
+    "get_admin_credential",
+    "get_admin_role_binding",
+    "NewAdminIdentity",
+    "AdminIdentity",
+    "NewAdminCredential",
+    "AdminCredential",
+    "NewAdminRoleBinding",
+    "AdminRoleBindingChanges",
+    "AdminRoleBinding",
+    "NewAuditEvent",
+    "AuditEvent",
+    "verify_audit_chain",
+    "NewAdministrativeOperation",
+    "AdministrativeOperation",
+    "lock_administrative_operation",
 ];
 
-/// Where the library's source, comment lines aside, names a bare registry
-/// writer or a step of [`STEPS`], one entry per line: the file under `src`,
-/// the first line of the top-level item that holds the mention, the name,
-/// and how many times, separated by ` | `. The writers are defined and
-/// re-exported `pub(crate)`, each wrapper is compiled only with
-/// `test-support`, and the callers are the trust write path's own steps and
-/// `crate::operation`'s approval, none of them public.
+/// The registry writers that deliberately stay public (the proposal's
+/// "Still open after PRs 7, 9 and 10"): break-glass restoration and bootstrap,
+/// whose verifier is the open decision, and the two operator writers that
+/// only narrow. A change that made one of them crate-private would be a
+/// decision this test does not take; the control probe fails on it.
+const REGISTRY_KEPT_PUBLIC: [&str; 5] = [
+    "restore_operator",
+    "issue_recovery_challenge",
+    "bootstrap_instance",
+    "disable_admin_identity",
+    "revoke_admin_credential",
+];
+
+/// Where the library's source, comments and literals aside, names a bare
+/// registry writer, a writer of [`REGISTRY_PRIVATE`] or a step of
+/// [`STEPS`], one entry per line: the file under `src`, the first line of
+/// the item that holds the mention (the top-level item, or an `impl` block
+/// at any depth that follows it: the `seed` of `trust::keyset`'s tests
+/// comes after their `impl Drop for Db`), the name, and how many times,
+/// separated by ` | `. The trust writers are defined and re-exported `pub(crate)`, each
+/// wrapper is compiled only with `test-support`, and the callers are the
+/// trust write path's own steps and `crate::operation`'s approval, none of
+/// them public. Of PR 10's writers, the operator writers are defined
+/// `pub(super)` and the three creates re-exported privately, to
+/// `bootstrap_steps` and `restore_steps` (and the `seed` of a database
+/// unit test in `trust::keyset`, through `test_support`);
+/// `update_admin_role_binding` is named only by its definition and its
+/// wrapper; the audit append and the operation-row writers are defined and
+/// re-exported `pub(crate)`, and called by the audited steps of the
+/// registry (`bootstrap_steps`, `issue_steps`, `restore_steps`), of
+/// `crate::trust` (each module's private `append_stamped`) and of
+/// `crate::operation` (the approval's `approve_steps` and `revoke_steps`,
+/// the toggle's `toggle_steps`, and `insert_pending`, which the gated
+/// `submit_*` writes call).
 const MENTIONS: &str = "
 persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_keyset_version | 1
 persistence/registry/mod.rs | pub(crate) use trust::{ | update_trust_keyset_version | 1
@@ -182,14 +266,88 @@ operation/approval.rs | async fn apply_create( | apply_create_version | 1
 operation/approval.rs | async fn apply_enable( | apply_enable_version | 1
 operation/approval.rs | async fn apply_source_create( | apply_create_source | 1
 operation/approval.rs | async fn apply_source_update( | apply_locked_update | 1
+persistence/registry/mod.rs | pub(crate) use events::{append_audit_event, push_string}; | append_audit_event | 1
+persistence/registry/mod.rs | pub(crate) use operation::{ | insert_administrative_operation | 1
+persistence/registry/mod.rs | pub(crate) use operation::{ | consume_administrative_operation | 1
+persistence/registry/mod.rs | pub(crate) use operation::{ | revoke_administrative_operation | 1
+persistence/registry/mod.rs | use operator::{create_admin_credential, create_admin_identity, create_admin_role_binding}; | create_admin_identity | 1
+persistence/registry/mod.rs | use operator::{create_admin_credential, create_admin_identity, create_admin_role_binding}; | create_admin_credential | 1
+persistence/registry/mod.rs | use operator::{create_admin_credential, create_admin_identity, create_admin_role_binding}; | create_admin_role_binding | 1
+persistence/registry/events.rs | pub(crate) async fn append_audit_event( | append_audit_event | 1
+persistence/registry/operation.rs | pub(crate) async fn insert_administrative_operation( | insert_administrative_operation | 1
+persistence/registry/operation.rs | pub(crate) async fn consume_administrative_operation( | consume_administrative_operation | 1
+persistence/registry/operation.rs | pub(crate) async fn revoke_administrative_operation( | revoke_administrative_operation | 1
+persistence/registry/operator.rs | pub(super) async fn create_admin_identity<'e>( | create_admin_identity | 1
+persistence/registry/operator.rs | pub(super) async fn create_admin_credential<'e>( | create_admin_credential | 1
+persistence/registry/operator.rs | pub(super) async fn create_admin_role_binding<'e>( | create_admin_role_binding | 1
+persistence/registry/operator.rs | pub(super) async fn update_admin_role_binding<'e>( | update_admin_role_binding | 1
+persistence/registry/test_support.rs | pub async fn create_admin_identity<'e>( | create_admin_identity | 2
+persistence/registry/test_support.rs | pub async fn create_admin_credential<'e>( | create_admin_credential | 2
+persistence/registry/test_support.rs | pub async fn create_admin_role_binding<'e>( | create_admin_role_binding | 2
+persistence/registry/test_support.rs | pub async fn update_admin_role_binding<'e>( | update_admin_role_binding | 2
+persistence/registry/test_support.rs | pub async fn append_audit_event( | append_audit_event | 2
+persistence/registry/test_support.rs | pub async fn insert_administrative_operation( | insert_administrative_operation | 2
+persistence/registry/test_support.rs | pub async fn consume_administrative_operation( | consume_administrative_operation | 2
+persistence/registry/test_support.rs | pub async fn revoke_administrative_operation( | revoke_administrative_operation | 2
+persistence/registry/bootstrap.rs | use super::{ | create_admin_identity | 1
+persistence/registry/bootstrap.rs | use super::{ | create_admin_credential | 1
+persistence/registry/bootstrap.rs | use super::{ | create_admin_role_binding | 1
+persistence/registry/bootstrap.rs | use super::{ | append_audit_event | 1
+persistence/registry/bootstrap.rs | async fn bootstrap_steps( | create_admin_identity | 1
+persistence/registry/bootstrap.rs | async fn bootstrap_steps( | create_admin_credential | 1
+persistence/registry/bootstrap.rs | async fn bootstrap_steps( | create_admin_role_binding | 1
+persistence/registry/bootstrap.rs | async fn bootstrap_steps( | append_audit_event | 1
+persistence/registry/recovery.rs | use super::{ | create_admin_identity | 1
+persistence/registry/recovery.rs | use super::{ | create_admin_credential | 1
+persistence/registry/recovery.rs | use super::{ | append_audit_event | 1
+persistence/registry/recovery.rs | use super::{ | create_admin_role_binding | 1
+persistence/registry/recovery.rs | async fn issue_steps( | append_audit_event | 1
+persistence/registry/recovery.rs | async fn restore_steps( | create_admin_identity | 1
+persistence/registry/recovery.rs | async fn restore_steps( | create_admin_credential | 1
+persistence/registry/recovery.rs | async fn restore_steps( | create_admin_role_binding | 1
+persistence/registry/recovery.rs | async fn restore_steps( | append_audit_event | 2
+operation/approval.rs | use crate::persistence::registry::{ | append_audit_event | 1
+operation/approval.rs | use crate::persistence::registry::{ | consume_administrative_operation | 1
+operation/approval.rs | use crate::persistence::registry::{ | insert_administrative_operation | 1
+operation/approval.rs | use crate::persistence::registry::{ | revoke_administrative_operation | 1
+operation/approval.rs | async fn approve_steps( | append_audit_event | 2
+operation/approval.rs | async fn approve_steps( | insert_administrative_operation | 1
+operation/approval.rs | async fn approve_steps( | consume_administrative_operation | 1
+operation/approval.rs | async fn revoke_steps( | append_audit_event | 1
+operation/approval.rs | async fn revoke_steps( | insert_administrative_operation | 1
+operation/approval.rs | async fn revoke_steps( | revoke_administrative_operation | 1
+operation/toggle.rs | use crate::persistence::registry::{ | append_audit_event | 1
+operation/toggle.rs | use crate::persistence::registry::{ | insert_administrative_operation | 1
+operation/toggle.rs | pub(crate) async fn insert_pending<E: From<RegistryError>>( | append_audit_event | 1
+operation/toggle.rs | pub(crate) async fn insert_pending<E: From<RegistryError>>( | insert_administrative_operation | 1
+operation/toggle.rs | async fn toggle_steps( | append_audit_event | 1
+trust/keyset.rs | use crate::persistence::registry::{ | append_audit_event | 1
+trust/keyset.rs | async fn append_stamped( | append_audit_event | 1
+trust/keyset.rs |         impl Drop for Db { | create_admin_identity | 1
+trust/keyset.rs |         impl Drop for Db { | create_admin_credential | 1
+trust/keyset.rs |         impl Drop for Db { | create_admin_role_binding | 1
+trust/source.rs | use crate::persistence::registry::{ | append_audit_event | 1
+trust/source.rs | async fn append_stamped( | append_audit_event | 1
 ";
 
 /// Text that would let source escape the item keys of [`MENTIONS`], none of
 /// which the library uses: a `rustfmt::skip` keeps an indented item that
-/// would then count under the item before it, and `#[path]`, a `path` in a
+/// would then count under the item before it; `#[path]`, a `path` in a
 /// `cfg_attr` and `include!` read source from a file this check does not
 /// key by its own name. Matched with all whitespace removed.
 const LAYOUT_ESCAPES: [&str; 4] = ["rustfmt::skip", "#[path", "path=\"", "include!("];
+
+/// The lints whose level, set in the source, would silence the warning
+/// that an `impl` nested in a function body draws (`non_local_definitions`,
+/// warned by default and in no group but `warnings`). A macro can expand
+/// such an `impl` from a name passed to it, where the `impl`'s own line
+/// names nothing; that warning, which the plain check refuses, is then what
+/// catches it. None of them is named in the library's code (matched as
+/// identifiers outside comments and literals), nor, outside comments, in
+/// the package's or the workspace's manifest or the workspace's cargo
+/// configuration, where a `[lints]` table or `rustflags` (`-A`, or
+/// `--cap-lints`, also refused there) would set it for the whole build.
+const LINT_ESCAPES: [&str; 2] = ["non_local_definitions", "warnings"];
 
 /// The environment a nested `cargo` or `rustc` must not inherit: this
 /// test's own build settings (`cargo test` and `cargo llvm-cov` set
@@ -353,13 +511,7 @@ fn compile_probe(library: &PlainLibrary, dir: &Path, name: &str, source: &str) -
 /// crate: private (E0603) or missing (E0432), and nothing else, so that a
 /// probe that fails for another reason does not count.
 fn assert_unreachable(library: &PlainLibrary, probes: &Path, name: &str, path: &str) {
-    let source = format!("pub use skyoauth_service::{path};\n");
-    let output = compile_probe(library, probes, name, &source);
-    let output_text = text(&output);
-    assert!(
-        !output.status.success(),
-        "`skyoauth_service::{path}` is reachable without `test-support`"
-    );
+    let output_text = probe_unreachable(library, probes, name, path);
     assert!(
         output_text.contains("error[E0603]") || output_text.contains("error[E0432]"),
         "`skyoauth_service::{path}` failed to compile, but not as a path that \
@@ -367,11 +519,38 @@ fn assert_unreachable(library: &PlainLibrary, probes: &Path, name: &str, path: &
     );
 }
 
+/// Asserts that `skyoauth_service::{path}` exists and is private (E0603)
+/// in a probe crate: for the path of a writer's defining module, so that a
+/// renamed module or a stale table, which leaves the path missing (E0432),
+/// fails this test instead of passing it.
+fn assert_private(library: &PlainLibrary, probes: &Path, name: &str, path: &str) {
+    let output_text = probe_unreachable(library, probes, name, path);
+    assert!(
+        output_text.contains("error[E0603]"),
+        "`skyoauth_service::{path}` failed to compile, but not as a private path \
+         (E0603), so the probe names nothing:\n{output_text}"
+    );
+}
+
+/// Compiles a probe that re-exports `skyoauth_service::{path}`, asserts
+/// that it fails, and returns its output.
+fn probe_unreachable(library: &PlainLibrary, probes: &Path, name: &str, path: &str) -> String {
+    let source = format!("pub use skyoauth_service::{path};\n");
+    let output = compile_probe(library, probes, name, &source);
+    assert!(
+        !output.status.success(),
+        "`skyoauth_service::{path}` is reachable without `test-support`"
+    );
+    text(&output)
+}
+
 /// The guard that makes a caller visible to the check above: each writer
 /// is `pub(super)` and carries, right before it, the `expect(dead_code)`
 /// that a build without the feature turns into a warning once anything
 /// calls the writer. Without this, removing the attribute and adding a
-/// public forwarder of another name in the same change would pass.
+/// public forwarder of another name in the same change would pass. The
+/// four ungated trust writers (PR 7) and `update_admin_role_binding`
+/// (PR 10), by their file under `src` and the start of their item.
 #[test]
 fn each_ungated_writer_keeps_its_visibility_and_dead_code_guard() {
     const GUARD: &str = "#[cfg_attr(
@@ -379,22 +558,26 @@ fn each_ungated_writer_keeps_its_visibility_and_dead_code_guard() {
     expect(dead_code, reason = \"ungated: tests only, through test_support\")
 )]
 ";
-    for (module, writer) in UNGATED {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/trust")
-            .join(format!("{module}.rs"));
+    let trust =
+        UNGATED.map(|(module, writer)| (format!("trust/{module}.rs"), format!("{writer}(")));
+    let operator = (
+        "persistence/registry/operator.rs".to_owned(),
+        "update_admin_role_binding<'e>(".to_owned(),
+    );
+    for (file, writer) in trust.into_iter().chain([operator]) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
         let source = fs::read_to_string(&path).unwrap();
-        let item = format!("async fn {writer}(");
+        let item = format!("async fn {writer}");
         assert_eq!(
             source.matches(&item).count(),
             1,
-            "`{writer}` is defined once in {}",
+            "`{item}` is defined once in {}",
             path.display()
         );
         let guarded = format!("{GUARD}pub(super) {item}");
         assert!(
             source.contains(&guarded),
-            "`{writer}` must be `pub(super)` right after its `expect(dead_code)` guard"
+            "`{item}` must be `pub(super)` right after its `expect(dead_code)` guard"
         );
     }
 }
@@ -411,6 +594,112 @@ fn identifier_count(line: &str, word: &str) -> usize {
         .count()
 }
 
+/// `source` with every comment and every string, byte string, raw string
+/// and character literal replaced by spaces, newlines kept, so that a name
+/// in a comment or a literal is not a mention and lines stay in place.
+/// Block comments nest, as in Rust; a `'` that does not open a character
+/// literal is a lifetime or a label and is kept.
+fn strip_comments_and_literals(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let blank = |out: &mut String, run: &[char]| {
+        for c in run {
+            out.push(if *c == '\n' { '\n' } else { ' ' });
+        }
+    };
+    let is_identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut i = 0;
+    while i < chars.len() {
+        let rest = &chars[i..];
+        let end = if rest.starts_with(&['/', '/']) {
+            rest.iter().position(|c| *c == '\n').unwrap_or(rest.len())
+        } else if rest.starts_with(&['/', '*']) {
+            let (mut depth, mut j) = (0_usize, 0);
+            while j < rest.len() {
+                if rest[j..].starts_with(&['/', '*']) {
+                    depth += 1;
+                    j += 2;
+                } else if rest[j..].starts_with(&['*', '/']) {
+                    depth -= 1;
+                    j += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            j
+        } else if rest[0] == 'r'
+            && !(i > 0 && is_identifier(chars[i - 1]) && !matches!(chars[i - 1], 'b' | 'c'))
+            && {
+                let hashes = rest[1..].iter().take_while(|c| **c == '#').count();
+                rest.get(1 + hashes) == Some(&'"')
+            }
+        {
+            let hashes = rest[1..].iter().take_while(|c| **c == '#').count();
+            let close: Vec<char> = std::iter::once('"')
+                .chain(std::iter::repeat_n('#', hashes))
+                .collect();
+            let body = 2 + hashes;
+            body + rest[body..]
+                .windows(close.len())
+                .position(|window| window == close.as_slice())
+                .map_or(rest.len() - body, |at| at + close.len())
+        } else if rest[0] == '"' {
+            let mut j = 1;
+            while j < rest.len() && rest[j] != '"' {
+                j += if rest[j] == '\\' { 2 } else { 1 };
+            }
+            (j + 1).min(rest.len())
+        } else if rest[0] == '\'' && rest.get(1) == Some(&'\\') {
+            2 + rest[2..]
+                .iter()
+                .skip(1)
+                .position(|c| *c == '\'')
+                .map_or(rest.len() - 2, |at| at + 2)
+        } else if rest[0] == '\'' && rest.get(2) == Some(&'\'') {
+            3
+        } else {
+            0
+        };
+        if end == 0 {
+            out.push(chars[i]);
+            i += 1;
+        } else {
+            blank(&mut out, &rest[..end]);
+            i += end;
+        }
+    }
+    out
+}
+
+/// Whether `line` (comments and literals stripped) starts an `impl` block,
+/// at any depth: an `impl` nested in a function body still adds methods to
+/// its type, public ones included, so it is keyed as an item of its own.
+fn is_nested_impl(line: &str) -> bool {
+    let line = line.trim_start();
+    ["impl ", "impl<", "unsafe impl "]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
+}
+
+/// The stripping the source check counts on: code stays, comments and
+/// literals go, a lifetime is not a character literal, and lines stay in
+/// place.
+#[test]
+fn stripping_keeps_code_and_blanks_comments_and_literals() {
+    let source = "f(\"a // b\", r#\"c \"x\" d\"#, '\\'', '\"', b'x');\n\
+                  g::<'e>(); // h\n/* i /* j */ k */ l\n\"m\n n\" o\n";
+    let stripped = strip_comments_and_literals(source);
+    let words: Vec<&str> = stripped
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .collect();
+    let words: Vec<&str> = words.into_iter().filter(|word| !word.is_empty()).collect();
+    assert_eq!(words, ["f", "b", "g", "e", "l", "o"]);
+    assert_eq!(stripped.lines().count(), source.lines().count());
+}
+
 /// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -424,15 +713,22 @@ fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
 }
 
 /// The stand-in for `expect(dead_code)` where the writers and steps are
-/// called in every build: outside comment lines, the library names each
-/// bare registry writer and each step of [`STEPS`] exactly as
-/// [`MENTIONS`] lists. A mention is keyed by the first line of the
-/// top-level item that holds it (a line that starts in column 0 and is not
-/// a comment, an attribute or the rest of an item), so a definition or a
-/// caller made `pub` changes the key, and a forwarder or a caller of any
-/// other name adds one, or a mention to a key. `rustfmt` puts every
-/// top-level item in column 0, so the check also refuses the
-/// [`LAYOUT_ESCAPES`] that could keep one out of it.
+/// called in every build: outside comments and string and character
+/// literals, the library names each bare registry writer, each writer of
+/// [`REGISTRY_PRIVATE`] and each step of [`STEPS`] exactly as [`MENTIONS`]
+/// lists. A mention is keyed by the first line of the item that holds it:
+/// the top-level item (a line that starts in column 0 and is not an
+/// attribute or the rest of an item), or the `impl` block, at any depth,
+/// that follows it, so a definition or a caller made `pub` changes the key,
+/// a forwarder or a caller of any other name, a public method of an `impl`
+/// nested in a function body included, adds one or a mention to a key, and
+/// a name moved into a comment or a literal to keep a count is not counted.
+/// `rustfmt` puts every top-level item in column 0, so the check also
+/// refuses the [`LAYOUT_ESCAPES`] that could keep one out of it and the
+/// [`LINT_ESCAPES`] that could silence a nested `impl` a macro expands, and
+/// it refuses `<name> as` (whitespace removed, outside comments and
+/// literals), an import or a cast under another name, which no count can
+/// follow.
 #[test]
 fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -440,9 +736,11 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
     rust_files(&src, &mut files);
     let names: Vec<&str> = REGISTRY_UNGATED
         .into_iter()
+        .chain(REGISTRY_PRIVATE.iter().map(|(_, writer)| *writer))
         .chain(STEPS.iter().map(|(_, step)| *step))
         .collect();
     let mut escapes = Vec::new();
+    let mut aliases = Vec::new();
     let mut found = BTreeMap::new();
     for file in files {
         let relative = file.strip_prefix(&src).unwrap();
@@ -454,19 +752,35 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
                 escapes.push(format!("{relative}: `{escape}`"));
             }
         }
+        let stripped = strip_comments_and_literals(&source);
+        for lint in LINT_ESCAPES {
+            if identifier_count(&stripped, lint) > 0 {
+                escapes.push(format!("{relative}: `{lint}`"));
+            }
+        }
+        let code: String = stripped.chars().filter(|c| !c.is_whitespace()).collect();
+        for name in &names {
+            if code.contains(&format!("{name}as")) {
+                aliases.push(format!("{relative}: `{name} as`"));
+            }
+        }
         let mut item = String::from("<the file's start>");
-        for line in source.lines() {
+        for (line, stripped_line) in source.lines().zip(stripped.lines()) {
             let continues = ["/", "#", "}", ")", "]", "{", "where"];
-            let starts_item = line.chars().next().is_some_and(|c| !c.is_whitespace())
-                && !continues.iter().any(|prefix| line.starts_with(prefix));
+            let starts_item = stripped_line
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_whitespace())
+                && !continues
+                    .iter()
+                    .any(|prefix| stripped_line.starts_with(prefix));
+            let starts_item = starts_item || is_nested_impl(stripped_line);
             if starts_item {
                 item = line.to_owned();
             }
-            if line.trim_start().starts_with("//") {
-                continue;
-            }
+            let code = &stripped_line;
             for name in &names {
-                let count = identifier_count(line, name);
+                let count = identifier_count(code, name);
                 if count > 0 {
                     *found
                         .entry((relative.clone(), item.clone(), (*name).to_owned()))
@@ -475,10 +789,34 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
             }
         }
     }
+    // The same lint levels set for the whole build: in a `[lints]` table of
+    // the package or the workspace, or as `rustflags` (`-A`,
+    // `--cap-lints`) in the workspace's cargo configuration.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for settings in ["Cargo.toml", "../Cargo.toml", "../.cargo/config.toml"] {
+        let Ok(text) = fs::read_to_string(manifest_dir.join(settings)) else {
+            continue;
+        };
+        let lines = text
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or(""));
+        let normalized = lines.collect::<Vec<_>>().join("\n").replace('-', "_");
+        for lint in LINT_ESCAPES.iter().chain(&["cap_lints"]) {
+            if normalized.contains(lint) {
+                escapes.push(format!("service/{settings}: `{lint}`"));
+            }
+        }
+    }
     assert!(
         escapes.is_empty(),
         "the library uses text that this source check cannot see through:\n{}",
         escapes.join("\n")
+    );
+    assert!(
+        aliases.is_empty(),
+        "the library imports or casts a crate-private registry writer or a step under \
+         another name, which this source check cannot follow:\n{}",
+        aliases.join("\n")
     );
     let mut expected = BTreeMap::new();
     for line in MENTIONS.lines().filter(|line| !line.is_empty()) {
@@ -505,7 +843,7 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
         .collect();
     assert!(
         unexpected.is_empty() && missing.is_empty(),
-        "a bare registry writer or a step is named where it should not be, under \
+        "a crate-private registry writer or a step is named where it should not be, under \
          another visibility, or a different number of times (file | item | name | \
          count). Update MENTIONS only if this is a deliberate narrowing or rename; \
          a new caller or a wider visibility is what this test exists to refuse.\n\
@@ -523,11 +861,13 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
     fs::create_dir_all(&probes).unwrap();
 
     // The control: the public writes and registry items resolve, so the
-    // probes below fail for the path they name, not for the setup.
+    // probes below fail for the path they name, not for the setup, and the
+    // registry writers that deliberately stay public are still public.
     let trust_uses = PUBLIC.iter().enumerate().map(|(index, path)| {
         format!("pub use skyoauth_service::trust::{path} as public_{index};\n")
     });
-    let registry_uses = REGISTRY_PUBLIC.iter().enumerate().map(|(index, item)| {
+    let registry_items = REGISTRY_PUBLIC.iter().chain(&REGISTRY_KEPT_PUBLIC);
+    let registry_uses = registry_items.enumerate().map(|(index, item)| {
         format!("pub use skyoauth_service::persistence::registry::{item} as registry_{index};\n")
     });
     let uses: String = trust_uses.chain(registry_uses).collect();
@@ -564,6 +904,25 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
         for (index, path) in paths.iter().enumerate() {
             let name = format!("probe_registry_{writer}_{index}");
             assert_unreachable(&library, &probes, &name, path);
+        }
+    }
+
+    for (module, writer) in REGISTRY_PRIVATE {
+        // The re-export of `registry` (crate-private or private), the
+        // defining module (private, so E0603 only) and the registry's
+        // test-support module.
+        let paths = [
+            format!("persistence::registry::{writer}"),
+            format!("persistence::registry::{module}::{writer}"),
+            format!("persistence::registry::test_support::{writer}"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let name = format!("probe_private_{writer}_{index}");
+            if index == 1 {
+                assert_private(&library, &probes, &name, path);
+            } else {
+                assert_unreachable(&library, &probes, &name, path);
+            }
         }
     }
 

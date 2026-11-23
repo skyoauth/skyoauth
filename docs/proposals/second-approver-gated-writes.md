@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 5 merged, PR 6 in progress (#116 merged), PR 7 merged (#120), PR 9 implemented and in review, PR 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 5 merged, PR 6 in progress (#116 merged), PRs 7 and 9 merged (#120, #122), PR 10 implemented and in review, PR 8 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
@@ -11,12 +11,14 @@ same sketch is a provisional lead pick, not ruled. Implemented so far: the
 in-transaction permit (PR 1), the registry operation module with the `0005`
 guard and index (PR 2), `crate::operation` with the toggle (PR 3), the
 keyset kinds (PR 4), the source kinds with the Q2 disable-only add-on
-(PR 5), and, in review, the ungated entry points made crate-private (PR 7);
-the tests of PR 6 have started (#116, merged). Not yet: the rest of the
-tests (PR 6), the test session's documents (PR 8), and any endpoint; no
-T00.x box is ticked. Every other choice below that goes beyond the written
-spec is a "provisional lead pick, 2026-11-23" (the Decisions list numbers
-them D1 to D29); "(inferred)" marks a point where the spec is silent. All
+(PR 5), the ungated entry points made crate-private (PR 7), the bare
+registry trust writers made crate-private (PR 9), and, in review, the
+registry's operator writers, audit append and operation-row writers made
+crate-private (PR 10); the tests of PR 6 have started (#116, merged). Not
+yet: the rest of the tests (PR 6), the test session's documents (PR 8),
+and any endpoint; no T00.x box is ticked. Every other choice below that
+goes beyond the written spec is a "provisional lead pick, 2026-11-23" (the
+Decisions list numbers them D1 to D29); "(inferred)" marks a point where the spec is silent. All
 of them, and the lead decisions the spec records, stay provisional until
 the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0); this text
 ratifies no ADR. The widening ruling it builds on is the user's
@@ -863,9 +865,10 @@ pub(crate) async fn apply_locked_update(/* transaction, requester,
 // service/src/operation/mod.rs: apply_policy_toggle, likewise.
 
 // service/src/persistence/registry/operation.rs (new): bare, check nothing
-// the database does not, like the other registry writers.
+// the database does not, like the other registry writers. The three
+// writers are crate-private since PR 10 (see "PR 10 as implemented").
 pub struct AdministrativeOperation { /* the 0005 columns */ }
-pub async fn insert_administrative_operation(
+pub(crate) async fn insert_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     new: &NewAdministrativeOperation,
 ) -> Result<AdministrativeOperation, RegistryError>;
@@ -874,13 +877,13 @@ pub async fn lock_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
 ) -> Result<Option<AdministrativeOperation>, RegistryError>;
-pub async fn consume_administrative_operation(
+pub(crate) async fn consume_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
     now: SystemTime,
     outcome: &str,
 ) -> Result<i64, RegistryError>;
-pub async fn revoke_administrative_operation(
+pub(crate) async fn revoke_administrative_operation(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
     revoking_operation_id: &str,
@@ -2014,42 +2017,202 @@ feature of the scenario package that turns on
 `skyoauth-service/test-support`, which a build without features never
 sees (accepted; the release-build item under "Still open" covers it).
 
-Still open after PRs 7 and 9:
+**PR 10 as implemented** (`service/src/persistence/registry/`; picks
+marked inferred in the code comments). The lead assigned the writers of
+rows 2, 6 and 7 of the survey under "Still open" (provisional lead pick,
+2026-11-23). `create_admin_identity`, `create_admin_credential` and
+`create_admin_role_binding` are `pub(super)` in `registry::operator`,
+visible only within `persistence::registry`, which re-exports them
+privately: their only callers outside tests are `bootstrap_instance`
+(`bootstrap.rs:521`, `:530`, `:541`) and `restore_operator`
+(`recovery.rs:1097`, `:1106`, `:1117`), both in the registry, so a caller
+anywhere else in the crate is a privacy error (E0603) in every build
+(inferred: the narrowest visibility that reaches them).
+`update_admin_role_binding` is `pub(super)` too and has no caller in the
+crate, so it takes PR 7's form: without the feature it is dead code, which
+`#[cfg_attr(not(feature = "test-support"), expect(dead_code, ...))]`
+states, so a caller in the registry, a public forwarder included, makes
+the expectation unfulfilled, a warning in such a build. `append_audit_event`
+is `pub(crate)`: the audited writes of the registry (`bootstrap_steps`,
+`issue_steps`, `restore_steps`), of `crate::trust` (each module's
+`append_stamped`) and of `crate::operation` (`approve_steps`,
+`revoke_steps`, `toggle_steps` and `insert_pending`) call it, and
+`crate::trust` and `crate::operation` are siblings of `crate::persistence`,
+which `pub(super)` or `pub(in crate::persistence)` would not reach.
+`insert_administrative_operation`,
+`consume_administrative_operation` and `revoke_administrative_operation`
+are `pub(crate)` for the same reason: `operation/approval.rs` calls all
+three and `operation/toggle.rs` the insert (in `insert_pending`, which the
+gated `submit_*` writes of `crate::trust` call). The tests reach all eight
+through wrappers of the same name in `persistence::registry::test_support`
+and change their paths only (`registry::create_admin_identity` becomes
+`registry::test_support::create_admin_identity`; an imported append or
+operation-row writer moves into a `test_support` group of the import):
+169 mentions in 11 integration and 5 scenario test files, and the `seed`
+of a database unit test in `trust::keyset`, which reaches the creates
+through `test_support` too (the crate's own test build has the feature,
+through the package's dev-dependency on itself). The scenario library
+(`tests/src`) calls none of them. The input and row types
+(`NewAdminIdentity`, `NewAuditEvent`, `NewAdministrativeOperation` and the
+rest) stay public: the wrappers take and return them. Nothing else moved:
+`bootstrap_instance`, `issue_recovery_challenge` and `restore_operator`
+stay public (the open decision below), so another crate can still enroll a
+`security_admin` through them, and making the creates crate-private does
+not change that; `disable_admin_identity` and `revoke_admin_credential`,
+which only narrow, stay public. No migration, no endpoint, no new gated
+kind, no dependency, no workflow change, and `Cargo.lock` is unchanged.
+
+`service/tests/ungated_writes_private.rs` covers the eight. Its probes
+require each to fail to resolve at `persistence::registry::<name>`, at its
+private defining module (`operator`, `events` or `operation`; there as a
+private path, E0603, since the review round, so a renamed module or a stale
+table fails the test instead of passing it) and at
+`persistence::registry::test_support::<name>`; the control probe also
+names the operator, audit and operation readers and types that stay public
+and the five registry writers that deliberately stay public
+(`restore_operator`, `issue_recovery_challenge`, `bootstrap_instance`,
+`disable_admin_identity`, `revoke_admin_credential`), so narrowing one of
+them fails it. The source check's table gains 62 places for the eight
+names, 106 in all: the definitions, the re-exports, the wrappers, the
+`use`s, the callers above and the unit test's `seed`, each keyed by the
+first line of the item that holds it and counted. The guard test now also
+requires `update_admin_role_binding` to be `pub(super)` right after its
+`expect(dead_code)`. The review round hardened the source check (see the
+next paragraphs): an `impl` block at any depth is an item key of its own,
+so the `seed` rows are keyed by the test module's `impl Drop for Db`;
+mentions are counted with comments and string and character literals
+removed; and the check refuses `<name> as` for a listed name (whitespace
+removed, outside comments and literals) and a level set for
+`non_local_definitions` or `warnings` in the library's source, the
+package's or the workspace's manifest or the workspace's cargo
+configuration, on top of the layout escapes it already refused (inferred,
+all four).
+
+PR 10's mutants (outside the repository; this records the verdicts), round
+1: forty-nine, forty-one killed. Thirty run against the whole test, all
+killed. By the source check, twenty: each of the eight writers made `pub`
+(for `update_admin_role_binding` the guard test too); a writer made `pub`
+and re-exported `pub`, for the identity create, the append, the operation
+insert and the binding update (their probes too); a public forwarder of
+another name of the append and of the binding create in `registry/mod.rs`,
+and of the binding update in `operator.rs` (the guard's diagnostic too);
+the guard removed together with that forwarder (the guard test too); and a
+new crate-visible caller, live from `app()`, of the binding create in
+`registry/grant.rs`, of the append and of the operation insert in
+`crate::operation`, and of the binding update in `registry/recovery.rs`
+(the guard's diagnostic too). By the features check, one: the scenario
+package enabling `test-support` through its `[dependencies]` entry. By the
+diagnostics check, three: the registry's `test_support` compiled without
+the feature (the binding update's expectation unfulfilled),
+`bootstrap_instance` re-exported `pub(crate)` (dead code; with that check
+off, the control probe), and PR 7's `create_version` made `pub` (the guard test too). By the
+build check, one: the scenario library naming
+`registry::test_support::append_audit_event`. By the layout refusal, three:
+an indented `#[rustfmt::skip]` public forwarder of the binding create in
+`bootstrap.rs`, a count-preserving one under its `use` block with that
+`use` entry replaced by a path at the call, and the same in
+`trust/keyset.rs` for the append. By the compiler, two: the append
+re-exported `pub` while still `pub(crate)` (E0364), and a caller of the
+identity create in `crate::operation`, outside the registry (E0603, the
+effect of `pub(super)`). Nineteen more run with a check disabled, to show
+which check carries a mutant; eight survive, each only with that check
+disabled. With the source check off, a writer made `pub` but re-exported
+as before (the identity create, the append, and, with the guard test off
+too, the binding update) survives; that is equivalent in effect, since the
+writer stays unreachable from outside the crate (a private module, a
+restricted re-export) and, for the update, still dead without the
+feature, and only the source check, which keeps the written visibility,
+kills it. With the source check off, a public forwarder of the append or of
+the binding create in `registry/mod.rs`, and a new caller of the binding
+create in `registry/grant.rs`, survive: no probe can name a forwarder of
+another name and those writers are live, so no diagnostic either; the
+source check is what kills them. With the layout refusal off, the
+count-preserving forwarder in `trust/keyset.rs` survives, and the one in
+`bootstrap.rs` survives only with the diagnostics check off as well (in a
+private module a `pub` forwarder is dead code, a warning, an accident of
+where it sits). The other eleven are killed: the made-`pub`-and-re-exported
+writers by their probes alone (and the binding update's by the guard
+test); the binding update's forwarder and its new caller, and the guard
+removed with a forwarder, by PR 7's diagnostic or the guard test with the
+source check off; the indented forwarder after `claim_policy` by the count
+check with the refusal off (its dead-code warning too); the
+count-preserving one in `bootstrap.rs` by that dead-code warning alone with
+the refusal off; and `bootstrap_instance` re-exported
+`pub(crate)`, and `disable_admin_identity` made `pub(super)`, by the
+control probe with the diagnostics check off.
+
+Round 1 missed four mutants that passed the whole test, each a
+count-preserving forwarder through which another crate could enroll a
+`security_admin` binding or append an audit event: a public method of an
+`impl NewAdminRoleBinding` nested in `bootstrap_steps` that calls the
+binding create, the call rewritten to that method (the `impl` with
+`allow(non_local_definitions)`); the same in `trust::keyset`'s
+`append_stamped` for the append; and an alias in `bootstrap.rs`'s `use`
+(`create_admin_role_binding as enroll_binding`) with the original name kept
+in a trailing comment, or in a string literal, and a public forwarder of
+the alias re-exported `pub`. The source check missed them because it keyed
+a mention by the item in column 0 only, counted comments after code and
+literals as mentions, and allowed aliases; the hardening above is the fix.
+The review round's run: 111 mutants, round 1's forty-nine, PR 9's
+thirty-eight ported to this tree, and twenty-four new; ninety-four killed.
+With every check on, every one is killed but PR 9's accepted survivor, a
+non-default feature of the scenario package that turns on `test-support`
+(the release-build item under "Still open"). Of the new ones, the four
+escapes and the alias split over two lines are killed by the new
+refusals, and each new check holds on its own: with the refusal off, the
+nested-`impl` key kills the two `impl` forwarders and the count, with
+comments and literals removed, kills the three aliases; without its
+`allow`, the nested `impl` draws `non_local_definitions`, which the
+diagnostics check refuses. A `macro_rules!` that expands such an `impl`
+from the writer's name passed to it, whose `impl` line names nothing, is
+killed by that warning, or by the refusal when an `allow` of
+`non_local_definitions` or `warnings` silences it (in the source, a
+`cfg_attr` included, or in the package's `[lints]` table). A probe table
+that names a module that does not exist (`operators`) fails the E0603
+requirement. Seventeen survive: PR 9's accepted one, and sixteen each only
+with a check disabled: the two
+`impl` forwarders with the nested-`impl` key and the refusal both off; the
+macro with the refusal off (with an `allow` of either lint); and round 1's
+eight and PR 9's four, as before. What still escapes, by inspection and
+not run: a lint level set outside the repository (a user's cargo
+configuration, `RUSTFLAGS` in the build's environment) together with a
+macro-expanded `impl`; code a procedural macro or a build script
+generates (the library has neither, and `include!` is refused); a public
+forwarder, under another name, of a caller one level up (`bootstrap_steps`,
+`insert_pending`, `append_stamped` and the like), which the check does not
+list, as it lists only the writers and the six trust steps; and whatever
+the check's small lexer misreads, since it is not rustc's (a unit test
+covers the cases it handles).
+
+Still open after PRs 7, 9 and 10:
 
 - Other registry writers that widen or change the security posture stay
   public, with no authorization, no gate and, but for the audited ones,
-  no audit event. PR 9 surveyed them and changed none; the operator
-  writers wait for a PR of their own. Seven of them already have callers
-  in the crate outside tests, so they would take PR 9's exact form
-  (crate-private, a `test_support` wrapper, the tests' paths changed, no
-  dead-code guard): `create_admin_identity`, `create_admin_credential` and
-  `create_admin_role_binding` (called at `bootstrap.rs:521`, `:530`,
-  `:541` and `recovery.rs:1097`, `:1106`, `:1117`), `append_audit_event`
-  (called in `bootstrap.rs`, `recovery.rs`, `crate::operation` and
-  `crate::trust`), and `insert_administrative_operation`,
-  `consume_administrative_operation` and `revoke_administrative_operation`
-  (called in `operation/approval.rs` and `operation/toggle.rs`). The
-  others, `update_admin_role_binding` among them, have no caller in the
-  crate outside tests and would need PR 7's `expect(dead_code)` form. Which
-  of them to make crate-private, and in which PR, is the lead's to decide.
+  no audit event. PR 9 surveyed them and changed none; PR 10 made the
+  writers of rows 2, 6 and 7 below crate-private (marked done there; see
+  "PR 10 as implemented"). The rest have no caller in the crate outside
+  tests, so they would need PR 7's `expect(dead_code)` form; for
+  `issue_recovery_challenge` and `restore_operator` see the open decision
+  below, and `bootstrap_instance` has no in-crate caller either. Which of
+  them to make crate-private, and in which PR, is the lead's to decide.
   The rank is the reviewer's, by the damage if the writer were wired to the
   wrong caller (nothing is wired today, and every one needs database write
-  rights; provisional lead pick, 2026-11-23). Line numbers are this PR's
+  rights; provisional lead pick, 2026-11-23). Line numbers are PR 9's
   tree, under `service/src/persistence/registry/`; "test files" counts the
   integration and scenario test files that name the writer.
 
-  | Rank | Writers                                                                                                                                                                                                                                                                                    | Where                                                                            | What they write                                                                                      | Callers in the crate, and why listed                                                                                                                                                                                                                                                                                                                                                             |
-  | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-  | 1    | `issue_recovery_challenge`, `restore_operator`                                                                                                                                                                                                                                             | `recovery.rs:925`, `:1032`                                                       | a replacement `security_admin`, every operator credential revoked, the recovery key replaced         | none outside tests; the registry verifies no signature (its module: the verifier does, before the restore), so a caller that issues a challenge and restores enrolls a `security_admin`; break-glass (T13.5), not a trust write; 4 test files each; see the open decision below                                                                                                                  |
-  | 2    | `create_admin_identity`, `create_admin_credential`, `create_admin_role_binding`, `update_admin_role_binding`                                                                                                                                                                               | `operator.rs:586`, `:646`, `:716`, `:759`                                        | operators, their credentials and role bindings, `security_admin` included, and a binding's re-enable | the three creates: `bootstrap_instance` and `restore_operator` (PR 9's form); the update: none (PR 7's form). Widen operator authority with no authorization and no audit event; not a trust write. Making the creates crate-private does not stop a caller enrolling a `security_admin` while `issue_recovery_challenge` and `restore_operator` stay public; 13 to 14 test files (9 the update) |
-  | 3    | `bootstrap_instance`                                                                                                                                                                                                                                                                       | `bootstrap.rs:481`                                                               | the policy row, the recovery state and the first `security_admin`                                    | none outside tests; refuses once bootstrap is closed (`AlreadyClosed`); until then, whoever calls first enrolls the first `security_admin`; 10 test files                                                                                                                                                                                                                                        |
-  | 4    | `create_principal_binding`, `update_principal_binding`                                                                                                                                                                                                                                     | `grant.rs:162`, `:227`                                                           | which claims of a trust source map to a workload principal                                           | none; widen who is accepted, checked only for the required predicates; 10 and 6 test files                                                                                                                                                                                                                                                                                                       |
-  | 4    | `create_service_identity`, `update_service_identity`, `add_service_identity_resource_server`, `create_service_grant`, `update_service_grant`, `add_service_grant_binding`, `add_service_grant_resource_server`                                                                             | `grant.rs:265`, `:330`, `:371`, `:445`, `:528`, `:565`, `:635`                   | service identities, grants, and their binding and audience sets                                      | none; widen what an exchange may obtain; the database's guards (`0009`, `0010`) check consistency, not authority; 3 to 10 test files each                                                                                                                                                                                                                                                        |
-  | 4    | `create_resource_server`, `update_resource_server`, `create_audience_tenant_assignment`, `update_audience_tenant_assignment`, `create_resource_server_checker`, `update_resource_server_checker`, `add_resource_server_checker_tenant`, `create_resource_action`, `update_resource_action` | `audience.rs:47`, `:100`, `:124`, `:188`, `:211`, `:261`, `:290`, `:355`, `:410` | audiences, tenant assignments, checkers and their tenant sets, actions                               | none; an enabled assignment or a checker tenant admits a tenant to an audience; 1 to 7 test files each                                                                                                                                                                                                                                                                                           |
-  | 5    | `create_tenant`, `update_tenant`, `create_principal`, `update_principal`                                                                                                                                                                                                                   | `tenant.rs:38`, `:97`, `:121`, `:176`                                            | tenants and principals, a re-enable included                                                         | none outside tests; a re-enable widens; 22, 2, 13 and 1 test files                                                                                                                                                                                                                                                                                                                               |
-  | 6    | `append_audit_event`                                                                                                                                                                                                                                                                       | `events.rs:541`                                                                  | one chained audit event                                                                              | every audited write (PR 9's form); widens no trust, but a caller can append a well-chained event of its choosing (the trail's integrity); 11 test files                                                                                                                                                                                                                                          |
-  | 7    | `insert_administrative_operation`, `consume_administrative_operation`, `revoke_administrative_operation`                                                                                                                                                                                   | `operation.rs:344`, `:382`, `:406`                                               | the gate's own operation rows                                                                        | `crate::operation` (PR 9's form); write no target: an operation is applied only by `crate::operation`, whose apply steps are crate-private, and the `0005` guard checks the rows; 5, 1 and 1 test files                                                                                                                                                                                          |
-  | 8    | `create_trust_keyset`, `update_trust_keyset`                                                                                                                                                                                                                                               | `trust.rs:44`, `:97`                                                             | a keyset and its `status`                                                                            | none outside tests; section 1 does not classify a keyset's status (the ruling names version and source writes); 9 and 4 test files                                                                                                                                                                                                                                                               |
+  | Rank | Writers                                                                                                                                                                                                                                                                                    | Where                                                                            | What they write                                                                                      | Callers in the crate, and why listed                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+  | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | 1    | `issue_recovery_challenge`, `restore_operator`                                                                                                                                                                                                                                             | `recovery.rs:925`, `:1032`                                                       | a replacement `security_admin`, every operator credential revoked, the recovery key replaced         | none outside tests; the registry verifies no signature (its module: the verifier does, before the restore), so a caller that issues a challenge and restores enrolls a `security_admin`; break-glass (T13.5), not a trust write; 4 test files each; see the open decision below                                                                                                                                                                                              |
+  | 2    | `create_admin_identity`, `create_admin_credential`, `create_admin_role_binding`, `update_admin_role_binding`                                                                                                                                                                               | `operator.rs:586`, `:646`, `:716`, `:759`                                        | operators, their credentials and role bindings, `security_admin` included, and a binding's re-enable | **Done (PR 10):** the three creates `pub(super)` (callers `bootstrap_instance` and `restore_operator`, PR 9's form), the update `pub(super)` with PR 7's `expect(dead_code)` (no caller). Widen operator authority with no authorization and no audit event; not a trust write. Making the creates crate-private does not stop a caller enrolling a `security_admin` while `issue_recovery_challenge` and `restore_operator` stay public; 13 to 14 test files (9 the update) |
+  | 3    | `bootstrap_instance`                                                                                                                                                                                                                                                                       | `bootstrap.rs:481`                                                               | the policy row, the recovery state and the first `security_admin`                                    | none outside tests; refuses once bootstrap is closed (`AlreadyClosed`); until then, whoever calls first enrolls the first `security_admin`; 10 test files                                                                                                                                                                                                                                                                                                                    |
+  | 4    | `create_principal_binding`, `update_principal_binding`                                                                                                                                                                                                                                     | `grant.rs:162`, `:227`                                                           | which claims of a trust source map to a workload principal                                           | none; widen who is accepted, checked only for the required predicates; 10 and 6 test files                                                                                                                                                                                                                                                                                                                                                                                   |
+  | 4    | `create_service_identity`, `update_service_identity`, `add_service_identity_resource_server`, `create_service_grant`, `update_service_grant`, `add_service_grant_binding`, `add_service_grant_resource_server`                                                                             | `grant.rs:265`, `:330`, `:371`, `:445`, `:528`, `:565`, `:635`                   | service identities, grants, and their binding and audience sets                                      | none; widen what an exchange may obtain; the database's guards (`0009`, `0010`) check consistency, not authority; 3 to 10 test files each                                                                                                                                                                                                                                                                                                                                    |
+  | 4    | `create_resource_server`, `update_resource_server`, `create_audience_tenant_assignment`, `update_audience_tenant_assignment`, `create_resource_server_checker`, `update_resource_server_checker`, `add_resource_server_checker_tenant`, `create_resource_action`, `update_resource_action` | `audience.rs:47`, `:100`, `:124`, `:188`, `:211`, `:261`, `:290`, `:355`, `:410` | audiences, tenant assignments, checkers and their tenant sets, actions                               | none; an enabled assignment or a checker tenant admits a tenant to an audience; 1 to 7 test files each                                                                                                                                                                                                                                                                                                                                                                       |
+  | 5    | `create_tenant`, `update_tenant`, `create_principal`, `update_principal`                                                                                                                                                                                                                   | `tenant.rs:38`, `:97`, `:121`, `:176`                                            | tenants and principals, a re-enable included                                                         | none outside tests; a re-enable widens; 22, 2, 13 and 1 test files                                                                                                                                                                                                                                                                                                                                                                                                           |
+  | 6    | `append_audit_event`                                                                                                                                                                                                                                                                       | `events.rs:541`                                                                  | one chained audit event                                                                              | **Done (PR 10):** `pub(crate)`; every audited write (PR 9's form); widens no trust, but a caller can append a well-chained event of its choosing (the trail's integrity); 11 test files                                                                                                                                                                                                                                                                                      |
+  | 7    | `insert_administrative_operation`, `consume_administrative_operation`, `revoke_administrative_operation`                                                                                                                                                                                   | `operation.rs:344`, `:382`, `:406`                                               | the gate's own operation rows                                                                        | **Done (PR 10):** `pub(crate)`; `crate::operation` (PR 9's form); write no target: an operation is applied only by `crate::operation`, whose apply steps are crate-private, and the `0005` guard checks the rows; 5, 1 and 1 test files                                                                                                                                                                                                                                      |
+  | 8    | `create_trust_keyset`, `update_trust_keyset`                                                                                                                                                                                                                                               | `trust.rs:44`, `:97`                                                             | a keyset and its `status`                                                                            | none outside tests; section 1 does not classify a keyset's status (the ruling names version and source writes); 9 and 4 test files                                                                                                                                                                                                                                                                                                                                           |
 
   Not listed: `set_widening_second_approver` (`operation.rs:452`) is
   already `pub(crate)`; the egress allowlist and the instance policy have
@@ -2086,7 +2249,16 @@ Still open after PRs 7 and 9:
   `skyoauth-service/test-support` (a `[features]` entry in
   `tests/Cargo.toml`, say): `ungated_writes_private.rs` checks a build
   without features only, so such an entry passes it, and `--all-features`
-  would turn it on (a PR 9 review mutant).
+  would turn it on (a PR 9 review mutant). A release build must not pass
+  `--all-targets` either: with the test targets, cargo unifies the
+  dev-dependencies' features into the one library build, so
+  `cargo build --release --workspace --all-targets` builds the library
+  with `test-support` (what `cargo tree -e features -i skyoauth-service`
+  shows with the dev-dependencies and does not without them), and any
+  dependent can enable the feature. The absence of the writers' symbols
+  from a release binary is weak evidence (an unreferenced function is
+  dropped, an inlined one leaves no symbol); the probes that compile a
+  dependent crate against the library without the feature are the check.
 - Whether `acknowledge_widening` applies to the toggle (the lead's, before
   T13.3).
 
@@ -2113,17 +2285,18 @@ layer too. `disable_version` stays unwired with the rest.
 and code comments; the test session owns tests, security scenarios, CI,
 the harness and `docs/testing/conformance-layout.md`):
 
-| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                               | After   |
-| --- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                                      | —       |
-| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated | —       |
-| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                        | 2       |
-| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)          | 1, 3    |
-| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (done in PR 4), `apply_*` split, D27 pre-validation, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); the tenant-path cancel's `NotFound` is done (PR 4). Implemented (see "PR 5 as implemented")                                                  | 3       |
-| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests of the gated path to `submit_*` (the tests of the ungated writes and their setup and race helpers stay on them through `trust::test_support`; see "PR 7 as implemented"), the A48 toggle legs                                                    | each PR |
-| 7   | coding  | the ungated entry points made crate-private (since review, `pub(super)`: private to `trust`), reached by the tests through the `test-support` feature. Implemented (see "PR 7 as implemented")                                                                                                                                                                                                                        | 6       |
-| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                             | 6       |
-| 9   | coding  | the bare registry trust writers (`create_trust_keyset_version`, `update_trust_keyset_version`, `create_trust_source`, `update_trust_source`) behind the same `test-support` mechanism at the registry layer, the tests and the scenario crate getting the feature through `[dev-dependencies]` (the lead's finding; provisional lead pick, 2026-11-23). Implemented (see "PR 9 as implemented")                       | 7       |
+| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | After   |
+| --- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                                                                                                                   | —       |
+| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated                                                                              | —       |
+| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                                                                                                     | 2       |
+| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)                                                                                       | 1, 3    |
+| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (done in PR 4), `apply_*` split, D27 pre-validation, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); the tenant-path cancel's `NotFound` is done (PR 4). Implemented (see "PR 5 as implemented")                                                                                                                               | 3       |
+| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests of the gated path to `submit_*` (the tests of the ungated writes and their setup and race helpers stay on them through `trust::test_support`; see "PR 7 as implemented"), the A48 toggle legs                                                                                                                                 | each PR |
+| 7   | coding  | the ungated entry points made crate-private (since review, `pub(super)`: private to `trust`), reached by the tests through the `test-support` feature. Implemented (see "PR 7 as implemented")                                                                                                                                                                                                                                                                                                     | 6       |
+| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                                                                                                          | 6       |
+| 9   | coding  | the bare registry trust writers (`create_trust_keyset_version`, `update_trust_keyset_version`, `create_trust_source`, `update_trust_source`) behind the same `test-support` mechanism at the registry layer, the tests and the scenario crate getting the feature through `[dev-dependencies]` (the lead's finding; provisional lead pick, 2026-11-23). Implemented (see "PR 9 as implemented")                                                                                                    | 7       |
+| 10  | coding  | the operator writers (`create_admin_identity`, `create_admin_credential`, `create_admin_role_binding`, `update_admin_role_binding`), `append_audit_event` and the operation-row writers (`insert_administrative_operation`, `consume_administrative_operation`, `revoke_administrative_operation`) behind the same `test-support` mechanism, rows 2, 6 and 7 of the survey under "Still open" (the lead's assignment; provisional lead pick, 2026-11-23). Implemented (see "PR 10 as implemented") | 9       |
 
 ADR-008:220, which repeats the T14.1/T14.2 attribution, is the lead's to
 correct; neither session edits it.

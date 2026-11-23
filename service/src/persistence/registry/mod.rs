@@ -13,28 +13,31 @@
 //! scope ceilings of an exchange and
 //! [`policy::resolve_scopes`](crate::policy::resolve_scopes) applies them
 //! (IR-062, IR-063, IR-083; see their modules). The operator identities,
-//! credentials and role bindings of `0005` have their own functions, and
-//! [`authorize_operator`] looks up whether a presented operator credential
-//! holds a role in a scope (design section 7.2; API-002, API-120; see its
-//! module for the one-way rules, the reserved actor IDs and what the lookup
-//! does not do). [`bootstrap_instance`] bootstraps the instance once: the
-//! policy row, the closed recovery state, the first `security_admin` and
-//! its audit event, in the caller's transaction (design section 7.2; T13.4,
-//! T13.6; see its module for the adopt rule and closure).
-//! [`issue_recovery_challenge`] and [`restore_operator`] are break-glass
-//! operator restoration: an expiring single-use challenge, and a restore
-//! that consumes it and, in the same savepoint, enrolls the replacement
-//! `security_admin` it names, revokes every operator credential and
-//! rotates the recovery key, with their audit events, in a
-//! `READ COMMITTED` transaction only ([`get_recovery_state`] reads the key
-//! and its epoch; design section 7.2; T13.5; see its module for the flow and
-//! what stays with the verifier). [`insert_administrative_operation`] and
-//! the functions beside it are the unwired registry floor of the
-//! second-approver flow: the operation rows of a pending gated write, an
-//! approval and a revocation, the policy row locks, and the locked operator
-//! lookups [`authorize_roles_locked`] and [`authorize_approval_locked`]
-//! (IR-052 to IR-054; `docs/proposals/second-approver-gated-writes.md`; see
-//! its module).
+//! credentials and role bindings of `0005` have their own functions (the
+//! writers that add operator access, `create_admin_identity`,
+//! `create_admin_credential`, `create_admin_role_binding` and
+//! `update_admin_role_binding`, are private to the registry; see "Writers
+//! kept crate-private"), and [`authorize_operator`] looks up whether a
+//! presented operator credential holds a role in a scope (design section
+//! 7.2; API-002, API-120; see its module for the one-way rules, the
+//! reserved actor IDs and what the lookup does not do).
+//! [`bootstrap_instance`] bootstraps the instance once: the policy row, the
+//! closed recovery state, the first `security_admin` and its audit event,
+//! in the caller's transaction (design section 7.2; T13.4, T13.6; see its
+//! module for the adopt rule and closure). [`issue_recovery_challenge`] and
+//! [`restore_operator`] are break-glass operator restoration: an expiring
+//! single-use challenge, and a restore that consumes it and, in the same
+//! savepoint, enrolls the replacement `security_admin` it names, revokes
+//! every operator credential and rotates the recovery key, with their audit
+//! events, in a `READ COMMITTED` transaction only ([`get_recovery_state`]
+//! reads the key and its epoch; design section 7.2; T13.5; see its module
+//! for the flow and what stays with the verifier).
+//! `insert_administrative_operation` and the functions beside it are the
+//! unwired registry floor of the second-approver flow: the operation rows
+//! of a pending gated write, an approval and a revocation, the policy row
+//! locks, and the locked operator lookups [`authorize_roles_locked`] and
+//! [`authorize_approval_locked`] (IR-052 to IR-054;
+//! `docs/proposals/second-approver-gated-writes.md`; see its module).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -298,20 +301,58 @@
 //!
 //! # Audit events
 //!
-//! [`append_audit_event`] appends one event to the instance's audit hash
-//! chain in a caller [`Transaction`](sqlx::Transaction), after the domain
-//! rows (a write that creates an `administrative_operation` inserts the
-//! operation after the event; see their module), and [`verify_audit_chain`]
-//! recomputes and checks the whole chain (IR-055 to IR-059). They are the
-//! exceptions to "one statement on any executor": an append is four or five
-//! statements that commit with the audited write. The registry's other writes still do not append
-//! events; the caller does, in the same transaction. Action names are the
-//! closed table [`AUDIT_ACTIONS`]. [`bootstrap_instance`] is a third
-//! exception: it runs its writes and appends its own event, last, in a
-//! caller [`Transaction`](sqlx::Transaction), which the caller commits or,
-//! on an error, rolls back. [`issue_recovery_challenge`] (its event before
-//! its operation) and [`restore_operator`] (its two events last) are
+//! `append_audit_event` (crate-private; see "Writers kept crate-private")
+//! appends one event to the instance's audit hash chain in a caller
+//! [`Transaction`](sqlx::Transaction), after the domain rows (a write that
+//! creates an `administrative_operation` inserts the operation after the
+//! event; see their module), and [`verify_audit_chain`] recomputes and
+//! checks the whole chain (IR-055 to IR-059). They are the exceptions to
+//! "one statement on any executor": an append is four or five statements
+//! that commit with the audited write. The registry's other writes still do
+//! not append events; the caller does, in the same transaction. Action
+//! names are the closed table [`AUDIT_ACTIONS`]. [`bootstrap_instance`] is
+//! a third exception: it runs its writes and appends its own event, last,
+//! in a caller [`Transaction`](sqlx::Transaction), which the caller commits
+//! or, on an error, rolls back. [`issue_recovery_challenge`] (its event
+//! before its operation) and [`restore_operator`] (its two events last) are
 //! exceptions of the same kind.
+//!
+//! # Writers kept crate-private
+//!
+//! Some writers check nothing the database does not, authorize no one and,
+//! but for the audit append itself, write no audit event, and have a
+//! caller in the crate that does those things, so they are not public
+//! (`docs/proposals/second-approver-gated-writes.md`, PRs 9 and 10):
+//!
+//! - the trust keyset version and trust source writers (`pub(crate)`,
+//!   PR 9; see "IDs, revisions and updates");
+//! - `create_admin_identity`, `create_admin_credential` and
+//!   `create_admin_role_binding`, visible only within this registry
+//!   (`pub(super)`, PR 10): [`bootstrap_instance`] and
+//!   [`restore_operator`] enroll an operator with them, and nothing else in
+//!   the crate calls them;
+//! - `update_admin_role_binding`, also `pub(super)` (PR 10), with no caller
+//!   in the crate: without the `test-support` feature it is dead code, which
+//!   an `expect(dead_code)` states, so a caller in the registry is a
+//!   warning in such a build;
+//! - `append_audit_event` and the operation-row writers
+//!   `insert_administrative_operation`, `consume_administrative_operation`
+//!   and `revoke_administrative_operation` (`pub(crate)`, PR 10): the
+//!   audited writes of this registry, of [`crate::trust`] and of
+//!   [`crate::operation`] call the append, and [`crate::operation`] the
+//!   operation-row writers, so they cannot be narrower.
+//!
+//! Tests, which are crates of their own, reach each through a wrapper of
+//! the same name in the `#[doc(hidden)]` module `test_support`, compiled
+//! only with the `test-support` feature, which only test targets turn on
+//! (`service/tests/ungated_writes_private.rs` checks that a normal build
+//! exposes none of them). This does not stop another crate from enrolling a
+//! `security_admin`: [`bootstrap_instance`], [`issue_recovery_challenge`]
+//! and [`restore_operator`] stay public (how the recovery verifier calls
+//! them is an open decision), and so do [`disable_admin_identity`] and
+//! [`revoke_admin_credential`], which only narrow, and the other bare
+//! writers of the grant, audience, tenant, principal and trust keyset
+//! tables.
 //!
 //! # Not done here
 //!
@@ -353,8 +394,9 @@ mod predicate;
 mod recovery;
 mod selection;
 mod tenant;
-// Off in a normal build: the bare registry trust writers for tests only
-// (second-approver proposal, PR 9; see the module).
+// Off in a normal build: for tests only, the bare registry trust writers
+// (second-approver proposal, PR 9) and the operator writers, the audit
+// append and the operation-row writers (PR 10); see the module.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
@@ -382,11 +424,11 @@ pub use error::{
     PredicateProblem, RegistryError, SAME_TENANT_OPERATION,
 };
 pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
-pub(crate) use events::push_string;
 pub use events::{
     AUDIT_HASH_PREFIX, AuditActor, AuditEvent, ChainBreak, ChainVerdict, MAX_ENVELOPE_INTEGER,
-    NewAuditEvent, append_audit_event, verify_audit_chain,
+    NewAuditEvent, verify_audit_chain,
 };
+pub(crate) use events::{append_audit_event, push_string};
 pub use grant::{
     add_service_grant_binding, add_service_grant_resource_server,
     add_service_identity_resource_server, create_principal_binding, create_service_grant,
@@ -413,22 +455,26 @@ pub use model::{
     TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges,
     TrustSourceKind, UnknownValue,
 };
-pub(crate) use operation::set_widening_second_approver;
 pub use operation::{
     AdministrativeOperation, ApprovalAuthority, NewAdministrativeOperation, RolesHeld,
-    authorize_approval_locked, authorize_roles_locked, consume_administrative_operation,
-    insert_administrative_operation, lock_administrative_operation, lock_instance_security_policy,
-    lock_instance_security_policy_shared, revoke_administrative_operation,
+    authorize_approval_locked, authorize_roles_locked, lock_administrative_operation,
+    lock_instance_security_policy, lock_instance_security_policy_shared,
+};
+pub(crate) use operation::{
+    consume_administrative_operation, insert_administrative_operation,
+    revoke_administrative_operation, set_widening_second_approver,
 };
 pub use operator::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges, AuthorizedOperator,
     DEPLOYMENT_OPERATOR_ACTOR, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
     OperatorRequest, OperatorScope, RECOVERY_KEY_ACTOR_PREFIX, authorize_operator,
-    authorize_operator_locked, create_admin_credential, create_admin_identity,
-    create_admin_role_binding, disable_admin_identity, get_admin_credential, get_admin_identity,
+    authorize_operator_locked, disable_admin_identity, get_admin_credential, get_admin_identity,
     get_admin_role_binding, is_reserved_actor_id, recovery_key_actor, revoke_admin_credential,
-    update_admin_role_binding,
 };
+// Private to the registry: `bootstrap` and `recovery` enroll an operator
+// with them; tests reach them through `test_support` (second-approver
+// proposal, PR 10).
+use operator::{create_admin_credential, create_admin_identity, create_admin_role_binding};
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use recovery::{
     ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL, IssueChallenge, MAX_CHALLENGE_TTL,

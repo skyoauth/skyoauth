@@ -44,8 +44,9 @@ use skyoauth_service::{
             self, AdminRole, AdminRoleBindingChanges, AdministrativeOperation, AuditActor,
             BootstrapRequest, ChainVerdict, JsonObject, NewAdminCredential, NewAdminIdentity,
             NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent, NewTenant,
-            NewTrustKeyset, NewTrustKeysetVersion, Status, TrustKeysetVersion, append_audit_event,
-            bootstrap_instance, insert_administrative_operation, lock_administrative_operation,
+            NewTrustKeyset, NewTrustKeysetVersion, Status, TrustKeysetVersion, bootstrap_instance,
+            lock_administrative_operation,
+            test_support::{append_audit_event, insert_administrative_operation},
             verify_audit_chain,
         },
     },
@@ -201,7 +202,7 @@ async fn operator(
     key: &str,
     bindings: &[(&str, AdminRole, Option<&str>)],
 ) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -213,7 +214,7 @@ async fn operator(
     .unwrap();
     credential(pool, &format!("crd_{admin}"), admin, key).await;
     for &(id, role, tenant_id) in bindings {
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             pool,
             &NewAdminRoleBinding {
                 id: id.into(),
@@ -229,7 +230,7 @@ async fn operator(
 }
 
 async fn credential(pool: &PgPool, id: &str, admin: &str, key: &str) {
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: id.into(),
@@ -1922,7 +1923,7 @@ async fn the_requester_must_still_be_a_trust_admin_with_its_credential() {
         let prepared = prepare(&pool, "key_sec1", &op_id).await.unwrap();
         ops.push((op, prepared));
     }
-    registry::update_admin_role_binding(
+    registry::test_support::update_admin_role_binding(
         &pool,
         "rb_trust",
         1,

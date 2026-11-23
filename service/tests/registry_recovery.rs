@@ -1570,7 +1570,7 @@ async fn more_operators(pool: &PgPool) {
         ("adm_two", Status::Enabled),
         ("adm_three", Status::Disabled),
     ] {
-        registry::create_admin_identity(
+        registry::test_support::create_admin_identity(
             pool,
             &NewAdminIdentity {
                 id: id.into(),
@@ -1587,7 +1587,7 @@ async fn more_operators(pool: &PgPool) {
         ("crd_two_c", "adm_two", Status::Enabled),
         ("crd_three", "adm_three", Status::Enabled),
     ] {
-        registry::create_admin_credential(
+        registry::test_support::create_admin_credential(
             pool,
             &NewAdminCredential {
                 id: id.into(),
@@ -1613,7 +1613,7 @@ async fn more_operators(pool: &PgPool) {
         ),
         ("rb_three", "adm_three", AdminRole::Auditor, None),
     ] {
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             pool,
             &NewAdminRoleBinding {
                 id: id.into(),
@@ -2824,7 +2824,7 @@ async fn a_restore_appends_its_events_after_its_writes() {
         restored
     });
     wait_until_blocked(&pool, second_pid, first_pid).await;
-    let event = registry::append_audit_event(
+    let event = registry::test_support::append_audit_event(
         &mut transaction,
         &NewAuditEvent {
             id: "aud_other_write".into(),
@@ -3048,7 +3048,7 @@ async fn write_targets(pool: &PgPool) {
     )
     .await
     .unwrap();
-    registry::create_admin_role_binding(
+    registry::test_support::create_admin_role_binding(
         pool,
         &NewAdminRoleBinding {
             id: "rb_off".into(),
@@ -3072,7 +3072,7 @@ async fn operator_write(
     admin: &str,
 ) -> Result<(), RegistryError> {
     match write {
-        0 => registry::create_admin_identity(
+        0 => registry::test_support::create_admin_identity(
             &mut **transaction,
             &NewAdminIdentity {
                 id: "adm_late".into(),
@@ -3082,7 +3082,7 @@ async fn operator_write(
         )
         .await
         .map(drop),
-        1 => registry::create_admin_credential(
+        1 => registry::test_support::create_admin_credential(
             &mut **transaction,
             &NewAdminCredential {
                 id: "crd_late".into(),
@@ -3094,7 +3094,7 @@ async fn operator_write(
         )
         .await
         .map(drop),
-        2 => registry::create_admin_role_binding(
+        2 => registry::test_support::create_admin_role_binding(
             &mut **transaction,
             &NewAdminRoleBinding {
                 id: "rb_late".into(),
@@ -3106,7 +3106,7 @@ async fn operator_write(
         )
         .await
         .map(drop),
-        _ => registry::update_admin_role_binding(
+        _ => registry::test_support::update_admin_role_binding(
             &mut **transaction,
             "rb_off",
             1,
@@ -3569,7 +3569,7 @@ async fn a_create_colliding_with_the_replacement_waits_for_the_restore_first() {
         let task = tokio::spawn(async move {
             let mut transaction = connection.begin().await.unwrap();
             let created = match create {
-                0 => registry::create_admin_identity(
+                0 => registry::test_support::create_admin_identity(
                     &mut *transaction,
                     &NewAdminIdentity {
                         id: "adm_new".into(),
@@ -3579,7 +3579,7 @@ async fn a_create_colliding_with_the_replacement_waits_for_the_restore_first() {
                 )
                 .await
                 .map(drop),
-                1 | 2 => registry::create_admin_credential(
+                1 | 2 => registry::test_support::create_admin_credential(
                     &mut *transaction,
                     &NewAdminCredential {
                         id: if create == 1 {
@@ -3601,7 +3601,7 @@ async fn a_create_colliding_with_the_replacement_waits_for_the_restore_first() {
                 )
                 .await
                 .map(drop),
-                _ => registry::create_admin_role_binding(
+                _ => registry::test_support::create_admin_role_binding(
                     &mut *transaction,
                     &NewAdminRoleBinding {
                         id: "rb_new".into(),

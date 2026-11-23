@@ -94,8 +94,9 @@
 //! `a24_neg_consume_names_other_tenants_source` (A24,
 //! `tests/security/a24.rs`), not here. Two cross-scope references of
 //! `administrative_operation` are refused by nothing, are accepted through
-//! the public registry API (`insert_administrative_operation`), and are not
-//! on the list:
+//! the registry API (`insert_administrative_operation`, crate-private since
+//! the second-approver proposal's PR 10 and reached here through
+//! `registry::test_support`), and are not on the list:
 //!
 //! - (a) an operation whose `audit_id` names an audit event of another
 //!   tenant: `administrative_operation_audit_id_fkey` references
@@ -1260,7 +1261,7 @@ async fn append_and_insert(
     action: &str,
     object_id: &str,
 ) -> Result<AdministrativeOperation, RegistryError> {
-    registry::append_audit_event(
+    registry::test_support::append_audit_event(
         transaction,
         &NewAuditEvent {
             id: new.audit_id.clone(),
@@ -1276,7 +1277,7 @@ async fn append_and_insert(
     )
     .await
     .unwrap();
-    registry::insert_administrative_operation(transaction, new).await
+    registry::test_support::insert_administrative_operation(transaction, new).await
 }
 
 /// `intruder`'s approve `id` by [`APPROVER`] of `owner`'s pending operation,
@@ -1310,7 +1311,7 @@ async fn approve(
 /// `intruder`'s cancel of `owner`'s pending operation, as a cancel is
 /// written: in one transaction, the cancel's event, its operation `id` by
 /// `intruder`'s requester, then the revocation of `owner`'s operation that
-/// names it ([`registry::revoke_administrative_operation`]), committed
+/// names it ([`registry::test_support::revoke_administrative_operation`]), committed
 /// whatever the revocation returned. The registry inserts no revocation
 /// with a new row, so the guard's `UPDATE` leg is the one reached.
 async fn cancel(
@@ -1329,7 +1330,7 @@ async fn cancel(
     )
     .await
     .unwrap();
-    let result = registry::revoke_administrative_operation(
+    let result = registry::test_support::revoke_administrative_operation(
         &mut transaction,
         &owner.pending(),
         id,

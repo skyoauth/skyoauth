@@ -44,10 +44,11 @@ use skyoauth_service::{
             BootstrapRequest, ChainVerdict, ChallengeBinding, DEFAULT_CHALLENGE_TTL,
             InstanceSecurityPolicy, IssueChallenge, JsonObject, NewAdminCredential,
             NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent,
-            NewTenant, OPERATOR_RESTORATION, RestoreRequest, Restored, Status, append_audit_event,
-            bootstrap_instance, get_recovery_state, insert_administrative_operation,
-            issue_recovery_challenge, lock_administrative_operation,
-            lock_instance_security_policy_shared, restore_operator, verify_audit_chain,
+            NewTenant, OPERATOR_RESTORATION, RestoreRequest, Restored, Status, bootstrap_instance,
+            get_recovery_state, issue_recovery_challenge, lock_administrative_operation,
+            lock_instance_security_policy_shared, restore_operator,
+            test_support::{append_audit_event, insert_administrative_operation},
+            verify_audit_chain,
         },
     },
 };
@@ -129,7 +130,7 @@ async fn operator(
     key: &str,
     bindings: &[(&str, AdminRole, Option<&str>)],
 ) {
-    registry::create_admin_identity(
+    registry::test_support::create_admin_identity(
         pool,
         &NewAdminIdentity {
             id: admin.into(),
@@ -141,7 +142,7 @@ async fn operator(
     .unwrap();
     credential(pool, &format!("crd_{admin}"), admin, key).await;
     for &(id, role, tenant_id) in bindings {
-        registry::create_admin_role_binding(
+        registry::test_support::create_admin_role_binding(
             pool,
             &NewAdminRoleBinding {
                 id: id.into(),
@@ -157,7 +158,7 @@ async fn operator(
 }
 
 async fn credential(pool: &PgPool, id: &str, admin: &str, key: &str) {
-    registry::create_admin_credential(
+    registry::test_support::create_admin_credential(
         pool,
         &NewAdminCredential {
             id: id.into(),
@@ -1674,7 +1675,7 @@ async fn the_requester_must_still_hold_the_plans_credential_and_role() {
     registry::disable_admin_identity(&pool, "adm_r4")
         .await
         .unwrap();
-    registry::update_admin_role_binding(
+    registry::test_support::update_admin_role_binding(
         &pool,
         "rb_r5",
         1,
