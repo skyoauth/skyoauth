@@ -2,9 +2,9 @@
 //! surface ([`registry`]).
 //!
 //! PostgreSQL is the authoritative store. The schema is defined by the
-//! forward-only, versioned SQL files in `service/migrations/`, embedded into
-//! the binary at build time. Migrations are an explicit deploy step
-//! (`skyoauth-service migrate`); the server never runs them on start.
+//! versioned SQL files in `service/migrations/` (no down migrations),
+//! embedded into the binary at build time. Migrations are an explicit deploy
+//! step (`skyoauth-service migrate`); the server never runs them on start.
 //!
 //! [`migrate`] refuses to proceed when:
 //!
@@ -13,6 +13,13 @@
 //! - the database records a migration this binary does not know (the schema
 //!   is newer than the binary);
 //! - an earlier migration was left partially applied.
+//!
+//! Until the first beta release there is no database upgrade path: an
+//! existing migration may be amended in place, so a database that applied an
+//! earlier text of an amended migration fails the checksum check above and is
+//! recreated, not migrated. The forward-only rule (applied files are never
+//! edited; fix forward with a new file) starts at the beta release
+//! (`service/migrations/README.md`, "Conventions").
 //!
 //! Concurrent runners, such as several replicas started at once, serialize on
 //! a session-level PostgreSQL advisory lock held for the whole run, so each
@@ -196,7 +203,9 @@ mod tests {
     }
 
     /// Like the transaction lint, a test-time rule: the runner would accept
-    /// gaps, down migrations and `-- no-transaction` files.
+    /// gaps, down migrations and `-- no-transaction` files. "Forward-only"
+    /// here means no down migrations; it says nothing about amending an
+    /// applied file, which is allowed before the beta release (module docs).
     #[test]
     fn migrations_are_forward_only_contiguous_and_transactional() {
         let migrations: Vec<_> = MIGRATOR.iter().collect();

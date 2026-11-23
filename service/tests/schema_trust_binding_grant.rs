@@ -296,7 +296,7 @@ async fn trust_catalog_pins_collation_triggers_and_search_path() {
     expected.sort();
     assert_eq!(triggers, expected);
 
-    // Every function in the schema, other than the frozen 0001 guard that
+    // Every function in the schema, other than the 0001 guard that
     // resolves no names, pins search_path with pg_catalog first and pg_temp
     // last (schema_foundation.rs checks the exact paths of 0002).
     let unpinned: Vec<String> = sqlx::query_scalar(

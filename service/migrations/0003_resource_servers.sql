@@ -62,10 +62,10 @@ CREATE DOMAIN skyoauth_string_list AS jsonb
 -- octet_length bound. These checks are named, so the service can tell them
 -- apart (README.md).
 
--- Forward-only bounds on a 0002 table (lead decision, 2026-11-20): 0002 is
--- frozen, so 0003 adds them. They are validated against existing rows (no
--- NOT VALID). secret_namespace is unique and NOT NULL; it gets only the
--- length bound, no character rule.
+-- Bounds on a 0002 table, added by 0003 rather than in 0002 (lead decision,
+-- 2026-11-20, under the forward-only rule then; README.md "Conventions").
+-- They are validated against existing rows (no NOT VALID). secret_namespace
+-- is unique and NOT NULL; it gets only the length bound, no character rule.
 ALTER TABLE tenant ADD CONSTRAINT tenant_id_octet_length_check
     CHECK (octet_length(id) <= 255);
 ALTER TABLE tenant ADD CONSTRAINT tenant_secret_namespace_octet_length_check

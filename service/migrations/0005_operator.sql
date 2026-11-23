@@ -53,8 +53,8 @@
 -- and every key column of the schema is bounded (lead decision,
 -- 2026-11-20), so the remaining unbounded key columns of 0002 get named
 -- 255-byte bounds here, as principal's did in 0004: the key of each foreign
--- key target, audit_event.tenant_id and the egress entry ID. The frozen 0002
--- file stays unchanged. The checks validate existing rows; README.md has the
+-- key target, audit_event.tenant_id and the egress entry ID. 0005 leaves the
+-- 0002 file unchanged. The checks validate existing rows; README.md has the
 -- upgrade precondition.
 ALTER TABLE audit_event
     ADD CONSTRAINT audit_event_id_octet_length_check CHECK (octet_length(id) <= 255),

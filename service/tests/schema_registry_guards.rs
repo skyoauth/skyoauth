@@ -142,7 +142,7 @@ const FUNCTIONS: [&str; 5] = [
 ];
 
 /// The tables of `0001` and `0002` whose `DELETE` or `TRUNCATE` guards
-/// call the frozen `skyoauth_reject_mutation()`.
+/// call `skyoauth_reject_mutation()` of `0001`.
 const FROZEN_GUARDED: [&str; 5] = [
     "schema_info",
     "instance_security_policy",
