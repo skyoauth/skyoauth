@@ -84,10 +84,22 @@ export function valueSwaps(text, table, id, value, extra = {}) {
 // GIT_WORK_TREE, GIT_INDEX_FILE, ..., which a git hook or `git rebase
 // --exec` exports, would make the fixtures be committed into that
 // repository), no global or system configuration, and a fixed identity.
+// Automatic gc and maintenance are off, through GIT_CONFIG_COUNT (a test
+// that passes its own GIT_CONFIG_COUNT replaces these two settings): after
+// a commit or merge git otherwise runs
+// `maintenance run --auto`, from git 2.47 on detached, and that creates and
+// removes objects/maintenance.lock in the fixture repository while the
+// test goes on, so a snapshot of that repository (assertGitImmune) or its
+// removal could race with it.
 export const GIT_ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_'))),
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_CONFIG_GLOBAL: '/dev/null',
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'gc.auto',
+  GIT_CONFIG_VALUE_0: '0',
+  GIT_CONFIG_KEY_1: 'maintenance.auto',
+  GIT_CONFIG_VALUE_1: 'false',
   GIT_AUTHOR_NAME: 't',
   GIT_AUTHOR_EMAIL: 't@example.invalid',
   GIT_COMMITTER_NAME: 't',
@@ -108,7 +120,9 @@ function snapshot(dir, rel = '', out = {}) {
 // (--test-name-pattern, one test each) in a child `node --test` that
 // inherits an absolute GIT_DIR of a scratch repository, and asserts that the
 // scratch repository is unchanged, file for file, and that they all ran and
-// passed.
+// passed. The scratch repository is made with GIT_ENV, so no background
+// maintenance of its own changes it between the snapshots; the child gets
+// this process's environment, not GIT_ENV, and builds its own.
 export function assertGitImmune(file, patterns) {
   const scratch = mkdtempSync(join(tmpdir(), 'git-immune-'));
   try {
