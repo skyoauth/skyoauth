@@ -142,13 +142,14 @@
 //!   D13): a parse never waits for a Stage A permit, and an upload never
 //!   waits for an in-transaction one. Both pools share tokio's blocking pool
 //!   (512 threads by default; this module is the service's only direct
-//!   `spawn_blocking` caller, though tokio itself uses that pool too, for
-//!   example for a DNS lookup when a connection is opened by host name) and
-//!   the CPU. A write waits at most once, [`IN_TRANSACTION_WAIT`] (2 s,
-//!   inferred), for a worker, under the locks above: an enable parses its
-//!   target and its compared versions in one blocking task, and a write
-//!   that compares no stored version (a create whose window intersects no
-//!   enabled version) takes no permit at all. A worker not granted in time
+//!   `spawn_blocking` caller; sqlx uses that pool too, for a host-name
+//!   lookup when it opens a connection and for file reads) and the CPU.
+//!   A write waits at most once, [`IN_TRANSACTION_WAIT`] (2 s, inferred),
+//!   for a permit, under the locks above: the bound covers the semaphore
+//!   wait only, not a queue in the blocking pool or the parse. An enable
+//!   parses its target and its compared versions in one blocking task, and
+//!   a write that compares no stored version (a create whose window
+//!   intersects no enabled version) takes no permit at all. A worker not granted in time
 //!   is [`KeysetWriteError::ValidationBusy`], retryable: the write's
 //!   savepoint rollback releases the parent lock and the operator rows;
 //!   retry after a back-off (proposal section 10: 503 with `Retry-After`).
@@ -167,7 +168,8 @@
 //!   pool, the bounded wait and [`KeysetWriteError::ValidationBusy`] above.
 //!   A runtime built with `max_blocking_threads` must leave room for both
 //!   pools ([`VALIDATION_WORKERS`] plus [`IN_TRANSACTION_WORKERS`]) and
-//!   headroom for tokio's own blocking work. Follow-up: a change of
+//!   headroom for other blocking work (sqlx's lookups, tokio's own).
+//!   Follow-up: a change of
 //!   [`KeysetVersion`] to take stored keys, or a stored marker that a
 //!   projection passed the point checks, would remove the parse.
 //! - **The verifier.** The T11.7 verifier's key cache is built the same
@@ -1447,8 +1449,11 @@ mod tests {
         assert!(!std::ptr::eq(&IN_TRANSACTION, &VALIDATION));
     }
 
-    /// Both pools fit far inside tokio's blocking pool, which they share
-    /// with tokio's own blocking work (see the module docs, "Cost").
+    /// Both pools fit far inside tokio's default blocking pool, which they
+    /// share with other blocking work (see the module docs, "Cost"). That is
+    /// all this checks: it does not read the service runtime's
+    /// configuration. The endpoint-wiring PR owns the runtime builder and
+    /// carries the test that pins `max_blocking_threads`.
     #[test]
     fn both_pools_fit_far_inside_the_blocking_pool() {
         let workers = VALIDATION_WORKERS + IN_TRANSACTION_WORKERS;

@@ -3188,9 +3188,12 @@ stay provisional until Gate M0:
   of the `IN_TRANSACTION_WORKERS` (2, inferred) workers of a pool of its
   own, separate from Stage A's `VALIDATION_WORKERS`: a parse never waits
   for a Stage A permit, and an upload never waits for an in-transaction
-  one. Both pools share tokio's blocking pool (512 threads by default) and
-  the CPU. A write waits at most once, `IN_TRANSACTION_WAIT` (2 s,
-  inferred), for a permit (an enable parses its target and the compared
+  one. Both pools share tokio's blocking pool (512 threads by default; sqlx
+  uses it too, for a host-name lookup when it opens a connection and for
+  file reads) and the CPU. A write waits at most once,
+  `IN_TRANSACTION_WAIT` (2 s, inferred), for a permit: the bound covers the
+  semaphore wait only, not a queue in the blocking pool or the parse (an
+  enable parses its target and the compared
   versions in one blocking task; a write that compares no stored version
   takes none); a permit not granted in time is
   `KeysetWriteError::ValidationBusy`, retryable after a back-off, and the
@@ -3200,7 +3203,7 @@ stay provisional until Gate M0:
   for 1 and 1.31 s for 8 compared versions, the most the cap allows. The
   wiring precondition (a permit of its own) is done; a runtime built with
   `max_blocking_threads` must leave room for both pools plus headroom for
-  tokio's own blocking work. The stored marker that a projection passed
+  other blocking work (sqlx's lookups, tokio's own). The stored marker that a projection passed
   the point checks (or a change of `KeysetVersion`) remains the follow-up
   that removes the parse.
 - Rotation (inferred): validity windows are immutable in the registry

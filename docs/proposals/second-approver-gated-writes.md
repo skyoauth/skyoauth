@@ -1496,6 +1496,11 @@ test PR or the test PR follows.
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed
 after PR 1.
 
+**Runtime sizing test.** The endpoint-wiring PR owns the runtime builder: it
+pins `max_blocking_threads` headroom for both parse pools plus other blocking
+work (sqlx's lookups, tokio's own) in a test. PR 1 documents the requirement
+and checks only the worker counts against tokio's default blocking limit.
+
 **What stays unwired.** The user ruled on Q1-Q7 and on the `0005`
 trigger on 2026-11-23 (D1 to D29 otherwise stay provisional), so PRs 1 to
 5 below may start; the lead says when. Until they land, no
