@@ -30,6 +30,7 @@ use std::{
 use common::TestDb;
 use serde_json::{Value, json};
 use skyoauth_service::{
+    jwk::{Algorithm, DEFAULT_ALLOWED_ALGORITHMS},
     operation::{
         Applied, ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, DigestEnvelope,
         Gated, OperationKind, PendingOperation, PreparedApproval, RequestDigest, RevokeIds,
@@ -63,6 +64,9 @@ const TEN_A: ApprovalScope<'static> = ApprovalScope::Tenant("ten_a");
 const TEN_B: ApprovalScope<'static> = ApprovalScope::Tenant("ten_b");
 const SEC: AdminRole = AdminRole::SecurityAdmin;
 const TRUST: AdminRole = AdminRole::TrustAdmin;
+/// The current `allowed` algorithms of every `prepare_approval` here: a
+/// toggle parses no keys.
+const ALLOWED: &[Algorithm] = DEFAULT_ALLOWED_ALGORITHMS;
 
 /// `micros` after `T0`, with sub-microsecond digits, so a write truncates
 /// it.
@@ -308,7 +312,7 @@ fn echo(pending: &PendingOperation) -> ApprovalEcho {
 
 /// [`prepare_approval`] on the instance path at `at(1)`.
 async fn prepare(pool: &PgPool, key: &str, op: &str) -> Result<PreparedApproval, ApprovalError> {
-    prepare_approval(pool, key, INSTANCE, op, at(1)).await
+    prepare_approval(pool, key, INSTANCE, op, ALLOWED, at(1)).await
 }
 
 async fn approve_in(
@@ -1090,7 +1094,7 @@ async fn an_approval_is_refused_from_its_expiry_on() {
     let op = pending(&pool, "key_req", "op_1", 1, true).await;
     let just_before = expiry() - Duration::from_nanos(1);
     refused(
-        prepare_approval(&pool, "key_sec1", INSTANCE, "op_1", expiry()).await,
+        prepare_approval(&pool, "key_sec1", INSTANCE, "op_1", ALLOWED, expiry()).await,
         "NotApprovable(Expired)",
     );
     refused(
@@ -1099,12 +1103,13 @@ async fn an_approval_is_refused_from_its_expiry_on() {
             "key_sec1",
             INSTANCE,
             "op_1",
+            ALLOWED,
             expiry() + Duration::from_secs(1),
         )
         .await,
         "NotApprovable(Expired)",
     );
-    let prepared = prepare_approval(&pool, "key_sec1", INSTANCE, "op_1", just_before)
+    let prepared = prepare_approval(&pool, "key_sec1", INSTANCE, "op_1", ALLOWED, just_before)
         .await
         .unwrap();
     let before = snapshot(&pool).await;
@@ -1279,7 +1284,7 @@ async fn the_approver_is_another_security_admin() {
     refused(prepare(&pool, "key_sec1", "op_none").await, "NotFound");
     refused(prepare(&pool, "key_trust", "op_none").await, "Unauthorized");
     refused(
-        prepare_approval(&pool, "key_trust", TEN_A, "op_1", at(1)).await,
+        prepare_approval(&pool, "key_trust", TEN_A, "op_1", ALLOWED, at(1)).await,
         "Unauthorized",
     );
     refused(
@@ -1840,7 +1845,7 @@ async fn consumed_revoked_and_foreign_operations_are_refused() {
     // The path's scope comes first.
     for scope in [TEN_A, TEN_B] {
         refused(
-            prepare_approval(&pool, "key_sec1", scope, "op_1", at(1)).await,
+            prepare_approval(&pool, "key_sec1", scope, "op_1", ALLOWED, at(1)).await,
             "NotFound",
         );
         refused(
@@ -1936,7 +1941,7 @@ async fn consumed_revoked_and_foreign_operations_are_refused() {
         "NotFound",
     );
     refused(
-        prepare_approval(&pool, "key_sec1", TEN_A, "op_own_tenant", at(1)).await,
+        prepare_approval(&pool, "key_sec1", TEN_A, "op_own_tenant", ALLOWED, at(1)).await,
         "SelfApproval",
     );
     refused(
@@ -1958,7 +1963,7 @@ async fn consumed_revoked_and_foreign_operations_are_refused() {
         "NotApprovable(WrongKind)",
     );
     refused(
-        prepare_approval(&pool, "key_sec1", TEN_A, "op_tenant", at(1)).await,
+        prepare_approval(&pool, "key_sec1", TEN_A, "op_tenant", ALLOWED, at(1)).await,
         "NotApprovable(WrongKind)",
     );
     refused(
@@ -1971,7 +1976,7 @@ async fn consumed_revoked_and_foreign_operations_are_refused() {
     );
     for scope in [INSTANCE, TEN_B] {
         refused(
-            prepare_approval(&pool, "key_sec1", scope, "op_tenant", at(1)).await,
+            prepare_approval(&pool, "key_sec1", scope, "op_tenant", ALLOWED, at(1)).await,
             "NotFound",
         );
         refused(

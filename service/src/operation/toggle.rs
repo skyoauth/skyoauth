@@ -114,24 +114,24 @@ pub(crate) async fn apply_policy_toggle(
 }
 
 /// What [`insert_pending`] stores besides the submission.
-pub(super) struct PendingRequest<'a> {
-    pub(super) kind: OperationKind,
-    pub(super) tenant_id: Option<&'a str>,
-    pub(super) expected_revision: i64,
-    pub(super) plan: JsonObject,
+pub(crate) struct PendingRequest<'a> {
+    pub(crate) kind: OperationKind,
+    pub(crate) tenant_id: Option<&'a str>,
+    pub(crate) expected_revision: i64,
+    pub(crate) plan: JsonObject,
 }
 
 /// The pending branch of a request (section 3, request step 8): the
 /// `administrative_operation.create` event through the audit head first,
 /// then the operation, with its digest and an expiry of the submission's
 /// `now` plus [`PENDING_OPERATION_TTL`], floored to a whole microsecond
-/// (D5).
-pub(super) async fn insert_pending(
+/// (D5). Shared by every gated kind, so generic over the kind's error.
+pub(crate) async fn insert_pending<E: From<RegistryError>>(
     transaction: &mut Transaction<'_, Postgres>,
     submission: &Submission<'_>,
     requester: &Requester,
     request: PendingRequest<'_>,
-) -> Result<PendingOperation, ApprovalError> {
+) -> Result<PendingOperation, E> {
     let expires_at = submission
         .now
         .checked_add(PENDING_OPERATION_TTL)
@@ -193,7 +193,7 @@ pub(super) async fn insert_pending(
 }
 
 /// An encode error, before or instead of a statement.
-fn encode_error(message: &'static str) -> ApprovalError {
+pub(crate) fn encode_error<E: From<RegistryError>>(message: &'static str) -> E {
     RegistryError::Other(sqlx::Error::Encode(message.into())).into()
 }
 
@@ -263,7 +263,8 @@ async fn toggle_steps(
         expected_revision,
         plan: plan.to_plan(),
     };
-    let pending = insert_pending(transaction, submission, &requester, request).await?;
+    let pending =
+        insert_pending::<ApprovalError>(transaction, submission, &requester, request).await?;
     Ok(Gated::Pending(pending))
 }
 
