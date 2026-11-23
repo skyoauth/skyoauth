@@ -38,12 +38,21 @@ function readme(badges = BADGES) {
 const BASE_README = `# skyoauth\n\n${BADGES.map((b) => `[![${b}](https://github.com/${REPO}/raw/badges/main/${b}.svg)](https://github.com/${REPO}/actions)`).join('\n')}\n\nText.\n`;
 
 // git for the fixtures and the script: no inherited GIT_* variable, no
-// global or system configuration, a fixed identity.
+// global or system configuration, a fixed identity. The fixtures also run
+// with automatic gc and maintenance off: after a commit or merge git
+// otherwise runs `maintenance run --auto`, from git 2.47 on detached, which
+// can still be writing to a checkout while the script reads it or the
+// checkouts are removed.
 const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
 const GIT_ENV = {
   ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_COUNT: '2',
+  GIT_CONFIG_KEY_0: 'gc.auto',
+  GIT_CONFIG_VALUE_0: '0',
+  GIT_CONFIG_KEY_1: 'maintenance.auto',
+  GIT_CONFIG_VALUE_1: 'false',
   GIT_AUTHOR_NAME: 'test',
   GIT_AUTHOR_EMAIL: 'test@example.invalid',
   GIT_COMMITTER_NAME: 'test',
