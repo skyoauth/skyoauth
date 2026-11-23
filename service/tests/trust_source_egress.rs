@@ -36,8 +36,8 @@ use skyoauth_service::{
         },
     },
     trust::{
-        self, DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT, create_source,
-        update_source,
+        self, DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT,
+        test_support::{create_source, update_source},
     },
 };
 use sqlx::{Connection, PgConnection, Postgres, Transaction};

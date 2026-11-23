@@ -126,8 +126,8 @@ pub async fn update_trust_keyset<'e>(
 /// `0004` `CHECK`s apply. It stays public for the integration and scenario
 /// tests (provisional lead pick, 2026-11-22: they call it from other
 /// crates, so it cannot be crate-private), and it must stay unreachable
-/// from any endpoint. The write path is
-/// [`trust::keyset::create_version`](crate::trust::keyset::create_version),
+/// from any endpoint. The write path is the gated
+/// [`trust::keyset::submit_create_version`](crate::trust::keyset::submit_create_version),
 /// which validates the upload, stores its canonical projection and
 /// fingerprint, checks the overlap and appends the audit event; it must be
 /// the only path that writes a keyset version outside tests.
@@ -287,8 +287,8 @@ pub(crate) async fn read_keyset_version<'e>(
 /// **Test-only: the unchecked floor**, like
 /// [`create_trust_keyset_version`]: a re-enable here runs no overlap check,
 /// no authorization and no audit event. It stays public for the tests and
-/// must stay unreachable from any endpoint; the write path is
-/// [`trust::keyset::enable_version`](crate::trust::keyset::enable_version)
+/// must stay unreachable from any endpoint; the write path is the gated
+/// [`trust::keyset::submit_enable_version`](crate::trust::keyset::submit_enable_version)
 /// and [`trust::keyset::disable_version`](crate::trust::keyset::disable_version)
 /// (provisional lead pick, 2026-11-22).
 pub async fn update_trust_keyset_version<'e>(

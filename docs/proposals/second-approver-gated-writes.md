@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 4 merged, PR 5 open, PR 6 in progress (#116 merged), PRs 7 and 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 5 merged, PR 6 in progress (#116 merged), PR 7 implemented and in review, PR 8 and the follow-up PR 9 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
@@ -8,14 +8,13 @@ your recommendations, except 0012, as we don't need to keep data until a
 beta release", and, on clarification, that the `0012` trigger is folded
 into migration `0005` itself (section 11; D15); the read-path index of the
 same sketch is a provisional lead pick, not ruled. Implemented so far: the
-in-transaction permit (PR 1), the registry operation module with the
-`0005` guard and index (PR 2), `crate::operation` with the toggle (PR 3),
-the keyset kinds (PR 4), and, in review, the source kinds with the Q2
-disable-only add-on (PR 5); the tests of PR 6 have started (#116,
-merged). Not yet: the rest of the tests
-(PR 6), the ungated entry points made crate-private (PR 7), the test
-session's documents (PR 8), and any endpoint; no T00.x box is
-ticked. Every other choice below that goes beyond the written
+in-transaction permit (PR 1), the registry operation module with the `0005`
+guard and index (PR 2), `crate::operation` with the toggle (PR 3), the
+keyset kinds (PR 4), the source kinds with the Q2 disable-only add-on
+(PR 5), and, in review, the ungated entry points made crate-private (PR 7);
+the tests of PR 6 have started (#116, merged). Not yet: the rest of the
+tests (PR 6), the test session's documents (PR 8), and any endpoint; no
+T00.x box is ticked. Every other choice below that goes beyond the written
 spec is a "provisional lead pick, 2026-11-23" (the Decisions list numbers
 them D1 to D29); "(inferred)" marks a point where the spec is silent. All
 of them, and the lead decisions the spec records, stay provisional until
@@ -919,11 +918,13 @@ authorization: the approve authorizes the approver, and the requester
 only by `admin_id`. Each writer is therefore split into step 1 and an
 `apply_*` function that takes the authorized `Requester` (D26).
 `create_version`, `enable_version`, `create_source` and `update_source`
-become step 1 plus `apply_*`, ungated. They
-stay public, documented as test-only like the bare registry writers
-(`keyset.rs:36-46`), until the test session has moved their callers
-to `submit_*`; then they become crate-private (PR 7 below). The callers
-PR 7 must move are `service/tests/trust_keyset_version.rs`,
+become step 1 plus `apply_*`, ungated. They stayed public, documented as
+test-only like the bare registry writers (`keyset.rs:36-46`), until PR 7
+made them private to `trust` (`pub(super)`). The plan was to move their
+callers to `submit_*` first; PR 7 keeps the callers on the ungated writes
+instead, through a `#[doc(hidden)]` module that only a `test-support`
+feature compiles (see "PR 7 as implemented"). The callers are
+`service/tests/trust_keyset_version.rs`,
 `service/tests/trust_source_egress.rs`, `direct_create` in
 `service/tests/keyset_approval.rs` (it calls the ungated
 `create_version` to set up rows) and the service path of
@@ -1667,7 +1668,7 @@ row, the `trust_keyset` row and a version ID's insert.
 `submit_create_source` and `submit_update_source` are the gated writes;
 `create_source` and `update_source` become step 1 plus
 `apply_create_source`, or plus `lock_source` and `apply_locked_update`
-(the sketch above now shows the split), and stay public until PR 7. The
+(the sketch above now shows the split), and stayed public until PR 7. The
 request steps that PR 4 ran together are split in `write.rs`
 (`authorize_gated_requester`, `require_acknowledged`, `lock_policy_shared`,
 `widening_mode`) so that an update can classify after its stored-row lock.
@@ -1808,6 +1809,103 @@ comparison dropped for both source kinds, and finds the kind-role guard
 still equivalent. Still open after PR 5: whether `acknowledge_widening`
 applies to the toggle (the lead's, before T13.3).
 
+**PR 7 as implemented** (`service/src/trust/`, `service/Cargo.toml`;
+picks marked inferred in the code comments). `create_version`,
+`enable_version`, `create_source` and `update_source` are `pub(super)`:
+visible only within `trust`, so a caller anywhere else in the crate (an
+endpoint module, `crate::operation`) is a privacy error (E0603) in every
+build; `trust` no longer re-exports them. They were `pub(crate)` in the
+first round of review; `pub(super)` is the reviewer's narrowing (provisional
+lead pick, 2026-11-23). Nothing in `crate::operation` needs them: the
+approval calls the `apply_*` steps. `disable_version` stays public:
+section 9 lists only the four, a disable is not widening (section 1) and
+has no gated form, so it stays the disable's write path. The callers did
+not move to `submit_*`: `trust_keyset_version.rs` and
+`trust_source_egress.rs` test the ungated writes' own behaviour (an event
+outcome `success`, no policy row needed), and the setup helpers and race
+tests of `keyset_approval.rs`, `source_approval.rs` and
+`schema_trust_source_egress_guard.rs` need a write that is not gated.
+Integration tests are crates of their own and cannot call a
+restricted-visibility function, so a `test-support` cargo feature, off by
+default, compiles a `#[doc(hidden)]` module `trust::test_support` with a
+wrapper of the same name and signature for each of the four (such an
+item cannot be re-exported), and the package's dev-dependency on itself
+with that feature turns it on for test targets only (inferred: the
+mechanism). Cargo applies a dev-dependency's features only to a build
+that needs dev-dependencies, so `cargo build`, `cargo run` and
+`cargo check --lib` leave it off; `--all-features` (every CI build but the
+scenario jobs') and any build of a test target turn it on. The tests
+change their imports only. The self-dependency adds one line to
+`Cargo.lock` (`skyoauth-service` in its own dependency list) and no
+package. In a build without the feature the four are dead code, which
+`#[cfg_attr(not(feature = "test-support"), expect(dead_code))]` states,
+so a caller inside `trust`, a public forwarder of another name included,
+makes the expectation unfulfilled, a warning in such a build (inferred).
+
+`service/tests/ungated_writes_private.rs` proves that a normal build
+neither exposes nor calls them. It runs `cargo check --workspace --lib
+--bins`, offline and `--locked`, in a target directory under
+`CARGO_TARGET_TMPDIR`, with the outer build's `CARGO_*`, `RUSTFLAGS` and
+coverage settings removed; the whole workspace, so that a member that
+enables `test-support` through a normal or build dependency changes the
+build. It then asserts that `skyoauth-service`'s library was built with no
+feature and emitted no diagnostic (so an unfulfilled `expect(dead_code)`
+fails it, though CI's own builds pass `--all-features` and never see that
+warning; inferred), and compiles probe crates against the library's
+metadata with `rustc`: one that names the public writes (`submit_*`,
+`disable_version`) must compile, and each of the four, named at its
+module, at `trust` and at `trust::test_support`, must fail as a private
+or unresolved path (E0603, E0432). It needs no database and is not
+ignored (inferred); its first run checks every dependency of the
+workspace's libraries (about 37 s on four cores, alone; about 36 s inside
+a full parallel run), later runs reuse that directory (about 1 s). A
+compile-fail doctest cannot prove it: doctests build with the
+dev-dependencies, so they see the feature. A second test in the same file
+reads `keyset.rs` and `source.rs` and requires each writer to be
+`pub(super)` right after its `expect(dead_code)` attribute, so that
+removing the guard and adding a forwarder in the same change does not pass
+either (inferred).
+
+PR 7's mutants (outside the repository; this records the verdicts):
+seventeen, all killed, none equivalent. By `ungated_writes_private`'s
+build check (the library's diagnostics), ten: each of the four writers
+made `pub` (and `create_version` made `pub` with `#[doc(hidden)]`, and
+`update_source` made `pub` and re-exported from `trust`),
+`trust::test_support` compiled without the feature, a public forwarder of
+another name in `keyset.rs` and in `trust/mod.rs`, and a crate-visible
+forwarder in `trust` called from `app()`. By its features check, two:
+`test-support` made a default feature, and the scenario crate enabling it
+through a normal dependency. By its probes alone (the diagnostics check
+disabled), one: `create_version` made `pub`; the first round's run, before
+the diagnostics check existed, killed every visibility mutant with the
+probes. By the source check, one: the `expect(dead_code)` removed together
+with a public forwarder added. By the compiler, three, not by the test: a
+reference to an ungated writer from `app()` and from `crate::operation`
+(E0603, the effect of `pub(super)`), and `disable_version` made
+crate-private (`trust` re-exports it).
+
+Still open after PR 7:
+
+- The bare registry writers `create_trust_keyset_version`,
+  `update_trust_keyset_version`, `create_trust_source` and
+  `update_trust_source` (`persistence::registry`, re-exported from its
+  `mod.rs`) are still public in the default build: widening writes with
+  no authorization, no gate and no audit event, reachable from outside the
+  crate. The reason their docs give for staying public (other crates call
+  them, so they cannot be crate-private; `registry/trust.rs`) no longer
+  holds now that a test-support feature exists. A follow-up, PR 9, puts
+  them behind the same mechanism at the registry layer, with this
+  package's tests and the scenario crate getting the feature through
+  their `[dev-dependencies]` (the lead's finding; provisional lead pick,
+  2026-11-23; not started, and not done here).
+- A release build must not pass `--all-features` or `test-support` (none
+  exists yet; the PR that adds one owns it). A `compile_error!` cannot
+  key on the profile: cargo exposes no profile `cfg`, and
+  `debug_assertions` is only a proxy that would also refuse
+  `cargo test --release`, so PR 7 adds none.
+- Whether `acknowledge_widening` applies to the toggle (the lead's, before
+  T13.3).
+
 **Line numbers.** Line numbers into the code and the migrations README
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed
 after PR 1.
@@ -1838,9 +1936,10 @@ the harness and `docs/testing/conformance-layout.md`):
 | 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                        | 2       |
 | 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)          | 1, 3    |
 | 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (done in PR 4), `apply_*` split, D27 pre-validation, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); the tenant-path cancel's `NotFound` is done (PR 4). Implemented (see "PR 5 as implemented")                                                  | 3       |
-| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                               | each PR |
-| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                           | 6       |
+| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests of the gated path to `submit_*` (the tests of the ungated writes and their setup and race helpers stay on them through `trust::test_support`; see "PR 7 as implemented"), the A48 toggle legs                                                    | each PR |
+| 7   | coding  | the ungated entry points made crate-private (since review, `pub(super)`: private to `trust`), reached by the tests through the `test-support` feature. Implemented (see "PR 7 as implemented")                                                                                                                                                                                                                        | 6       |
 | 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                             | 6       |
+| 9   | coding  | the bare registry trust writers (`create_trust_keyset_version`, `update_trust_keyset_version`, `create_trust_source`, `update_trust_source`) behind the same `test-support` mechanism at the registry layer, the tests and the scenario crate getting the feature through `[dev-dependencies]` (the lead's finding; provisional lead pick, 2026-11-23). Not started                                                   | 7       |
 
 ADR-008:220, which repeats the T14.1/T14.2 attribution, is the lead's to
 correct; neither session edits it.
