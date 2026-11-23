@@ -82,7 +82,7 @@ impl Payload {
 /// [`approve_operation`]. `Debug` prints the kind only.
 pub struct PreparedApproval {
     operation_id: String,
-    request_digest: Vec<u8>,
+    request_digest: RequestDigest,
     payload: Payload,
 }
 
@@ -236,6 +236,27 @@ fn recompute(
     .map_err(|_| ApprovalError::PlanIntegrity)
 }
 
+/// A stored digest as a [`RequestDigest`]: 32 bytes, or
+/// [`ApprovalError::PlanIntegrity`] (the column allows 32 to 64 bytes, and
+/// this flow writes 32 only).
+fn stored_digest(bytes: &[u8]) -> Result<RequestDigest, ApprovalError> {
+    RequestDigest::try_from(bytes).map_err(|_| ApprovalError::PlanIntegrity)
+}
+
+/// The locked row's stored digest, checked before the echo is compared
+/// (D6): 32 bytes, and equal to the digest recomputed from the row's ID,
+/// tenant, actor, kind, expected revision, expiry and plan. Anything else
+/// is [`ApprovalError::PlanIntegrity`], a data-integrity error, never an
+/// [`ApprovalError::EchoMismatch`].
+fn verified_digest(locked: &AdministrativeOperation) -> Result<RequestDigest, ApprovalError> {
+    let stored = stored_digest(&locked.request_digest)?;
+    let expires_at = locked.expires_at.ok_or(ApprovalError::PlanIntegrity)?;
+    if recompute(locked, expires_at)? != stored {
+        return Err(ApprovalError::PlanIntegrity);
+    }
+    Ok(stored)
+}
+
 /// Consumed or revoked, under the row lock.
 fn check_open(locked: &AdministrativeOperation) -> Result<(), ApprovalError> {
     if locked.consumed_at.is_some() {
@@ -254,7 +275,8 @@ fn check_open(locked: &AdministrativeOperation) -> Result<(), ApprovalError> {
 /// scope ([`ApprovalError::NotFound`]), self-approval, its kind, whether it
 /// is consumed, revoked or expired at `now` ([`ApprovalError::NotApprovable`]);
 /// only then the digest and the plan ([`ApprovalError::PlanIntegrity`] for a
-/// plan that is not its kind's). Takes no lock and writes nothing.
+/// stored digest that is not 32 bytes, or a plan that is not its kind's).
+/// Takes no lock and writes nothing.
 pub async fn prepare_approval(
     pool: &PgPool,
     approver_public_identity: &str,
@@ -285,6 +307,7 @@ pub async fn prepare_approval(
         return Err(ApprovalError::NotApprovable(NotApprovableReason::Expired));
     }
     let (request_digest, plan) = read_plan(pool, operation_id).await?;
+    let request_digest = stored_digest(&request_digest)?;
     let payload = Payload::parse(kind, &plan).ok_or(ApprovalError::PlanIntegrity)?;
     Ok(PreparedApproval {
         operation_id: operation_id.into(),
@@ -388,16 +411,16 @@ async fn approve_steps(
         .await?
         .ok_or(ApprovalError::NotFound)?;
     check_open(&locked)?;
-    if locked.request_digest != echo.request_digest.as_bytes()
+    // The stored digest first: a row that does not match its own digest is
+    // a data-integrity error whatever the echo says.
+    let stored = verified_digest(&locked)?;
+    if stored != echo.request_digest
         || locked.expected_revision != echo.expected_revision
-        || locked.request_digest != prepared.request_digest
+        || stored != prepared.request_digest
     {
         return Err(ApprovalError::EchoMismatch);
     }
     let expires_at = locked.expires_at.ok_or(ApprovalError::PlanIntegrity)?;
-    if recompute(&locked, expires_at)?.as_bytes()[..] != locked.request_digest[..] {
-        return Err(ApprovalError::PlanIntegrity);
-    }
     let payload =
         Payload::parse(kind, &locked.immutable_plan).ok_or(ApprovalError::PlanIntegrity)?;
     if payload != prepared.payload {
@@ -558,6 +581,12 @@ async fn revoke_steps(
             if !revoke.scope.holds(header.tenant_id.as_deref()) {
                 return Err(ApprovalError::NotFound);
             }
+            // Another operator's operation is `Unauthorized`, a missing one
+            // `NotFound`: that tells an instance `security_admin` that the
+            // operation exists, which it may read anyway on the instance
+            // path (Q1). On a tenant path it would tell one `trust_admin`
+            // of another's operation, so the first tenant kind (PR 4 or 5)
+            // must answer `NotFound` there (proposal, PR 5 row).
             if header.actor_id != actor.admin_id {
                 return Err(ApprovalError::Unauthorized);
             }
@@ -630,7 +659,92 @@ async fn revoke_steps(
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    /// A pending toggle row whose digest is the one recomputed from it.
+    fn locked_row() -> AdministrativeOperation {
+        let Value::Object(plan) = json!({
+            "requester_credential_id": "crd_1",
+            "widening_second_approver": true,
+        }) else {
+            unreachable!()
+        };
+        let mut row = AdministrativeOperation {
+            id: "op_1".into(),
+            tenant_id: None,
+            actor_id: "adm_1".into(),
+            kind: "instance_security_policy_update".into(),
+            request_digest: Vec::new(),
+            expected_revision: 1,
+            immutable_plan: plan,
+            challenge_hash: None,
+            expires_at: Some(
+                SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000),
+            ),
+            consumed_at: None,
+            revoked_at: None,
+            revocation_operation_id: None,
+            approves_operation_id: None,
+            revision: 1,
+            outcome: "pending".into(),
+            audit_id: "evt_op_1".into(),
+        };
+        row.request_digest = recompute(&row, row.expires_at.unwrap())
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        row
+    }
+
+    #[test]
+    fn a_stored_digest_is_32_bytes_and_its_rows_own() {
+        let row = locked_row();
+        let digest = verified_digest(&row).unwrap();
+        assert_eq!(digest.as_bytes()[..], row.request_digest[..]);
+        assert_eq!(stored_digest(&row.request_digest).unwrap(), digest);
+        // Another length, even with the right 32 bytes first.
+        for bytes in [
+            [&row.request_digest[..], &[0][..]].concat(),
+            [&row.request_digest[..], &row.request_digest[..]].concat(),
+            row.request_digest[..31].to_vec(),
+            Vec::new(),
+        ] {
+            assert!(matches!(
+                stored_digest(&bytes),
+                Err(ApprovalError::PlanIntegrity)
+            ));
+            let longer = AdministrativeOperation {
+                request_digest: bytes,
+                ..row.clone()
+            };
+            assert!(matches!(
+                verified_digest(&longer),
+                Err(ApprovalError::PlanIntegrity)
+            ));
+        }
+        // 32 bytes that are not the row's digest, and a row changed under
+        // its digest.
+        let mut other = row.clone();
+        other.request_digest[0] ^= 1;
+        assert!(matches!(
+            verified_digest(&other),
+            Err(ApprovalError::PlanIntegrity)
+        ));
+        let mut moved = row.clone();
+        moved.expected_revision = 2;
+        assert!(matches!(
+            verified_digest(&moved),
+            Err(ApprovalError::PlanIntegrity)
+        ));
+        let mut no_expiry = row;
+        no_expiry.expires_at = None;
+        assert!(matches!(
+            verified_digest(&no_expiry),
+            Err(ApprovalError::PlanIntegrity)
+        ));
+    }
 
     #[test]
     fn the_unlocked_reads_take_no_lock_and_the_plan_comes_last() {

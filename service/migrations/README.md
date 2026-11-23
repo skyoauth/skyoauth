@@ -2943,8 +2943,8 @@ names are in `KNOWN_CONSTRAINTS`, and `service/tests/registry_operator.rs`
 tests the surface.
 
 Operations and approvals (`docs/proposals/second-approver-gated-writes.md`
-sections 2, 3 and 9; IR-052 to IR-054; nothing calls these functions yet
-and no endpoint is wired). `insert_administrative_operation` inserts an
+sections 2, 3 and 9; IR-052 to IR-054; `crate::operation` calls them,
+and no endpoint or startup path calls that yet). `insert_administrative_operation` inserts an
 unconsumed, unrevoked operation with no challenge and returns the row;
 `lock_administrative_operation` reads one `FOR NO KEY UPDATE`, or `None`.
 `consume_administrative_operation` sets `consumed_at` and the `outcome`,
@@ -2959,7 +2959,13 @@ row with `lock_administrative_operation` first and checks `consumed_at`,
 `revoked_at` and `expires_at` under that lock.
 `lock_instance_security_policy_shared` takes the policy row `FOR SHARE` (a widening trust write; D10) and
 `lock_instance_security_policy` `FOR NO KEY UPDATE` (the toggle; D19);
-before bootstrap both are `NotFound` (D18). `authorize_roles_locked` and
+before bootstrap both are `NotFound` (D18). The crate-private
+`set_widening_second_approver` is the compare-and-set of
+`widening_second_approver` at an expected revision (`StaleRevision` or
+`NotFound` otherwise); only the toggle of `crate::operation` calls it, so
+it is the only online write of the policy row once bootstrap has
+inserted it (IR-052, IR-053).
+`authorize_roles_locked` and
 `authorize_approval_locked` lock the operator rows they found `FOR SHARE`
 and repeat the lookup, as `authorize_operator_locked` does.
 `authorize_roles_locked` returns the operator of one credential and, for

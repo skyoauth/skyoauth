@@ -1222,31 +1222,25 @@ async fn the_echo_and_the_stored_digest_must_match() {
         op.request_digest
     );
 
-    // A stored digest of 33 bytes never matches a 32-byte echo.
-    let long = {
-        let mut new = raw_toggle("op_long", toggle_plan("crd_adm_req", true), None);
-        new.request_digest.push(0);
-        new
-    };
-    insert_raw(&pool, &long).await;
-    let prepared_long = prepare(&pool, "key_sec1", "op_long").await.unwrap();
-    let long_echo = ApprovalEcho {
-        request_digest: RequestDigest::try_from(&long.request_digest[..32]).unwrap(),
-        expected_revision: 1,
-    };
-    refused(
-        approve(
-            &pool,
-            "key_sec1",
-            INSTANCE,
-            &prepared_long,
-            &long_echo,
-            &*clock,
-        )
-        .await,
-        "EchoMismatch",
-    );
-    // A stored digest the row does not recompute to.
+    // A stored digest of another length is a data-integrity error, even
+    // when its first 32 bytes are the row's digest: prepare_approval
+    // refuses it, so no approval of it starts. (The approve's own check
+    // under the lock is unit-tested: `verified_digest` in approval.rs.)
+    for (id, repeat) in [("op_long", false), ("op_double", true)] {
+        let mut new = raw_toggle(id, toggle_plan("crd_adm_req", true), None);
+        if repeat {
+            new.request_digest = new.request_digest.repeat(2);
+        } else {
+            new.request_digest.push(0);
+        }
+        insert_raw(&pool, &new).await;
+        refused(prepare(&pool, "key_sec1", id).await, "PlanIntegrity");
+        // Authorization still comes first.
+        refused(prepare(&pool, "key_trust", id).await, "Unauthorized");
+    }
+    // A stored digest the row does not recompute to is a data-integrity
+    // error whatever the echo: the stored digest is checked before the echo
+    // is compared with it.
     let forged = raw_toggle(
         "op_forged",
         toggle_plan("crd_adm_req", true),
@@ -1254,24 +1248,62 @@ async fn the_echo_and_the_stored_digest_must_match() {
     );
     insert_raw(&pool, &forged).await;
     let prepared_forged = prepare(&pool, "key_sec1", "op_forged").await.unwrap();
-    let forged_echo = ApprovalEcho {
-        request_digest: RequestDigest::from_bytes([0xd1; 32]),
+    let before_forged = snapshot(&pool).await;
+    for echoed in [
+        RequestDigest::from_bytes([0xd1; 32]),
+        RequestDigest::from_bytes([0xd2; 32]),
+        op.request_digest,
+    ] {
+        let forged_echo = ApprovalEcho {
+            request_digest: echoed,
+            expected_revision: 1,
+        };
+        refused(
+            approve(
+                &pool,
+                "key_sec1",
+                INSTANCE,
+                &prepared_forged,
+                &forged_echo,
+                &*clock,
+            )
+            .await,
+            "PlanIntegrity",
+        );
+    }
+    // A valid stored digest and an echo of another valid digest.
+    let good = raw_toggle("op_good", toggle_plan("crd_adm_req", true), None);
+    insert_raw(&pool, &good).await;
+    let prepared_good = prepare(&pool, "key_sec1", "op_good").await.unwrap();
+    let good_echo = ApprovalEcho {
+        request_digest: RequestDigest::try_from(&good.request_digest[..]).unwrap(),
         expected_revision: 1,
     };
-    let before_forged = snapshot(&pool).await;
-    refused(
-        approve(
-            &pool,
-            "key_sec1",
-            INSTANCE,
-            &prepared_forged,
-            &forged_echo,
-            &*clock,
-        )
-        .await,
-        "PlanIntegrity",
-    );
-    assert_eq!(snapshot(&pool).await, before_forged);
+    let before_forged = {
+        let mut rows = before_forged;
+        rows.retain(|row| !row.starts_with("audit_chain_head "));
+        rows
+    };
+    for wrong in [RequestDigest::from_bytes([0xd1; 32]), op.request_digest] {
+        refused(
+            approve(
+                &pool,
+                "key_sec1",
+                INSTANCE,
+                &prepared_good,
+                &ApprovalEcho {
+                    request_digest: wrong,
+                    ..good_echo
+                },
+                &*clock,
+            )
+            .await,
+            "EchoMismatch",
+        );
+    }
+    let mut after = snapshot(&pool).await;
+    after.retain(|row| !row.starts_with("audit_chain_head ") && !row.contains("op_good"));
+    assert_eq!(after, before_forged);
     assert_eq!(clock.samples(), 0);
 
     // The right echo still applies op_1.

@@ -133,9 +133,14 @@
 //! request's `expected_revision` ([`ApprovalError::StaleRevision`]). With
 //! `single_actor_mode` on it applies at once: the compare-and-set and
 //! `instance_security_policy.update` with outcome `success_single_actor`.
-//! Otherwise it goes pending, whatever the current or the requested value
-//! (the toggle is always gated, turning it off included; ADR-008:100-105),
-//! for a distinct `security_admin` to approve on the instance path. The
+//! Otherwise it goes pending, whatever the current or the requested value,
+//! for a distinct `security_admin` to approve on the instance path: turning
+//! the setting on or off needs that approver (IR-052,
+//! `docs/contracts/identity-registry.md:423-427`; tasks:147;
+//! ADR-008:100-103). A request for the current value (a no-op) is accepted
+//! like any other (inferred): applied at once it writes the same value at
+//! the next revision; pending, its approval only advances the revision, so
+//! every other pending toggle goes stale at its approval. The
 //! `acknowledge_widening` flag of the [`Submission`] is ignored: whether
 //! the toggle needs it is not decided (proposal, "Not decided here";
 //! inferred). The authorization is the toggle's own, instance
@@ -207,7 +212,8 @@ pub const OUTCOME_REJECTED: &str = "rejected";
 /// operation.
 pub const OUTCOME_SUCCESS: &str = "success";
 /// The outcome of the event of a write applied at once under
-/// `single_actor_mode` (section 7; Q4).
+/// `single_actor_mode` (section 7; Q4; inferred value, as section 7's whole
+/// value set).
 pub const OUTCOME_SUCCESS_SINGLE_ACTOR: &str = "success_single_actor";
 
 /// A kind of gated write (section 2; inferred names). `#[non_exhaustive]`:
