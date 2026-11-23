@@ -5,7 +5,7 @@
       "debug"
     ]
   },
-  "test-count": 13,
+  "test-count": 18,
   "rust-suites": {
     "skyoauth-scenarios": {
       "package-name": "skyoauth-scenarios",
@@ -30,6 +30,20 @@
       "cwd": "/home/runner/work/skyoauth/skyoauth/tests",
       "status": "listed",
       "testcases": {
+        "security::a29::a29_neg_approve_across_instance_and_tenant": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_neg_approve_of_other_tenants_operation": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
         "security::a29::a29_neg_binding_of_other_tenants_workload": {
           "kind": "test",
           "ignored": false,
@@ -79,6 +93,20 @@
             "status": "matches"
           }
         },
+        "security::a29::a29_neg_revocation_across_instance_and_tenant": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_neg_revocation_by_other_tenants_operation": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
         "security::a29::a29_neg_service_identity_audience_of_other_tenant": {
           "kind": "test",
           "ignored": false,
@@ -101,6 +129,13 @@
           }
         },
         "security::a29::a29_neg_writes_to_other_tenants_records_find_nothing": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_pos_same_scope_approve_and_revocation_are_written": {
           "kind": "test",
           "ignored": false,
           "filter-match": {
