@@ -33,11 +33,14 @@ tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 # second-approver proposal, "PR 9 as implemented"). This turns on a
 # feature of a dependency, not one of this package, so it is not what the
 # "No features" note above rules out: Cargo applies it only to builds that
-# need dev-dependencies (this package's test targets; the `scenarios-*`
-# jobs build them with `-p skyoauth-scenarios` and no `--features`), never
-# to this package's library in `src/`, which must not use it.
-# `service/tests/ungated_writes_private.rs` fails if a normal build of the
-# workspace turns it on.
+# need dev-dependencies, that is, builds of this package's test targets
+# (the `scenarios-*` jobs build them with `-p skyoauth-scenarios` and no
+# `--features`). Such a build has one copy of the service library, with the
+# feature on, and this package's library in `src/` compiles against that
+# copy, so a use of `test_support` there would compile in it. `src/` must
+# not use it: `service/tests/ungated_writes_private.rs` checks the
+# workspace's libraries without test targets, where such a use fails to
+# compile, and fails if a normal build turns the feature on.
 skyoauth-service = { path = "../service", features = ["test-support"] }
 serde_json = "1.0.154"
 # `rt-multi-thread` so replica races run in parallel

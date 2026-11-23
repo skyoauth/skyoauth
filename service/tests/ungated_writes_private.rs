@@ -30,19 +30,29 @@
 //!   a warning (a caller outside `trust` is a privacy error in every build);
 //! - compiles small probe crates against the library's metadata with
 //!   `rustc`. A probe that names an ungated writer, a bare registry writer
-//!   or one of the registry writers' in-crate callers at any of its paths
+//!   or one of the crate-private steps below at any of its paths
 //!   must fail as a private (E0603) or unresolved (E0432) path, and a probe
 //!   that names the public writes and registry items must compile, so a
 //!   probe that fails for an unrelated reason (a toolchain mismatch, a
 //!   missing crate) fails this test instead of passing it.
 //!
-//! The registry writers are called in every build, so `expect(dead_code)`
-//! cannot guard them. A source check stands in for it: outside comments,
-//! the library names each registry writer only at its definition, the
-//! crate-private re-export, its test-support wrapper and its known callers
-//! in `trust::keyset` and `trust::source`, each with its visibility as
-//! written there, so a forwarder of another name, a new caller and a widened
-//! definition or caller each fail it (inferred).
+//! The registry writers are called in every build, and so are the six
+//! crate-private steps of `trust` that apply a write without authorizing,
+//! gating or auditing it themselves (`insert_create_version`,
+//! `apply_create_version`, `apply_enable_version`, `apply_status`,
+//! `apply_create_source`, `apply_locked_update`; PR 7's
+//! `expect(dead_code)` covers only the four `pub(super)` writers, not
+//! these), so no dead-code guard fits them. A source check stands in for
+//! it: outside comments, the library names each writer and each step only
+//! at the places a table lists (the definition, the crate-private
+//! re-export, the test-support wrapper, the `use`s, and the callers in
+//! `trust::keyset`, `trust::source` and `crate::operation`'s approval),
+//! each keyed by the item that holds it with that item's visibility and
+//! counted, so a forwarder of another name, a new caller and a widened
+//! definition or caller each fail it, and so does source that could hide
+//! an item from those keys (`rustfmt::skip`, `#[path]`, `include!`;
+//! inferred). The probes also require each step to be unreachable from
+//! outside the crate.
 //!
 //! It needs no database, so it is not `#[ignore]`d (inferred), and runs
 //! offline from the crates the outer build has already fetched. The first
@@ -88,10 +98,19 @@ const REGISTRY_UNGATED: [&str; 4] = [
     "update_trust_source",
 ];
 
-/// The functions of `trust` that call a bare registry writer, by module.
-/// None may be reachable from outside the crate either.
-const REGISTRY_CALLERS: [(&str, &str); 4] = [
+/// The crate-private steps of the trust write path that apply a write
+/// without authorizing, gating or auditing it themselves: the four that
+/// call a bare registry writer (`insert_create_version`, `apply_status`,
+/// `apply_create_source`, `apply_locked_update`) and the two that call
+/// those (`apply_create_version`, `apply_enable_version`), by module. Their
+/// callers authorize, gate and audit; `crate::operation`'s approval calls
+/// four of them, so they are `pub(crate)` (but `apply_status`, which is
+/// private to `trust::keyset`). None may be reachable from outside the
+/// crate.
+const STEPS: [(&str, &str); 6] = [
     ("keyset", "insert_create_version"),
+    ("keyset", "apply_create_version"),
+    ("keyset", "apply_enable_version"),
     ("keyset", "apply_status"),
     ("source", "apply_create_source"),
     ("source", "apply_locked_update"),
@@ -112,133 +131,65 @@ const REGISTRY_PUBLIC: [&str; 9] = [
 ];
 
 /// Where the library's source, comment lines aside, names a bare registry
-/// writer: the file under `src`, the first line of the top-level item that
-/// holds the mention, the writer, and how many times. The definitions are
-/// `pub(crate)`, re-exported `pub(crate)`; each wrapper is compiled only
-/// with `test-support`; and the callers are the trust write path's steps,
-/// none of them public.
-const REGISTRY_MENTIONS: [(&str, &str, &str, usize); 20] = [
-    (
-        "persistence/registry/mod.rs",
-        "pub(crate) use trust::{",
-        "create_trust_keyset_version",
-        1,
-    ),
-    (
-        "persistence/registry/mod.rs",
-        "pub(crate) use trust::{",
-        "update_trust_keyset_version",
-        1,
-    ),
-    (
-        "persistence/registry/mod.rs",
-        "pub(crate) use trust::{",
-        "create_trust_source",
-        1,
-    ),
-    (
-        "persistence/registry/mod.rs",
-        "pub(crate) use trust::{",
-        "update_trust_source",
-        1,
-    ),
-    (
-        "persistence/registry/test_support.rs",
-        "pub async fn create_trust_keyset_version<'e>(",
-        "create_trust_keyset_version",
-        2,
-    ),
-    (
-        "persistence/registry/test_support.rs",
-        "pub async fn update_trust_keyset_version<'e>(",
-        "update_trust_keyset_version",
-        2,
-    ),
-    (
-        "persistence/registry/test_support.rs",
-        "pub async fn create_trust_source<'e>(",
-        "create_trust_source",
-        2,
-    ),
-    (
-        "persistence/registry/test_support.rs",
-        "pub async fn update_trust_source<'e>(",
-        "update_trust_source",
-        2,
-    ),
-    (
-        "persistence/registry/trust.rs",
-        "pub(crate) async fn create_trust_keyset_version<'e>(",
-        "create_trust_keyset_version",
-        1,
-    ),
-    (
-        "persistence/registry/trust.rs",
-        "pub(crate) async fn update_trust_keyset_version<'e>(",
-        "update_trust_keyset_version",
-        1,
-    ),
-    (
-        "persistence/registry/trust.rs",
-        "pub(crate) async fn create_trust_source<'e>(",
-        "create_trust_source",
-        1,
-    ),
-    (
-        "persistence/registry/trust.rs",
-        "pub(crate) async fn update_trust_source<'e>(",
-        "update_trust_source",
-        1,
-    ),
-    (
-        "trust/keyset.rs",
-        "use crate::persistence::registry::{",
-        "create_trust_keyset_version",
-        1,
-    ),
-    (
-        "trust/keyset.rs",
-        "use crate::persistence::registry::{",
-        "update_trust_keyset_version",
-        1,
-    ),
-    (
-        "trust/keyset.rs",
-        "pub(crate) async fn insert_create_version(",
-        "create_trust_keyset_version",
-        1,
-    ),
-    (
-        "trust/keyset.rs",
-        "async fn apply_status(",
-        "update_trust_keyset_version",
-        1,
-    ),
-    (
-        "trust/source.rs",
-        "use crate::persistence::registry::{",
-        "create_trust_source",
-        1,
-    ),
-    (
-        "trust/source.rs",
-        "use crate::persistence::registry::{",
-        "update_trust_source",
-        1,
-    ),
-    (
-        "trust/source.rs",
-        "pub(crate) async fn apply_create_source(",
-        "create_trust_source",
-        1,
-    ),
-    (
-        "trust/source.rs",
-        "pub(crate) async fn apply_locked_update(",
-        "update_trust_source",
-        1,
-    ),
-];
+/// writer or a step of [`STEPS`], one entry per line: the file under `src`,
+/// the first line of the top-level item that holds the mention, the name,
+/// and how many times, separated by ` | `. The writers are defined and
+/// re-exported `pub(crate)`, each wrapper is compiled only with
+/// `test-support`, and the callers are the trust write path's own steps and
+/// `crate::operation`'s approval, none of them public.
+const MENTIONS: &str = "
+persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_keyset_version | 1
+persistence/registry/mod.rs | pub(crate) use trust::{ | update_trust_keyset_version | 1
+persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_source | 1
+persistence/registry/mod.rs | pub(crate) use trust::{ | update_trust_source | 1
+persistence/registry/test_support.rs | pub async fn create_trust_keyset_version<'e>( | create_trust_keyset_version | 2
+persistence/registry/test_support.rs | pub async fn update_trust_keyset_version<'e>( | update_trust_keyset_version | 2
+persistence/registry/test_support.rs | pub async fn create_trust_source<'e>( | create_trust_source | 2
+persistence/registry/test_support.rs | pub async fn update_trust_source<'e>( | update_trust_source | 2
+persistence/registry/trust.rs | pub(crate) async fn create_trust_keyset_version<'e>( | create_trust_keyset_version | 1
+persistence/registry/trust.rs | pub(crate) async fn update_trust_keyset_version<'e>( | update_trust_keyset_version | 1
+persistence/registry/trust.rs | pub(crate) async fn create_trust_source<'e>( | create_trust_source | 1
+persistence/registry/trust.rs | pub(crate) async fn update_trust_source<'e>( | update_trust_source | 1
+trust/keyset.rs | use crate::persistence::registry::{ | create_trust_keyset_version | 1
+trust/keyset.rs | use crate::persistence::registry::{ | update_trust_keyset_version | 1
+trust/keyset.rs | pub(crate) async fn insert_create_version( | insert_create_version | 1
+trust/keyset.rs | pub(crate) async fn insert_create_version( | create_trust_keyset_version | 1
+trust/keyset.rs | pub(crate) async fn apply_create_version( | apply_create_version | 1
+trust/keyset.rs | pub(crate) async fn apply_create_version( | insert_create_version | 1
+trust/keyset.rs | async fn create_steps( | apply_create_version | 1
+trust/keyset.rs | async fn submit_create_steps( | apply_create_version | 1
+trust/keyset.rs | async fn status_steps( | apply_status | 1
+trust/keyset.rs | async fn apply_status( | apply_status | 1
+trust/keyset.rs | async fn apply_status( | update_trust_keyset_version | 1
+trust/keyset.rs | pub(crate) async fn apply_enable_version( | apply_enable_version | 1
+trust/keyset.rs | pub(crate) async fn apply_enable_version( | apply_status | 1
+trust/keyset.rs | async fn submit_enable_steps( | apply_status | 1
+trust/source.rs | use crate::persistence::registry::{ | create_trust_source | 1
+trust/source.rs | use crate::persistence::registry::{ | update_trust_source | 1
+trust/source.rs | pub(crate) async fn apply_create_source( | apply_create_source | 1
+trust/source.rs | pub(crate) async fn apply_create_source( | create_trust_source | 1
+trust/source.rs | async fn create_steps( | apply_create_source | 1
+trust/source.rs | async fn submit_create_steps( | apply_create_source | 1
+trust/source.rs | pub(crate) async fn apply_locked_update( | apply_locked_update | 1
+trust/source.rs | pub(crate) async fn apply_locked_update( | update_trust_source | 1
+trust/source.rs | async fn update_steps( | apply_locked_update | 1
+trust/source.rs | async fn submit_update_steps( | apply_locked_update | 1
+operation/approval.rs | use crate::trust::{ | apply_create_version | 1
+operation/approval.rs | use crate::trust::{ | apply_enable_version | 1
+operation/approval.rs | use crate::trust::{ | apply_create_source | 1
+operation/approval.rs | use crate::trust::{ | apply_locked_update | 1
+operation/approval.rs | async fn apply_create( | apply_create_version | 1
+operation/approval.rs | async fn apply_enable( | apply_enable_version | 1
+operation/approval.rs | async fn apply_source_create( | apply_create_source | 1
+operation/approval.rs | async fn apply_source_update( | apply_locked_update | 1
+";
+
+/// Text that would let source escape the item keys of [`MENTIONS`], none of
+/// which the library uses: a `rustfmt::skip` keeps an indented item that
+/// would then count under the item before it, and `#[path]`, a `path` in a
+/// `cfg_attr` and `include!` read source from a file this check does not
+/// key by its own name. Matched with all whitespace removed.
+const LAYOUT_ESCAPES: [&str; 4] = ["rustfmt::skip", "#[path", "path=\"", "include!("];
 
 /// The environment a nested `cargo` or `rustc` must not inherit: this
 /// test's own build settings (`cargo test` and `cargo llvm-cov` set
@@ -472,23 +423,37 @@ fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// The stand-in for `expect(dead_code)` at the registry layer, where the
-/// writers are called in every build: outside comment lines, the library
-/// names each bare registry writer exactly at [`REGISTRY_MENTIONS`]. A
-/// mention is keyed by the first line of the top-level item that holds it
-/// (a line that starts in column 0 and is not a comment, an attribute or
-/// the rest of an item), so a definition or a caller made `pub` changes
-/// the key, and a forwarder or a caller of any other name adds one.
+/// The stand-in for `expect(dead_code)` where the writers and steps are
+/// called in every build: outside comment lines, the library names each
+/// bare registry writer and each step of [`STEPS`] exactly as
+/// [`MENTIONS`] lists. A mention is keyed by the first line of the
+/// top-level item that holds it (a line that starts in column 0 and is not
+/// a comment, an attribute or the rest of an item), so a definition or a
+/// caller made `pub` changes the key, and a forwarder or a caller of any
+/// other name adds one, or a mention to a key. `rustfmt` puts every
+/// top-level item in column 0, so the check also refuses the
+/// [`LAYOUT_ESCAPES`] that could keep one out of it.
 #[test]
-fn each_registry_writer_is_crate_private_and_named_only_where_expected() {
+fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &mut files);
+    let names: Vec<&str> = REGISTRY_UNGATED
+        .into_iter()
+        .chain(STEPS.iter().map(|(_, step)| *step))
+        .collect();
+    let mut escapes = Vec::new();
     let mut found = BTreeMap::new();
     for file in files {
         let relative = file.strip_prefix(&src).unwrap();
         let relative = relative.to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&file).unwrap();
+        let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+        for escape in LAYOUT_ESCAPES {
+            if compact.contains(escape) {
+                escapes.push(format!("{relative}: `{escape}`"));
+            }
+        }
         let mut item = String::from("<the file's start>");
         for line in source.lines() {
             let continues = ["/", "#", "}", ")", "]", "{", "where"];
@@ -500,27 +465,53 @@ fn each_registry_writer_is_crate_private_and_named_only_where_expected() {
             if line.trim_start().starts_with("//") {
                 continue;
             }
-            for writer in REGISTRY_UNGATED {
-                let count = identifier_count(line, writer);
+            for name in &names {
+                let count = identifier_count(line, name);
                 if count > 0 {
                     *found
-                        .entry((relative.clone(), item.clone(), writer.to_owned()))
+                        .entry((relative.clone(), item.clone(), (*name).to_owned()))
                         .or_insert(0) += count;
                 }
             }
         }
     }
-    let expected: BTreeMap<_, _> = REGISTRY_MENTIONS
+    assert!(
+        escapes.is_empty(),
+        "the library uses text that this source check cannot see through:\n{}",
+        escapes.join("\n")
+    );
+    let mut expected = BTreeMap::new();
+    for line in MENTIONS.lines().filter(|line| !line.is_empty()) {
+        let fields: Vec<&str> = line.split(" | ").collect();
+        let [file, item, name, count] = fields[..] else {
+            panic!("a malformed line of MENTIONS: {line}");
+        };
+        let key = (file.to_owned(), item.to_owned(), name.to_owned());
+        let previous = expected.insert(key, count.parse::<usize>().unwrap());
+        assert!(previous.is_none(), "a duplicate line of MENTIONS: {line}");
+    }
+    let show = |(file, item, name): &(String, String, String), count: usize| {
+        format!("{file} | {item} | {name} | {count}")
+    };
+    let unexpected: Vec<String> = found
         .iter()
-        .map(|&(file, item, writer, count)| {
-            ((file.to_owned(), item.to_owned(), writer.to_owned()), count)
-        })
+        .filter(|(key, count)| expected.get(*key) != Some(*count))
+        .map(|(key, count)| show(key, *count))
         .collect();
-    assert_eq!(
-        found, expected,
-        "a bare registry writer is named where it should not be, with another \
-         visibility, or a different number of times (left: the source, right: \
-         the expected (file, item, writer) mentions)"
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|(key, count)| found.get(*key) != Some(*count))
+        .map(|(key, count)| show(key, *count))
+        .collect();
+    assert!(
+        unexpected.is_empty() && missing.is_empty(),
+        "a bare registry writer or a step is named where it should not be, under \
+         another visibility, or a different number of times (file | item | name | \
+         count). Update MENTIONS only if this is a deliberate narrowing or rename; \
+         a new caller or a wider visibility is what this test exists to refuse.\n\
+         In the source, not in MENTIONS:\n{}\nIn MENTIONS, not in the source:\n{}",
+        unexpected.join("\n"),
+        missing.join("\n")
     );
 }
 
@@ -576,13 +567,10 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
         }
     }
 
-    for (module, caller) in REGISTRY_CALLERS {
-        let paths = [
-            format!("trust::{module}::{caller}"),
-            format!("trust::{caller}"),
-        ];
+    for (module, step) in STEPS {
+        let paths = [format!("trust::{module}::{step}"), format!("trust::{step}")];
         for (index, path) in paths.iter().enumerate() {
-            let name = format!("probe_caller_{caller}_{index}");
+            let name = format!("probe_step_{step}_{index}");
             assert_unreachable(&library, &probes, &name, path);
         }
     }
