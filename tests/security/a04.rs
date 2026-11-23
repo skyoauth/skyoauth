@@ -1301,7 +1301,8 @@ async fn gate_on(pool: &PgPool) {
         &mut transaction,
         &Submission {
             public_identity: FIRST_KEY,
-            acknowledge_widening: false,
+            // Ignored by the toggle; `true` holds under D2 either way.
+            acknowledge_widening: true,
             operation_id: "op_gate",
             event_id: "evt_op_gate",
             now: at(T0),

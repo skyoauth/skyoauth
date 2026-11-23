@@ -1231,9 +1231,10 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_a_toggle_without_a_distinct_approver_never_applies",
   "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_self_approval_of_the_toggle_is_refused",
   "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_an_approver_without_security_admin_is_refused",
-  "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_each_step_without_its_role_is_refused",
+  "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_each_toggle_step_without_its_role_is_refused",
   "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_a_cancelled_or_rejected_toggle_never_applies",
   "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_refusals_come_in_the_flows_order",
+  "nextest:skyoauth-scenarios/pg/security::a48::a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone",
 ]
 
 [[scenario.stage]]

@@ -38,7 +38,11 @@
 //!
 //! Two pieces of SQL are their own, both documented where they are:
 //! [`seed_policy`], the one write, stands in for the startup mirror of
-//! deployment configuration (IR-053), which does not exist; and
+//! deployment configuration (IR-053), which does not exist (an inferred
+//! pick, the layout's §1.3 "Deployment-configuration stand-ins":
+//! deployment-configuration state that IR-053 forbids writing online may
+//! be SQL-seeded by a scenario until the IR-053 mirror exists, and this
+//! stand-in is listed as such); and
 //! [`events`] and [`operation_ids`], read-only, since the registry lists
 //! neither audit events nor operations.
 //!
@@ -67,31 +71,38 @@
 //! - **Negative, no distinct approver.** A pending toggle that nobody else
 //!   approves never applies: the policy row and the operation stay as the
 //!   request left them through its 24-hour expiry (`PENDING_OPERATION_TTL`;
-//!   Q1, ruled by the user, 2026-11-23), and an approval prepared before
-//!   the expiry is `NotApprovable(Expired)` at it and after it, writing
-//!   nothing; the operation stays `pending`
+//!   proposal Q1, ruled by the user, 2026-11-23), and an approval prepared
+//!   before the expiry is `NotApprovable(Expired)` at it and after it,
+//!   writing nothing; the operation stays `pending`
 //!   (`a48_neg_a_toggle_without_a_distinct_approver_never_applies`).
 //! - **Negative, self-approval.** The requester, by the credential it
 //!   requested with or by its other one, is `SelfApproval` at the
 //!   preparation, at the approval (with another approver's preparation)
 //!   and at a reject, and so is the bootstrap's operator for a toggle it
 //!   requested; nothing is written, and another `security_admin` then
-//!   applies it (`a48_neg_self_approval_of_the_toggle_is_refused`).
+//!   applies it (`a48_neg_self_approval_of_the_toggle_is_refused`). This
+//!   pins the flow's own checks, which refuse before any write: the `0005`
+//!   guard behind them, `administrative_operation_approver_distinct`, is
+//!   never reached, so these tests stay green without it; it has service
+//!   tests only (`service/tests/schema_operation_approval_guard.rs`,
+//!   `service/tests/registry_operation.rs`).
 //! - **Negative, approver without `security_admin`.** A `trust_admin`, an
 //!   instance `auditor`, an unknown key, and `security_admin`s whose
 //!   binding was disabled, credential revoked or identity disabled after
 //!   their own preparation are `Unauthorized` at the preparation, the
-//!   approval and a reject, on the instance path and, for the
-//!   `trust_admin`, on its tenant's path; nothing is written, and a
-//!   `security_admin` then applies it
+//!   approval and a reject on the instance path; the `trust_admin` is
+//!   `Unauthorized` on its tenant's path too, at the preparation, the
+//!   approval (with another approver's instance preparation) and a reject;
+//!   nothing is written, and a `security_admin` then applies it
 //!   (`a48_neg_an_approver_without_security_admin_is_refused`).
-//! - **Negative, each step without its role.** The toggle's request by an
-//!   operator without instance `security_admin` (a `trust_admin`, an
+//! - **Negative, each toggle step without its role.** The toggle's request
+//!   by an operator without instance `security_admin` (a `trust_admin`, an
 //!   instance `auditor`, an unknown key) is `Unauthorized` and writes
 //!   nothing; a cancel by one of them is `Unauthorized`; and once the
 //!   requester has lost its role, its own cancel is `Unauthorized` and an
-//!   approval is `RequesterNotAuthorized` (Q5; D21), writing nothing
-//!   (`a48_neg_each_step_without_its_role_is_refused`).
+//!   approval is `RequesterNotAuthorized` (proposal Q5; D21), writing
+//!   nothing (`a48_neg_each_toggle_step_without_its_role_is_refused`). Only
+//!   the toggle's steps: the other steps of the chain are pending (below).
 //! - **Negative, cancel and reject.** A cancel by another
 //!   `security_admin` is `Unauthorized` and a reject by the requester
 //!   `SelfApproval`; the requester's cancel (by its other credential) and
@@ -108,6 +119,17 @@
 //!   state (`SelfApproval`, not `Consumed` or `Expired`), then consumed or
 //!   expired; a reject and a cancel authorize their actor before the
 //!   lookup too (`a48_neg_refusals_come_in_the_flows_order`).
+//! - **Negative, single actor needs `security_admin`.** With
+//!   `single_actor_mode` on ([`seed_policy`]) and the toggle turned on at
+//!   once, a gated write by a `trust_admin` of `ten_a` without instance
+//!   `security_admin` (a keyset version create, through
+//!   `skyoauth_service::trust::submit_create_version`) is not applied
+//!   alone: it is a pending `trust_keyset_version_create` operation, no
+//!   version is written, and an instance `security_admin` then approves it
+//!   on the tenant's path; the same create by an operator that holds both
+//!   roles is applied at once with the outcome `success_single_actor` and
+//!   no operation (proposal Q4, ruled)
+//!   (`a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone`).
 //!
 //! # Spec and flow picks
 //!
@@ -125,11 +147,41 @@
 //! `success_single_actor`), the event actions and their actors (the
 //! approver on `administrative_operation.approve`, the requester on the
 //! policy event), the `approve`, `cancel` and `reject` operations, the
-//! 24-hour expiry (D5; Q1 is the user's ruling), that an expired operation
-//! stays `pending` (D22), that the requester must still hold its role and
-//! credential at the approval (Q5; D21), that cancel is the requester's
-//! and reject another `security_admin`'s (section 3), and the refusal
-//! order and its error names (D20, section 3; `ApprovalError`).
+//! 24-hour expiry (D5; proposal Q1 is the user's ruling), that an expired
+//! operation stays `pending` (D22), that the requester must still hold its
+//! role and credential at the approval (proposal Q5; D21), that cancel is
+//! the requester's and reject another `security_admin`'s (section 3), that
+//! under `single_actor_mode` the one actor must hold instance
+//! `security_admin` (proposal Q4), that both events of an approve carry
+//! its one clock sample (D28), and the refusal order and its error names
+//! (D20, section 3; `ApprovalError`). `acknowledge_widening` is sent `true`
+//! on every request: the toggle ignores it, and D2 ignores the flag on a
+//! non-widening write and rejected refusing it, so `true` holds whichever
+//! way the toggle is classed.
+//!
+//! These tests pin those picks by exact name or value; a change of a pick
+//! must touch the tests listed with it:
+//!
+//! - the refusal order (D20): `a48_neg_refusals_come_in_the_flows_order`,
+//!   and the error each refusal test expects;
+//! - a cancel by another operator on the instance path is `Unauthorized`
+//!   (proposal Q1's instance-path rule; `NotFound` on a tenant path):
+//!   `a48_neg_a_cancelled_or_rejected_toggle_never_applies`;
+//! - a reject by the requester is `SelfApproval`:
+//!   `a48_neg_a_cancelled_or_rejected_toggle_never_applies`,
+//!   `a48_neg_self_approval_of_the_toggle_is_refused` and
+//!   `a48_neg_refusals_come_in_the_flows_order`;
+//! - an expired operation stays `pending` (D22):
+//!   `a48_neg_a_toggle_without_a_distinct_approver_never_applies` and
+//!   `a48_neg_refusals_come_in_the_flows_order`;
+//! - the audit events' actors, revisions, outcomes and actions, the
+//!   operation kinds (`instance_security_policy_update`, `approve`,
+//!   `cancel`, `reject`, `trust_keyset_version_create`) and outcomes
+//!   (`pending`, `applied`, `cancelled`, `rejected`, `success`,
+//!   `success_single_actor`), and the event times at the approve's clock
+//!   sample (D28): both positives,
+//!   `a48_neg_a_cancelled_or_rejected_toggle_never_applies` and
+//!   `a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone`.
 //!
 //! # Not expressible through the library, so not tested
 //!
@@ -155,7 +207,8 @@
 //! (tenants, audiences, sources, grants; T13.2, T13.8), and the toggle
 //! through the operator endpoints, with the request layer they need
 //! (generated IDs, T10.2; the role of each endpoint; T13.3). None of that
-//! is built. The read path of a pending operation (OQ-API-14; Q1 ruled) and
+//! is built. The read path of a pending operation (OQ-API-14; proposal Q1
+//! ruled) and
 //! the external audit sink to which T13.3 emits admin-operation events
 //! (OQ-TM-12) are not tested here either. A48's M1b stage, "human", is not
 //! touched.
@@ -174,6 +227,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde_json::{Value, json};
 use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
     jwk::DEFAULT_ALLOWED_ALGORITHMS,
@@ -188,10 +242,11 @@ use skyoauth_service::{
         registry::{
             self, AdminRole, AdminRoleBindingChanges, AdministrativeOperation, AuditActor,
             BootstrapRequest, ChainVerdict, InstanceSecurityPolicy, NewAdminCredential,
-            NewAdminIdentity, NewAdminRoleBinding, NewTenant, Status, bootstrap_instance,
-            lock_administrative_operation,
+            NewAdminIdentity, NewAdminRoleBinding, NewTenant, NewTrustKeyset, RegistryError,
+            Status, TrustKeysetVersion, bootstrap_instance, lock_administrative_operation,
         },
     },
+    trust::{KeysetWriteError, NewKeysetVersion, submit_create_version, validate_upload},
 };
 
 /// The instance ID of every fixture: a lowercase UUIDv7 (IR-057).
@@ -248,7 +303,11 @@ enum Policy {
 /// a configured and validated audit sink, revision 1. That mirror does not
 /// exist and no public API writes the row, so this is the one SQL write of
 /// the module; bootstrap then adopts the row unchanged (the lead's ruling
-/// of 2026-11-21, `registry::bootstrap`, "Adopting a policy row").
+/// of 2026-11-21, `registry::bootstrap`, "Adopting a policy row"). Inferred
+/// pick (layout §1.3, "Deployment-configuration stand-ins"):
+/// deployment-configuration state that IR-053 forbids writing online may
+/// be SQL-seeded by a scenario until the IR-053 mirror exists; this is
+/// that stand-in, and the layout lists it.
 async fn seed_policy(pool: &PgPool, single_actor_mode: bool) {
     sqlx::query(
         "INSERT INTO instance_security_policy \
@@ -389,7 +448,8 @@ async fn request(
         &mut transaction,
         &Submission {
             public_identity: key,
-            acknowledge_widening: false,
+            // Ignored by the toggle; `true` holds under D2 either way.
+            acknowledge_widening: true,
             operation_id: op,
             event_id: &event_id,
             now,
@@ -438,12 +498,24 @@ async fn prepare(
     prepare_on(pool, key, INSTANCE, op, now).await
 }
 
-/// Approves `prepared` with `key` on the instance path, echoing `pending`,
-/// with the clock at `now`, in a transaction committed either way. The
-/// IDs it writes are `appr_<op>`, `evt_appr_<op>` and `evt_write_<op>`.
+/// [`approve_on`] the instance path.
 async fn approve(
     pool: &PgPool,
     key: &str,
+    prepared: &PreparedApproval,
+    pending: &PendingOperation,
+    now: SystemTime,
+) -> Result<Applied, ApprovalError> {
+    approve_on(pool, key, INSTANCE, prepared, pending, now).await
+}
+
+/// Approves `prepared` with `key` on `scope`, echoing `pending`, with the
+/// clock at `now`, in a transaction committed either way. The IDs it
+/// writes are `appr_<op>`, `evt_appr_<op>` and `evt_write_<op>`.
+async fn approve_on(
+    pool: &PgPool,
+    key: &str,
+    scope: ApprovalScope<'_>,
     prepared: &PreparedApproval,
     pending: &PendingOperation,
     now: SystemTime,
@@ -458,7 +530,7 @@ async fn approve(
     let result = approve_operation(
         &mut transaction,
         key,
-        INSTANCE,
+        scope,
         prepared,
         &ApprovalEcho {
             request_digest: pending.request_digest,
@@ -1020,6 +1092,10 @@ async fn a48_neg_an_approver_without_security_admin_is_refused() {
         "Unauthorized",
     );
     refused(
+        approve_on(&pool, TRUST, ten_a, &prepared, &on, at(7)).await,
+        "Unauthorized",
+    );
+    refused(
         revoke(&pool, Revocation::Reject, TRUST, ten_a, "op_on", at(7)).await,
         "Unauthorized",
     );
@@ -1033,7 +1109,7 @@ async fn a48_neg_an_approver_without_security_admin_is_refused() {
 }
 
 #[tokio::test]
-async fn a48_neg_each_step_without_its_role_is_refused() {
+async fn a48_neg_each_toggle_step_without_its_role_is_refused() {
     let (db, pool) = fixture(Policy::Bootstrapped).await;
     let empty = written(&pool).await;
     // The request.
@@ -1056,7 +1132,7 @@ async fn a48_neg_each_step_without_its_role_is_refused() {
     assert_eq!(written(&pool).await, unchanged);
 
     // The requester without its role: its cancel, and an approval of what
-    // it requested (Q5; D21).
+    // it requested (proposal Q5; D21).
     let binding = registry::get_admin_role_binding(&pool, "rb_req")
         .await
         .unwrap();
@@ -1255,5 +1331,215 @@ async fn a48_neg_refusals_come_in_the_flows_order() {
     assert_eq!(written(&pool).await, unchanged);
     assert_eq!(state(&pool, "op_late").await, open());
     assert_eq!(flag(&policy(&pool).await), (2, true));
+    db.drop([pool]).await;
+}
+
+/// The key of `adm_both`, `trust_admin` of `ten_a` and instance
+/// `security_admin`.
+const BOTH: &str = "spki-sha256:both";
+
+/// The P-256 generator `G` and `2G`, as JWK coordinates: two distinct
+/// public keys on the curve, so the overlap check of two enabled versions
+/// finds no key under two kids.
+const P256_G: (&str, &str) = (
+    "axfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpY",
+    "T-NC4v4af5uO5-tKfA-eFivOM1drMV7Oy7ZAaDe_UfU",
+);
+const P256_2G: (&str, &str) = (
+    "fPJ7GI0DT36KUjgDBLUaw8CJaeJ38hs1pgtI_EdmmXg",
+    "B3dVENuO0EApPZrGn3Qw27p9reY86YIpngS3nSJ4c9E",
+);
+
+/// Submits the create of the enabled, open-ended version `id` of `ks_a`
+/// with one ES256 key `kid` at `point`, by `key`, as the operation `op`
+/// recorded by the event `evt_<op>`, at `now`, in a transaction committed
+/// either way.
+async fn create_version(
+    pool: &PgPool,
+    key: &str,
+    op: &str,
+    id: &str,
+    (kid, point): (&str, (&str, &str)),
+    now: SystemTime,
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    let (x, y) = point;
+    let keys = validate_upload(
+        json!({"keys": [{"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig",
+                         "kid": kid, "x": x, "y": y}]}),
+        DEFAULT_ALLOWED_ALGORITHMS,
+    )
+    .await
+    .unwrap();
+    let Value::Object(provenance) = json!({"uploaded_by": key, "file": format!("{kid}.jwks.json")})
+    else {
+        unreachable!()
+    };
+    let event_id = format!("evt_{op}");
+    let mut transaction = pool.begin().await.unwrap();
+    let result = submit_create_version(
+        &mut transaction,
+        &Submission {
+            public_identity: key,
+            acknowledge_widening: true,
+            operation_id: op,
+            event_id: &event_id,
+            now,
+        },
+        &NewKeysetVersion {
+            id,
+            tenant_id: "ten_a",
+            keyset_id: "ks_a",
+            keys: &keys,
+            effective_at: at(0),
+            expires_at: None,
+            status: Status::Enabled,
+            provenance: &provenance,
+        },
+        DEFAULT_ALLOWED_ALGORITHMS,
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    result
+}
+
+#[tokio::test]
+async fn a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone() {
+    let (db, pool) = fixture(Policy::Seeded {
+        single_actor_mode: true,
+    })
+    .await;
+    operator(
+        &pool,
+        "adm_both",
+        BOTH,
+        &[
+            ("rb_both_trust", AdminRole::TrustAdmin, Some("ten_a")),
+            ("rb_both_sec", AdminRole::SecurityAdmin, None),
+        ],
+    )
+    .await;
+    registry::create_trust_keyset(
+        &pool,
+        &NewTrustKeyset {
+            id: "ks_a".into(),
+            tenant_id: "ten_a".into(),
+            name: "partner".into(),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    // The gate on, at once: the one actor is a security_admin.
+    let Ok(Gated::Applied(gate)) = request(&pool, REQ, "op_gate", 1, true, at(1)).await else {
+        panic!("the toggle is not applied at once");
+    };
+    assert!(gate.widening_second_approver && gate.single_actor_mode);
+    let gated = policy(&pool).await;
+
+    // The trust_admin alone: pending, no version written.
+    let Gated::Pending(pending) = create_version(
+        &pool,
+        TRUST,
+        "op_kv",
+        "kv_trust",
+        ("k-trust", P256_G),
+        at(2),
+    )
+    .await
+    .unwrap() else {
+        panic!("the trust_admin's create is applied alone");
+    };
+    assert_eq!(pending.kind, OperationKind::TrustKeysetVersionCreate);
+    assert_eq!(pending.expected_revision, 0);
+    assert!(matches!(
+        registry::get_trust_keyset_version(&pool, "ten_a", "kv_trust").await,
+        Err(RegistryError::NotFound)
+    ));
+    assert_eq!(state(&pool, "op_kv").await, open());
+    assert_eq!(operation(&pool, "op_kv").await.actor_id, "adm_trust");
+
+    // An instance security_admin approves it on the tenant's path.
+    let ten_a = ApprovalScope::Tenant("ten_a");
+    let prepared = prepare_on(&pool, SEC, ten_a, "op_kv", at(3)).await.unwrap();
+    let Applied::KeysetVersion(written_kv) =
+        approve_on(&pool, SEC, ten_a, &prepared, &pending, at(4))
+            .await
+            .unwrap()
+    else {
+        panic!("the approval applied something else");
+    };
+    assert_eq!(
+        (
+            written_kv.id.as_str(),
+            written_kv.status,
+            written_kv.revision
+        ),
+        ("kv_trust", Status::Enabled, 1)
+    );
+    assert_eq!(
+        state(&pool, "op_kv").await,
+        ("applied".into(), Some(at(4)), None, None)
+    );
+
+    // An operator with both roles is applied at once, with no operation.
+    let Gated::Applied(both_kv) =
+        create_version(&pool, BOTH, "op_kv2", "kv_both", ("k-both", P256_2G), at(5))
+            .await
+            .unwrap()
+    else {
+        panic!("the security_admin's create is not applied at once");
+    };
+    assert_eq!(
+        (both_kv.id.as_str(), both_kv.status, both_kv.revision),
+        ("kv_both", Status::Enabled, 1)
+    );
+    assert_eq!(find_operation(&pool, "op_kv2").await, None);
+    assert_eq!(policy(&pool).await, gated);
+    assert_eq!(
+        events(&pool).await[1..],
+        [
+            event(
+                "evt_op_kv",
+                "adm_trust",
+                "administrative_operation.create",
+                "op_kv",
+                None,
+                Some(1),
+                "success",
+                2
+            ),
+            event(
+                "evt_appr_op_kv",
+                "adm_sec",
+                "administrative_operation.approve",
+                "op_kv",
+                Some(1),
+                Some(2),
+                "success",
+                4
+            ),
+            event(
+                "evt_write_op_kv",
+                "adm_trust",
+                "trust_keyset_version.create",
+                "kv_trust",
+                None,
+                Some(1),
+                "success",
+                4
+            ),
+            event(
+                "evt_op_kv2",
+                "adm_both",
+                "trust_keyset_version.create",
+                "kv_both",
+                None,
+                Some(1),
+                "success_single_actor",
+                5
+            ),
+        ]
+    );
+    assert_chain_intact(&pool).await;
     db.drop([pool]).await;
 }
