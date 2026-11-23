@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 3 merged, PR 4 open, PR 6 in progress (#116 merged), PRs 5, 7 and 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 4 merged, PR 5 open, PR 6 in progress (#116 merged), PRs 7 and 8 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
@@ -10,8 +10,9 @@ into migration `0005` itself (section 11; D15); the read-path index of the
 same sketch is a provisional lead pick, not ruled. Implemented so far: the
 in-transaction permit (PR 1), the registry operation module with the
 `0005` guard and index (PR 2), `crate::operation` with the toggle (PR 3),
-and, in review, the keyset kinds (PR 4); the tests of PR 6 have started
-(#116, merged). Not yet: the source kinds (PR 5), the rest of the tests
+the keyset kinds (PR 4), and, in review, the source kinds with the Q2
+disable-only add-on (PR 5); the tests of PR 6 have started (#116,
+merged). Not yet: the rest of the tests
 (PR 6), the ungated entry points made crate-private (PR 7), the test
 session's documents (PR 8), and any endpoint; no T00.x box is
 ticked. Every other choice below that goes beyond the written
@@ -150,19 +151,19 @@ The server classifies each write by a pure function of the write and, for
 a source update, the stored row read under its lock (the Q2 exception). No
 caller input decides it (ADR-008 item 12).
 
-| Write                                                                                                                        | Widening                                                        | Basis                                                                                                                                                                                                     |
-| ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create_version`, enabled or disabled                                                                                        | yes                                                             | the ruling ("a create"); Q3                                                                                                                                                                               |
-| `enable_version`, a re-enable and an enable of an already enabled version included                                           | yes                                                             | the ruling ("an enable, a re-enable"); `keyset.rs:100-103` writes the latter like any other enable                                                                                                        |
-| `disable_version`                                                                                                            | no                                                              | not among the ruling's writes (`keyset.rs:34-35`); ADR-008 item 3 by analogy                                                                                                                              |
-| `create_source`                                                                                                              | yes                                                             | the ruling                                                                                                                                                                                                |
-| `update_source` whose new `status` is `disabled` and whose every other mutable member equals the stored row's                | no (Q2, ruled by the user, 2026-11-23); before that ruling, yes | the 2026-11-22 ruling counts "a trust source write" (ADR-008:217-219); Q2, accepted, makes this exception, by analogy with ADR-008 item 3 and tasks:463 ("disabling is not widening" for an egress entry) |
-| any other `update_source`: an enable, a rename, a no-op, a disable that also changes a member, a change to a disabled source | yes                                                             | the ruling; `source.rs:49-52` already treats a disable that changes a member as a change                                                                                                                  |
+| Write                                                                                                                                             | Widening                                                        | Basis                                                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_version`, enabled or disabled                                                                                                             | yes                                                             | the ruling ("a create"); Q3                                                                                                                                                                               |
+| `enable_version`, a re-enable and an enable of an already enabled version included                                                                | yes                                                             | the ruling ("an enable, a re-enable"); `keyset.rs:100-103` writes the latter like any other enable                                                                                                        |
+| `disable_version`                                                                                                                                 | no                                                              | not among the ruling's writes (`keyset.rs:34-35`); ADR-008 item 3 by analogy                                                                                                                              |
+| `create_source`                                                                                                                                   | yes                                                             | the ruling                                                                                                                                                                                                |
+| `update_source` whose new `status` is `disabled` and whose every other mutable member equals the stored row's                                     | no (Q2, ruled by the user, 2026-11-23); before that ruling, yes | the 2026-11-22 ruling counts "a trust source write" (ADR-008:217-219); Q2, accepted, makes this exception, by analogy with ADR-008 item 3 and tasks:463 ("disabling is not widening" for an egress entry) |
+| any other `update_source`: an enable, a rename, a no-op on an enabled source, a disable that also changes a member, a change to a disabled source | yes                                                             | the ruling; `source.rs:49-52` already treats a disable that changes a member as a change                                                                                                                  |
 
 Before the Q2 ruling every trust source write was widening and both
 classifications depended on the write kind only. The user accepted Q2
 (2026-11-23, relayed by the lead), so the disable-only exception, an add-on to
-PR 5, proceeds: `classify_source_update(stored, changes)` returns "not widening"
+PR 5, is implemented there: `classify_source_update(stored, changes)` returns "not widening"
 exactly when `changes.status == Disabled` and the other fourteen members of
 `TrustSourceChanges` (`model.rs:937-953`) equal the stored ones. A finer
 per-member diff (fewer audiences narrows, a new algorithm widens) is rejected
@@ -315,7 +316,8 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
 
 1. Pure checks before any statement: the provenance check
    (`keyset.rs:168-169`), the syntax of a created source's members
-   (`source.rs:93-98`). The upload was validated before the transaction
+   (`source.rs:93-98`), and D27's pre-validation where a PR implements it
+   (PRs 4 and 5). The upload was validated before the transaction
    (Stage A, `keyset.rs:48-62`).
 2. Step 0, then step 1: the requester's operator rows `FOR SHARE`
    (`write.rs:43-59`; for the toggle, instance `security_admin`). When Q4
@@ -328,20 +330,24 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
    step function that takes them, shared with the approve (D26).
 3. A widening write with the flag unset is refused here
    (`WideningNotAcknowledged`). Its class depends on the kind only, except
-   a source update's (step 6); `disable_version` is never widening. (Until
-   the PR 5 add-on lands, a source update is classified here too, as
-   widening.)
+   a source update's, which skips this step and is checked at step 6;
+   `disable_version` is never widening.
 4. The `instance_security_policy` row `FOR SHARE` (new; D10). A missing
    row is `PolicyUnavailable` (D18). `disable_version` skips steps 3, 4
-   and 6: its class is fixed.
+   and 6: its class is fixed. A source update locks the row here whatever
+   its class, so one lock order holds, and refuses a missing row only at
+   step 6, once it is known to be widening (inferred).
 5. The module's own locks and reads, unchanged: the parent `trust_keyset`
    `FOR NO KEY UPDATE` (`keyset.rs:181-185`) and its reads; or the
    `trust_source` row `FOR NO KEY UPDATE` (`source.rs:123-129`), now
    reading every mutable column, not only the destinations (for the
    plan's `changed`).
 6. The Q2 add-on of PR 5 (Q2 ruled by the user, 2026-11-23): a source update is
-   classified from the stored row; a disable-only update is applied at once, and
-   any other update with the flag unset is `WideningNotAcknowledged`.
+   classified from the stored row; a disable-only update is applied at once
+   with outcome `success`, without the flag and whatever the policy row
+   says, even before bootstrap (inferred); any other update with the flag
+   unset is `WideningNotAcknowledged`, and then a missing policy row is
+   `PolicyUnavailable`.
 7. The module's checks, unchanged: the cap of 8 and the overlap check (on
    the in-transaction pool, section 8); the syntax of changed members and
    the egress entries `FOR SHARE` (`source.rs:130-135`).
@@ -445,10 +451,12 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    `keyset.rs:178-202` (the parent lock, the target read and revision, the
    cap, the overlap check of the stored versions on the in-transaction
    pool, the insert or compare-and-set), or steps 2 to 4 of
-   `source.rs:123-152` (the source row and revision, the class, the syntax
-   of changed members, the entries `FOR SHARE`, the insert or
-   compare-and-set). For the toggle: the policy row `FOR NO KEY UPDATE`
-   and its compare-and-set. The policy row is not read for a trust kind:
+   `source.rs:123-152` (the source row and revision, the syntax of
+   changed members, the entries `FOR SHARE`, the insert or
+   compare-and-set). The class is not computed again: the expected
+   revision pins the stored row, and the approve checks the plan's
+   `changed` against that row (PR 5, inferred). For the toggle: the
+   policy row `FOR NO KEY UPDATE` and its compare-and-set. The policy row is not read for a trust kind:
    an approval stays valid if the toggle went off meanwhile (inferred).
    The step function ends with the registry write and appends nothing: it
    returns the row and the domain event, unstamped (D26).
@@ -532,7 +540,7 @@ identity-registry:423-427; ADR-008:100-103).
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
 | the approver's `security_admin` role, enabled identity and credential (tasks:149: "rechecking revision and role")                                            | the payload itself: the projection, window, status and provenance; the source members  |
 | the approver is not the requester; the requester's identity is enabled, its submitting credential enabled and unrevoked, and its role held (Q5; D21)         | the raw upload's Stage A validation (`keyset.rs:550-563`); only its projection is kept |
-| the operation is pending, unexpired, unrevoked, of an approvable kind; the echo; the recomputed digest                                                       | the class: recomputed, and at an unchanged revision it is the same                     |
+| the operation is pending, unexpired, unrevoked, of an approvable kind; the echo; the recomputed digest                                                       | the class: not recomputed; `changed` is checked on the row the expected revision pins  |
 | the projection, parsed in full again before the transaction against the plan's `allowed_algorithms` and the current `allowed` set, and its fingerprint (D25) |                                                                                        |
 | the parsed projection equal byte for byte to the locked plan's (D24)                                                                                         |                                                                                        |
 | the database constraints, which run only here (section 3)                                                                                                    |                                                                                        |
@@ -843,11 +851,15 @@ pub async fn submit_update_source(
     changes: &TrustSourceChanges,
 ) -> Result<Gated<TrustSource>, SourceWriteError>;
 
-// Post-authorization steps (D26), as for keysets.
+// Post-authorization steps (D26), as for keysets. An update is split in
+// two (PR 5): the stored row's lock, which the request classifies from,
+// and the steps after it.
 pub(crate) async fn apply_create_source(/* transaction, requester, new */)
     -> Result<(TrustSource, UnstampedEvent), SourceWriteError>;
-pub(crate) async fn apply_update_source(/* transaction, requester,
-    tenant_id, id, expected_revision, changes */)
+pub(crate) async fn lock_source(/* transaction, tenant_id, id,
+    expected_revision */) -> Result<TrustSource, SourceWriteError>;
+pub(crate) async fn apply_locked_update(/* transaction, requester,
+    stored, changes */)
     -> Result<(TrustSource, UnstampedEvent), SourceWriteError>;
 // service/src/operation/mod.rs: apply_policy_toggle, likewise.
 
@@ -917,7 +929,10 @@ PR 7 must move are `service/tests/trust_keyset_version.rs`,
 `create_version` to set up rows) and the service path of
 `service/tests/schema_trust_source_egress_guard.rs` (its `trust::`
 import of `create_source` and `update_source`, and their calls in the
-case runner).
+case runner), and `service/tests/source_approval.rs` (its `direct_create`
+and `direct_update` helpers, which call the ungated `create_source` and
+`update_source` to set up rows, and the race tests that call
+`update_source` directly as the competing write).
 
 ### 10. Errors
 
@@ -1416,8 +1431,8 @@ OF revocation_operation_id` variant) is folded into migration `0005` itself,
     set); the current set only (the approver could not see what the
     request was validated against).
 26. **D26.** **Post-authorization step functions** (`apply_create_version`,
-    `apply_enable_version`, `apply_create_source`, `apply_update_source`,
-    `apply_policy_toggle`) take the authorized
+    `apply_enable_version`, `apply_create_source`, `lock_source` with
+    `apply_locked_update`, `apply_policy_toggle`) take the authorized
     `Requester { admin_id, credential_id }`, which `authorize_trust_admin`
     returns in place of the bare `admin_id` (PRs 4 and 5), run through the
     registry write and return the domain event unstamped; both `submit_*`
@@ -1546,7 +1561,7 @@ in its module docs). The kinds, `Applied` and `ApprovalError` hold the
 toggle's only: the trust kinds, `Applied::KeysetVersion` and
 `Applied::Source`, and `ApprovalError::Keyset` and `ApprovalError::Source`
 came with PR 4 (the keyset ones, with the `allowed` parameter of
-`prepare_approval`) or come with PR 5 (the source ones). `SystemClock` is the production `Clock`. The toggle's
+`prepare_approval`) or with PR 5 (the source ones). `SystemClock` is the production `Clock`. The toggle's
 compare-and-set is the crate-private registry writer
 `set_widening_second_approver`, so no ungated setter is public. The
 toggle's plan is exactly `requester_credential_id` and
@@ -1646,7 +1661,121 @@ of a keyset request against a toggle (the toggle's race is #116's
 emulation). The races PR 4 runs on two connections are on the operation
 row, the `trust_keyset` row and a version ID's insert.
 
-**Left open for PR 5.** Before T13.3 wires the endpoint, the lead decides
+**PR 5 as implemented** (`service/src/trust/source.rs`,
+`service/src/trust/write.rs`, `service/src/operation/source_plan.rs`,
+`service/src/operation/`; picks marked inferred in the module docs).
+`submit_create_source` and `submit_update_source` are the gated writes;
+`create_source` and `update_source` become step 1 plus
+`apply_create_source`, or plus `lock_source` and `apply_locked_update`
+(the sketch above now shows the split), and stay public until PR 7. The
+request steps that PR 4 ran together are split in `write.rs`
+(`authorize_gated_requester`, `require_acknowledged`, `lock_policy_shared`,
+`widening_mode`) so that an update can classify after its stored-row lock.
+A create's refusal order is PR 4's. An update's is the requester, the
+stored row (`NotFound`, `StaleRevision`), then, for a widening update only,
+the flag and a missing policy row (inferred); the policy row is locked
+`FOR SHARE` before the source row for every update, a disable-only one
+included, so the lock order does not depend on the class (inferred). Q2:
+`classify_source_update` compares the fourteen other members with the
+stored row by value; `proof_bounds` by the database's `jsonb` equality on
+the locked row (key order and a number's spelling are no change, and a
+stored number beyond `f64` precision, which only a row written outside the
+service can hold, is compared exactly, so an echo that rounds it is a
+change), at the request and again at the approve (inferred).
+`serde_json` is built with `float_roundtrip`, so a float in a plan's
+`proof_bounds` text reads back to the value the request compared;
+without it, some floats (`1.132605069600529e-13`) came back one unit off
+and the approve refused a valid plan as `PlanIntegrity`. A disabled source
+written with its stored members is disable-only too (inferred). A
+disable-only update is applied at once with outcome `success`, even before
+bootstrap (inferred: the mode table's first row does not read the policy).
+D27 at the request, before any statement, so before the requester:
+the syntax of a create's destinations, then the non-empty, `> 0` and
+`true` checks of section 3's list and the `skyoauth_string_list` domain,
+each refused as the `Invariant` the database names, the domain first and
+then the table checks by name, as PostgreSQL runs them (inferred: scope
+and order; the kind, profile, replay, length, character, unique and
+foreign-key checks stay approve-time). A source parses nothing in the
+transaction, so `ValidationBusy` does not arise. The plans are
+`CreateSourcePlan` and `UpdateSourcePlan`
+(`service/src/operation/source_plan.rs`), each with its fifteen mutable members in a private `source` field, built
+by its constructor or parsed from a stored plan. A create's plan is its 21
+members: the requester's credential, the source's ID, tenant, kind, keyset
+and cluster, and the fifteen mutable members; an update's is 18: the
+credential, the source's ID, the fifteen members as requested and
+`changed`, the sorted names of the members that differ from the stored
+row (inferred: member names are the registry's; `proof_bounds` as compact
+JSON text, as a keyset create's provenance). Every member is public: the
+CA bundle and the reviewer credential are named by reference only. At
+approve, a create plan whose tenant is not the operation's, and an update
+plan whose `changed` is not what its changes change on the row at the
+expected revision, are `PlanIntegrity` (inferred); the class is not
+computed again, since that revision pins the row it was read from
+(inferred); a source write's refusal, a stale target revision included, is
+`ApprovalError::Source`. The approval rechecks the syntax and each entry
+under its own locks (operator rows, operation row, source row, entries),
+so an entry disabled after the request is `Source(EgressNotAllowed)`, not
+the `0011` guard's `Invariant`; the guard then finds the entry the
+approval holds. That the guard refuses on the service path, as
+`Invariant { kind: EgressEntryEnabled }`, when the service's own entry
+check is skipped, is verified only by a mutant (the reviewer's, which
+dropped the check); no committed test reaches the guard through the
+service, which always checks the entry first. The guard's own refusal and
+the bare registry writers' mapping of it are tested in
+`service/tests/schema_trust_source_egress_guard.rs` and
+`service/tests/trust_source_egress.rs`. `service/tests/source_approval.rs`
+tests, on two connections where a race is involved: the plan and digest of both kinds,
+the mode table with the disable-only row, `WideningNotAcknowledged` for
+every widening shape (a disable plus a change, an enable, a re-enable, a
+no-op on an enabled source, a changed `proof_bounds` value), floats that
+need the shortest round trip through the plan text and through a request
+body, `proof_bounds` beyond `f64` precision written by raw SQL, the refusal
+order before bootstrap, D27 against the database's own refusal case by
+case, canonical-form destinations at the request and at approve, the entry
+disabled between request and approve (A05) and the approval waiting for an
+uncommitted entry disable while it holds the source row, the clock with
+the compare-and-set waiting behind an uncommitted `consumed_assertion`
+insert (`FOR KEY SHARE`) in both directions of the expiry, the expiry
+boundary, D24 (a plan unequal to its digest, and a locked plan changed
+past the `0005` trigger after the preparation), the preparation's
+authorize-before-parse, a digest other than the prepared one, the
+requester's binding and credential states, a break-glass restoration
+between request and approve (the restored operator's approval is
+`RequesterNotAuthorized`), a name taken before the approve (refused,
+pending), the tenant-path cancel and reject, two approves, approve and
+cancel, approve and a direct write in both commit orders, and the policy
+row on the real path: a source create holding it `FOR SHARE` against
+`submit_widening_toggle` holding it `FOR NO KEY UPDATE`, both commit
+orders, and an update that waits for the toggle before it locks its
+source row. Not tested: a source plan changed past the guard before the
+preparation and put back before the approval (#116's toggle test covers
+the comparison it relies on), and PostgreSQL 17 locally (the PR's runs
+used 16.15; CI uses 17).
+
+PR 5's mutants (outside the repository; this records the verdicts): 74,
+covering the class of an update, the shared gate steps and
+`authorize_trust_admin`, the lock order (the policy row before the source
+row, the source row's strength, the requester first), the clock before the
+source write and between the source row's lock and the compare-and-set,
+the plans' members, D24 and D27 (scope and order), canonical form and the
+egress entries at the request and the approve, the dispatch, the
+cancel and reject guards, the approve operation's tenant (M31), the
+events, the pending rows, the savepoints, the isolation, and `proof_bounds`
+compared in memory or always equal, at the request and at the approve.
+72 are killed.
+Two are equivalent: the cancel's kind-role guard dropped (PR 4's verdict
+holds with the source kinds, since `requester_role` maps every tenant kind
+to tenant `trust_admin`), and an approve that classifies the update again
+and refuses a disable-only one (a request-written plan is never
+disable-only against the row its expected revision pins, since the approve
+also checks `changed` against that row; only a raw plan could be, and
+applying a disable widens nothing). The savepoints of the two `submit_*`
+functions survived the first run, because a `COMMIT` of an aborted
+transaction rolls back without an error; a test that keeps using the
+caller's transaction after a refusal and probes the locks with `NOWAIT`
+kills them.
+
+**Left open for PR 5** (PR 5's outcome follows this paragraph). Before T13.3 wires the endpoint, the lead decides
 whether `acknowledge_widening` applies to the toggle, turning it off
 included (ADR-008 item 12; "Not decided here"); PRs 3 and 4 ignore the
 flag for it. Three PR 3 mutants are equivalent only because the toggle is
@@ -1672,6 +1801,12 @@ refuses it (`a_plan_written_past_its_guard_is_plan_integrity`, #116,
 a plan whose projection text is not the canonical text the preparation
 parsed, and a locked plan changed after the preparation with the `0005`
 immutability trigger disabled in between, are both `PlanIntegrity`.
+PR 5 kills the clock mutant with a source compare-and-set waiting behind an
+uncommitted `consumed_assertion` insert, kills the approve operation
+inserted with tenant NULL with the source kinds too, kills the D24
+comparison dropped for both source kinds, and finds the kind-role guard
+still equivalent. Still open after PR 5: whether `acknowledge_widening`
+applies to the toggle (the lead's, before T13.3).
 
 **Line numbers.** Line numbers into the code and the migrations README
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed
@@ -1702,7 +1837,7 @@ the harness and `docs/testing/conformance-layout.md`):
 | 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated | —       |
 | 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                        | 2       |
 | 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)          | 1, 3    |
-| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (done in PR 4), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); the tenant-path cancel's `NotFound` is done (PR 4)                                                                                  | 3       |
+| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (done in PR 4), `apply_*` split, D27 pre-validation, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); the tenant-path cancel's `NotFound` is done (PR 4). Implemented (see "PR 5 as implemented")                                                  | 3       |
 | 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                               | each PR |
 | 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                           | 6       |
 | 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                             | 6       |

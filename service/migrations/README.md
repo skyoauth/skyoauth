@@ -1195,9 +1195,10 @@ The database does not enforce these rules; the service must:
   the operation and the remaining updates of step 3. `audit_id` stays an
   immediate, not deferrable foreign key, so the event is inserted first.
   Writes that create no operation (consume, outcome) update their rows
-  before the head, in the `0002` order. A trust source write (T11.2)
-  creates no operation either; its order is in "Trust source writes" under
-  "Rust registry surface".
+  before the head, in the `0002` order. A trust source write (T11.2) that
+  is applied at once creates no operation either, and a pending gated
+  request writes no source row; both orders are in "Trust source writes"
+  under "Rust registry surface".
 
 - `0005` makes two `0002` tables foreign-key targets, so a bare `TRUNCATE`
   of them now fails with `0A000` (a table referenced in a foreign key) before
@@ -3422,14 +3423,15 @@ overlap check refuses to compare such a stored row.
 
 ### Trust source writes
 
-`skyoauth_service::trust::create_source` and `update_source` are the
-audited write path of a trust source with the IR-152 egress check (T11.2;
-see their module documentation for the full rules). Library-level only: no
-endpoint calls them and nothing wires them at startup. Each runs in the
-caller's transaction, in a savepoint of its own that it rolls back on every
-error, and neither commits nor rolls back the caller's transaction. The
-picks are the lead's (provisional lead pick, 2026-11-22) unless marked
-inferred:
+`skyoauth_service::trust::create_source` and `update_source`, and the
+gated `submit_create_source` and `submit_update_source`, are the audited
+write path of a trust source with the IR-152 egress check (T11.2; see their
+module documentation for the full rules). Library-level only: no endpoint
+calls them and nothing wires them at startup. Each runs in the caller's
+transaction, in a savepoint of its own that it rolls back on every error,
+and neither commits nor rolls back the caller's transaction. The picks are
+the lead's (provisional lead pick, 2026-11-22; the gate's, 2026-11-23)
+unless marked inferred:
 
 - Only a `trust_admin` of the source's tenant writes
   (`authorize_operator_locked` with `OperatorScope::Tenant` and
@@ -3466,6 +3468,31 @@ inferred:
   resolves to, belongs to the fetcher or the egress entry writer (inferred).
 - Only `READ COMMITTED` runs: any other level is `UnsupportedIsolation`
   before any lock. A `40001` or `40P01` is `RegistryError::Retry`.
+- The gate (`docs/proposals/second-approver-gated-writes.md`, its PR 5):
+  every create is widening, and so is every update except a disable-only
+  one, whose new `status` is `disabled` and whose other fourteen members
+  equal the stored row's, `proof_bounds` by `jsonb` equality on the locked
+  row (Q2, ruled by the user, 2026-11-23). The server
+  decides the class from the stored row. A disable-only update is applied
+  at once with outcome `success`, without `acknowledge_widening`, whatever
+  the policy row says; a widening write without the flag is
+  `WideningNotAcknowledged`, then a missing policy row `PolicyUnavailable`,
+  and it is applied at once with outcome `success_widening` while the toggle
+  is off, applied with `success_single_actor` under `single_actor_mode` for
+  a requester who also holds instance `security_admin` (Q4), and pending
+  otherwise. Before any statement a request refuses the plainly typed
+  `CHECK`s (D27: the non-empty members, `review_timeout_ms > 0`,
+  `stale_revocation_acknowledged` true, the `skyoauth_string_list` domain)
+  with the `Invariant` the database gives, so an unauthorized caller gets
+  them too (inferred: scope and order). A pending operation's plan holds
+  the source's public members only (`ca_bundle_ref` and
+  `reviewer_credential_ref` are references, never secrets), with
+  destinations in canonical form; an update's also holds `changed`, the
+  members that differ from the stored row. The approval reruns the write
+  from the plan under its own locks: the syntax, each entry `FOR SHARE`
+  and the insert or the compare-and-set at the operation's expected
+  revision. `create_source` and `update_source` stay ungated, and
+  test-only, until the proposal's PR 7 makes them crate-private.
 - The event is `trust_source.create` or `trust_source.update` (every
   update, a status-only one included; provisional lead pick, 2026-11-22,
   open), appended last in the source's tenant, with the operator as actor.
@@ -3473,15 +3500,23 @@ inferred:
   but have no writer yet. The event records no destination and no entry ID,
   since the envelope has no member for them (inferred).
 
-Lock order, extending the orders above for this write, which creates no
-operation: the operator rows (`authorize_operator_locked`, `FOR SHARE`),
-then, for an update, the `trust_source` row (`FOR NO KEY UPDATE`, raised
-to `FOR UPDATE` by the compare-and-set, see below), then the egress entry
-rows `FOR SHARE` (discovery before TokenReview; a valid source
-has at most one), then the write's own locks, then the audit head last. It
-puts `trust_source` before `egress_allowlist_entry`, against the by-name
-table order of step 1 of "What 0005 adds", which is for writes that create
-an operation: an update reads the stored row before it knows which entry to
+Lock order, extending the orders above for this write: the operator rows
+(`FOR SHARE`; a gated request also locks the instance `security_admin`
+binding, if any, in the same `authorize_roles_locked` statement), then, for
+a gated request, the `instance_security_policy` row `FOR SHARE` (every
+gated update, a disable-only one included; inferred), then, for an update,
+the `trust_source` row (`FOR NO KEY UPDATE`, raised to `FOR UPDATE` by the
+compare-and-set, see below), then the egress entry rows `FOR SHARE`
+(discovery before TokenReview; a valid source has at most one), then the
+write's own locks, then the audit head last. A pending request writes no
+source: it appends its `administrative_operation.create` event (the audit
+head) and then inserts the operation. An approval takes its operator rows,
+the operation row `FOR NO KEY UPDATE`, then the source row, the entries and
+the write as above, samples the clock once (D28), then takes the audit
+head; it takes no policy row. The order puts `instance_security_policy` and
+`trust_source` before `egress_allowlist_entry`, against the by-name table
+order of step 1 of "What 0005 adds", which is for writes that create an
+operation: an update reads the stored row before it knows which entry to
 lock. A concurrent update of the same source waits on the source row and
 holds no entry lock while it waits; it then reads the committed revision
 and is `StaleRevision`. `FOR SHARE` conflicts with the `UPDATE` that
@@ -3534,11 +3569,13 @@ Follow-ups and open questions:
 - A trust source write counts as widening and needs an IR-054 approval by
   a second approver while `widening_second_approver` is on (ruled by the
   user, 2026-11-22, relayed by the lead; this decides the IR-052 widening
-  question for this write). The write path must not be wired to an
-  endpoint before the request layer exists (generated IDs, T10.2; the role
-  of each endpoint, T13.2, T13.3) and before the source kinds of the
-  second-approver flow land (`docs/proposals/second-approver-gated-writes.md`,
-  PR 5; no task ID names the flow).
+  question for this write), except a disable-only update (Q2, ruled by the
+  user, 2026-11-23). `submit_create_source` and `submit_update_source` put
+  the writes through the second-approver flow
+  (`docs/proposals/second-approver-gated-writes.md`, PR 5; no task ID names
+  the flow). The write path must not be wired to an endpoint before the
+  request layer exists (generated IDs, T10.2; the role of each endpoint,
+  T13.2, T13.3), and an endpoint calls the gated writes only.
 - The fetch-time `jwks_uri` match and the degraded health signal (IR-152)
   are not built. The egress check has a database backstop: the trigger
   pattern of `docs/proposals/ir-080-assignment-write-guard.md` is accepted

@@ -17,6 +17,7 @@ use super::{
     UnstampedEvent,
     digest::{from_microseconds, microseconds_since_epoch},
     keyset_plan::{CreatePlan, EnablePlan},
+    source_plan::{CreateSourcePlan, UpdateSourcePlan, changed_members},
     toggle::{TogglePlan, apply_policy_toggle, lock_policy_at},
 };
 use crate::jwk::{Algorithm, ValidatedKeyset};
@@ -31,6 +32,7 @@ use crate::persistence::registry::{
 use crate::trust::{
     NewKeysetVersion,
     keyset::{apply_create_version, apply_enable_version, check_provenance, read_version_identity},
+    source::{apply_create_source, apply_locked_update, lock_source, proof_bounds_equal},
     validate_upload,
     write::{in_savepoint, require_read_committed},
 };
@@ -67,6 +69,8 @@ const READ_PLAN: &str =
 enum Payload {
     TrustKeysetVersionCreate(CreatePlan),
     TrustKeysetVersionEnable(EnablePlan),
+    TrustSourceCreate(CreateSourcePlan),
+    TrustSourceUpdate(UpdateSourcePlan),
     InstanceSecurityPolicyUpdate(TogglePlan),
 }
 
@@ -80,6 +84,12 @@ impl Payload {
             OperationKind::TrustKeysetVersionEnable => {
                 EnablePlan::from_plan(plan).map(Self::TrustKeysetVersionEnable)
             }
+            OperationKind::TrustSourceCreate => {
+                CreateSourcePlan::from_plan(plan).map(Self::TrustSourceCreate)
+            }
+            OperationKind::TrustSourceUpdate => {
+                UpdateSourcePlan::from_plan(plan).map(Self::TrustSourceUpdate)
+            }
             OperationKind::InstanceSecurityPolicyUpdate => {
                 TogglePlan::from_plan(plan).map(Self::InstanceSecurityPolicyUpdate)
             }
@@ -90,6 +100,8 @@ impl Payload {
         match self {
             Self::TrustKeysetVersionCreate(_) => OperationKind::TrustKeysetVersionCreate,
             Self::TrustKeysetVersionEnable(_) => OperationKind::TrustKeysetVersionEnable,
+            Self::TrustSourceCreate(_) => OperationKind::TrustSourceCreate,
+            Self::TrustSourceUpdate(_) => OperationKind::TrustSourceUpdate,
             Self::InstanceSecurityPolicyUpdate(_) => OperationKind::InstanceSecurityPolicyUpdate,
         }
     }
@@ -339,7 +351,10 @@ pub async fn prepare_approval(
     let payload = Payload::parse(kind, &plan).ok_or(ApprovalError::PlanIntegrity)?;
     let keys = match &payload {
         Payload::TrustKeysetVersionCreate(plan) => Some(prepare_keys(plan, allowed).await?),
-        Payload::TrustKeysetVersionEnable(_) | Payload::InstanceSecurityPolicyUpdate(_) => None,
+        Payload::TrustKeysetVersionEnable(_)
+        | Payload::TrustSourceCreate(_)
+        | Payload::TrustSourceUpdate(_)
+        | Payload::InstanceSecurityPolicyUpdate(_) => None,
     };
     Ok(PreparedApproval {
         operation_id: operation_id.into(),
@@ -503,6 +518,12 @@ async fn approve_steps(
         Payload::TrustKeysetVersionEnable(plan) => {
             apply_enable(transaction, &locked, &requester, &plan).await?
         }
+        Payload::TrustSourceCreate(plan) => {
+            apply_source_create(transaction, &locked, &requester, &plan).await?
+        }
+        Payload::TrustSourceUpdate(plan) => {
+            apply_source_update(transaction, &locked, &requester, &plan).await?
+        }
         Payload::InstanceSecurityPolicyUpdate(plan) => {
             let policy = lock_policy_at(transaction, locked.expected_revision).await?;
             let (row, event) = apply_policy_toggle(
@@ -628,6 +649,59 @@ async fn apply_enable(
     )
     .await?;
     Ok((Applied::KeysetVersion(row), event))
+}
+
+/// Step 5 of a trust source create's approve: the create's steps from the
+/// plan (D26): the syntax of its destinations again, each entry
+/// `FOR SHARE` and the insert. The tenant is the operation's; a plan that
+/// names another is [`ApprovalError::PlanIntegrity`] (inferred: the
+/// request writes the operation in the source's tenant, so another value
+/// is a data-integrity error).
+async fn apply_source_create(
+    transaction: &mut Transaction<'_, Postgres>,
+    locked: &AdministrativeOperation,
+    requester: &Requester,
+    plan: &CreateSourcePlan,
+) -> Result<(Applied, UnstampedEvent), ApprovalError> {
+    let new = plan.to_new().ok_or(ApprovalError::PlanIntegrity)?;
+    if locked.tenant_id.as_deref() != Some(new.tenant_id.as_str()) {
+        return Err(ApprovalError::PlanIntegrity);
+    }
+    let (row, event) = apply_create_source(transaction, requester, &new).await?;
+    Ok((Applied::Source(row), event))
+}
+
+/// Step 5 of a trust source update's approve: the stored row at the
+/// operation's `expected_revision` `FOR NO KEY UPDATE`, whose members the
+/// changes differ from must be the plan's `changed` (inferred: at the same
+/// revision the row is the one the request read, so another list is a
+/// data-integrity error, [`ApprovalError::PlanIntegrity`]); then the
+/// update's steps (D26). The class is not computed again: the revision
+/// binds the row the request classified.
+async fn apply_source_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    locked: &AdministrativeOperation,
+    requester: &Requester,
+    plan: &UpdateSourcePlan,
+) -> Result<(Applied, UnstampedEvent), ApprovalError> {
+    let tenant_id = locked
+        .tenant_id
+        .as_deref()
+        .ok_or(ApprovalError::PlanIntegrity)?;
+    let changes = plan.to_changes().ok_or(ApprovalError::PlanIntegrity)?;
+    let stored = lock_source(
+        transaction,
+        tenant_id,
+        &plan.source_id,
+        locked.expected_revision,
+    )
+    .await?;
+    let equal = proof_bounds_equal(transaction, &stored, &changes.proof_bounds).await?;
+    if changed_members(&stored, &changes, equal) != plan.changed {
+        return Err(ApprovalError::PlanIntegrity);
+    }
+    let (row, event) = apply_locked_update(transaction, requester, &stored, &changes).await?;
+    Ok((Applied::Source(row), event))
 }
 
 /// A cancel or a reject.
