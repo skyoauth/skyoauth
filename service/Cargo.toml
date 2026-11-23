@@ -17,7 +17,8 @@ sha2 = { version = "0.11.1", default-features = false }
 # Exact pin: persistence::migrate calls the `#[doc(hidden)]` `Migrator::run_direct`.
 # `json` decodes and binds the registry's jsonb columns.
 sqlx = { version = "=0.9.1", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+# `time`: the bounded wait of the in-transaction parse permit (`trust::keyset`).
+tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.44"
 url = "2.5.8"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

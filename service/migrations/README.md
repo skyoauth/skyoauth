@@ -3177,20 +3177,26 @@ stay provisional until Gate M0:
   run none. The compared stored versions (the other enabled versions whose
   windows intersect, and the re-enabled version itself) pass
   `parse_stored` as a cheap gate and then a full
-  `validate_keyset(&stored, &KNOWN_ALGORITHMS)` on the same bounded pool;
+  `validate_keyset(&stored, &KNOWN_ALGORITHMS)` on the in-transaction pool
+  (not Stage A's);
   a failure is `StoredVersion`, a data-integrity error. The T11.7 verifier
   builds its keys the same way, never from `parse_stored`.
 - That full parse runs inside the transaction and is linear in the
   intersecting enabled versions, up to 8 stored sets per write under the
-  cap (an enable's target and at most 7 others). It holds the parent keyset row, the
-  operator rows `FOR SHARE`, a database connection and one of the two
-  process-wide validation workers, so it can starve other tenants' Stage
-  A. Estimated at about 0.18 s per compared 20-key set in release; debug
-  builds measured 0.30 s for 1 and 1.31 s for 8 compared versions, the
-  most the cap allows. Wiring precondition: before any endpoint calls the module, the
-  in-transaction parses need a permit or priority separate from Stage A's,
-  or a stored marker that a projection passed the point checks (which, or
-  a change of `KeysetVersion`, removes the parse).
+  cap (an enable's target and at most 7 others). It holds the parent
+  keyset row, the operator rows `FOR SHARE`, a database connection and one
+  of the `IN_TRANSACTION_WORKERS` (2, inferred) workers of a pool of its
+  own, separate from Stage A's `VALIDATION_WORKERS`: a stored-version parse
+  never waits behind an upload's validation, and an upload never waits
+  behind a parse. A permit not granted within `IN_TRANSACTION_WAIT` (2 s,
+  inferred; per acquisition, and an enable acquires twice) is
+  `KeysetWriteError::ValidationBusy`, retryable, and the savepoint
+  rollback releases the parent row. Estimated at about 0.18 s per compared
+  20-key set in release; debug builds measured 0.30 s for 1 and 1.31 s for
+  8 compared versions, the most the cap allows. The wiring precondition
+  (a permit of its own) is done; the stored marker that a projection
+  passed the point checks (or a change of `KeysetVersion`) remains the
+  follow-up that removes the parse.
 - Rotation (inferred): validity windows are immutable in the registry
   (whether they should stay so is open), so disabling is the only
   retirement. Disable the open-ended old version, then create the
