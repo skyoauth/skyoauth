@@ -193,6 +193,18 @@ pub(crate) fn microseconds_since_epoch(time: SystemTime) -> Option<i64> {
     }
 }
 
+/// The time `microseconds` after the Unix epoch (before it when negative):
+/// the inverse of [`microseconds_since_epoch`] on whole microseconds.
+/// `None` when `SystemTime` cannot hold it.
+pub(crate) fn from_microseconds(microseconds: i64) -> Option<SystemTime> {
+    let magnitude = std::time::Duration::from_micros(microseconds.unsigned_abs());
+    if microseconds >= 0 {
+        UNIX_EPOCH.checked_add(magnitude)
+    } else {
+        UNIX_EPOCH.checked_sub(magnitude)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -450,5 +462,13 @@ mod tests {
         assert_eq!(microseconds_since_epoch(before), Some(-1));
         let before = UNIX_EPOCH - Duration::from_nanos(1_001);
         assert_eq!(microseconds_since_epoch(before), Some(-2));
+        for micros in [0, 1, -1, 1_790_086_400_123_456, -62_135_596_800_000_000] {
+            let time = from_microseconds(micros).unwrap();
+            assert_eq!(microseconds_since_epoch(time), Some(micros));
+        }
+        assert_eq!(
+            from_microseconds(1_790_086_400_123_456),
+            Some(UNIX_EPOCH + Duration::from_micros(1_790_086_400_123_456))
+        );
     }
 }

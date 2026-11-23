@@ -14,9 +14,12 @@ use super::{
     Applied, ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, DigestEnvelope,
     NotApprovableReason, OUTCOME_APPLIED, OUTCOME_CANCELLED, OUTCOME_REJECTED, OUTCOME_SUCCESS,
     OperationKind, PLAN_REQUESTER_CREDENTIAL_ID, RequestDigest, Requester, RevokeIds,
-    digest::microseconds_since_epoch,
+    UnstampedEvent,
+    digest::{from_microseconds, microseconds_since_epoch},
+    keyset_plan::{CreatePlan, EnablePlan},
     toggle::{TogglePlan, apply_policy_toggle, lock_policy_at},
 };
+use crate::jwk::{Algorithm, ValidatedKeyset};
 use crate::persistence::registry::{
     AdminRole, AdministrativeOperation, ApprovalAuthority, AuditActor, AuthorizedOperator,
     JsonObject, NewAdministrativeOperation, NewAuditEvent, OperatorRequest, OperatorScope,
@@ -25,7 +28,12 @@ use crate::persistence::registry::{
     insert_administrative_operation, lock_administrative_operation,
     revoke_administrative_operation,
 };
-use crate::trust::write::{in_savepoint, require_read_committed};
+use crate::trust::{
+    NewKeysetVersion,
+    keyset::{apply_create_version, apply_enable_version, check_provenance, read_version_identity},
+    validate_upload,
+    write::{in_savepoint, require_read_committed},
+};
 
 /// The kind of an approval (IR-054), of a cancel and of a reject (section
 /// 2; inferred names, as the audit verbs).
@@ -57,6 +65,8 @@ const READ_PLAN: &str =
 /// What an approval needs of a kind's plan: the plan parsed as the kind's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Payload {
+    TrustKeysetVersionCreate(CreatePlan),
+    TrustKeysetVersionEnable(EnablePlan),
     InstanceSecurityPolicyUpdate(TogglePlan),
 }
 
@@ -64,6 +74,12 @@ impl Payload {
     /// The plan of an operation of `kind`, or `None` when it is not one.
     fn parse(kind: OperationKind, plan: &JsonObject) -> Option<Self> {
         match kind {
+            OperationKind::TrustKeysetVersionCreate => {
+                CreatePlan::from_plan(plan).map(Self::TrustKeysetVersionCreate)
+            }
+            OperationKind::TrustKeysetVersionEnable => {
+                EnablePlan::from_plan(plan).map(Self::TrustKeysetVersionEnable)
+            }
             OperationKind::InstanceSecurityPolicyUpdate => {
                 TogglePlan::from_plan(plan).map(Self::InstanceSecurityPolicyUpdate)
             }
@@ -72,6 +88,8 @@ impl Payload {
 
     fn kind(&self) -> OperationKind {
         match self {
+            Self::TrustKeysetVersionCreate(_) => OperationKind::TrustKeysetVersionCreate,
+            Self::TrustKeysetVersionEnable(_) => OperationKind::TrustKeysetVersionEnable,
             Self::InstanceSecurityPolicyUpdate(_) => OperationKind::InstanceSecurityPolicyUpdate,
         }
     }
@@ -84,6 +102,9 @@ pub struct PreparedApproval {
     operation_id: String,
     request_digest: RequestDigest,
     payload: Payload,
+    /// A keyset create's projection, parsed in full on the Stage A pool
+    /// (D25); `None` for every other kind.
+    keys: Option<ValidatedKeyset>,
 }
 
 impl PreparedApproval {
@@ -276,12 +297,19 @@ fn check_open(locked: &AdministrativeOperation) -> Result<(), ApprovalError> {
 /// is consumed, revoked or expired at `now` ([`ApprovalError::NotApprovable`]);
 /// only then the digest and the plan ([`ApprovalError::PlanIntegrity`] for a
 /// stored digest that is not 32 bytes, or a plan that is not its kind's).
-/// Takes no lock and writes nothing.
+/// For a keyset create it then parses the plan's projection in full on the
+/// Stage A pool ([`validate_upload`]) against the plan's
+/// `allowed_algorithms` intersected with `allowed`, the caller's current
+/// set (D25; a refusal is [`ApprovalError::Keyset`]), and compares its
+/// fingerprint with the plan's ([`ApprovalError::PlanIntegrity`]); whether
+/// the projection is byte for byte the plan's is the approve's check, under
+/// the lock (D24). Takes no lock and writes nothing.
 pub async fn prepare_approval(
     pool: &PgPool,
     approver_public_identity: &str,
     scope: ApprovalScope<'_>,
     operation_id: &str,
+    allowed: &[Algorithm],
     now: SystemTime,
 ) -> Result<PreparedApproval, ApprovalError> {
     let approver = authorize_operator(pool, &approver_request(approver_public_identity))
@@ -309,11 +337,40 @@ pub async fn prepare_approval(
     let (request_digest, plan) = read_plan(pool, operation_id).await?;
     let request_digest = stored_digest(&request_digest)?;
     let payload = Payload::parse(kind, &plan).ok_or(ApprovalError::PlanIntegrity)?;
+    let keys = match &payload {
+        Payload::TrustKeysetVersionCreate(plan) => Some(prepare_keys(plan, allowed).await?),
+        Payload::TrustKeysetVersionEnable(_) | Payload::InstanceSecurityPolicyUpdate(_) => None,
+    };
     Ok(PreparedApproval {
         operation_id: operation_id.into(),
         request_digest,
         payload,
+        keys,
     })
+}
+
+/// A keyset create's projection parsed in full on the Stage A pool, against
+/// the plan's algorithms that `allowed` holds too (D25), with the plan's
+/// fingerprint. Text that is not JSON, or a fingerprint other than the
+/// plan's, is [`ApprovalError::PlanIntegrity`]; a set the rules refuse,
+/// an empty intersection included, is [`ApprovalError::Keyset`].
+async fn prepare_keys(
+    plan: &CreatePlan,
+    allowed: &[Algorithm],
+) -> Result<ValidatedKeyset, ApprovalError> {
+    let value: Value =
+        serde_json::from_str(&plan.public_jwks).map_err(|_| ApprovalError::PlanIntegrity)?;
+    let both: Vec<Algorithm> = plan
+        .allowed_algorithms
+        .iter()
+        .copied()
+        .filter(|alg| allowed.contains(alg))
+        .collect();
+    let keys = validate_upload(value, &both).await?;
+    if keys.fingerprint().as_str() != plan.fingerprint {
+        return Err(ApprovalError::PlanIntegrity);
+    }
+    Ok(keys)
 }
 
 /// Approves the operation `prepared` names, on the path `scope`, for the
@@ -426,6 +483,13 @@ async fn approve_steps(
     if payload != prepared.payload {
         return Err(ApprovalError::PlanIntegrity);
     }
+    // D24: what the preparation parsed is byte for byte the locked plan's
+    // projection.
+    if let Payload::TrustKeysetVersionCreate(plan) = &payload
+        && prepared.keys.as_ref().map(ValidatedKeyset::public_json) != Some(&plan.public_jwks)
+    {
+        return Err(ApprovalError::PlanIntegrity);
+    }
     // Step 5: the kind's post-authorization step, through the registry
     // write.
     let requester = Requester {
@@ -433,6 +497,12 @@ async fn approve_steps(
         credential_id: requester.credential_id,
     };
     let (applied, event) = match payload {
+        Payload::TrustKeysetVersionCreate(plan) => {
+            apply_create(transaction, &locked, prepared, &requester, &plan).await?
+        }
+        Payload::TrustKeysetVersionEnable(plan) => {
+            apply_enable(transaction, &locked, &requester, &plan).await?
+        }
         Payload::InstanceSecurityPolicyUpdate(plan) => {
             let policy = lock_policy_at(transaction, locked.expected_revision).await?;
             let (row, event) = apply_policy_toggle(
@@ -490,6 +560,74 @@ async fn approve_steps(
     .await?;
     consume_administrative_operation(transaction, id, now, OUTCOME_APPLIED).await?;
     Ok(applied)
+}
+
+/// Step 5 of a keyset create's approve: the create's steps from the plan
+/// (D26), on the projection [`prepare_approval`] parsed and step 4
+/// compared with the locked plan. The provenance private-member check runs
+/// again (section 4); the window is the plan's whole microseconds; the
+/// tenant is the operation's.
+async fn apply_create(
+    transaction: &mut Transaction<'_, Postgres>,
+    locked: &AdministrativeOperation,
+    prepared: &PreparedApproval,
+    requester: &Requester,
+    plan: &CreatePlan,
+) -> Result<(Applied, UnstampedEvent), ApprovalError> {
+    let provenance = plan.provenance().ok_or(ApprovalError::PlanIntegrity)?;
+    check_provenance(&provenance)?;
+    let keys = prepared.keys.as_ref().ok_or(ApprovalError::PlanIntegrity)?;
+    let tenant_id = locked
+        .tenant_id
+        .as_deref()
+        .ok_or(ApprovalError::PlanIntegrity)?;
+    let effective_at =
+        from_microseconds(plan.effective_at_us).ok_or(ApprovalError::PlanIntegrity)?;
+    let expires_at = match plan.expires_at_us {
+        Some(micros) => Some(from_microseconds(micros).ok_or(ApprovalError::PlanIntegrity)?),
+        None => None,
+    };
+    let new = NewKeysetVersion {
+        id: &plan.version_id,
+        tenant_id,
+        keyset_id: &plan.keyset_id,
+        keys,
+        effective_at,
+        expires_at,
+        status: plan.status,
+        provenance: &provenance,
+    };
+    let (row, event) = apply_create_version(transaction, requester, &new).await?;
+    Ok((Applied::KeysetVersion(row), event))
+}
+
+/// Step 5 of a keyset enable's approve: the version's keyset and stored
+/// fingerprint must be the plan's (inferred: both are immutable, so another
+/// value is a data-integrity error, [`ApprovalError::PlanIntegrity`]), then
+/// the enable's steps at the operation's `expected_revision` (D26).
+async fn apply_enable(
+    transaction: &mut Transaction<'_, Postgres>,
+    locked: &AdministrativeOperation,
+    requester: &Requester,
+    plan: &EnablePlan,
+) -> Result<(Applied, UnstampedEvent), ApprovalError> {
+    let tenant_id = locked
+        .tenant_id
+        .as_deref()
+        .ok_or(ApprovalError::PlanIntegrity)?;
+    let identity = read_version_identity(transaction, tenant_id, &plan.version_id).await?;
+    if identity.keyset_id != plan.keyset_id || identity.fingerprint != plan.fingerprint {
+        return Err(ApprovalError::PlanIntegrity);
+    }
+    let (row, event) = apply_enable_version(
+        transaction,
+        requester,
+        tenant_id,
+        &plan.version_id,
+        locked.expected_revision,
+    )
+    .await?;
+    Ok((Applied::KeysetVersion(row), event))
 }
 
 /// A cancel or a reject.
@@ -581,14 +719,16 @@ async fn revoke_steps(
             if !revoke.scope.holds(header.tenant_id.as_deref()) {
                 return Err(ApprovalError::NotFound);
             }
-            // Another operator's operation is `Unauthorized`, a missing one
-            // `NotFound`: that tells an instance `security_admin` that the
-            // operation exists, which it may read anyway on the instance
-            // path (Q1). On a tenant path it would tell one `trust_admin`
-            // of another's operation, so the first tenant kind (PR 4 or 5)
-            // must answer `NotFound` there (proposal, PR 5 row).
+            // Another operator's operation: on a tenant path `NotFound`,
+            // like a missing one, so one `trust_admin` learns nothing of
+            // another's operations; on the instance path `Unauthorized`,
+            // which tells an instance `security_admin` that the operation
+            // exists, which it may read anyway there (Q1).
             if header.actor_id != actor.admin_id {
-                return Err(ApprovalError::Unauthorized);
+                return Err(match revoke.scope {
+                    ApprovalScope::Tenant(_) => ApprovalError::NotFound,
+                    ApprovalScope::Instance => ApprovalError::Unauthorized,
+                });
             }
             let (_, scope, role) = header.kind()?;
             // The kind's role is the path's (see `requester_request`).
@@ -788,5 +928,33 @@ mod tests {
                 role: AdminRole::SecurityAdmin,
             }
         );
+    }
+
+    /// The cancel's guard that the kind's role is the path's cannot refuse
+    /// a cancel the path check let through: for every kind, on every path
+    /// that holds the operation, the kind's requester role is the one
+    /// `requester_request` looked up, or the kind is refused as
+    /// `WrongKind` before the guard. The guard stays as a defence against
+    /// a future kind that breaks this.
+    #[test]
+    fn a_kinds_requester_role_is_its_paths() {
+        for &kind in OperationKind::ALL {
+            for scope in [ApprovalScope::Instance, ApprovalScope::Tenant("ten_a")] {
+                for tenant_id in [None, Some("ten_a"), Some("ten_b")] {
+                    if !scope.holds(tenant_id) {
+                        continue;
+                    }
+                    let Some((role_scope, role)) = kind.requester_role(tenant_id) else {
+                        continue;
+                    };
+                    let request = requester_request("key", scope);
+                    assert_eq!(
+                        (role_scope, role),
+                        (request.scope, request.role),
+                        "{kind:?} {tenant_id:?}"
+                    );
+                }
+            }
+        }
     }
 }

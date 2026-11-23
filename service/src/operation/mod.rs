@@ -1,10 +1,12 @@
 //! The second-approver flow of gated writes
-//! (`docs/proposals/second-approver-gated-writes.md`, PR 3; IR-052 to
-//! IR-054; tasks section 2, the approve endpoints): the request digest, the
-//! operation kinds, the approval ([`prepare_approval`], then
+//! (`docs/proposals/second-approver-gated-writes.md`, PRs 3 and 4; IR-052
+//! to IR-054; tasks section 2, the approve endpoints): the request digest,
+//! the operation kinds, the approval ([`prepare_approval`], then
 //! [`approve_operation`]), its cancel and reject ([`cancel_operation`],
-//! [`reject_operation`]), and the first gated kind, the toggle of
-//! `widening_second_approver` ([`submit_widening_toggle`]; D16).
+//! [`reject_operation`]), the toggle of `widening_second_approver`
+//! ([`submit_widening_toggle`]; D16), and the approve dispatch of the
+//! keyset kinds, whose requests are [`crate::trust`]'s
+//! `submit_create_version` and `submit_enable_version` (PR 4).
 //!
 //! Every pick below is the proposal's (a provisional lead pick, 2026-11-23,
 //! D1 to D29) unless marked (inferred); all of them stay provisional until
@@ -15,11 +17,11 @@
 //! Nothing calls these functions yet: no endpoint, and nothing at startup.
 //! No endpoint lands before the request layer exists (generated IDs, T10.2;
 //! the raw body bound; NUL rejection; the role of each endpoint; T13.3).
-//! The trust kinds (`trust_keyset_version_create`, `_enable`,
-//! `trust_source_create`, `_update`) and their `submit_*` writes come with
-//! PRs 4 and 5 of the proposal: until then [`OperationKind`] has the toggle
-//! only, and any other stored kind is [`NotApprovableReason::WrongKind`]
-//! (inferred).
+//! The trust source kinds (`trust_source_create`, `_update`) and their
+//! `submit_*` writes come with PR 5 of the proposal: until then
+//! [`OperationKind`] has the toggle and the two keyset kinds
+//! (`trust_keyset_version_create`, `_enable`), and any other stored kind is
+//! [`NotApprovableReason::WrongKind`] (inferred).
 //!
 //! # The pending operation
 //!
@@ -33,8 +35,12 @@
 //! expiry (D22). Every plan holds `requester_credential_id`, the
 //! credential the request was authorized with (D21); the toggle's plan holds
 //! `widening_second_approver` too, and nothing else (inferred: no version
-//! member, since the digest prefix carries the version). No plan holds a
-//! secret.
+//! member, since the digest prefix carries the version). A keyset create's
+//! plan holds the version's ID, keyset, window, status and provenance, its
+//! canonical public projection and fingerprint, never the raw upload, and
+//! the algorithms the upload was validated against (D25); a keyset
+//! enable's names the version, its keyset and its stored fingerprint
+//! (section 2). No plan holds a secret.
 //!
 //! # Approve
 //!
@@ -45,8 +51,12 @@
 //! [`ApprovalError::NotFound`], the approver's own operation
 //! [`ApprovalError::SelfApproval`], then the kind, consumed, revoked and
 //! expired, [`ApprovalError::NotApprovable`]), and only then reads the
-//! digest and the plan and parses it (D20). A toggle's plan that is not
-//! exactly its two members is [`ApprovalError::PlanIntegrity`].
+//! digest and the plan and parses it (D20). A plan that is not exactly its
+//! kind's members is [`ApprovalError::PlanIntegrity`]. For a keyset create
+//! it then parses the plan's projection in full on the Stage A pool, against
+//! the plan's algorithms that the caller's `allowed` holds too (D25; a
+//! refusal is [`ApprovalError::Keyset`]), and checks its fingerprint
+//! ([`ApprovalError::PlanIntegrity`]).
 //!
 //! [`approve_operation`] runs in a savepoint of the caller's transaction,
 //! only under `READ COMMITTED` (section 3, approve steps 2 to 7):
@@ -68,14 +78,22 @@
 //!    [`ApprovalError::NotApprovable`]; a stored digest or expected
 //!    revision unequal to the echo, or a digest unequal to the one
 //!    [`prepare_approval`] read, is [`ApprovalError::EchoMismatch`]; a
-//!    digest recomputed from the stored row unequal to the stored one, or a
-//!    locked plan unequal to the one [`prepare_approval`] parsed (D24 for
-//!    the toggle, inferred), is [`ApprovalError::PlanIntegrity`];
+//!    digest recomputed from the stored row unequal to the stored one, a
+//!    locked plan unequal to the one [`prepare_approval`] parsed, or, for a
+//!    keyset create, a parsed projection that is not byte for byte the
+//!    locked plan's (D24), is [`ApprovalError::PlanIntegrity`];
 //! 5. the kind's post-authorization step (D26). The toggle: the policy row
 //!    `FOR NO KEY UPDATE` (missing: [`ApprovalError::PolicyUnavailable`],
 //!    D18), its revision against `expected_revision`
-//!    ([`ApprovalError::StaleRevision`], D19), and its compare-and-set. It
-//!    returns the row and its domain event, unstamped;
+//!    ([`ApprovalError::StaleRevision`], D19), and its compare-and-set. A
+//!    keyset create: the provenance check again, then the create's steps
+//!    from the plan in the operation's tenant (the parent lock, the cap,
+//!    the overlap check, the insert). A keyset enable: the version's keyset
+//!    and fingerprint against the plan's (inferred: both immutable, so
+//!    another value is [`ApprovalError::PlanIntegrity`]), then the enable's
+//!    steps at `expected_revision`. A keyset write's refusal, its stale
+//!    revision included, is [`ApprovalError::Keyset`]. Each returns the row
+//!    and its domain event, unstamped;
 //! 6. **the clock** (D28): the injected [`Clock`] is sampled once, after
 //!    the registry write and before the first append, and floored to a
 //!    whole microsecond. `now >= expires_at` is
@@ -115,8 +133,12 @@
 //!   (inferred: every kind of the flow on the instance path is an instance
 //!   `security_admin` write, the toggle, and on a tenant path a tenant
 //!   `trust_admin` write, section 6), so a caller without it learns
-//!   nothing about the operation. Another operator, a `security_admin`
-//!   included, is [`ApprovalError::Unauthorized`] (inferred).
+//!   nothing about the operation. Another operator's operation is
+//!   [`ApprovalError::NotFound`] on a tenant path, like a missing one, so
+//!   one `trust_admin` learns nothing of another's (proposal, "PR 4 as
+//!   implemented"); on the instance path it is
+//!   [`ApprovalError::Unauthorized`] (inferred), since any instance
+//!   `security_admin` may read it there anyway.
 //! - **Reject** is by an instance `security_admin` who is not the
 //!   requester: the requester is [`ApprovalError::SelfApproval`]
 //!   (inferred: the approve's refusal, since a reject is the approver's
@@ -145,14 +167,16 @@
 //! the toggle needs it is not decided (proposal, "Not decided here";
 //! inferred). The authorization is the toggle's own, instance
 //! `security_admin` through [`authorize_operator_locked`] (tasks:147), not
-//! the trust writes' `authorize_trust_admin` of PR 4.
+//! the trust writes' `authorize_trust_admin`.
 //!
 //! # Lock order
 //!
 //! As the proposal declares ("Lock order"): the operator rows `FOR SHARE`
 //! in the `0005` order; the pending operation row `FOR NO KEY UPDATE`
 //! (approve, cancel, reject); the policy row `FOR NO KEY UPDATE` (the
-//! toggle, request and approve); the registry write; the audit head last.
+//! toggle, request and approve) or `FOR SHARE` (a keyset request); the
+//! `trust_keyset` row `FOR NO KEY UPDATE` (a keyset request and approve);
+//! the registry write; the audit head last.
 //! One operation is applied per transaction (D17). A `40001` or `40P01` is
 //! [`RegistryError::Retry`] in [`ApprovalError::Registry`].
 //!
@@ -172,6 +196,7 @@
 
 mod approval;
 mod digest;
+pub(crate) mod keyset_plan;
 mod toggle;
 
 use std::{
@@ -184,11 +209,13 @@ pub use approval::{
 };
 pub use digest::{DIGEST_PREFIX, DigestEnvelope, DigestLengthError, NotCanonical, RequestDigest};
 pub use toggle::submit_widening_toggle;
+pub(crate) use toggle::{PendingRequest, encode_error, insert_pending};
 
 use crate::persistence::registry::{
     AdminRole, AuditActor, InstanceSecurityPolicy, NewAuditEvent, OperatorScope, RegistryError,
+    TrustKeysetVersion,
 };
-use crate::trust::write::WriteError;
+use crate::trust::{KeysetWriteError, write::WriteError};
 
 /// How long a pending operation stays approvable (D5; Q1, ruled by the
 /// user, 2026-11-23).
@@ -215,23 +242,38 @@ pub const OUTCOME_SUCCESS: &str = "success";
 /// `single_actor_mode` (section 7; Q4; inferred value, as section 7's whole
 /// value set).
 pub const OUTCOME_SUCCESS_SINGLE_ACTOR: &str = "success_single_actor";
+/// The outcome of the event of a widening write applied at once, with the
+/// flag, while `widening_second_approver` is off (section 7; D23; inferred
+/// value, as section 7's whole value set).
+pub const OUTCOME_SUCCESS_WIDENING: &str = "success_widening";
 
 /// A kind of gated write (section 2; inferred names). `#[non_exhaustive]`:
-/// the trust kinds come with PRs 4 and 5.
+/// the trust source kinds come with PR 5.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationKind {
+    /// A trust keyset version create, enabled or disabled (Q3).
+    TrustKeysetVersionCreate,
+    /// A trust keyset version enable, a re-enable and an enable of an
+    /// enabled version included.
+    TrustKeysetVersionEnable,
     /// A change of `widening_second_approver` (the toggle).
     InstanceSecurityPolicyUpdate,
 }
 
 impl OperationKind {
     /// Every kind.
-    pub const ALL: &[Self] = &[Self::InstanceSecurityPolicyUpdate];
+    pub const ALL: &[Self] = &[
+        Self::TrustKeysetVersionCreate,
+        Self::TrustKeysetVersionEnable,
+        Self::InstanceSecurityPolicyUpdate,
+    ];
 
     /// The `kind` column's value.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::TrustKeysetVersionCreate => "trust_keyset_version_create",
+            Self::TrustKeysetVersionEnable => "trust_keyset_version_enable",
             Self::InstanceSecurityPolicyUpdate => "instance_security_policy_update",
         }
     }
@@ -243,13 +285,18 @@ impl OperationKind {
 
     /// The scope and role the requester of an operation of this kind in
     /// `tenant_id` holds (section 6), or `None` when the kind does not
-    /// belong to that scope (a toggle names no tenant).
+    /// belong to that scope (a toggle names no tenant, a keyset write
+    /// always names one).
     fn requester_role(self, tenant_id: Option<&str>) -> Option<(OperatorScope<'_>, AdminRole)> {
         match (self, tenant_id) {
             (Self::InstanceSecurityPolicyUpdate, None) => {
                 Some((OperatorScope::Instance, AdminRole::SecurityAdmin))
             }
-            (Self::InstanceSecurityPolicyUpdate, Some(_)) => None,
+            (Self::TrustKeysetVersionCreate | Self::TrustKeysetVersionEnable, Some(tenant_id)) => {
+                Some((OperatorScope::Tenant(tenant_id), AdminRole::TrustAdmin))
+            }
+            (Self::InstanceSecurityPolicyUpdate, Some(_))
+            | (Self::TrustKeysetVersionCreate | Self::TrustKeysetVersionEnable, None) => None,
         }
     }
 }
@@ -383,11 +430,13 @@ impl UnstampedEvent {
     }
 }
 
-/// The row an approval wrote. `#[non_exhaustive]`: the trust kinds come
-/// with PRs 4 and 5.
+/// The row an approval wrote. `#[non_exhaustive]`: the trust source kinds
+/// come with PR 5. Not `Eq`: a keyset version's provenance is JSON.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Applied {
+    /// A keyset version created or enabled.
+    KeysetVersion(TrustKeysetVersion),
     InstanceSecurityPolicy(InstanceSecurityPolicy),
 }
 
@@ -409,8 +458,8 @@ pub enum NotApprovableReason {
 /// `Display` is fixed text per variant and `Debug` names the variant (and
 /// the reason of [`Self::NotApprovable`]); neither holds a digest, an ID, a
 /// revision or another value of the request. `source()` returns the inner
-/// [`RegistryError`] only. `#[non_exhaustive]`: PRs 4 and 5 add the trust
-/// writes' errors.
+/// [`RegistryError`] only, also from inside [`Self::Keyset`].
+/// `#[non_exhaustive]`: PR 5 adds the trust source writes' errors.
 #[non_exhaustive]
 pub enum ApprovalError {
     /// The presented credential does not authorize this call: no instance
@@ -439,6 +488,15 @@ pub enum ApprovalError {
     StaleRevision,
     /// The caller's transaction does not run at `READ COMMITTED`.
     UnsupportedIsolation,
+    /// The keyset write of an approved keyset kind refused it, as it
+    /// refuses the direct write: a moved target
+    /// ([`RegistryError::StaleRevision`] inside), an overlap, the cap, a
+    /// stored version that does not parse, no in-transaction worker in time
+    /// ([`KeysetWriteError::ValidationBusy`], retryable), a database
+    /// constraint; or, at [`prepare_approval`], the plan's projection
+    /// refused against the allowed algorithms (D25). The operation stays
+    /// pending (D14).
+    Keyset(KeysetWriteError),
     /// A registry error: a store failure, [`RegistryError::Retry`] (retry
     /// the whole transaction), or a database refusal.
     Registry(RegistryError),
@@ -485,6 +543,7 @@ impl fmt::Display for ApprovalError {
             Self::UnsupportedIsolation => {
                 f.write_str("operation writes run only at READ COMMITTED")
             }
+            Self::Keyset(err) => write!(f, "the approved keyset write was refused: {err}"),
             Self::Registry(err) => write!(f, "operation write failed: {err}"),
         }
     }
@@ -503,6 +562,7 @@ impl fmt::Debug for ApprovalError {
             Self::PolicyUnavailable => f.write_str("PolicyUnavailable"),
             Self::StaleRevision => f.write_str("StaleRevision"),
             Self::UnsupportedIsolation => f.write_str("UnsupportedIsolation"),
+            Self::Keyset(err) => f.debug_tuple("Keyset").field(err).finish(),
             Self::Registry(err) => f.debug_tuple("Registry").field(err).finish(),
         }
     }
@@ -512,8 +572,15 @@ impl std::error::Error for ApprovalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Registry(err) => Some(err),
+            Self::Keyset(err) => err.source(),
             _ => None,
         }
+    }
+}
+
+impl From<KeysetWriteError> for ApprovalError {
+    fn from(err: KeysetWriteError) -> Self {
+        Self::Keyset(err)
     }
 }
 
@@ -566,6 +633,30 @@ mod tests {
             OperationKind::InstanceSecurityPolicyUpdate.requester_role(Some("ten_a")),
             None
         );
+        for (kind, name) in [
+            (
+                OperationKind::TrustKeysetVersionCreate,
+                "trust_keyset_version_create",
+            ),
+            (
+                OperationKind::TrustKeysetVersionEnable,
+                "trust_keyset_version_enable",
+            ),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(
+                kind.requester_role(Some("ten_a")),
+                Some((OperatorScope::Tenant("ten_a"), AdminRole::TrustAdmin))
+            );
+            assert_eq!(kind.requester_role(None), None);
+        }
+        assert_eq!(OperationKind::ALL.len(), 3);
+        for name in [
+            "trust_keyset_version_disable",
+            "trust_keyset_version_update",
+        ] {
+            assert_eq!(OperationKind::from_name(name), None, "{name}");
+        }
     }
 
     #[test]
@@ -662,6 +753,26 @@ mod tests {
         let err = ApprovalError::Registry(RegistryError::StaleRevision);
         assert_eq!(format!("{err:?}"), "Registry(StaleRevision)");
         assert!(err.to_string().starts_with("operation write failed: "));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    /// A refused keyset write prints the keyset error's own fixed text, and
+    /// its source is that error's source.
+    #[test]
+    fn a_refused_keyset_write_prints_the_keyset_error() {
+        let err = ApprovalError::from(KeysetWriteError::ValidationBusy);
+        assert_eq!(format!("{err:?}"), "Keyset(ValidationBusy)");
+        assert_eq!(
+            err.to_string(),
+            "the approved keyset write was refused: the in-transaction validation workers \
+             are busy; retry"
+        );
+        assert!(std::error::Error::source(&err).is_none());
+        let err = ApprovalError::Keyset(KeysetWriteError::Registry(RegistryError::StaleRevision));
+        assert_eq!(format!("{err:?}"), "Keyset(Registry(StaleRevision))");
+        assert!(err.to_string().starts_with(
+            "the approved keyset write was refused: trust keyset version write failed: "
+        ));
         assert!(std::error::Error::source(&err).is_some());
     }
 

@@ -3267,21 +3267,28 @@ only the new revision, since it does not read the timestamp column. The range ch
 ### Trust keyset version writes
 
 `skyoauth_service::trust::keyset` (`validate_upload`, `create_version`,
-`enable_version`, `disable_version`) is the audited write path of a trust
-keyset version (T11.3, T11.9; see its module documentation for the full
-rules). Library-level only: no endpoint calls it and nothing wires it at
-startup. The picks are the lead's (provisional lead pick, 2026-11-22)
-unless marked inferred, and the `jwk` picks dated 2026-11-21 it relies on
-stay provisional until Gate M0:
+`enable_version`, `disable_version`, and the gated `submit_create_version`
+and `submit_enable_version`) is the audited write path of a trust keyset
+version (T11.3, T11.9; see its module documentation for the full rules).
+Library-level only: no endpoint calls it and nothing wires it at startup.
+The picks are the lead's (provisional lead pick, 2026-11-22) unless marked
+inferred, and the `jwk` picks dated 2026-11-21 it relies on stay
+provisional until Gate M0:
 
 - A keyset version write (a create, an enable, a re-enable) counts as
   widening and needs an IR-054 approval by a second approver while
   `widening_second_approver` is on (ruled by the user, 2026-11-22, relayed
   by the lead; this decides OQ-ADR008-3 and the IR-052 widening question
-  for this write). It must not be wired to any endpoint before the T14.1
-  and T14.2 design of the second-approver flow, and before the request
-  layer of T14.1 and T14.2 exists. Until then it assumes a single actor:
-  no write waits for an approval.
+  for this write). The second-approver flow is designed in
+  `docs/proposals/second-approver-gated-writes.md` (accepted, 2026-11-23);
+  no task ID names it (the nearest owners are T13.3, T13.2, T13.8, T11.6,
+  T10.4 and T10.2). `submit_create_version` and `submit_enable_version`
+  put these writes through it (its PR 4): pending while the toggle is on,
+  applied at once with outcome `success_widening` while it is off.
+  `create_version` and `enable_version` stay ungated, and test-only, until
+  its PR 7 makes them crate-private. Nothing may be wired to an endpoint
+  before the request layer exists (generated IDs, T10.2; the role of each
+  endpoint, T13.2, T13.3), and an endpoint calls the gated writes only.
 - It must be the only path that writes a keyset version outside tests.
   The registry writers `create_trust_keyset_version` and
   `update_trust_keyset_version` are the unchecked floor (any `public_jwks`
@@ -3512,8 +3519,10 @@ Follow-ups and open questions:
   a second approver while `widening_second_approver` is on (ruled by the
   user, 2026-11-22, relayed by the lead; this decides the IR-052 widening
   question for this write). The write path must not be wired to an
-  endpoint before the T14.1 and T14.2 design of the second-approver flow
-  and the request layer (T14.1, T14.2).
+  endpoint before the request layer exists (generated IDs, T10.2; the role
+  of each endpoint, T13.2, T13.3) and before the source kinds of the
+  second-approver flow land (`docs/proposals/second-approver-gated-writes.md`,
+  PR 5; no task ID names the flow).
 - The fetch-time `jwks_uri` match and the degraded health signal (IR-152)
   are not built. The egress check has a database backstop: the trigger
   pattern of `docs/proposals/ir-080-assignment-write-guard.md` is accepted

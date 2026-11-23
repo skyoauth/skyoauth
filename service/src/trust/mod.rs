@@ -6,8 +6,11 @@
 //!   of a trust keyset version: they authorize the operator, check the
 //!   overlap of the keyset's enabled versions, write the row and append its
 //!   audit event, in the caller's transaction, after [`validate_upload`] has
-//!   validated the upload outside it. See the [`keyset`] module for the
-//!   rules, the lock order and what is not done here.
+//!   validated the upload outside it. [`submit_create_version`] and
+//!   [`submit_enable_version`] are the same writes through the
+//!   second-approver gate ([`crate::operation`]): applied at once, or a
+//!   pending operation for a second approver. See the [`keyset`] module for
+//!   the rules, the lock order and what is not done here.
 //! - **Trust sources** (T11.2; identity-registry IR-152): [`create_source`]
 //!   and [`update_source`] are the audited write path of a trust source:
 //!   they authorize the operator, check the source's egress destinations
@@ -25,7 +28,7 @@ pub(crate) mod write;
 pub use keyset::{
     IN_TRANSACTION_WAIT, IN_TRANSACTION_WORKERS, KeysetAudit, KeysetWriteError,
     MAX_ENABLED_VERSIONS_PER_KEYSET, NewKeysetVersion, VALIDATION_WORKERS, create_version,
-    disable_version, enable_version, validate_upload,
+    disable_version, enable_version, submit_create_version, submit_enable_version, validate_upload,
 };
 pub use source::{
     DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT, create_source,

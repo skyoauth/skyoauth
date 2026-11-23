@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 and 2 merged, PR 3 open, PRs 4 to 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 3 merged, PR 4 open, PRs 5 to 8 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
@@ -9,10 +9,10 @@ beta release", and, on clarification, that the `0012` trigger is folded
 into migration `0005` itself (section 11; D15); the read-path index of the
 same sketch is a provisional lead pick, not ruled. Implemented so far: the
 in-transaction permit (PR 1), the registry operation module with the
-`0005` guard and index (PR 2), and, in review, `crate::operation` with the
-toggle (PR 3). Not yet: the keyset and source kinds (PRs 4 and 5), their
-tests and the ungated entry points made crate-private (PRs 6 and 7), the
-test session's documents (PR 8), and any endpoint; no T00.x box is
+`0005` guard and index (PR 2), `crate::operation` with the toggle (PR 3),
+and, in review, the keyset kinds (PR 4). Not yet: the source kinds (PR 5),
+their tests and the ungated entry points made crate-private (PRs 6 and 7),
+the test session's documents (PR 8), and any endpoint; no T00.x box is
 ticked. Every other choice below that goes beyond the written
 spec is a "provisional lead pick, 2026-11-23" (the Decisions list numbers
 them D1 to D29); "(inferred)" marks a point where the spec is silent. All
@@ -721,7 +721,7 @@ pub struct PreparedApproval { /* operation ID, digest read, kind, payload */ }
 /// The requester as step 1 authorized it (request) or as the plan names
 /// it (approve); the post-authorization step functions take this.
 /// `authorize_trust_admin` (`write.rs:43-59`) returns it in place of the
-/// bare `admin_id` (PRs 4 and 5).
+/// bare `admin_id` (PR 4; PR 5 shares it).
 pub(crate) struct Requester {
     pub admin_id: String,
     pub credential_id: String,
@@ -794,10 +794,13 @@ pub async fn submit_widening_toggle(
 ) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError>;
 
 // service/src/trust/keyset.rs
+/// `allowed` is the set `validate_upload` validated `new.keys` against;
+/// the plan records it (D25).
 pub async fn submit_create_version(
     transaction: &mut Transaction<'_, Postgres>,
     submission: &Submission<'_>,
     new: &NewKeysetVersion<'_>,
+    allowed: &[Algorithm],
 ) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError>;
 
 pub async fn submit_enable_version(
@@ -1533,8 +1536,8 @@ test PR or the test PR follows.
 in its module docs). The kinds, `Applied` and `ApprovalError` hold the
 toggle's only: the trust kinds, `Applied::KeysetVersion` and
 `Applied::Source`, and `ApprovalError::Keyset` and `ApprovalError::Source`
-come with PRs 4 and 5, as does the `allowed` parameter of
-`prepare_approval`. `SystemClock` is the production `Clock`. The toggle's
+came with PR 4 (the keyset ones, with the `allowed` parameter of
+`prepare_approval`) or come with PR 5 (the source ones). `SystemClock` is the production `Clock`. The toggle's
 compare-and-set is the crate-private registry writer
 `set_widening_second_approver`, so no ungated setter is public. The
 toggle's plan is exactly `requester_credential_id` and
@@ -1542,10 +1545,12 @@ toggle's plan is exactly `requester_credential_id` and
 `PlanIntegrity`. The approve applies D24 to the toggle too: the prepared
 plan must equal the locked plan. `acknowledge_widening` is ignored by the
 toggle, which is always gated (see "Open"). The toggle authorizes with the
-local instance `security_admin` lookup, not PR 4's `authorize_trust_admin`.
+local instance `security_admin` lookup, not the trust writes'
+`authorize_trust_admin`.
 A cancel looks up the path's role (instance `security_admin`, tenant
 `trust_admin`, the role of every kind of the flow on that path) before it
-reads the operation; another operator is `Unauthorized`. The operations a
+reads the operation; another operator is `Unauthorized` (on a tenant path
+`NotFound` since PR 4, below). The operations a
 cancel, a reject and an approve insert have outcome `success`, and the
 toggle's event applied at once `success_single_actor` (section 7; the value
 set is inferred). The stored digest is checked before the echo: one that is
@@ -1559,16 +1564,66 @@ gated both ways is IR-052's (identity-registry:423-427: "Turning the
 setting on or off ... MUST have a distinct second `security_admin`
 approver"; tasks:147; ADR-008:100-103), not a pick.
 
-**Left open for PRs 4 and 5.** Before T13.3 wires the endpoint, the lead
-decides whether `acknowledge_widening` applies to the toggle, turning it
-off included (ADR-008 item 12; "Not decided here"); PR 3 ignores the flag.
-Three PR 3 mutants are equivalent only because the toggle is the one kind,
-and become live with the trust kinds; killing them is a required test of
-PRs 4 and 5: the D24 comparison of the prepared payload with the locked
-plan dropped (a keyset create's projection, PR 4); the clock sampled
-between the target's lock and the registry write (a source
-compare-and-set can wait there, PR 5); and the cancel's kind-role guard
-dropped (a tenant kind, PR 4 or 5).
+**PR 4 as implemented** (`service/src/trust/keyset.rs`,
+`service/src/trust/write.rs`, `service/src/operation/`; picks marked
+inferred in the module docs). `submit_create_version` takes the `allowed`
+set the upload was validated against (the sketch above now shows it).
+`authorize_trust_admin` returns `Requester`; the gated requests lock the
+tenant `trust_admin` binding and the instance `security_admin` binding in
+one `authorize_roles_locked` statement whatever the policy says
+(inferred), and require `holds(0)`, so a `security_admin` without the
+tenant role is `Unauthorized`. The order is the isolation, the requester,
+the flag (`WideningNotAcknowledged`), the policy row `FOR SHARE`
+(`PolicyUnavailable` before bootstrap), then the mode; a pending request
+runs the write's own checks under its locks (D7) and `ValidationBusy`
+keeps PR 1's meaning. Request-time pure checks (D27): the provenance, an
+empty version ID (refused as `Invariant` on
+`trust_keyset_version_id_check`, as the insert would be), and a key whose
+algorithm is outside `allowed` (inferred: `Upload`, as `validate_keyset`
+refuses it). A create's plan is its ten members: the requester's
+credential, the version and keyset IDs, the canonical projection text and
+its fingerprint, the sorted `allowed` names, the window in whole
+microseconds, the status, and the provenance as compact JSON text
+(inferred: text, so the `jsonb` column returns it exactly, whatever
+numbers it holds); an enable's is the credential, the version, its keyset
+and its stored fingerprint. At approve, an enable whose version's keyset or fingerprint
+is not the plan's is `PlanIntegrity` (inferred: both are immutable); a
+keyset write's refusal, a stale target revision included, is
+`ApprovalError::Keyset` (inferred: the toggle keeps its own
+`StaleRevision`). The approve operation's tenant is the operation's, which
+is the target's (the `0005` guard requires it). `Applied` is `Debug`,
+`Clone` and `PartialEq` but no longer `Eq` (a version's provenance is
+JSON). On a tenant path a cancel of
+another operator's operation is now `NotFound`, like a missing one (the PR
+5 row's item, done here since PR 4 adds the first tenant kind); on the
+instance path it stays `Unauthorized`.
+
+**Left open for PR 5.** Before T13.3 wires the endpoint, the lead decides
+whether `acknowledge_widening` applies to the toggle, turning it off
+included (ADR-008 item 12; "Not decided here"); PRs 3 and 4 ignore the
+flag for it. Three PR 3 mutants are equivalent only because the toggle is
+the one kind, and become live with the trust kinds; killing them is a
+required test of PRs 4 and 5: the clock sampled between the target's lock
+and the registry write (PR 4 kills it with a keyset create, whose insert
+waits on another transaction's uncommitted version with the same ID; a
+source compare-and-set can wait there too, to test in PR 5); the cancel's
+kind-role guard dropped (a tenant kind, PR 4 or 5); plus the approve
+operation inserted with tenant NULL (M31; PR 4 kills it, since the
+`0005` guard refuses an approve outside its operation's tenant). PR 4
+found the kind-role guard still equivalent with the keyset kinds and
+expects it to stay so with every kind: the path check before it already
+refuses any kind whose requester role is not the path's (`requester_role`
+and `requester_request` encode the same table; a unit test pins it), so
+the guard is a defence for a future kind only. The D24 comparison of the
+prepared payload with the locked plan dropped is not equivalent in PR 3:
+`prepare_approval` checks only the stored digest's length, so a plan
+written past the immutability guard before the preparation and put back
+before the approval passes the recompute (D6) and the echo, and only D24
+refuses it (`a_plan_written_past_its_guard_is_plan_integrity`, #116,
+8b80158). PR 4 must still kill it for a keyset create's projection, and does:
+a plan whose projection text is not the canonical text the preparation
+parsed, and a locked plan changed after the preparation with the `0005`
+immutability trigger disabled in between, are both `PlanIntegrity`.
 
 **Line numbers.** Line numbers into the code and the migrations README
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed
@@ -1593,16 +1648,16 @@ layer too. `disable_version` stays unwired with the rest.
 and code comments; the test session owns tests, security scenarios, CI,
 the harness and `docs/testing/conformance-layout.md`):
 
-| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | After   |
-| --- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                                                                                                                                                                        | —       |
-| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated                                                                                                                                   | —       |
-| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                                                                                                                                                          | 2       |
-| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)                                                                                                                                            | 1, 3    |
-| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); on a tenant path, a cancel of an operation that is not the caller's must be `NotFound`, like a missing one (PR 3's cancel answers `Unauthorized`, harmless only on the instance path; whichever of PRs 4 and 5 adds the first tenant kind) | 3       |
-| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                                                                                                                                                                 | each PR |
-| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | 6       |
-| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                                                                                                                                                               | 6       |
+| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                               | After   |
+| --- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                                      | —       |
+| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated | —       |
+| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                        | 2       |
+| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :290-292), `source.rs` (:236-246) and the migrations README (:3131-3133, :3362-3363)          | 1, 3    |
+| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (done in PR 4), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23); the tenant-path cancel's `NotFound` is done (PR 4)                                                                                  | 3       |
+| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                               | each PR |
+| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                           | 6       |
+| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                             | 6       |
 
 ADR-008:220, which repeats the T14.1/T14.2 attribution, is the lead's to
 correct; neither session edits it.

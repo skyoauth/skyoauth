@@ -6,13 +6,17 @@
 //! [`create_version`], [`enable_version`] and [`disable_version`] wrap the
 //! registry's bare [`create_trust_keyset_version`] and
 //! [`update_trust_keyset_version`], which check nothing the database does
-//! not. They run in the caller's transaction and neither commit nor roll
-//! it back. The upload is validated before that transaction, by
+//! not. [`submit_create_version`] and [`submit_enable_version`] are the
+//! gated create and enable of the second-approver flow
+//! (`docs/proposals/second-approver-gated-writes.md`, PR 4; see "The
+//! gate"). They run in the caller's transaction and neither commit nor
+//! roll it back. The upload is validated before that transaction, by
 //! [`validate_upload`]. The picks below are the lead's (provisional lead
-//! pick, 2026-11-22) unless marked (inferred); all are provisional until
-//! the maintainer ratifies the ADRs (T00.8 to T00.17, Gate M0), and so are
-//! the [`crate::jwk`] picks dated 2026-11-21 that this module relies on.
-//! The widening ruling below is the user's, not a provisional pick.
+//! pick, 2026-11-22; the gate's, 2026-11-23) unless marked (inferred); all
+//! are provisional until the maintainer ratifies the ADRs (T00.8 to T00.17,
+//! Gate M0), and so are the [`crate::jwk`] picks dated 2026-11-21 that this
+//! module relies on. The widening ruling below is the user's, not a
+//! provisional pick.
 //!
 //! # Not wired, and the one write path
 //!
@@ -20,19 +24,25 @@
 //!   re-enable) counts as widening: while `widening_second_approver` is on
 //!   it needs an IR-054 approval by a second approver (ruled by the user,
 //!   2026-11-22, relayed by the lead; this decides OQ-ADR008-3 and the
-//!   widening question of identity-registry IR-052 for this write). What
-//!   remains is the design of the second-approver flow (T14.1, T14.2).
+//!   widening question of identity-registry IR-052 for this write). The
+//!   second-approver flow is designed in
+//!   `docs/proposals/second-approver-gated-writes.md` (accepted,
+//!   2026-11-23); no task ID names it (the nearest owners are T13.3, T13.2,
+//!   T13.8, T11.6, T10.4 and T10.2). [`submit_create_version`] and
+//!   [`submit_enable_version`] put this module's widening writes through
+//!   it (see "The gate").
 //! - **No endpoint.** Nothing calls these functions yet, and they must not
-//!   be wired to any endpoint before the T14.1 and T14.2 design of the
-//!   second-approver flow, and before the request layer of T14.1 and T14.2
-//!   exists (generated IDs, the raw body bound, the role of each endpoint).
-//! - **Single actor.** A write takes effect at once on one operator's
-//!   authority: no write waits for an approval. With
-//!   `widening_second_approver` on, a [`create_version`] or an
-//!   [`enable_version`] here would apply a widening write without the
-//!   approval it needs, which is why the module must not be wired before
-//!   that flow is designed. (The ruling names a create, an enable and a
-//!   re-enable; [`disable_version`] is not among them.)
+//!   be wired to any endpoint before the request layer exists (generated
+//!   IDs, T10.2; the raw body bound; the role of each endpoint, T13.2,
+//!   T13.3). An endpoint calls the `submit_*` functions, never the ungated
+//!   ones.
+//! - **Ungated writes.** [`create_version`] and [`enable_version`] take
+//!   effect at once on one operator's authority: with
+//!   `widening_second_approver` on, they would apply a widening write
+//!   without the approval it needs. They stay public for the tests until
+//!   the proposal's PR 7 makes them crate-private. (The ruling names a
+//!   create, an enable and a re-enable; [`disable_version`] is not among
+//!   them and is never gated.)
 //! - **The only write path.** The registry writers
 //!   [`create_trust_keyset_version`] and [`update_trust_keyset_version`]
 //!   are the unchecked floor: they store any `public_jwks` and
@@ -44,6 +54,44 @@
 //!   outside tests. The A04 scenario tests (`tests/security`) stay on the
 //!   raw writers until A04 M1a is claimed, then switch to this module
 //!   (follow-up).
+//!
+//! # The gate
+//!
+//! [`submit_create_version`] and [`submit_enable_version`] (proposal
+//! sections 1 to 3). Every keyset create, enabled or disabled (Q3), and
+//! every enable, a re-enable and an enable of an enabled version included,
+//! is widening: the server decides it, never the caller. A request runs,
+//! in its savepoint:
+//!
+//! 1. the requester, a `trust_admin` of the version's tenant: its identity,
+//!    its credential, its `trust_admin` binding and its instance
+//!    `security_admin` binding, if any, `FOR SHARE` in one lookup (Q4;
+//!    inferred: the instance binding is always looked up, so the lock set
+//!    does not depend on the policy). A `security_admin` without the tenant
+//!    role is [`KeysetWriteError::Unauthorized`] like any other miss;
+//! 2. `acknowledge_widening`: a request without it is
+//!    [`KeysetWriteError::WideningNotAcknowledged`];
+//! 3. the policy row `FOR SHARE`; missing (before bootstrap), it is
+//!    [`KeysetWriteError::PolicyUnavailable`] (D18);
+//! 4. the mode. `widening_second_approver` off: the write is applied at
+//!    once, its event's outcome `success_widening` (D23).
+//!    `single_actor_mode` on and the requester also an instance
+//!    `security_admin`: applied at once, outcome `success_single_actor`
+//!    (Q4). Otherwise the write's own checks run under its locks (D7), and
+//!    a pending operation is written with its `administrative_operation.create`
+//!    event; no version is written. A create's plan holds the projection,
+//!    the fingerprint and the algorithms `new.keys` was validated against
+//!    (D25), never the raw upload; an enable's names the version, its
+//!    keyset and its stored fingerprint.
+//!
+//! The approval ([`crate::operation::approve_operation`]) reruns the
+//! write's steps 3 to 6 below under the approval's locks, from the locked
+//! plan, and samples the clock once, after the registry write (D28). The
+//! steps are split for it (D26): `apply_create_version` and
+//! `apply_enable_version` return the row and its event unstamped, and the
+//! caller stamps and appends the event. A permit wait under the gate is the
+//! direct write's: [`KeysetWriteError::ValidationBusy`], with the
+//! savepoint's locks released.
 //!
 //! # Stage A: the upload, outside the transaction
 //!
@@ -202,8 +250,9 @@
 //!    `admin_credential` and `admin_role_binding` rows `FOR SHARE`, in the
 //!    `0005` order;
 //! 2. [`enable_version`] and [`disable_version`] only: reads the version's
-//!    `keyset_id`, without a lock (the column is immutable). A version
-//!    missing from the tenant is [`RegistryError::NotFound`];
+//!    `keyset_id` and `fingerprint`, without a lock (both columns are
+//!    immutable). A version missing from the tenant is
+//!    [`RegistryError::NotFound`];
 //! 3. the parent `trust_keyset` row by tenant and ID `FOR NO KEY UPDATE`.
 //!    A keyset missing from the tenant is [`RegistryError::NotFound`]. This
 //!    lock serializes the writes of one keyset: every write here takes it
@@ -267,7 +316,10 @@
 //!
 //! One event, last, in the version's tenant: actor the authorized operator
 //! (`{"type": "operator", "id": <admin_id>}`), `object_id` the version's
-//! ID, outcome `success` (inferred, as for bootstrap and restore). A create
+//! ID, outcome `success` (inferred, as for bootstrap and restore; a gated
+//! write applied at once has `success_widening` or `success_single_actor`,
+//! and an approved one `success` with the requester as actor, after the
+//! approval's own event: see "The gate"). A create
 //! is `trust_keyset_version.create` with no previous revision and the new
 //! row's revision; a status change is `trust_keyset_version.enable` or
 //! `trust_keyset_version.disable` (identity-registry IR-059) with the
@@ -289,9 +341,9 @@
 //!
 //! # Not done here
 //!
-//! - Wiring to an endpoint, and the second-approver flow that the widening
-//!   ruling above requires (IR-054 approvals while
-//!   `widening_second_approver` is on; OQ-ADR008-3, IR-052; T14.1, T14.2).
+//! - Wiring to an endpoint (see "Not wired"), and making the ungated
+//!   [`create_version`] and [`enable_version`] crate-private (the
+//!   proposal's PR 7).
 //! - The raw request-body bound before the upload is parsed.
 //! - The keyset's own status: a version of a disabled keyset is written
 //!   like any other (inferred: the verifier reads the keyset's status).
@@ -317,14 +369,22 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-use super::write::{WriteError, authorize_trust_admin, in_savepoint, require_read_committed};
+use super::write::{
+    GatedWriteError, Mode, WriteError, authorize_trust_admin, authorize_widening_write,
+    in_savepoint, require_read_committed,
+};
 use crate::jwk::{
-    Algorithm, JwkSet, JwkSetError, KNOWN_ALGORITHMS, KeysetFingerprint, KeysetVersion,
+    Algorithm, JwkError, JwkSet, JwkSetError, KNOWN_ALGORITHMS, KeysetFingerprint, KeysetVersion,
     OverlapError, PRIVATE_MEMBERS, ValidatedKeyset, VersionStatus, check_version_overlap,
     parse_stored, validate_keyset,
 };
+use crate::operation::{
+    Gated, OUTCOME_SUCCESS, OperationKind, PendingRequest, Requester, Submission, UnstampedEvent,
+    encode_error, insert_pending,
+    keyset_plan::{CreatePlan, CreateRequest, EnablePlan},
+};
 use crate::persistence::registry::{
-    AuditActor, JsonObject, KeysetVersionText, NewAuditEvent, NewTrustKeysetVersion, RegistryError,
+    AuditActor, InvariantKind, JsonObject, KeysetVersionText, NewTrustKeysetVersion, RegistryError,
     Status, TrustKeysetVersion, append_audit_event, create_trust_keyset_version,
     floor_to_microsecond, read_enabled_keyset_versions, read_keyset_version,
     update_trust_keyset_version,
@@ -371,12 +431,19 @@ const ENABLE_ACTION: &str = "trust_keyset_version.enable";
 /// The audit action of [`disable_version`] (identity-registry IR-059).
 const DISABLE_ACTION: &str = "trust_keyset_version.disable";
 
-/// The outcome of the event (inferred, as for bootstrap).
-const SUCCESS: &str = "success";
+/// The outcome of the event of an ungated write (inferred, as for
+/// bootstrap).
+const SUCCESS: &str = OUTCOME_SUCCESS;
 
-/// Step 2 of a status change: the version's keyset, immutable, unlocked.
-const VERSION_KEYSET: &str =
-    "SELECT keyset_id FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2";
+/// Step 2 of a status change: the version's keyset and fingerprint, both
+/// immutable, unlocked. The fingerprint is a gated enable's plan member
+/// (proposal section 2).
+const VERSION_IDENTITY: &str =
+    "SELECT keyset_id, fingerprint FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2";
+
+/// The `0004` check that a version ID is not empty, under PostgreSQL's
+/// default name (D27 pre-validates it at a gated request).
+const VERSION_ID_CHECK: &str = "trust_keyset_version_id_check";
 
 /// Step 4 of a disable: the version's revision, after the parent lock; no
 /// other column is fetched.
@@ -476,6 +543,13 @@ pub enum KeysetWriteError {
     /// makes a version enabled and compares a stored version returns it;
     /// [`validate_upload`] waits for its own workers without a bound.
     ValidationBusy,
+    /// A gated write ([`submit_create_version`], [`submit_enable_version`])
+    /// without `acknowledge_widening`: each is widening (proposal section
+    /// 1), whether `widening_second_approver` is on or off.
+    WideningNotAcknowledged,
+    /// A gated write found no `instance_security_policy` row (D18).
+    /// Retryable once the instance is bootstrapped.
+    PolicyUnavailable,
     /// A registry error: a store failure, [`RegistryError::Retry`] (retry
     /// the whole transaction), or the write's own outcome, such as
     /// [`RegistryError::NotFound`], [`RegistryError::StaleRevision`],
@@ -527,6 +601,10 @@ impl fmt::Display for KeysetWriteError {
             Self::ValidationBusy => {
                 f.write_str("the in-transaction validation workers are busy; retry")
             }
+            Self::WideningNotAcknowledged => {
+                f.write_str("the trust keyset version write is widening and was not acknowledged")
+            }
+            Self::PolicyUnavailable => f.write_str("the instance security policy is unavailable"),
             Self::Registry(err) => write!(f, "trust keyset version write failed: {err}"),
         }
     }
@@ -544,6 +622,8 @@ impl fmt::Debug for KeysetWriteError {
             Self::UnsupportedIsolation => f.write_str("UnsupportedIsolation"),
             Self::WorkerUnavailable => f.write_str("WorkerUnavailable"),
             Self::ValidationBusy => f.write_str("ValidationBusy"),
+            Self::WideningNotAcknowledged => f.write_str("WideningNotAcknowledged"),
+            Self::PolicyUnavailable => f.write_str("PolicyUnavailable"),
             Self::Registry(err) => f.debug_tuple("Registry").field(err).finish(),
         }
     }
@@ -573,6 +653,11 @@ impl From<sqlx::Error> for KeysetWriteError {
 impl WriteError for KeysetWriteError {
     const UNSUPPORTED_ISOLATION: Self = Self::UnsupportedIsolation;
     const UNAUTHORIZED: Self = Self::Unauthorized;
+}
+
+impl GatedWriteError for KeysetWriteError {
+    const WIDENING_NOT_ACKNOWLEDGED: Self = Self::WideningNotAcknowledged;
+    const POLICY_UNAVAILABLE: Self = Self::PolicyUnavailable;
 }
 
 /// Runs `work` on tokio's blocking pool once one of the
@@ -869,30 +954,78 @@ fn projection(keys: &ValidatedKeyset) -> Result<JsonObject, KeysetWriteError> {
         .map_err(|err| RegistryError::Other(sqlx::Error::Encode(err.into())).into())
 }
 
-/// Step 7: the event of a write by `admin_id`.
-async fn append_event(
-    transaction: &mut Transaction<'_, Postgres>,
-    audit: &KeysetAudit<'_>,
-    admin_id: String,
-    action: &str,
+/// Refuses a `provenance` naming a JWK private member, before any
+/// statement (see the module docs, "Provenance"). The approve of a gated
+/// create runs it again on the plan's provenance (proposal section 4).
+pub(crate) fn check_provenance(provenance: &JsonObject) -> Result<(), KeysetWriteError> {
+    if names_a_private_member(provenance) {
+        return Err(KeysetWriteError::PrivateMemberInProvenance);
+    }
+    Ok(())
+}
+
+/// The pure checks of a gated create's request step 1, before any
+/// statement: the provenance ([`check_provenance`]); an empty version ID,
+/// refused as the `0004` check `trust_keyset_version_id_check` refuses it
+/// at the insert (D27, the one plainly typed constraint of a version: its
+/// other `0004` and `0007` checks are lengths, characters, ranges and the
+/// window, which stay approve-time); and a key whose algorithm is outside
+/// `allowed`, the set the plan records as the one `new.keys` was validated
+/// against (D25; inferred: refused as [`validate_keyset`] refuses it, the
+/// key named by its index in the validated set's `kid` order, since only
+/// the caller knows which set it validated with).
+fn check_create_request(
+    new: &NewKeysetVersion<'_>,
+    allowed: &[Algorithm],
+) -> Result<(), KeysetWriteError> {
+    check_provenance(new.provenance)?;
+    if new.id.is_empty() {
+        return Err(RegistryError::Invariant {
+            kind: InvariantKind::Check,
+            constraint: Some(VERSION_ID_CHECK),
+        }
+        .into());
+    }
+    for (index, key) in new.keys.keys().iter().enumerate() {
+        if !allowed.contains(&key.algorithm()) {
+            let error = match key.alg() {
+                Some(alg) => JwkError::AlgorithmNotAllowed(alg),
+                None => JwkError::NoAllowedAlgorithm,
+            };
+            return Err(KeysetWriteError::Upload(JwkSetError::Key { index, error }));
+        }
+    }
+    Ok(())
+}
+
+/// A step function's event of a write by `requester` of `version`,
+/// unstamped (D26).
+fn unstamped(
+    requester: &Requester,
+    action: &'static str,
     previous_revision: Option<i64>,
     version: &TrustKeysetVersion,
+) -> UnstampedEvent {
+    UnstampedEvent {
+        tenant_id: Some(version.tenant_id.clone()),
+        actor: AuditActor::Operator(requester.admin_id.clone()),
+        action,
+        object_id: version.id.clone(),
+        previous_revision,
+        new_revision: Some(version.revision),
+    }
+}
+
+/// Step 7: `event` stamped with the caller's ID, `now` and `outcome`,
+/// through the audit head.
+async fn append_stamped(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: UnstampedEvent,
+    event_id: &str,
+    now: SystemTime,
+    outcome: &str,
 ) -> Result<(), KeysetWriteError> {
-    append_audit_event(
-        transaction,
-        &NewAuditEvent {
-            id: audit.event_id.into(),
-            tenant_id: Some(version.tenant_id.clone()),
-            timestamp: audit.now,
-            actor: AuditActor::Operator(admin_id),
-            action: action.into(),
-            object_id: version.id.clone(),
-            previous_revision,
-            new_revision: Some(version.revision),
-            outcome: SUCCESS.into(),
-        },
-    )
-    .await?;
+    append_audit_event(transaction, &event.stamp(event_id, now, outcome)).await?;
     Ok(())
 }
 
@@ -903,15 +1036,17 @@ async fn append_event(
 /// `trust_keyset_version.create` event last, in `transaction` (see the
 /// module docs for the rules, the order and the locks). Runs only under
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
+///
+/// Ungated: it applies a widening write on one operator's authority, so it
+/// stays test-only until it becomes crate-private (see the module docs,
+/// "Not wired"); [`submit_create_version`] is the gated write.
 pub async fn create_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     new: &NewKeysetVersion<'_>,
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
-    if names_a_private_member(new.provenance) {
-        return Err(KeysetWriteError::PrivateMemberInProvenance);
-    }
+    check_provenance(new.provenance)?;
     in_savepoint(transaction, async |savepoint| {
         create_steps(savepoint, public_identity, new, audit).await
     })
@@ -926,9 +1061,23 @@ async fn create_steps(
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
     require_read_committed::<KeysetWriteError>(transaction).await?;
-    let admin_id =
+    let requester =
         authorize_trust_admin::<KeysetWriteError>(transaction, public_identity, new.tenant_id)
             .await?;
+    let (version, event) = apply_create_version(transaction, &requester, new).await?;
+    append_stamped(transaction, event, audit.event_id, audit.now, SUCCESS).await?;
+    Ok(version)
+}
+
+/// Steps 3 to 5 of a create, through the checks and before the insert:
+/// the parent lock, then, when `new.status` is enabled, the count of the
+/// keyset's enabled versions and the overlap check. A gated create's
+/// pending request runs exactly these (D7); [`apply_create_version`] runs
+/// them and then [`insert_create_version`].
+pub(crate) async fn check_create_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    new: &NewKeysetVersion<'_>,
+) -> Result<(), KeysetWriteError> {
     lock_keyset(transaction, new.tenant_id, new.keyset_id).await?;
     if new.status == Status::Enabled {
         let rows =
@@ -953,6 +1102,19 @@ async fn create_steps(
             check_overlap(&version, rows).await?;
         }
     }
+    Ok(())
+}
+
+/// Step 6 of a create: the insert by `requester`, after
+/// [`check_create_version`] in the same savepoint. Returns the row and its
+/// `trust_keyset_version.create` event, unstamped; appends nothing (D26).
+/// The insert can wait: on a conflicting uncommitted version ID, until
+/// that transaction ends (proposal section 3, approve step 6).
+pub(crate) async fn insert_create_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    requester: &Requester,
+    new: &NewKeysetVersion<'_>,
+) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError> {
     let fingerprint: &KeysetFingerprint = new.keys.fingerprint();
     let version = create_trust_keyset_version(
         &mut **transaction,
@@ -969,8 +1131,112 @@ async fn create_steps(
         },
     )
     .await?;
-    append_event(transaction, audit, admin_id, CREATE_ACTION, None, &version).await?;
-    Ok(version)
+    let event = unstamped(requester, CREATE_ACTION, None, &version);
+    Ok((version, event))
+}
+
+/// The post-authorization steps of a create (D26): steps 3 to 6, the
+/// checks ([`check_create_version`]) and the insert
+/// ([`insert_create_version`]), by `requester`, whom the caller authorized.
+/// Returns the row and its event, unstamped; the caller appends it. The
+/// provenance is the caller's to check first ([`check_provenance`]).
+pub(crate) async fn apply_create_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    requester: &Requester,
+    new: &NewKeysetVersion<'_>,
+) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError> {
+    check_create_version(transaction, new).await?;
+    insert_create_version(transaction, requester, new).await
+}
+
+/// Requests the create of the keyset version `new` (proposal section 3,
+/// "Request"): a widening write, enabled or disabled (Q3), for the
+/// `trust_admin` of `new.tenant_id` whose credential has
+/// `submission.public_identity`. `allowed` is the set [`validate_upload`]
+/// validated `new.keys` against; the plan records it (D25).
+///
+/// Before any statement: the provenance check, an empty version ID (D27)
+/// and a key outside `allowed`. Then, in a savepoint, only under
+/// `READ COMMITTED`: the requester's rows `FOR SHARE` (with its instance
+/// `security_admin` binding, if any; Q4), `acknowledge_widening`
+/// ([`KeysetWriteError::WideningNotAcknowledged`]), the policy row
+/// `FOR SHARE` ([`KeysetWriteError::PolicyUnavailable`]), and the mode:
+///
+/// - `widening_second_approver` off: applied at once, as
+///   [`create_version`], with the event's outcome `success_widening` (D23);
+/// - on, `single_actor_mode` on and the requester also an instance
+///   `security_admin`: applied at once, outcome `success_single_actor`
+///   (Q4);
+/// - otherwise the create's checks (the parent lock, the cap and the
+///   overlap check), then a pending `trust_keyset_version_create`
+///   operation at expected revision 0, whose plan holds the projection and
+///   fingerprint, never the raw upload. No version is written.
+///
+/// The caller commits on `Ok` and rolls back on `Err`.
+pub async fn submit_create_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    new: &NewKeysetVersion<'_>,
+    allowed: &[Algorithm],
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    check_create_request(new, allowed)?;
+    in_savepoint(transaction, async |savepoint| {
+        submit_create_steps(savepoint, submission, new, allowed).await
+    })
+    .await
+}
+
+/// Request steps 0 to 8 of [`submit_create_version`], in its savepoint.
+async fn submit_create_steps(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    new: &NewKeysetVersion<'_>,
+    allowed: &[Algorithm],
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    require_read_committed::<KeysetWriteError>(transaction).await?;
+    let (requester, mode) =
+        authorize_widening_write::<KeysetWriteError>(transaction, submission, new.tenant_id)
+            .await?;
+    match mode {
+        Mode::Apply(outcome) => {
+            let (version, event) = apply_create_version(transaction, &requester, new).await?;
+            append_stamped(
+                transaction,
+                event,
+                submission.event_id,
+                submission.now,
+                outcome,
+            )
+            .await?;
+            Ok(Gated::Applied(version))
+        }
+        Mode::Pending => {
+            check_create_version(transaction, new).await?;
+            let plan = CreatePlan::new(&CreateRequest {
+                requester_credential_id: &requester.credential_id,
+                version_id: new.id,
+                keyset_id: new.keyset_id,
+                keys: new.keys,
+                allowed,
+                effective_at: new.effective_at,
+                expires_at: new.expires_at,
+                status: new.status,
+                provenance: new.provenance,
+            })
+            .map_err(|_| encode_error::<KeysetWriteError>("a time is outside the time range"))?;
+            let request = PendingRequest {
+                kind: OperationKind::TrustKeysetVersionCreate,
+                tenant_id: Some(new.tenant_id),
+                // A create has no target revision (README:946).
+                expected_revision: 0,
+                plan: plan.to_plan(),
+            };
+            let pending =
+                insert_pending::<KeysetWriteError>(transaction, submission, &requester, request)
+                    .await?;
+            Ok(Gated::Pending(pending))
+        }
+    }
 }
 
 /// Enables the keyset version `id` of `tenant_id` at `expected_revision`
@@ -980,6 +1246,9 @@ async fn create_steps(
 /// `transaction` (see the module docs). A re-enable after a rotation is
 /// refused while the replacement is enabled. Runs only under
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
+///
+/// Ungated, as [`create_version`]; [`submit_enable_version`] is the gated
+/// write.
 pub async fn enable_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
@@ -996,7 +1265,8 @@ pub async fn enable_version(
 /// for the operator whose credential has `public_identity`, and appends its
 /// `trust_keyset_version.disable` event last, in `transaction` (see the
 /// module docs). No overlap check runs. Runs only under `READ COMMITTED`.
-/// The caller commits on `Ok` and rolls back on `Err`.
+/// The caller commits on `Ok` and rolls back on `Err`. Never gated: a
+/// disable is not widening (proposal section 1).
 pub async fn disable_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
@@ -1035,23 +1305,61 @@ async fn set_status(
 async fn status_steps(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
-    (tenant_id, id, expected_revision): (&str, &str, i64),
+    target: (&str, &str, i64),
     status: Status,
     audit: &KeysetAudit<'_>,
 ) -> Result<TrustKeysetVersion, KeysetWriteError> {
     require_read_committed::<KeysetWriteError>(transaction).await?;
-    let admin_id =
-        authorize_trust_admin::<KeysetWriteError>(transaction, public_identity, tenant_id).await?;
-    let keyset_id: String = sqlx::query_scalar(VERSION_KEYSET)
+    let requester =
+        authorize_trust_admin::<KeysetWriteError>(transaction, public_identity, target.0).await?;
+    let identity = read_version_identity(transaction, target.0, target.1).await?;
+    let (version, event) =
+        apply_status(transaction, &requester, target, &identity.keyset_id, status).await?;
+    append_stamped(transaction, event, audit.event_id, audit.now, SUCCESS).await?;
+    Ok(version)
+}
+
+/// A version's immutable `keyset_id` and `fingerprint`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VersionIdentity {
+    pub(crate) keyset_id: String,
+    pub(crate) fingerprint: String,
+}
+
+/// Step 2 of a status change: the version's [`VersionIdentity`], without a
+/// lock (both columns are immutable). A version missing from the tenant is
+/// [`RegistryError::NotFound`].
+pub(crate) async fn read_version_identity(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    id: &str,
+) -> Result<VersionIdentity, KeysetWriteError> {
+    let (keyset_id, fingerprint) = sqlx::query_as(VERSION_IDENTITY)
         .bind(tenant_id)
         .bind(id)
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(RegistryError::NotFound)?;
-    lock_keyset(transaction, tenant_id, &keyset_id).await?;
-    // The target, in a new statement after the parent lock: an enable reads
-    // the row with its keys, a disable its revision only.
-    let (previous_revision, action) = match status {
+    Ok(VersionIdentity {
+        keyset_id,
+        fingerprint,
+    })
+}
+
+/// Steps 3 to 5 of a status change of the version `id` of `tenant_id` in
+/// `keyset_id`, through the checks: the parent lock, then the target in a
+/// new statement (an enable reads the row with its keys, a disable its
+/// revision only) against `expected_revision`, then, for an enable, the
+/// count and the overlap check. Returns the stored revision. A gated
+/// enable's pending request runs exactly these (D7).
+async fn check_status(
+    transaction: &mut Transaction<'_, Postgres>,
+    (tenant_id, id, expected_revision): (&str, &str, i64),
+    keyset_id: &str,
+    status: Status,
+) -> Result<i64, KeysetWriteError> {
+    lock_keyset(transaction, tenant_id, keyset_id).await?;
+    match status {
         Status::Enabled => {
             let stored = read_keyset_version(&mut **transaction, tenant_id, id)
                 .await?
@@ -1061,13 +1369,13 @@ async fn status_steps(
                 return Err(RegistryError::StaleRevision.into());
             }
             let rows =
-                read_enabled_keyset_versions(&mut **transaction, tenant_id, &keyset_id).await?;
+                read_enabled_keyset_versions(&mut **transaction, tenant_id, keyset_id).await?;
             check_enabled_count(&rows, id)?;
             // The target and its compared versions in one parse step: one
             // permit, one wait, per write.
             let ((row, keys), compared) = parse_enable(stored, rows).await?;
             check_against(&enabled(&row, keys.set()), &compared)?;
-            (previous_revision, ENABLE_ACTION)
+            Ok(previous_revision)
         }
         Status::Disabled => {
             let previous_revision: i64 = sqlx::query_scalar(TARGET_REVISION)
@@ -1079,22 +1387,141 @@ async fn status_steps(
             if previous_revision != expected_revision {
                 return Err(RegistryError::StaleRevision.into());
             }
-            (previous_revision, DISABLE_ACTION)
+            Ok(previous_revision)
         }
-    };
+    }
+}
+
+/// Steps 3 to 6 of a status change by `requester`: [`check_status`], then
+/// the compare-and-set. Returns the row and its event, unstamped.
+async fn apply_status(
+    transaction: &mut Transaction<'_, Postgres>,
+    requester: &Requester,
+    target: (&str, &str, i64),
+    keyset_id: &str,
+    status: Status,
+) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError> {
+    let previous_revision = check_status(transaction, target, keyset_id, status).await?;
+    let (tenant_id, id, expected_revision) = target;
     let version =
         update_trust_keyset_version(&mut **transaction, tenant_id, id, expected_revision, status)
             .await?;
-    append_event(
+    let action = match status {
+        Status::Enabled => ENABLE_ACTION,
+        Status::Disabled => DISABLE_ACTION,
+    };
+    let event = unstamped(requester, action, Some(previous_revision), &version);
+    Ok((version, event))
+}
+
+/// The post-authorization steps of an enable (D26): steps 2 to 6 of the
+/// version `id` of `tenant_id` at `expected_revision`, by `requester`,
+/// whom the caller authorized: the version's keyset, the parent lock, the
+/// target and its revision, the count, the overlap check of its stored
+/// keys on the in-transaction pool, and the compare-and-set. Returns the
+/// row and its `trust_keyset_version.enable` event, unstamped; the caller
+/// appends it.
+pub(crate) async fn apply_enable_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    requester: &Requester,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError> {
+    let identity = read_version_identity(transaction, tenant_id, id).await?;
+    let target = (tenant_id, id, expected_revision);
+    apply_status(
         transaction,
-        audit,
-        admin_id,
-        action,
-        Some(previous_revision),
-        &version,
+        requester,
+        target,
+        &identity.keyset_id,
+        Status::Enabled,
     )
-    .await?;
-    Ok(version)
+    .await
+}
+
+/// Requests the enable of the keyset version `id` of `tenant_id` at
+/// `expected_revision` (proposal section 3, "Request"): a widening write,
+/// a re-enable and an enable of an enabled version included, for the
+/// `trust_admin` whose credential has `submission.public_identity`. In a
+/// savepoint, only under `READ COMMITTED`: the requester's rows, the flag
+/// and the policy row as [`submit_create_version`], then the version's
+/// keyset and fingerprint and the mode:
+///
+/// - applied at once, as [`enable_version`], with the event's outcome
+///   `success_widening` or `success_single_actor` (D23; Q4);
+/// - otherwise the enable's checks (the parent lock, the target's
+///   revision, the cap, the parse and the overlap check), then a pending
+///   `trust_keyset_version_enable` operation at `expected_revision`, whose
+///   plan names the version, its keyset and its stored fingerprint. The
+///   version is not written.
+///
+/// The caller commits on `Ok` and rolls back on `Err`.
+pub async fn submit_enable_version(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    let target = (tenant_id, id, expected_revision);
+    in_savepoint(transaction, async |savepoint| {
+        submit_enable_steps(savepoint, submission, target).await
+    })
+    .await
+}
+
+/// Request steps 0 to 8 of [`submit_enable_version`], in its savepoint.
+async fn submit_enable_steps(
+    transaction: &mut Transaction<'_, Postgres>,
+    submission: &Submission<'_>,
+    target: (&str, &str, i64),
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    let (tenant_id, id, expected_revision) = target;
+    require_read_committed::<KeysetWriteError>(transaction).await?;
+    let (requester, mode) =
+        authorize_widening_write::<KeysetWriteError>(transaction, submission, tenant_id).await?;
+    let identity = read_version_identity(transaction, tenant_id, id).await?;
+    match mode {
+        Mode::Apply(outcome) => {
+            let (version, event) = apply_status(
+                transaction,
+                &requester,
+                target,
+                &identity.keyset_id,
+                Status::Enabled,
+            )
+            .await?;
+            append_stamped(
+                transaction,
+                event,
+                submission.event_id,
+                submission.now,
+                outcome,
+            )
+            .await?;
+            Ok(Gated::Applied(version))
+        }
+        Mode::Pending => {
+            check_status(transaction, target, &identity.keyset_id, Status::Enabled).await?;
+            let plan = EnablePlan {
+                requester_credential_id: requester.credential_id.clone(),
+                version_id: id.into(),
+                keyset_id: identity.keyset_id,
+                fingerprint: identity.fingerprint,
+            };
+            let request = PendingRequest {
+                kind: OperationKind::TrustKeysetVersionEnable,
+                tenant_id: Some(tenant_id),
+                expected_revision,
+                plan: plan.to_plan(),
+            };
+            let pending =
+                insert_pending::<KeysetWriteError>(transaction, submission, &requester, request)
+                    .await?;
+            Ok(Gated::Pending(pending))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1128,9 +1555,11 @@ mod tests {
              FOR NO KEY UPDATE"
         );
         assert_eq!(
-            VERSION_KEYSET,
-            "SELECT keyset_id FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2"
+            VERSION_IDENTITY,
+            "SELECT keyset_id, fingerprint FROM trust_keyset_version \
+             WHERE tenant_id = $1 AND id = $2"
         );
+        assert_eq!(VERSION_ID_CHECK, "trust_keyset_version_id_check");
         assert_eq!(
             TARGET_REVISION,
             "SELECT revision FROM trust_keyset_version WHERE tenant_id = $1 AND id = $2"
@@ -1236,6 +1665,16 @@ mod tests {
                 KeysetWriteError::ValidationBusy,
                 "the in-transaction validation workers are busy; retry",
                 "ValidationBusy",
+            ),
+            (
+                KeysetWriteError::WideningNotAcknowledged,
+                "the trust keyset version write is widening and was not acknowledged",
+                "WideningNotAcknowledged",
+            ),
+            (
+                KeysetWriteError::PolicyUnavailable,
+                "the instance security policy is unavailable",
+                "PolicyUnavailable",
             ),
             (
                 KeysetWriteError::Registry(RegistryError::StaleRevision),
@@ -2134,11 +2573,19 @@ mod tests {
         /// `ValidationBusy` after [`IN_TRANSACTION_WAIT`] with its locks
         /// released, and leaves the transaction usable; the transaction is
         /// then committed.
-        async fn busy(
+        async fn busy<T: std::fmt::Debug>(
             pool: &PgPool,
-            write: impl AsyncFnOnce(
-                &mut Transaction<'static, Postgres>,
-            ) -> Result<TrustKeysetVersion, KeysetWriteError>,
+            write: impl AsyncFnOnce(&mut Transaction<'static, Postgres>) -> Result<T, KeysetWriteError>,
+        ) {
+            busy_as(pool, "ValidationBusy", write).await;
+        }
+
+        /// [`busy`] for a call whose error prints as `expected` (an
+        /// approval's `Keyset(ValidationBusy)`).
+        async fn busy_as<T: std::fmt::Debug, E: std::fmt::Debug>(
+            pool: &PgPool,
+            expected: &str,
+            write: impl AsyncFnOnce(&mut Transaction<'static, Postgres>) -> Result<T, E>,
         ) {
             let mut tx = pool.begin().await.unwrap();
             let start = std::time::Instant::now();
@@ -2146,11 +2593,10 @@ mod tests {
                 async { tokio::time::timeout(HANG, write(&mut tx)).await },
                 until_locked(pool),
             );
-            let result = result.expect("the wait is bounded");
-            assert!(
-                matches!(result, Err(KeysetWriteError::ValidationBusy)),
-                "{result:?}"
-            );
+            match result.expect("the wait is bounded") {
+                Ok(value) => panic!("expected {expected}, got Ok({value:?})"),
+                Err(err) => assert_eq!(format!("{err:?}"), expected),
+            }
             // One wait per write, not one per parse.
             let waited = start.elapsed();
             assert!(waited >= IN_TRANSACTION_WAIT, "{waited:?}");
@@ -2166,18 +2612,17 @@ mod tests {
         /// `write` in its own transaction, committed: it needs no worker,
         /// so it succeeds at once while every in-transaction worker is
         /// taken.
-        async fn at_once(
+        async fn at_once<T>(
             pool: &PgPool,
-            write: impl AsyncFnOnce(
-                &mut Transaction<'static, Postgres>,
-            ) -> Result<TrustKeysetVersion, KeysetWriteError>,
-        ) {
+            write: impl AsyncFnOnce(&mut Transaction<'static, Postgres>) -> Result<T, KeysetWriteError>,
+        ) -> T {
             let mut tx = pool.begin().await.unwrap();
             let result = tokio::time::timeout(IN_TRANSACTION_WAIT / 2, write(&mut tx))
                 .await
                 .expect("the write waited for a worker");
-            result.unwrap_or_else(|err| panic!("{err:?}"));
+            let value = result.unwrap_or_else(|err| panic!("{err:?}"));
             tx.commit().await.unwrap();
+            value
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -2275,6 +2720,165 @@ mod tests {
             let behind = tokio::time::timeout(HANG, behind).await.unwrap().unwrap();
             drop((behind, held));
             assert_eq!(stored_state(pool).await, (rows(Some(("enabled", 2))), 4));
+            db.drop().await;
+        }
+
+        /// A clock at [`now`].
+        struct Now;
+
+        impl crate::operation::Clock for Now {
+            fn now(&self) -> SystemTime {
+                now()
+            }
+        }
+
+        fn submission<'a>(operation_id: &'a str, event_id: &'a str) -> Submission<'a> {
+            Submission {
+                public_identity: TRUST,
+                acknowledge_widening: true,
+                operation_id,
+                event_id,
+                now: now(),
+            }
+        }
+
+        /// The number of administrative operations.
+        async fn operations(pool: &PgPool) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM administrative_operation")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        /// The gated writes keep the direct writes' permit semantics: a
+        /// request, pending or applied at once, and an approval that must
+        /// compare a stored version wait for an in-transaction worker under
+        /// their locks and are `ValidationBusy` when none frees up, with
+        /// nothing written and the locks released; a disabled create needs
+        /// no worker.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+        async fn a_gated_write_with_no_in_transaction_worker_is_validation_busy() {
+            use crate::operation::{
+                ApprovalEcho, ApprovalIds, ApprovalScope, approve_operation, prepare_approval,
+            };
+            use crate::persistence::registry::{BootstrapRequest, bootstrap_instance};
+
+            let _statics = STATICS.lock().await;
+            let db = Db::create().await;
+            let pool = db.pool();
+            // The policy row, and an instance `security_admin` to approve.
+            let mut tx = pool.begin().await.unwrap();
+            bootstrap_instance(
+                &mut tx,
+                &BootstrapRequest {
+                    instance_id: "019a9f3c-5b2e-7c41-9d8e-0123456789ab",
+                    admin_id: "adm_sec",
+                    credential_id: "crd_adm_sec",
+                    public_identity: "key_adm_sec",
+                    trust_anchor_ref: "deployment/operator-ca",
+                    binding_id: "rb_adm_sec",
+                    recovery_public_key: &[0x11; 32],
+                    audit_event_id: "aud_bootstrap",
+                    now: now(),
+                },
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+            let set_widening = async |on: bool| {
+                sqlx::query(
+                    "UPDATE instance_security_policy \
+                     SET widening_second_approver = $1, revision = revision + 1",
+                )
+                .bind(on)
+                .execute(pool)
+                .await
+                .unwrap();
+            };
+            set_widening(true).await;
+            let provenance = JsonObject::new();
+            let key_1 = validate_upload(p256("k1"), DEFAULT_ALLOWED_ALGORITHMS)
+                .await
+                .unwrap();
+            let key_2 = validate_upload(p256_b("k2"), DEFAULT_ALLOWED_ALGORITHMS)
+                .await
+                .unwrap();
+            let enabled_1 = version("ver_1", &key_1, Status::Enabled, &provenance);
+            let disabled_2 = version("ver_2", &key_2, Status::Disabled, &provenance);
+            let enabled_3 = version("ver_3", &key_2, Status::Enabled, &provenance);
+            let enabled_4 = version("ver_4", &key_2, Status::Enabled, &provenance);
+            let allowed = DEFAULT_ALLOWED_ALGORITHMS;
+            at_once(pool, async |tx| {
+                create_version(tx, TRUST, &enabled_1, &audit("aud_1")).await
+            })
+            .await;
+            at_once(pool, async |tx| {
+                create_version(tx, TRUST, &disabled_2, &audit("aud_2")).await
+            })
+            .await;
+            let Gated::Pending(op) = at_once(pool, async |tx| {
+                submit_create_version(tx, &submission("op_3", "aud_3"), &enabled_3, allowed).await
+            })
+            .await
+            else {
+                panic!("not pending");
+            };
+            let prepared = prepare_approval(
+                pool,
+                "key_adm_sec",
+                ApprovalScope::Tenant("ten_a"),
+                "op_3",
+                allowed,
+                now(),
+            )
+            .await
+            .unwrap();
+            let echo = ApprovalEcho {
+                request_digest: op.request_digest,
+                expected_revision: op.expected_revision,
+            };
+            let state = (stored_state(pool).await, operations(pool).await);
+            let held = hold(&IN_TRANSACTION, IN_TRANSACTION_WORKERS).await;
+
+            // Pending requests: a create and an enable, each comparing
+            // `ver_1`.
+            busy(pool, async |tx| {
+                submit_create_version(tx, &submission("op_4", "aud_4"), &enabled_4, allowed).await
+            })
+            .await;
+            busy(pool, async |tx| {
+                let submission = submission("op_4", "aud_4");
+                submit_enable_version(tx, &submission, "ten_a", "ver_2", 1).await
+            })
+            .await;
+            // The approval reruns the create under its locks.
+            busy_as(pool, "Keyset(ValidationBusy)", async |tx| {
+                let ids = ApprovalIds {
+                    approve_operation_id: "appr_3",
+                    approve_event_id: "aud_appr_3",
+                    write_event_id: "aud_write_3",
+                };
+                let scope = ApprovalScope::Tenant("ten_a");
+                approve_operation(tx, "key_adm_sec", scope, &prepared, &echo, &ids, &Now).await
+            })
+            .await;
+            assert_eq!((stored_state(pool).await, operations(pool).await), state);
+            // Applied at once, the toggle off.
+            set_widening(false).await;
+            busy(pool, async |tx| {
+                submit_create_version(tx, &submission("op_4", "aud_4"), &enabled_4, allowed).await
+            })
+            .await;
+            assert_eq!((stored_state(pool).await, operations(pool).await), state);
+            // A disabled create compares nothing.
+            let disabled_4 = version("ver_4", &key_2, Status::Disabled, &provenance);
+            let applied = at_once(pool, async |tx| {
+                submit_create_version(tx, &submission("op_4", "aud_4"), &disabled_4, allowed).await
+            })
+            .await;
+            assert!(matches!(applied, Gated::Applied(_)), "{applied:?}");
+            drop(held);
             db.drop().await;
         }
     }

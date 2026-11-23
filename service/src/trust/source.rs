@@ -234,16 +234,19 @@
 //! # Not done here
 //!
 //! - No endpoint and no HTTP: nothing calls these functions yet. They must
-//!   not be wired to a request path before the request layer of T14.1 and
-//!   T14.2 exists (generated IDs, NUL rejection, the role of each endpoint)
-//!   and before the T14.1 and T14.2 design of the second-approver flow,
-//!   since a wired write would apply a widening source write without the
-//!   approval IR-052 requires.
+//!   not be wired to a request path before the request layer exists
+//!   (generated IDs, T10.2; NUL rejection; the role of each endpoint,
+//!   T13.2, T13.3) and before the source kinds of the second-approver flow
+//!   land (`docs/proposals/second-approver-gated-writes.md`, PR 5), since a
+//!   wired write would apply a widening source write without the approval
+//!   IR-052 requires.
 //! - Widening: a trust source write counts as widening and needs an IR-054
 //!   approval by a second approver while `widening_second_approver` is on
 //!   (ruled by the user, 2026-11-22, relayed by the lead; this decides the
-//!   IR-052 widening question for this write). What remains is the design
-//!   of the second-approver flow (T14.1, T14.2); no write here waits for an
+//!   IR-052 widening question for this write). The second-approver flow is
+//!   designed in that proposal (accepted, 2026-11-23); no task ID names it
+//!   (the nearest owners are T13.3, T13.2, T13.8, T11.6, T10.4 and T10.2).
+//!   Its source kinds are PR 5's; until then no write here waits for an
 //!   approval.
 //! - The fetch-time match of a discovered `jwks_uri` against an enabled
 //!   `jwks` entry, the degraded health signal and the fetches themselves
@@ -567,7 +570,8 @@ async fn create_steps(
     require_read_committed::<SourceWriteError>(transaction).await?;
     let admin_id =
         authorize_trust_admin::<SourceWriteError>(transaction, public_identity, &new.tenant_id)
-            .await?;
+            .await?
+            .admin_id;
     check_egress(transaction, destinations).await?;
     let source = create_trust_source(&mut **transaction, new).await?;
     append_audit_event(
@@ -625,7 +629,9 @@ async fn update_steps(
 ) -> Result<TrustSource, SourceWriteError> {
     require_read_committed::<SourceWriteError>(transaction).await?;
     let admin_id =
-        authorize_trust_admin::<SourceWriteError>(transaction, public_identity, tenant_id).await?;
+        authorize_trust_admin::<SourceWriteError>(transaction, public_identity, tenant_id)
+            .await?
+            .admin_id;
     let Some(stored) = sqlx::query(LOCK_SOURCE)
         .bind(tenant_id)
         .bind(id)
