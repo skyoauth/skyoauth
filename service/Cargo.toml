@@ -48,9 +48,13 @@ test-support = []
 
 [dev-dependencies]
 # This package itself with `test-support`, so its integration tests and
-# doctests reach `trust::test_support` under a plain `cargo test`. Cargo
-# applies a dev-dependency's features only to builds that need
-# dev-dependencies, so `cargo build` and `cargo run` leave it off.
+# doctests reach `trust::test_support` and
+# `persistence::registry::test_support` under a plain `cargo test`, and so
+# does the library's own unit-test build (the `seed` of `trust::keyset`'s
+# database tests enrolls its operator through
+# `persistence::registry::test_support`). Cargo applies a dev-dependency's
+# features only to builds that need dev-dependencies, so `cargo build` and
+# `cargo run` leave it off.
 skyoauth-service = { path = ".", features = ["test-support"] }
 http-body-util = "0.1.5"
 # `time` for timeouts that turn a hung database test into a failure.

@@ -2036,8 +2036,10 @@ the expectation unfulfilled, a warning in such a build. `append_audit_event`
 is `pub(crate)`: the audited writes of the registry (`bootstrap_steps`,
 `issue_steps`, `restore_steps`), of `crate::trust` (each module's
 `append_stamped`) and of `crate::operation` (`approve_steps`,
-`revoke_steps`, `toggle_steps` and `insert_pending`) call it, and the last
-two are siblings of `crate::persistence`. `insert_administrative_operation`,
+`revoke_steps`, `toggle_steps` and `insert_pending`) call it, and
+`crate::trust` and `crate::operation` are siblings of `crate::persistence`,
+which `pub(super)` or `pub(in crate::persistence)` would not reach.
+`insert_administrative_operation`,
 `consume_administrative_operation` and `revoke_administrative_operation`
 are `pub(crate)` for the same reason: `operation/approval.rs` calls all
 three and `operation/toggle.rs` the insert (in `insert_pending`, which the
@@ -2062,7 +2064,9 @@ kind, no dependency, no workflow change, and `Cargo.lock` is unchanged.
 
 `service/tests/ungated_writes_private.rs` covers the eight. Its probes
 require each to fail to resolve at `persistence::registry::<name>`, at its
-private defining module (`operator`, `events` or `operation`) and at
+private defining module (`operator`, `events` or `operation`; there as a
+private path, E0603, since the review round, so a renamed module or a stale
+table fails the test instead of passing it) and at
 `persistence::registry::test_support::<name>`; the control probe also
 names the operator, audit and operation readers and types that stay public
 and the five registry writers that deliberately stay public
@@ -2071,12 +2075,21 @@ and the five registry writers that deliberately stay public
 them fails it. The source check's table gains 62 places for the eight
 names, 106 in all: the definitions, the re-exports, the wrappers, the
 `use`s, the callers above and the unit test's `seed`, each keyed by the
-first line of its top-level item and counted; its layout-escape refusals
-are unchanged. The guard test now also requires `update_admin_role_binding`
-to be `pub(super)` right after its `expect(dead_code)`.
+first line of the item that holds it and counted. The guard test now also
+requires `update_admin_role_binding` to be `pub(super)` right after its
+`expect(dead_code)`. The review round hardened the source check (see the
+next paragraphs): an `impl` block at any depth is an item key of its own,
+so the `seed` rows are keyed by the test module's `impl Drop for Db`;
+mentions are counted with comments and string and character literals
+removed; and the check refuses `<name> as` for a listed name (whitespace
+removed, outside comments and literals) and a level set for
+`non_local_definitions` or `warnings` in the library's source, the
+package's or the workspace's manifest or the workspace's cargo
+configuration, on top of the layout escapes it already refused (inferred,
+all four).
 
-PR 10's mutants (outside the repository; this records the verdicts):
-forty-nine, forty-one killed. Thirty run against the whole test, all
+PR 10's mutants (outside the repository; this records the verdicts), round
+1: forty-nine, forty-one killed. Thirty run against the whole test, all
 killed. By the source check, twenty: each of the eight writers made `pub`
 (for `update_admin_role_binding` the guard test too); a writer made `pub`
 and re-exported `pub`, for the identity create, the append, the operation
@@ -2127,6 +2140,49 @@ count-preserving one in `bootstrap.rs` by that dead-code warning alone with
 the refusal off; and `bootstrap_instance` re-exported
 `pub(crate)`, and `disable_admin_identity` made `pub(super)`, by the
 control probe with the diagnostics check off.
+
+Round 1 missed four mutants that passed the whole test, each a
+count-preserving forwarder through which another crate could enroll a
+`security_admin` binding or append an audit event: a public method of an
+`impl NewAdminRoleBinding` nested in `bootstrap_steps` that calls the
+binding create, the call rewritten to that method (the `impl` with
+`allow(non_local_definitions)`); the same in `trust::keyset`'s
+`append_stamped` for the append; and an alias in `bootstrap.rs`'s `use`
+(`create_admin_role_binding as enroll_binding`) with the original name kept
+in a trailing comment, or in a string literal, and a public forwarder of
+the alias re-exported `pub`. The source check missed them because it keyed
+a mention by the item in column 0 only, counted comments after code and
+literals as mentions, and allowed aliases; the hardening above is the fix.
+The review round's run: 111 mutants, round 1's forty-nine, PR 9's
+thirty-eight ported to this tree, and twenty-four new; ninety-four killed.
+With every check on, every one is killed but PR 9's accepted survivor, a
+non-default feature of the scenario package that turns on `test-support`
+(the release-build item under "Still open"). Of the new ones, the four
+escapes and the alias split over two lines are killed by the new
+refusals, and each new check holds on its own: with the refusal off, the
+nested-`impl` key kills the two `impl` forwarders and the count, with
+comments and literals removed, kills the three aliases; without its
+`allow`, the nested `impl` draws `non_local_definitions`, which the
+diagnostics check refuses. A `macro_rules!` that expands such an `impl`
+from the writer's name passed to it, whose `impl` line names nothing, is
+killed by that warning, or by the refusal when an `allow` of
+`non_local_definitions` or `warnings` silences it (in the source, a
+`cfg_attr` included, or in the package's `[lints]` table). A probe table
+that names a module that does not exist (`operators`) fails the E0603
+requirement. Seventeen survive: PR 9's accepted one, and sixteen each only
+with a check disabled: the two
+`impl` forwarders with the nested-`impl` key and the refusal both off; the
+macro with the refusal off (with an `allow` of either lint); and round 1's
+eight and PR 9's four, as before. What still escapes, by inspection and
+not run: a lint level set outside the repository (a user's cargo
+configuration, `RUSTFLAGS` in the build's environment) together with a
+macro-expanded `impl`; code a procedural macro or a build script
+generates (the library has neither, and `include!` is refused); a public
+forwarder, under another name, of a caller one level up (`bootstrap_steps`,
+`insert_pending`, `append_stamped` and the like), which the check does not
+list, as it lists only the writers and the six trust steps; and whatever
+the check's small lexer misreads, since it is not rustc's (a unit test
+covers the cases it handles).
 
 Still open after PRs 7, 9 and 10:
 
@@ -2193,7 +2249,16 @@ Still open after PRs 7, 9 and 10:
   `skyoauth-service/test-support` (a `[features]` entry in
   `tests/Cargo.toml`, say): `ungated_writes_private.rs` checks a build
   without features only, so such an entry passes it, and `--all-features`
-  would turn it on (a PR 9 review mutant).
+  would turn it on (a PR 9 review mutant). A release build must not pass
+  `--all-targets` either: with the test targets, cargo unifies the
+  dev-dependencies' features into the one library build, so
+  `cargo build --release --workspace --all-targets` builds the library
+  with `test-support` (what `cargo tree -e features -i skyoauth-service`
+  shows with the dev-dependencies and does not without them), and any
+  dependent can enable the feature. The absence of the writers' symbols
+  from a release binary is weak evidence (an unreferenced function is
+  dropped, an inlined one leaves no symbol); the probes that compile a
+  dependent crate against the library without the feature are the check.
 - Whether `acknowledge_widening` applies to the toggle (the lead's, before
   T13.3).
 

@@ -9,11 +9,14 @@
 //! their results as not counted, and they are no claim. They run through
 //! the typed registry API (`skyoauth_service::persistence::registry`:
 //! [`bootstrap_instance`], [`issue_recovery_challenge`],
-//! [`restore_operator`], [`get_recovery_state`], the operator getters and
-//! mutators, [`authorize_operator`], [`get_instance_security_policy`],
-//! [`verify_audit_chain`], and [`append_audit_event`] for the event that
-//! holds the audit chain head in the failure tests) against a real
-//! PostgreSQL, one fresh database
+//! [`restore_operator`], [`get_recovery_state`], the operator getters,
+//! `disable_admin_identity` and `revoke_admin_credential`,
+//! [`authorize_operator`], [`get_instance_security_policy`] and
+//! [`verify_audit_chain`]; and, through `registry::test_support`, a
+//! `#[doc(hidden)]` module behind the `test-support` feature, the operator
+//! creates, `update_admin_role_binding` and [`append_audit_event`] for the
+//! event that holds the audit chain head in the failure tests) against a
+//! real PostgreSQL, one fresh database
 //! per test (per round in the replica tests), and write nothing past the
 //! registry. The only SQL of their own is one read-only helper, [`counts`]
 //! (see its docs), and two `SET SESSION CHARACTERISTICS AS TRANSACTION

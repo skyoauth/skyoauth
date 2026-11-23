@@ -394,8 +394,9 @@ mod predicate;
 mod recovery;
 mod selection;
 mod tenant;
-// Off in a normal build: the bare registry trust writers for tests only
-// (second-approver proposal, PR 9; see the module).
+// Off in a normal build: for tests only, the bare registry trust writers
+// (second-approver proposal, PR 9) and the operator writers, the audit
+// append and the operation-row writers (PR 10); see the module.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
