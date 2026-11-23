@@ -40,8 +40,9 @@ use skyoauth_service::{
         },
     },
     trust::{
-        self, KeysetAudit, KeysetWriteError, NewKeysetVersion, create_version, disable_version,
-        enable_version, validate_upload,
+        self, KeysetAudit, KeysetWriteError, NewKeysetVersion, disable_version,
+        test_support::{create_version, enable_version},
+        validate_upload,
     },
 };
 use sqlx::{Connection, PgConnection, Postgres, Transaction};
