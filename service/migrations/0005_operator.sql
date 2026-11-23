@@ -15,12 +15,12 @@
 -- directory has them and the rules left to the service. "(inferred)" marks
 -- a choice the specifications do not dictate.
 --
--- Guard triggers raise SK001 and are ENABLE ALWAYS, so they also fire under
--- session_replication_role = replica. They keep IDs and the other immutable
--- columns unchanged, keep one-way state one-way, reject an UPDATE that
--- consumes an operation that is already revoked, check revisions, and keep
--- consumed proofs unchanged. An INSERT that carries both consumed_at and
--- revoked_at, or one UPDATE that sets both, is left to the service.
+-- Guard triggers raise SK001 (the approval and revocation checks at the end
+-- of this file: 23514) and are ENABLE ALWAYS, so they also fire under
+-- session_replication_role = replica. They keep immutable columns unchanged,
+-- keep one-way state one-way, reject an UPDATE consuming a revoked operation,
+-- check revisions, and keep consumed proofs unchanged. An INSERT carrying
+-- both consumed_at and revoked_at, or one UPDATE setting both, is the service's.
 --
 -- Every column is NOT NULL unless the logical model marks the field
 -- optional. Every foreign key is named, takes no action on delete or update
@@ -484,3 +484,149 @@ CREATE TRIGGER administrative_operation_revision
     BEFORE INSERT OR UPDATE ON administrative_operation
     FOR EACH ROW EXECUTE FUNCTION skyoauth_check_revision();
 ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operation_revision;
+
+-- The approval and revocation guards (IR-054;
+-- docs/proposals/second-approver-gated-writes.md section 11 and D15). The
+-- review of 0005 first left these two rules to the service; on 2026-11-23
+-- the user accepted a database tripwire for them, folded into 0005 in place
+-- under the pre-beta exception (README.md "Conventions"; ruling relayed by
+-- the lead; provisional until the maintainer ratifies the ADRs, T00.8 to
+-- T00.17, Gate M0). A database created from the earlier 0005 is recreated.
+-- README.md "What 0005 adds" has the details; "(inferred)" marks a choice
+-- the proposal and the rulings do not dictate.
+--
+-- An operation of kind 'approve' names an operation of its own tenant, IS
+-- NOT DISTINCT FROM, so an instance approve (tenant_id NULL) names an
+-- instance operation, and is never by that operation's actor. Only kind
+-- 'approve': a route_bundle_approval also names its preparation, and one
+-- person MAY hold both roles there (IR-054; GW-130, GW-131), so it is not
+-- checked here. A revocation (a cancel or a reject) names a revoking
+-- operation of the revoked row's tenant, checked where the link is written,
+-- on the revoked row: on INSERT too, since 0005 lets an insert carry a
+-- revocation, and on an UPDATE that names revocation_operation_id. A
+-- refusal is check_violation (23514) naming
+-- administrative_operation_approves_same_tenant,
+-- administrative_operation_approver_distinct or
+-- administrative_operation_revokes_same_tenant (not catalog constraints;
+-- the registry lists them in KNOWN_CONSTRAINTS). The message names the
+-- table, never a value. The tenant is compared first, then the actor
+-- (inferred). Nothing else is checked: roles, the digest, the state of the
+-- approved operation and the kind of the revoking one stay service rules.
+--
+-- The triggers are plain (non-deferrable) AFTER ... FOR EACH ROW triggers,
+-- as those of 0010 and 0011: they fire at the end of the statement, after
+-- every CHECK, NOT NULL and unique constraint and after the foreign-key
+-- checks, whose internal triggers (RI_ConstraintTrigger_c_*) sort, and so
+-- fire, before administrative_operation_approval_check and
+-- administrative_operation_revocation_check. So a missing approved or
+-- revoking operation is still the foreign key's 23503, and the guard reads
+-- the referenced row only once it is known to exist. The names must keep
+-- sorting after "RI_". The guard finds no row only where the foreign keys
+-- do not fire (session_replication_role = replica) and then passes the row
+-- (inferred, as 0010 does).
+--
+-- The guards read the referenced row's tenant_id and actor_id without a
+-- row lock (inferred): both are immutable (administrative_operation_immutable
+-- above), deletes are refused (0006), and the foreign-key check already
+-- holds the row FOR KEY SHARE, so no concurrent write can change what they
+-- read. Taking no lock also keeps an approve from waiting for the
+-- FOR NO KEY UPDATE lock that an approver or a canceller holds on the
+-- pending row.
+--
+-- The functions read administrative_operation, so they are created as the
+-- table readers of 0010 and 0011 are: the schema is resolved by
+-- current_schema() at migrate time, the table is named with that schema
+-- and the body is passed as a quoted literal (%L). Their search_path is
+-- pinned to pg_catalog, pg_temp (they resolve no unqualified table). They
+-- are SECURITY INVOKER: a role that inserts an approve or writes a
+-- revocation needs SELECT on administrative_operation (README.md "What 0005
+-- adds", "Privileges").
+DO $migration$
+DECLARE
+    schema_name constant text := current_schema();
+BEGIN
+    EXECUTE format('CREATE FUNCTION %I() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+    SET search_path = pg_catalog, pg_temp
+    AS %L', 'skyoauth_check_operation_approval',
+        replace($body$
+DECLARE
+    approved_tenant text COLLATE "C";
+    approved_actor text COLLATE "C";
+BEGIN
+    SELECT o.tenant_id, o.actor_id INTO approved_tenant, approved_actor
+        FROM @schema@.administrative_operation o
+        WHERE o.id = NEW.approves_operation_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF approved_tenant IS DISTINCT FROM NEW.tenant_id THEN
+        RAISE EXCEPTION 'an approve in % names an operation of another tenant', TG_TABLE_NAME
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'administrative_operation_approves_same_tenant',
+                  SCHEMA = TG_TABLE_SCHEMA, TABLE = TG_TABLE_NAME,
+                  COLUMN = 'approves_operation_id';
+    END IF;
+    IF approved_actor IS NOT DISTINCT FROM NEW.actor_id THEN
+        RAISE EXCEPTION 'an approve in % is by the actor of the operation it approves', TG_TABLE_NAME
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'administrative_operation_approver_distinct',
+                  SCHEMA = TG_TABLE_SCHEMA, TABLE = TG_TABLE_NAME,
+                  COLUMN = 'actor_id';
+    END IF;
+    RETURN NULL;
+END;
+$body$, '@schema@', quote_ident(schema_name)));
+
+    EXECUTE format('CREATE FUNCTION %I() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+    SET search_path = pg_catalog, pg_temp
+    AS %L', 'skyoauth_check_operation_revocation',
+        replace($body$
+DECLARE
+    revoking_tenant text COLLATE "C";
+BEGIN
+    SELECT o.tenant_id INTO revoking_tenant
+        FROM @schema@.administrative_operation o
+        WHERE o.id = NEW.revocation_operation_id;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    IF revoking_tenant IS DISTINCT FROM NEW.tenant_id THEN
+        RAISE EXCEPTION 'a revocation in % names an operation of another tenant', TG_TABLE_NAME
+            USING ERRCODE = 'check_violation',
+                  CONSTRAINT = 'administrative_operation_revokes_same_tenant',
+                  SCHEMA = TG_TABLE_SCHEMA, TABLE = TG_TABLE_NAME,
+                  COLUMN = 'revocation_operation_id';
+    END IF;
+    RETURN NULL;
+END;
+$body$, '@schema@', quote_ident(schema_name)));
+END;
+$migration$;
+
+CREATE TRIGGER administrative_operation_approval_check
+    AFTER INSERT ON administrative_operation
+    FOR EACH ROW WHEN (NEW.kind = 'approve')
+    EXECUTE FUNCTION skyoauth_check_operation_approval();
+ALTER TABLE administrative_operation
+    ENABLE ALWAYS TRIGGER administrative_operation_approval_check;
+
+CREATE TRIGGER administrative_operation_revocation_check
+    AFTER INSERT OR UPDATE OF revocation_operation_id ON administrative_operation
+    FOR EACH ROW WHEN (NEW.revocation_operation_id IS NOT NULL)
+    EXECUTE FUNCTION skyoauth_check_operation_revocation();
+ALTER TABLE administrative_operation
+    ENABLE ALWAYS TRIGGER administrative_operation_revocation_check;
+
+-- The approver's read path (OQ-API-14; the proposal's D22): the open
+-- operations of a tenant, by ID. Rows without an expiry (approve, cancel,
+-- reject) are never open. A provisional lead pick, 2026-11-23 (inferred),
+-- not ruled: it was part of the same sketch as the guards. The read query
+-- adds expires_at > now and the approvable kinds, and reads the instance
+-- with a second statement, tenant_id IS NULL.
+CREATE INDEX administrative_operation_open_by_tenant
+    ON administrative_operation (tenant_id, id)
+    WHERE consumed_at IS NULL AND revoked_at IS NULL AND expires_at IS NOT NULL;

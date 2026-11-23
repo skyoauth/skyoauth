@@ -495,24 +495,41 @@ macro_rules! binding_columns {
     };
 }
 
-/// The authorization statement. `$1` is the `public_identity`, `$2` the
-/// role and `$3` the tenant, `NULL` for the instance scope. The scope
-/// predicate is true for an instance request only on a binding with no
-/// tenant, and for a tenant request only on a binding of exactly that
+/// An authorization statement that finds the credential by `$credential`.
+/// `$2` is the role and `$3` the tenant, `NULL` for the instance scope. The
+/// scope predicate is true for an instance request only on a binding with
+/// no tenant, and for a tenant request only on a binding of exactly that
 /// tenant; `b.tenant_id = NULL` is never true, so an instance request never
 /// reaches the second disjunct.
-const AUTHORIZE_OPERATOR: &str = "SELECT i.id AS admin_id, c.id AS credential_id, \
-     b.id AS binding_id, b.role \
-     FROM admin_credential c \
-     JOIN admin_identity i ON i.id = c.admin_id \
-     JOIN admin_role_binding b ON b.admin_id = i.id \
-     WHERE c.public_identity = $1 \
-       AND c.status = 'enabled' \
-       AND c.revoked_at IS NULL \
-       AND i.status = 'enabled' \
-       AND b.status = 'enabled' \
-       AND b.role = $2 \
-       AND (($3::text IS NULL AND b.tenant_id IS NULL) OR b.tenant_id = $3::text)";
+macro_rules! authorize_statement {
+    ($credential:literal) => {
+        concat!(
+            "SELECT i.id AS admin_id, c.id AS credential_id, \
+             b.id AS binding_id, b.role \
+             FROM admin_credential c \
+             JOIN admin_identity i ON i.id = c.admin_id \
+             JOIN admin_role_binding b ON b.admin_id = i.id \
+             WHERE ",
+            $credential,
+            " AND c.status = 'enabled' \
+               AND c.revoked_at IS NULL \
+               AND i.status = 'enabled' \
+               AND b.status = 'enabled' \
+               AND b.role = $2 \
+               AND (($3::text IS NULL AND b.tenant_id IS NULL) OR b.tenant_id = $3::text)"
+        )
+    };
+}
+
+/// The authorization statement of [`authorize_operator`]: `$1` is the
+/// `public_identity`.
+const AUTHORIZE_OPERATOR: &str = authorize_statement!("c.public_identity = $1");
+
+/// The same lookup by the credential's ID (`$1`) and its operator's ID
+/// (`$4`), for an operator known by its IDs rather than by a presented key:
+/// the requester of an approval
+/// ([`authorize_approval_locked`](super::authorize_approval_locked)).
+const AUTHORIZE_CREDENTIAL: &str = authorize_statement!("c.id = $1 AND c.admin_id = $4");
 
 /// The row locks of [`authorize_operator_locked`], in the `0005` lock order:
 /// identity, credential, binding, each by its ID.
@@ -779,6 +796,32 @@ pub async fn authorize_operator<'e>(
         .await?)
 }
 
+/// [`authorize_operator`] for the credential `credential_id` of the operator
+/// `admin_id`, by their IDs instead of a presented `public_identity`: the
+/// same statuses, role and scope, every miss the same `Ok(None)`, no lock
+/// and no clock. For
+/// [`authorize_approval_locked`](super::authorize_approval_locked), which
+/// checks the requester of an operation by the IDs its plan holds.
+pub(super) async fn authorize_credential<'e>(
+    executor: impl PgExecutor<'e>,
+    admin_id: &str,
+    credential_id: &str,
+    scope: OperatorScope<'_>,
+    role: AdminRole,
+) -> Result<Option<AuthorizedOperator>, RegistryError> {
+    let tenant_id = match scope {
+        OperatorScope::Instance => None,
+        OperatorScope::Tenant(tenant_id) => Some(tenant_id),
+    };
+    Ok(sqlx::query_as(AUTHORIZE_CREDENTIAL)
+        .bind(credential_id)
+        .bind(role.as_str())
+        .bind(tenant_id)
+        .bind(admin_id)
+        .fetch_optional(executor)
+        .await?)
+}
+
 /// [`authorize_operator`] whose decision holds until `transaction` ends: on
 /// a hit, locks the identity, credential and binding rows `FOR SHARE` by ID,
 /// in that order, repeats the lookup and returns the hit only if the repeat
@@ -882,6 +925,20 @@ mod tests {
         ] {
             assert_eq!(lock, format!("SELECT FROM {table} WHERE id = $1 FOR SHARE"));
         }
+    }
+
+    /// The lookup by IDs is the lookup by key with only the credential
+    /// predicate replaced.
+    #[test]
+    fn the_lookup_by_ids_differs_only_in_the_credential_predicate() {
+        assert_eq!(
+            AUTHORIZE_CREDENTIAL,
+            AUTHORIZE_OPERATOR.replace(
+                "WHERE c.public_identity = $1 AND",
+                "WHERE c.id = $1 AND c.admin_id = $4 AND"
+            )
+        );
+        assert_eq!(AUTHORIZE_CREDENTIAL.matches("c.public_identity").count(), 0);
     }
 
     #[test]

@@ -82,11 +82,19 @@ const REVISIONED: [&str; 3] = [
     "administrative_operation",
 ];
 
-/// The functions 0005 adds; none resolves a table.
+/// The functions 0005 adds that resolve no table.
 const FUNCTIONS: [&str; 3] = [
     "skyoauth_check_recovery_key_rotation",
     "skyoauth_reject_change_once_set",
     "skyoauth_reject_consume_after_revoke",
+];
+
+/// The approval and revocation guard functions 0005 adds; each reads
+/// `administrative_operation`, named with its schema
+/// (schema_operation_approval_guard.rs).
+const READERS: [&str; 2] = [
+    "skyoauth_check_operation_approval",
+    "skyoauth_check_operation_revocation",
 ];
 
 /// A row as column and SQL value pairs.
@@ -360,6 +368,17 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
             "skyoauth_reject_consume_after_revoke",
         ),
         guard("administrative_operation", "revision", revision),
+        // The approval and revocation guards (AFTER triggers).
+        guard(
+            "administrative_operation",
+            "approval_check",
+            "skyoauth_check_operation_approval",
+        ),
+        guard(
+            "administrative_operation",
+            "revocation_check",
+            "skyoauth_check_operation_revocation",
+        ),
         guard(
             "consumed_assertion",
             "no_update",
@@ -388,7 +407,8 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     assert_eq!(triggers, expected);
 
     // Each trigger fires on the operations its guard covers, whatever
-    // columns an UPDATE names (no UPDATE OF column list).
+    // columns an UPDATE names (no UPDATE OF column list), but for the
+    // revocation guard, an AFTER trigger on an UPDATE OF its one column.
     let mut events: Vec<(String, i16, i32)> = sqlx::query_as(
         "SELECT t.tgname::text, t.tgtype, cardinality(t.tgattr::int2[])
          FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
@@ -403,6 +423,14 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update, 32
     // truncate.
     for (name, tgtype, columns) in &events {
+        if name == "administrative_operation_approval_check" {
+            assert_eq!((*tgtype, *columns), (1 | 4, 0), "{name}");
+            continue;
+        }
+        if name == "administrative_operation_revocation_check" {
+            assert_eq!((*tgtype, *columns), (1 | 4 | 16, 1), "{name}");
+            continue;
+        }
         let want = if name.ends_with("_revision") {
             1 | 2 | 4 | 16
         } else if name.ends_with("_no_truncate") {
@@ -431,6 +459,37 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     for (name, config, source) in &functions {
         assert_eq!(config, &["search_path=pg_catalog, pg_temp"], "{name}");
         for table in TABLES {
+            assert!(!source.contains(table), "{name} names {table}");
+        }
+    }
+    // The approval and revocation guards pin the same path and name the one
+    // table they read with its schema only.
+    let mut readers: Vec<(String, Vec<String>, String)> = sqlx::query_as(
+        "SELECT p.proname::text, p.proconfig, p.prosrc FROM pg_proc p
+         WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+           AND p.proname = ANY($1)",
+    )
+    .bind(READERS.map(String::from).to_vec())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    readers.sort();
+    assert_eq!(readers.len(), READERS.len());
+    for (name, config, source) in &readers {
+        assert_eq!(config, &["search_path=pg_catalog, pg_temp"], "{name}");
+        // The constraint names they raise start with the table name.
+        let read = source.replace("'administrative_operation_", "'");
+        assert_eq!(
+            read.matches("administrative_operation").count(),
+            1,
+            "{name}"
+        );
+        assert_eq!(
+            read.matches(" public.administrative_operation o").count(),
+            1,
+            "{name}"
+        );
+        for table in TABLES.iter().filter(|t| **t != "administrative_operation") {
             assert!(!source.contains(table), "{name} names {table}");
         }
     }
@@ -572,6 +631,15 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
             "consumed_assertion_pkey",
             "consumed_assertion",
             "(tenant_id, trust_source_id, replay_key_digest)",
+        ),
+        // The approver's read path, a partial index (inferred lead pick;
+        // schema_operation_approval_guard.rs).
+        (
+            "administrative_operation_open_by_tenant".to_string(),
+            "CREATE INDEX administrative_operation_open_by_tenant ON public.administrative_operation \
+             USING btree (tenant_id, id) WHERE ((consumed_at IS NULL) AND (revoked_at IS NULL) \
+             AND (expires_at IS NOT NULL))"
+                .to_string(),
         ),
         // The pruning index of 0006 (schema_registry_guards.rs).
         (
@@ -1514,7 +1582,7 @@ async fn the_largest_keys_fit_their_indexes() {
            INSERT INTO administrative_operation VALUES
                ({o}, {t}, {a}, 'tenant.update', sha512('o'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'pending', {e});
            INSERT INTO administrative_operation VALUES
-               ({p}, {t}, {a}, 'approve', sha512('p'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL, {o}, 1, 'applied', 'evt_1');
+               ({p}, {t}, 'adm_2', 'approve', sha512('p'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL, {o}, 1, 'applied', 'evt_1');
            UPDATE administrative_operation SET revoked_at = '2026-11-20Z', revocation_operation_id = {p},
                revision = 2 WHERE id = {o};
            INSERT INTO consumed_assertion VALUES ({t}, {s}, sha512('jti'), {}, '2026-11-20Z', '2026-11-21Z')"#,
@@ -1878,13 +1946,18 @@ async fn administrative_operation_keeps_its_plan_and_references() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn administrative_operation_consumption_and_revocation_are_one_way() {
     let (db, pool) = seeded().await;
+    // `op_3` is revoked by an operation of its own tenant, `op_5`: since the
+    // `0005` revocation guard, one of another tenant is refused
+    // (schema_operation_approval_guard.rs).
     run(
         &pool,
         "UPDATE administrative_operation SET consumed_at = '2026-11-20 00:30Z', outcome = 'applied',
              revision = revision + 1 WHERE id = 'op_1';
          UPDATE administrative_operation SET consumed_at = '2026-11-20 00:01Z',
              revision = revision + 1 WHERE id = 'op_4';
-         UPDATE administrative_operation SET revoked_at = '2026-11-20 00:30Z', revocation_operation_id = 'op_2',
+         INSERT INTO administrative_operation VALUES ('op_5', 'ten_a', 'adm_2', 'cancel', sha256('op_5'), 4,
+             '{}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'success', 'evt_3');
+         UPDATE administrative_operation SET revoked_at = '2026-11-20 00:30Z', revocation_operation_id = 'op_5',
              revision = revision + 1 WHERE id = 'op_3'",
     )
     .await;
@@ -1926,8 +1999,9 @@ async fn administrative_operation_consumption_and_revocation_are_one_way() {
         [
             ("op_1".into(), consumed("2026-11-20 00:30:00"), None, 2),
             ("op_2".into(), consumed("2030-01-01 00:00:00"), None, 3),
-            ("op_3".into(), None, Some("op_2".into()), 2),
+            ("op_3".into(), None, Some("op_5".into()), 2),
             ("op_4".into(), consumed("2026-11-20 00:01:00"), None, 2),
+            ("op_5".into(), None, None, 1),
         ]
     );
     db.drop([pool]).await;
@@ -2074,9 +2148,13 @@ async fn assert_rejected_with_message(
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn revoked_operation_is_not_consumed_afterwards() {
     let (db, pool) = seeded().await;
+    // `op_3` is revoked by an operation of its own tenant (the `0005`
+    // revocation guard).
     run(
         &pool,
-        "UPDATE administrative_operation SET revoked_at = '2026-11-20 00:20Z', revocation_operation_id = 'op_2',
+        "INSERT INTO administrative_operation VALUES ('op_5', 'ten_a', 'adm_2', 'cancel', sha256('op_5'), 4,
+             '{}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'success', 'evt_3');
+         UPDATE administrative_operation SET revoked_at = '2026-11-20 00:20Z', revocation_operation_id = 'op_5',
              revision = revision + 1 WHERE id = 'op_3';
          UPDATE administrative_operation SET consumed_at = '2026-11-20 00:10Z', outcome = 'applied',
              revision = revision + 1 WHERE id = 'op_1'",

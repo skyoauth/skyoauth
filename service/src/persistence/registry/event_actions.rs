@@ -36,6 +36,14 @@
 //!   bindings (`admin_role_binding`), an IR-054 approval
 //!   (`administrative_operation.approve`), and the workload registry tables
 //!   of `0002` to `0004`.
+//! - The revocations of a pending gated write
+//!   (`docs/proposals/second-approver-gated-writes.md` section 7) are
+//!   `administrative_operation.cancel`, by its requester, and
+//!   `administrative_operation.reject`, by an approver: each inserts its
+//!   revoking operation and sets the revoked row's `revoked_at` and
+//!   `revocation_operation_id`, and the event's `object_id` is the revoked
+//!   operation (inferred verbs, IR-059 fixing only the syntax; provisional
+//!   lead pick, 2026-11-23). They have no writer yet.
 //!
 //! Each table has the verbs its writes allow: `create` for an insert,
 //! `enable` and `disable` for a write that changes only `status` (as
@@ -69,7 +77,9 @@ pub const AUDIT_ACTIONS: &[&str] = &[
     "admin_role_binding.disable",
     "admin_role_binding.enable",
     "administrative_operation.approve",
+    "administrative_operation.cancel",
     "administrative_operation.create",
+    "administrative_operation.reject",
     "audience_tenant_assignment.create",
     "audience_tenant_assignment.disable",
     "audience_tenant_assignment.enable",
@@ -161,6 +171,13 @@ mod tests {
         assert!(AUDIT_ACTIONS.windows(2).all(|w| w[0] < w[1]));
         for name in AUDIT_ACTIONS {
             assert!(is_audit_action_syntax(name), "{name}");
+            assert!(is_audit_action(name), "{name}");
+        }
+        // The revocations of a pending gated write.
+        for name in [
+            "administrative_operation.cancel",
+            "administrative_operation.reject",
+        ] {
             assert!(is_audit_action(name), "{name}");
         }
         // IR-059's table.

@@ -28,8 +28,10 @@ const GUARD: &str = "SK001";
 /// bootstrap writes, and `administrative_operation`, which the recovery
 /// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
 /// `0008` and `0009` name them, the constraint names that the `0010`
-/// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), and the two names the
-/// `0011` egress guard trigger raises ([`EGRESS_ENTRY_ENABLED`]), sorted
+/// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), the two names the
+/// `0011` egress guard trigger raises ([`EGRESS_ENTRY_ENABLED`]), and the
+/// three names the `0005` approval and revocation guards raise
+/// ([`SAME_TENANT_OPERATION`] and [`DISTINCT_APPROVER`]), sorted
 /// byte-wise. A unique, foreign key or check violation maps to a typed
 /// variant only for a name listed here. The database test
 /// `registry_constraint_names_match_the_catalog` keeps the list equal to the
@@ -74,8 +76,14 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "administrative_operation_actor_id_check",
     "administrative_operation_actor_id_octet_length_check",
     "administrative_operation_approve_kind_check",
+    // Raised by the `0005` approval guard, not a catalog constraint
+    // ([`DISTINCT_APPROVER`]).
+    "administrative_operation_approver_distinct",
     "administrative_operation_approves_id_octet_length_check",
     "administrative_operation_approves_operation_id_fkey",
+    // Raised by the `0005` approval guard, not a catalog constraint
+    // ([`SAME_TENANT_OPERATION`]).
+    "administrative_operation_approves_same_tenant",
     "administrative_operation_approves_self_check",
     "administrative_operation_audit_id_fkey",
     "administrative_operation_audit_id_octet_length_check",
@@ -99,6 +107,9 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "administrative_operation_revocation_id_octet_length_check",
     "administrative_operation_revocation_operation_id_fkey",
     "administrative_operation_revoked_at_range_check",
+    // Raised by the `0005` revocation guard, not a catalog constraint
+    // ([`SAME_TENANT_OPERATION`]).
+    "administrative_operation_revokes_same_tenant",
     "administrative_operation_revokes_self_check",
     "administrative_operation_tenant_id_fkey",
     "administrative_operation_tenant_id_octet_length_check",
@@ -423,6 +434,30 @@ pub const EGRESS_ENTRY_ENABLED: [&str; 2] = [
     "trust_source_token_review_endpoint_egress_enabled",
 ];
 
+/// The constraint names that the `0005` approval and revocation guards of
+/// `administrative_operation` raise with a `check_violation` (`23514`) when
+/// an `approve` names an operation of another tenant, or a revoked row names
+/// a revoking operation of another tenant (IR-054; the tenants compare with
+/// `IS NOT DISTINCT FROM`, so the instance, `NULL`, is a tenant of its own).
+/// Ruled by the user, 2026-11-23, folded into `0005`
+/// (`docs/proposals/second-approver-gated-writes.md`, D15); the names are
+/// the proposal's. They are not catalog constraints; both are in
+/// [`KNOWN_CONSTRAINTS`]. They map to [`InvariantKind::SameTenantOperation`],
+/// not to [`InvariantKind::Check`] (inferred: a kind of their own, as the
+/// `0010` and `0011` guard names have).
+pub const SAME_TENANT_OPERATION: [&str; 2] = [
+    "administrative_operation_approves_same_tenant",
+    "administrative_operation_revokes_same_tenant",
+];
+
+/// The constraint name that the `0005` approval guard raises with a
+/// `check_violation` (`23514`) when an `approve` has the actor of the
+/// operation it approves (IR-054: no self-approval; ruled as for
+/// [`SAME_TENANT_OPERATION`]). Not a catalog constraint; it is in
+/// [`KNOWN_CONSTRAINTS`]. It maps to [`InvariantKind::DistinctApprover`]
+/// (inferred, as above).
+pub const DISTINCT_APPROVER: [&str; 1] = ["administrative_operation_approver_distinct"];
+
 /// The error of a registry function.
 ///
 /// The variants carry only constraint names from [`KNOWN_CONSTRAINTS`],
@@ -572,6 +607,16 @@ pub enum InvariantKind {
     /// pick, 2026-11-22). The service refuses such a write first, with its
     /// own error; this is what a registry writer or raw SQL gets.
     EgressEntryEnabled,
+    /// `23514` from a `0005` approval or revocation guard of
+    /// `administrative_operation` ([`SAME_TENANT_OPERATION`]): an `approve`
+    /// names an operation of another tenant, or a revocation a revoking
+    /// operation of another tenant (the instance counts as a tenant of its
+    /// own). A missing operation is [`Self::ForeignKey`] instead.
+    SameTenantOperation,
+    /// `23514` from the `0005` approval guard of `administrative_operation`
+    /// ([`DISTINCT_APPROVER`]): an `approve` whose actor is the actor of the
+    /// operation it approves (IR-054).
+    DistinctApprover,
 }
 
 impl InvariantKind {
@@ -582,6 +627,8 @@ impl InvariantKind {
             Self::NotNull => "not-null",
             Self::AssignmentActive => "active-assignment",
             Self::EgressEntryEnabled => "enabled-egress-entry",
+            Self::SameTenantOperation => "same-tenant-operation",
+            Self::DistinctApprover => "distinct-approver",
         }
     }
 }
@@ -655,6 +702,10 @@ fn classify(error: &dyn DatabaseError) -> Option<RegistryError> {
                     InvariantKind::AssignmentActive
                 } else if EGRESS_ENTRY_ENABLED.contains(&constraint) {
                     InvariantKind::EgressEntryEnabled
+                } else if SAME_TENANT_OPERATION.contains(&constraint) {
+                    InvariantKind::SameTenantOperation
+                } else if DISTINCT_APPROVER.contains(&constraint) {
+                    InvariantKind::DistinctApprover
                 } else {
                     InvariantKind::Check
                 },
@@ -1029,6 +1080,90 @@ mod tests {
                         kind: InvariantKind::Check,
                         constraint: Some(constraint)
                     } if constraint == name
+                ),
+                "{error:?}"
+            );
+        }
+    }
+
+    /// The `0005` approval and revocation guards' `23514` names map to
+    /// `SameTenantOperation` and `DistinctApprover`, never `Check`; a
+    /// `40001` or `40P01` naming one is still `Retry`, and the foreign keys
+    /// and the other checks of the same columns keep their kinds.
+    #[test]
+    fn the_operation_guard_names_map_to_their_own_invariant_kinds() {
+        assert!(SAME_TENANT_OPERATION.windows(2).all(|w| w[0] < w[1]));
+        for (names, kind, text, debug) in [
+            (
+                &SAME_TENANT_OPERATION[..],
+                InvariantKind::SameTenantOperation,
+                "same-tenant-operation",
+                "SameTenantOperation",
+            ),
+            (
+                &DISTINCT_APPROVER[..],
+                InvariantKind::DistinctApprover,
+                "distinct-approver",
+                "DistinctApprover",
+            ),
+        ] {
+            for &name in names {
+                assert_eq!(known_constraint(name), Some(name));
+                let error = map(Some("23514"), Some(name));
+                match &error {
+                    RegistryError::Invariant {
+                        kind: mapped,
+                        constraint: Some(constraint),
+                    } => assert_eq!((*mapped, *constraint), (kind, name)),
+                    other => panic!("{other:?}"),
+                }
+                assert_eq!(
+                    error.to_string(),
+                    format!("registry write violates {text} constraint {name}")
+                );
+                assert_eq!(
+                    format!("{error:?}"),
+                    format!("Invariant {{ kind: {debug}, constraint: Some({name:?}) }}")
+                );
+                assert_redacted(&error);
+                for code in ["40001", "40P01"] {
+                    assert!(
+                        matches!(map(Some(code), Some(name)), RegistryError::Retry(_)),
+                        "{code}"
+                    );
+                }
+            }
+        }
+        for (code, name, kind) in [
+            (
+                "23503",
+                "administrative_operation_approves_operation_id_fkey",
+                InvariantKind::ForeignKey,
+            ),
+            (
+                "23503",
+                "administrative_operation_revocation_operation_id_fkey",
+                InvariantKind::ForeignKey,
+            ),
+            (
+                "23514",
+                "administrative_operation_approves_self_check",
+                InvariantKind::Check,
+            ),
+            (
+                "23514",
+                "administrative_operation_revokes_self_check",
+                InvariantKind::Check,
+            ),
+        ] {
+            let error = map(Some(code), Some(name));
+            assert!(
+                matches!(
+                    error,
+                    RegistryError::Invariant {
+                        kind: mapped,
+                        constraint: Some(constraint)
+                    } if mapped == kind && constraint == name
                 ),
                 "{error:?}"
             );

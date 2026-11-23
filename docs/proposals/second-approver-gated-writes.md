@@ -103,7 +103,7 @@ What the spec fixes:
 - The table: `administrative_operation` exists (`0005_operator.sql:236-330`)
   with immutable plan, digest, kind, actor, tenant, expected revision,
   expiry and approved operation (`:425-431`), set-once consumption and
-  revocation (`:453-457`), no consume after revoke (`:459-464`) and
+  revocation (`:453-457`; a repeat with the same value is not refused), no consume after revoke (`:459-464`) and
   `consumed_at < expires_at` (`:328-329`). The service rules the database
   leaves open are in `service/migrations/README.md:960-975` (a distinct
   approver, the digest echo, the tenant, an expiry, no secrets in the
@@ -316,7 +316,9 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
    (`write.rs:43-59`; for the toggle, instance `security_admin`). When Q4
    is accepted, the requester's instance `security_admin` binding, if any,
    is locked in the same ordered statement as the tenant binding
-   (`authorize_roles_locked`, section 9). This step yields the requester's
+   (`authorize_roles_locked`, section 9; it returns `Some` when any listed
+   role is held, so the caller checks `holds(0)` for the required one, a
+   required test of PRs 4 and 5). This step yields the requester's
    `admin_id` and credential ID; every later step is a post-authorization
    step function that takes them, shared with the approve (D26).
 3. A widening write with the flag unset is refused here
@@ -950,6 +952,18 @@ implementation PR also rewrites the README's `0005` text that leaves these two
 rules to the service (README:960-968) and adds the new names to
 `KNOWN_CONSTRAINTS`.
 
+The sketch below is corrected to what `0005` now holds (PR 2): the first
+version left out the revocation function, the `ENABLE ALWAYS` of the
+revocation trigger and the `SECURITY INVOKER` clause both functions carry,
+and did not say how a guard treats a missing row or whether it locks. As
+implemented (inferred where marked in `0005`): the functions are created
+schema-qualified as the `0010` and `0011` readers are; a guard that does not
+find the referenced row passes it, which happens only in replica mode, where
+the foreign keys do not fire (as in `0010`); the guards read without a row
+lock, since `tenant_id` and `actor_id` are immutable and the foreign-key
+check already holds the row `FOR KEY SHARE`; and the tenant is compared
+before the actor.
+
 ```sql
 -- Text to merge into 0005_operator.sql (not a new migration file).
 
@@ -958,8 +972,14 @@ rules to the service (README:960-968) and adds the new names to
 -- operation's actor. Only kind 'approve': a route_bundle_approval also
 -- names its preparation, and one person MAY hold both roles there (IR-054;
 -- GW-130, GW-131).
+-- Created in a DO block with the schema from current_schema(), as 0010 and
+-- 0011 create their table readers; it reads the approved row's tenant_id
+-- and actor_id without a row lock and passes a row whose approved
+-- operation it does not find (replica mode, where the foreign key does not
+-- fire).
 CREATE FUNCTION skyoauth_check_operation_approval() RETURNS trigger
     LANGUAGE plpgsql
+    SECURITY INVOKER
     SET search_path = pg_catalog, pg_temp
     AS $$ ... $$;  -- reads <schema>.administrative_operation, as 0011 reads
 CREATE TRIGGER administrative_operation_approval_check
@@ -974,11 +994,18 @@ ALTER TABLE administrative_operation
 -- A revocation (cancel, reject) names an operation of the revoked row's
 -- tenant; checked where the link is written, on the revoked row.
 -- INSERT too: 0005 lets an insert carry a revocation.
+CREATE FUNCTION skyoauth_check_operation_revocation() RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY INVOKER
+    SET search_path = pg_catalog, pg_temp
+    AS $$ ... $$;  -- reads the revoking row's tenant_id, as above
 CREATE TRIGGER administrative_operation_revocation_check
     AFTER INSERT OR UPDATE OF revocation_operation_id
     ON administrative_operation
     FOR EACH ROW WHEN (NEW.revocation_operation_id IS NOT NULL)
     EXECUTE FUNCTION skyoauth_check_operation_revocation();
+ALTER TABLE administrative_operation
+    ENABLE ALWAYS TRIGGER administrative_operation_revocation_check;
 -- Raises 23514 naming administrative_operation_revokes_same_tenant.
 
 -- The approver's read path (OQ-API-14): open operations of a tenant.

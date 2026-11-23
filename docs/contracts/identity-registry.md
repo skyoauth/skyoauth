@@ -586,7 +586,12 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   administrative events of M1a are the verbs each table's writes allow (see
   `AUDIT_ACTIONS`) among `create`, `update`, `enable`, `disable` and, for a
   binding or grant, `delete`, on the operator and workload registry
-  entities, plus `administrative_operation.approve` (IR-054). `<verb>` is
+  entities, plus `administrative_operation.approve` (IR-054); the
+  revocations of a pending gated write are
+  `administrative_operation.cancel`, by its requester, and
+  `administrative_operation.reject`, by an approver, each with the revoked
+  operation as `object_id` (`docs/proposals/second-approver-gated-writes.md`
+  section 7; inferred verbs, provisional lead pick, 2026-11-23). `<verb>` is
   lowercase snake case too (inferred). Human, gateway, key and provider
   actions are added with their writers.
 

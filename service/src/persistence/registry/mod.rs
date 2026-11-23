@@ -28,7 +28,13 @@
 //! rotates the recovery key, with their audit events, in a
 //! `READ COMMITTED` transaction only ([`get_recovery_state`] reads the key
 //! and its epoch; design section 7.2; T13.5; see its module for the flow and
-//! what stays with the verifier).
+//! what stays with the verifier). [`insert_administrative_operation`] and
+//! the functions beside it are the unwired registry floor of the
+//! second-approver flow: the operation rows of a pending gated write, an
+//! approval and a revocation, the policy row locks, and the locked operator
+//! lookups [`authorize_roles_locked`] and [`authorize_approval_locked`]
+//! (IR-052 to IR-054; `docs/proposals/second-approver-gated-writes.md`; see
+//! its module).
 //!
 //! The module lives under `persistence` because it is the first Rust entry
 //! point to the schema that module migrates; later registry tables belong
@@ -213,6 +219,8 @@
 //! | `23514`  | `check_violation` (table or list domain)   | `Invariant { kind: Check, constraint: Some(_) }`      |
 //! | `23514`  | a `0010` guard: assignment not enabled     | `Invariant { kind: AssignmentActive, .. }`            |
 //! | `23514`  | the `0011` guard: no enabled egress entry  | `Invariant { kind: EgressEntryEnabled, .. }`          |
+//! | `23514`  | a `0005` guard: an operation's tenant      | `Invariant { kind: SameTenantOperation, .. }`         |
+//! | `23514`  | the `0005` guard: an approve by the actor  | `Invariant { kind: DistinctApprover, .. }`            |
 //! | `23502`  | `not_null_violation`                       | `Invariant { kind: NotNull, constraint: None }`       |
 //! | `SK001`  | a guard trigger                            | `Guard`                                               |
 //! | —        | a stored time outside the readable range   | `UnreadableTimestamp { table, column, id }`           |
@@ -252,6 +260,15 @@
 //! of [`EGRESS_ENTRY_ENABLED`]. The guard runs after every other check of
 //! the row and locks the entry `FOR SHARE`, with the caller's privileges
 //! (migrations README, "What 0011 adds").
+//!
+//! Since the amended `0005` the database refuses an `administrative_operation`
+//! of kind `approve` that names an operation of another tenant
+//! (`Invariant { kind: SameTenantOperation, .. }`) or of its own actor
+//! (`Invariant { kind: DistinctApprover, .. }`), and a revocation that names
+//! a revoking operation of another tenant (`SameTenantOperation`); the
+//! instance is a tenant of its own (IR-054; ruled by the user, 2026-11-23;
+//! migrations README, "What 0005 adds"). The constraint is one of
+//! [`SAME_TENANT_OPERATION`] or [`DISTINCT_APPROVER`].
 //!
 //! The `Display` and `Debug` text of a [`RegistryError`] never includes a
 //! value from the request or the row: the variants carry only constraint,
@@ -323,6 +340,7 @@ mod events;
 mod grant;
 mod instance;
 mod model;
+mod operation;
 mod operator;
 mod predicate;
 mod recovery;
@@ -348,8 +366,8 @@ pub use bootstrap::{
 };
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{
-    ASSIGNMENT_ACTIVE, EGRESS_ENTRY_ENABLED, InvariantKind, KNOWN_CONSTRAINTS, PredicateProblem,
-    RegistryError,
+    ASSIGNMENT_ACTIVE, DISTINCT_APPROVER, EGRESS_ENTRY_ENABLED, InvariantKind, KNOWN_CONSTRAINTS,
+    PredicateProblem, RegistryError, SAME_TENANT_OPERATION,
 };
 pub use event_actions::{AUDIT_ACTIONS, is_audit_action, is_audit_action_syntax};
 pub use events::{
@@ -381,6 +399,12 @@ pub use model::{
     ServiceGrantChanges, ServiceIdentity, ServiceIdentityChanges, Status, Tenant, TenantPatch,
     TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges,
     TrustSourceKind, UnknownValue,
+};
+pub use operation::{
+    AdministrativeOperation, ApprovalAuthority, NewAdministrativeOperation, RolesHeld,
+    authorize_approval_locked, authorize_roles_locked, consume_administrative_operation,
+    insert_administrative_operation, lock_administrative_operation, lock_instance_security_policy,
+    lock_instance_security_policy_shared, revoke_administrative_operation,
 };
 pub use operator::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges, AuthorizedOperator,
