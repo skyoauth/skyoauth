@@ -1,22 +1,31 @@
-//! A normal build of `skyoauth-service`, without the `test-support`
-//! feature, exposes none of the ungated trust writes (second-approver
+//! A normal build of the workspace, without the `test-support` feature,
+//! neither exposes nor calls the ungated trust writes (second-approver
 //! proposal, `docs/proposals/second-approver-gated-writes.md`, PR 7).
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
-//! apply a widening write without the second approver, so they are
-//! crate-private, and only `trust::test_support`, compiled with the
-//! feature, exposes them to this package's tests. Every test target of
-//! this package is built with the feature (the package's dev-dependency on
-//! itself), so a test cannot simply name the writers and expect a compile
-//! error. This test therefore checks the library without the feature, as a
-//! dependent crate would see it: it runs `cargo check` on the library alone
-//! (a build that turns no dev-dependency feature on), in a target
-//! directory of its own, and then compiles small probe crates against that
-//! library's metadata with `rustc`. A probe that names an ungated writer at
-//! any of its paths must fail as a private (E0603) or unresolved (E0432)
-//! path, and a probe that names the public writes must compile, so a probe
-//! that fails for an unrelated reason (a toolchain mismatch, a missing
-//! crate) fails this test instead of passing it.
+//! apply a write without the second-approver gate, so they are visible
+//! only within `trust` (`pub(super)`), and only `trust::test_support`,
+//! compiled with the feature, exposes them to this package's tests. Every
+//! test target of this package is built with the feature (the package's
+//! dev-dependency on itself), so a test cannot simply name the writers and
+//! expect a compile error. This test therefore checks the library without
+//! the feature, as a dependent crate would see it: it runs `cargo check`
+//! on the workspace's libraries and binaries (a build that turns no
+//! dev-dependency feature on, and that a workspace member enabling the
+//! feature through a normal or build dependency would change), in a target
+//! directory of its own, and then:
+//!
+//! - asserts that `skyoauth-service`'s library was built with no feature;
+//! - asserts that the library emitted no warning. Without the feature each
+//!   writer carries `expect(dead_code)`, so a caller in `trust`, a public
+//!   forwarder included, makes the expectation unfulfilled, which is a
+//!   warning (a caller outside `trust` is a privacy error in every build);
+//! - compiles small probe crates against the library's metadata with
+//!   `rustc`. A probe that names an ungated writer at any of its paths must
+//!   fail as a private (E0603) or unresolved (E0432) path, and a probe that
+//!   names the public writes must compile, so a probe that fails for an
+//!   unrelated reason (a toolchain mismatch, a missing crate) fails this
+//!   test instead of passing it.
 //!
 //! It needs no database, so it is not `#[ignore]`d (inferred), and runs
 //! offline from the crates the outer build has already fetched. The first
@@ -100,6 +109,14 @@ struct PlainLibrary {
     deps: BTreeSet<PathBuf>,
 }
 
+/// Whether a cargo JSON message is about `skyoauth-service`'s library
+/// target (not its binary, whose target name is `skyoauth-service`).
+fn is_service_library(message: &Value) -> bool {
+    let kinds = message["target"]["kind"].as_array();
+    message["target"]["name"] == "skyoauth_service"
+        && kinds.is_some_and(|kinds| kinds.iter().any(|kind| kind == "lib"))
+}
+
 fn check_plain_library(target_dir: &Path) -> PlainLibrary {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| env!("CARGO").into());
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -108,7 +125,7 @@ fn check_plain_library(target_dir: &Path) -> PlainLibrary {
         .args(["--locked", "--offline", "--quiet"])
         .arg("--manifest-path")
         .arg(&manifest)
-        .args(["--package", "skyoauth-service", "--lib"])
+        .args(["--workspace", "--lib", "--bins"])
         .arg("--target-dir")
         .arg(target_dir)
         .args(["--message-format", "json"])
@@ -116,15 +133,23 @@ fn check_plain_library(target_dir: &Path) -> PlainLibrary {
         .expect("cargo runs");
     assert!(
         output.status.success(),
-        "cargo check of the plain library failed:\n{}",
+        "cargo check of the plain workspace failed:\n{}",
         text(&output)
     );
     let mut found = None;
     let mut deps = BTreeSet::new();
+    let mut diagnostics = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let Ok(message) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if message["reason"] == "compiler-message" && is_service_library(&message) {
+            // Cargo replays a fresh unit's cached diagnostics, so a warm run
+            // sees them too.
+            let rendered = message["message"]["rendered"].as_str().unwrap_or("?");
+            diagnostics.push(rendered.to_owned());
+            continue;
+        }
         if message["reason"] != "compiler-artifact" {
             continue;
         }
@@ -134,10 +159,11 @@ fn check_plain_library(target_dir: &Path) -> PlainLibrary {
                 deps.insert(dir.to_path_buf());
             }
         }
-        if message["target"]["name"] != "skyoauth_service" {
+        if !is_service_library(&message) {
             continue;
         }
-        // The build this test relies on: no feature, so no `test-support`.
+        // The build this test relies on: no feature, so no `test-support`,
+        // whichever workspace member asks for it.
         assert_eq!(
             message["features"],
             Value::Array(Vec::new()),
@@ -152,6 +178,12 @@ fn check_plain_library(target_dir: &Path) -> PlainLibrary {
             .expect("the library's metadata");
         found = Some(PathBuf::from(rmeta));
     }
+    assert!(
+        diagnostics.is_empty(),
+        "the library without `test-support` emitted diagnostics (an unfulfilled \
+         `expect(dead_code)` means an ungated writer is public or called):\n{}",
+        diagnostics.join("\n")
+    );
     let rmeta = found.expect("cargo reported the library's artifact");
     PlainLibrary { rmeta, deps }
 }
@@ -186,6 +218,38 @@ fn compile_probe(library: &PlainLibrary, dir: &Path, name: &str, source: &str) -
         .arg(&file)
         .output()
         .expect("rustc runs")
+}
+
+/// The guard that makes a caller visible to the check above: each writer
+/// is `pub(super)` and carries, right before it, the `expect(dead_code)`
+/// that a build without the feature turns into a warning once anything
+/// calls the writer. Without this, removing the attribute and adding a
+/// public forwarder of another name in the same change would pass.
+#[test]
+fn each_ungated_writer_keeps_its_visibility_and_dead_code_guard() {
+    const GUARD: &str = "#[cfg_attr(
+    not(feature = \"test-support\"),
+    expect(dead_code, reason = \"ungated: tests only, through test_support\")
+)]
+";
+    for (module, writer) in UNGATED {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/trust")
+            .join(format!("{module}.rs"));
+        let source = fs::read_to_string(&path).unwrap();
+        let item = format!("async fn {writer}(");
+        assert_eq!(
+            source.matches(&item).count(),
+            1,
+            "`{writer}` is defined once in {}",
+            path.display()
+        );
+        let guarded = format!("{GUARD}pub(super) {item}");
+        assert!(
+            source.contains(&guarded),
+            "`{writer}` must be `pub(super)` right after its `expect(dead_code)` guard"
+        );
+    }
 }
 
 #[test]

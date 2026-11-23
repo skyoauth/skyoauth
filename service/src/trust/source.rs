@@ -3,7 +3,7 @@
 //! `/admin/v1/tenants/{tenant}/trust-sources` row; migrations README, "What
 //! 0004 adds", the service rules).
 //!
-//! `create_source` and `update_source` (both crate-private) wrap the
+//! `create_source` and `update_source` (both `pub(super)`) wrap the
 //! registry's bare [`create_trust_source`] and [`update_trust_source`],
 //! which check nothing the database does not. [`submit_create_source`] and
 //! [`submit_update_source`] are the gated create and update of the
@@ -354,15 +354,17 @@
 //!   designed in that proposal (accepted, 2026-11-23); no task ID names it
 //!   (the nearest owners are T13.3, T13.2, T13.8, T11.6, T10.4 and T10.2).
 //!   The gated writes put source writes through it (see "The gate").
-//!   `create_source` and `update_source` stay ungated: with
-//!   `widening_second_approver` on they would apply a widening write on one
-//!   operator's authority. They are crate-private (the proposal's PR 7),
-//!   and nothing in the crate calls them outside tests; this package's
-//!   integration tests reach them through the `#[doc(hidden)]`
+//!   `create_source` and `update_source` stay ungated: they apply a create
+//!   or an update, a widening one or not, on one operator's authority
+//!   without the gate, so with `widening_second_approver` on a widening
+//!   one would skip its approval. They are visible only within `trust`
+//!   (`pub(super)`, the proposal's PR 7), so no other module of the crate
+//!   can call them, and nothing in `trust` calls them outside tests; this
+//!   package's integration tests reach them through the `#[doc(hidden)]`
 //!   `trust::test_support`, compiled only with the `test-support` feature,
 //!   which a normal build leaves off
 //!   (`service/tests/ungated_writes_private.rs` checks that such a build
-//!   exposes neither).
+//!   exposes neither and calls neither).
 //! - The fetch-time match of a discovered `jwks_uri` against an enabled
 //!   `jwks` entry, the degraded health signal and the fetches themselves
 //!   (IR-152; T11.2, T11.8).
@@ -885,7 +887,7 @@ pub(crate) async fn apply_create_source(
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
 ///
 /// Ungated: it applies a widening write on one operator's authority, so it
-/// is crate-private (see the module docs, "Not done here");
+/// is visible only within `trust` (see the module docs, "Not done here");
 /// [`submit_create_source`] is the gated write. Nothing in the crate calls
 /// it outside tests: the integration tests reach it through
 /// `trust::test_support` (the `test-support` feature).
@@ -893,7 +895,7 @@ pub(crate) async fn apply_create_source(
     not(feature = "test-support"),
     expect(dead_code, reason = "ungated: tests only, through test_support")
 )]
-pub(crate) async fn create_source(
+pub(super) async fn create_source(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     new: &NewTrustSource,
@@ -1133,13 +1135,14 @@ pub(crate) fn classify_source_update(
 /// `principal_binding` or `consumed_assertion` insert that references the
 /// source waits.
 ///
-/// Ungated and crate-private, as `create_source`;
+/// Ungated (an update, a widening one or not, without the gate) and
+/// `pub(super)`, as `create_source`;
 /// [`submit_update_source`] is the gated write.
 #[cfg_attr(
     not(feature = "test-support"),
     expect(dead_code, reason = "ungated: tests only, through test_support")
 )]
-pub(crate) async fn update_source(
+pub(super) async fn update_source(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     tenant_id: &str,

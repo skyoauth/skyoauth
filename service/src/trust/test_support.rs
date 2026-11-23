@@ -1,13 +1,14 @@
 //! The ungated trust writes, for this package's integration tests only.
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
-//! apply a widening write at once on one operator's authority, without the
-//! second approver that `widening_second_approver` asks for, so they are
-//! crate-private (second-approver proposal, PR 7). The integration tests
-//! under `service/tests` are crates of their own and test those writes
-//! directly, so this module, compiled only with the `test-support` feature,
-//! exposes each through a wrapper of the same name and signature (a
-//! crate-private function cannot be re-exported). The feature is off in a
+//! apply a create, an enable or an update, a widening one or not, at once
+//! on one operator's authority, without the second-approver gate that
+//! `widening_second_approver` asks for, so they are visible only within
+//! `trust` (`pub(super)`; second-approver proposal, PR 7). The integration
+//! tests under `service/tests` are crates of their own and test those
+//! writes directly, so this module, compiled only with the `test-support`
+//! feature, exposes each through a wrapper of the same name and signature
+//! (a restricted-visibility function cannot be re-exported). The feature is off in a
 //! normal build; this package's dev-dependency on itself turns it on for
 //! its test targets only (inferred: the mechanism; the proposal's "PR 7 as
 //! implemented"). Nothing outside tests may enable it, and no endpoint may
@@ -25,7 +26,7 @@ use crate::persistence::registry::{
     NewTrustSource, TrustKeysetVersion, TrustSource, TrustSourceChanges,
 };
 
-/// The crate-private `trust::keyset::create_version`: the ungated keyset
+/// The `pub(super)` `trust::keyset::create_version`: the ungated keyset
 /// version create. Tests only.
 pub async fn create_version(
     transaction: &mut Transaction<'_, Postgres>,
@@ -36,7 +37,7 @@ pub async fn create_version(
     keyset::create_version(transaction, public_identity, new, audit).await
 }
 
-/// The crate-private `trust::keyset::enable_version`: the ungated keyset
+/// The `pub(super)` `trust::keyset::enable_version`: the ungated keyset
 /// version enable. Tests only.
 pub async fn enable_version(
     transaction: &mut Transaction<'_, Postgres>,
@@ -57,7 +58,7 @@ pub async fn enable_version(
     .await
 }
 
-/// The crate-private `trust::source::create_source`: the ungated trust
+/// The `pub(super)` `trust::source::create_source`: the ungated trust
 /// source create. Tests only.
 pub async fn create_source(
     transaction: &mut Transaction<'_, Postgres>,
@@ -68,7 +69,7 @@ pub async fn create_source(
     source::create_source(transaction, public_identity, new, audit).await
 }
 
-/// The crate-private `trust::source::update_source`: the ungated trust
+/// The `pub(super)` `trust::source::update_source`: the ungated trust
 /// source update. Tests only.
 pub async fn update_source(
     transaction: &mut Transaction<'_, Postgres>,

@@ -3,7 +3,7 @@
 //! `/admin/v1/tenants/{tenant}/keysets` row; migrations README, "What 0004
 //! adds", the service rules).
 //!
-//! `create_version`, `enable_version` (both crate-private) and
+//! `create_version`, `enable_version` (both `pub(super)`) and
 //! [`disable_version`] wrap the registry's bare
 //! [`create_trust_keyset_version`] and [`update_trust_keyset_version`],
 //! which check nothing the database does not. [`submit_create_version`] and
@@ -39,13 +39,14 @@
 //! - **Ungated writes.** `create_version` and `enable_version` take
 //!   effect at once on one operator's authority: with
 //!   `widening_second_approver` on, they would apply a widening write
-//!   without the approval it needs. They are crate-private (the proposal's
-//!   PR 7), and nothing in the crate calls them outside tests; this
+//!   without the approval it needs. They are visible only within `trust`
+//!   (`pub(super)`, the proposal's PR 7), so no other module of the crate
+//!   can call them, and nothing in `trust` calls them outside tests; this
 //!   package's integration tests reach them through the `#[doc(hidden)]`
 //!   `trust::test_support`, compiled only with the `test-support` feature,
 //!   which a normal build leaves off
 //!   (`service/tests/ungated_writes_private.rs` checks that such a build
-//!   exposes neither). (The ruling names a create, an enable and a
+//!   exposes neither and calls neither). (The ruling names a create, an enable and a
 //!   re-enable; [`disable_version`] is not among them, is never gated and
 //!   stays public: it is the disable's write path.)
 //! - **The only write path.** The registry writers
@@ -1066,7 +1067,7 @@ async fn append_stamped(
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
 ///
 /// Ungated: it applies a widening write on one operator's authority, so it
-/// is crate-private (see the module docs, "Not wired");
+/// is visible only within `trust` (see the module docs, "Not wired");
 /// [`submit_create_version`] is the gated write. Nothing in the crate calls
 /// it outside tests: the integration tests reach it through
 /// `trust::test_support` (the `test-support` feature).
@@ -1074,7 +1075,7 @@ async fn append_stamped(
     not(feature = "test-support"),
     expect(dead_code, reason = "ungated: tests only, through test_support")
 )]
-pub(crate) async fn create_version(
+pub(super) async fn create_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     new: &NewKeysetVersion<'_>,
@@ -1281,13 +1282,13 @@ async fn submit_create_steps(
 /// refused while the replacement is enabled. Runs only under
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
 ///
-/// Ungated and crate-private, as `create_version`;
+/// Ungated and `pub(super)`, as `create_version`;
 /// [`submit_enable_version`] is the gated write.
 #[cfg_attr(
     not(feature = "test-support"),
     expect(dead_code, reason = "ungated: tests only, through test_support")
 )]
-pub(crate) async fn enable_version(
+pub(super) async fn enable_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     tenant_id: &str,

@@ -10,8 +10,9 @@
 //!   when the write is applied, checks the overlap of the keyset's enabled
 //!   versions where a version becomes enabled, writes the row and appends
 //!   its audit event, in the caller's transaction, after
-//!   [`validate_upload`] has validated the upload outside it. See the [`keyset`] module for the rules, the lock
-//!   order and what is not done here.
+//!   [`validate_upload`] has validated the upload outside it. See the
+//!   [`keyset`] module for the rules, the lock order and what is not done
+//!   here.
 //! - **Trust sources** (T11.2; identity-registry IR-152):
 //!   [`submit_create_source`] and [`submit_update_source`] are the audited
 //!   write path of a trust source, through the second-approver gate: a
@@ -19,15 +20,18 @@
 //!   disable-only update applied at once as not widening. Each authorizes
 //!   the operator, checks the source's egress destinations against the
 //!   egress allowlist and, when the write is applied, writes the row and
-//!   appends its audit event, in the caller's transaction. See the [`source`] module for the rules, the
-//!   lock order and what is not done here.
+//!   appends its audit event, in the caller's transaction. See the
+//!   [`source`] module for the rules, the lock order and what is not done
+//!   here.
 //!
-//! The ungated create and enable of a keyset version and create and update
-//! of a trust source (`create_version`, `enable_version`, `create_source`,
-//! `update_source`) apply a widening write on one operator's authority, so
-//! they are crate-private (second-approver proposal, PR 7). This package's
-//! integration tests reach them through a `#[doc(hidden)]` module compiled
-//! only with the `test-support` feature, which a normal build leaves off.
+//! The ungated writes (`create_version`, `enable_version`, `create_source`,
+//! `update_source`) apply a create, an enable or an update, a widening one
+//! or not, at once on one operator's authority, without the gate. They are
+//! visible only within this module (`pub(super)`; second-approver
+//! proposal, PR 7), so no other module of the crate, an endpoint included,
+//! can call them. This package's integration tests reach them through a
+//! `#[doc(hidden)]` module compiled only with the `test-support` feature,
+//! which a normal build leaves off.
 //!
 //! The module is library-level only: no endpoint calls it yet, and nothing
 //! wires it at startup (provisional lead pick, 2026-11-22).

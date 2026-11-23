@@ -599,7 +599,7 @@ The database does not enforce these rules; the service must:
   egress entry of the matching purpose when they are written (IR-152), and
   validate them as URLs in canonical form. The service-layer write path
   `skyoauth_service::trust::source` (the gated `submit_create_source` and
-  `submit_update_source`, and the crate-private `create_source` and
+  `submit_update_source`, and the `trust`-private `create_source` and
   `update_source`) checks both rules, in the caller's transaction (T11.2;
   see "Trust source writes" under "Rust registry surface"). Since `0011`,
   a trigger also refuses a changed destination that has no enabled entry,
@@ -3271,7 +3271,7 @@ only the new revision, since it does not read the timestamp column. The range ch
 
 `skyoauth_service::trust::keyset` (`validate_upload`, `disable_version`,
 the gated `submit_create_version` and `submit_enable_version`, and the
-crate-private, ungated `create_version` and `enable_version`) is the
+`trust`-private, ungated `create_version` and `enable_version`) is the
 audited write path of a trust keyset version (T11.3, T11.9; see its module
 documentation for the full rules). Library-level only: no endpoint calls
 it and nothing wires it at startup.
@@ -3295,10 +3295,11 @@ provisional until Gate M0:
   fingerprint is refused (`StoredFingerprintMismatch`), at the request and
   at the approval.
   `create_version` and `enable_version` stay ungated and, since its PR 7,
-  crate-private: this package's integration tests reach them through the
-  `#[doc(hidden)]` `trust::test_support`, compiled only with the
-  `test-support` feature, which a normal build leaves off. Nothing may be
-  wired to an endpoint before the request layer exists (generated IDs,
+  visible only within `trust` (`pub(super)`), so no other module of the
+  crate can call them; this package's integration tests reach them
+  through the `#[doc(hidden)]` `trust::test_support`, compiled only with
+  the `test-support` feature, which a normal build leaves off. Nothing may
+  be wired to an endpoint before the request layer exists (generated IDs,
   T10.2; the role of each endpoint, T13.2, T13.3), and an endpoint calls
   the gated writes only.
 - It must be the only path that writes a keyset version outside tests.
@@ -3430,8 +3431,8 @@ overlap check refuses to compare such a stored row.
 ### Trust source writes
 
 `skyoauth_service::trust::source` (the gated `submit_create_source` and
-`submit_update_source`, and the crate-private, ungated `create_source` and
-`update_source`) is the audited write path of a trust source with the
+`submit_update_source`, and the `trust`-private, ungated `create_source`
+and `update_source`) is the audited write path of a trust source with the
 IR-152 egress check (T11.2; see the module documentation for the full
 rules). Library-level only: no endpoint calls them and nothing wires them
 at startup. Each runs in the caller's transaction, in a savepoint of its
@@ -3498,8 +3499,9 @@ the caller's transaction. The picks are the lead's (provisional lead pick,
   from the plan under its own locks: the syntax, each entry `FOR SHARE`
   and the insert or the compare-and-set at the operation's expected
   revision. `create_source` and `update_source` stay ungated and, since
-  the proposal's PR 7, crate-private, reached by the tests as the keyset
-  writes are (`trust::test_support`, the `test-support` feature).
+  the proposal's PR 7, visible only within `trust` (`pub(super)`),
+  reached by the tests as the keyset writes are (`trust::test_support`,
+  the `test-support` feature).
 - The event is `trust_source.create` or `trust_source.update` (every
   update, a status-only one included; provisional lead pick, 2026-11-22,
   open), appended last in the source's tenant, with the operator as actor.
