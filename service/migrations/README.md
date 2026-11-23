@@ -11,6 +11,19 @@ not a migration.
   edited, renamed or removed; the runner refuses a changed checksum, and the
   checksum covers comments too. Fix forward with a new file. There are no
   down migrations.
+- **Pre-beta exception** (ruled by the user, 2026-11-23, relayed by the
+  lead): "we don't need to keep data until a beta release" and "I meant db
+  migration are not needed intra releases." Until the first beta release,
+  no database upgrade path between pre-beta releases is provided or
+  tested, and an existing migration may be amended in place instead of
+  fixed forward with a new file. A database created from an earlier
+  version of the migrations is recreated, not migrated: sqlx records each
+  applied migration's checksum, so an amended migration fails validation
+  (`migrate` refuses it) on a database that applied the earlier text. The
+  forward-only rule is reinstated at the beta release (date set by the
+  maintainer). The sections below for `0001` to `0011` still call those
+  files frozen and record errata outside them; that is the record of the
+  rule when each was written, not a bar to a pre-beta amendment.
 - **Contiguous versions:** `0001_…`, `0002_…`, and so on. A unit test checks
   this; it is a test-time rule, not something the runner enforces.
 - **One transaction per file.** sqlx wraps each file in a transaction. Never
@@ -1517,7 +1530,8 @@ function, column, trigger or index and changes nothing else. Choices marked
   produce from the service-account identity and UID that a TokenReview
   returns or a locally validated projected token carries (ADR-005 items 4
   and 7; design §5.4); the documents do not say how the namespace and name
-  are taken from that identity. Changing a key needs a new migration and
+  are taken from that identity. Changing a key needs a new migration (or,
+  before the beta release, an in-place amendment; "Conventions") and
   rewriting every `kubernetes_production` binding. Every other key is
   optional and, omitted, unconstrained (ADR-016 item 1). Each check holds
   for every row of another profile, and applies to every row of its own, a
@@ -1531,7 +1545,8 @@ function, column, trigger or index and changes nothing else. Choices marked
 - **One table.** The registry checks the same sets before its statement
   (`service/src/persistence/registry/predicate.rs`, see "Rust registry
   surface"), where `GITHUB_JOB_WORKFLOW_REF` names the optional key.
-  Changing a set needs a new migration that replaces the check, and the
+  Changing a set needs a new migration that replaces the check (or,
+  before the beta release, an in-place amendment; "Conventions"), and the
   registry table changes with it.
 - **Not checked.**
   - Removing an optional predicate widens the binding and needs review
@@ -2430,7 +2445,8 @@ Open for all registry tables:
   values on every instance today. If such a column ever gets another
   collation, a later forward-only migration replaces the check with the
   `0004` form, `CHECK ((<column> COLLATE "C") !~ '[[:space:][:cntrl:]]')`;
-  the frozen files stay unchanged.
+  the frozen files stay unchanged (before the beta release the files may
+  instead be amended in place; "Conventions").
 
 Not done in `0002`:
 
@@ -2481,7 +2497,8 @@ Not done in `0002`:
   - `audit_chain_head.head_hash` and `audit_event.prev_hash` check
     `octet_length(…) > 0`, but IR-056 makes every hash a raw 32-byte
     SHA-256 digest. The database accepts any non-empty value; checking
-    `= 32` needs a later migration.
+    `= 32` needs a later migration (or, before the beta release, an
+    in-place amendment; "Conventions").
 
 Not done in `0003`:
 
