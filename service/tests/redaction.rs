@@ -26,6 +26,7 @@ use std::{
 use common::TestDb;
 use serde_json::json;
 use skyoauth_service::{
+    jwk::DEFAULT_ALLOWED_ALGORITHMS,
     operation::{
         ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, Gated, PendingOperation,
         PreparedApproval, RequestDigest, Submission, approve_operation, prepare_approval,
@@ -335,7 +336,15 @@ async fn insert_raw(pool: &PgPool, id: &str, digest: Vec<u8>) {
 }
 
 async fn prepare(key: &str, pool: &PgPool, id: &str) -> Result<PreparedApproval, ApprovalError> {
-    prepare_approval(pool, key, ApprovalScope::Instance, id, at(1)).await
+    prepare_approval(
+        pool,
+        key,
+        ApprovalScope::Instance,
+        id,
+        DEFAULT_ALLOWED_ALGORITHMS,
+        at(1),
+    )
+    .await
 }
 
 /// An approval by [`SEC_KEY`] in a transaction committed either way, with
