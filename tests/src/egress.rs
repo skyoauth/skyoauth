@@ -7,7 +7,7 @@
 //! allowlist entry of its purpose with exactly that value (`23514`,
 //! `trust_source_discovery_url_egress_enabled` or
 //! `trust_source_token_review_endpoint_egress_enabled`). A scenario that
-//! creates sources with `registry::create_trust_source` first allows their
+//! creates sources with `registry::test_support::create_trust_source` first allows their
 //! destinations with [`allow_destinations`].
 
 use skyoauth_service::persistence::{PgPool, registry::NewTrustSource};

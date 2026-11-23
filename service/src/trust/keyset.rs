@@ -4,9 +4,9 @@
 //! adds", the service rules).
 //!
 //! `create_version`, `enable_version` (both `pub(super)`) and
-//! [`disable_version`] wrap the registry's bare
-//! [`create_trust_keyset_version`] and [`update_trust_keyset_version`],
-//! which check nothing the database does not. [`submit_create_version`] and
+//! [`disable_version`] wrap the registry's bare, crate-private
+//! `create_trust_keyset_version` and `update_trust_keyset_version`, which
+//! check nothing the database does not. [`submit_create_version`] and
 //! [`submit_enable_version`] are the gated create and enable of the
 //! second-approver flow (`docs/proposals/second-approver-gated-writes.md`,
 //! PR 4; see "The gate"). They run in the caller's transaction and neither
@@ -50,16 +50,18 @@
 //!   re-enable; [`disable_version`] is not among them, is never gated and
 //!   stays public: it is the disable's write path.)
 //! - **The only write path.** The registry writers
-//!   [`create_trust_keyset_version`] and [`update_trust_keyset_version`]
-//!   are the unchecked floor: they store any `public_jwks` and
-//!   `fingerprint` the `0004` `CHECK`s allow and re-enable a version with no
-//!   overlap check. They stay public for the integration and scenario tests
-//!   (the scenario crate calls them, so they cannot be crate-private), are
-//!   documented as test-only, and must stay unreachable from any endpoint.
-//!   This module must be the only path that writes a keyset version
-//!   outside tests. The A04 scenario tests (`tests/security`) stay on the
-//!   raw writers until A04 M1a is claimed, then switch to this module
-//!   (follow-up).
+//!   `create_trust_keyset_version` and `update_trust_keyset_version` are
+//!   the unchecked floor: they store any `public_jwks` and `fingerprint`
+//!   the `0004` `CHECK`s allow and re-enable a version with no overlap
+//!   check. They are crate-private (`pub(crate)`, the proposal's PR 9),
+//!   since this module's steps call them, the gated approval's included;
+//!   the integration and scenario tests reach them through the registry's
+//!   `#[doc(hidden)]` `test_support` module, compiled only with the
+//!   `test-support` feature, and they must stay unreachable from any
+//!   endpoint. This module must be the only path that writes a keyset
+//!   version outside tests. The A04 scenario tests (`tests/security`) stay
+//!   on the raw writers until A04 M1a is claimed, then switch to this
+//!   module (follow-up).
 //!
 //! # The gate
 //!

@@ -452,7 +452,7 @@ async fn seed(pool: &PgPool, side: Side) {
     }
     for on in SOURCES {
         egress::allow_destinations(pool, &source(side, on)).await;
-        registry::create_trust_source(pool, &source(side, on))
+        registry::test_support::create_trust_source(pool, &source(side, on))
             .await
             .unwrap();
     }
@@ -655,7 +655,7 @@ pub(super) const MATCHING_GRANTS: [MatchingGrant; 3] =
 
 /// Creates the A50 records of `side` (module docs, "The A50 additions").
 async fn seed_matching(pool: &PgPool, side: Side) {
-    registry::create_trust_source(
+    registry::test_support::create_trust_source(
         pool,
         &NewTrustSource {
             id: side.id(SECOND_GENERIC),

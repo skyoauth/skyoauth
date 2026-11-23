@@ -183,7 +183,9 @@ async fn two_tenants() -> (TestDb, PgPool) {
         .unwrap();
         let source = single_use_source(side.tenant, side.source, "github");
         egress::allow_destinations(&pool, &source).await;
-        registry::create_trust_source(&pool, &source).await.unwrap();
+        registry::test_support::create_trust_source(&pool, &source)
+            .await
+            .unwrap();
     }
     (db, pool)
 }
@@ -437,7 +439,7 @@ async fn a24_neg_replay_after_consumption() {
         tenant: A.tenant,
         source: "src_a2",
     };
-    registry::create_trust_source(
+    registry::test_support::create_trust_source(
         &pool,
         &single_use_source(second.tenant, second.source, "github-2"),
     )

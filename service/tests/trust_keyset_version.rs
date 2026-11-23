@@ -470,7 +470,7 @@ async fn raw_version(
     status: Status,
     window: (SystemTime, Option<SystemTime>),
 ) {
-    registry::create_trust_keyset_version(
+    registry::test_support::create_trust_keyset_version(
         pool,
         &NewTrustKeysetVersion {
             id: id.into(),

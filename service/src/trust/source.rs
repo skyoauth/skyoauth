@@ -4,8 +4,9 @@
 //! 0004 adds", the service rules).
 //!
 //! `create_source` and `update_source` (both `pub(super)`) wrap the
-//! registry's bare [`create_trust_source`] and [`update_trust_source`],
-//! which check nothing the database does not. [`submit_create_source`] and
+//! registry's bare, crate-private `create_trust_source` and
+//! `update_trust_source` (the proposal's PR 9), which check nothing the
+//! database does not. [`submit_create_source`] and
 //! [`submit_update_source`] are the gated create and update of the
 //! second-approver flow (`docs/proposals/second-approver-gated-writes.md`,
 //! PR 5; see "The gate"). They run in the caller's transaction and neither
@@ -236,7 +237,7 @@
 //!    the compare-and-set update. Every compare-and-set takes the source
 //!    row `FOR UPDATE` until the transaction ends, whatever it changes, a
 //!    status-only write or one that changes nothing included.
-//!    [`update_trust_source`] always sets `name`, a column of the unique key
+//!    `update_trust_source` always sets `name`, a column of the unique key
 //!    `(tenant_id, name)`. With the `BEFORE UPDATE` row triggers of
 //!    `trust_source` (`trust_source_immutable`, `trust_source_revision`),
 //!    PostgreSQL chooses the row lock from the columns in the `SET` list,

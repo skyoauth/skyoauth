@@ -90,7 +90,7 @@
 //!   `created_at` and a principal's `created_at` are immutable too; a
 //!   tenant's and a principal's `name` and `status` are mutable (lead
 //!   ruling, 2026-11-21). Of a keyset version only `status` changes, with
-//!   [`update_trust_keyset_version`].
+//!   `update_trust_keyset_version`.
 //! - [`update_tenant`] and [`update_principal`] take a patch: only the
 //!   columns set in it change. An empty patch is an encode error,
 //!   [`RegistryError::Other`], before any statement runs, so it neither
@@ -112,15 +112,22 @@
 //!   [`remove_service_grant_resource_server`]). A service identity and a
 //!   grant are created with their initial sets in the same statement.
 //! - A trust keyset version is immutable but for its `status` (`0004`).
-//!   [`update_trust_keyset_version`] enables or disables it as a
+//!   `update_trust_keyset_version` enables or disables it as a
 //!   compare-and-set on the version's own revision (added by `0007`), like
 //!   the other tables, with no tie to the keyset's revision (lead decision,
-//!   2026-11-21). [`create_trust_keyset_version`] and
-//!   [`update_trust_keyset_version`] are the unchecked floor, kept public
-//!   for tests only: the keyset version write path is
-//!   [`trust::keyset`](crate::trust::keyset), which checks the JWK rules
-//!   and the overlap, authorizes and audits (provisional lead pick,
-//!   2026-11-22).
+//!   2026-11-21). `create_trust_keyset_version` and
+//!   `update_trust_keyset_version`, like `create_trust_source` and
+//!   `update_trust_source`, are the unchecked floor and crate-private
+//!   (`pub(crate)`; second-approver proposal, PR 9): the keyset version
+//!   write path is [`trust::keyset`](crate::trust::keyset), which checks
+//!   the JWK rules and the overlap, authorizes, gates and audits
+//!   (provisional lead pick, 2026-11-22), and the trust source write path
+//!   is [`trust::source`](crate::trust::source). Within the crate only
+//!   those two modules call them. Tests, which are crates of their own,
+//!   reach them through the `#[doc(hidden)]` module `test_support`,
+//!   compiled only with the `test-support` feature, which only test
+//!   targets turn on (`service/tests/ungated_writes_private.rs` checks that
+//!   a normal build exposes none of them).
 //! - Disabling and re-enabling a tenant, a principal or a keyset version is
 //!   a plain status change here. Whether re-enabling needs an approval, and
 //!   any other widening rule, belongs to the service layer (provisional
@@ -180,7 +187,7 @@
 //! (inferred).
 //!
 //! An update that leaves such a column untouched ([`update_tenant`],
-//! [`update_principal`] and [`update_trust_keyset_version`], none of which
+//! [`update_principal`] and `update_trust_keyset_version`, none of which
 //! writes a timestamp) behaves in one of two ways:
 //!
 //! - With a range check in force but `NOT VALID`, PostgreSQL checks the
@@ -252,7 +259,7 @@
 //! committed update of the assignment fails with `40001`, `Retry`.
 //!
 //! Since `0011` the database refuses a trust source write
-//! ([`create_trust_source`], [`update_trust_source`]) that sets
+//! (`create_trust_source`, `update_trust_source`) that sets
 //! `discovery_url` or `token_review_endpoint` to a value, new or changed,
 //! that no enabled egress allowlist entry of its purpose lists (IR-152;
 //! provisional lead pick, 2026-11-22):
@@ -346,6 +353,11 @@ mod predicate;
 mod recovery;
 mod selection;
 mod tenant;
+// Off in a normal build: the bare registry trust writers for tests only
+// (second-approver proposal, PR 9; see the module).
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support;
 mod trust;
 
 pub use assertion::{
@@ -430,11 +442,14 @@ pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
     update_principal, update_tenant,
 };
-pub(crate) use trust::{KeysetVersionText, read_enabled_keyset_versions, read_keyset_version};
+pub(crate) use trust::{
+    KeysetVersionText, create_trust_keyset_version, create_trust_source,
+    read_enabled_keyset_versions, read_keyset_version, update_trust_keyset_version,
+    update_trust_source,
+};
 pub use trust::{
-    create_trust_keyset, create_trust_keyset_version, create_trust_source, get_trust_keyset,
-    get_trust_keyset_version, get_trust_source, list_trust_keyset_versions, list_trust_keysets,
-    list_trust_sources, update_trust_keyset, update_trust_keyset_version, update_trust_source,
+    create_trust_keyset, get_trust_keyset, get_trust_keyset_version, get_trust_source,
+    list_trust_keyset_versions, list_trust_keysets, list_trust_sources, update_trust_keyset,
 };
 
 use sqlx::{FromRow, Row, postgres::PgRow};

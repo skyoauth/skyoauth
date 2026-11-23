@@ -103,7 +103,7 @@ async fn seeded() -> (TestDb, PgPool) {
     .await
     .unwrap();
     for (tenant, source) in [("ten_a", "src_a"), ("ten_a", "src_a2"), ("ten_b", "src_b")] {
-        registry::create_trust_source(&pool, &oidc_source(tenant, source))
+        registry::test_support::create_trust_source(&pool, &oidc_source(tenant, source))
             .await
             .unwrap();
     }

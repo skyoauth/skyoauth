@@ -27,6 +27,18 @@ sqlx = { version = "=0.9.1", default-features = false, features = ["postgres", "
 tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
+# The service with `test-support`, for the scenario tests only: they set up
+# keyset versions and trust sources with the bare registry writers, which
+# a normal build keeps crate-private (`persistence::registry::test_support`;
+# second-approver proposal, "PR 9 as implemented"). This turns on a
+# feature of a dependency, not one of this package, so it is not what the
+# "No features" note above rules out: Cargo applies it only to builds that
+# need dev-dependencies (this package's test targets; the `scenarios-*`
+# jobs build them with `-p skyoauth-scenarios` and no `--features`), never
+# to this package's library in `src/`, which must not use it.
+# `service/tests/ungated_writes_private.rs` fails if a normal build of the
+# workspace turns it on.
+skyoauth-service = { path = "../service", features = ["test-support"] }
 serde_json = "1.0.154"
 # `rt-multi-thread` so replica races run in parallel
 # (`#[tokio::test(flavor = "multi_thread")]`).

@@ -396,7 +396,9 @@ async fn seeded() -> (TestDb, PgPool) {
         token_review_source("ten_a", "src_k8s", "k3s", "cluster_1"),
         oidc_source("ten_b", "src_b", "github"),
     ] {
-        registry::create_trust_source(&pool, &source).await.unwrap();
+        registry::test_support::create_trust_source(&pool, &source)
+            .await
+            .unwrap();
     }
     for (tenant, id, source, principal) in [
         ("ten_a", "bnd_1", "src_gh", "wld_1"),
@@ -603,10 +605,12 @@ async fn keysets_are_tenant_local_and_update_by_revision() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn keyset_versions_are_created_read_and_listed_per_keyset() {
     let (db, pool) = seeded().await;
-    let created =
-        registry::create_trust_keyset_version(&pool, &new_version("ten_a", "kv_2", "ks_1"))
-            .await
-            .unwrap();
+    let created = registry::test_support::create_trust_keyset_version(
+        &pool,
+        &new_version("ten_a", "kv_2", "ks_1"),
+    )
+    .await
+    .unwrap();
     let expected = new_version("ten_a", "kv_2", "ks_1");
     assert_eq!(
         (
@@ -633,26 +637,32 @@ async fn keyset_versions_are_created_read_and_listed_per_keyset() {
     let mut open = new_version("ten_a", "kv_1", "ks_1");
     open.expires_at = None;
     open.effective_at = at(-1_000_001) - Duration::from_nanos(1);
-    let open = registry::create_trust_keyset_version(&pool, &open)
+    let open = registry::test_support::create_trust_keyset_version(&pool, &open)
         .await
         .unwrap();
     assert_eq!((open.effective_at, open.expires_at), (at(-1_000_002), None));
     let mut nanos = new_version("ten_a", "kv_3", "ks_1");
     nanos.effective_at = at(5) + Duration::from_nanos(999);
     nanos.expires_at = Some(at(6));
-    let nanos = registry::create_trust_keyset_version(&pool, &nanos)
+    let nanos = registry::test_support::create_trust_keyset_version(&pool, &nanos)
         .await
         .unwrap();
     assert_eq!(nanos.effective_at, at(5));
     registry::create_trust_keyset(&pool, &new_keyset("ten_a", "ks_2", "other"))
         .await
         .unwrap();
-    registry::create_trust_keyset_version(&pool, &new_version("ten_a", "kv_0", "ks_2"))
-        .await
-        .unwrap();
-    registry::create_trust_keyset_version(&pool, &new_version("ten_b", "kv_b", "ks_b"))
-        .await
-        .unwrap();
+    registry::test_support::create_trust_keyset_version(
+        &pool,
+        &new_version("ten_a", "kv_0", "ks_2"),
+    )
+    .await
+    .unwrap();
+    registry::test_support::create_trust_keyset_version(
+        &pool,
+        &new_version("ten_b", "kv_b", "ks_b"),
+    )
+    .await
+    .unwrap();
 
     let ids = |versions: Vec<registry::TrustKeysetVersion>| -> Vec<String> {
         versions.into_iter().map(|v| v.id).collect()
@@ -689,7 +699,7 @@ async fn keyset_versions_are_created_read_and_listed_per_keyset() {
 
     let create = |new: NewTrustKeysetVersion| {
         let pool = pool.clone();
-        async move { registry::create_trust_keyset_version(&pool, &new).await }
+        async move { registry::test_support::create_trust_keyset_version(&pool, &new).await }
     };
     assert_exists(
         create(new_version("ten_a", "kv_2", "ks_1")).await,
@@ -844,12 +854,14 @@ async fn trust_source_fields_follow_its_kind() {
     let mut local = jwks_source("ten_a", "src_local", "k3s-local", "ks_1");
     local.assertion_profile = AssertionProfile::ProjectedServiceAccount;
     local.stale_revocation_acknowledged = Some(true);
-    let local = registry::create_trust_source(&pool, &local).await.unwrap();
+    let local = registry::test_support::create_trust_source(&pool, &local)
+        .await
+        .unwrap();
     assert_eq!(local.stale_revocation_acknowledged, Some(true));
 
     let create = |new: NewTrustSource| {
         let pool = pool.clone();
-        async move { registry::create_trust_source(&pool, &new).await }
+        async move { registry::test_support::create_trust_source(&pool, &new).await }
     };
     let oidc_new = || oidc_source("ten_a", "src_x", "x");
     let jwks_new = || jwks_source("ten_a", "src_x", "x", "ks_1");
@@ -983,19 +995,19 @@ async fn trust_source_fields_follow_its_kind() {
     let mut changes = source_changes(&oidc);
     changes.discovery_url = None;
     assert_check(
-        registry::update_trust_source(&pool, "ten_a", "src_gh", 1, &changes).await,
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_gh", 1, &changes).await,
         "trust_source_discovery_url_kind_check",
     );
     let mut changes = source_changes(&oidc);
     changes.token_review_endpoint = Some("https://k.example".into());
     assert_check(
-        registry::update_trust_source(&pool, "ten_a", "src_gh", 1, &changes).await,
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_gh", 1, &changes).await,
         "trust_source_token_review_fields_kind_check",
     );
     let mut changes = source_changes(&review);
     changes.review_timeout_ms = None;
     assert_check(
-        registry::update_trust_source(&pool, "ten_a", "src_k8s", 1, &changes).await,
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_k8s", 1, &changes).await,
         "trust_source_token_review_fields_kind_check",
     );
     let mut changes = source_changes(&review);
@@ -1003,9 +1015,10 @@ async fn trust_source_fields_follow_its_kind() {
     changes.ca_fingerprint = Some("sha256:cb".into());
     changes.review_timeout_ms = Some(2500);
     changes.status = Status::Disabled;
-    let rotated = registry::update_trust_source(&pool, "ten_a", "src_k8s", 1, &changes)
-        .await
-        .unwrap();
+    let rotated =
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_k8s", 1, &changes)
+            .await
+            .unwrap();
     assert_eq!(rotated.revision, 2);
     assert_eq!(
         (
@@ -1037,9 +1050,10 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
     changes.audiences = strings(&["https://a.example", "https://b.example"]);
     changes.algorithms = Some(strings(&["ES256", "ES384"]));
     changes.proof_bounds = object(json!({"max_age_seconds": 60, "clock_skew": 5}));
-    let updated = registry::update_trust_source(&pool, "ten_a", "src_up", 1, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_up", 1, &changes)
+            .await
+            .unwrap();
     assert_eq!(updated.revision, 2);
     assert_eq!(
         (&updated.name[..], &updated.exact_issuer[..]),
@@ -1055,9 +1069,15 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
             .unwrap(),
         updated
     );
-    assert_stale(registry::update_trust_source(&pool, "ten_a", "src_up", 1, &changes).await);
-    assert_not_found(registry::update_trust_source(&pool, "ten_b", "src_up", 2, &changes).await);
-    assert_not_found(registry::update_trust_source(&pool, "ten_a", "src_x", 1, &changes).await);
+    assert_stale(
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_up", 1, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_trust_source(&pool, "ten_b", "src_up", 2, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_x", 1, &changes).await,
+    );
     let listed: Vec<_> = registry::list_trust_sources(&pool, "ten_a", Page::first(10))
         .await
         .unwrap()
@@ -1068,7 +1088,7 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
 
     let create = |new: NewTrustSource| {
         let pool = pool.clone();
-        async move { registry::create_trust_source(&pool, &new).await }
+        async move { registry::test_support::create_trust_source(&pool, &new).await }
     };
     assert_exists(
         create(oidc_source("ten_b", "src_gh", "other")).await,
@@ -1229,7 +1249,7 @@ async fn trust_sources_update_by_revision_and_name_their_constraints() {
     let mut rename = source_changes(&updated);
     rename.name = "github".into();
     assert_exists(
-        registry::update_trust_source(&pool, "ten_a", "src_up", 2, &rename).await,
+        registry::test_support::update_trust_source(&pool, "ten_a", "src_up", 2, &rename).await,
         "trust_source_tenant_id_name_key",
     );
     assert_eq!(
@@ -2258,7 +2278,9 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
         let pool = p.clone();
         let mut changes = source_changes(&source);
         changes.name = format!("src-n{n}");
-        async move { registry::update_trust_source(&pool, "ten_a", "src_gh", 1, &changes).await }
+        async move {
+            registry::test_support::update_trust_source(&pool, "ten_a", "src_gh", 1, &changes).await
+        }
     })
     .await;
     assert_eq!(outcome, (1, 3), "trust_source");
@@ -2435,9 +2457,12 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
     let (db, pool) = seeded().await;
-    registry::create_trust_keyset_version(&pool, &new_version("ten_b", "kv_b", "ks_b"))
-        .await
-        .unwrap();
+    registry::test_support::create_trust_keyset_version(
+        &pool,
+        &new_version("ten_b", "kv_b", "ks_b"),
+    )
+    .await
+    .unwrap();
     for (tenant, other) in [("ten_a", "ten_b"), ("ten_b", "ten_a")] {
         let keysets = registry::list_trust_keysets(&pool, tenant, Page::first(10))
             .await
@@ -2478,8 +2503,14 @@ async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
         for source in &sources {
             assert_not_found(registry::get_trust_source(&pool, other, &source.id).await);
             assert_not_found(
-                registry::update_trust_source(&pool, other, &source.id, 1, &source_changes(source))
-                    .await,
+                registry::test_support::update_trust_source(
+                    &pool,
+                    other,
+                    &source.id,
+                    1,
+                    &source_changes(source),
+                )
+                .await,
             );
         }
         for binding in &bindings {
@@ -2609,17 +2640,27 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
 
     // Each function at i64::MAX: the ten_a row is stale; a missing ID and
     // the ten_b row are not found in ten_a.
+    // `$function` is a path under `registry`: the test-support writer is
+    // `test_support::update_trust_source`.
     macro_rules! at_max {
-        ($function:ident, $id:literal, $other_tenant_id:literal, $argument:expr) => {
-            assert_stale(registry::$function(&pool, "ten_a", $id, MAX, $argument).await);
-            assert_not_found(registry::$function(&pool, "ten_a", "x_1", MAX, $argument).await);
+        ($($function:ident)::+, $id:literal, $other_tenant_id:literal, $argument:expr) => {
+            assert_stale(registry::$($function)::+(&pool, "ten_a", $id, MAX, $argument).await);
             assert_not_found(
-                registry::$function(&pool, "ten_a", $other_tenant_id, MAX, $argument).await,
+                registry::$($function)::+(&pool, "ten_a", "x_1", MAX, $argument).await,
+            );
+            assert_not_found(
+                registry::$($function)::+(&pool, "ten_a", $other_tenant_id, MAX, $argument)
+                    .await,
             );
         };
     }
     at_max!(update_trust_keyset, "ks_1", "ks_b", &keyset_changes);
-    at_max!(update_trust_source, "src_gh", "src_b", &source_changes);
+    at_max!(
+        test_support::update_trust_source,
+        "src_gh",
+        "src_b",
+        &source_changes
+    );
     at_max!(update_principal_binding, "bnd_1", "bnd_b", &binding_changes);
     at_max!(update_service_identity, "svc_1", "svc_b", &service_changes);
     at_max!(update_service_grant, "grt_1", "grt_b", &grant_changes);
@@ -2671,7 +2712,7 @@ async fn times_at_the_writable_bounds_round_trip_and_beyond_them_write_nothing()
     let mut bounds = new_version("ten_a", "kv_1", "ks_1");
     bounds.effective_at = at(EARLIEST);
     bounds.expires_at = Some(at(LATEST));
-    let created = registry::create_trust_keyset_version(&pool, &bounds)
+    let created = registry::test_support::create_trust_keyset_version(&pool, &bounds)
         .await
         .unwrap();
     assert_eq!(
@@ -2697,10 +2738,10 @@ async fn times_at_the_writable_bounds_round_trip_and_beyond_them_write_nothing()
     }
     let mut early = new_version("ten_a", "kv_2", "ks_1");
     early.effective_at = at(EARLIEST - 1);
-    assert_out_of_range(registry::create_trust_keyset_version(&pool, &early).await);
+    assert_out_of_range(registry::test_support::create_trust_keyset_version(&pool, &early).await);
     let mut late = new_version("ten_a", "kv_2", "ks_1");
     late.expires_at = Some(at(i64::MAX));
-    assert_out_of_range(registry::create_trust_keyset_version(&pool, &late).await);
+    assert_out_of_range(registry::test_support::create_trust_keyset_version(&pool, &late).await);
     let mut grant = direct_grant("ten_a", "grt_2", "wld_1", &["bnd_1"]);
     grant.valid_until = Some(at(EARLIEST - 1));
     assert_out_of_range(registry::create_service_grant(&pool, &grant).await);
@@ -2728,9 +2769,12 @@ async fn times_at_the_writable_bounds_round_trip_and_beyond_them_write_nothing()
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn trust_guards_and_unreachable_constraints_map_from_raw_statements() {
     let (db, pool) = seeded().await;
-    registry::create_trust_keyset_version(&pool, &new_version("ten_a", "kv_1", "ks_1"))
-        .await
-        .unwrap();
+    registry::test_support::create_trust_keyset_version(
+        &pool,
+        &new_version("ten_a", "kv_1", "ks_1"),
+    )
+    .await
+    .unwrap();
     for sql in [
         "UPDATE trust_keyset SET tenant_id = 'ten_b', revision = revision + 1 WHERE id = 'ks_1'",
         "UPDATE trust_keyset_version SET fingerprint = 'sha256:02', revision = revision + 1 WHERE id = 'kv_1'",
@@ -2825,7 +2869,7 @@ async fn trust_errors_do_not_repeat_request_values() {
     let (db, pool) = seeded().await;
     let mut source = token_review_source("ten_a", "src_x", "x", "cluster_1");
     source.reviewer_credential_ref = Some("secret-ref-value".into());
-    let err = registry::create_trust_source(&pool, &source)
+    let err = registry::test_support::create_trust_source(&pool, &source)
         .await
         .unwrap_err();
     assert!(
@@ -2994,8 +3038,14 @@ async fn times_outside_the_range_checks_are_unreadable_timestamps_naming_the_row
     // The row an update returns is read the same way. With the check
     // dropped the write applies, and the caller gets the error.
     assert_unreadable(
-        registry::update_trust_keyset_version(&mut *tx, "ten_a", "kv_late", 1, Status::Disabled)
-            .await,
+        registry::test_support::update_trust_keyset_version(
+            &mut *tx,
+            "ten_a",
+            "kv_late",
+            1,
+            Status::Disabled,
+        )
+        .await,
         ("trust_keyset_version", "expires_at", "kv_late"),
     );
     let written: (String, i64) =

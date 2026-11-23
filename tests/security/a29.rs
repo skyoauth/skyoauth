@@ -378,16 +378,21 @@ async fn two_tenants() -> (TestDb, PgPool) {
         registry::create_trust_keyset(&pool, &keyset(side, side.keyset(), "partner"))
             .await
             .unwrap();
-        registry::create_trust_keyset_version(&pool, &version(side, side.version(), side.keyset()))
-            .await
-            .unwrap();
+        registry::test_support::create_trust_keyset_version(
+            &pool,
+            &version(side, side.version(), side.keyset()),
+        )
+        .await
+        .unwrap();
         for source in [
             github_source(side, side.github(), "github"),
             uploaded_source(side, side.uploaded(), "partner", side.keyset()),
             kubernetes_source(side, side.kubernetes(), "cluster"),
         ] {
             egress::allow_destinations(&pool, &source).await;
-            registry::create_trust_source(&pool, &source).await.unwrap();
+            registry::test_support::create_trust_source(&pool, &source)
+                .await
+                .unwrap();
         }
         registry::create_principal_binding(
             &pool,
@@ -618,7 +623,11 @@ async fn a29_pos_tenants_reuse_object_names() {
             "trust_keyset_tenant_id_name_key",
         );
         assert_name_taken(
-            registry::create_trust_source(&pool, &github_source(side, dup("src"), "github")).await,
+            registry::test_support::create_trust_source(
+                &pool,
+                &github_source(side, dup("src"), "github"),
+            )
+            .await,
             "trust_source_tenant_id_name_key",
         );
         assert_name_taken(
@@ -663,7 +672,7 @@ async fn a29_neg_keyset_version_on_other_tenants_keyset() {
     for (owner, intruder) in DIRECTIONS {
         let id = intruder.id("kv_cross");
         assert_crossing_refused(
-            registry::create_trust_keyset_version(
+            registry::test_support::create_trust_keyset_version(
                 &pool,
                 &version(intruder, id.clone(), owner.keyset()),
             )
@@ -685,7 +694,7 @@ async fn a29_neg_uploaded_source_on_other_tenants_keyset() {
     for (owner, intruder) in DIRECTIONS {
         let id = intruder.id("src_cross");
         assert_crossing_refused(
-            registry::create_trust_source(
+            registry::test_support::create_trust_source(
                 &pool,
                 &uploaded_source(intruder, id.clone(), "cross", owner.keyset()),
             )
@@ -989,7 +998,7 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
             .await
             .unwrap();
         assert_not_found(
-            registry::update_trust_source(
+            registry::test_support::update_trust_source(
                 &pool,
                 t,
                 &source.id,

@@ -685,7 +685,9 @@ async fn a22_neg_other_registries_identities_never_authorize() {
             status: Status::Enabled,
         };
         egress::allow_destinations(&pool, &new).await;
-        let source = registry::create_trust_source(&pool, &new).await.unwrap();
+        let source = registry::test_support::create_trust_source(&pool, &new)
+            .await
+            .unwrap();
         others.push(source.exact_issuer);
     }
     assert_eq!(others.len(), 3 * SHAPES.len() + 4 * TENANTS.len());

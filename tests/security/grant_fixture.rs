@@ -153,7 +153,9 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
         status: Status::Enabled,
     };
     egress::allow_destinations(&pool, &source).await;
-    registry::create_trust_source(&pool, &source).await.unwrap();
+    registry::test_support::create_trust_source(&pool, &source)
+        .await
+        .unwrap();
     registry::create_principal_binding(
         &pool,
         &NewPrincipalBinding {

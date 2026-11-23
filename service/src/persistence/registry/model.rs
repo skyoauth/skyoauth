@@ -821,8 +821,9 @@ impl FromRow<'_, PgRow> for TrustKeysetVersion {
     }
 }
 
-/// The input of
-/// [`create_trust_keyset_version`](super::create_trust_keyset_version).
+/// The input of the crate-private `create_trust_keyset_version`, the
+/// keyset version write's registry floor (tests reach it through the
+/// `test-support` feature).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewTrustKeysetVersion {
     pub id: String,
@@ -904,7 +905,9 @@ impl FromRow<'_, PgRow> for TrustSource {
     }
 }
 
-/// The input of [`create_trust_source`](super::create_trust_source).
+/// The input of the crate-private `create_trust_source`, the trust source
+/// write's registry floor (tests reach it through the `test-support`
+/// feature).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewTrustSource {
     pub id: String,
@@ -929,8 +932,8 @@ pub struct NewTrustSource {
     pub status: Status,
 }
 
-/// The mutable columns of a source, all replaced by
-/// [`update_trust_source`](super::update_trust_source). `kind`,
+/// The mutable columns of a source, all replaced by the crate-private
+/// `update_trust_source`. `kind`,
 /// `cluster_id` and `jwks_keyset_id` are immutable, so they are not here;
 /// the kind-specific fields that are must still match the stored kind.
 #[derive(Debug, Clone, PartialEq)]

@@ -1,31 +1,48 @@
 //! A normal build of the workspace, without the `test-support` feature,
-//! neither exposes nor calls the ungated trust writes (second-approver
-//! proposal, `docs/proposals/second-approver-gated-writes.md`, PR 7).
+//! neither exposes nor calls the ungated trust writes, and exposes none of
+//! the bare registry trust writers (second-approver proposal,
+//! `docs/proposals/second-approver-gated-writes.md`, PRs 7 and 9).
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
 //! apply a write without the second-approver gate, so they are visible
-//! only within `trust` (`pub(super)`), and only `trust::test_support`,
-//! compiled with the feature, exposes them to this package's tests. Every
-//! test target of this package is built with the feature (the package's
-//! dev-dependency on itself), so a test cannot simply name the writers and
-//! expect a compile error. This test therefore checks the library without
-//! the feature, as a dependent crate would see it: it runs `cargo check`
-//! on the workspace's libraries and binaries (a build that turns no
-//! dev-dependency feature on, and that a workspace member enabling the
-//! feature through a normal or build dependency would change), in a target
-//! directory of its own, and then:
+//! only within `trust` (`pub(super)`, PR 7). The registry's
+//! `create_trust_keyset_version`, `update_trust_keyset_version`,
+//! `create_trust_source` and `update_trust_source` write a keyset version
+//! or a trust source with no authorization, no gate and no audit event, so
+//! they are crate-private (`pub(crate)`, PR 9): the trust write path in
+//! `crate::trust` calls them, gated paths included, so they cannot be
+//! narrower. Only the `#[doc(hidden)]` modules `trust::test_support` and
+//! `persistence::registry::test_support`, compiled with the feature, expose
+//! them to tests. Every test target of this package is built with the
+//! feature (the package's dev-dependency on itself), and so is every test
+//! target of `skyoauth-scenarios` (its dev-dependency on this package), so a
+//! test cannot simply name the writers and expect a compile error. This
+//! test therefore checks the library without the feature, as a dependent
+//! crate would see it: it runs `cargo check` on the workspace's libraries
+//! and binaries (a build that turns no dev-dependency feature on, and that
+//! a workspace member enabling the feature through a normal or build
+//! dependency would change), in a target directory of its own, and then:
 //!
 //! - asserts that `skyoauth-service`'s library was built with no feature;
 //! - asserts that the library emitted no warning. Without the feature each
-//!   writer carries `expect(dead_code)`, so a caller in `trust`, a public
-//!   forwarder included, makes the expectation unfulfilled, which is a
-//!   warning (a caller outside `trust` is a privacy error in every build);
+//!   `trust` writer carries `expect(dead_code)`, so a caller in `trust`, a
+//!   public forwarder included, makes the expectation unfulfilled, which is
+//!   a warning (a caller outside `trust` is a privacy error in every build);
 //! - compiles small probe crates against the library's metadata with
-//!   `rustc`. A probe that names an ungated writer at any of its paths must
-//!   fail as a private (E0603) or unresolved (E0432) path, and a probe that
-//!   names the public writes must compile, so a probe that fails for an
-//!   unrelated reason (a toolchain mismatch, a missing crate) fails this
-//!   test instead of passing it.
+//!   `rustc`. A probe that names an ungated writer, a bare registry writer
+//!   or one of the registry writers' in-crate callers at any of its paths
+//!   must fail as a private (E0603) or unresolved (E0432) path, and a probe
+//!   that names the public writes and registry items must compile, so a
+//!   probe that fails for an unrelated reason (a toolchain mismatch, a
+//!   missing crate) fails this test instead of passing it.
+//!
+//! The registry writers are called in every build, so `expect(dead_code)`
+//! cannot guard them. A source check stands in for it: outside comments,
+//! the library names each registry writer only at its definition, the
+//! crate-private re-export, its test-support wrapper and its known callers
+//! in `trust::keyset` and `trust::source`, each with its visibility as
+//! written there, so a forwarder of another name, a new caller and a widened
+//! definition or caller each fail it (inferred).
 //!
 //! It needs no database, so it is not `#[ignore]`d (inferred), and runs
 //! offline from the crates the outer build has already fetched. The first
@@ -33,7 +50,7 @@
 //! reuse the target directory under `CARGO_TARGET_TMPDIR`.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
     fs,
@@ -60,6 +77,167 @@ const PUBLIC: [&str; 6] = [
     "source::submit_create_source",
     "source::submit_update_source",
     "disable_version",
+];
+
+/// The bare registry trust writers (PR 9), defined in
+/// `persistence/registry/trust.rs`.
+const REGISTRY_UNGATED: [&str; 4] = [
+    "create_trust_keyset_version",
+    "update_trust_keyset_version",
+    "create_trust_source",
+    "update_trust_source",
+];
+
+/// The functions of `trust` that call a bare registry writer, by module.
+/// None may be reachable from outside the crate either.
+const REGISTRY_CALLERS: [(&str, &str); 4] = [
+    ("keyset", "insert_create_version"),
+    ("keyset", "apply_status"),
+    ("source", "apply_create_source"),
+    ("source", "apply_locked_update"),
+];
+
+/// The registry items of the same tables that stay public: the readers,
+/// and the row and input types the test-support wrappers take and return.
+const REGISTRY_PUBLIC: [&str; 9] = [
+    "get_trust_keyset_version",
+    "list_trust_keyset_versions",
+    "get_trust_source",
+    "list_trust_sources",
+    "NewTrustKeysetVersion",
+    "TrustKeysetVersion",
+    "NewTrustSource",
+    "TrustSourceChanges",
+    "TrustSource",
+];
+
+/// Where the library's source, comment lines aside, names a bare registry
+/// writer: the file under `src`, the first line of the top-level item that
+/// holds the mention, the writer, and how many times. The definitions are
+/// `pub(crate)`, re-exported `pub(crate)`; each wrapper is compiled only
+/// with `test-support`; and the callers are the trust write path's steps,
+/// none of them public.
+const REGISTRY_MENTIONS: [(&str, &str, &str, usize); 20] = [
+    (
+        "persistence/registry/mod.rs",
+        "pub(crate) use trust::{",
+        "create_trust_keyset_version",
+        1,
+    ),
+    (
+        "persistence/registry/mod.rs",
+        "pub(crate) use trust::{",
+        "update_trust_keyset_version",
+        1,
+    ),
+    (
+        "persistence/registry/mod.rs",
+        "pub(crate) use trust::{",
+        "create_trust_source",
+        1,
+    ),
+    (
+        "persistence/registry/mod.rs",
+        "pub(crate) use trust::{",
+        "update_trust_source",
+        1,
+    ),
+    (
+        "persistence/registry/test_support.rs",
+        "pub async fn create_trust_keyset_version<'e>(",
+        "create_trust_keyset_version",
+        2,
+    ),
+    (
+        "persistence/registry/test_support.rs",
+        "pub async fn update_trust_keyset_version<'e>(",
+        "update_trust_keyset_version",
+        2,
+    ),
+    (
+        "persistence/registry/test_support.rs",
+        "pub async fn create_trust_source<'e>(",
+        "create_trust_source",
+        2,
+    ),
+    (
+        "persistence/registry/test_support.rs",
+        "pub async fn update_trust_source<'e>(",
+        "update_trust_source",
+        2,
+    ),
+    (
+        "persistence/registry/trust.rs",
+        "pub(crate) async fn create_trust_keyset_version<'e>(",
+        "create_trust_keyset_version",
+        1,
+    ),
+    (
+        "persistence/registry/trust.rs",
+        "pub(crate) async fn update_trust_keyset_version<'e>(",
+        "update_trust_keyset_version",
+        1,
+    ),
+    (
+        "persistence/registry/trust.rs",
+        "pub(crate) async fn create_trust_source<'e>(",
+        "create_trust_source",
+        1,
+    ),
+    (
+        "persistence/registry/trust.rs",
+        "pub(crate) async fn update_trust_source<'e>(",
+        "update_trust_source",
+        1,
+    ),
+    (
+        "trust/keyset.rs",
+        "use crate::persistence::registry::{",
+        "create_trust_keyset_version",
+        1,
+    ),
+    (
+        "trust/keyset.rs",
+        "use crate::persistence::registry::{",
+        "update_trust_keyset_version",
+        1,
+    ),
+    (
+        "trust/keyset.rs",
+        "pub(crate) async fn insert_create_version(",
+        "create_trust_keyset_version",
+        1,
+    ),
+    (
+        "trust/keyset.rs",
+        "async fn apply_status(",
+        "update_trust_keyset_version",
+        1,
+    ),
+    (
+        "trust/source.rs",
+        "use crate::persistence::registry::{",
+        "create_trust_source",
+        1,
+    ),
+    (
+        "trust/source.rs",
+        "use crate::persistence::registry::{",
+        "update_trust_source",
+        1,
+    ),
+    (
+        "trust/source.rs",
+        "pub(crate) async fn apply_create_source(",
+        "create_trust_source",
+        1,
+    ),
+    (
+        "trust/source.rs",
+        "pub(crate) async fn apply_locked_update(",
+        "update_trust_source",
+        1,
+    ),
 ];
 
 /// The environment a nested `cargo` or `rustc` must not inherit: this
@@ -220,6 +398,24 @@ fn compile_probe(library: &PlainLibrary, dir: &Path, name: &str, source: &str) -
         .expect("rustc runs")
 }
 
+/// Asserts that `skyoauth_service::{path}` does not resolve in a probe
+/// crate: private (E0603) or missing (E0432), and nothing else, so that a
+/// probe that fails for another reason does not count.
+fn assert_unreachable(library: &PlainLibrary, probes: &Path, name: &str, path: &str) {
+    let source = format!("pub use skyoauth_service::{path};\n");
+    let output = compile_probe(library, probes, name, &source);
+    let output_text = text(&output);
+    assert!(
+        !output.status.success(),
+        "`skyoauth_service::{path}` is reachable without `test-support`"
+    );
+    assert!(
+        output_text.contains("error[E0603]") || output_text.contains("error[E0432]"),
+        "`skyoauth_service::{path}` failed to compile, but not as a path that \
+         does not resolve:\n{output_text}"
+    );
+}
+
 /// The guard that makes a caller visible to the check above: each writer
 /// is `pub(super)` and carries, right before it, the `expect(dead_code)`
 /// that a build without the feature turns into a warning once anything
@@ -252,6 +448,82 @@ fn each_ungated_writer_keeps_its_visibility_and_dead_code_guard() {
     }
 }
 
+/// How many times `line` names `word` as a whole identifier.
+fn identifier_count(line: &str, word: &str) -> usize {
+    let is_identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    line.match_indices(word)
+        .filter(|(start, _)| {
+            let before = line[..*start].chars().next_back();
+            let after = line[start + word.len()..].chars().next();
+            !before.is_some_and(is_identifier) && !after.is_some_and(is_identifier)
+        })
+        .count()
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+/// The stand-in for `expect(dead_code)` at the registry layer, where the
+/// writers are called in every build: outside comment lines, the library
+/// names each bare registry writer exactly at [`REGISTRY_MENTIONS`]. A
+/// mention is keyed by the first line of the top-level item that holds it
+/// (a line that starts in column 0 and is not a comment, an attribute or
+/// the rest of an item), so a definition or a caller made `pub` changes
+/// the key, and a forwarder or a caller of any other name adds one.
+#[test]
+fn each_registry_writer_is_crate_private_and_named_only_where_expected() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    let mut found = BTreeMap::new();
+    for file in files {
+        let relative = file.strip_prefix(&src).unwrap();
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let source = fs::read_to_string(&file).unwrap();
+        let mut item = String::from("<the file's start>");
+        for line in source.lines() {
+            let continues = ["/", "#", "}", ")", "]", "{", "where"];
+            let starts_item = line.chars().next().is_some_and(|c| !c.is_whitespace())
+                && !continues.iter().any(|prefix| line.starts_with(prefix));
+            if starts_item {
+                item = line.to_owned();
+            }
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for writer in REGISTRY_UNGATED {
+                let count = identifier_count(line, writer);
+                if count > 0 {
+                    *found
+                        .entry((relative.clone(), item.clone(), writer.to_owned()))
+                        .or_insert(0) += count;
+                }
+            }
+        }
+    }
+    let expected: BTreeMap<_, _> = REGISTRY_MENTIONS
+        .iter()
+        .map(|&(file, item, writer, count)| {
+            ((file.to_owned(), item.to_owned(), writer.to_owned()), count)
+        })
+        .collect();
+    assert_eq!(
+        found, expected,
+        "a bare registry writer is named where it should not be, with another \
+         visibility, or a different number of times (left: the source, right: \
+         the expected (file, item, writer) mentions)"
+    );
+}
+
 #[test]
 fn a_build_without_test_support_exposes_no_ungated_write() {
     let base = Path::new(env!("CARGO_TARGET_TMPDIR")).join("ungated-writes-private");
@@ -259,15 +531,15 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
     let probes = base.join("probes");
     fs::create_dir_all(&probes).unwrap();
 
-    // The control: the public writes resolve, so the probes below fail for
-    // the path they name, not for the setup.
-    let uses: String = PUBLIC
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            format!("pub use skyoauth_service::trust::{path} as public_{index};\n")
-        })
-        .collect();
+    // The control: the public writes and registry items resolve, so the
+    // probes below fail for the path they name, not for the setup.
+    let trust_uses = PUBLIC.iter().enumerate().map(|(index, path)| {
+        format!("pub use skyoauth_service::trust::{path} as public_{index};\n")
+    });
+    let registry_uses = REGISTRY_PUBLIC.iter().enumerate().map(|(index, item)| {
+        format!("pub use skyoauth_service::persistence::registry::{item} as registry_{index};\n")
+    });
+    let uses: String = trust_uses.chain(registry_uses).collect();
     let control = compile_probe(&library, &probes, "control", &uses);
     assert!(
         control.status.success(),
@@ -277,9 +549,7 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
 
     for (module, writer) in UNGATED {
         // The defining module, the re-export of `trust` and the test-support
-        // module. Each must fail to resolve: private (E0603) or missing
-        // (E0432), and nothing else, so that a probe that fails for another
-        // reason does not count.
+        // module.
         let paths = [
             format!("trust::{module}::{writer}"),
             format!("trust::{writer}"),
@@ -287,18 +557,33 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
         ];
         for (index, path) in paths.iter().enumerate() {
             let name = format!("probe_{writer}_{index}");
-            let source = format!("pub use skyoauth_service::{path};\n");
-            let output = compile_probe(&library, &probes, &name, &source);
-            let output_text = text(&output);
-            assert!(
-                !output.status.success(),
-                "`skyoauth_service::{path}` is reachable without `test-support`"
-            );
-            assert!(
-                output_text.contains("error[E0603]") || output_text.contains("error[E0432]"),
-                "`skyoauth_service::{path}` failed to compile, but not as a path that \
-                 does not resolve:\n{output_text}"
-            );
+            assert_unreachable(&library, &probes, &name, path);
+        }
+    }
+
+    for writer in REGISTRY_UNGATED {
+        // The re-export of `registry`, the defining module (private), the
+        // registry's test-support module, and `trust`'s.
+        let paths = [
+            format!("persistence::registry::{writer}"),
+            format!("persistence::registry::trust::{writer}"),
+            format!("persistence::registry::test_support::{writer}"),
+            format!("trust::test_support::{writer}"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let name = format!("probe_registry_{writer}_{index}");
+            assert_unreachable(&library, &probes, &name, path);
+        }
+    }
+
+    for (module, caller) in REGISTRY_CALLERS {
+        let paths = [
+            format!("trust::{module}::{caller}"),
+            format!("trust::{caller}"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            let name = format!("probe_caller_{caller}_{index}");
+            assert_unreachable(&library, &probes, &name, path);
         }
     }
 }

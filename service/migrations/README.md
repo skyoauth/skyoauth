@@ -663,9 +663,10 @@ The database does not enforce these rules; the service must:
   the raw registry writer `create_trust_keyset_version` stores any
   supplied `public_jwks` and `fingerprint` unchecked, so the keyset write
   path `skyoauth_service::trust::keyset` must be the only write path. The
-  raw writers stay public as the test-only floor, unreachable from any
-  endpoint (see "Trust keyset version writes" under "Rust registry
-  surface"). Exceptions: the raw request body is not bounded (only the
+  raw writers are crate-private (`pub(crate)`) since the second-approver
+  proposal's PR 9: tests reach them only through the `test-support`
+  feature, and they stay unreachable from any endpoint (see "Trust keyset
+  version writes" under "Rust registry surface"). Exceptions: the raw request body is not bounded (only the
   parsed value is). The wiring PR must enforce a raw request-body size
   limit before parsing (64 KiB is consistent: a valid set is at most
   34,290 bytes). The keyset write path stores the projection and its
@@ -3306,10 +3307,15 @@ provisional until Gate M0:
   The registry writers `create_trust_keyset_version` and
   `update_trust_keyset_version` are the unchecked floor (any `public_jwks`
   and `fingerprint` the `0004` checks allow; a re-enable with no overlap
-  check). They stay public because the scenario crate calls them, are
-  documented as test-only, and must stay unreachable from any endpoint.
-  The A04 scenario tests stay on them until A04 M1a is claimed, then switch
-  to this module (follow-up).
+  check). Since the second-approver proposal's PR 9 they are
+  crate-private (`pub(crate)`): this module's steps call them, the gated
+  approval's included, so they cannot be narrower, and the integration and
+  scenario tests reach them through the `#[doc(hidden)]`
+  `persistence::registry::test_support`, compiled only with the
+  `test-support` feature, which only test targets turn on (the scenario
+  package through its `[dev-dependencies]`). They must stay unreachable
+  from any endpoint. The A04 scenario tests stay on them until A04 M1a is
+  claimed, then switch to this module (follow-up).
 - Stage A, before the caller opens its transaction: `validate_upload` runs
   `validate_keyset` on the parsed upload on tokio's blocking pool, at most
   two at a time across the process (inferred), behind a tokio semaphore
@@ -3501,7 +3507,10 @@ the caller's transaction. The picks are the lead's (provisional lead pick,
   revision. `create_source` and `update_source` stay ungated and, since
   the proposal's PR 7, visible only within `trust` (`pub(super)`),
   reached by the tests as the keyset writes are (`trust::test_support`,
-  the `test-support` feature).
+  the `test-support` feature). The registry writers `create_trust_source`
+  and `update_trust_source` beneath them are crate-private since the
+  proposal's PR 9, like the keyset version writers, and reached by the
+  tests through `persistence::registry::test_support`.
 - The event is `trust_source.create` or `trust_source.update` (every
   update, a status-only one included; provisional lead pick, 2026-11-22,
   open), appended last in the source's tenant, with the operator as actor.

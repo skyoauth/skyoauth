@@ -27,13 +27,18 @@ url = "2.5.8"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [features]
-# `test-support`: the `#[doc(hidden)]` module `trust::test_support`, which
+# `test-support`: the `#[doc(hidden)]` modules `trust::test_support`, which
 # exposes the ungated trust writes (`create_version`, `enable_version`,
-# `create_source`, `update_source`) to this package's integration tests.
-# Off in a normal build, where those writes are crate-private; the
-# dev-dependency on this package below turns it on for test targets only
-# (inferred: the mechanism; second-approver proposal, "PR 7 as
-# implemented").
+# `create_source`, `update_source`) to this package's integration tests, and
+# `persistence::registry::test_support`, which exposes the bare registry
+# trust writers (`create_trust_keyset_version`,
+# `update_trust_keyset_version`, `create_trust_source`,
+# `update_trust_source`) to those tests and to the scenario tests of
+# `skyoauth-scenarios`. Off in a normal build, where those writes are
+# crate-private; the dev-dependency on this package below, and the one in
+# `tests/Cargo.toml`, turn it on for test targets only (inferred: the
+# mechanism; second-approver proposal, "PR 7 as implemented" and "PR 9 as
+# implemented"). Only a `[dev-dependencies]` entry may name it.
 test-support = []
 
 [dev-dependencies]
