@@ -112,7 +112,7 @@ What the spec fixes:
   expiry and approved operation (`:425-431`), set-once consumption and
   revocation (`:453-457`; a repeat with the same value is not refused), no consume after revoke (`:459-464`) and
   `consumed_at < expires_at` (`:328-329`). The service rules the database
-  leaves open are in `service/migrations/README.md:960-975` (a distinct
+  leaves open are in `service/migrations/README.md:1064-1088` (a distinct
   approver, the digest echo, the tenant, an expiry, no secrets in the
   plan).
 
@@ -481,7 +481,7 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    `administrative_operation.approve`, the approve operation insert, the
    domain event, and the update of the pending row (`consumed_at` the
    step 6 sample, `outcome = 'applied'`, revision + 1), whose row step 4
-   already holds, so it does not wait (README:1055-1059). The waits inside
+   already holds, so it does not wait (README:1166-1172). The waits inside
    the append (the tenant row `FOR KEY SHARE` and the audit head) come
    after the sample and are not covered (Limits).
 
@@ -496,7 +496,7 @@ check as in approve; the operator rows `FOR SHARE`; the operation row
 `FOR NO KEY UPDATE` (consumed or already revoked: `NotApprovable`); then
 the head: `administrative_operation.cancel` or `.reject`, the revoking
 operation insert, the update of the pending row. This is the `0005`
-revocation order exactly (README:1055-1059). A cancel authorizes the
+revocation order exactly (README:1166-1172). A cancel authorizes the
 operation's `actor_id` through any enabled, unrevoked credential of that
 identity, not only the submitting one.
 
@@ -991,7 +991,7 @@ amended in place; the forward-only rule is reinstated at the beta release (date
 set by the maintainer). An edited `0005` changes its checksum, so a database
 created before the edit must be recreated; `migrate` refuses it otherwise. The
 implementation PR also rewrites the README's `0005` text that leaves these two
-rules to the service (README:960-968) and adds the new names to
+rules to the service (README:1066-1077) and adds the new names to
 `KNOWN_CONSTRAINTS`.
 
 The sketch below is corrected to what `0005` now holds (PR 2): the first

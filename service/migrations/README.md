@@ -26,7 +26,7 @@ not a migration.
   rule when each was written, not a bar to a pre-beta amendment. Likewise,
   their "Upgrade precondition" items describe applying a migration to a
   populated database at an earlier version; no such upgrade is supported
-  before the beta release, where the database is recreated instead.
+  before the beta release; until then the database is recreated instead.
 - **Contiguous versions:** `0001_…`, `0002_…`, and so on. A unit test checks
   this; it is a test-time rule, not something the runner enforces.
 - **One transaction per file.** sqlx wraps each file in a transaction. Never
@@ -1608,7 +1608,7 @@ changes no existing column, constraint, trigger or index. Choices marked
 
 - **Frozen comments.** The comments of `0002` (lines 269–271: tenants and
   principals carry no revision) and `0004` (lines 91–94: versions have no
-  revision) describe the schema before `0007`; the files stay unchanged.
+  revision) describe the schema before `0007`; those lines stay as written.
 
 The registry's `KNOWN_CONSTRAINTS` lists the new checks of the tables it
 writes (`tenant_revision_check`, `principal_revision_check`,

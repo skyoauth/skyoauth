@@ -992,7 +992,8 @@ async fn submit_create_steps(
             let request = PendingRequest {
                 kind: OperationKind::TrustSourceCreate,
                 tenant_id: Some(&new.tenant_id),
-                // A create has no target revision (README:946).
+                // A create has no target revision (migrations README, "What 0005
+                // adds": `expected_revision` is 0 for a create).
                 expected_revision: 0,
                 plan: plan.to_plan(),
             };

@@ -18,7 +18,7 @@
 //! existing migration may be amended in place, so a database that applied an
 //! earlier text of an amended migration fails the checksum check above and is
 //! recreated, not migrated. The forward-only rule (applied files are never
-//! edited; fix forward with a new file) starts at the beta release
+//! edited; fix forward with a new file) applies again from the beta release
 //! (`service/migrations/README.md`, "Conventions").
 //!
 //! Concurrent runners, such as several replicas started at once, serialize on

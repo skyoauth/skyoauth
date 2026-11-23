@@ -87,7 +87,7 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
 - Until the first beta release there is no database upgrade path: an
   existing migration may be amended in place, and `migrate` refuses a
   database that applied its earlier text (the checksum differs), so recreate
-  that database. The forward-only rule starts at the beta release.
+  that database. The forward-only rule applies again from the beta release.
 - Conventions for writing migrations, and the limits of the append-only
   triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
 
