@@ -4,9 +4,9 @@
 -- foreign keys that had none (lead decisions, 2026-11-21; README.md "What
 -- 0007 adds"). The conventions of 0002 to 0006 apply. "(inferred)" marks a
 -- choice the specifications and lead decisions do not dictate. README.md
--- "Follow-ups" listed these items. The earlier migrations stay unchanged;
--- the comments of 0002 and 0004 on revisions describe the schema before
--- 0007.
+-- "Follow-ups" listed these items. 0007 leaves the earlier migrations as
+-- they were; the comments of 0002 and 0004 on revisions describe the
+-- schema before 0007.
 --
 -- Each table's new column and checks are added by one ALTER TABLE
 -- statement, so a table is scanned once to validate its new checks. The

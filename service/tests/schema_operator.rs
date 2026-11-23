@@ -996,7 +996,7 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
 /// <table>_<column>_octet_length_check (255 or 2048 bytes, or 32 to 64 bytes
 /// for a digest; the name may abbreviate the column), or a value-set or
 /// constant check named <table>_<column>_check. The one exception is pinned:
-/// the frozen 0002 bound of egress_allowlist_entry.exact_destination keeps
+/// the 0002 bound of egress_allowlist_entry.exact_destination keeps
 /// its generated name. 0005 adds the bounds of the 0002 key columns that had
 /// none.
 #[tokio::test]

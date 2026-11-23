@@ -129,9 +129,9 @@
 //! the subset only at issuance; and that it accepts defaults outside the
 //! other ceilings. That last pick is provisional:
 //! `service/migrations/README.md` ("What 0004 adds", the list "The database
-//! does not enforce these rules; the service must", line 579 at this
-//! commit) leaves keeping `default_scopes` and `scopes` within every other
-//! ceiling to the service. A later write-time check in the registry, or a
+//! does not enforce these rules; the service must") leaves keeping
+//! `default_scopes` and `scopes` within every other ceiling to the
+//! service. A later write-time check in the registry, or a
 //! typed refusal, would change the last block of
 //! `a26_neg_defaults_outside_a_narrowed_ceiling_are_invalid_not_trimmed`;
 //! a check above the registry would not turn it red, since the test calls

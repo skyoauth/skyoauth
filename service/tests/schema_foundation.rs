@@ -175,7 +175,7 @@ const FOUNDATION_TABLES: [&str; 6] = [
     "audit_chain_head",
 ];
 
-/// Functions of the frozen `0001` migration that pin no `search_path`. Each
+/// Functions of the `0001` migration that pin no `search_path`. Each
 /// must resolve no names through the caller's path: `skyoauth_reject_mutation`
 /// only raises with `TG_OP` and `TG_TABLE_NAME`.
 const UNPINNED_FROZEN_FUNCTIONS: [&str; 1] = ["skyoauth_reject_mutation"];

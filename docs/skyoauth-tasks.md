@@ -32,7 +32,7 @@ service/              Existing skyoauth-service (Axum/Tokio)
   src/core/           Proposed tenant/principal/profile/decision types
   src/config/         Validated configuration and reloads
   src/persistence/    PostgreSQL repositories, revisions and transactions
-  migrations/         Forward-only versioned SQL migrations (`skyoauth-service migrate`)
+  migrations/         Versioned SQL migrations (`skyoauth-service migrate`)
   src/admin/          Independent operator roles, bootstrap and recovery
   src/registry/       Resource servers, audiences/actions, clients and origins
   src/route_control/  M3 separately deployed route-control subcommand and observers

@@ -9,7 +9,7 @@
 -- values are COLLATE "C", so they compare and sort byte-wise in every
 -- database; human names and outcome text keep the database collation
 -- (inferred). Enumerations are text with a CHECK, not PostgreSQL enums, so
--- they can evolve forward-only. Every guard trigger rejects with SQLSTATE
+-- their value set can change later. Every guard trigger rejects with SQLSTATE
 -- SK001 and is ENABLE ALWAYS, so it also fires under
 -- session_replication_role = replica (inferred for guards that are not
 -- append-only); like the 0001 guard they are a tripwire, not a boundary.

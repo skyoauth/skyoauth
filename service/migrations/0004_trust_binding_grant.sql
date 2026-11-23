@@ -49,10 +49,10 @@
 -- referenced principal: a binding and a grant actor name a workload
 -- (identity-registry section 5.1; design section 5.6), a service identity a
 -- service principal (tasks section 3 "Ownership"). The constant column and
--- its default are the mechanism (inferred). 0002 is frozen, so 0004 bounds
--- the key columns of principal forward-only, as 0003 bounds tenant (lead
--- decision, 2026-11-20, consistent with tenant IDs in 0003), validated
--- against existing rows: README.md has the upgrade precondition.
+-- its default are the mechanism (inferred). 0004, not 0002, bounds the key
+-- columns of principal, as 0003 bounds tenant (lead decision, 2026-11-20,
+-- consistent with tenant IDs in 0003, under the forward-only rule then),
+-- validated against existing rows: README.md has the upgrade precondition.
 ALTER TABLE principal ADD CONSTRAINT principal_id_octet_length_check
     CHECK (octet_length(id) <= 255);
 ALTER TABLE principal ADD CONSTRAINT principal_tenant_id_octet_length_check

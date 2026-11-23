@@ -9,7 +9,7 @@
 | Path                  | Description                                          |
 | --------------------- | ---------------------------------------------------- |
 | `service/`            | Rust service (`skyoauth-service`, axum + tokio)      |
-| `service/migrations/` | Forward-only PostgreSQL migrations (sqlx, embedded)  |
+| `service/migrations/` | Versioned PostgreSQL migrations (sqlx, embedded)     |
 | `clients/typescript`  | TypeScript client library (`@skyoauth/client`)       |
 
 ## Service
@@ -84,6 +84,10 @@ SKYOAUTH_DATABASE_URL=postgres://user:password@host:5432/skyoauth \
   Percent-encode reserved characters in values too: an unencoded `&` in a
   query `password` followed by a supported key (`?password=a&user=b`) cannot
   be detected.
+- Until the first beta release there is no database upgrade path: an
+  existing migration may be amended in place, and `migrate` refuses a
+  database that applied its earlier text (the checksum differs), so recreate
+  that database. The forward-only rule applies again from the beta release.
 - Conventions for writing migrations, and the limits of the append-only
   triggers, are in [`service/migrations/README.md`](service/migrations/README.md).
 

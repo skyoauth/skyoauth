@@ -23,7 +23,10 @@ not a migration.
   forward-only rule is reinstated at the beta release (date set by the
   maintainer). The sections below for `0001` to `0011` still call those
   files frozen and record errata outside them; that is the record of the
-  rule when each was written, not a bar to a pre-beta amendment.
+  rule when each was written, not a bar to a pre-beta amendment. Likewise,
+  their "Upgrade precondition" items describe applying a migration to a
+  populated database at an earlier version; no such upgrade is supported
+  before the beta release; until then the database is recreated instead.
 - **Contiguous versions:** `0001_…`, `0002_…`, and so on. A unit test checks
   this; it is a test-time rule, not something the runner enforces.
 - **One transaction per file.** sqlx wraps each file in a transaction. Never
@@ -59,8 +62,8 @@ not a migration.
   `current_schema()` at migrate time and creates table-reading functions
   with `EXECUTE format(…)` in a `DO` block, passing the body as a quoted
   literal (`%L`), never inside a dollar-quoted one, since a schema name may
-  contain `$$`. The one exception is `skyoauth_reject_mutation()` from the
-  frozen `0001`: it resolves no names (it only raises with `TG_OP` and
+  contain `$$`. The one exception is `skyoauth_reject_mutation()` from
+  `0001`: it resolves no names (it only raises with `TG_OP` and
   `TG_TABLE_NAME`), so it needs no pin. A catalog test checks every other
   function.
 - **Append-only tables** attach `skyoauth_reject_mutation()` (from `0001`)
@@ -225,9 +228,11 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
 - **ID column bounds.** Every ID column of `0003`, own IDs and reference
   columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
   are bounded by lead decision (2026-11-20), `tenant.id` with
-  `tenant_id_octet_length_check`, a forward-only constraint on the frozen
-  `0002` table; every other ID column (`id` of the assignment, checker and
-  action) and every reference column is bounded the same way (inferred).
+  `tenant_id_octet_length_check`, a constraint `0003` adds to the `0002`
+  table rather than amending `0002` (the forward-only rule was in force
+  when `0003` was written); every other ID column (`id` of the assignment,
+  checker and action) and every reference column is bounded the same way
+  (inferred).
   Without its bound, an over-long ID would fail with the btree error `54000`
   on its key's index. The reference columns need their own bound too: a
   `CHECK` runs before the row enters any index, but the foreign key check
@@ -429,14 +434,16 @@ not part of it.
   it neither normalizes nor rejects unnormalized names, issuers or claim
   values, so two spellings of the same text are two values.
 - **`principal`.** `0004` adds `principal_tenant_id_id_kind_key`
-  (`UNIQUE (tenant_id, id, kind)`) to the frozen `0002` table, and, because
-  that is a new key, the forward-only bounds `principal_id_octet_length_check`
-  and `principal_tenant_id_octet_length_check` (255 bytes). A binding and a
-  grant actor reference `(tenant_id, id, kind)` with a constant `'workload'`
-  column, and a service identity with a constant `'service'` column, so the
-  database pins the principal kind as well as the tenant (inferred
-  mechanism). The 255-byte bound is a lead decision (2026-11-20),
-  consistent with tenant IDs in `0003`: IDs are server-generated, and no M1a database is deployed.
+  (`UNIQUE (tenant_id, id, kind)`) to the `0002` table, and, because that
+  is a new key, the bounds `principal_id_octet_length_check` and
+  `principal_tenant_id_octet_length_check` (255 bytes), rather than
+  amending `0002` (the forward-only rule was in force when `0004` was
+  written). A binding and a grant actor reference `(tenant_id, id, kind)`
+  with a constant `'workload'` column, and a service identity with a
+  constant `'service'` column, so the database pins the principal kind as
+  well as the tenant (inferred mechanism). The 255-byte bound is a lead
+  decision (2026-11-20), consistent with tenant IDs in `0003`: IDs are
+  server-generated, and no M1a database is deployed.
   Up to `0003` the database accepts longer principal IDs, and `0004`
   validates the new checks against existing rows. Upgrade precondition:
   before `0004` is applied to a populated database,
@@ -762,15 +769,17 @@ database created from the earlier `0005` is recreated.
 - **`0002` key bounds.** `0005` makes `audit_event` and
   `instance_security_policy` foreign-key targets, and every key column of
   the schema is bounded (lead decision, 2026-11-20), so `0005` adds the
-  forward-only 255-byte bounds `audit_event_id_octet_length_check`,
+  255-byte bounds `audit_event_id_octet_length_check`,
   `audit_event_tenant_id_octet_length_check`,
   `instance_security_policy_instance_id_octet_length_check` and
-  `egress_allowlist_entry_id_octet_length_check` to the frozen `0002`
-  tables, as `0004` did for `principal`. An over-long value fails with
-  `23514`. The test `every_key_column_of_the_schema_has_a_named_bound`
-  checks every unique and foreign-key column of every table. Up to `0004`
-  the database accepts longer values, and `0005` validates the new checks
-  against existing rows. Upgrade precondition: before `0005` is applied to a
+  `egress_allowlist_entry_id_octet_length_check` to the `0002` tables, as
+  `0004` did for `principal`, rather than amending `0002` (the
+  forward-only rule was in force when `0005` was written). An over-long
+  value fails with `23514`. The test
+  `every_key_column_of_the_schema_has_a_named_bound` checks every unique
+  and foreign-key column of every table. Up to `0004` the database accepts
+  longer values, and `0005` validates the new checks against existing
+  rows. Upgrade precondition: before `0005` is applied to a
   populated database,
   `select (select count(*) from audit_event where octet_length(id) > 255 or octet_length(tenant_id) > 255) + (select count(*) from instance_security_policy where octet_length(instance_id) > 255) + (select count(*) from egress_allowlist_entry where octet_length(id) > 255)`
   must return 0.
@@ -1599,7 +1608,7 @@ changes no existing column, constraint, trigger or index. Choices marked
 
 - **Frozen comments.** The comments of `0002` (lines 269–271: tenants and
   principals carry no revision) and `0004` (lines 91–94: versions have no
-  revision) describe the schema before `0007`; the files stay unchanged.
+  revision) describe the schema before `0007`; those lines stay as written.
 
 The registry's `KNOWN_CONSTRAINTS` lists the new checks of the tables it
 writes (`tenant_revision_check`, `principal_revision_check`,
@@ -2550,10 +2559,10 @@ Open for all registry tables:
   (`audience`, `action_name`) do not name a collation in the expression;
   they rely on their columns being `COLLATE "C"`, so they hold the same
   values on every instance today. If such a column ever gets another
-  collation, a later forward-only migration replaces the check with the
-  `0004` form, `CHECK ((<column> COLLATE "C") !~ '[[:space:][:cntrl:]]')`;
-  the frozen files stay unchanged (before the beta release the files may
-  instead be amended in place; "Conventions").
+  collation, a later migration replaces the check with the `0004` form,
+  `CHECK ((<column> COLLATE "C") !~ '[[:space:][:cntrl:]]')`, and leaves
+  the earlier files unchanged (from the beta release on; before it, the
+  files may instead be amended in place; "Conventions").
 
 Not done in `0002`:
 
@@ -2584,8 +2593,10 @@ Not done in `0002`:
   verification outcomes, never hash values; unit tests may check known
   answers.
 
-- Errata for comments and checks in `0002`, which is frozen (its checksum
-  covers comments), so they are corrected here and not in the file:
+- Errata for comments and checks in `0002`, recorded here and not in the
+  file under the forward-only rule in force when they were written (the
+  file's checksum covers comments; before the beta release the file may
+  instead be amended in place; "Conventions"):
   - Lines 116–118, on `instance_security_policy.instance_id`: "No format or
     source is given for the instance ID" is superseded by identity-registry
     IR-057: a lowercase hyphenated UUIDv7, generated once at first
