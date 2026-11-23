@@ -3,20 +3,20 @@
 //! `/admin/v1/tenants/{tenant}/keysets` row; migrations README, "What 0004
 //! adds", the service rules).
 //!
-//! [`create_version`], [`enable_version`] and [`disable_version`] wrap the
-//! registry's bare [`create_trust_keyset_version`] and
-//! [`update_trust_keyset_version`], which check nothing the database does
-//! not. [`submit_create_version`] and [`submit_enable_version`] are the
-//! gated create and enable of the second-approver flow
-//! (`docs/proposals/second-approver-gated-writes.md`, PR 4; see "The
-//! gate"). They run in the caller's transaction and neither commit nor
-//! roll it back. The upload is validated before that transaction, by
-//! [`validate_upload`]. The picks below are the lead's (provisional lead
-//! pick, 2026-11-22; the gate's, 2026-11-23) unless marked (inferred); all
-//! are provisional until the maintainer ratifies the ADRs (T00.8 to T00.17,
-//! Gate M0), and so are the [`crate::jwk`] picks dated 2026-11-21 that this
-//! module relies on. The widening ruling below is the user's, not a
-//! provisional pick.
+//! `create_version`, `enable_version` (both crate-private) and
+//! [`disable_version`] wrap the registry's bare
+//! [`create_trust_keyset_version`] and [`update_trust_keyset_version`],
+//! which check nothing the database does not. [`submit_create_version`] and
+//! [`submit_enable_version`] are the gated create and enable of the
+//! second-approver flow (`docs/proposals/second-approver-gated-writes.md`,
+//! PR 4; see "The gate"). They run in the caller's transaction and neither
+//! commit nor roll it back. The upload is validated before that
+//! transaction, by [`validate_upload`]. The picks below are the lead's
+//! (provisional lead pick, 2026-11-22; the gate's, 2026-11-23) unless
+//! marked (inferred); all are provisional until the maintainer ratifies the
+//! ADRs (T00.8 to T00.17, Gate M0), and so are the [`crate::jwk`] picks
+//! dated 2026-11-21 that this module relies on. The widening ruling below
+//! is the user's, not a provisional pick.
 //!
 //! # Not wired, and the one write path
 //!
@@ -36,13 +36,18 @@
 //!   IDs, T10.2; the raw body bound; the role of each endpoint, T13.2,
 //!   T13.3). An endpoint calls the `submit_*` functions, never the ungated
 //!   ones.
-//! - **Ungated writes.** [`create_version`] and [`enable_version`] take
+//! - **Ungated writes.** `create_version` and `enable_version` take
 //!   effect at once on one operator's authority: with
 //!   `widening_second_approver` on, they would apply a widening write
-//!   without the approval it needs. They stay public for the tests until
-//!   the proposal's PR 7 makes them crate-private. (The ruling names a
-//!   create, an enable and a re-enable; [`disable_version`] is not among
-//!   them and is never gated.)
+//!   without the approval it needs. They are crate-private (the proposal's
+//!   PR 7), and nothing in the crate calls them outside tests; this
+//!   package's integration tests reach them through the `#[doc(hidden)]`
+//!   `trust::test_support`, compiled only with the `test-support` feature,
+//!   which a normal build leaves off
+//!   (`service/tests/ungated_writes_private.rs` checks that such a build
+//!   exposes neither). (The ruling names a create, an enable and a
+//!   re-enable; [`disable_version`] is not among them, is never gated and
+//!   stays public: it is the disable's write path.)
 //! - **The only write path.** The registry writers
 //!   [`create_trust_keyset_version`] and [`update_trust_keyset_version`]
 //!   are the unchecked floor: they store any `public_jwks` and
@@ -138,21 +143,21 @@
 //!   reader recomputes the projection with [`parse_stored`].
 //! - **Provenance** (inferred). `provenance` is stored as given, and the
 //!   database floor does not look at it. It must never carry upload
-//!   content: [`create_version`] refuses one with a member named like a JWK
+//!   content: `create_version` refuses one with a member named like a JWK
 //!   private member ([`PRIVATE_MEMBERS`]), at any depth and inside arrays,
 //!   with [`KeysetWriteError::PrivateMemberInProvenance`], before any
 //!   statement. Member names only: a value is not looked at.
 //! - **Overlap.** [`check_version_overlap`] runs wherever a version becomes
-//!   enabled: [`create_version`] of an enabled version and
-//!   [`enable_version`] (a re-enable included). A disabled create and
+//!   enabled: `create_version` of an enabled version and
+//!   `enable_version` (a re-enable included). A disabled create and
 //!   [`disable_version`] run no overlap check. The check compares the
 //!   version with every other enabled version of the keyset whose window
 //!   intersects its own ([`crate::jwk`], "Versions"). An
-//!   [`enable_version`] of a version that is already enabled is checked and
+//!   `enable_version` of a version that is already enabled is checked and
 //!   written like any other (inferred: the revision advances and the event
 //!   is appended).
 //! - **Whole microseconds** (inferred). The registry stores a time floored
-//!   to a whole microsecond, so [`create_version`] floors `effective_at`
+//!   to a whole microsecond, so `create_version` floors `effective_at`
 //!   and `expires_at` the same way, through the one helper the writer uses,
 //!   before the check: a window `[T0, T1 + 500 ns)` next to an enabled
 //!   `[T1, T2)` is stored as `[T0, T1)` and is accepted whether it is
@@ -171,7 +176,7 @@
 //!   compared version as a [`JwkSet`], which only the full parse builds, and
 //!   [`KeysetVersion`] is not changed here. So each stored version the check
 //!   compares (the other enabled versions whose windows intersect, and for
-//!   [`enable_version`] the enabled version itself) is first read through
+//!   `enable_version` the enabled version itself) is first read through
 //!   [`parse_stored`] as a cheap gate (size before the parse, then shape and
 //!   member rules, no point arithmetic), then fully parsed with
 //!   `validate_keyset(&stored, &KNOWN_ALGORITHMS)`, point checks included,
@@ -227,7 +232,7 @@
 //!   are immutable in the registry, so disabling is the only way to retire a
 //!   version, an open-ended one included. To replace the key of a `kid`:
 //!   [`disable_version`] the old open-ended version, then
-//!   [`create_version`] the replacement, enabled, with the same `kid`. A
+//!   `create_version` the replacement, enabled, with the same `kid`. A
 //!   re-enable of the old version is refused with
 //!   [`KeysetWriteError::Overlap`] while the replacement is enabled, and
 //!   accepted once it is disabled. Whether windows should stay immutable, so
@@ -239,7 +244,7 @@
 //!
 //! # Order and locks
 //!
-//! [`create_version`] first refuses a `provenance` naming a private member,
+//! `create_version` first refuses a `provenance` naming a private member,
 //! before any statement. Then each write function runs these steps in a
 //! savepoint of its own:
 //!
@@ -249,7 +254,7 @@
 //! 1. [`authorize_operator_locked`]: the operator's `admin_identity`,
 //!    `admin_credential` and `admin_role_binding` rows `FOR SHARE`, in the
 //!    `0005` order;
-//! 2. [`enable_version`] and [`disable_version`] only: reads the version's
+//! 2. `enable_version` and [`disable_version`] only: reads the version's
 //!    `keyset_id` and `fingerprint`, without a lock (both columns are
 //!    immutable). A version missing from the tenant is
 //!    [`RegistryError::NotFound`];
@@ -354,9 +359,7 @@
 //!
 //! # Not done here
 //!
-//! - Wiring to an endpoint (see "Not wired"), and making the ungated
-//!   [`create_version`] and [`enable_version`] crate-private (the
-//!   proposal's PR 7).
+//! - Wiring to an endpoint (see "Not wired").
 //! - The raw request-body bound before the upload is parsed.
 //! - The keyset's own status: a version of a disabled keyset is written
 //!   like any other (inferred: the verifier reads the keyset's status).
@@ -435,10 +438,10 @@ static VALIDATION: Semaphore = Semaphore::const_new(VALIDATION_WORKERS);
 /// The permits of the in-transaction parse pool.
 static IN_TRANSACTION: Semaphore = Semaphore::const_new(IN_TRANSACTION_WORKERS);
 
-/// The audit action of [`create_version`] (identity-registry IR-059).
+/// The audit action of `create_version` (identity-registry IR-059).
 const CREATE_ACTION: &str = "trust_keyset_version.create";
 
-/// The audit action of [`enable_version`] (identity-registry IR-059).
+/// The audit action of `enable_version` (identity-registry IR-059).
 const ENABLE_ACTION: &str = "trust_keyset_version.enable";
 
 /// The audit action of [`disable_version`] (identity-registry IR-059).
@@ -475,10 +478,11 @@ pub struct KeysetAudit<'a> {
     pub now: SystemTime,
 }
 
-/// The input of [`create_version`]: the registry's
-/// [`NewTrustKeysetVersion`] with the keys as a [`ValidatedKeyset`] from
-/// [`validate_upload`] in place of the `public_jwks` and `fingerprint`
-/// columns, which the function derives from it.
+/// The input of a keyset version create ([`submit_create_version`]): the
+/// registry's [`NewTrustKeysetVersion`] with the keys as a
+/// [`ValidatedKeyset`] from [`validate_upload`] in place of the
+/// `public_jwks` and `fingerprint` columns, which the function derives from
+/// it.
 #[derive(Debug, Clone, Copy)]
 pub struct NewKeysetVersion<'a> {
     pub id: &'a str,
@@ -499,8 +503,9 @@ pub struct NewKeysetVersion<'a> {
     pub provenance: &'a JsonObject,
 }
 
-/// Why [`validate_upload`], [`create_version`], [`enable_version`] or
-/// [`disable_version`] did not succeed. On every variant from a write
+/// Why [`validate_upload`], a keyset version write ([`submit_create_version`],
+/// [`submit_enable_version`], [`disable_version`]) or its approval did not
+/// succeed. On every variant from a write
 /// function, its savepoint is rolled back; the caller rolls back too.
 ///
 /// `Display` is fixed text per variant and `Debug` names the variant (and
@@ -760,7 +765,7 @@ async fn run_holding<T: Send + 'static>(
 /// Stage A: validates the parsed upload `upload` with [`validate_keyset`]
 /// against the `allowed` algorithms, on the bounded blocking pool (see the
 /// module docs). Run it before opening the write's transaction; pass the
-/// result to [`create_version`]. A refused upload is
+/// result to [`submit_create_version`]. A refused upload is
 /// [`KeysetWriteError::Upload`].
 pub async fn validate_upload(
     upload: Value,
@@ -1061,9 +1066,15 @@ async fn append_stamped(
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
 ///
 /// Ungated: it applies a widening write on one operator's authority, so it
-/// stays test-only until it becomes crate-private (see the module docs,
-/// "Not wired"); [`submit_create_version`] is the gated write.
-pub async fn create_version(
+/// is crate-private (see the module docs, "Not wired");
+/// [`submit_create_version`] is the gated write. Nothing in the crate calls
+/// it outside tests: the integration tests reach it through
+/// `trust::test_support` (the `test-support` feature).
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(crate) async fn create_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     new: &NewKeysetVersion<'_>,
@@ -1076,7 +1087,7 @@ pub async fn create_version(
     .await
 }
 
-/// Steps 0 to 7 of [`create_version`], in its savepoint.
+/// Steps 0 to 7 of `create_version`, in its savepoint.
 async fn create_steps(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
@@ -1186,7 +1197,7 @@ pub(crate) async fn apply_create_version(
 /// `FOR SHARE` ([`KeysetWriteError::PolicyUnavailable`]), and the mode:
 ///
 /// - `widening_second_approver` off: applied at once, as
-///   [`create_version`], with the event's outcome `success_widening` (D23);
+///   `create_version`, with the event's outcome `success_widening` (D23);
 /// - on, `single_actor_mode` on and the requester also an instance
 ///   `security_admin`: applied at once, outcome `success_single_actor`
 ///   (Q4);
@@ -1270,9 +1281,13 @@ async fn submit_create_steps(
 /// refused while the replacement is enabled. Runs only under
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
 ///
-/// Ungated, as [`create_version`]; [`submit_enable_version`] is the gated
-/// write.
-pub async fn enable_version(
+/// Ungated and crate-private, as `create_version`;
+/// [`submit_enable_version`] is the gated write.
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(crate) async fn enable_version(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     tenant_id: &str,
@@ -1309,7 +1324,7 @@ pub async fn disable_version(
     .await
 }
 
-/// [`enable_version`] or [`disable_version`] in a savepoint. `target` is
+/// `enable_version` or [`disable_version`] in a savepoint. `target` is
 /// the tenant, the ID and the expected revision.
 async fn set_status(
     transaction: &mut Transaction<'_, Postgres>,
@@ -1474,7 +1489,7 @@ pub(crate) async fn apply_enable_version(
 /// and the policy row as [`submit_create_version`], then the version's
 /// keyset and fingerprint and the mode:
 ///
-/// - applied at once, as [`enable_version`], with the event's outcome
+/// - applied at once, as `enable_version`, with the event's outcome
 ///   `success_widening` or `success_single_actor` (D23; Q4);
 /// - otherwise the enable's checks (the parent lock, the target's
 ///   revision, the cap, the parse and the overlap check), then a pending
@@ -1851,8 +1866,8 @@ mod tests {
     /// that, run in one process (`cargo test`), they cannot take each
     /// other's workers. The other tests never hold those permits.
     ///
-    /// Hazard: any lib test that runs [`create_version`] or
-    /// [`enable_version`] of an enabled version, or
+    /// Hazard: any lib test that runs `create_version` or
+    /// `enable_version` of an enabled version, or
     /// [`parse_stored_versions`], must take `STATICS` too. Otherwise it gets
     /// [`KeysetWriteError::ValidationBusy`] while a test below holds every
     /// in-transaction permit (the upload test for about 2.3 s, the

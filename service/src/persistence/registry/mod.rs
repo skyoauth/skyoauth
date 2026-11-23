@@ -321,10 +321,10 @@
 //! recheck at issuance and live authorization stays with the service,
 //! IR-081; the
 //! egress check of a source's URLs, which the service-layer write path
-//! [`trust::create_source`](crate::trust::create_source) and
-//! [`trust::update_source`](crate::trust::update_source) does (T11.2,
-//! IR-152), secret reference resolution, template predicates, JWK checks
-//! and the other scope ceilings; "What 0004 adds"),
+//! [`trust::submit_create_source`](crate::trust::submit_create_source)
+//! and [`trust::submit_update_source`](crate::trust::submit_update_source)
+//! does (T11.2, IR-152), secret reference resolution, template
+//! predicates, JWK checks and the other scope ceilings; "What 0004 adds"),
 //! does not generate IDs (T10.2) and does not run migrations. An
 //! impersonation grant is kept dormant by the database since `0009`: an
 //! update of one, or a change of its list rows after its creating

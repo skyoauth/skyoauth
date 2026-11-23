@@ -3,9 +3,9 @@
 //! `/admin/v1/tenants/{tenant}/trust-sources` row; migrations README, "What
 //! 0004 adds", the service rules).
 //!
-//! [`create_source`] and [`update_source`] wrap the registry's bare
-//! [`create_trust_source`] and [`update_trust_source`], which check nothing
-//! the database does not. [`submit_create_source`] and
+//! `create_source` and `update_source` (both crate-private) wrap the
+//! registry's bare [`create_trust_source`] and [`update_trust_source`],
+//! which check nothing the database does not. [`submit_create_source`] and
 //! [`submit_update_source`] are the gated create and update of the
 //! second-approver flow (`docs/proposals/second-approver-gated-writes.md`,
 //! PR 5; see "The gate"). They run in the caller's transaction and neither
@@ -354,10 +354,15 @@
 //!   designed in that proposal (accepted, 2026-11-23); no task ID names it
 //!   (the nearest owners are T13.3, T13.2, T13.8, T11.6, T10.4 and T10.2).
 //!   The gated writes put source writes through it (see "The gate").
-//!   [`create_source`] and [`update_source`] stay ungated: with
+//!   `create_source` and `update_source` stay ungated: with
 //!   `widening_second_approver` on they would apply a widening write on one
-//!   operator's authority. They stay public for the tests until the
-//!   proposal's PR 7 makes them crate-private.
+//!   operator's authority. They are crate-private (the proposal's PR 7),
+//!   and nothing in the crate calls them outside tests; this package's
+//!   integration tests reach them through the `#[doc(hidden)]`
+//!   `trust::test_support`, compiled only with the `test-support` feature,
+//!   which a normal build leaves off
+//!   (`service/tests/ungated_writes_private.rs` checks that such a build
+//!   exposes neither).
 //! - The fetch-time match of a discovered `jwks_uri` against an enabled
 //!   `jwks` entry, the degraded health signal and the fetches themselves
 //!   (IR-152; T11.2, T11.8).
@@ -416,10 +421,10 @@ pub const DISCOVERY_URL: &str = "discovery_url";
 /// it.
 pub const TOKEN_REVIEW_ENDPOINT: &str = "token_review_endpoint";
 
-/// The audit action of [`create_source`] (identity-registry IR-059).
+/// The audit action of `create_source` (identity-registry IR-059).
 const CREATE_ACTION: &str = "trust_source.create";
 
-/// The audit action of [`update_source`] (identity-registry IR-059).
+/// The audit action of `update_source` (identity-registry IR-059).
 const UPDATE_ACTION: &str = "trust_source.update";
 
 /// The outcome of the event of an ungated write (inferred, as for
@@ -464,7 +469,8 @@ pub struct SourceAudit<'a> {
     pub now: SystemTime,
 }
 
-/// Why [`create_source`] or [`update_source`] did not write. On every
+/// Why a trust source write ([`submit_create_source`],
+/// [`submit_update_source`]) or its approval did not write. On every
 /// variant the function's savepoint is rolled back; the caller rolls back
 /// too. `Display` and `Debug` never contain a destination or another value
 /// of the request.
@@ -879,9 +885,15 @@ pub(crate) async fn apply_create_source(
 /// `READ COMMITTED`. The caller commits on `Ok` and rolls back on `Err`.
 ///
 /// Ungated: it applies a widening write on one operator's authority, so it
-/// stays test-only until it becomes crate-private (see the module docs,
-/// "The gate"); [`submit_create_source`] is the gated write.
-pub async fn create_source(
+/// is crate-private (see the module docs, "Not done here");
+/// [`submit_create_source`] is the gated write. Nothing in the crate calls
+/// it outside tests: the integration tests reach it through
+/// `trust::test_support` (the `test-support` feature).
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(crate) async fn create_source(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     new: &NewTrustSource,
@@ -894,7 +906,7 @@ pub async fn create_source(
     .await
 }
 
-/// Steps 0 to 5 of [`create_source`], in its savepoint.
+/// Steps 0 to 5 of `create_source`, in its savepoint.
 async fn create_steps(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
@@ -922,7 +934,7 @@ async fn create_steps(
 /// and the mode:
 ///
 /// - `widening_second_approver` off: applied at once, as
-///   [`create_source`], with the event's outcome `success_widening` (D23);
+///   `create_source`, with the event's outcome `success_widening` (D23);
 /// - on, `single_actor_mode` on and the requester also an instance
 ///   `security_admin`: applied at once, outcome `success_single_actor`
 ///   (Q4);
@@ -1121,9 +1133,13 @@ pub(crate) fn classify_source_update(
 /// `principal_binding` or `consumed_assertion` insert that references the
 /// source waits.
 ///
-/// Ungated, as [`create_source`]; [`submit_update_source`] is the gated
-/// write.
-pub async fn update_source(
+/// Ungated and crate-private, as `create_source`;
+/// [`submit_update_source`] is the gated write.
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(crate) async fn update_source(
     transaction: &mut Transaction<'_, Postgres>,
     public_identity: &str,
     tenant_id: &str,
@@ -1139,7 +1155,7 @@ pub async fn update_source(
     .await
 }
 
-/// Steps 0 to 5 of [`update_source`], in its savepoint. `target` is the
+/// Steps 0 to 5 of `update_source`, in its savepoint. `target` is the
 /// tenant, the ID and the expected revision.
 async fn update_steps(
     transaction: &mut Transaction<'_, Postgres>,
@@ -1167,7 +1183,7 @@ async fn update_steps(
 /// `FOR SHARE`, the stored row ([`RegistryError::NotFound`],
 /// [`RegistryError::StaleRevision`]), and the class (Q2):
 ///
-/// - disable-only: applied at once, as [`update_source`], outcome
+/// - disable-only: applied at once, as `update_source`, outcome
 ///   `success`, whatever the policy and the flag;
 /// - widening: without `acknowledge_widening`,
 ///   [`SourceWriteError::WideningNotAcknowledged`]; with no policy row,

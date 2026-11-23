@@ -56,8 +56,8 @@ use skyoauth_service::{
         },
     },
     trust::{
-        SourceAudit, SourceWriteError, create_source, submit_create_source, submit_update_source,
-        update_source,
+        SourceAudit, SourceWriteError, submit_create_source, submit_update_source,
+        test_support::{create_source, update_source},
     },
 };
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres, Transaction};

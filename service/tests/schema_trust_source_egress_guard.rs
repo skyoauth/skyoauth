@@ -39,8 +39,8 @@ use skyoauth_service::{
         },
     },
     trust::{
-        DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT, create_source,
-        update_source,
+        DISCOVERY_URL, SourceAudit, SourceWriteError, TOKEN_REVIEW_ENDPOINT,
+        test_support::{create_source, update_source},
     },
 };
 use sqlx::{
