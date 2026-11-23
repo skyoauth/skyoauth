@@ -41,15 +41,17 @@ use skyoauth_service::{
         self, PgPool,
         registry::{
             self, AdminRole, AdminRoleBindingChanges, AdministrativeOperation, AuditActor,
-            BootstrapRequest, ChainVerdict, InstanceSecurityPolicy, JsonObject, NewAdminCredential,
+            BootstrapRequest, ChainVerdict, ChallengeBinding, DEFAULT_CHALLENGE_TTL,
+            InstanceSecurityPolicy, IssueChallenge, JsonObject, NewAdminCredential,
             NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent,
-            NewTenant, Status, append_audit_event, bootstrap_instance,
-            insert_administrative_operation, lock_administrative_operation,
-            lock_instance_security_policy_shared, verify_audit_chain,
+            NewTenant, OPERATOR_RESTORATION, RestoreRequest, Restored, Status, append_audit_event,
+            bootstrap_instance, get_recovery_state, insert_administrative_operation,
+            issue_recovery_challenge, lock_administrative_operation,
+            lock_instance_security_policy_shared, restore_operator, verify_audit_chain,
         },
     },
 };
-use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres, Transaction};
+use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres, Transaction, types::Json};
 use tokio::task::JoinHandle;
 
 const INSTANCE_ID: &str = "019a9f3c-5b2e-7c41-9d8e-0123456789ab";
@@ -618,10 +620,21 @@ async fn backend_pid(connection: &mut PgConnection) -> i32 {
 /// Waits until the backend `blocked`, which runs `task`, waits for a lock
 /// held by `holder`. Fails at once if `task` finished without waiting.
 async fn wait_until_blocked<T>(pool: &PgPool, blocked: i32, holder: i32, task: &JoinHandle<T>) {
+    wait_until_blocked_by_any(pool, blocked, &[holder], task).await;
+}
+
+/// [`wait_until_blocked`] by any of `holders`: a waiter queued behind
+/// another waiter may be blocked by that waiter, not the holder.
+async fn wait_until_blocked_by_any<T>(
+    pool: &PgPool,
+    blocked: i32,
+    holders: &[i32],
+    task: &JoinHandle<T>,
+) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT $1 = ANY (pg_blocking_pids($2))")
-                .bind(holder)
+            let waiting: bool = sqlx::query_scalar("SELECT pg_blocking_pids($2) && $1")
+                .bind(holders)
                 .bind(blocked)
                 .fetch_one(pool)
                 .await
@@ -750,6 +763,137 @@ async fn single_actor_mode(pool: &PgPool) {
     .execute(pool)
     .await
     .unwrap();
+}
+
+/// `tgenabled` of `administrative_operation_immutable`: `A` (fires
+/// always) as `0005` leaves it.
+async fn immutable_guard(pool: &PgPool) -> String {
+    sqlx::query_scalar(
+        "SELECT tgenabled::text FROM pg_trigger \
+         WHERE tgrelid = 'administrative_operation'::regclass \
+         AND tgname = 'administrative_operation_immutable'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Writes `plan` over the stored plan of the operation `id`, past the
+/// immutability guard, and leaves its digest as it was: in one
+/// transaction the guard is disabled, the plan written (the revision
+/// advanced, as the revision guard requires) and the guard enabled
+/// `ALWAYS` again. DDL is transactional, so a failure rolls the disable
+/// back with the write; either way the guard fires always afterwards.
+async fn rewrite_plan(pool: &PgPool, id: &str, plan: Value) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await.unwrap();
+    let written = async {
+        sqlx::query(
+            "ALTER TABLE administrative_operation \
+             DISABLE TRIGGER administrative_operation_immutable",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        let done = sqlx::query(
+            "UPDATE administrative_operation SET immutable_plan = $2, \
+             revision = revision + 1 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(Json(plan))
+        .execute(&mut *transaction)
+        .await?;
+        assert_eq!(done.rows_affected(), 1, "{id}");
+        sqlx::query(
+            "ALTER TABLE administrative_operation \
+             ENABLE ALWAYS TRIGGER administrative_operation_immutable",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        Ok::<(), sqlx::Error>(())
+    }
+    .await;
+    match written {
+        Ok(()) => transaction.commit().await.unwrap(),
+        Err(_) => transaction.rollback().await.unwrap(),
+    }
+    assert_eq!(immutable_guard(pool).await, "A");
+    written
+}
+
+/// The SQLSTATE of a database error.
+fn sqlstate(err: &sqlx::Error) -> Option<String> {
+    err.as_database_error()
+        .and_then(|e| e.code())
+        .map(|code| code.into_owned())
+}
+
+/// The replacement operator a restoration enrolls: `adm_new` with
+/// `crd_new` (`key_new`) and `rb_new`, an instance `security_admin`.
+const RESTORED_KEY: &str = "key_new";
+
+/// A break-glass restoration, committed: the challenge `op_restore` issued
+/// at `at(2)` for [`RESTORED_KEY`]'s operator, then restored at `at(3)`.
+/// It revokes every operator credential still unrevoked (the recovery
+/// module docs, "Restore", step 6). The registry does not verify the
+/// recovery key's signature; the digest and challenge hash are the
+/// caller's bytes.
+async fn restore(pool: &PgPool) -> Restored {
+    let state = get_recovery_state(pool).await.unwrap().unwrap();
+    let new_key = [0x22; 32];
+    let plan = object(json!({
+        "instance_id": INSTANCE_ID,
+        "recovery_key_epoch": state.recovery_key_epoch,
+        "admin_id": "adm_new",
+        "credential_id": "crd_new",
+        "binding_id": "rb_new",
+        "public_identity": RESTORED_KEY,
+        "trust_anchor_ref": "deployment/operator-ca",
+        "new_recovery_public_key": new_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+    }));
+    let (digest, hash) = ([0xd1; 32], [0xc7; 48]);
+    let mut transaction = pool.begin().await.unwrap();
+    issue_recovery_challenge(
+        &mut transaction,
+        &IssueChallenge {
+            operation_id: "op_restore",
+            kind: OPERATOR_RESTORATION,
+            request_digest: &digest,
+            immutable_plan: &plan,
+            challenge_hash: &hash,
+            ttl: DEFAULT_CHALLENGE_TTL,
+            now: at(2),
+            audit_event_id: "evt_issue_restore",
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    let restored = restore_operator(
+        &mut transaction,
+        &RestoreRequest {
+            operation_id: "op_restore",
+            binding: ChallengeBinding {
+                request_digest: &digest,
+                challenge_hash: &hash,
+                instance_id: INSTANCE_ID,
+                expected_revision: state.revision,
+                recovery_key_epoch: state.recovery_key_epoch,
+            },
+            admin_id: "adm_new",
+            credential_id: "crd_new",
+            binding_id: "rb_new",
+            public_identity: RESTORED_KEY,
+            trust_anchor_ref: "deployment/operator-ca",
+            new_recovery_public_key: &new_key,
+            audit_event_id: "evt_restore",
+            rotation_audit_event_id: "evt_rotate",
+            now: at(3),
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    restored
 }
 
 /// A gated toggle is a pending operation: its `create` event first, then
@@ -1372,6 +1516,126 @@ async fn the_approver_is_authorized_before_the_plan_is_read() {
     db.drop([pool]).await;
 }
 
+/// A plan written past the immutability guard (`ALTER TABLE ... DISABLE
+/// TRIGGER`, then enabled again) is `PlanIntegrity`, writes nothing and
+/// samples no clock, whichever check sees it first:
+///
+/// - written between the preparation and the approval, under its old
+///   digest: the locked row no longer recomputes to its digest (D6), and
+///   its plan is not the prepared one (D24);
+/// - prepared again after that write: the prepared plan is the locked one,
+///   so only the recomputed digest refuses it (D6);
+/// - written before the preparation and put back before the approval: the
+///   locked row recomputes to its digest again and the echo and the
+///   prepared digest are its own, so only the comparison of the prepared
+///   plan with the locked one refuses it (D24; `prepare_approval` checks
+///   the stored digest's length, not the plan against it).
+///
+/// The guard fires always again after every write, a failed one included.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_plan_written_past_its_guard_is_plan_integrity() {
+    let (db, pool) = seeded().await;
+    assert_eq!(immutable_guard(&pool).await, "A");
+    let op_b = pending(&pool, "key_req", "op_b", 1, true).await;
+    let op_a = pending(&pool, "key_req", "op_a", 1, true).await;
+    let original = Value::Object(toggle_plan("crd_adm_req", true));
+    let flipped = Value::Object(toggle_plan("crd_adm_req", false));
+    let clock = TestClock::new(at(10));
+
+    // The guard refuses a plain write of the plan; a rewrite that fails
+    // leaves the guard on and the row as it was.
+    let before = snapshot(&pool).await;
+    let err = sqlx::query(
+        "UPDATE administrative_operation SET immutable_plan = $2, revision = revision + 1 \
+         WHERE id = $1",
+    )
+    .bind("op_b")
+    .bind(Json(flipped.clone()))
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    assert_eq!(sqlstate(&err).as_deref(), Some("SK001"), "{err}");
+    let err = rewrite_plan(&pool, "op_b", json!([])).await.unwrap_err();
+    assert_eq!(sqlstate(&err).as_deref(), Some("23514"), "{err}");
+    assert_eq!(snapshot(&pool).await, before);
+
+    // Between the preparation and the approval.
+    let prepared_b = prepare(&pool, "key_sec1", "op_b").await.unwrap();
+    rewrite_plan(&pool, "op_b", flipped.clone()).await.unwrap();
+    let row = operation(&pool, "op_b").await;
+    assert_eq!(Value::Object(row.immutable_plan), flipped);
+    assert_eq!(row.request_digest, op_b.request_digest.as_bytes());
+    let prepared_b_after = prepare(&pool, "key_sec1", "op_b").await.unwrap();
+    let before = snapshot(&pool).await;
+    for prepared in [&prepared_b, &prepared_b_after] {
+        refused(
+            approve(&pool, "key_sec1", INSTANCE, prepared, &echo(&op_b), &*clock).await,
+            "PlanIntegrity",
+        );
+    }
+    assert_eq!(snapshot(&pool).await, before);
+
+    // Before the preparation, put back before the approval.
+    rewrite_plan(&pool, "op_a", flipped).await.unwrap();
+    let prepared_a = prepare(&pool, "key_sec1", "op_a").await.unwrap();
+    rewrite_plan(&pool, "op_a", original.clone()).await.unwrap();
+    let row = operation(&pool, "op_a").await;
+    assert_eq!(Value::Object(row.immutable_plan.clone()), original);
+    let recomputed = DigestEnvelope {
+        id: "op_a",
+        tenant_id: None,
+        actor_id: "adm_req",
+        kind: KIND,
+        expected_revision: 1,
+        expires_at_us: i64::try_from(T0 + DAY).unwrap(),
+        plan: &row.immutable_plan,
+    }
+    .digest()
+    .unwrap();
+    assert_eq!(recomputed, op_a.request_digest);
+    assert_eq!(row.request_digest, op_a.request_digest.as_bytes());
+    let before = snapshot(&pool).await;
+    refused(
+        approve(
+            &pool,
+            "key_sec1",
+            INSTANCE,
+            &prepared_a,
+            &echo(&op_a),
+            &*clock,
+        )
+        .await,
+        "PlanIntegrity",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    assert_eq!(clock.samples(), 0);
+    let unchanged = policy(&pool).await;
+    assert_eq!(
+        (unchanged.revision, unchanged.widening_second_approver),
+        (1, false)
+    );
+    assert_chain_intact(&pool).await;
+    assert_eq!(immutable_guard(&pool).await, "A");
+
+    // Prepared again from the row as it is, the approval applies it.
+    let prepared_a = prepare(&pool, "key_sec1", "op_a").await.unwrap();
+    approve(
+        &pool,
+        "key_sec1",
+        INSTANCE,
+        &prepared_a,
+        &echo(&op_a),
+        &*clock,
+    )
+    .await
+    .unwrap();
+    assert!(policy(&pool).await.widening_second_approver);
+    assert_eq!(operation(&pool, "op_a").await.outcome, "applied");
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
 /// The approval locks the requester's operator rows and refuses an
 /// operation whose plan's credential is disabled, revoked or rotated away,
 /// whose identity is disabled, or whose role binding is disabled; the
@@ -1494,6 +1758,72 @@ async fn the_requester_must_still_hold_the_plans_credential_and_role() {
     )
     .await
     .unwrap();
+    db.drop([pool]).await;
+}
+
+/// A break-glass restoration between the request and the approval revokes
+/// every operator credential, the plan's included, and leaves the
+/// requester's identity and role binding enabled. The replacement
+/// `security_admin` it enrolls may prepare the operation, but its approval
+/// is `RequesterNotAuthorized` (D21), whether prepared before or after the
+/// restoration, and writes nothing; an approver from before the
+/// restoration is `Unauthorized`. The replacement may still reject it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restoration_between_the_request_and_the_approval_refuses_it() {
+    let (db, pool) = seeded().await;
+    let op = pending(&pool, "key_req", "op_1", 1, true).await;
+    let prepared_before = prepare(&pool, "key_sec1", "op_1").await.unwrap();
+    let restored = restore(&pool).await;
+    for id in ["crd_adm_req", "crd_adm_req_b", "crd_adm_sec1"] {
+        assert!(
+            restored.revoked_credential_ids.iter().any(|c| c == id),
+            "{id}"
+        );
+    }
+    let (status, revoked): (String, bool) = sqlx::query_as(
+        "SELECT c.status, c.revoked_at IS NOT NULL FROM admin_credential c \
+         JOIN admin_identity i ON i.id = c.admin_id \
+         JOIN admin_role_binding b ON b.admin_id = i.id \
+         WHERE c.id = 'crd_adm_req' AND i.status = 'enabled' \
+         AND b.id = 'rb_req' AND b.status = 'enabled'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), revoked), ("disabled", true));
+
+    refused(prepare(&pool, "key_sec1", "op_1").await, "Unauthorized");
+    let prepared_after = prepare(&pool, RESTORED_KEY, "op_1").await.unwrap();
+    let clock = TestClock::new(at(10));
+    let before = snapshot(&pool).await;
+    for prepared in [&prepared_before, &prepared_after] {
+        refused(
+            approve(&pool, RESTORED_KEY, INSTANCE, prepared, &echo(&op), &*clock).await,
+            "RequesterNotAuthorized",
+        );
+        refused(
+            approve(&pool, "key_sec1", INSTANCE, prepared, &echo(&op), &*clock).await,
+            "Unauthorized",
+        );
+    }
+    assert_eq!(clock.samples(), 0);
+    assert_eq!(snapshot(&pool).await, before);
+    let row = operation(&pool, "op_1").await;
+    assert_eq!(
+        (row.outcome.as_str(), row.consumed_at, row.revoked_at),
+        ("pending", None, None)
+    );
+    let unchanged = policy(&pool).await;
+    assert_eq!(
+        (unchanged.revision, unchanged.widening_second_approver),
+        (1, false)
+    );
+    assert_chain_intact(&pool).await;
+
+    reject(&pool, RESTORED_KEY, INSTANCE, "op_1").await.unwrap();
+    assert_eq!(operation(&pool, "op_1").await.outcome, "rejected");
+    assert_chain_intact(&pool).await;
     db.drop([pool]).await;
 }
 
@@ -2225,6 +2555,100 @@ async fn policy_writes_serialize_on_the_policy_row() {
         assert_eq!(policy(&pool).await.revision, revision + 1);
     }
     holder.close().await.unwrap();
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// Policy writes queued behind a trust write's `FOR SHARE` on the policy
+/// row complete without a deadlock (`40P01`): the first takes the row
+/// `FOR NO KEY UPDATE` and applies, the second waits for it and is stale.
+/// Had they taken the row `FOR SHARE` before their compare-and-set, both
+/// would hold it with the trust write, and each compare-and-set would wait
+/// for the other's lock once the trust write ends. A trust write that
+/// waits for an approval reads the row the approval wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn policy_writes_behind_a_trust_write_do_not_deadlock() {
+    let (db, pool) = seeded().await;
+    let (mut holder, holder_pid) = connection(&pool).await;
+
+    // Two approvals behind a trust write.
+    let op_a = pending(&pool, "key_req", "op_a", 1, true).await;
+    let op_b = pending(&pool, "key_req", "op_b", 1, false).await;
+    let prepared_a = prepare(&pool, "key_sec1", "op_a").await.unwrap();
+    let prepared_b = prepare(&pool, "key_sec2", "op_b").await.unwrap();
+    let (clock_a, clock_b) = (TestClock::new(at(10)), TestClock::new(at(11)));
+    let mut held = holder.begin().await.unwrap();
+    lock_instance_security_policy_shared(&mut held)
+        .await
+        .unwrap();
+    let (pid_a, task_a) =
+        spawn_approve(&pool, "key_sec1", prepared_a, echo(&op_a), clock_a.clone()).await;
+    wait_until_blocked(&pool, pid_a, holder_pid, &task_a).await;
+    let (pid_b, task_b) =
+        spawn_approve(&pool, "key_sec2", prepared_b, echo(&op_b), clock_b.clone()).await;
+    wait_until_blocked_by_any(&pool, pid_b, &[holder_pid, pid_a], &task_b).await;
+    held.commit().await.unwrap();
+    // Neither is a Registry(Retry { sqlstate: Some("40P01") }).
+    finished(task_a).await.unwrap();
+    refused(finished(task_b).await, "StaleRevision");
+    assert_eq!((clock_a.samples(), clock_b.samples()), (1, 0));
+    assert_eq!(operation(&pool, "op_a").await.outcome, "applied");
+    let row_b = operation(&pool, "op_b").await;
+    assert_eq!(
+        (row_b.outcome.as_str(), row_b.consumed_at, row_b.revoked_at),
+        ("pending", None, None)
+    );
+    let after = policy(&pool).await;
+    assert_eq!((after.revision, after.widening_second_approver), (2, true));
+
+    // A trust write waits for an approval and reads what it wrote.
+    let op_c = pending(&pool, "key_req", "op_c", 2, false).await;
+    let prepared_c = prepare(&pool, "key_sec1", "op_c").await.unwrap();
+    let mut held = holder.begin().await.unwrap();
+    approve_in(
+        &mut held,
+        "key_sec1",
+        INSTANCE,
+        &prepared_c,
+        &echo(&op_c),
+        &*TestClock::new(at(12)),
+    )
+    .await
+    .unwrap();
+    let (mut writer, writer_pid) = connection(&pool).await;
+    let task = tokio::spawn(async move {
+        let mut writing = writer.begin().await.unwrap();
+        let read = lock_instance_security_policy_shared(&mut writing).await;
+        writing.commit().await.unwrap();
+        writer.close().await.unwrap();
+        read
+    });
+    wait_until_blocked(&pool, writer_pid, holder_pid, &task).await;
+    held.commit().await.unwrap();
+    let read = finished(task).await.unwrap();
+    assert_eq!((read.revision, read.widening_second_approver), (3, false));
+
+    // Two single-actor toggles behind a trust write.
+    single_actor_mode(&pool).await;
+    let revision = policy(&pool).await.revision;
+    let mut held = holder.begin().await.unwrap();
+    lock_instance_security_policy_shared(&mut held)
+        .await
+        .unwrap();
+    let (pid_1, task_1) = spawn_request(&pool, "op_t1", revision, true).await;
+    wait_until_blocked(&pool, pid_1, holder_pid, &task_1).await;
+    let (pid_2, task_2) = spawn_request(&pool, "op_t2", revision, true).await;
+    wait_until_blocked_by_any(&pool, pid_2, &[holder_pid, pid_1], &task_2).await;
+    held.commit().await.unwrap();
+    assert!(matches!(finished(task_1).await.unwrap(), Gated::Applied(_)));
+    refused(finished(task_2).await, "StaleRevision");
+    holder.close().await.unwrap();
+    let after = policy(&pool).await;
+    assert_eq!(
+        (after.revision, after.widening_second_approver),
+        (revision + 1, true)
+    );
     assert_chain_intact(&pool).await;
     db.drop([pool]).await;
 }
