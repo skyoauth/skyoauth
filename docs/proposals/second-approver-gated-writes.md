@@ -6,7 +6,8 @@ Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
 your recommendations, except 0012, as we don't need to keep data until a
 beta release", and, on clarification, that the `0012` trigger is folded
-into migration `0005` itself (section 11; D15). Nothing here is
+into migration `0005` itself (section 11; D15); the read-path index of the
+same sketch is a provisional lead pick, not ruled. Nothing here is
 implemented: no migration edit, no production code, no endpoint, and no
 T00.x box is ticked. Every other choice below that goes beyond the written
 spec is a "provisional lead pick, 2026-11-23" (the Decisions list numbers
@@ -930,11 +931,13 @@ pending write returns 202 with the operation's ID, digest and `expires_at`.
 No new table or column, and no new migration file. The proposal offered an
 optional migration `0012` in the `0010` and `0011` pattern: a tripwire for the
 two service rules the `0005` review left to the service (README:962-968), plus
-an index for the read path. The user accepted it on 2026-11-23 (relayed by the
-lead) in a changed form: the distinct approver and same-tenant tripwire trigger,
-with its `INSERT OR UPDATE OF revocation_operation_id` variant, is folded into
-migration `0005` itself, not added as `0012` (D15). The read-path index below
-goes into `0005` with it (inferred: it was part of `0012`). This is allowed by
+an index for the read path. On 2026-11-23 (relayed by the lead) the user
+accepted the tripwire trigger in a changed form: the distinct approver and
+same-tenant tripwire trigger, with its `INSERT OR UPDATE OF
+revocation_operation_id` variant, is folded into migration `0005` itself, not
+added as `0012` (D15). The read-path index was part of the same sketch and is
+folded into `0005` too as a provisional lead pick (inferred), not ruled. This
+is allowed by
 the pre-beta exception to the forward-only rule (`service/migrations/README.md`,
 "Conventions"), ruled by the user on 2026-11-23 (relayed by the lead): "we don't
 need to keep data until a beta release" and "I meant db migration are not needed
@@ -1297,15 +1300,16 @@ the Stage A pool.
 14. **D14.** **A failed approve leaves the operation pending.** Rejected:
     recording the failure in a second transaction (a write path for refusals
     no other write has).
-15. **D15.** **The distinct-approver and same-tenant guard, and the
-    read-path index, in `0005`** (section 11). Proposed as an optional
-    migration `0012`; accepted by the user, 2026-11-23, in the changed
-    form: the distinct-approver / same-tenant tripwire trigger (and the
-    `INSERT OR UPDATE OF revocation_operation_id` variant) is folded into
-    migration `0005` itself, not added as `0012`. It reverses, for these
-    two rules only, the `0005` review's acceptance that they stay service
-    rules (README:966-968). An edited `0005` changes its checksum, so a
-    database created before the edit must be recreated (the pre-beta
+15. **D15.** **The distinct-approver and same-tenant guard, and the read-path
+    index, in `0005`** (section 11). Proposed as an optional migration `0012`.
+    The user accepted the tripwire trigger, 2026-11-23, in the changed form: the
+    distinct-approver / same-tenant tripwire trigger (and the `INSERT OR UPDATE
+OF revocation_operation_id` variant) is folded into migration `0005` itself,
+    not added as `0012`. The read-path index was part of the same sketch and is
+    folded into `0005` too as a provisional lead pick (inferred), not ruled. It
+    reverses, for these two rules only, the `0005` review's acceptance that they
+    stay service rules (README:966-968). An edited `0005` changes its checksum,
+    so a database created before the edit must be recreated (the pre-beta
     exception, `service/migrations/README.md` "Conventions"). Rejected: no
     backstop for self-approval; a new `0012` file (the user's ruling).
 16. **D16.** **The toggle is the first gated kind**: the smallest, no JWK
@@ -1421,13 +1425,14 @@ wire shape of the approve endpoints (OQ-API-13); the approver role (IR-054);
 the IR-152 egress backstop (`0011`, README "What 0011 adds"); soft disable
 as fail-safe for bindings and grants (ADR-008 item 3).
 
-**Ruled by the user, 2026-11-23, relayed by the lead.** The user accepted
-the recommended answer to each of Q1 to Q7 ("Accept all your
-recommendations, except 0012, as we don't need to keep data until a beta
-release"); `0012` was accepted in a changed form, folded into `0005`
-(D15). Each answer below is the recommendation as ruled; the ADRs stay
-unratified, so these rulings are provisional in the same way as the
-2026-11-22 ruling.
+**Ruled by the user, 2026-11-23, relayed by the lead.** The user accepted the
+recommended answer to each of Q1 to Q7 ("Accept all your recommendations, except
+0012, as we don't need to keep data until a beta release"); the tripwire trigger
+of `0012` was accepted in a changed form, folded into `0005` (D15); the
+read-path index of the same sketch is folded into `0005` too as a provisional
+lead pick (inferred), not ruled. Each answer below is the recommendation as
+ruled; the ADRs stay unratified, so these rulings are provisional in the same
+way as the 2026-11-22 ruling.
 
 1. **Q1.** **Expiry and read path (OQ-API-14).** Ruled: a fixed 24-hour
    `expires_at`; `GET /admin/v1/tenants/{tenant}/operations/{operation}` and a
@@ -1487,8 +1492,9 @@ test PR or the test PR follows.
 
 ## Implementation notes
 
-**What stays unwired.** The user accepted the proposal on 2026-11-23, so
-PRs 1 to 5 below may start; the lead says when. Until they land, no
+**What stays unwired.** The user ruled on Q1-Q7 and on the `0005`
+trigger on 2026-11-23 (D1 to D29 otherwise stay provisional), so PRs 1 to
+5 below may start; the lead says when. Until they land, no
 endpoint calls `trust::keyset`, `trust::source` or the new functions, and
 nothing wires them at startup (`mod.rs:18-19`). Even after the PRs below
 merge, no endpoint lands before the request layer exists (generated IDs,
@@ -1500,16 +1506,16 @@ layer too. `disable_version` stays unwired with the rest.
 and code comments; the test session owns tests, security scenarios, CI,
 the harness and `docs/testing/conformance-layout.md`):
 
-| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                      | After   |
-| --- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                             | —       |
-| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard and index of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated                                       | —       |
-| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                               | 2       |
-| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3131-3133, :3350-3351) | 1, 3    |
-| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23)                                                                                                  | 3       |
-| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                      | each PR |
-| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                  | 6       |
-| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                    | 6       |
+| PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                               | After   |
+| --- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                                      | —       |
+| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard (ruled) and the index (provisional lead pick, not ruled) of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated | —       |
+| 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                                        | 2       |
+| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3131-3133, :3350-3351)          | 1, 3    |
+| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23)                                                                                                           | 3       |
+| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                               | each PR |
+| 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                           | 6       |
+| 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                             | 6       |
 
 ADR-008:220, which repeats the T14.1/T14.2 attribution, is the lead's to
 correct; neither session edits it.
