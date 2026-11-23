@@ -223,9 +223,11 @@ If the rendered README itself cannot be fetched, the pull request passes with a
 warning only when it leaves every README file GitHub could render (`README*` at
 the top level, in `.github/` and in `docs/`, none of them a symbolic link) byte
 for byte as on the base branch; a pull request that changes one fails, and is
-checked in full by re-running the job once the GitHub API recovers. To protect
-`main`, require the `CI passed` check: it passes when `Docs consistency` and
-`Conformance registry` passed and every other job passed or was skipped.
+checked in full by re-running the job once the GitHub API recovers. The
+`CI passed` check is now required by the ruleset for the protected branches,
+`main` included (set up by the user, 2026-11-23): it passes when
+`Docs consistency` and `Conformance registry` passed and every other job
+passed or was skipped.
 Dependabot keeps actions, crates and npm packages up to date.
 
 ## License

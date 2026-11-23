@@ -1,13 +1,19 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Proposed, not accepted. Drafted 2026-11-23 for the lead's review agent
-and then the user's acceptance. Nothing here is implemented: no migration, no
-production code, no endpoint, and no T00.x box is ticked. Every choice below
-that goes beyond the written spec is a "provisional lead pick, 2026-11-23" (the
-Decisions list numbers them D1 to D29); "(inferred)" marks a point where the
-spec is silent. All of them, and the lead decisions the spec records, stay
-provisional until the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0); this
-text ratifies no ADR. The widening ruling it builds on is the user's
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); implementation not started.
+
+Drafted 2026-11-23 for the lead's review agent and then the user's
+acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
+your recommendations, except 0012, as we don't need to keep data until a
+beta release", and, on clarification, that the `0012` trigger is folded
+into migration `0005` itself (section 11; D15). Nothing here is
+implemented: no migration edit, no production code, no endpoint, and no
+T00.x box is ticked. Every other choice below that goes beyond the written
+spec is a "provisional lead pick, 2026-11-23" (the Decisions list numbers
+them D1 to D29); "(inferred)" marks a point where the spec is silent. All
+of them, and the lead decisions the spec records, stay provisional until
+the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0); this text
+ratifies no ADR. The widening ruling it builds on is the user's
 (2026-11-22, relayed by the lead), not a pick.
 
 ## Problem
@@ -98,7 +104,7 @@ What the spec fixes:
   expiry and approved operation (`:425-431`), set-once consumption and
   revocation (`:453-457`), no consume after revoke (`:459-464`) and
   `consumed_at < expires_at` (`:328-329`). The service rules the database
-  leaves open are in `service/migrations/README.md:947-962` (a distinct
+  leaves open are in `service/migrations/README.md:960-975` (a distinct
   approver, the digest echo, the tenant, an expiry, no secrets in the
   plan).
 
@@ -111,11 +117,11 @@ race behaviour.
 
 **Owner.** No task ID names the second-approver flow. The code and docs
 attribute it to "T14.1, T14.2" (`keyset.rs:24-28` and `:265-267`,
-`source.rs:236-246`, `service/migrations/README.md:3114-3116` and
-`:3333-3334`, ADR-008:220, conformance-layout:180,
+`source.rs:236-246`, `service/migrations/README.md:3131-3133` and
+`:3350-3351`, ADR-008:220, conformance-layout:180,
 `tests/conformance/README.md:7`, `tests/security/a04.rs:136`), and some of
 them name "the request layer of T14.1 and T14.2" too (`keyset.rs:27`,
-`source.rs:237-238`, README:3115-3116 and :3334); but T14.1–T14.2 are the
+`source.rs:237-238`, README:3132-3133 and :3351); but T14.1–T14.2 are the
 audience registry and the IR-080 reference checks (tasks:533-534). Three
 places also say the ruling is recorded in "ADR-008 item 12"
 (conformance-layout:180, `tests/conformance/README.md:7`,
@@ -134,28 +140,27 @@ detection" (conformance-layout:180). This proposal uses those IDs.
 
 ### 1. Which writes are widening, and what happens to them
 
-The server classifies each write by a pure function of the write and,
-only with the Q2 add-on, for a source update, the stored row read under
-its lock. No caller input
-decides it (ADR-008 item 12).
+The server classifies each write by a pure function of the write and, for
+a source update, the stored row read under its lock (the Q2 exception). No
+caller input decides it (ADR-008 item 12).
 
-| Write                                                                                                                        | Widening                                                     | Basis                                                                                                                                                                         |
-| ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create_version`, enabled or disabled                                                                                        | yes                                                          | the ruling ("a create"); Q3                                                                                                                                                   |
-| `enable_version`, a re-enable and an enable of an already enabled version included                                           | yes                                                          | the ruling ("an enable, a re-enable"); `keyset.rs:100-103` writes the latter like any other enable                                                                            |
-| `disable_version`                                                                                                            | no                                                           | not among the ruling's writes (`keyset.rs:34-35`); ADR-008 item 3 by analogy                                                                                                  |
-| `create_source`                                                                                                              | yes                                                          | the ruling                                                                                                                                                                    |
-| `update_source` whose new `status` is `disabled` and whose every other mutable member equals the stored row's                | no, only if the user accepts Q2; until then yes (the ruling) | the ruling counts "a trust source write" (ADR-008:217-219); Q2 proposes ADR-008 item 3 by analogy and tasks:463 ("disabling is not widening" for an egress entry); (inferred) |
-| any other `update_source`: an enable, a rename, a no-op, a disable that also changes a member, a change to a disabled source | yes                                                          | the ruling; `source.rs:49-52` already treats a disable that changes a member as a change                                                                                      |
+| Write                                                                                                                        | Widening                                                        | Basis                                                                                                                                                                                                     |
+| ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create_version`, enabled or disabled                                                                                        | yes                                                             | the ruling ("a create"); Q3                                                                                                                                                                               |
+| `enable_version`, a re-enable and an enable of an already enabled version included                                           | yes                                                             | the ruling ("an enable, a re-enable"); `keyset.rs:100-103` writes the latter like any other enable                                                                                                        |
+| `disable_version`                                                                                                            | no                                                              | not among the ruling's writes (`keyset.rs:34-35`); ADR-008 item 3 by analogy                                                                                                                              |
+| `create_source`                                                                                                              | yes                                                             | the ruling                                                                                                                                                                                                |
+| `update_source` whose new `status` is `disabled` and whose every other mutable member equals the stored row's                | no (Q2, ruled by the user, 2026-11-23); before that ruling, yes | the 2026-11-22 ruling counts "a trust source write" (ADR-008:217-219); Q2, accepted, makes this exception, by analogy with ADR-008 item 3 and tasks:463 ("disabling is not widening" for an egress entry) |
+| any other `update_source`: an enable, a rename, a no-op, a disable that also changes a member, a change to a disabled source | yes                                                             | the ruling; `source.rs:49-52` already treats a disable that changes a member as a change                                                                                                                  |
 
-So, until the user answers Q2, every trust source write is widening and
-both classifications depend on the write kind only. The disable-only
-exception is an add-on to PR 5 that lands only after the user accepts Q2:
-then `classify_source_update(stored, changes)` returns "not widening"
-exactly when `changes.status == Disabled` and the other fourteen members
-of `TrustSourceChanges` (`model.rs:937-953`) equal the stored ones. A
-finer per-member diff (fewer audiences narrows, a new algorithm widens) is
-rejected (D1).
+Before the Q2 ruling every trust source write was widening and both
+classifications depended on the write kind only. The user accepted Q2
+(2026-11-23, relayed by the lead), so the disable-only exception, an add-on to
+PR 5, proceeds: `classify_source_update(stored, changes)` returns "not widening"
+exactly when `changes.status == Disabled` and the other fourteen members of
+`TrustSourceChanges` (`model.rs:937-953`) equal the stored ones. A finer
+per-member diff (fewer audiences narrows, a new algorithm widens) is rejected
+(D1).
 
 **The flag.** A widening write must carry `acknowledge_widening = true`.
 Without it the write is refused with `WideningNotAcknowledged`, whether
@@ -183,17 +188,17 @@ column (D3):
 | Column                                    | Pending gated write                                                                                                                                                             |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id`                                      | caller-generated (T10.2)                                                                                                                                                        |
-| `tenant_id`                               | the target's tenant; `NULL` for the toggle (README:956-957: the tenant of its audit event)                                                                                      |
+| `tenant_id`                               | the target's tenant; `NULL` for the toggle (README:969-970: the tenant of its audit event)                                                                                      |
 | `actor_id`                                | the requester's `admin_id`                                                                                                                                                      |
 | `kind`                                    | `trust_keyset_version_create`, `trust_keyset_version_enable`, `trust_source_create`, `trust_source_update` or `instance_security_policy_update` (inferred names)                |
 | `request_digest`                          | SHA-256 of the canonical request, 32 bytes (below)                                                                                                                              |
-| `expected_revision`                       | the target's revision: the version (an enable), the source (an update), the policy row (the toggle); 0 for a create (README:933)                                                |
+| `expected_revision`                       | the target's revision: the version (an enable), the source (an update), the policy row (the toggle); 0 for a create (README:946)                                                |
 | `immutable_plan`                          | the validated payload (below)                                                                                                                                                   |
 | `expires_at`                              | the request's `now` plus 24 hours (D5; OQ-API-14; Q1)                                                                                                                           |
 | `consumed_at`                             | set once, by the approve                                                                                                                                                        |
 | `revoked_at`, `revocation_operation_id`   | set once, together, by a cancel or a reject                                                                                                                                     |
 | `approves_operation_id`, `challenge_hash` | `NULL`                                                                                                                                                                          |
-| `outcome`                                 | `pending`, then `applied`, `cancelled` or `rejected` (inferred values; `outcome` and `revision` are the mutable columns, README:788-792); it stays `pending` after expiry (D22) |
+| `outcome`                                 | `pending`, then `applied`, `cancelled` or `rejected` (inferred values; `outcome` and `revision` are the mutable columns, README:801-805); it stays `pending` after expiry (D22) |
 | `audit_id`                                | the `administrative_operation.create` event, inserted first                                                                                                                     |
 
 **The plan** (version 1, every member written by the server from typed
@@ -224,7 +229,7 @@ unrevoked (D21).
 No member holds a secret: the projection is public-only, provenance naming
 a JWK private member is refused (`keyset.rs:89-94`), and the source's
 `ca_bundle_ref` and `reviewer_credential_ref` are references
-(README:960-962).
+(README:973-975).
 
 **The digest.**
 
@@ -314,8 +319,10 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
    `admin_id` and credential ID; every later step is a post-authorization
    step function that takes them, shared with the approve (D26).
 3. A widening write with the flag unset is refused here
-   (`WideningNotAcknowledged`). Until the user accepts Q2 its class depends
-   on the kind only; `disable_version` is never widening.
+   (`WideningNotAcknowledged`). Its class depends on the kind only, except
+   a source update's (step 6); `disable_version` is never widening. (Until
+   the PR 5 add-on lands, a source update is classified here too, as
+   widening.)
 4. The `instance_security_policy` row `FOR SHARE` (new; D10). A missing
    row is `PolicyUnavailable` (D18). `disable_version` skips steps 3, 4
    and 6: its class is fixed.
@@ -324,9 +331,9 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
    `trust_source` row `FOR NO KEY UPDATE` (`source.rs:123-129`), now
    reading every mutable column, not only the destinations (for the
    plan's `changed`).
-6. Only with the Q2 add-on of PR 5: a source update is classified from
-   the stored row; a disable-only update is applied at once, and any other
-   update with the flag unset is `WideningNotAcknowledged`.
+6. The Q2 add-on of PR 5 (Q2 ruled by the user, 2026-11-23): a source update is
+   classified from the stored row; a disable-only update is applied at once, and
+   any other update with the flag unset is `WideningNotAcknowledged`.
 7. The module's checks, unchanged: the cap of 8 and the overlap check (on
    the in-transaction pool, section 8); the syntax of changed members and
    the egress entries `FOR SHARE` (`source.rs:130-135`).
@@ -334,7 +341,7 @@ only under `READ COMMITTED` (step 0, `write.rs:30-41`), for the reasons of
    last, exactly the module's steps 6 and 7 (keyset) or 4 and 5 (source).
    Pending: the audit head through `append_audit_event`, the event
    `administrative_operation.create`, then the operation insert
-   (README:1040-1041; the issue of a recovery challenge does the same,
+   (README:1053-1054; the issue of a recovery challenge does the same,
    `service/src/persistence/registry/recovery.rs:48-66`). No registry
    write: the source row is never taken `FOR UPDATE` by a request, so a
    pending request does not block binding inserts or token exchanges
@@ -407,7 +414,7 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    for the kind (tenant `trust_admin`, or instance `security_admin` for the
    toggle) by ID, then the lookups repeated as `authorize_operator_locked`
    does (`operator.rs:160-172`; the lookup requires an enabled and
-   unrevoked credential, `operator.rs:504-516`, README:970-971). A
+   unrevoked credential, `operator.rs:504-516`, README:983-984). A
    requester whose identity is disabled, whose submitting credential is
    disabled or revoked, or who lost the role is `RequesterNotAuthorized`
    (Q5; D21).
@@ -452,7 +459,7 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    `administrative_operation.approve`, the approve operation insert, the
    domain event, and the update of the pending row (`consumed_at` the
    step 6 sample, `outcome = 'applied'`, revision + 1), whose row step 4
-   already holds, so it does not wait (README:1042-1046). The waits inside
+   already holds, so it does not wait (README:1055-1059). The waits inside
    the append (the tenant row `FOR KEY SHARE` and the audit head) come
    after the sample and are not covered (Limits).
 
@@ -467,7 +474,7 @@ check as in approve; the operator rows `FOR SHARE`; the operation row
 `FOR NO KEY UPDATE` (consumed or already revoked: `NotApprovable`); then
 the head: `administrative_operation.cancel` or `.reject`, the revoking
 operation insert, the update of the pending row. This is the `0005`
-revocation order exactly (README:1042-1046). A cancel authorizes the
+revocation order exactly (README:1055-1059). A cancel authorizes the
 operation's `actor_id` through any enabled, unrevoked credential of that
 identity, not only the submitting one.
 
@@ -497,7 +504,7 @@ off, neither updates the row at the request: both pass the revision
 check, both go pending, and the second to be approved gets
 `StaleRevision` at its approval, since the first approval moved the
 revision. A write locks the rows it
-updates `FOR NO KEY UPDATE` (README:1025-1026); a toggle that took
+updates `FOR NO KEY UPDATE` (README:1038-1039); a toggle that took
 `FOR SHARE` and then updated would upgrade its lock, and two concurrent
 toggles would each wait for the other's share lock and end in `40P01`, as
 the review reproduced on PostgreSQL 17.12 (D19). A trust write takes the
@@ -525,7 +532,7 @@ is always gated, whatever its current value (ADR-008:100-105).
 | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | a direct write (a disable, another update) moves the target's revision                                                     | `StaleRevision`; the operation stays pending and can never apply; the requester cancels it or it expires                                                                                                                                                                |
 | a concurrent disable runs while the approve holds the target                                                               | they serialize on the `trust_keyset` or `trust_source` row; the second sees the first's revision                                                                                                                                                                        |
-| an egress entry the change needs is disabled                                                                               | `EgressNotAllowed` (the service's entry check, `source.rs:509-532`). If the service check were skipped, the `0011` trigger `trust_source_egress_enabled` refuses the write with `23514`, `Invariant { kind: EgressEntryEnabled }` (README "What 0011 adds", :2136-2150) |
+| an egress entry the change needs is disabled                                                                               | `EgressNotAllowed` (the service's entry check, `source.rs:509-532`). If the service check were skipped, the `0011` trigger `trust_source_egress_enabled` refuses the write with `23514`, `Invariant { kind: EgressEntryEnabled }` (README "What 0011 adds", :2151-2165) |
 | an entry disable starts while the approve holds the entry `FOR SHARE`                                                      | the disable waits for the approve's commit; the source is then degraded at fetch (`source.rs:178-188`)                                                                                                                                                                  |
 | another version was enabled and now overlaps                                                                               | `Overlap`; after that version is disabled, a new approve of the same operation passes                                                                                                                                                                                   |
 | the keyset reached 8 enabled versions                                                                                      | `TooManyEnabledVersions`                                                                                                                                                                                                                                                |
@@ -552,12 +559,12 @@ is always gated, whatever its current value (ADR-008:100-105).
   when one operator holds both roles. A second `trust_admin` cannot
   approve. A tenant operation is approved only on its tenant path and an
   instance operation only on the instance path; anything else is
-  `NotFound` (README:953-955: an approval of a tenant operation stays in
+  `NotFound` (README:966-968: an approval of a tenant operation stays in
   its tenant).
 - **`single_actor_mode` on.** No approve call is made (tasks:149): the
   write applies at once and its event records the single-actor approval.
-  Recommended reading (Q4): the one actor must also hold instance
-  `security_admin`; otherwise the write goes pending as above.
+  Ruled (Q4, by the user, 2026-11-23): the one actor must also hold
+  instance `security_admin`; otherwise the write goes pending as above.
 - **`widening_second_approver` off.** No second approver; the flag, the
   expected revision and the audit event suffice (IR-052).
 - **The toggle's own approval.** Always a distinct second `security_admin`,
@@ -918,15 +925,30 @@ is inferred: `Unauthorized` and `SelfApproval` 403; `NotFound` 404;
 `ValidationBusy` and `Retry` 503 with `Retry-After`; `PlanIntegrity` 500. A
 pending write returns 202 with the operation's ID, digest and `expires_at`.
 
-### 11. Schema (PROPOSAL ONLY, not a migration)
+### 11. Schema (text to merge into `0005`)
 
-No new table or column. One optional migration, `0012` (D15), in the
-`0010` and `0011` pattern: a tripwire for the two service rules the `0005`
-review left to the service (README:949-955), plus an index for the read
-path.
+No new table or column, and no new migration file. The proposal offered an
+optional migration `0012` in the `0010` and `0011` pattern: a tripwire for the
+two service rules the `0005` review left to the service (README:962-968), plus
+an index for the read path. The user accepted it on 2026-11-23 (relayed by the
+lead) in a changed form: the distinct approver and same-tenant tripwire trigger,
+with its `INSERT OR UPDATE OF revocation_operation_id` variant, is folded into
+migration `0005` itself, not added as `0012` (D15). The read-path index below
+goes into `0005` with it (inferred: it was part of `0012`). This is allowed by
+the pre-beta exception to the forward-only rule (`service/migrations/README.md`,
+"Conventions"), ruled by the user on 2026-11-23 (relayed by the lead): "we don't
+need to keep data until a beta release" and "I meant db migration are not needed
+intra releases." Until the beta release, no database upgrade path between
+pre-beta releases is provided or tested, and an existing migration may be
+amended in place; the forward-only rule is reinstated at the beta release (date
+set by the maintainer). An edited `0005` changes its checksum, so a database
+created before the edit must be recreated; `migrate` refuses it otherwise. The
+implementation PR also rewrites the README's `0005` text that leaves these two
+rules to the service (README:960-968) and adds the new names to
+`KNOWN_CONSTRAINTS`.
 
 ```sql
--- PROPOSAL ONLY. Not a migration file.
+-- Text to merge into 0005_operator.sql (not a new migration file).
 
 -- An approve names an operation of its own tenant (IS NOT DISTINCT FROM,
 -- so an instance approve names an instance operation) and is never by that
@@ -985,7 +1007,7 @@ follow-up).
 ## Lock order (declaration)
 
 The `0005` order puts the operator rows first and the audit head last
-(README:1023-1046). The new locks sit as follows.
+(README:1036-1059). The new locks sit as follows.
 
 **Request** (direct or pending):
 
@@ -993,7 +1015,7 @@ The `0005` order puts the operator rows first and the audit head last
    (identity, credential, binding or bindings);
 2. the `instance_security_policy` row (new): `FOR SHARE` for a trust
    write; `FOR NO KEY UPDATE` for the toggle, in both branches, since it
-   is the row the toggle updates (README:1025-1026; D19);
+   is the row the toggle updates (README:1038-1039; D19);
 3. the module's rows, in the module's order: the `trust_keyset` row
    `FOR NO KEY UPDATE`; or the `trust_source` row `FOR NO KEY UPDATE`
    (update), then the egress entries `FOR SHARE`, discovery before
@@ -1009,7 +1031,7 @@ The `0005` order puts the operator rows first and the audit head last
    identities by ID, the two credentials by ID (the approver's and the
    requester's submitting one), the bindings by ID;
 2. the pending operation row `FOR NO KEY UPDATE` (`administrative_operation`
-   is the fifth `0005` table, README:1030-1032);
+   is the fifth `0005` table, README:1043-1045);
 3. the module's rows, as request step 3 (for the toggle, the policy row
    `FOR NO KEY UPDATE`);
 4. the registry write (a source compare-and-set takes the source row
@@ -1066,7 +1088,7 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
   database (D14).
 - `now` is the service's clock, as for every write here; the table has no
   creation time, so the 24-hour bound is the service's rule, not the
-  database's (README:958-959 asks only for an expiry). The approve samples
+  database's (README:971-972 asks only for an expiry). The approve samples
   it after its registry write, just before its first append (D28). The
   waits inside the append, for the tenant row `FOR KEY SHARE` and the audit
   head, come after the sample, so an approve can commit after `expires_at`
@@ -1078,9 +1100,9 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
   overshoot is small only if other transactions hold the tenant row and
   the head briefly, which holds while every writer commits promptly after
   its append (an assumption, not a guarantee).
-- The `0012` guard, if accepted, is a tripwire against application DML,
-  not a security boundary (README "Limits"); it cannot check roles or the
-  digest.
+- The guard folded into `0005` (section 11) is a tripwire against
+  application DML, not a security boundary (README "Limits"); it cannot
+  check roles or the digest.
 - Rows are never deleted (`administrative_operation_no_delete`, `0006`):
   expired and revoked operations stay, with their public plans, readable
   by auditors.
@@ -1094,7 +1116,9 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
   `security_admin` can enrol a second operator identity and grant it
   `security_admin` (tasks:183; design:660), then approve its own requests
   through it. The audit chain shows the enrolment and the grant, but no
-  check here prevents it while the toggle is on (Q7).
+  check here prevents it while the toggle is on. Q7 (ruled by the user,
+  2026-11-23) gates such grants while the toggle is on, as a follow-up;
+  until it lands the residual risk is accepted.
 - An approver sees the service checks' verdict at the request, not the
   database constraints', which run only at approve (section 3).
 
@@ -1137,9 +1161,9 @@ The implementation PRs must have (owned by the test session; section
   write's `FOR SHARE` against the toggle's `FOR NO KEY UPDATE`); approve
   and an entry disable; none ends in `40P01`.
 - **Classification.** Every row of the table in section 1, both values of
-  the flag, the toggle off and on, `single_actor_mode` off and on; until
-  Q2 is accepted, a disable-only source update goes pending like any other
-  source write.
+  the flag, the toggle off and on, `single_actor_mode` off and on; a
+  disable-only source update is not widening (Q2, ruled by the user,
+  2026-11-23), while a disable that also changes a member is.
 - **Database constraints at approve.** A request that a unique key or a
   `0004` check refuses only at the write (a source name taken between
   request and approve) is approved and refused, writes nothing and stays
@@ -1171,9 +1195,9 @@ The implementation PRs must have (owned by the test session; section
 - **Sources.** An entry disabled between request and approve refuses with
   `EgressNotAllowed`; through the bare writer, the `0011` guard refuses;
   a pending request holds no `FOR UPDATE` on the source (`pg_locks`, a
-  binding insert does not wait); only if the user accepts Q2 (the PR 5
-  add-on), a disable-only update is applied at once while the toggle is
-  on.
+  binding insert does not wait); with the PR 5 add-on (Q2, ruled by the
+  user, 2026-11-23), a disable-only update is applied at once while the
+  toggle is on.
 - **Toggle** (A48): pending without a second `security_admin`; applied by a
   distinct one; one actor under `single_actor_mode`; no online write to
   `single_actor_mode` or the sink fields.
@@ -1183,8 +1207,12 @@ The implementation PRs must have (owned by the test session; section
   transaction is refused before any lock.
 - **Redaction.** `Display` and `Debug` of every new variant contain no
   digest, ID, revision or destination (`service/tests/redaction.rs`).
-- **Catalog** (if `0012`): trigger and function names, `tgenabled = 'A'`,
-  pinned `search_path`, the two names in `KNOWN_CONSTRAINTS`.
+- **Catalog** (the `0005` trigger, section 11): trigger and function
+  names, `tgenabled = 'A'`, pinned `search_path`, the three raised names in
+  `KNOWN_CONSTRAINTS`, and the new triggers and index in the `0005`
+  catalog tests that pin every `0005` trigger
+  (`service/tests/schema_operator.rs`) and every constraint name
+  (`service/tests/registry.rs`).
 
 Mutants: the actor comparison dropped; the digest echo or the recompute
 dropped; the expiry predicate dropped; the policy row read without
@@ -1199,16 +1227,18 @@ the Stage A pool.
 
 ## Decisions (provisional lead picks, 2026-11-23)
 
-1. **D1.** **Classification is computed by the server.** Until the user
-   answers Q2, it follows the ruling exactly: every trust source write and
-   every keyset version create and enable is widening, and only
-   `disable_version` is not (ADR-008:217-219). The disable-only source
-   exception, computed from the stored row, is an add-on to PR 5 that
-   lands only after the user accepts Q2. Rejected: a caller flag that
-   decides (ADR-008 item 12 forbids it); a per-member widening and
-   narrowing diff of sources (error-prone over fourteen members, and the
-   ruling counts every source write); shipping the disable-only exception
-   before Q2 is answered (it goes beyond the ruling).
+1. **D1.** **Classification is computed by the server.** Every keyset
+   version create and enable is widening and `disable_version` is not
+   (ADR-008:217-219). Every trust source write is widening except a
+   disable-only update, computed from the stored row: the user accepted
+   that exception (Q2, ruled by the user, 2026-11-23, relayed by the
+   lead), and it lands as an add-on to PR 5. Until that ruling the pick
+   was to follow the 2026-11-22 ruling exactly and treat every source
+   write as widening. Rejected: a caller flag that decides (ADR-008 item
+   12 forbids it); a per-member widening and narrowing diff of sources
+   (error-prone over fourteen members, and the ruling counts every other
+   source write); shipping the disable-only exception before Q2 was
+   answered (it went beyond the ruling then).
 2. **D2.** **The flag** is required on every widening write, toggle on or off,
    and ignored on a non-widening one. Rejected: refusing a flag on a
    non-widening write (friction with no gain).
@@ -1220,7 +1250,8 @@ the Stage A pool.
 4. **D4.** **The plan holds the validated public payload.** Rejected: the raw
    upload (it may hold private members, A05); a digest only, with the
    payload sent again at approve (the approver could not review it).
-5. **D5.** **24-hour expiry**, fixed (OQ-API-14 is open; Q1). Rejected: the
+5. **D5.** **24-hour expiry**, fixed (OQ-API-14 is open in the contract; Q1,
+   ruled by the user, 2026-11-23). Rejected: the
    15-minute challenge bound of LT-107 (too short for a second person);
    no bound (stale intent).
 6. **D6.** **Digest over a canonical form, recomputed at approve.** Rejected: a
@@ -1266,10 +1297,17 @@ the Stage A pool.
 14. **D14.** **A failed approve leaves the operation pending.** Rejected:
     recording the failure in a second transaction (a write path for refusals
     no other write has).
-15. **D15.** **Migration `0012`** (optional guard and index). It reverses, for
-    these two rules only, the `0005` review's acceptance that they stay
-    service rules (README:953-955), so it needs the user's acceptance with
-    this proposal. Rejected: no backstop for self-approval.
+15. **D15.** **The distinct-approver and same-tenant guard, and the
+    read-path index, in `0005`** (section 11). Proposed as an optional
+    migration `0012`; accepted by the user, 2026-11-23, in the changed
+    form: the distinct-approver / same-tenant tripwire trigger (and the
+    `INSERT OR UPDATE OF revocation_operation_id` variant) is folded into
+    migration `0005` itself, not added as `0012`. It reverses, for these
+    two rules only, the `0005` review's acceptance that they stay service
+    rules (README:966-968). An edited `0005` changes its checksum, so a
+    database created before the edit must be recreated (the pre-beta
+    exception, `service/migrations/README.md` "Conventions"). Rejected: no
+    backstop for self-approval; a new `0012` file (the user's ruling).
 16. **D16.** **The toggle is the first gated kind**: the smallest, no JWK
     cost, and it exercises the whole machinery (A48).
 17. **D17.** **One operation applied per transaction.**
@@ -1283,7 +1321,7 @@ the Stage A pool.
     requests on one revision both go pending and the revision check refuses
     the second application. Rejected: `FOR SHARE` then a compare-and-set (two
     concurrent toggles deadlock, `40P01`, as the review reproduced on
-    PostgreSQL 17.12; README:1025-1026 asks for `FOR NO KEY UPDATE` on a
+    PostgreSQL 17.12; README:1038-1039 asks for `FOR NO KEY UPDATE` on a
     row the write updates, never `FOR UPDATE`).
 20. **D20.** **`prepare_approval` authorizes before it reads the plan**:
     the approver's lookup, the scope check, self-approval and the unlocked
@@ -1383,11 +1421,15 @@ wire shape of the approve endpoints (OQ-API-13); the approver role (IR-054);
 the IR-152 egress backstop (`0011`, README "What 0011 adds"); soft disable
 as fail-safe for bindings and grants (ADR-008 item 3).
 
-## Open
+**Ruled by the user, 2026-11-23, relayed by the lead.** The user accepted
+the recommended answer to each of Q1 to Q7 ("Accept all your
+recommendations, except 0012, as we don't need to keep data until a beta
+release"); `0012` was accepted in a changed form, folded into `0005`
+(D15). Each answer below is the recommendation as ruled; the ADRs stay
+unratified, so these rulings are provisional in the same way as the
+2026-11-22 ruling.
 
-Questions for the user, each with the recommended answer:
-
-1. **Q1.** **Expiry and read path (OQ-API-14).** Recommended: a fixed 24-hour
+1. **Q1.** **Expiry and read path (OQ-API-14).** Ruled: a fixed 24-hour
    `expires_at`; `GET /admin/v1/tenants/{tenant}/operations/{operation}` and a
    list of open operations (and the instance twins), readable by instance
    `security_admin`, the requester and the tenant `auditor`, returning the
@@ -1397,27 +1439,27 @@ Questions for the user, each with the recommended answer:
    (D29). The operator client recomputes the digest from that response alone
    before echoing it, so an approver never echoes a digest it has not checked
    against what it read.
-2. **Q2.** **Is a disable-only source update widening?** The ruling says "a
-   trust source write", so until the user answers, it is (D1). Recommended:
-   accept the exception, not widening, like a soft disable of a binding or
-   grant (ADR-008 item 3, by analogy), so a source can be shut off at once
-   while the toggle is on; it then lands as the PR 5 add-on.
+2. **Q2.** **Is a disable-only source update widening?** The 2026-11-22 ruling
+   says "a trust source write", so until this ruling it was (D1). Ruled: the
+   exception is accepted, not widening, like a soft disable of a binding or
+   grant (ADR-008 item 3, by analogy), so a source can be shut off at once while
+   the toggle is on; it lands as the PR 5 add-on.
 3. **Q3.** **Is a disabled keyset version create widening?** It makes no key
-   live. Recommended: yes, as the ruling's text says; the cost is one approval
+   live. Ruled: yes, as the ruling's text says; the cost is one approval
    for a create-then-enable, and the rotation path creates enabled anyway.
 4. **Q4.** **Under `single_actor_mode`, must the one actor also hold
-   `security_admin`?** Recommended: yes; a `trust_admin` without it gets a
+   `security_admin`?** Ruled: yes; a `trust_admin` without it gets a
    pending operation that a `security_admin` approves. This is in tension
    with tasks:149 ("under single_actor_mode no approve call"): once the
    fallback leaves a request pending, an approve call is made under
-   `single_actor_mode`, so accepting Q4 also reads tasks:149 as applying
+   `single_actor_mode`, so the ruling also reads tasks:149 as applying
    to a requester who holds `security_admin`.
 5. **Q5.** **Is the requester checked again at approve?** The spec names
-   the approver's role only (public-api:451). Recommended: yes, the role,
+   the approver's role only (public-api:451). Ruled: yes, the role,
    the identity and the submitting credential (D21); a requester who lost
    `trust_admin`, or whose credential was revoked, should not have a
    change applied in their name.
-6. **Q6.** **A fingerprint in the audit event?** Recommended: no, for now; the
+6. **Q6.** **A fingerprint in the audit event?** Ruled: no, for now; the
    plan and the version row hold it, and an envelope member is an ADR-level
    change to the IR-056 hash input. The cost is that the external sink
    cannot show which plan an approval covered; a `request_digest` member
@@ -1425,11 +1467,15 @@ Questions for the user, each with the recommended answer:
    whole plan of every kind.
 7. **Q7.** **Gate `security_admin` grants while the toggle is on?** One
    `security_admin` can enrol a second identity and grant it
-   `security_admin`, then approve through it (Limits). Recommended: yes,
+   `security_admin`, then approve through it (Limits). Ruled: yes,
    as a follow-up: while `widening_second_approver` is on, a grant of
    instance `security_admin` (and the enrolment of an identity that
    receives one) is itself a gated kind needing a distinct existing
    `security_admin`; until then, record the residual risk as accepted.
+
+## Open
+
+No question of this proposal is open.
 
 **Not decided here** (for the lead): how an approver learns of a pending
 operation (notification); metrics, including whether `SelfApproval` and
@@ -1441,12 +1487,14 @@ test PR or the test PR follows.
 
 ## Implementation notes
 
-**What stays unwired until the user accepts.** Everything: no endpoint
-calls `trust::keyset`, `trust::source` or the new functions, and nothing
-wires them at startup (`mod.rs:18-19`). Even after the PRs below merge, no
-endpoint lands before the request layer exists (generated IDs, T10.2; the
-raw body bound; NUL rejection; the role of each endpoint; T13.3) and the
-read path of Q1 is decided. `disable_version` stays unwired with the rest.
+**What stays unwired.** The user accepted the proposal on 2026-11-23, so
+PRs 1 to 5 below may start; the lead says when. Until they land, no
+endpoint calls `trust::keyset`, `trust::source` or the new functions, and
+nothing wires them at startup (`mod.rs:18-19`). Even after the PRs below
+merge, no endpoint lands before the request layer exists (generated IDs,
+T10.2; the raw body bound; NUL rejection; the role of each endpoint;
+T13.3); the read path of Q1 is ruled, but its endpoint waits for that
+layer too. `disable_version` stays unwired with the rest.
 
 **PR decomposition** (the coding session owns production code, migrations
 and code comments; the test session owns tests, security scenarios, CI,
@@ -1455,11 +1503,11 @@ the harness and `docs/testing/conformance-layout.md`):
 | PR  | Session | Content                                                                                                                                                                                                                                                                                                                                                                                                      | After   |
 | --- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | 1   | coding  | the in-transaction permit (section 8), with tokio's `time` feature added to the non-dev dependency and the module docs' precondition marked done                                                                                                                                                                                                                                                             | —       |
-| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; `0012` and its README section if accepted                                                                                                                                                                                              | —       |
+| 2   | coding  | `persistence::registry::operation` (section 9), the policy row lock, `authorize_approval_locked`, `authorize_roles_locked`, `cancel` and `reject` in `AUDIT_ACTIONS`; the guard and index of section 11 merged into `0005` in place (no new file), with the README's `0005` text and the new names in `KNOWN_CONSTRAINTS`; a database created before must be recreated                                       | —       |
 | 3   | coding  | `crate::operation`: digest, kinds, `prepare_approval`, `approve_operation`, `cancel_operation`, `reject_operation`, the toggle                                                                                                                                                                                                                                                                               | 2       |
-| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3114-3116, :3333-3334) | 1, 3    |
-| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source` (every source write widening), the full stored-row read; the disable-only classification only as an add-on after the user accepts Q2                                                                          | 3       |
-| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                                                                                      | each PR |
+| 4   | coding  | keyset kinds: `authorize_trust_admin` returning `Requester { admin_id, credential_id }`, `apply_*` split, D27 pre-validation if cheap, `submit_create_version`, `submit_enable_version`, the approve dispatch; the T14.1/T14.2 attribution and "the request layer of T14.1 and T14.2" corrected in `keyset.rs` (:24-28, :265-267), `source.rs` (:236-246) and the migrations README (:3131-3133, :3350-3351) | 1, 3    |
+| 5   | coding  | source kinds: `Requester` from `authorize_trust_admin` (shared with PR 4, whichever lands first), `apply_*` split, D27 pre-validation if cheap, `submit_create_source`, `submit_update_source`, the full stored-row read; the disable-only classification as its add-on (Q2, ruled by the user, 2026-11-23)                                                                                                  | 3       |
+| 6   | test    | tests for PRs 1 to 5 as each lands (section "Tests"), including the `0005` guard's tests and the `0005` catalog pins, the policy-row fixture, moving the trust tests to `submit_*`, the A48 toggle legs                                                                                                                                                                                                      | each PR |
 | 7   | coding  | the ungated entry points made crate-private                                                                                                                                                                                                                                                                                                                                                                  | 6       |
 | 8   | test    | the test session's files: `conformance-layout.md` (the mapping below; the A04 paragraph's T14.1/T14.2 attribution and "ADR-008 item 12" wording, :180), `tests/conformance/README.md` (:7, both), `tests/security/a04.rs` (:132 the item-12 wording, :136 the attribution); no stage status change until a test claims it                                                                                    | 6       |
 
@@ -1481,12 +1529,15 @@ correct; neither session edits it.
 - A29 M1a (conformance-layout:141; T10.8): that stage is `implemented`
   (`tests/conformance/README.md:7`), and its closed list covers the
   composite foreign keys of `0004` only (`tests/security/a29.rs:47-65`).
-  An approval, cancel or reject of another tenant's operation is a
-  crossing for that list only if `0012` is accepted, since only then does
-  the database refuse it; the test then lands with the list change (PR 6,
-  PR 8). Otherwise it is covered outside A29, as A24 covers
-  `consumed_assertion_trust_source_id_fkey`, by the service tests of the
-  scope check (section "Tests").
+  With the guard accepted and folded into `0005` (D15), the database
+  refuses an approval, cancel or reject of another tenant's operation, so
+  it becomes a tenant-owned crossing for A29's closed list (T10.8). The
+  list says it covers `0004` only and puts later crossings outside A29, as
+  A24 covers `consumed_assertion_trust_source_id_fkey` of `0005`; whether
+  the new crossing joins A29's list or is covered outside A29 in the same
+  way is the test session's change to the layout and the list (PR 8), and
+  its test lands with that change (PR 6). Until then the service tests of
+  the scope check cover it (section "Tests").
 - A37 M1a (conformance-layout:149; T12.2): predicate removal through the
   same machinery, once binding writes have a service path (not here).
 - A47 M1b (conformance-layout:159): out of scope; the approve endpoint's
@@ -1499,4 +1550,5 @@ second-approver flow itself (see "Owner" above); the code's "T14.1, T14.2"
 does not match the tasks doc. The design defines neither
 `AdministrativeOperation` nor `InstanceSecurityPolicy` fields (the logical
 model is tasks §3). No contract maps admin errors to HTTP statuses. The
-expiry bound and read path are OQ-API-14, still open.
+expiry bound and read path are OQ-API-14, still open in the contract; Q1
+(ruled by the user, 2026-11-23) settles them for this flow.
