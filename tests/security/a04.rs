@@ -11,7 +11,10 @@
 //! the trust keyset and keyset version writes and reads, and the reads of
 //! the source, binding and grant that hang off a keyset) against a real
 //! PostgreSQL, one fresh database per test (per round in the replica
-//! tests), with no SQL of their own. The fixture is local ([`fixture`]):
+//! tests), with no SQL of their own; one test also drives the
+//! second-approver flow's public library (`skyoauth_service::operation` and
+//! `skyoauth_service::trust::submit_create_version`, see the gated
+//! positive below), which has no endpoint yet. The fixture is local ([`fixture`]):
 //! tenants `ten_a` and `ten_b`, each with a workload, a keyset `ks_<t>`
 //! with one enabled version `kv_old_<t>` (window `T0` to `T2`), a second
 //! keyset `ks_other_<t>` with a version of its own, an `uploaded_jwks`
@@ -74,6 +77,21 @@
 //!   version ID, all get `StaleRevision` or `AlreadyExists` after its
 //!   commit, and exactly one of them succeeds after its rollback
 //!   (`a04_neg_blocked_rotation_steps_follow_the_holder_commit_or_rollback`).
+//! - **Positive, gated create.** With `widening_second_approver` turned on
+//!   through A48's toggle (requested by `adm_first`, approved by
+//!   `adm_sec`, `single_actor_mode` off), `ten_a`'s `trust_admin` submits a
+//!   new enabled version `kv_gated` with an overlapping window and the
+//!   widening acknowledged: it is a pending `trust_keyset_version_create`
+//!   operation at expected revision 0, no version is written and the
+//!   lineage is unchanged. `adm_sec`'s approval on the tenant's path writes
+//!   it exactly as uploaded (the window to the microsecond, enabled, the
+//!   validated projection and fingerprint, the provenance) at revision 1,
+//!   listed first, and the parent, source, binding, grant and the other
+//!   tenant keep every column and revision
+//!   (`a04_pos_a_gated_version_create_waits_for_a_second_approver`). The
+//!   gated enable and re-enable, and every refusal of the flow, have
+//!   service tests only (`service/tests/keyset_approval.rs`), which are no
+//!   conformance evidence.
 //!
 //! # Spec and registry picks
 //!
@@ -133,12 +151,15 @@
 //! item 12 carries the 2026-11-19 decision only) that a keyset version write (a
 //! create, an enable, a re-enable) and a trust source write count as
 //! widening and need an IR-054 second-approver approval while
-//! `widening_second_approver` is on. The registry does not enforce it and
-//! the second-approver flow is not built (no task ID names it; nearest
-//! owners T13.3, which names OQ-API-14, T13.2, T13.8, T11.6, T10.4 and T10.2;
-//! docs/proposals/second-approver-gated-writes.md), so no test here
-//! claims it: the positive tests create, enable and re-enable versions
-//! with no approval because the registry has none to ask for.
+//! `widening_second_approver` is on. The registry does not enforce it; the
+//! second-approver flow exists as a library with no endpoint
+//! (`skyoauth_service::operation`, `skyoauth_service::trust`; no task ID
+//! names it; nearest owners T13.3, which names OQ-API-14, T13.2, T13.8,
+//! T11.6, T10.4 and T10.2; docs/proposals/second-approver-gated-writes.md).
+//! The registry tests create, enable and re-enable versions with no
+//! approval because the registry has none to ask for; the gated positive
+//! drives the flow's create once, partial and no claim, like every test
+//! here.
 //!
 //! # Not expressible in the registry, so not tested
 //!
@@ -188,7 +209,9 @@
 //!   IR-052), and the server's widening detection with its explicit flag
 //!   for a new or re-enabled version, which the ruling above counts as
 //!   widening (ADR-008 item 12; OQ-ADR008-3; IR-054). The registry writes
-//!   no event and does not tell widening from narrowing.
+//!   no event and does not tell widening from narrowing; the flow's library
+//!   does both (the gated positive), but with no endpoint it is not the
+//!   audited endpoint this asks for.
 //!
 //! Open owner question, not claimed either: that the rotation is
 //! independent of human-provider changes (T11.6's last clause). Human
@@ -245,16 +268,22 @@ use skyoauth_scenarios::{
     rep::{self, Replicas},
 };
 use skyoauth_service::jwk::{DEFAULT_ALLOWED_ALGORITHMS, parse_jwk_set};
+use skyoauth_service::operation::{
+    Applied, ApprovalEcho, ApprovalIds, ApprovalScope, Clock, Gated, OperationKind,
+    PendingOperation, Submission, approve_operation, prepare_approval, submit_widening_toggle,
+};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
-        self, ActivationState, AssertionProfile, BindingProfile, GrantMode, InvariantKind,
-        JsonObject, MAX_PAGE_SIZE, NewPrincipal, NewPrincipalBinding, NewServiceGrant, NewTenant,
+        self, ActivationState, AdminRole, AssertionProfile, BindingProfile, BootstrapRequest,
+        GrantMode, InvariantKind, JsonObject, MAX_PAGE_SIZE, NewAdminCredential, NewAdminIdentity,
+        NewAdminRoleBinding, NewPrincipal, NewPrincipalBinding, NewServiceGrant, NewTenant,
         NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, PrincipalBinding,
         PrincipalKind, RegistryError, ReplayMode, ServiceGrant, Status, TrustKeyset,
-        TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceKind,
+        TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceKind, bootstrap_instance,
     },
 };
+use skyoauth_service::trust::{NewKeysetVersion, submit_create_version, validate_upload};
 use sqlx::{Connection, PgConnection};
 
 /// The issuer of every source: an external CI with uploaded keys.
@@ -1177,6 +1206,251 @@ async fn a04_pos_concurrent_uploads_add_overlapping_versions_under_one_parent() 
         db.drop(std::iter::once(pool).chain(replicas.into_pools()))
             .await;
     }
+}
+
+/// The keys of the operators of [`gate_on`].
+const FIRST_KEY: &str = "spki-sha256:first";
+const SEC_KEY: &str = "spki-sha256:sec";
+const TRUST_KEY: &str = "spki-sha256:trust-a";
+
+/// The approve's clock, set by the test.
+struct FixedClock(SystemTime);
+
+impl Clock for FixedClock {
+    fn now(&self) -> SystemTime {
+        self.0
+    }
+}
+
+/// One enabled operator `admin` with the credential `crd_<admin>` (`key`)
+/// and one enabled binding `rb_<admin>`.
+async fn operator(pool: &PgPool, admin: &str, key: &str, role: AdminRole, tenant: Option<&str>) {
+    registry::create_admin_identity(
+        pool,
+        &NewAdminIdentity {
+            id: admin.into(),
+            status: Status::Enabled,
+            created_at: at(T0),
+        },
+    )
+    .await
+    .unwrap();
+    registry::create_admin_credential(
+        pool,
+        &NewAdminCredential {
+            id: format!("crd_{admin}"),
+            admin_id: admin.into(),
+            public_identity: key.into(),
+            trust_anchor_ref: "deployment/operator-ca".into(),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    registry::create_admin_role_binding(
+        pool,
+        &NewAdminRoleBinding {
+            id: format!("rb_{admin}"),
+            admin_id: admin.into(),
+            role,
+            tenant_id: tenant.map(Into::into),
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Bootstraps the instance (its operator `adm_first`, instance
+/// `security_admin`, [`FIRST_KEY`]), adds `adm_sec` ([`SEC_KEY`]),
+/// instance `security_admin`, and `adm_trust_a` ([`TRUST_KEY`]),
+/// `trust_admin` of `ten_a`, and turns `widening_second_approver` on
+/// through the second-approver flow: `adm_first` requests it and `adm_sec`
+/// approves it (A48's toggle; `single_actor_mode` stays off). Every time is
+/// before `T1`.
+async fn gate_on(pool: &PgPool) {
+    let mut transaction = pool.begin().await.unwrap();
+    bootstrap_instance(
+        &mut transaction,
+        &BootstrapRequest {
+            instance_id: "019a9f3c-5b2e-7c41-9d8e-0123456789ab",
+            admin_id: "adm_first",
+            credential_id: "crd_first",
+            public_identity: FIRST_KEY,
+            trust_anchor_ref: "deployment/operator-ca",
+            binding_id: "rb_first",
+            recovery_public_key: &[0x11; 32],
+            audit_event_id: "aud_bootstrap",
+            now: at(T0),
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    operator(pool, "adm_sec", SEC_KEY, AdminRole::SecurityAdmin, None).await;
+    operator(
+        pool,
+        "adm_trust_a",
+        TRUST_KEY,
+        AdminRole::TrustAdmin,
+        Some("ten_a"),
+    )
+    .await;
+    let mut transaction = pool.begin().await.unwrap();
+    let toggle = submit_widening_toggle(
+        &mut transaction,
+        &Submission {
+            public_identity: FIRST_KEY,
+            // Ignored by the toggle; `true` holds under D2 either way.
+            acknowledge_widening: true,
+            operation_id: "op_gate",
+            event_id: "evt_op_gate",
+            now: at(T0),
+        },
+        1,
+        true,
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let Gated::Pending(toggle) = toggle else {
+        panic!("the toggle is not pending: {toggle:?}");
+    };
+    approve(pool, INSTANCE_PATH, "op_gate", &toggle, at(T0 + 2)).await;
+    let policy = registry::get_instance_security_policy(pool).await.unwrap();
+    assert!(policy.widening_second_approver && !policy.single_actor_mode);
+}
+
+const INSTANCE_PATH: ApprovalScope<'static> = ApprovalScope::Instance;
+
+/// Prepares (at `now` less a microsecond) and approves the operation `op`
+/// on `scope` by `adm_sec`, echoing `pending`, with the clock at `now`, in
+/// a transaction committed on success.
+async fn approve(
+    pool: &PgPool,
+    scope: ApprovalScope<'_>,
+    op: &str,
+    pending: &PendingOperation,
+    now: SystemTime,
+) -> Applied {
+    let before = now - Duration::from_micros(1);
+    let prepared = prepare_approval(pool, SEC_KEY, scope, op, DEFAULT_ALLOWED_ALGORITHMS, before)
+        .await
+        .unwrap();
+    let (approve_operation_id, approve_event_id, write_event_id) = (
+        format!("appr_{op}"),
+        format!("evt_appr_{op}"),
+        format!("evt_write_{op}"),
+    );
+    let mut transaction = pool.begin().await.unwrap();
+    let applied = approve_operation(
+        &mut transaction,
+        SEC_KEY,
+        scope,
+        &prepared,
+        &ApprovalEcho {
+            request_digest: pending.request_digest,
+            expected_revision: pending.expected_revision,
+        },
+        &ApprovalIds {
+            approve_operation_id: &approve_operation_id,
+            approve_event_id: &approve_event_id,
+            write_event_id: &write_event_id,
+        },
+        &FixedClock(now),
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    applied
+}
+
+#[tokio::test]
+async fn a04_pos_a_gated_version_create_waits_for_a_second_approver() {
+    let (db, pool) = fixture().await;
+    gate_on(&pool).await;
+    let before = lineage(&pool, A).await;
+    let other_before = tenant_snapshot(&pool, B).await;
+    let old = versions(&pool, A, &A.keyset()).await;
+
+    // The new version that overlaps the old one, uploaded enabled.
+    let upload = version(A, "kv_gated", &A.keyset(), "new", T1, Some(at(T3)));
+    let keys = validate_upload(
+        Value::Object(upload.public_jwks.clone()),
+        DEFAULT_ALLOWED_ALGORITHMS,
+    )
+    .await
+    .unwrap();
+    let new = NewKeysetVersion {
+        id: &upload.id,
+        tenant_id: A.tenant,
+        keyset_id: &upload.keyset_id,
+        keys: &keys,
+        effective_at: upload.effective_at,
+        expires_at: upload.expires_at,
+        status: Status::Enabled,
+        provenance: &upload.provenance,
+    };
+    let mut transaction = pool.begin().await.unwrap();
+    let gated = submit_create_version(
+        &mut transaction,
+        &Submission {
+            public_identity: TRUST_KEY,
+            acknowledge_widening: true,
+            operation_id: "op_kv",
+            event_id: "evt_op_kv",
+            now: at(T0 + 10),
+        },
+        &new,
+        DEFAULT_ALLOWED_ALGORITHMS,
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+
+    // Pending: no version is written, and nothing else changes.
+    let Gated::Pending(pending) = gated else {
+        panic!("the create is not pending: {gated:?}");
+    };
+    assert_eq!(pending.kind, OperationKind::TrustKeysetVersionCreate);
+    assert_eq!(pending.expected_revision, 0);
+    assert_not_found(registry::get_trust_keyset_version(&pool, A.tenant, &upload.id).await);
+    assert_eq!(versions(&pool, A, &A.keyset()).await, old);
+    assert_eq!(lineage(&pool, A).await, before);
+
+    // Another operator's approval, an instance security_admin's, on the
+    // tenant's path writes it as uploaded: the window to the microsecond,
+    // enabled, the projection and fingerprint the upload validated to, and
+    // the provenance.
+    let applied = approve(
+        &pool,
+        ApprovalScope::Tenant(A.tenant),
+        "op_kv",
+        &pending,
+        at(T0 + 20),
+    )
+    .await;
+    let written = registry::get_trust_keyset_version(&pool, A.tenant, &upload.id)
+        .await
+        .unwrap();
+    assert_eq!(applied, Applied::KeysetVersion(written.clone()));
+    let projection: JsonObject = serde_json::from_str(keys.public_json()).unwrap();
+    assert_eq!(
+        written,
+        TrustKeysetVersion {
+            public_jwks: projection,
+            fingerprint: keys.fingerprint().as_str().into(),
+            ..stored(&upload, Status::Enabled, 1)
+        }
+    );
+    let mut expected = old.clone();
+    expected.insert(0, written);
+    assert_eq!(versions(&pool, A, &A.keyset()).await, expected);
+    // The parent, source, binding and grant keep their IDs, columns and
+    // revisions, and the other tenant is unchanged.
+    assert_eq!(lineage(&pool, A).await, before);
+    assert_eq!(tenant_snapshot(&pool, B).await, other_before);
+    db.drop([pool]).await;
 }
 
 #[tokio::test]
