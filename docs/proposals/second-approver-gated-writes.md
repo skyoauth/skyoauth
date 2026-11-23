@@ -1,14 +1,14 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: proposal only, drafted 2026-11-23 for the lead's review agent and
-then the user's acceptance. Nothing here is implemented: no migration, no
+Status: Proposed, not accepted. Drafted 2026-11-23 for the lead's review agent
+and then the user's acceptance. Nothing here is implemented: no migration, no
 production code, no endpoint, and no T00.x box is ticked. Every choice below
-that goes beyond the written spec is a "provisional lead pick, 2026-11-23"
-(the Decisions list numbers them D1 to D29); "(inferred)" marks a point
-where the spec is silent. All of them, and the lead decisions the spec
-records, stay provisional until the maintainer ratifies the ADRs
-(T00.8–T00.17, Gate M0); this text ratifies no ADR. The widening ruling it
-builds on is the user's (2026-11-22, relayed by the lead), not a pick.
+that goes beyond the written spec is a "provisional lead pick, 2026-11-23" (the
+Decisions list numbers them D1 to D29); "(inferred)" marks a point where the
+spec is silent. All of them, and the lead decisions the spec records, stay
+provisional until the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0); this
+text ratifies no ADR. The widening ruling it builds on is the user's
+(2026-11-22, relayed by the lead), not a pick.
 
 ## Problem
 
@@ -369,7 +369,7 @@ trigger `trust_source_egress_enabled`. For example:
 
 The unnamed `0004` checks carry PostgreSQL's default names, as
 `KNOWN_CONSTRAINTS` lists them (`service/src/persistence/registry/error.rs`,
-lines 329-394). These values come from the typed input (`NewTrustSource`,
+lines 329-400). These values come from the typed input (`NewTrustSource`,
 `TrustSourceChanges`, `model.rs:909-953`, and the version's window), so a
 request the service accepts can be approved and then refused at every approve.
 Each refuses the approve as it refuses the direct write (`AlreadyExists`,
@@ -413,7 +413,7 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    (Q5; D21).
 4. The operation row `FOR NO KEY UPDATE`, read again: consumed, revoked or not
    an approvable kind is `NotApprovable` with its reason (expiry is checked in
-   step 5, after the last row lock); a digest or expected revision unequal to
+   step 6, after the registry write); a digest or expected revision unequal to
    the echo, or a digest unequal to the one `prepare_approval` read, is
    `EchoMismatch`; a recomputed digest unequal to the stored one, or (a keyset
    create) a prepared `ValidatedKeyset::public_json` not byte for byte equal to
@@ -430,22 +430,31 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    compare-and-set). For the toggle: the policy row `FOR NO KEY UPDATE`
    and its compare-and-set. The policy row is not read for a trust kind:
    an approval stays valid if the toggle went off meanwhile (inferred).
-   **The clock** (D28): the step function takes the operation's
-   `expires_at` as a deadline and samples the injected clock once, after
-   its last row lock and before the registry write. `now >= expires_at` is
-   `NotApprovable(Expired)`; otherwise that one sample is the write's time,
-   both events' time and `consumed_at`. An approve that waited on the
-   operator, operation or target locks past the expiry is therefore
-   refused, instead of recording a `consumed_at` taken before it waited,
-   which the `0005` check (`consumed_at < expires_at`, `0005:328-329`),
-   comparing the two stored values only, would accept.
-6. Last, through `append_audit_event` (so the head is taken here):
+   The step function ends with the registry write and appends nothing: it
+   returns the row and the domain event, unstamped (D26).
+6. **The clock** (D28): after the registry write and before the first
+   append, the approve samples the injected clock once. `now >= expires_at`
+   is `NotApprovable(Expired)`, and the savepoint rollback undoes the
+   registry write, so nothing is written. Otherwise that one sample is
+   both events' time and `consumed_at`; it is needed for nothing earlier,
+   since trust rows store no write time and the modules' `now` feeds only
+   the event timestamp (`source.rs:578`, `:664`; `keyset.rs:703`). Every
+   wait that can be long comes before the sample: the operator, operation
+   and target locks, the parse permit and the overlap parse, a conflicting
+   uncommitted unique key at the insert, and a source compare-and-set's
+   `FOR UPDATE`, which waits for every `principal_binding` and
+   `consumed_assertion` insert through the source (`source.rs:136-152`). An
+   approve that waited past the expiry is therefore refused, instead of
+   recording a `consumed_at` taken before it waited, which the `0005`
+   check (`consumed_at < expires_at`, `0005:328-329`), comparing the two
+   stored values only, would accept.
+7. Last, through `append_audit_event` (so the head is taken here):
    `administrative_operation.approve`, the approve operation insert, the
    domain event, and the update of the pending row (`consumed_at` the
-   step 5 sample, `outcome = 'applied'`, revision + 1), whose row step 4
-   already holds, so it does not wait (README:1042-1046). The wait for the
-   head comes after the sample; it is held only for appends and is not
-   covered (Limits).
+   step 6 sample, `outcome = 'applied'`, revision + 1), whose row step 4
+   already holds, so it does not wait (README:1042-1046). The waits inside
+   the append (the tenant row `FOR KEY SHARE` and the audit head) come
+   after the sample and are not covered (Limits).
 
 A failure anywhere rolls the savepoint back: the target is unchanged and
 the operation stays pending until it expires, so an approval refused for
@@ -468,11 +477,11 @@ operations: each is `RequesterNotAuthorized` at approve until it expires.
 They cancel with the new credential (the cancel authorizes by `actor_id`)
 and submit again. A restoration revokes every credential still unrevoked
 (`recovery.rs:146-151`), so after it every pending operation is
-`RequesterNotAuthorized` until it expires. The replacement operator is a
-new identity (`recovery.rs:152-158`), so the replaced requester cannot
-cancel; a `security_admin` rejects the operations, or they expire. Another
-requester can cancel only once a new credential is enrolled for their
-identity.
+`RequesterNotAuthorized` until it expires. It does not disable any
+identity, and the replacement operator is a new identity
+(`recovery.rs:152-158`): a requester, the replaced one included, can
+cancel once a credential is enrolled for their identity. Until then a
+`security_admin` rejects the operations, or they expire.
 
 **The toggle** (`submit_widening_toggle`) follows the request steps with
 the policy row as target: instance `security_admin`; then the policy row
@@ -698,18 +707,17 @@ pub(crate) struct Requester {
     pub credential_id: String,
 }
 
-/// The server clock, sampled by the approve after its last row lock
-/// (D28). Production reads `SystemTime::now()`; tests inject their own.
+/// The server clock, sampled by the approve after its registry write and
+/// before its first append (D28). Production reads `SystemTime::now()`;
+/// tests inject their own.
 pub trait Clock: Sync {
     fn now(&self) -> SystemTime;
 }
 
-/// When the step function samples the clock: a request passes its `now`
-/// unchecked; an approve passes the clock and the operation's expiry.
-pub(crate) enum WriteTime<'a> {
-    Request(SystemTime),
-    Approve { clock: &'a dyn Clock, deadline: SystemTime },
-}
+/// A step function's domain event, without its ID, time and outcome; the
+/// caller stamps and appends it (the request with its `now`, the approve
+/// with its one clock sample).
+pub(crate) struct UnstampedEvent { /* action, object, revisions, tenant */ }
 
 #[non_exhaustive]
 pub enum Applied {
@@ -784,19 +792,16 @@ pub async fn submit_enable_version(
 // Post-authorization steps (D26): no operator lookup of their own; both
 // submit_* (after step 1) and approve_operation (after
 // authorize_approval_locked) call them. Each takes the policy decision
-// already made and runs the module's steps 2 to 7 (keyset) or 2 to 5
-// (source).
+// already made and runs the module's steps 2 to 6 (keyset) or 2 to 4
+// (source), through the registry write; the caller appends the event.
 pub(crate) async fn apply_create_version(
     transaction: &mut Transaction<'_, Postgres>,
     requester: &Requester,
     new: &NewKeysetVersion<'_>,
-    time: WriteTime<'_>,
-    event_id: &str,
-    outcome: &str,
-) -> Result<(TrustKeysetVersion, SystemTime), KeysetWriteError>; // + time
+) -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError>;
 pub(crate) async fn apply_enable_version(/* as above, with tenant_id, id,
-    expected_revision */) -> Result<(TrustKeysetVersion, SystemTime),
-    KeysetWriteError>;
+    expected_revision */)
+    -> Result<(TrustKeysetVersion, UnstampedEvent), KeysetWriteError>;
 
 // service/src/trust/source.rs
 pub async fn submit_create_source(
@@ -815,12 +820,11 @@ pub async fn submit_update_source(
 ) -> Result<Gated<TrustSource>, SourceWriteError>;
 
 // Post-authorization steps (D26), as for keysets.
-pub(crate) async fn apply_create_source(/* transaction, requester, new,
-    time, event_id, outcome */)
-    -> Result<(TrustSource, SystemTime), SourceWriteError>;
+pub(crate) async fn apply_create_source(/* transaction, requester, new */)
+    -> Result<(TrustSource, UnstampedEvent), SourceWriteError>;
 pub(crate) async fn apply_update_source(/* transaction, requester,
-    tenant_id, id, expected_revision, changes, time, event_id, outcome */)
-    -> Result<(TrustSource, SystemTime), SourceWriteError>;
+    tenant_id, id, expected_revision, changes */)
+    -> Result<(TrustSource, UnstampedEvent), SourceWriteError>;
 // service/src/operation/mod.rs: apply_policy_toggle, likewise.
 
 // service/src/persistence/registry/operation.rs (new): bare, check nothing
@@ -1007,11 +1011,15 @@ The `0005` order puts the operator rows first and the audit head last
 2. the pending operation row `FOR NO KEY UPDATE` (`administrative_operation`
    is the fifth `0005` table, README:1030-1032);
 3. the module's rows, as request step 3 (for the toggle, the policy row
-   `FOR NO KEY UPDATE`); then, with every row lock held, the one clock
-   sample and the expiry check (D28);
-4. the registry write;
-5. the audit head, last: the approve event, the approve operation insert,
-   the domain event, then the update of the pending row, locked in step 2.
+   `FOR NO KEY UPDATE`);
+4. the registry write (a source compare-and-set takes the source row
+   `FOR UPDATE` here);
+5. the one clock sample and the expiry check (D28), with every row the
+   decision depends on locked;
+6. the audit head, last (`append_audit_event`, which first takes the
+   tenant row `FOR KEY SHARE`): the approve event, the approve operation
+   insert, the domain event, then the update of the pending row, locked in
+   step 2.
 
 **Cancel and reject:** the operator rows, the pending row
 `FOR NO KEY UPDATE`, then the head, the event, the revoking operation and
@@ -1059,9 +1067,17 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
 - `now` is the service's clock, as for every write here; the table has no
   creation time, so the 24-hour bound is the service's rule, not the
   database's (README:958-959 asks only for an expiry). The approve samples
-  it after its last row lock (D28); the wait for the audit head comes
-  after the sample, so an approve can commit slightly after `expires_at`
-  with a `consumed_at` before it. The head is held only for appends.
+  it after its registry write, just before its first append (D28). The
+  waits inside the append, for the tenant row `FOR KEY SHARE` and the audit
+  head, come after the sample, so an approve can commit after `expires_at`
+  with a `consumed_at` before it. This is accepted because every row the
+  decision depends on stays locked from before the sample until the
+  commit; the wait is bounded by other transactions' appends, not by this
+  one; the audit chain has no rule ordering events by timestamp; and every
+  existing write already stamps its event before its head wait. The
+  overshoot is small only if other transactions hold the tenant row and
+  the head briefly, which holds while every writer commits promptly after
+  its append (an assumption, not a guarantee).
 - The `0012` guard, if accepted, is a tripwire against application DML,
   not a security boundary (README "Limits"); it cannot check roles or the
   digest.
@@ -1105,7 +1121,10 @@ The implementation PRs must have (owned by the test session; section
   microsecond before (injected clock); an approve that waits on a lock (the
   target row held by another connection) while the injected clock is advanced
   past `expires_at` is `NotApprovable(Expired)` and writes nothing, and with the
-  clock left before it, records the post-lock sample as `consumed_at` (D28);
+  clock left before it, records the post-write sample as `consumed_at`; a
+  source update whose compare-and-set waits behind a `FOR KEY SHARE` holder
+  (an uncommitted binding insert through the source) while the injected
+  clock is advanced past `expires_at` is refused and writes nothing (D28);
   consumed, revoked, wrong kind (a recovery challenge's ID); another tenant's
   operation on a tenant path, a tenant operation on the instance path and the
   reverse (`NotFound`); a requester whose role was disabled (Q5); a cancel by
@@ -1135,7 +1154,10 @@ The implementation PRs must have (owned by the test session; section
   case: a pending toggle is listed on the instance path (`tenant_id = $1`
   bound to `NULL` matches nothing, so a single-statement implementation
   would silently list nothing there). The digest recomputed from a read
-  response alone, with no other input, equals the stored one (D29).
+  response alone, with no other input, equals the stored one (D29),
+  including for a version whose `effective_at_us` and `expires_at_us` are
+  above 2^53 (the plan as canonical text; the envelope integers parsed as
+  exact i64).
 - **Keysets.** A gated create writes no `trust_keyset_version` row until
   approved; an overlap introduced between request and approve refuses, and
   passes after the conflict is disabled; the cap reached meanwhile;
@@ -1169,7 +1191,8 @@ dropped; the expiry predicate dropped; the policy row read without
 `FOR SHARE` (the toggle race); the toggle's policy row taken `FOR SHARE`
 (two toggles); `prepare_approval` parsing before it authorizes; the
 requester's credential check dropped, or its `status` check dropped;
-the clock sampled before the locks; a member left out of the read
+the clock sampled before the locks, or before the registry write; a
+member left out of the read
 response's digest envelope; a create classified as not widening; the
 approve's overlap check skipped; the in-transaction parse moved back to
 the Stage A pool.
@@ -1305,8 +1328,10 @@ the Stage A pool.
     `apply_enable_version`, `apply_create_source`, `apply_update_source`,
     `apply_policy_toggle`) take the authorized
     `Requester { admin_id, credential_id }`, which `authorize_trust_admin`
-    returns in place of the bare `admin_id` (PRs 4 and 5), and a
-    `WriteTime`; both `submit_*` and `approve_operation` call them.
+    returns in place of the bare `admin_id` (PRs 4 and 5), run through the
+    registry write and return the domain event unstamped; both `submit_*`
+    (which stamps it with its `now`) and `approve_operation` (which stamps
+    it with its one clock sample, D28) call them and append the event.
     Rejected: calling the existing writers from the approve (they authorize
     by `public_identity`, `write.rs:43-59`, which the approve does not have
     for the requester); duplicating the steps in `crate::operation`.
@@ -1318,11 +1343,18 @@ the Stage A pool.
     range, unique and foreign-key checks stay approve-time. Rejected:
     duplicating every constraint in the service (drift); none (a request
     the service accepts is refused at every approve for a typo).
-28. **D28.** **The approve samples a fresh server clock after its last row
-    lock**, through an injected `Clock`, and uses that one sample for the
-    expiry check, the write, the events and `consumed_at`. Rejected: one
-    `now` passed in before the locks (an approve that waited past the
-    expiry would be recorded as consumed before it); a database clock
+28. **D28.** **The approve samples a fresh server clock after its registry
+    write, just before `append_audit_event`**, through an injected `Clock`,
+    and uses that one sample for the expiry check, both events and
+    `consumed_at`; an expired result rolls the savepoint back, so nothing
+    is written. Trust rows store no write time, so nothing earlier needs
+    it. Only the waits inside the append remain after the sample (Limits).
+    Rejected: one `now` passed in before the locks (an approve that waited
+    past the expiry would be recorded as consumed before it); a sample
+    after the row locks but before the registry write (a source
+    compare-and-set's `FOR UPDATE` waits for every binding insert and
+    token exchange through the source, `source.rs:136-152`, and an insert
+    waits on a conflicting uncommitted unique key); a database clock
     (`clock_timestamp()`; every other write here takes the caller's clock,
     and tests could not inject it).
 29. **D29.** **The read response returns the whole digest envelope**: the
@@ -1330,7 +1362,14 @@ the Stage A pool.
     `expected_revision`, `expires_at` as the integer microseconds the
     preimage uses (beside any display form) and the plan exactly as the
     preimage holds it, so the operator client can recompute the digest
-    from the response alone (Q1). Rejected: returning the digest without
+    from the response alone (Q1). The plan is returned as its canonical
+    text (a JSON string holding the bytes the preimage embeds), not as a
+    JSON value: the `0007` range lets `effective_at_us` and `expires_at_us`
+    exceed 2^53, which a client parsing numbers as floating point would
+    round, recomputing a different digest and blocking approval of a
+    far-future window. The envelope's own integers (`expected_revision`,
+    `expires_at`) are exact i64 and the client must parse them as such.
+    Rejected: returning the digest without
     its inputs (the approver, a different operator, cannot know the
     requester's `actor_id`).
 
@@ -1349,15 +1388,15 @@ as fail-safe for bindings and grants (ADR-008 item 3).
 Questions for the user, each with the recommended answer:
 
 1. **Q1.** **Expiry and read path (OQ-API-14).** Recommended: a fixed 24-hour
-   `expires_at`; `GET /admin/v1/tenants/{tenant}/operations/{operation}`
-   and a list of open operations (and the instance twins), readable by
-   instance `security_admin`, the requester and the tenant `auditor`,
-   returning the digest and the whole digest envelope: the operation `id`,
-   the requester's `actor_id`, `kind`, `tenant_id`, `expected_revision`,
-   `expires_at` as the integer microseconds the preimage uses, and the
-   plan (D29). The operator client recomputes the digest from that
-   response alone before echoing it, so an approver never echoes a digest
-   it has not checked against what it read.
+   `expires_at`; `GET /admin/v1/tenants/{tenant}/operations/{operation}` and a
+   list of open operations (and the instance twins), readable by instance
+   `security_admin`, the requester and the tenant `auditor`, returning the
+   digest and the whole digest envelope: the operation `id`, the requester's
+   `actor_id`, `kind`, `tenant_id`, `expected_revision`, `expires_at` as the
+   integer microseconds the preimage uses, and the plan as its canonical text
+   (D29). The operator client recomputes the digest from that response alone
+   before echoing it, so an approver never echoes a digest it has not checked
+   against what it read.
 2. **Q2.** **Is a disable-only source update widening?** The ruling says "a
    trust source write", so until the user answers, it is (D1). Recommended:
    accept the exception, not widening, like a soft disable of a binding or
