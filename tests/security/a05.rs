@@ -47,9 +47,12 @@
 //! - **Positive, upload.** A one-key set (the RFC 7517 appendix A.1 P-256
 //!   public key) and a three-key set (the RFC 7638 RSA key, a P-256 key and
 //!   the RFC 8037 Ed25519 key, with `use` and `key_ops`) are validated and
-//!   written as enabled versions through the gated create; each is stored
-//!   as its canonical public projection and fingerprint, whose keys carry
-//!   only `alg`, `kty`, `kid` and their type's public members
+//!   written as enabled versions through the gated create. The expected
+//!   projection and fingerprint of each are written out here from the
+//!   input keys, never taken from the validator: every key, with its `kid`,
+//!   its type's public members and their input values, `alg` where the
+//!   upload had it, and nothing else (`use` and `key_ops` dropped). Stage
+//!   A's output and the stored row must both equal them
 //!   (`a05_pos_public_only_jwks_upload_is_accepted`).
 //! - **Negative, private members.** A key with one of the eight private or
 //!   symmetric members `d`, `p`, `q`, `dp`, `dq`, `qi`, `oth`, `k` (RFC 7518
@@ -62,7 +65,7 @@
 //!   private keys and an `oct` key. The same sets written through the
 //!   registry floor are refused by `trust_keyset_version_public_jwks_check`.
 //!   A good upload whose `provenance` names a private member, nested in an
-//!   array, is refused by `submit_create_version` with
+//!   array, and no other one, is refused by `submit_create_version` with
 //!   `PrivateMemberInProvenance` (an inferred rule of `trust::keyset`).
 //!   After each refusal the keyset has no version and the audit chain no
 //!   new event; a good upload is then written, as the control
@@ -314,10 +317,14 @@ const PRIVATE: [&str; 8] = ["d", "p", "q", "dp", "dq", "qi", "oth", "k"];
 const KEY_REFERENCE: [&str; 3] = ["x5u", "x5c", "jku"];
 
 /// A plausible value of `member`: the shape it has in a real private key or
-/// a real header, never one the check could depend on.
+/// a real header, never one the check could depend on. It names no private
+/// member itself, so `member` is the only one in a key or provenance built
+/// with it: the `oth` entries keep `r` and `t` and leave out their `d`
+/// (RFC 7518 section 6.3.2.7), which the recursive provenance check would
+/// otherwise refuse in place of `oth`.
 fn member_value(member: &str) -> Value {
     match member {
-        "oth" => json!([{"r": P256_D, "d": P256_D, "t": P256_D}]),
+        "oth" => json!([{"r": P256_D, "t": P256_D}]),
         "x5u" => json!("https://keys.a.example/cert.pem"),
         "jku" => json!("https://keys.a.example/jwks.json"),
         "x5c" => json!(["MIIBszCCAVmgAwIBAgIUQ2VydGlmaWNhdGU"]),
@@ -661,18 +668,41 @@ const PUBLIC_JWKS_REFUSAL: Refusal = Refusal {
     constraint: "trust_keyset_version_public_jwks_check",
 };
 
-/// The members a stored projection's key may carry: `alg`, `kty`, `kid`
-/// and the public members of its type.
-const PROJECTED_MEMBERS: [&str; 8] = ["alg", "kty", "kid", "n", "e", "crv", "x", "y"];
+/// An accepted upload and what it must be stored as, written out from the
+/// input keys: its keys' `kid`s, its canonical public projection and that
+/// projection's fingerprint.
+struct Accepted {
+    id: &'static str,
+    upload: Value,
+    kids: &'static [&'static str],
+    projection: String,
+    fingerprint: &'static str,
+}
 
-#[tokio::test]
-async fn a05_pos_public_only_jwks_upload_is_accepted() {
-    let (db, pool) = upload_fixture().await;
-    let uploads = [
-        ("kv_one", set(vec![good_key()])),
-        (
-            "kv_three",
-            set(vec![
+/// The two accepted uploads. Each projection is the input keys written out
+/// in `jwk::projection`'s canonical form: `{"keys":[…]}`, the keys sorted
+/// by `kid` (the input order of the three-key set is `rsa`, `ec`, `ed`),
+/// each key's members in lexicographic order, no whitespace; the members
+/// `kid`, `kty`, the type's public members with their input values, and
+/// `alg` only where the upload had it (`use` and `key_ops` dropped). Each
+/// fingerprint is the unpadded base64url SHA-256 of that text, computed
+/// outside the library (Python `hashlib.sha256` and
+/// `base64.urlsafe_b64encode`, `=` stripped) and pinned here.
+fn accepted_uploads() -> [Accepted; 2] {
+    let (ec_x, ec_y) = P256_1G;
+    [
+        Accepted {
+            id: "kv_one",
+            upload: set(vec![good_key()]),
+            kids: &["good"],
+            projection: format!(
+                r#"{{"keys":[{{"crv":"P-256","kid":"good","kty":"EC","x":"{P256_X}","y":"{P256_Y}"}}]}}"#
+            ),
+            fingerprint: "QaEpbe93pWl7PXKJD4lsM55i9Xh0IzQquiGvQYGrsRo",
+        },
+        Accepted {
+            id: "kv_three",
+            upload: set(vec![
                 with(
                     with(rsa("rsa"), "use", json!("sig")),
                     "key_ops",
@@ -681,14 +711,45 @@ async fn a05_pos_public_only_jwks_upload_is_accepted() {
                 with(p256("ec", P256_1G), "alg", json!("ES256")),
                 with(ed25519("ed"), "use", json!("sig")),
             ]),
-        ),
-    ];
+            kids: &["ec", "ed", "rsa"],
+            projection: format!(
+                concat!(
+                    r#"{{"keys":["#,
+                    r#"{{"alg":"ES256","crv":"P-256","kid":"ec","kty":"EC","x":"{ec_x}","y":"{ec_y}"}},"#,
+                    r#"{{"crv":"Ed25519","kid":"ed","kty":"OKP","x":"{ed_x}"}},"#,
+                    r#"{{"alg":"RS256","e":"AQAB","kid":"rsa","kty":"RSA","n":"{rsa_n}"}}"#,
+                    r#"]}}"#,
+                ),
+                ec_x = ec_x,
+                ec_y = ec_y,
+                ed_x = ED25519_X,
+                rsa_n = RSA_N,
+            ),
+            fingerprint: "2uCIdszkdVr_uAuweJyNtxnWIgVdhYmC6AZKS5bMJXs",
+        },
+    ]
+}
+
+#[tokio::test]
+async fn a05_pos_public_only_jwks_upload_is_accepted() {
+    let (db, pool) = upload_fixture().await;
     let mut expected = Vec::new();
-    for (step, (id, value)) in uploads.into_iter().enumerate() {
+    for (step, accepted) in accepted_uploads().into_iter().enumerate() {
+        let Accepted {
+            id,
+            upload: value,
+            kids,
+            projection,
+            fingerprint,
+        } = accepted;
         let step = u64::try_from(step).unwrap();
         let keys = upload(value)
             .await
             .unwrap_or_else(|err| panic!("{id}: {err:?}"));
+        // Stage A's output is the written-out projection, byte for byte,
+        // and its fingerprint.
+        assert_eq!(keys.public_json(), projection, "{id}");
+        assert_eq!(keys.fingerprint().as_str(), fingerprint, "{id}");
         let outcome = create_version(
             &pool,
             id,
@@ -702,16 +763,27 @@ async fn a05_pos_public_only_jwks_upload_is_accepted() {
         let Gated::Applied(row) = outcome else {
             panic!("{id}: the create is not applied: {outcome:?}");
         };
-        // Stored as the validated public projection and its fingerprint.
-        let projection: JsonObject = serde_json::from_str(keys.public_json()).unwrap();
+        // Stored as the written-out projection and fingerprint: every key,
+        // each with exactly its expected members and values.
+        let stored_kids: Vec<&str> = row.public_jwks["keys"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: no keys array"))
+            .iter()
+            .map(|key| {
+                key["kid"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id}: a key without kid"))
+            })
+            .collect();
+        assert_eq!(stored_kids, kids, "{id}");
         assert_eq!(
             row,
             TrustKeysetVersion {
                 id: id.into(),
                 tenant_id: TENANT.into(),
                 keyset_id: KEYSET.into(),
-                public_jwks: projection,
-                fingerprint: keys.fingerprint().as_str().into(),
+                public_jwks: object(serde_json::from_str(&projection).unwrap()),
+                fingerprint: fingerprint.into(),
                 effective_at: at(0),
                 expires_at: None,
                 status: Status::Enabled,
@@ -727,15 +799,6 @@ async fn a05_pos_public_only_jwks_upload_is_accepted() {
             row,
             "{id}"
         );
-        // Its keys carry public members only.
-        for key in row.public_jwks["keys"].as_array().unwrap() {
-            for member in key.as_object().unwrap().keys() {
-                assert!(
-                    PROJECTED_MEMBERS.contains(&member.as_str()),
-                    "{id}: stored member {member}"
-                );
-            }
-        }
         expected.push(row);
     }
     assert_eq!(versions(&pool).await, expected);
