@@ -1085,16 +1085,36 @@ async fn every_consume_miss_is_the_same_not_restorable() {
     )
     .await
     .unwrap();
+    // Its audit event is of its tenant: the 0005 audit guard refuses an
+    // operation of ten_a recorded by an instance event.
+    let mut transaction = pool.begin().await.unwrap();
+    registry::test_support::append_audit_event(
+        &mut transaction,
+        &NewAuditEvent {
+            id: "aud_raw_tenant".into(),
+            tenant_id: Some("ten_a".into()),
+            timestamp: now(),
+            actor: AuditActor::Operator("deployment_operator".into()),
+            action: "administrative_operation.create".into(),
+            object_id: "raw_tenant".into(),
+            previous_revision: None,
+            new_revision: Some(1),
+            outcome: "success".into(),
+        },
+    )
+    .await
+    .unwrap();
     sqlx::query(
         "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, request_digest, \
          expected_revision, immutable_plan, challenge_hash, expires_at, outcome, audit_id) \
          SELECT 'raw_tenant', 'ten_a', actor_id, kind, request_digest, expected_revision, \
-         immutable_plan, challenge_hash, expires_at, outcome, audit_id \
+         immutable_plan, challenge_hash, expires_at, outcome, 'aud_raw_tenant' \
          FROM administrative_operation WHERE id = 'raw_good'",
     )
-    .execute(&pool)
+    .execute(&mut *transaction)
     .await
     .unwrap();
+    transaction.commit().await.unwrap();
 
     let bound = binding();
     let other_digest = ChallengeBinding {

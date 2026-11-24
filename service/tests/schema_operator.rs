@@ -97,6 +97,10 @@ const READERS: [&str; 2] = [
     "skyoauth_check_operation_revocation",
 ];
 
+/// The audit guard function 0005 adds; it reads `audit_event`, named with
+/// its schema (schema_operation_approval_guard.rs).
+const AUDIT_READER: &str = "skyoauth_check_operation_audit_event";
+
 /// A row as column and SQL value pairs.
 type Row = &'static [(&'static str, &'static str)];
 
@@ -368,12 +372,13 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
             "skyoauth_reject_consume_after_revoke",
         ),
         guard("administrative_operation", "revision", revision),
-        // The approval and revocation guards (AFTER triggers).
+        // The approval, audit and revocation guards (AFTER triggers).
         guard(
             "administrative_operation",
             "approval_check",
             "skyoauth_check_operation_approval",
         ),
+        guard("administrative_operation", "audit_check", AUDIT_READER),
         guard(
             "administrative_operation",
             "revocation_check",
@@ -423,7 +428,9 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
     // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update, 32
     // truncate.
     for (name, tgtype, columns) in &events {
-        if name == "administrative_operation_approval_check" {
+        if name == "administrative_operation_approval_check"
+            || name == "administrative_operation_audit_check"
+        {
             assert_eq!((*tgtype, *columns), (1 | 4, 0), "{name}");
             continue;
         }
@@ -492,6 +499,28 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         for table in TABLES.iter().filter(|t| **t != "administrative_operation") {
             assert!(!source.contains(table), "{name} names {table}");
         }
+    }
+    // The audit guard pins the same path and names the one table it reads,
+    // audit_event, with its schema only, and no table of 0005.
+    let (config, source): (Vec<String>, String) = sqlx::query_as(
+        "SELECT p.proconfig, p.prosrc FROM pg_proc p
+         WHERE p.pronamespace = to_regnamespace(quote_ident(current_schema()))
+           AND p.proname = $1",
+    )
+    .bind(AUDIT_READER)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(config, ["search_path=pg_catalog, pg_temp"]);
+    assert_eq!(source.matches("audit_event").count(), 1, "{source}");
+    assert_eq!(
+        source.matches(" public.audit_event e").count(),
+        1,
+        "{source}"
+    );
+    let read = source.replace("'administrative_operation_", "'");
+    for table in TABLES {
+        assert!(!read.contains(table), "{AUDIT_READER} names {table}");
     }
 
     // IDs, keys, references and enumerations compare byte-wise; only the
@@ -1570,9 +1599,9 @@ async fn the_largest_keys_fit_their_indexes() {
     );
     let e = md5_id(9000);
     let sql = format!(
-        r#"INSERT INTO audit_event VALUES ({e}, NULL, 4, '\x03', '2026-11-20Z', 'adm_1', 'administrative_operation.create', 'op', NULL, NULL, 'pending');
+        r#"INSERT INTO tenant VALUES ({t}, 'big', 'ns_big', 'enabled');
+           INSERT INTO audit_event VALUES ({e}, {t}, 4, '\x03', '2026-11-20Z', 'adm_1', 'administrative_operation.create', 'op', NULL, NULL, 'pending');
            UPDATE audit_chain_head SET sequence = 4, head_hash = '\x04';
-           INSERT INTO tenant VALUES ({t}, 'big', 'ns_big', 'enabled');
            INSERT INTO trust_source VALUES ({s}, {t}, 'big', 'oidc_discovery', 'https://x', 'https://x/d',
                NULL, NULL, NULL, NULL, NULL, NULL, NULL, '["aud"]', '["RS256"]', '{{}}', 'on_demand_jwt', NULL,
                'single_use', 'enabled');
@@ -1582,7 +1611,7 @@ async fn the_largest_keys_fit_their_indexes() {
            INSERT INTO administrative_operation VALUES
                ({o}, {t}, {a}, 'tenant.update', sha512('o'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'pending', {e});
            INSERT INTO administrative_operation VALUES
-               ({p}, {t}, 'adm_2', 'approve', sha512('p'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL, {o}, 1, 'applied', 'evt_1');
+               ({p}, {t}, 'adm_2', 'approve', sha512('p'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL, {o}, 1, 'applied', {e});
            UPDATE administrative_operation SET revoked_at = '2026-11-20Z', revocation_operation_id = {p},
                revision = 2 WHERE id = {o};
            INSERT INTO consumed_assertion VALUES ({t}, {s}, sha512('jti'), {}, '2026-11-20Z', '2026-11-21Z')"#,
@@ -1907,13 +1936,16 @@ async fn administrative_operation_keeps_its_plan_and_references() {
         23514 UPDATE administrative_operation SET revoked_at = '2026-11-20Z', revocation_operation_id = 'op_3', revision = revision + 1 WHERE id = 'op_3'
     "#).await;
     // Kinds other than approve may name what they approve: a route bundle
-    // approval names its preparation. A consumed operation may also be
-    // revoked; see the next test.
+    // approval names its preparation, of its own tenant (the approval
+    // guard; schema_operation_approval_guard.rs). A consumed operation may
+    // also be revoked; see the next test.
     accepts(
         &pool,
         &op(&[
+            ("tenant_id", "'ten_a'"),
             ("kind", "'route_bundle_approval'"),
             ("approves_operation_id", "'op_3'"),
+            ("audit_id", "'evt_3'"),
         ]),
     )
     .await;
@@ -2324,11 +2356,16 @@ async fn assert_one_deadlock_victim(first: SqlTask, second: SqlTask) {
 }
 
 /// The audit append of a writer that already holds its row locks: lock the
-/// head, insert the next event and advance the head (0002).
-const APPEND_EVENT: &str = r"SELECT FROM audit_chain_head FOR UPDATE;
-    INSERT INTO audit_event VALUES ('evt_4', NULL, 4, '\x03', '2026-11-20Z', 'adm_2',
+/// head, insert the next event, in `tenant`'s scope (an SQL literal: the
+/// operation's, for the audit guard), and advance the head (0002).
+fn append_event(tenant: &str) -> String {
+    format!(
+        r"SELECT FROM audit_chain_head FOR UPDATE;
+    INSERT INTO audit_event VALUES ('evt_4', {tenant}, 4, '\x03', '2026-11-20Z', 'adm_2',
         'administrative_operation.create', 'op_5', NULL, NULL, 'pending');
-    UPDATE audit_chain_head SET sequence = 4, head_hash = '\x04'";
+    UPDATE audit_chain_head SET sequence = 4, head_hash = '\x04'"
+    )
+}
 
 /// Deadlock 1 of the README lock-ordering note: a writer that locks a row
 /// with FOR UPDATE and then waits for the audit head deadlocks with a head
@@ -2340,10 +2377,11 @@ const APPEND_EVENT: &str = r"SELECT FROM audit_chain_head FOR UPDATE;
 async fn for_update_on_a_referenced_row_deadlocks_with_the_audit_head() {
     let (db, pool) = seeded().await;
     let approve = format!(
-        "BEGIN; {APPEND_EVENT};
+        "BEGIN; {};
          INSERT INTO administrative_operation VALUES
              ('op_5', NULL, 'adm_2', 'approve', sha256('op_5'), 1, '{{}}', NULL, NULL, NULL, NULL, NULL,
-              'op_1', 1, 'applied', 'evt_4')"
+              'op_1', 1, 'applied', 'evt_4')",
+        append_event("NULL")
     );
     let mut locker = pool.acquire().await.unwrap().detach();
     let mut head = pool.acquire().await.unwrap().detach();
@@ -2391,12 +2429,13 @@ async fn a_row_updated_after_the_audit_head_must_be_locked_first() {
     let (db, pool) = seeded().await;
     let revoke = |lock_first: &str| {
         format!(
-            "BEGIN; {lock_first} {APPEND_EVENT};
+            "BEGIN; {lock_first} {};
              INSERT INTO administrative_operation VALUES
                  ('op_5', 'ten_a', 'adm_1', 'route_bundle_approval_revoke', sha256('op_5'), 1, '{{}}', NULL,
                   NULL, NULL, NULL, NULL, NULL, 1, 'applied', 'evt_4');
              UPDATE administrative_operation SET revoked_at = '2026-11-20 00:30Z', revocation_operation_id = 'op_5',
-                 revision = revision + 1 WHERE id = 'op_3'"
+                 revision = revision + 1 WHERE id = 'op_3'",
+            append_event("'ten_a'")
         )
     };
     let mut locker = pool.acquire().await.unwrap().detach();
@@ -2624,15 +2663,21 @@ async fn fk_violation(conn: &mut PgConnection, sql: &str, constraint: &str) {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn references_hold_back_deletes_and_are_never_deferred() {
     let (db, pool) = seeded().await;
-    // Rows referenced through exactly one foreign key each.
+    // Rows referenced through exactly one foreign key each. An operation of
+    // ten_o needs an audit event of ten_o (the audit guard), which would
+    // reference ten_o by a second foreign key, so op_t names the instance
+    // event evt_1 with that guard disabled for its one insert.
     run(
         &pool,
         "INSERT INTO tenant VALUES ('ten_r', 'r', 'ns_r', 'enabled'), ('ten_o', 'o', 'ns_o', 'enabled');
          INSERT INTO admin_identity VALUES ('adm_c', 'enabled'), ('adm_r', 'enabled');
          INSERT INTO admin_credential VALUES ('crd_c', 'adm_c', 'sha256:cc', 'ops-ca', 'enabled', NULL);
          INSERT INTO admin_role_binding VALUES ('rb_r', 'adm_r', 'auditor', 'ten_r', 'enabled');
+         ALTER TABLE administrative_operation DISABLE TRIGGER administrative_operation_audit_check;
          INSERT INTO administrative_operation VALUES
-             ('op_t', 'ten_o', 'adm_1', 'tenant.update', sha256('op_t'), 1, '{}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'pending', 'evt_1'),
+             ('op_t', 'ten_o', 'adm_1', 'tenant.update', sha256('op_t'), 1, '{}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'pending', 'evt_1');
+         ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operation_audit_check;
+         INSERT INTO administrative_operation VALUES
              ('op_w', NULL, 'adm_1', 'route_bundle_approval_revoke', sha256('op_w'), 1, '{}', NULL, NULL, NULL, NULL, NULL, NULL, 1, 'applied', 'evt_1'),
              ('op_v', NULL, 'adm_1', 'tenant.update', sha256('op_v'), 1, '{}', NULL, NULL, NULL, '2026-11-20Z', 'op_w', NULL, 1, 'revoked', 'evt_1')",
     )

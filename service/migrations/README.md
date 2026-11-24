@@ -749,12 +749,12 @@ that "Not done in `0004`" lists (T10.9). It reuses
 `skyoauth_check_recovery_key_rotation()` and
 `skyoauth_reject_consume_after_revoke()`. None reads a table, so each pins
 `search_path` to `pg_catalog, pg_temp`. Every trigger is `ENABLE ALWAYS`
-and raises `SK001` for a row it rejects. Since its amendment in place on
-2026-11-23 (pre-beta exception, "Conventions"), `0005` also adds the
-approval and revocation guards, two functions that read
-`administrative_operation` and raise `23514`, and an index for the
-approver's read path; see "Approval and revocation guards" below. A
-database created from the earlier `0005` is recreated.
+and raises `SK001` for a row it rejects. Since its amendments in place on
+2026-11-23 and 2026-11-24 (pre-beta exception, "Conventions"), `0005` also
+adds the approval, audit and revocation guards, three functions that read
+`administrative_operation` or `audit_event` and raise `23514`, and an index
+for the approver's read path; see "Approval, audit and revocation guards"
+below. A database created from an earlier `0005` is recreated.
 
 - **Authority.** Operators, their credentials and the recovery state are
   instance authority: instance security_admin enrolls operators and scoped
@@ -845,13 +845,14 @@ database created from the earlier `0005` is recreated.
   2026-11-21). An `INSERT` is not checked, and the database never compares
   the two timestamps (see the service rules below). An operation of kind `approve` names the operation it
   approves; other kinds may name one too, for example a
-  `route_bundle_approval` naming its preparation. No operation approves or
-  revokes itself. A
+  `route_bundle_approval` naming its preparation, and every kind names one
+  of its own tenant. No operation approves or revokes itself. A
   recovery challenge has an expiry, and nothing is consumed at or after its
   expiry (LT-107). `actor_id` is not a foreign key, because bootstrap and
   break-glass recovery act for actors that are not operator identities.
-  `audit_id` references the audit event that records the operation, so that
-  event is inserted first (see the ordering note below).
+  `audit_id` references the audit event that records the operation, of the
+  operation's tenant, so that event is inserted first (see the ordering
+  note below).
 - **Consumed assertions** (T10.9; ADR-016 items 6 and 7). The primary key
   `(tenant_id, trust_source_id, replay_key_digest)` makes consumption atomic
   across replicas. A replay fails with `23505` on `consumed_assertion_pkey`,
@@ -871,9 +872,9 @@ database created from the earlier `0005` is recreated.
   to the role, `revoked_at` and `revocation_operation_id` to each other,
   `challenge_hash` to `expires_at`, and `consumed_at` to `expires_at` when
   both are set; `approves_operation_id` is required only for kind
-  `approve`. `administrative_operation.tenant_id` is tied to nothing: the
-  service sets it to the `tenant_id` of its audit event (see the service
-  rules below). Only `admin_identity.created_at` (`now()`)
+  `approve`. `administrative_operation.tenant_id` is tied to the `tenant_id`
+  of its audit event by the audit guard (see "Approval, audit and
+  revocation guards" below). Only `admin_identity.created_at` (`now()`)
   and `revision` (1) have defaults.
 - **One-way and immutable state** (`SK001`). The set-once guard rejects a
   change to a named column once that column is not `NULL` and not `false`.
@@ -893,8 +894,8 @@ database created from the earlier `0005` is recreated.
   rejects an `UPDATE` that sets `consumed_at` on an operation whose
   `revoked_at` is already set and whose `consumed_at` is not; an `UPDATE`
   that leaves `consumed_at` unset still passes. The guards, each a
-  `BEFORE … FOR EACH ROW` trigger (the two `AFTER` guards of the amended
-  `0005` are under "Approval and revocation guards" below):
+  `BEFORE … FOR EACH ROW` trigger (the three `AFTER` guards of the amended
+  `0005` are under "Approval, audit and revocation guards" below):
 
   | Trigger                                            | Fires on           | Function                                 |
   | -------------------------------------------------- | ------------------ | ---------------------------------------- |
@@ -955,7 +956,7 @@ database created from the earlier `0005` is recreated.
   nullable columns, the keys and the triggers.
 
 - **Privileges.** The `BEFORE` guards read no table, so they need no grant;
-  the approval and revocation guards need `SELECT` (see below). Foreign
+  the approval, audit and revocation guards need `SELECT` (see below). Foreign
   key checks run as the table owner. Consuming a proof therefore needs only
   `INSERT` on `consumed_assertion`, with a plain `INSERT` or
   `ON CONFLICT DO NOTHING` without a conflict target. Naming the target
@@ -963,58 +964,100 @@ database created from the earlier `0005` is recreated.
   `SELECT` too and otherwise fails with `42501`. Pruning needs `DELETE`.
   The test `proof_consumption_needs_only_insert` checks each case.
 
-- **Approval and revocation guards** (IR-054;
+- **Approval, audit and revocation guards** (IR-054;
   `docs/proposals/second-approver-gated-writes.md` section 11 and D15).
   The review of `0005` first left these rules to the service (see the
   service rules below); on 2026-11-23 the user accepted a database
-  tripwire for them, folded into `0005` in place rather than added as a
-  new file (relayed by the lead; provisional until the maintainer ratifies
-  the ADRs, T00.8–T00.17, Gate M0). Choices marked "(inferred)" are the
+  tripwire for the approval and revocation rules, and on 2026-11-24 for
+  the two cross-scope references those guards left open (an operation's
+  audit event, and the approved operation of a kind other than
+  `approve`), each folded into `0005` in place rather than added as a new
+  file (relayed by the lead; provisional until the maintainer ratifies the
+  ADRs, T00.8–T00.17, Gate M0). Choices marked "(inferred)" are the
   implementation's.
-  - **Rule.** An operation of kind `approve` names an operation of its own
-    tenant, compared with `IS NOT DISTINCT FROM` (an instance approve, with
-    a `NULL` tenant, names only an instance operation, and a tenant approve
-    never an instance one), and is not by that operation's actor (byte-wise
-    `actor_id`). The tenant is checked first (inferred). Only kind
-    `approve`: a `route_bundle_approval` also names its preparation, and
-    one person may hold both roles there (IR-054), so it is not checked,
-    nor is any other kind. A revocation names a revoking operation of the
-    revoked row's tenant, on `INSERT` (`0005` lets an insert carry a
+  - **Rule.** An operation of any kind that names an approved operation
+    (`approves_operation_id`) names one of its own tenant, compared with
+    `IS NOT DISTINCT FROM` (an instance operation, with a `NULL` tenant,
+    names only an instance operation, and a tenant operation never an
+    instance one). No source makes a reference to another scope
+    legitimate: the proposal gives an `approve` the approved operation's
+    tenant, also when an instance `security_admin` approves (section 2,
+    "The approval"), the service rules below already asked the same of the
+    other kinds, and the `issuer_system` route bundle is prepared and
+    approved in the instance (gateway-containment GW-116); no document
+    gives a `route_bundle_approval` another scope than its preparation's.
+    An `approve` is also not by the approved operation's actor
+    (byte-wise `actor_id`); the tenant is checked first (inferred). The
+    actor check is for kind `approve` only: a `route_bundle_approval` also
+    names its preparation, and one person may hold both roles there
+    (IR-054; GW-130, GW-131), so its actor is not checked, nor is any other
+    kind's. Every operation names an audit event (`audit_id`) of its own
+    tenant, compared the same way: an instance operation an instance event
+    (`NULL` tenant), a tenant operation an event of that tenant. These two
+    checks run on `INSERT` only, since `tenant_id`, `approves_operation_id`
+    and `audit_id` never change. A revocation names a revoking operation of
+    the revoked row's tenant, on `INSERT` (`0005` lets an insert carry a
     revocation) and on an `UPDATE` that names `revocation_operation_id`.
     Nothing else is checked: the roles, the digest, the approved
     operation's state and the revoking operation's kind and actor (a
-    cancel is by the requester) stay service rules.
+    cancel is by the requester) stay service rules, and the audit event's
+    action, object and actor are not compared with the operation.
   - **Error.** A refusal is `23514` (`check_violation`) naming
     `administrative_operation_approves_same_tenant` (column
     `approves_operation_id`), `administrative_operation_approver_distinct`
-    (column `actor_id`) or `administrative_operation_revokes_same_tenant`
+    (column `actor_id`), `administrative_operation_audit_same_tenant`
+    (column `audit_id`) or `administrative_operation_revokes_same_tenant`
     (column `revocation_operation_id`), with the schema and table; the
     message names the table, never a value. The names are raised by the
     triggers and are not catalog constraints. `KNOWN_CONSTRAINTS` lists
     them; `SAME_TENANT_OPERATION` and `DISTINCT_APPROVER` hold them, so the
     registry maps them to `Invariant { kind: SameTenantOperation }` and
     `Invariant { kind: DistinctApprover }`, kinds of their own (inferred),
-    as it maps the `0010` and `0011` names.
+    as it maps the `0010` and `0011` names. The audit name shares
+    `SameTenantOperation` (inferred): it is the same rule on another
+    reference of the operation.
+  - **Trigger, not composite key, for the audit event** (inferred). A
+    composite foreign key from `(audit_id, tenant_id)` to
+    `audit_event (id, tenant_id)` would need a second unique key on the
+    append-only `audit_event` (sound, since `id` alone is unique, but a
+    second index on every event), and under the default `MATCH SIMPLE` it
+    checks nothing for an instance operation (`tenant_id` `NULL`), so an
+    instance operation could still name a tenant's event; `MATCH FULL`
+    refuses every instance operation. The trigger compares `NULL` too, as
+    the other two guards do, and leaves `audit_event` unchanged.
   - **Triggers and timing.** `administrative_operation_approval_check`
-    (`AFTER INSERT`, `WHEN (NEW.kind = 'approve')`) runs
-    `skyoauth_check_operation_approval()`, and
+    (`AFTER INSERT`, `WHEN (NEW.approves_operation_id IS NOT NULL)`) runs
+    `skyoauth_check_operation_approval()`,
+    `administrative_operation_audit_check` (`AFTER INSERT`, every row) runs
+    `skyoauth_check_operation_audit_event()`, and
     `administrative_operation_revocation_check`
     (`AFTER INSERT OR UPDATE OF revocation_operation_id`,
     `WHEN (NEW.revocation_operation_id IS NOT NULL)`) runs
-    `skyoauth_check_operation_revocation()`. Both are plain row triggers,
-    not deferrable and `ENABLE ALWAYS`, as those of `0010` and `0011`. They
-    fire at the end of the statement, after every `CHECK`, `NOT NULL` and
-    unique constraint and after the foreign-key checks, whose internal
-    triggers (`RI_ConstraintTrigger_…`) sort, and so fire, before them. So
-    a missing approved or revoking operation is still the foreign key's
-    `23503`, and an operation inserted earlier in the same statement is
-    seen.
-  - **Locks.** The guards read the referenced row's `tenant_id` and
-    `actor_id` without a row lock (inferred): both are immutable, deletes
-    are refused (`0006`), and the foreign-key check already holds the row
-    `FOR KEY SHARE`. So an approve or a revocation does not wait for the
-    `FOR NO KEY UPDATE` lock that an approver or a canceller holds on the
-    row it names, and holds nothing that conflicts with it.
+    `skyoauth_check_operation_revocation()`. All three are plain row
+    triggers, not deferrable and `ENABLE ALWAYS`, as those of `0010` and
+    `0011`, and fire in that (name) order, so a row that crosses two
+    references is refused for its approved operation first. They fire at
+    the end of the statement, after every `CHECK`, `NOT NULL` and unique
+    constraint and after the foreign-key checks, whose internal triggers
+    (`RI_ConstraintTrigger_…`) sort, and so fire, before them. So a missing
+    approved or revoking operation or audit event is still the foreign
+    key's `23503`, and an operation inserted earlier in the same statement
+    is seen. `administrative_operation_audit_id_fkey` is immediate, so an
+    operation inserted before its event fails with that `23503` even when
+    the transaction inserts the event later; an event inserted earlier in
+    the same transaction, uncommitted, is seen.
+  - **Locks.** The guards read the referenced row without a row lock
+    (inferred): an operation's `tenant_id` and `actor_id` are immutable and
+    its deletes are refused (`0006`), an audit event is append-only (`0002`
+    refuses its `UPDATE`, `DELETE` and `TRUNCATE`), and the foreign-key
+    check already holds the row `FOR KEY SHARE`. So an approve or a
+    revocation does not wait for the `FOR NO KEY UPDATE` lock that an
+    approver or a canceller holds on the row it names, and holds nothing
+    that conflicts with it. They add no step to the lock order of the
+    service rules below: the reads happen inside the operation's `INSERT`
+    of step 2 (after the audit head and the event) or the revocation's
+    `UPDATE` of step 3, take no lock and wait for none, and the audit guard
+    reads only the event's row, never `audit_chain_head`.
   - **Replica mode.** The guards fire under
     `session_replication_role = replica`; the foreign keys do not. A guard
     that finds no referenced row passes the row (inferred, as `0010`
@@ -1024,10 +1067,12 @@ database created from the earlier `0005` is recreated.
     and `0011` readers are: the schema is resolved by `current_schema()` at
     migrate time and the table named with it, `search_path` is pinned to
     `pg_catalog, pg_temp`, and they are `SECURITY INVOKER`. A role that
-    inserts an `approve` needs `SELECT` on `administrative_operation`'s
-    `id`, `tenant_id` and `actor_id`; one that writes a revocation needs
-    `SELECT` on `id` and `tenant_id`; otherwise `42501`. An operation that
-    names neither needs no `SELECT`. The second-approver flow also takes
+    inserts any operation needs `SELECT` on `audit_event`'s `id` and
+    `tenant_id`; one that inserts an operation naming an approved
+    operation (an `approve`, a `route_bundle_approval`) needs `SELECT` on
+    `administrative_operation`'s `id`, `tenant_id` and `actor_id`; one that
+    writes a revocation needs `SELECT` on `id` and `tenant_id`; otherwise
+    `42501`. The second-approver flow also takes
     the `instance_security_policy` row `FOR SHARE`, which needs `SELECT`
     on it and `UPDATE` on one of its columns: grant `UPDATE (instance_id)`,
     a column `instance_security_policy_immutable` keeps unchangeable, as
@@ -1040,7 +1085,7 @@ database created from the earlier `0005` is recreated.
     without an expiry (`approve`, `cancel`, `reject`) are never open. A
     provisional lead pick, 2026-11-23 (inferred), not ruled.
   - **Tests.** `service/tests/schema_operation_approval_guard.rs` checks
-    the rule, the errors, the catalog, replica mode, that no lock is taken
+    the rules, the errors, the catalog, replica mode, that no lock is taken
     and the privileges; `service/tests/schema_operator.rs` pins the
     triggers, functions and index with the rest of `0005`.
 
@@ -1066,10 +1111,12 @@ Choices marked "(inferred)" in `0005`, which no source dictates:
 - an `approve` must name an approved operation and other kinds may; no
   operation approves or revokes itself; an operation may be both consumed
   and revoked;
-- in the approval and revocation guards (2026-11-23): the tenant is
-  checked before the actor; a referenced row that is not found passes; the
-  referenced row is read without a lock; the errors map to invariant kinds
-  of their own; and the read-path index;
+- in the approval, audit and revocation guards (2026-11-23 and
+  2026-11-24): the tenant is checked before the actor; a referenced row
+  that is not found passes; the referenced row is read without a lock; the
+  errors map to invariant kinds of their own, the audit name to
+  `SameTenantOperation`; a trigger rather than a composite key for the
+  audit event; and the read-path index;
 - the immutable columns beyond the plan, digest, kind, actor and IDs listed
   above;
 - `digest_key_version` is an opaque ID; `retain_until` is after
@@ -1085,17 +1132,20 @@ The database does not enforce these rules; the service must:
   approver is not the actor, and that an approval or revocation of a
   tenant operation stays in its tenant, as service rules; since the
   amendment of 2026-11-23 the database enforces both as a tripwire (see
-  "Approval and revocation guards" above): an `approve` by the approved
-  operation's actor, or naming an operation of another tenant, and a
-  revocation by an operation of another tenant fail with `23514`. The
-  service still checks them first, and still checks the approver's role
-  and the approved operation's state, which the database does not;
+  "Approval, audit and revocation guards" above): an `approve` by the
+  approved operation's actor, or naming an operation of another tenant,
+  and a revocation by an operation of another tenant fail with `23514`.
+  The service still checks them first, and still checks the approver's
+  role and the approved operation's state, which the database does not;
 - give an operation of a kind other than `approve` that names an
   operation (a `route_bundle_approval` names its preparation) one of its
-  own tenant; the database does not check it, since the guard checks only
-  kind `approve`;
-- give an operation the `tenant_id` of the audit event that records it; the
-  database checks neither against the other;
+  own tenant, and give an operation the `tenant_id` of the audit event
+  that records it. Since the amendment of 2026-11-24 the database refuses
+  both crossings with `23514` as a tripwire too
+  (`administrative_operation_approves_same_tenant`,
+  `administrative_operation_audit_same_tenant`); the service still checks
+  them first. The database does not check which event of the tenant an
+  operation names (its action, `object_id` or actor);
 - give every pending gated write, `route_bundle_approval` and recovery
   challenge an `expires_at`; the database requires one only with a `challenge_hash`;
 - keep secrets out of `immutable_plan`: it is kept for the life of the row
@@ -1179,12 +1229,15 @@ The database does not enforce these rules; the service must:
      (a `bytea` key column takes no `COLLATE`; it already compares
      bytewise);
   2. then lock the audit head, insert the audit event and insert the
-     operation;
+     operation. The insert's guards read the event it names and any
+     operation it approves without a lock (see "Approval, audit and
+     revocation guards" above), so they add no lock and no wait here;
   3. then do the remaining updates. A revocation's `UPDATE` of the revoked
      row comes here, after the head lock, because it names the revoking
      operation, which exists only after step 2. It does not wait here: the
      revoker already waited in step 1 for the locks of the rows it needs,
-     before it took the audit head.
+     before it took the audit head, and its guard reads the revoking
+     operation without a lock.
 
   PostgreSQL locks the rows of such a statement as they are returned. The
   test `writers_locking_rows_in_key_order_wait_instead_of_deadlocking`

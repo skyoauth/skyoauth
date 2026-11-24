@@ -7,7 +7,9 @@ that review are marked "provisional lead pick, 2026-11-24"; the crate choice
 them stay provisional until the maintainer ratifies the ADRs (T00.8–T00.17,
 Gate M0); this text ratifies no ADR and ticks no task. It changes no code: the
 implementation PR does, and edits the places under "Reconciliation". Line
-numbers refer to `main` at `3028360`.
+numbers refer to `main` at `3028360`, except those into
+`service/migrations/README.md`, retargeted after the 2026-11-24 amendment of
+`0005` moved them.
 
 > **Departs from the approved shape.** The user approved a "verified
 > response" value that only the library's verifier builds and that
@@ -452,8 +454,8 @@ lead's. This proposal edits none of them.
 | `service/src/persistence/registry/mod.rs:349-352`, `:363-364` | the recovery writers stay public, "an open decision"; "does not verify a recovery signature (the verifier does"                 | the restore verifies                                                                       |
 | `service/src/persistence/registry/operator.rs:37-39`          | nothing stops "enrolling a `security_admin` while ... `issue_recovery_challenge` and `restore_operator` stay public"            | only `bootstrap_instance` remains, before closure                                          |
 | `service/tests/ungated_writes_private.rs:190-201`             | kept public, "whose verifier is the open decision"                                                                              | section 8                                                                                  |
-| `service/migrations/README.md:3131-3132`                      | "the registry still does not hash"                                                                                              | the library hashes                                                                         |
-| `service/migrations/README.md:3149-3150`                      | "The registry does not verify the recovery signature: the caller verifies it first"                                             | the restore verifies                                                                       |
+| `service/migrations/README.md:3184-3185`                      | "the registry still does not hash"                                                                                              | the library hashes                                                                         |
+| `service/migrations/README.md:3202-3203`                      | "The registry does not verify the recovery signature: the caller verifies it first"                                             | the restore verifies                                                                       |
 | `docs/contracts/identity-registry.md:328-332`, `:342-344`     | the caller verifies; "The registry still does not hash"                                                                         | the restore verifies over `M` rebuilt from the row; the library hashes                     |
 | `identity-registry.md:274-276`, `:548-549`                    | the key's length only, "it does not check the bytes further"; "the signature check is not implemented yet"                      | the weak-key checks; the restore's check                                                   |
 | `tests/security/a32.rs:188-199`, `:238-245`, `:2260-2262`     | "the registry neither hashes nor verifies"; "The verifier is the only check"; that the hash is signed is "the local verifier's" | the test session rewords                                                                   |

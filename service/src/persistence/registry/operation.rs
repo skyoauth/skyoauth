@@ -54,13 +54,16 @@
 //! ([`RegistryError::Invariant`]).
 //!
 //! Since the amended `0005` the database also refuses, with `23514`, an
-//! `approve` that names an operation of another tenant or of its own actor,
-//! and a revocation whose revoking operation is of another tenant
+//! operation of any kind that names an approved operation of another tenant,
+//! an `approve` of an operation of its own actor, an operation whose audit
+//! event is of another tenant, and a revocation whose revoking operation is
+//! of another tenant
 //! ([`InvariantKind::SameTenantOperation`](super::InvariantKind::SameTenantOperation)
 //! and [`InvariantKind::DistinctApprover`](super::InvariantKind::DistinctApprover);
-//! migrations README, "What 0005 adds"). Only kind `approve` is checked: a
-//! `route_bundle_approval` by the same actor stays allowed, and the tenant of
-//! the operation any other kind names is the caller's to check.
+//! migrations README, "What 0005 adds"). Only the actor check is limited to
+//! kind `approve`: a `route_bundle_approval` by the actor of the preparation
+//! it names stays allowed, but not one naming another tenant's preparation.
+//! The caller still checks the tenants first; the guards are a tripwire.
 //!
 //! # The policy row
 //!

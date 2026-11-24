@@ -2334,9 +2334,14 @@ correct; neither session edits it.
   its status and stamp. The revocation guard's INSERT leg (no public
   writer), `administrative_operation_approver_distinct` and the flow's own
   scope check (`NotFound` before a guard is reached) stay service tests.
-  `consumed_assertion_trust_source_id_fkey` stays with A24. Open: (a) and
-  (b) of the review (an operation naming another tenant's audit event; a
-  non-approve kind naming another tenant's operation), not on the list.
+  `consumed_assertion_trust_source_id_fkey` stays with A24. (a) and (b)
+  of the review (an operation naming another tenant's audit event; a
+  non-approve kind naming another tenant's operation) are refused by
+  `0005` since its amendment of 2026-11-24 (the user's ruling, relayed by
+  the lead; provisional): `administrative_operation_audit_same_tenant`,
+  and the approval guard for every kind that names an operation, so the
+  section 11 sketch's "Only kind 'approve'" now holds for the actor only
+  (README "What 0005 adds"). They are not on the list yet.
 - A37 M1a (conformance-layout:149; T12.2): predicate removal through the
   same machinery, once binding writes have a service path (not here).
 - A47 M1b (conformance-layout:159): out of scope; the approve endpoint's
