@@ -82,6 +82,29 @@
 //!   the same tenant, all get `AlreadyExists` after its commit, and exactly
 //!   one of them succeeds after its rollback
 //!   (`a43_neg_blocked_registrations_follow_the_holder_commit_or_rollback`).
+//! - **Enabled assignment at write, positive.** While every assignment is
+//!   enabled, each tenant names its own and the shared audience through
+//!   the four writes that name an audience: a new service identity and a
+//!   new direct grant with that one audience, and the audience added to an
+//!   identity and a grant that name the tenant's other audience. Every
+//!   write reads back exactly, and the assignments stay enabled at revision
+//!   1 (`a43_pos_reference_through_an_enabled_assignment_is_accepted`).
+//! - **Enabled assignment at write, negative.** Once the tenant's
+//!   assignment of that audience is disabled, the same writes, with the
+//!   same arguments, and a create that names it next to the tenant's other,
+//!   enabled audience, are each refused by the `0010` guard (T14.2; IR-080):
+//!   `Invariant { AssignmentActive, <table>_assignment_active }`, compared
+//!   by variant, kind and constraint, and distinct from the foreign-key
+//!   refusal above. Each refusal writes nothing, and the disable itself
+//!   leaves the identities and grants that already name the audience as
+//!   they were (stranding is fine, provisional lead pick, 2026-11-22). An
+//!   audience a record already lists is still the unique key's
+//!   `AlreadyExists`, which comes first. While A's assignment of the shared
+//!   audience is disabled, B, whose own assignment of it is enabled, still
+//!   names it, and the other way round: the guard reads the writing
+//!   tenant's assignment, not the resource server's other assignments.
+//!   Enabled again, the assignment accepts the same writes as the positive
+//!   does (`a43_neg_reference_through_a_disabled_assignment_is_refused`).
 //!
 //! # Spec and registry picks
 //!
@@ -123,19 +146,24 @@
 //!
 //! # Not tested here
 //!
-//! - **An enabled assignment at write.** IR-080 and T14.2 refuse a
-//!   reference "outside an active same-tenant assignment". Since `0010` the
-//!   database refuses a service identity's or grant's audience row whose
-//!   assignment is disabled, at insert, under a `FOR SHARE` lock on the
-//!   assignment (provisional lead pick, 2026-11-22; migrations README,
-//!   "What 0010 adds"; the user accepted
+//! - **An enabled assignment at write, beyond the refusal.** IR-080 and
+//!   T14.2 refuse a reference "outside an active same-tenant assignment".
+//!   Since `0010` the database refuses a service identity's or grant's
+//!   audience row whose assignment is disabled, at insert, under a
+//!   `FOR SHARE` lock on the assignment (provisional lead pick, 2026-11-22;
+//!   migrations README, "What 0010 adds"; the user accepted
 //!   `docs/proposals/ir-080-assignment-write-guard.md`, which reverses the
 //!   README rule "The database does not enforce these rules; the service
-//!   must" for these two tables). The registry reports it as
-//!   `Invariant { AssignmentActive, <table>_assignment_active }`, a refusal
-//!   distinct from the foreign-key refusal these tests compare. Its tests
-//!   are the service's, `service/tests/schema_assignment_write_guard.rs`;
-//!   no test here asserts it, so A43 makes no claim for it yet. An
+//!   must" for these two tables). The tests above pin the refusal, its
+//!   positive control and re-enabling, one write at a time, on direct
+//!   grants. Not here, and the service's tests
+//!   (`service/tests/schema_assignment_write_guard.rs`): the race of an
+//!   insert with a concurrent disable (the `FOR SHARE` lock, and `40001`
+//!   under REPEATABLE READ or SERIALIZABLE), a disabled resource server
+//!   behind an enabled assignment (a dormant reference that the live check
+//!   denies, IR-081: A31's M2 stage), and replica mode. Neither here nor
+//!   there: a delegation grant naming an audience of a disabled assignment
+//!   (the guard is per audience row, whatever the grant's mode). An
 //!   assignment cannot be removed (`0006` rejects its `DELETE`), and the
 //!   registry has no superseded assignment.
 //! - **Who may assign.** The registry authorizes nobody (`registry` "Not
@@ -154,9 +182,6 @@
 //! these tests reach only the registry. Still needed, with the owner of
 //! each part:
 //!
-//! - An A43 test of the enabled-assignment check at write, the other half
-//!   of T14.2 above: the `0010` guard is built and has service tests, but
-//!   A43 has no test of its own for it yet.
 //! - Audience syntax and Unicode normalization (OQ-IR-9, open; a service
 //!   rule per migrations README "What 0003 adds"; T14.1).
 //! - The tenant-admin negative at the endpoint: T14.1 (its tenant-admin
@@ -1385,4 +1410,462 @@ async fn a43_neg_blocked_registrations_follow_the_holder_commit_or_rollback() {
             db.drop(pools).await;
         }
     }
+}
+
+const SERVICE_ASSIGNMENT_ACTIVE: &str = "service_identity_resource_server_assignment_active";
+const GRANT_ASSIGNMENT_ACTIVE: &str = "service_grant_resource_server_assignment_active";
+
+/// One audience of one tenant, named through that tenant's assignment of it
+/// in `a43_pos_reference_through_an_enabled_assignment_is_accepted` and
+/// `a43_neg_reference_through_a_disabled_assignment_is_refused`. The
+/// carriers are an identity and a grant of the tenant that name `other`,
+/// the tenant's other assigned audience, and not `target`; the new IDs name
+/// a service principal and a grant that no record has yet.
+struct Reference {
+    side: Side,
+    label: &'static str,
+    /// The resource server named.
+    target: String,
+    /// The tenant's assignment of `target`.
+    assignment: String,
+    /// The audience the carriers name.
+    other: String,
+    carrier_identity: String,
+    carrier_grant: String,
+    new_identity: String,
+    new_grant: String,
+}
+
+impl Reference {
+    /// The tenant's own audience, then the shared one, for each tenant. The
+    /// carriers of the own audience are created by [`references_fixture`],
+    /// naming the shared audience; those of the shared audience are the
+    /// fixture's identity and grant, naming the own audience.
+    fn all() -> Vec<Reference> {
+        let mut out = Vec::new();
+        for side in [A, B] {
+            out.push(Reference {
+                side,
+                label: "own",
+                target: side.audience(),
+                assignment: side.assignment(),
+                other: SHARED.into(),
+                carrier_identity: side.id("svc_carrier"),
+                carrier_grant: side.id("grt_carrier"),
+                new_identity: side.id("svc_new_own"),
+                new_grant: side.id("grt_new_own"),
+            });
+            out.push(Reference {
+                side,
+                label: "shared",
+                target: SHARED.into(),
+                assignment: side.shared_assignment(),
+                other: side.audience(),
+                carrier_identity: side.service(),
+                carrier_grant: side.grant(),
+                new_identity: side.id("svc_new_shared"),
+                new_grant: side.id("grt_new_shared"),
+            });
+        }
+        out
+    }
+
+    /// Both audiences, sorted byte-wise, as a carrier lists them once
+    /// `target` is added.
+    fn both(&self) -> Vec<String> {
+        let mut both = vec![self.other.clone(), self.target.clone()];
+        both.sort();
+        both
+    }
+}
+
+/// The fixture, and for each tenant the service principals of the new
+/// identities of [`Reference::all`] and the carriers of its own audience,
+/// which name the shared audience only. Every assignment is enabled.
+async fn references_fixture() -> (TestDb, PgPool) {
+    let (db, pool) = fixture().await;
+    for reference in Reference::all() {
+        let side = reference.side;
+        registry::create_principal(
+            &pool,
+            &principal(
+                side,
+                reference.new_identity.clone(),
+                PrincipalKind::Service,
+                &format!("new-{}", reference.label),
+            ),
+        )
+        .await
+        .unwrap();
+        if reference.carrier_identity != side.service() {
+            registry::create_principal(
+                &pool,
+                &principal(
+                    side,
+                    reference.carrier_identity.clone(),
+                    PrincipalKind::Service,
+                    "carrier",
+                ),
+            )
+            .await
+            .unwrap();
+            registry::create_service_identity(
+                &pool,
+                &service_identity(
+                    side,
+                    reference.carrier_identity.clone(),
+                    "carrier",
+                    &[&reference.other],
+                ),
+            )
+            .await
+            .unwrap();
+            registry::create_service_grant(
+                &pool,
+                &direct_grant(
+                    side,
+                    reference.carrier_grant.clone(),
+                    "carrier",
+                    &[&reference.other],
+                ),
+            )
+            .await
+            .unwrap();
+        }
+    }
+    (db, pool)
+}
+
+/// Sets the status of an assignment, leaving its terms, and returns the
+/// stored row.
+async fn set_assignment_status(
+    pool: &PgPool,
+    id: &str,
+    status: Status,
+) -> AudienceTenantAssignment {
+    let held = registry::get_audience_tenant_assignment(pool, id)
+        .await
+        .unwrap();
+    let updated = registry::update_audience_tenant_assignment(
+        pool,
+        id,
+        held.revision,
+        &AudienceTenantAssignmentChanges {
+            allowed_profiles: held.allowed_profiles.clone(),
+            allowed_scopes: held.allowed_scopes.clone(),
+            constraint_versions: held.constraint_versions.clone(),
+            status,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        updated,
+        AudienceTenantAssignment {
+            status,
+            revision: held.revision + 1,
+            ..held
+        }
+    );
+    updated
+}
+
+/// The four writes that name an audience, each naming `reference.target`,
+/// all accepted and read back exactly: a new identity and a new grant with
+/// that one audience, and the audience added to the carriers at revision 1.
+async fn assert_reference_accepted(pool: &PgPool, reference: &Reference) {
+    let side = reference.side;
+    let t = side.tenant;
+    let target = reference.target.as_str();
+    let label = format!("{t} naming {target} ({})", reference.label);
+    let created = registry::create_service_identity(
+        pool,
+        &service_identity(
+            side,
+            reference.new_identity.clone(),
+            &format!("new-{}", reference.label),
+            &[target],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (created.resource_server_ids.clone(), created.revision),
+        (vec![reference.target.clone()], 1),
+        "{label}"
+    );
+    assert_eq!(
+        registry::get_service_identity(pool, t, &reference.new_identity)
+            .await
+            .unwrap(),
+        created,
+        "{label}"
+    );
+    assert_eq!(
+        registry::add_service_identity_resource_server(
+            pool,
+            t,
+            &reference.carrier_identity,
+            1,
+            target
+        )
+        .await
+        .unwrap(),
+        2,
+        "{label}"
+    );
+    let identity = registry::get_service_identity(pool, t, &reference.carrier_identity)
+        .await
+        .unwrap();
+    assert_eq!(
+        (identity.resource_server_ids, identity.revision),
+        (reference.both(), 2),
+        "{label}"
+    );
+    let created = registry::create_service_grant(
+        pool,
+        &direct_grant(
+            side,
+            reference.new_grant.clone(),
+            &format!("new-{}", reference.label),
+            &[target],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (created.resource_server_ids.clone(), created.revision),
+        (vec![reference.target.clone()], 1),
+        "{label}"
+    );
+    assert_eq!(
+        registry::get_service_grant(pool, t, &reference.new_grant)
+            .await
+            .unwrap(),
+        created,
+        "{label}"
+    );
+    assert_eq!(
+        registry::add_service_grant_resource_server(pool, t, &reference.carrier_grant, 1, target)
+            .await
+            .unwrap(),
+        2,
+        "{label}"
+    );
+    let grant = registry::get_service_grant(pool, t, &reference.carrier_grant)
+        .await
+        .unwrap();
+    assert_eq!(
+        (grant.resource_server_ids, grant.revision),
+        (reference.both(), 2),
+        "{label}"
+    );
+}
+
+/// The writes of [`assert_reference_accepted`], and the two creates naming
+/// `other` next to `target`, each refused by the `0010` guard of its table,
+/// by variant, kind and constraint. They write nothing: the new IDs stay
+/// unknown and the carriers at revision 1 (the caller compares snapshots).
+async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
+    let side = reference.side;
+    let t = side.tenant;
+    let target = reference.target.as_str();
+    let other = reference.other.as_str();
+    let service_refusal = Refusal {
+        kind: InvariantKind::AssignmentActive,
+        constraint: SERVICE_ASSIGNMENT_ACTIVE,
+    };
+    let grant_refusal = Refusal {
+        kind: InvariantKind::AssignmentActive,
+        constraint: GRANT_ASSIGNMENT_ACTIVE,
+    };
+    let name = format!("new-{}", reference.label);
+    let refusals = [
+        (
+            refusal(
+                registry::create_service_identity(
+                    pool,
+                    &service_identity(side, reference.new_identity.clone(), &name, &[target]),
+                )
+                .await,
+            ),
+            &service_refusal,
+        ),
+        (
+            refusal(
+                registry::add_service_identity_resource_server(
+                    pool,
+                    t,
+                    &reference.carrier_identity,
+                    1,
+                    target,
+                )
+                .await,
+            ),
+            &service_refusal,
+        ),
+        (
+            refusal(
+                registry::create_service_grant(
+                    pool,
+                    &direct_grant(side, reference.new_grant.clone(), &name, &[target]),
+                )
+                .await,
+            ),
+            &grant_refusal,
+        ),
+        (
+            refusal(
+                registry::add_service_grant_resource_server(
+                    pool,
+                    t,
+                    &reference.carrier_grant,
+                    1,
+                    target,
+                )
+                .await,
+            ),
+            &grant_refusal,
+        ),
+        // Next to an audience whose assignment is enabled, the statement
+        // still fails as a whole.
+        (
+            refusal(
+                registry::create_service_identity(
+                    pool,
+                    &service_identity(
+                        side,
+                        reference.new_identity.clone(),
+                        &name,
+                        &[other, target],
+                    ),
+                )
+                .await,
+            ),
+            &service_refusal,
+        ),
+        (
+            refusal(
+                registry::create_service_grant(
+                    pool,
+                    &direct_grant(side, reference.new_grant.clone(), &name, &[other, target]),
+                )
+                .await,
+            ),
+            &grant_refusal,
+        ),
+    ];
+    for (index, (actual, expected)) in refusals.iter().enumerate() {
+        assert_eq!(
+            actual, *expected,
+            "{t} naming {target} ({}), write {index}",
+            reference.label
+        );
+    }
+    assert_not_found(registry::get_service_identity(pool, t, &reference.new_identity).await);
+    assert_not_found(registry::get_service_grant(pool, t, &reference.new_grant).await);
+}
+
+#[tokio::test]
+async fn a43_pos_reference_through_an_enabled_assignment_is_accepted() {
+    let (db, pool) = references_fixture().await;
+    let all = Page::first(MAX_PAGE_SIZE);
+    let expected_assignments: Vec<AudienceTenantAssignment> =
+        assignments().iter().map(stored_assignment).collect();
+    // The writes that the negative refuses once the assignment is disabled,
+    // with the same arguments, while every assignment is enabled.
+    for reference in Reference::all() {
+        assert_reference_accepted(&pool, &reference).await;
+    }
+    // The assignments are unchanged: enabled, at revision 1.
+    assert_eq!(
+        registry::list_audience_tenant_assignments(&pool, all)
+            .await
+            .unwrap(),
+        expected_assignments
+    );
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
+    let (db, pool) = references_fixture().await;
+    // The guard's names are the registry's.
+    assert_eq!(
+        registry::ASSIGNMENT_ACTIVE,
+        [GRANT_ASSIGNMENT_ACTIVE, SERVICE_ASSIGNMENT_ACTIVE]
+    );
+    for reference in Reference::all() {
+        let side = reference.side;
+        let before = snapshot(&pool).await;
+        let disabled = set_assignment_status(&pool, &reference.assignment, Status::Disabled).await;
+        assert_eq!(
+            (
+                disabled.tenant_id.as_str(),
+                disabled.resource_server_id.as_str()
+            ),
+            (side.tenant, reference.target.as_str())
+        );
+        // Disabling strands the references already made (provisional lead
+        // pick, 2026-11-22): the identities and grants are unchanged.
+        let after_disable = snapshot(&pool).await;
+        assert_eq!(after_disable[2..], before[2..], "{}", reference.label);
+        assert_reference_refused(&pool, &reference).await;
+        assert_eq!(snapshot(&pool).await, after_disable, "{}", reference.label);
+        if reference.target == side.audience() {
+            // An audience a record already lists stays the unique key's
+            // refusal: the guard runs after it.
+            assert_eq!(
+                already_exists(
+                    registry::add_service_identity_resource_server(
+                        &pool,
+                        side.tenant,
+                        &side.service(),
+                        1,
+                        &reference.target,
+                    )
+                    .await
+                ),
+                "service_identity_resource_server_pkey"
+            );
+            assert_eq!(
+                already_exists(
+                    registry::add_service_grant_resource_server(
+                        &pool,
+                        side.tenant,
+                        &side.grant(),
+                        1,
+                        &reference.target,
+                    )
+                    .await
+                ),
+                "service_grant_resource_server_pkey"
+            );
+            assert_eq!(snapshot(&pool).await, after_disable, "{}", reference.label);
+        } else {
+            // The other tenant's assignment of the shared audience is still
+            // enabled, and that tenant still names the audience: the guard
+            // reads the writing tenant's own assignment.
+            let peer = if side.suffix == A.suffix { B } else { A };
+            let peer_grant = peer.id("grt_peer");
+            let created = registry::create_service_grant(
+                &pool,
+                &direct_grant(peer, peer_grant.clone(), "peer", &[SHARED]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(created.resource_server_ids, [SHARED]);
+            assert_eq!(
+                registry::get_service_grant(&pool, peer.tenant, &peer_grant)
+                    .await
+                    .unwrap(),
+                created
+            );
+        }
+        // Enabled again, the assignment accepts the same writes.
+        let enabled = set_assignment_status(&pool, &reference.assignment, Status::Enabled).await;
+        assert_eq!(enabled.revision, 3);
+        assert_reference_accepted(&pool, &reference).await;
+    }
+    db.drop([pool]).await;
 }
