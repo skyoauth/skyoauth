@@ -196,12 +196,15 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "principal_id_octet_length_check",
     "principal_kind_check",
     "principal_name_check",
+    "principal_name_no_control_check",
+    "principal_name_octet_length_check",
     "principal_pkey",
     "principal_revision_check",
     "principal_status_check",
     "principal_tenant_id_fkey",
     "principal_tenant_id_id_key",
     "principal_tenant_id_id_kind_key",
+    "principal_tenant_id_kind_name_key",
     "principal_tenant_id_octet_length_check",
     "recovery_state_instance_id_check",
     "recovery_state_instance_id_fkey",
@@ -1044,6 +1047,49 @@ mod tests {
         }
         // The deferred binding-set check at commit is a guard like any other.
         assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+    }
+
+    /// A principal name taken in its tenant and kind is `AlreadyExists`
+    /// naming the `0002` key, as every other unique name; its bound and its
+    /// control-character rule are named checks.
+    #[test]
+    fn principal_name_constraints_map_by_name() {
+        let error = map(Some("23505"), Some("principal_tenant_id_kind_name_key"));
+        assert!(
+            matches!(
+                error,
+                RegistryError::AlreadyExists {
+                    constraint: "principal_tenant_id_kind_name_key"
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "registry row already exists (unique principal_tenant_id_kind_name_key)"
+        );
+        assert_redacted(&error);
+        for constraint in [
+            "principal_name_octet_length_check",
+            "principal_name_no_control_check",
+        ] {
+            let error = map(Some("23514"), Some(constraint));
+            assert!(
+                matches!(
+                    error,
+                    RegistryError::Invariant {
+                        kind: InvariantKind::Check,
+                        constraint: Some(name)
+                    } if name == constraint
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("registry write violates check constraint {constraint}")
+            );
+            assert_redacted(&error);
+        }
     }
 
     /// The `0011` egress guard's `23514` names a destination column and

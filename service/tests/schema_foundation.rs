@@ -408,6 +408,208 @@ async fn principal_belongs_to_one_tenant_and_backs_composite_references() {
     db.drop([pool]).await;
 }
 
+/// A principal's name is unique within its tenant and kind, disabled rows
+/// included, and at most 2048 bytes, so the largest key, an incompressible
+/// 2048-byte name next to a 255-byte tenant ID, fits its index, and an
+/// over-long name fails with the named check, never with the btree error
+/// `54000`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn principal_name_is_unique_per_tenant_and_kind_and_bounded() {
+    let (db, pool) = migrated().await;
+    run(&pool, TENANTS).await;
+    run(
+        &pool,
+        "INSERT INTO principal VALUES
+             ('wld_1', 'ten_a', 'workload', 'deployer', 'disabled'),
+             ('svc_1', 'ten_a', 'service', 'deployer', 'enabled'),
+             ('usr_1', 'ten_a', 'human', 'deployer', 'enabled'),
+             ('wld_b', 'ten_b', 'workload', 'deployer', 'enabled'),
+             ('wld_2', 'ten_a', 'workload', 'Deployer', 'enabled'),
+             ('wld_3', 'ten_a', 'workload', 'deployer ', 'enabled')",
+    )
+    .await;
+    rejects(
+        &pool,
+        "
+        23505 INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', 'deployer', 'enabled')
+        23505 INSERT INTO principal VALUES ('usr_2', 'ten_a', 'human', 'deployer', 'enabled')
+        23505 UPDATE principal SET name = 'deployer', revision = revision + 1 WHERE id = 'wld_2'
+        23514 INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', repeat('a', 2049), 'enabled')
+        23514 INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', repeat('é', 1025), 'enabled')
+    ",
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    for (sql, constraint) in [
+        (
+            "INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', 'deployer', 'enabled')",
+            "principal_tenant_id_kind_name_key",
+        ),
+        (
+            "INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', repeat('a', 2049), 'enabled')",
+            "principal_name_octet_length_check",
+        ),
+    ] {
+        let err = sqlx::raw_sql(sql).execute(&mut *conn).await.expect_err(sql);
+        assert_eq!(
+            err.as_database_error().and_then(|e| e.constraint()),
+            Some(constraint),
+            "{sql}: {err}"
+        );
+    }
+    drop(conn);
+    // The largest key: 255 + 8 + 2048 incompressible bytes.
+    let tenant = "left((SELECT string_agg(md5(i::text), '' ORDER BY i) \
+                  FROM generate_series(1000, 1007) i), 255)";
+    let name =
+        "(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series(2000, 2063) i)";
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "INSERT INTO tenant VALUES ({tenant}, 'big', 'ns_big', 'enabled');
+         INSERT INTO principal VALUES ('wld_big', {tenant}, 'workload', {name}, 'enabled')"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let lengths: (i32, i32) = sqlx::query_as(
+        "SELECT octet_length(tenant_id), octet_length(name) FROM principal WHERE id = 'wld_big'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lengths, (255, 2048));
+    db.drop([pool]).await;
+}
+
+/// Names with a control character, C0 or C1 (U+0000–U+001F, U+007F–U+009F),
+/// such as a trailing newline or an ANSI escape sequence, are refused on
+/// insert and on rename by the named check
+/// `principal_name_no_control_check`, judged under `"C"`. Format
+/// characters are not controls and pass, as in `0004`: a right-to-left
+/// override (U+202E) and a zero-width space (U+200B), which display
+/// surfaces must escape. So are the line and paragraph separators U+2028
+/// and U+2029 (categories Zl and Zp), accepted on insert and on rename.
+/// Spaces that are not controls have no rule.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn principal_name_has_no_control_character_but_may_hold_format_characters() {
+    let (db, pool) = migrated().await;
+    run(&pool, TENANTS).await;
+    run(
+        &pool,
+        "INSERT INTO principal VALUES ('wld_1', 'ten_a', 'workload', 'deployer', 'enabled')",
+    )
+    .await;
+    let definition: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint
+         WHERE conrelid = 'principal'::regclass AND conname = 'principal_name_no_control_check'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        definition,
+        r#"CHECK (((name COLLATE "C") !~ '[[:cntrl:]]'::text))"#
+    );
+    let mut conn = pool.acquire().await.unwrap();
+    for value in [
+        // A trailing newline.
+        r"E'deployer\n'",
+        // An ANSI escape sequence (ESC is U+001B).
+        r"E'\x1b[31mdeployer\x1b[0m'",
+        r"E'deploy\ter'",
+        r"E'deployer\r'",
+        "'deployer' || chr(1)",
+        "'deployer' || chr(127)",
+        // U+0085 and U+009F, the C1 controls.
+        "'deployer' || chr(133)",
+        "'deployer' || chr(159)",
+    ] {
+        for sql in [
+            format!(
+                "INSERT INTO principal VALUES ('wld_2', 'ten_a', 'workload', {value}, 'enabled')"
+            ),
+            format!(
+                "UPDATE principal SET name = {value}, revision = revision + 1 WHERE id = 'wld_1'"
+            ),
+        ] {
+            let err = sqlx::raw_sql(AssertSqlSafe(sql.clone()))
+                .execute(&mut *conn)
+                .await
+                .expect_err(&sql);
+            let db_err = err.as_database_error().unwrap();
+            assert_eq!(
+                (db_err.code().as_deref(), db_err.constraint()),
+                (Some("23514"), Some("principal_name_no_control_check")),
+                "{sql}: {err}"
+            );
+        }
+    }
+    drop(conn);
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM principal WHERE name <> 'deployer'"
+        )
+        .await,
+        0
+    );
+    for (id, value, expected) in [
+        // U+202E RIGHT-TO-LEFT OVERRIDE, a bidirectional format character.
+        (
+            "wld_rlo",
+            "'deploy' || chr(8238) || 'er'",
+            "deploy\u{202e}er",
+        ),
+        // U+200B ZERO WIDTH SPACE.
+        (
+            "wld_zwsp",
+            "'deploy' || chr(8203) || 'er'",
+            "deploy\u{200b}er",
+        ),
+        // U+2028 LINE SEPARATOR (Zl) and U+2029 PARAGRAPH SEPARATOR (Zp).
+        (
+            "wld_ls",
+            "'deploy' || chr(8232) || 'er'",
+            "deploy\u{2028}er",
+        ),
+        (
+            "wld_ps",
+            "'deploy' || chr(8233) || 'er'",
+            "deploy\u{2029}er",
+        ),
+        // U+00A0, the first code point after the C1 controls.
+        ("wld_nbsp", "'deploy' || chr(160) || 'er'", "deploy\u{a0}er"),
+        // Spaces that are not controls have no rule.
+        ("wld_space", "' deploy er '", " deploy er "),
+    ] {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "INSERT INTO principal VALUES ('{id}', 'ten_a', 'workload', {value}, 'enabled')"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A rename of `wld_1` to the value followed by `1` (the value itself
+        // is taken).
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "UPDATE principal SET name = {value} || '1', revision = revision + 1 \
+             WHERE id = 'wld_1'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, expected) in [(id, expected.to_owned()), ("wld_1", format!("{expected}1"))] {
+            let stored: String = sqlx::query_scalar("SELECT name FROM principal WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(stored, expected, "{id}");
+        }
+    }
+    db.drop([pool]).await;
+}
+
 /// A guard argument that names no column is a plain error, not SK001, so a
 /// typo in a later migration fails the first update instead of passing it.
 #[tokio::test]

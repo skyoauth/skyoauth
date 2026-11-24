@@ -11,7 +11,9 @@
 //! `RestoreError`, a `SignedRecoveryResponse` or a `RecoveryPreview`
 //! (`persistence::registry::recovery`, "Restore";
 //! `docs/proposals/recovery-verified-response.md`). Nor may the bytes of a
-//! refused public key appear in an `IdentityError` (`crate::identity`).
+//! refused public key appear in an `IdentityError` (`crate::identity`). An
+//! `IdError` of an ID generator carries no detail of its cause either
+//! (`crate::ids`, "Generators").
 //!
 //! The unreachable-host and refused-connection tests need no server. The
 //! TLS, wrong-password and approval tests need `SKYOAUTH_IT_DATABASE_URL`
@@ -34,6 +36,7 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::json;
 use skyoauth_service::{
     identity::{IdentityError, MAX_SPKI_DER_BYTES, canonical_public_identity},
+    ids::IdError,
     jwk::DEFAULT_ALLOWED_ALGORITHMS,
     operation::{
         ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, Gated, PendingOperation,
@@ -825,6 +828,31 @@ fn a_refused_public_key_prints_none_of_its_bytes() {
             assert_omits(&format!("{expected:?} {what}"), &text, &markers);
         }
     }
+}
+
+/// Each `IdError`'s `Display` is fixed text and its `Debug` the variant's
+/// name alone, so no cause (an operating-system error, a counter, the kind)
+/// reaches a response or a log; the error has no source.
+#[test]
+fn every_id_error_is_fixed_text() {
+    for (err, text, debug) in [
+        (
+            IdError::SourceFailed,
+            "the ID generator's source of randomness failed",
+            "SourceFailed",
+        ),
+        (
+            IdError::Exhausted,
+            "the ID generator is exhausted",
+            "Exhausted",
+        ),
+    ] {
+        assert_eq!(err.to_string(), text);
+        assert_eq!(format!("{err:?}"), debug);
+        assert_eq!(format!("{err:#?}"), debug);
+        assert!(err.source().is_none());
+    }
+    assert_ne!(IdError::SourceFailed, IdError::Exhausted);
 }
 
 /// The `Debug` of a response and of a preview prints none of their values.
