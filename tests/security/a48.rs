@@ -181,9 +181,11 @@
 //! - the refusal order (D20): `a48_neg_refusals_come_in_the_flows_order`,
 //!   and the error each refusal test expects;
 //! - the toggle off refused without the acknowledgement, after the
-//!   authorization and before the policy row (section 3, request step 3;
-//!   the refusal itself is the user's ruling of 2026-11-24): both
-//!   acknowledgement tests;
+//!   authorization and before the policy row's revision check and any write
+//!   (section 3, request step 3; the refusal itself is the user's ruling of
+//!   2026-11-24): both acknowledgement tests. The lock order is pinned by the
+//!   service test
+//!   `the_acknowledgement_is_checked_after_the_authorization_before_any_lock_or_write`;
 //! - a cancel by another operator on the instance path is `Unauthorized`
 //!   (proposal Q1's instance-path rule; `NotFound` on a tenant path):
 //!   `a48_neg_a_cancelled_or_rejected_toggle_never_applies`;
