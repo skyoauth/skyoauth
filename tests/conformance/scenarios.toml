@@ -668,7 +668,7 @@ matrix_sha256 = "f96a812349dd5f50643a92137aab75b92ee22867ff411870b7a8a5b5c5c23c9
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "scope policy: an omitted scope resolves to the grant's stored explicit defaults; no defaults, an empty or excessive scope and defaults outside a ceiling give one error, never a trimmed set; another tenant's ceilings never apply, and uncommitted changes never apply outside their transaction (registry API)"
+scope = "scope policy: an omitted scope resolves to the grant's stored explicit defaults; an omitted scope with missing or out-of-ceiling defaults, or an explicit empty or excessive scope, gives one error, never a trimmed set; another tenant's ceilings never apply, and uncommitted changes never apply outside their transaction (registry API)"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = [
