@@ -1,4 +1,5 @@
-//! Shared fixture of the grant-selection scenarios A25 and A50: two
+//! Shared fixture of the grant-selection scenarios A25 and A50, also used
+//! by A02's claim-mutation table on the `src_gh` and `src_alt` bindings: two
 //! tenants with the same object graph, created through the typed registry
 //! API (`skyoauth_service::persistence::registry`), the grants, sources and
 //! bindings the scenarios select and match, and evidence that every binding
