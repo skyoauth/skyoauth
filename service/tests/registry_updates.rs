@@ -259,35 +259,68 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
     db.drop([pool]).await;
 }
 
-/// `0002` has no unique constraint on a tenant's or a principal's name, so
-/// a rename to a name in use succeeds; constraint errors of an update map by
-/// name as for every other write.
+#[track_caller]
+fn assert_name_taken<T: Debug>(result: Result<T, RegistryError>) {
+    assert!(
+        matches!(
+            result,
+            Err(RegistryError::AlreadyExists {
+                constraint: "principal_tenant_id_kind_name_key"
+            })
+        ),
+        "{result:?}"
+    );
+}
+
+/// A principal's name is unique within its tenant and kind (`0002`,
+/// IR-021), disabled principals included, on create and on rename, and the
+/// duplicate maps to `AlreadyExists` naming the key. The same name in
+/// another tenant or of another kind is accepted. A tenant's name is not
+/// unique: no rule for it is decided, so a rename to a name in use
+/// succeeds.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn tenant_and_principal_names_need_not_be_unique() {
+async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     let (db, pool) = seeded().await;
-    let unique: Vec<String> = sqlx::query_scalar(
-        "SELECT conname::text FROM pg_constraint
+    let unique: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conname::text, pg_get_constraintdef(oid) FROM pg_constraint
          WHERE contype IN ('u', 'p') AND conrelid IN ('tenant'::regclass, 'principal'::regclass)
          ORDER BY conname::text COLLATE \"C\"",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
+    let unique: Vec<(&str, &str)> = unique.iter().map(|(n, d)| (&n[..], &d[..])).collect();
     assert_eq!(
         unique,
         [
-            "principal_pkey",
-            "principal_tenant_id_id_key",
-            "principal_tenant_id_id_kind_key",
-            "tenant_pkey",
-            "tenant_secret_namespace_key"
+            ("principal_pkey", "PRIMARY KEY (id)"),
+            ("principal_tenant_id_id_key", "UNIQUE (tenant_id, id)"),
+            (
+                "principal_tenant_id_id_kind_key",
+                "UNIQUE (tenant_id, id, kind)"
+            ),
+            (
+                "principal_tenant_id_kind_name_key",
+                "UNIQUE (tenant_id, kind, name)"
+            ),
+            ("tenant_pkey", "PRIMARY KEY (id)"),
+            ("tenant_secret_namespace_key", "UNIQUE (secret_namespace)"),
         ]
     );
+
+    // Tenant names: a rename to a name in use succeeds.
     let renamed = registry::update_tenant(&pool, "ten_b", 1, &name("Tenant ten_a"))
         .await
         .unwrap();
     assert_eq!(renamed.name, "Tenant ten_a");
+
+    let principal = |tenant: &str, id: &str, kind, name: &str| NewPrincipal {
+        name: name.into(),
+        ..new_principal(tenant, id, kind)
+    };
+    // The same name of another kind in the same tenant: the human `usr_1`
+    // takes the workload `wld_1`'s name.
     let renamed = registry::update_principal(
         &pool,
         "ten_a",
@@ -298,6 +331,86 @@ async fn tenant_and_principal_names_need_not_be_unique() {
     .await
     .unwrap();
     assert_eq!(renamed.name, "principal wld_1");
+    // The same name and kind in another tenant.
+    let created = registry::create_principal(
+        &pool,
+        &principal(
+            "ten_b",
+            "wld_b2",
+            PrincipalKind::Workload,
+            "principal wld_1",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.name, "principal wld_1");
+    // The same name and kind in the same tenant is refused on create, for
+    // each kind, and nothing is written.
+    for (id, kind) in [
+        ("wld_2", PrincipalKind::Workload),
+        ("usr_2", PrincipalKind::Human),
+    ] {
+        assert_name_taken(
+            registry::create_principal(&pool, &principal("ten_a", id, kind, "principal wld_1"))
+                .await,
+        );
+        assert_not_found(registry::get_principal(&pool, "ten_a", id).await);
+    }
+    // A name differing only in case is another name: the comparison is
+    // byte-wise.
+    registry::create_principal(
+        &pool,
+        &principal("ten_a", "wld_3", PrincipalKind::Workload, "Principal WLD_1"),
+    )
+    .await
+    .unwrap();
+    // A rename into a taken name of the same kind is refused and changes
+    // nothing.
+    assert_name_taken(
+        registry::update_principal(
+            &pool,
+            "ten_a",
+            "wld_3",
+            1,
+            &principal_patch(name("principal wld_1")),
+        )
+        .await,
+    );
+    let unchanged = registry::get_principal(&pool, "ten_a", "wld_3")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&unchanged.name[..], unchanged.revision),
+        ("Principal WLD_1", 1)
+    );
+    // A disabled principal keeps its name: it is still taken.
+    registry::update_principal(
+        &pool,
+        "ten_a",
+        "wld_1",
+        1,
+        &principal_patch(status(Status::Disabled)),
+    )
+    .await
+    .unwrap();
+    assert_name_taken(
+        registry::create_principal(
+            &pool,
+            &principal("ten_a", "wld_4", PrincipalKind::Workload, "principal wld_1"),
+        )
+        .await,
+    );
+    // A principal may be renamed to its own name.
+    let same = registry::update_principal(
+        &pool,
+        "ten_a",
+        "wld_1",
+        2,
+        &principal_patch(name("principal wld_1")),
+    )
+    .await
+    .unwrap();
+    assert_eq!((&same.name[..], same.revision), ("principal wld_1", 3));
     db.drop([pool]).await;
 }
 

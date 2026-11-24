@@ -87,16 +87,28 @@ ALTER TABLE tenant ENABLE ALWAYS TRIGGER tenant_immutable;
 -- Principal (identity-registry section 5.1). kind is one of the three kinds
 -- of that table; the lower-case spelling is (inferred). status values as for
 -- tenant (inferred).
+-- name is a tenant-local label, unique within its tenant and kind (IR-021;
+-- design section 7.4), disabled rows included. The key includes kind, so a
+-- human principal that enrollment creates cannot take a name away from a
+-- workload or service principal (lead decision, 2026-11-24, an
+-- in-place pre-beta amendment). As a unique free-text key it
+-- is bounded like the 0004 names (2048 bytes, so the key stays below the
+-- btree limit); unlike them it may contain whitespace (lead decision,
+-- 2026-11-24: a human principal's name is a display label). It keeps the database collation,
+-- whose equality is byte-wise for any deterministic collation.
 CREATE TABLE principal (
     id          text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
     tenant_id   text COLLATE "C" NOT NULL REFERENCES tenant (id),
     kind        text COLLATE "C" NOT NULL CHECK (kind IN ('human', 'workload', 'service')),
-    name        text        NOT NULL CHECK (name <> ''),
+    name        text        NOT NULL CHECK (name <> '')
+        CONSTRAINT principal_name_octet_length_check
+        CHECK (octet_length(name) <= 2048),
     status      text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),
     created_at  timestamptz NOT NULL DEFAULT now(),
     -- Target of composite same-tenant foreign keys from tenant-owned tables
     -- (IR-031; tasks section 3 "Ownership").
-    UNIQUE (tenant_id, id)
+    UNIQUE (tenant_id, id),
+    CONSTRAINT principal_tenant_id_kind_name_key UNIQUE (tenant_id, kind, name)
 );
 
 -- Ownership and kind never change (inferred: a principal is created in its

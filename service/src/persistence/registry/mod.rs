@@ -58,7 +58,9 @@
 //! # IDs, revisions and updates
 //!
 //! - Writes take caller-supplied IDs and `secret_namespace`; generating them
-//!   is T10.2. Rows are created at revision 1 (the database's default).
+//!   is T10.2, whose format and generator interface are
+//!   [`crate::ids`] (not wired yet). Rows are created at revision 1 (the
+//!   database's default).
 //! - An update replaces every mutable column of the row with the caller's
 //!   values (read, modify, then write back); [`update_tenant`] and
 //!   [`update_principal`] instead take a patch of the columns to change

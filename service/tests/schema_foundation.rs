@@ -408,6 +408,79 @@ async fn principal_belongs_to_one_tenant_and_backs_composite_references() {
     db.drop([pool]).await;
 }
 
+/// A principal's name is unique within its tenant and kind, disabled rows
+/// included, and at most 2048 bytes, so the largest key, an incompressible
+/// 2048-byte name next to a 255-byte tenant ID, fits its index, and an
+/// over-long name fails with the named check, never with the btree error
+/// `54000`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn principal_name_is_unique_per_tenant_and_kind_and_bounded() {
+    let (db, pool) = migrated().await;
+    run(&pool, TENANTS).await;
+    run(
+        &pool,
+        "INSERT INTO principal VALUES
+             ('wld_1', 'ten_a', 'workload', 'deployer', 'disabled'),
+             ('svc_1', 'ten_a', 'service', 'deployer', 'enabled'),
+             ('usr_1', 'ten_a', 'human', 'deployer', 'enabled'),
+             ('wld_b', 'ten_b', 'workload', 'deployer', 'enabled'),
+             ('wld_2', 'ten_a', 'workload', 'Deployer', 'enabled'),
+             ('wld_3', 'ten_a', 'workload', 'deployer ', 'enabled')",
+    )
+    .await;
+    rejects(
+        &pool,
+        "
+        23505 INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', 'deployer', 'enabled')
+        23505 INSERT INTO principal VALUES ('usr_2', 'ten_a', 'human', 'deployer', 'enabled')
+        23505 UPDATE principal SET name = 'deployer', revision = revision + 1 WHERE id = 'wld_2'
+        23514 INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', repeat('a', 2049), 'enabled')
+        23514 INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', repeat('é', 1025), 'enabled')
+    ",
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    for (sql, constraint) in [
+        (
+            "INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', 'deployer', 'enabled')",
+            "principal_tenant_id_kind_name_key",
+        ),
+        (
+            "INSERT INTO principal VALUES ('wld_4', 'ten_a', 'workload', repeat('a', 2049), 'enabled')",
+            "principal_name_octet_length_check",
+        ),
+    ] {
+        let err = sqlx::raw_sql(sql).execute(&mut *conn).await.expect_err(sql);
+        assert_eq!(
+            err.as_database_error().and_then(|e| e.constraint()),
+            Some(constraint),
+            "{sql}: {err}"
+        );
+    }
+    drop(conn);
+    // The largest key: 255 + 8 + 2048 incompressible bytes.
+    let tenant = "left((SELECT string_agg(md5(i::text), '' ORDER BY i) \
+                  FROM generate_series(1000, 1007) i), 255)";
+    let name =
+        "(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series(2000, 2063) i)";
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "INSERT INTO tenant VALUES ({tenant}, 'big', 'ns_big', 'enabled');
+         INSERT INTO principal VALUES ('wld_big', {tenant}, 'workload', {name}, 'enabled')"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let lengths: (i32, i32) = sqlx::query_as(
+        "SELECT octet_length(tenant_id), octet_length(name) FROM principal WHERE id = 'wld_big'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(lengths, (255, 2048));
+    db.drop([pool]).await;
+}
+
 /// A guard argument that names no column is a plain error, not SK001, so a
 /// typo in a later migration fails the first update instead of passing it.
 #[tokio::test]

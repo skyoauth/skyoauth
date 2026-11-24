@@ -196,12 +196,14 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "principal_id_octet_length_check",
     "principal_kind_check",
     "principal_name_check",
+    "principal_name_octet_length_check",
     "principal_pkey",
     "principal_revision_check",
     "principal_status_check",
     "principal_tenant_id_fkey",
     "principal_tenant_id_id_key",
     "principal_tenant_id_id_kind_key",
+    "principal_tenant_id_kind_name_key",
     "principal_tenant_id_octet_length_check",
     "recovery_state_instance_id_check",
     "recovery_state_instance_id_fkey",
@@ -1044,6 +1046,40 @@ mod tests {
         }
         // The deferred binding-set check at commit is a guard like any other.
         assert!(matches!(map(Some("SK001"), None), RegistryError::Guard));
+    }
+
+    /// A principal name taken in its tenant and kind is `AlreadyExists`
+    /// naming the `0002` key, as every other unique name; its bound is a
+    /// named check.
+    #[test]
+    fn principal_name_constraints_map_by_name() {
+        let error = map(Some("23505"), Some("principal_tenant_id_kind_name_key"));
+        assert!(
+            matches!(
+                error,
+                RegistryError::AlreadyExists {
+                    constraint: "principal_tenant_id_kind_name_key"
+                }
+            ),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "registry row already exists (unique principal_tenant_id_kind_name_key)"
+        );
+        assert_redacted(&error);
+        let error = map(Some("23514"), Some("principal_name_octet_length_check"));
+        assert!(
+            matches!(
+                error,
+                RegistryError::Invariant {
+                    kind: InvariantKind::Check,
+                    constraint: Some("principal_name_octet_length_check")
+                }
+            ),
+            "{error:?}"
+        );
+        assert_redacted(&error);
     }
 
     /// The `0011` egress guard's `23514` names a destination column and

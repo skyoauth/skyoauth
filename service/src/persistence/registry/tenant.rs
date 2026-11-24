@@ -117,7 +117,10 @@ pub async fn update_tenant<'e>(
     updated(&row)
 }
 
-/// Creates a principal in its tenant.
+/// Creates a principal in its tenant. A name another principal of the same
+/// tenant and kind has, disabled or not, is [`RegistryError::AlreadyExists`]
+/// naming `principal_tenant_id_kind_name_key`; the same name in another
+/// tenant or of another kind is accepted (`0002`; IR-021).
 pub async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
@@ -162,8 +165,11 @@ pub async fn get_principal<'e>(
 ///
 /// The update is kind-agnostic: the rule that only workload and service
 /// principals change through this path belongs to the service handler
-/// (lead ruling, 2026-11-21). A name need not be unique: `0002` has no
-/// unique constraint on it. An empty patch is an encode error,
+/// (lead ruling, 2026-11-21). A name is unique within the tenant and kind:
+/// a rename to a name another principal of the same tenant and kind has,
+/// disabled or not, is [`RegistryError::AlreadyExists`] naming
+/// `principal_tenant_id_kind_name_key` and changes nothing. An empty patch
+/// is an encode error,
 /// [`RegistryError::Other`], before any statement runs. Re-enabling a
 /// disabled principal is a plain status change here; whether it needs an
 /// approval, and any other widening rule, belongs to the service layer

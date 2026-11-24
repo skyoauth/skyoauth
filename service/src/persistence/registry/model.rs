@@ -430,7 +430,8 @@ pub struct Principal {
     pub tenant_id: String,
     /// Immutable.
     pub kind: PrincipalKind,
-    /// Mutable and not unique (`0002` has no unique constraint on it).
+    /// Mutable, and unique within the tenant and kind, disabled principals
+    /// included (`0002` `principal_tenant_id_kind_name_key`; IR-021).
     pub name: String,
     pub status: Status,
     /// Immutable.
