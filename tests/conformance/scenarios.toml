@@ -42,6 +42,7 @@ legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = [
   "nextest:skyoauth-scenarios/pg/security::a02::a02_pos_push_claims_match_the_push_binding",
+  "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_event_name_case_variant_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_issue_comment_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_missing_event_name_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_pull_request_against_push_binding",

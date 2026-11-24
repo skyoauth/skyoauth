@@ -21,13 +21,16 @@
 //! `policy::Evidence` is a map of claim name to string value, which
 //! `service/src/policy/matching.rs` marks inferred: "the verifier, T11.x,
 //! does not exist yet, so this is the smallest shape matching needs". The
-//! GitHub verifier (T22.2: issuer, signature, audience and time; immutable
-//! owner and repository IDs; explicit event, ref, environment, workflow and
-//! reusable-workflow context) does not exist, so the claim sets here are
-//! written by hand as the verified claims it is expected to hand over, not
-//! decoded from any token. A real token's claim names, value spellings and
-//! types (a number-valued ID, for instance) may differ from these strings;
-//! when the verifier lands, these tables must be rebuilt from its output.
+//! claim sets here are written by hand as the verified claims a GitHub
+//! verifier is expected to hand over, not decoded from any token. That
+//! verifier (T22.2: issuer, signature, audience and time; immutable owner
+//! and repository IDs; explicit event, ref, environment, workflow and
+//! reusable-workflow context) comes after the M1a gate (tasks, "Workload
+//! federation (M2)"), and mock GitHub token issuance stays M2 (layout §4,
+//! M1a row); both are tracked in M2. A real token's claim names, value
+//! spellings and types (a number-valued ID, for instance) may differ from
+//! these strings; when the verifier exists (T22.2, M2), these tables must
+//! be rebuilt from its output.
 //!
 //! **The claim-mutation table.** The push claim set ([`PUSH_CLAIMS`]) is
 //! the binding's policy, written out here and pinned against the stored
@@ -37,8 +40,9 @@
 //! `deploy.yml` workflow at `refs/heads/main`. Each case changes or removes
 //! only the claims it names and keeps every other claim equal, so each
 //! negative is "otherwise matching" (T22.5): a real `pull_request` token
-//! would also carry another `ref` and `sub`, but then the `ref` predicate
-//! alone would deny it and the `event_name` predicate would go untested.
+//! differs at least in `ref` as well as in the event, but then the `ref`
+//! predicate alone would deny it and the `event_name` predicate would go
+//! untested.
 //! Every case runs on two bases: exactly the push claim set, and the same
 //! with claims no predicate names ([`UNNAMED_CLAIMS`]), as a real token
 //! has. Each test first matches the unchanged base (the in-test control),
@@ -47,8 +51,9 @@
 //! - **Positive.** The exact push claim set, and the same with unnamed
 //!   claims, match the grant's own binding, as stored (ID, policy and
 //!   revision) (`a02_pos_push_claims_match_the_push_binding`).
-//! - **Negative.** Each gives no binding, `None`, while the selection still
-//!   succeeds with the same one eligible binding: `event_name` set to
+//! - **Negative.** Each is a `match_binding` call over the one-element
+//!   list of the grant's eligible binding that gives no binding, `None`:
+//!   `event_name` set to
 //!   `pull_request` (`a02_neg_pull_request_against_push_binding`),
 //!   `pull_request_target`
 //!   (`a02_neg_pull_request_target_against_push_binding`),
@@ -56,46 +61,55 @@
 //!   `issue_comment` (`a02_neg_issue_comment_against_push_binding`) or
 //!   `workflow_run` (`a02_neg_workflow_run_against_push_binding`);
 //!   `event_name` absent or empty
-//!   (`a02_neg_missing_event_name_against_push_binding`); a wrong or absent
-//!   owner ID, another owner in `repository`, or a same-named repository of
-//!   another owner (`a02_neg_wrong_owner_against_push_binding`); a wrong or
-//!   absent repository ID, another repository name of the same owner, or a
-//!   sibling repository (`a02_neg_wrong_repo_against_push_binding`); another
-//!   branch, a tag (`event_name` still `push`), a pull request merge ref,
-//!   the short `main`, or no `ref` (`a02_neg_wrong_ref_against_push_binding`);
-//!   another, a case-variant or no environment
-//!   (`a02_neg_wrong_environment_against_push_binding`); and another
-//!   workflow file, the same file at another ref or in another repository,
-//!   or no `workflow_ref` (`a02_neg_wrong_workflow_against_push_binding`).
+//!   (`a02_neg_missing_event_name_against_push_binding`); the case variant
+//!   `Push` (`a02_neg_event_name_case_variant_against_push_binding`); a
+//!   wrong or absent owner ID, another owner in `repository`, or a
+//!   same-named repository of another owner
+//!   (`a02_neg_wrong_owner_against_push_binding`); a wrong or absent
+//!   repository ID, another or absent repository name, or a sibling
+//!   repository (`a02_neg_wrong_repo_against_push_binding`); another
+//!   branch, a branch name that extends the bound one
+//!   (`refs/heads/main-next`), a tag (`event_name` still `push`), a pull
+//!   request merge ref, the short `main`, or no `ref`
+//!   (`a02_neg_wrong_ref_against_push_binding`); another environment, one
+//!   that extends the bound one (`production-preview`), a case variant or
+//!   none (`a02_neg_wrong_environment_against_push_binding`); and another
+//!   workflow file, the same file at another ref, at a ref that extends the
+//!   bound one (`@refs/heads/main-next`) or in another repository, or no
+//!   `workflow_ref` (`a02_neg_wrong_workflow_against_push_binding`).
 //!
-//! Byte-wise exact comparison (the case-variant environment, the short
-//! `main`) is ADR-016 item 1 and design section 5.3: no case folding,
-//! prefix or wildcard. The generic near-miss matrices (case, trailing
+//! Byte-wise exact comparison (the case-variant `event_name` and
+//! environment, the short `main`, and the values that only extend the
+//! bound ones, which a prefix match would accept) is ADR-016 item 1 and
+//! design section 5.3: no case folding, prefix or wildcard. The textual
+//! `repository` name is optional when a production binding is defined, and
+//! A37 covers a binding that omits it
+//! (`a37_pos_optional_predicate_omitted_is_unconstrained`); the fixture's
+//! bindings name it, as well as `repository_id`, so here an absent
+//! `repository` denies like any configured claim absent from the evidence
+//! (T12.2, ADR-016 item 1). The generic near-miss matrices (case, trailing
 //! space, near-miss claim names) are A50's and the service tests'
 //! (`service/tests/registry_selection.rs`); that a `github_production`
-//! binding cannot omit any of these predicates is A37's.
+//! binding cannot omit its required predicates is A37's.
 //!
-//! **What remains of A02 M1a** before it can be implemented and stamped:
+//! **What this partial covers, and what it does not.** It covers the
+//! policy matcher over hand-written claim maps: the mutation table above.
+//! Whether such maps meet the stage's scope, "policy on verified-claim
+//! fixtures", is for the lead to rule; until then the stage stays
+//! `planned`, with no stamp and no row edit. Not covered here: the
+//! reusable-workflow identity (`job_workflow_ref`; ADR-016 item 3), which
+//! no `github_production` binding of the fixture names, so no case changes
+//! it; and the whole-token shape, since each case changes only the claims
+//! it names, while a realistic `pull_request` token also differs in `ref`,
+//! `event_name` and other claims.
 //!
-//! - the GitHub verifier (T22.2) that turns a token into verified claims,
-//!   and with it the final shape of `Evidence`, which may move these
-//!   tables;
-//! - the GH harness component (mock GitHub OIDC) and the "verified-claim
-//!   fixtures" the stage's scope names: tokens of each event, verified at
-//!   the selected source, so the cases come from the verifier rather than
-//!   from hand-written maps (as shared fixtures, `tests/conformance/
-//!   fixtures/a02/`, if the stage takes FX fixtures; layout §1.3);
-//! - the reusable-workflow identity (`job_workflow_ref`; ADR-016 item 3,
-//!   T22.2), which no `github_production` binding in the fixture names, so
-//!   no case here changes it, and the fork and pull-request context of
-//!   T22.5 beyond `event_name`;
-//! - a review of the stage against its §8 row once the verifier exists
-//!   (the lead's ruling: no stamp and no row edit until then).
-//!
-//! Not A02 M1a's: the exchange and its wire denial (`invalid_grant`), and
-//! the live negative, the real token of a `schedule` or
-//! `workflow_dispatch` run denied by the push-only binding in
-//! `live-wif-negative`, which are A02's M2 stage.
+//! Tracked in M2: signed-token verification and the claim shapes it
+//! produces (T22.2), from whose output these maps must then be rebuilt;
+//! mock GitHub token issuance (the GH harness component); the fork and
+//! pull-request context of T22.5 beyond `event_name`; the exchange and its
+//! wire denial (`invalid_grant`); and the live negative, the real token of
+//! a `schedule` or `workflow_dispatch` run denied by the push-only binding
+//! in `live-wif-negative`.
 
 use std::collections::BTreeMap;
 
@@ -385,6 +399,15 @@ async fn a02_neg_missing_event_name_against_push_binding() {
 }
 
 #[tokio::test]
+async fn a02_neg_event_name_case_variant_against_push_binding() {
+    assert_every_case_matches_nothing(&[(
+        "case-variant event_name",
+        &[Change::Set("event_name", "Push")],
+    )])
+    .await;
+}
+
+#[tokio::test]
 async fn a02_neg_wrong_owner_against_push_binding() {
     assert_every_case_matches_nothing(&[
         (
@@ -420,6 +443,7 @@ async fn a02_neg_wrong_repo_against_push_binding() {
             &[Change::Set("repository_id", "987655")],
         ),
         ("repository ID absent", &[Change::Remove("repository_id")]),
+        ("repository name absent", &[Change::Remove("repository")]),
         (
             "other repository name",
             &[Change::Set("repository", "example/release-fork")],
@@ -443,6 +467,10 @@ async fn a02_neg_wrong_repo_against_push_binding() {
 async fn a02_neg_wrong_ref_against_push_binding() {
     assert_every_case_matches_nothing(&[
         ("other branch", &[Change::Set("ref", "refs/heads/dev")]),
+        (
+            "branch name that extends the bound one",
+            &[Change::Set("ref", "refs/heads/main-next")],
+        ),
         ("tag push", &[Change::Set("ref", "refs/tags/v1.0.0")]),
         (
             "pull request merge ref",
@@ -460,6 +488,10 @@ async fn a02_neg_wrong_environment_against_push_binding() {
         (
             "other environment",
             &[Change::Set("environment", "staging")],
+        ),
+        (
+            "environment that extends the bound one",
+            &[Change::Set("environment", "production-preview")],
         ),
         (
             "case-variant environment",
@@ -485,6 +517,13 @@ async fn a02_neg_wrong_workflow_against_push_binding() {
             &[Change::Set(
                 "workflow_ref",
                 "example/release/.github/workflows/deploy.yml@refs/heads/dev",
+            )],
+        ),
+        (
+            "same workflow at a ref that extends the bound one",
+            &[Change::Set(
+                "workflow_ref",
+                "example/release/.github/workflows/deploy.yml@refs/heads/main-next",
             )],
         ),
         (
