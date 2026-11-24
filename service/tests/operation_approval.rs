@@ -251,13 +251,15 @@ fn refused<T: Debug>(result: Result<T, ApprovalError>, expected: &str) {
 }
 
 /// Requests the toggle to `value` at the policy's `revision` with `key`, as
-/// the operation `op` recorded by `evt_<op>`, at `now`, in `transaction`.
-async fn request_in(
+/// the operation `op` recorded by `evt_<op>`, with `acknowledge_widening`
+/// set to `acknowledge`, at `now`, in `transaction`.
+async fn submit_in(
     transaction: &mut Transaction<'_, Postgres>,
     key: &str,
     op: &str,
     revision: i64,
     value: bool,
+    acknowledge: bool,
     now: SystemTime,
 ) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError> {
     let event_id = format!("evt_{op}");
@@ -265,7 +267,7 @@ async fn request_in(
         transaction,
         &Submission {
             public_identity: key,
-            acknowledge_widening: false,
+            acknowledge_widening: acknowledge,
             operation_id: op,
             event_id: &event_id,
             now,
@@ -276,6 +278,45 @@ async fn request_in(
     .await
 }
 
+/// [`submit_in`] at `at(0)` in a transaction committed either way.
+async fn submit(
+    pool: &PgPool,
+    key: &str,
+    op: &str,
+    revision: i64,
+    value: bool,
+    acknowledge: bool,
+) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError> {
+    let mut transaction = pool.begin().await.unwrap();
+    let result = submit_in(
+        &mut transaction,
+        key,
+        op,
+        revision,
+        value,
+        acknowledge,
+        at(0),
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    result
+}
+
+/// [`submit_in`] acknowledging the widening exactly when it turns the
+/// setting off: turning it off needs `acknowledge_widening`, turning it on
+/// does not (the user's ruling, 2026-11-24), so every request on here is
+/// also one without the acknowledgement.
+async fn request_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    key: &str,
+    op: &str,
+    revision: i64,
+    value: bool,
+    now: SystemTime,
+) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError> {
+    submit_in(transaction, key, op, revision, value, !value, now).await
+}
+
 /// [`request_in`] at `at(0)` in a transaction committed either way.
 async fn request(
     pool: &PgPool,
@@ -284,10 +325,7 @@ async fn request(
     revision: i64,
     value: bool,
 ) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError> {
-    let mut transaction = pool.begin().await.unwrap();
-    let result = request_in(&mut transaction, key, op, revision, value, at(0)).await;
-    transaction.commit().await.unwrap();
-    result
+    submit(pool, key, op, revision, value, !value).await
 }
 
 /// A pending toggle to `value` by `key` at `revision`.
@@ -484,6 +522,19 @@ async fn events(pool: &PgPool) -> Vec<Event> {
          FROM audit_event WHERE id <> 'aud_bootstrap' ORDER BY sequence",
     )
     .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// What a toggle request may write, counted: the operations, the audit
+/// events, and the policy row's revision and value.
+async fn written(pool: &PgPool) -> (i64, i64, i64, bool) {
+    sqlx::query_as(
+        "SELECT (SELECT count(*) FROM administrative_operation), \
+         (SELECT count(*) FROM audit_event), revision, widening_second_approver \
+         FROM instance_security_policy",
+    )
+    .fetch_one(pool)
     .await
     .unwrap()
 }
@@ -2311,6 +2362,272 @@ async fn the_toggles_refusals_write_nothing_and_release_the_policy_row() {
     let before = snapshot(&pool).await;
     refused(
         request(&pool, "key_req", "op_1", 1, true).await,
+        "PolicyUnavailable",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    db.drop([pool]).await;
+}
+
+/// A pending toggle from [`submit`].
+#[track_caller]
+fn gated_pending(result: Result<Gated<InstanceSecurityPolicy>, ApprovalError>) -> PendingOperation {
+    match result {
+        Ok(Gated::Pending(pending)) => pending,
+        other => panic!("not pending: {other:?}"),
+    }
+}
+
+/// A toggle applied at once from [`submit`].
+#[track_caller]
+fn gated_applied(
+    result: Result<Gated<InstanceSecurityPolicy>, ApprovalError>,
+) -> InstanceSecurityPolicy {
+    match result {
+        Ok(Gated::Applied(row)) => row,
+        other => panic!("not applied: {other:?}"),
+    }
+}
+
+/// Turning `widening_second_approver` off is a widening write (the user's
+/// ruling, 2026-11-24): every request that sets it to false needs
+/// `acknowledge_widening`, whatever the current value, a false to false
+/// request included. Without it the request is `WideningNotAcknowledged`
+/// and writes nothing (no operation, no event, the policy row and its
+/// revision unchanged), and the transaction goes on. With it the request
+/// goes pending and an approval applies it. Turning the setting on needs no
+/// acknowledgement.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn turning_the_toggle_off_needs_the_acknowledgement() {
+    let (db, pool) = seeded().await;
+
+    // False to false, a request for the current value.
+    let before = snapshot(&pool).await;
+    assert_eq!(written(&pool).await, (0, 1, 1, false));
+    for key in ["key_req", "key_req_b"] {
+        let mut transaction = pool.begin().await.unwrap();
+        refused(
+            submit_in(&mut transaction, key, "op_x", 1, false, false, at(0)).await,
+            "WideningNotAcknowledged",
+        );
+        assert!(!policy_conflicts(&pool, "FOR UPDATE").await);
+        // The transaction goes on.
+        gated_pending(submit_in(&mut transaction, key, "op_y", 1, false, true, at(0)).await);
+        transaction.rollback().await.unwrap();
+    }
+    assert_eq!(written(&pool).await, (0, 1, 1, false));
+    assert_eq!(snapshot(&pool).await, before);
+    // Acknowledged, it goes pending, and its approval only advances the
+    // revision.
+    let same = gated_pending(submit(&pool, "key_req", "op_same", 1, false, true).await);
+    assert_eq!(written(&pool).await, (1, 2, 1, false));
+    assert_eq!(
+        operation(&pool, "op_same").await.immutable_plan,
+        toggle_plan("crd_adm_req", false)
+    );
+    let prepared = prepare(&pool, "key_sec1", "op_same").await.unwrap();
+    approve(
+        &pool,
+        "key_sec1",
+        INSTANCE,
+        &prepared,
+        &echo(&same),
+        &*TestClock::new(at(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(written(&pool).await, (2, 4, 2, false));
+
+    // On, without the acknowledgement: pending, then approved.
+    let on = gated_pending(submit(&pool, "key_req", "op_on", 2, true, false).await);
+    let prepared = prepare(&pool, "key_sec2", "op_on").await.unwrap();
+    approve(
+        &pool,
+        "key_sec2",
+        INSTANCE,
+        &prepared,
+        &echo(&on),
+        &*TestClock::new(at(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(written(&pool).await, (4, 7, 3, true));
+
+    // True to false, without the acknowledgement: refused, nothing written.
+    let before = snapshot(&pool).await;
+    for key in ["key_req", "key_req_b"] {
+        refused(
+            submit(&pool, key, "op_x", 3, false, false).await,
+            "WideningNotAcknowledged",
+        );
+    }
+    assert_eq!(written(&pool).await, (4, 7, 3, true));
+    assert_eq!(snapshot(&pool).await, before);
+    // With it: pending, then approved.
+    let off = gated_pending(submit(&pool, "key_req", "op_off", 3, false, true).await);
+    assert_eq!(written(&pool).await, (5, 8, 3, true));
+    let prepared = prepare(&pool, "key_sec1", "op_off").await.unwrap();
+    approve(
+        &pool,
+        "key_sec1",
+        INSTANCE,
+        &prepared,
+        &echo(&off),
+        &*TestClock::new(at(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(written(&pool).await, (6, 10, 4, false));
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// Under `single_actor_mode` turning the setting off needs the
+/// acknowledgement too, false to false included: without it the request is
+/// `WideningNotAcknowledged` and writes nothing; with it the toggle applies
+/// at once. Turning it on applies at once without it.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn under_single_actor_mode_turning_the_toggle_off_needs_the_acknowledgement() {
+    let (db, pool) = seeded().await;
+    single_actor_mode(&pool).await;
+    let before = snapshot(&pool).await;
+    refused(
+        submit(&pool, "key_req", "op_x", 2, false, false).await,
+        "WideningNotAcknowledged",
+    );
+    assert_eq!(written(&pool).await, (0, 1, 2, false));
+    assert_eq!(snapshot(&pool).await, before);
+    let row = gated_applied(submit(&pool, "key_req", "op_1", 2, false, true).await);
+    assert_eq!((row.revision, row.widening_second_approver), (3, false));
+    let row = gated_applied(submit(&pool, "key_req", "op_2", 3, true, false).await);
+    assert_eq!((row.revision, row.widening_second_approver), (4, true));
+    let before = snapshot(&pool).await;
+    refused(
+        submit(&pool, "key_req", "op_x", 4, false, false).await,
+        "WideningNotAcknowledged",
+    );
+    assert_eq!(written(&pool).await, (0, 3, 4, true));
+    assert_eq!(snapshot(&pool).await, before);
+    let row = gated_applied(submit(&pool, "key_req", "op_3", 4, false, true).await);
+    assert_eq!(row, policy(&pool).await);
+    assert_eq!((row.revision, row.widening_second_approver), (5, false));
+    assert!(row.single_actor_mode);
+    let update = |id, previous| {
+        event(
+            id,
+            "adm_req",
+            "instance_security_policy.update",
+            INSTANCE_ID,
+            Some(previous),
+            Some(previous + 1),
+            "success_single_actor",
+            0,
+        )
+    };
+    assert_eq!(
+        events(&pool).await,
+        [
+            update("evt_op_1", 2),
+            update("evt_op_2", 3),
+            update("evt_op_3", 4)
+        ]
+    );
+    assert_eq!(written(&pool).await, (0, 4, 5, false));
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// The acknowledgement is checked where the trust writes check theirs
+/// (request step 3): after the authorization, so an operator without the
+/// role gets `Unauthorized`, and before the policy row (its revision, its
+/// absence, its lock) and every write, in both branches. A request without
+/// it is refused while another transaction holds the policy row and the
+/// audit head, and with an operation and event ID already taken.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_acknowledgement_is_checked_after_the_authorization_before_any_lock_or_write() {
+    let (db, pool) = seeded().await;
+    pending(&pool, "key_req", "op_1", 1, true).await;
+    for single in [false, true] {
+        if single {
+            single_actor_mode(&pool).await;
+        }
+        let revision = policy(&pool).await.revision;
+        let before = snapshot(&pool).await;
+        for key in ["key_trust", "spki-sha256:unknown"] {
+            refused(
+                submit(&pool, key, "op_x", revision, false, false).await,
+                "Unauthorized",
+            );
+        }
+        for stale in [revision - 1, revision + 1] {
+            refused(
+                submit(&pool, "key_req", "op_x", stale, false, false).await,
+                "WideningNotAcknowledged",
+            );
+        }
+        // `op_1` and `evt_op_1` are taken.
+        refused(
+            submit(&pool, "key_req", "op_1", revision, false, false).await,
+            "WideningNotAcknowledged",
+        );
+        // The policy row and the audit head held elsewhere: the refusal
+        // waits for neither, and the acknowledged request does.
+        let (mut holder, _) = connection(&pool).await;
+        let mut held = holder.begin().await.unwrap();
+        for table in ["instance_security_policy", "audit_chain_head"] {
+            sqlx::query(AssertSqlSafe(format!("SELECT FROM {table} FOR UPDATE")))
+                .execute(&mut *held)
+                .await
+                .unwrap();
+        }
+        for acknowledge in [false, true] {
+            let mut transaction = pool.begin().await.unwrap();
+            sqlx::query("SET LOCAL lock_timeout = '1s'")
+                .execute(&mut *transaction)
+                .await
+                .unwrap();
+            let result = submit_in(
+                &mut transaction,
+                "key_req",
+                "op_x",
+                revision,
+                false,
+                acknowledge,
+                at(0),
+            )
+            .await;
+            transaction.rollback().await.unwrap();
+            match (acknowledge, result) {
+                (false, result) => refused(result, "WideningNotAcknowledged"),
+                (true, Err(ApprovalError::Registry(err))) => {
+                    let code = std::error::Error::source(&err)
+                        .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                        .and_then(|raw| raw.as_database_error())
+                        .and_then(|raw| raw.code());
+                    assert_eq!(code.as_deref(), Some("55P03"), "{err:?}");
+                }
+                (true, other) => panic!("expected a lock timeout, got {other:?}"),
+            }
+        }
+        held.rollback().await.unwrap();
+        holder.close().await.unwrap();
+        assert_eq!(snapshot(&pool).await, before);
+    }
+    db.drop([pool]).await;
+
+    // No policy row: the flag comes before `PolicyUnavailable`, as for the
+    // trust writes.
+    let (db, pool) = migrated().await;
+    operator(&pool, "adm_req", "key_req", &[("rb_req", SEC, None)]).await;
+    let before = snapshot(&pool).await;
+    refused(
+        submit(&pool, "key_req", "op_1", 1, false, false).await,
+        "WideningNotAcknowledged",
+    );
+    refused(
+        submit(&pool, "key_req", "op_1", 1, false, true).await,
         "PolicyUnavailable",
     );
     assert_eq!(snapshot(&pool).await, before);

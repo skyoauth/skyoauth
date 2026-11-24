@@ -150,6 +150,9 @@ const OP_LONG: &str = "op_redact_long_8c21";
 const OP_UNREADABLE: &str = "op_redact_infinite_3a90";
 const OP_STALE: &str = "op_redact_stale_57d1";
 const OP_MISSING: &str = "op_redact_missing_e6f2";
+/// A toggle off without `acknowledge_widening`, and its event.
+const OP_UNACKNOWLEDGED: &str = "op_redact_unack_5d09";
+const UNACKNOWLEDGED_EVENT: &str = "evt_redact_unack_c4a7";
 const REQ_ADMIN: &str = "adm_redact_req_2d4c";
 const REQ_CREDENTIAL: &str = "crd_redact_req_62d8";
 const REQ_KEY: &str = "spki-sha256:redact-req-91c3";
@@ -392,7 +395,8 @@ async fn approve(
 /// (`RegistryError::Other`, from a check constraint unknown to the registry,
 /// whose raw `sqlx::Error` quotes the failing row), and a row the registry
 /// cannot read (an infinite expiry, the ID of the row in its
-/// `RegistryError`). No `Display` or `Debug` of the error or of its
+/// `RegistryError`), and a toggle off without `acknowledge_widening`
+/// (`WideningNotAcknowledged`). No `Display` or `Debug` of the error or of its
 /// `RegistryError` holds an ID, a public identity, the plan or the digest
 /// of the request. The
 /// `Debug` of a prepared approval holds none of them either, and that of a
@@ -439,6 +443,7 @@ async fn approval_errors_omit_the_requests_values() {
         OP_UNREADABLE,
         OP_STALE,
         OP_MISSING,
+        OP_UNACKNOWLEDGED,
         REQ_ADMIN,
         REQ_CREDENTIAL,
         REQ_KEY,
@@ -447,6 +452,7 @@ async fn approval_errors_omit_the_requests_values() {
         UNKNOWN_KEY,
         CREATE_EVENT,
         UNLISTED_EVENT,
+        UNACKNOWLEDGED_EVENT,
         "widening_second_approver",
     ]
     .map(String::from)
@@ -475,6 +481,25 @@ async fn approval_errors_omit_the_requests_values() {
     );
 
     // The refusals.
+    let unacknowledged = {
+        let mut transaction = pool.begin().await.unwrap();
+        let result = submit_widening_toggle(
+            &mut transaction,
+            &Submission {
+                public_identity: REQ_KEY,
+                acknowledge_widening: false,
+                operation_id: OP_UNACKNOWLEDGED,
+                event_id: UNACKNOWLEDGED_EVENT,
+                now: at(0),
+            },
+            1,
+            false,
+        )
+        .await;
+        transaction.commit().await.unwrap();
+        result
+    };
+    refused(unacknowledged, "WideningNotAcknowledged", &markers);
     refused(
         prepare(UNKNOWN_KEY, &pool, OP).await,
         "Unauthorized",

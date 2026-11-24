@@ -166,7 +166,9 @@
 //! [`submit_widening_toggle`] requests a change of
 //! `widening_second_approver` (section 3, "The toggle"; D16, D19): in a
 //! savepoint, only under `READ COMMITTED`, the requester's instance
-//! `security_admin` rows `FOR SHARE`, then the policy row
+//! `security_admin` rows `FOR SHARE`, then, for a request that sets it to
+//! false, `acknowledge_widening` (without it,
+//! [`ApprovalError::WideningNotAcknowledged`]), then the policy row
 //! `FOR NO KEY UPDATE`, never `FOR SHARE`, in both branches (a missing row
 //! is [`ApprovalError::PolicyUnavailable`]), and its revision against the
 //! request's `expected_revision` ([`ApprovalError::StaleRevision`]). With
@@ -179,12 +181,18 @@
 //! ADR-008:100-103). A request for the current value (a no-op) is accepted
 //! like any other (inferred): applied at once it writes the same value at
 //! the next revision; pending, its approval only advances the revision, so
-//! every other pending toggle goes stale at its approval. The
-//! `acknowledge_widening` flag of the [`Submission`] is ignored: whether
-//! the toggle needs it is not decided (proposal, "Not decided here";
-//! inferred). The authorization is the toggle's own, instance
-//! `security_admin` through [`authorize_operator_locked`] (tasks:147), not
-//! the trust writes' `authorize_trust_admin`.
+//! every other pending toggle goes stale at its approval. Turning the
+//! setting off is a widening write (the user's ruling, 2026-11-24, relayed
+//! by the lead; tasks:147; ADR-008 item 12): every request that sets it to
+//! false needs `acknowledge_widening`, whatever the current value (a false
+//! to false request included) and under `single_actor_mode` too; a request
+//! that sets it to true does not. The flag is checked where the trust
+//! writes check theirs (request step 3): after the authorization, so a
+//! caller without the role learns nothing from it, and before the policy
+//! row's lock and any write, so a refusal writes nothing (no event, no
+//! operation, no policy change). The authorization is the toggle's own,
+//! instance `security_admin` through [`authorize_operator_locked`]
+//! (tasks:147), not the trust writes' `authorize_trust_admin`.
 //!
 //! # Lock order
 //!
@@ -234,7 +242,10 @@ use crate::persistence::registry::{
     AdminRole, AuditActor, InstanceSecurityPolicy, NewAuditEvent, OperatorScope, RegistryError,
     TrustKeysetVersion, TrustSource,
 };
-use crate::trust::{KeysetWriteError, SourceWriteError, write::WriteError};
+use crate::trust::{
+    KeysetWriteError, SourceWriteError,
+    write::{GatedWriteError, WriteError},
+};
 
 /// How long a pending operation stays approvable (D5; Q1, ruled by the
 /// user, 2026-11-23).
@@ -363,7 +374,8 @@ pub struct PendingOperation {
 pub struct Submission<'a> {
     /// The canonical public identity of the presented credential.
     pub public_identity: &'a str,
-    /// Ignored by the toggle (see the module docs, "The toggle").
+    /// The toggle needs it only to set `widening_second_approver` to false
+    /// (see the module docs, "The toggle").
     pub acknowledge_widening: bool,
     pub operation_id: &'a str,
     pub event_id: &'a str,
@@ -529,6 +541,10 @@ pub enum ApprovalError {
     StaleRevision,
     /// The caller's transaction does not run at `READ COMMITTED`.
     UnsupportedIsolation,
+    /// A toggle that sets `widening_second_approver` to false, a widening
+    /// write, without `acknowledge_widening` (the user's ruling,
+    /// 2026-11-24): nothing is written.
+    WideningNotAcknowledged,
     /// The keyset write of an approved keyset kind refused it, as it
     /// refuses the direct write: a moved target
     /// ([`RegistryError::StaleRevision`] inside), an overlap, the cap, a
@@ -591,6 +607,9 @@ impl fmt::Display for ApprovalError {
             Self::UnsupportedIsolation => {
                 f.write_str("operation writes run only at READ COMMITTED")
             }
+            Self::WideningNotAcknowledged => f.write_str(
+                "the instance security policy write is widening and was not acknowledged",
+            ),
             Self::Keyset(err) => write!(f, "the approved keyset write was refused: {err}"),
             Self::Source(err) => write!(f, "the approved trust source write was refused: {err}"),
             Self::Registry(err) => write!(f, "operation write failed: {err}"),
@@ -611,6 +630,7 @@ impl fmt::Debug for ApprovalError {
             Self::PolicyUnavailable => f.write_str("PolicyUnavailable"),
             Self::StaleRevision => f.write_str("StaleRevision"),
             Self::UnsupportedIsolation => f.write_str("UnsupportedIsolation"),
+            Self::WideningNotAcknowledged => f.write_str("WideningNotAcknowledged"),
             Self::Keyset(err) => f.debug_tuple("Keyset").field(err).finish(),
             Self::Source(err) => f.debug_tuple("Source").field(err).finish(),
             Self::Registry(err) => f.debug_tuple("Registry").field(err).finish(),
@@ -656,6 +676,11 @@ impl From<sqlx::Error> for ApprovalError {
 impl WriteError for ApprovalError {
     const UNSUPPORTED_ISOLATION: Self = Self::UnsupportedIsolation;
     const UNAUTHORIZED: Self = Self::Unauthorized;
+}
+
+impl GatedWriteError for ApprovalError {
+    const WIDENING_NOT_ACKNOWLEDGED: Self = Self::WideningNotAcknowledged;
+    const POLICY_UNAVAILABLE: Self = Self::PolicyUnavailable;
 }
 
 #[cfg(test)]
@@ -805,6 +830,11 @@ mod tests {
                 ApprovalError::UnsupportedIsolation,
                 "UnsupportedIsolation",
                 "operation writes run only at READ COMMITTED",
+            ),
+            (
+                ApprovalError::WideningNotAcknowledged,
+                "WideningNotAcknowledged",
+                "the instance security policy write is widening and was not acknowledged",
             ),
         ];
         for (err, debug, display) in cases {

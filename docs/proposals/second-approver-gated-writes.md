@@ -1600,10 +1600,10 @@ compare-and-set is the crate-private registry writer
 toggle's plan is exactly `requester_credential_id` and
 `widening_second_approver`, with no version member; any other shape is
 `PlanIntegrity`. The approve applies D24 to the toggle too: the prepared
-plan must equal the locked plan. `acknowledge_widening` is ignored by the
-toggle in PRs 3 to 7, which is always gated; the user's ruling of
-2026-11-24 is that turning it off needs the flag, for every request that
-sets false (ruled by the user, 2026-11-24, relayed by the lead; see "Open"). The toggle
+plan must equal the locked plan. `acknowledge_widening` was ignored by the
+toggle in PRs 3 to 7, which is always gated; since the user's ruling of
+2026-11-24 the toggle refuses a request that sets false without the flag
+(`WideningNotAcknowledged`; relayed by the lead; see "Open"). The toggle
 authorizes with the local instance `security_admin` lookup, not the trust writes'
 `authorize_trust_admin`.
 A cancel looks up the path's role (instance `security_admin`, tenant
@@ -1843,7 +1843,7 @@ inserted with tenant NULL with the source kinds too, kills the D24
 comparison dropped for both source kinds, and finds the kind-role guard
 still equivalent. Ruled after PR 5 (the user, 2026-11-24): `acknowledge_widening`
 applies to the toggle turned off, and a toggle off without it gets
-`WideningNotAcknowledged`; T13.3 implements it.
+`WideningNotAcknowledged`; `submit_widening_toggle` implements it, T13.3 wires it.
 
 **PR 7 as implemented** (`service/src/trust/`, `service/Cargo.toml`;
 picks marked inferred in the code comments). `create_version`,
@@ -2294,7 +2294,7 @@ Still open after PRs 7, 9 and 10:
   dependent crate against the library without the feature are the check.
 - Decided (the user, 2026-11-24): `acknowledge_widening` applies to the
   toggle turned off; a toggle off without it gets `WideningNotAcknowledged`,
-  like every other widening write. T13.3 implements it.
+  like every other widening write. The library implements it; T13.3 wires it.
 
 **Line numbers.** Line numbers into the code and the migrations README
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed

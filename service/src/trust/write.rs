@@ -7,9 +7,10 @@
 //! ([`authorize_widening_write`]), or one by one for a source update, which
 //! classifies after it has read its stored row (Q2). Each module's docs
 //! state the rules; this module only holds the code once. The isolation
-//! check and the savepoint are shared with the second-approver flow too
-//! ([`crate::operation`]). It is crate-private and adds nothing to the
-//! public API. Nothing here names a kind of write.
+//! check, the savepoint and the flag check of step 3 are shared with the
+//! second-approver flow too ([`crate::operation`]; the toggle turned off).
+//! It is crate-private and adds nothing to the public API. Nothing here
+//! names a kind of write.
 
 use sqlx::{Connection, Postgres, Transaction};
 
@@ -50,9 +51,9 @@ pub(crate) async fn require_read_committed<E: WriteError>(
     Ok(())
 }
 
-/// The error of a gated trust write: a [`WriteError`] with the two
-/// refusals of the gate's own steps (proposal section 10), unit variants of
-/// fixed text.
+/// The error of a gated write (a trust write, or the toggle's
+/// `ApprovalError`): a [`WriteError`] with the two refusals of the gate's
+/// own steps (proposal section 10), unit variants of fixed text.
 pub(crate) trait GatedWriteError: WriteError {
     /// Request step 3: a widening write without `acknowledge_widening`.
     const WIDENING_NOT_ACKNOWLEDGED: Self;

@@ -3248,7 +3248,9 @@ async fn a_source_request_and_a_policy_toggle_serialize_on_the_policy_row() {
     let mut held = holder.begin().await.unwrap();
     let toggled = submit_widening_toggle(
         &mut held,
-        &submission("key_sec1", "op_t9", "evt_op_t9", false),
+        // Turning the setting off needs the acknowledgement (the user's
+        // ruling, 2026-11-24).
+        &submission("key_sec1", "op_t9", "evt_op_t9", true),
         revision,
         false,
     )
