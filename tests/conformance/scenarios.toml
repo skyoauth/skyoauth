@@ -1356,6 +1356,7 @@ layers = ["security"]
 envs = ["pg"]
 harness = ["PG", "UC", "OP", "restore fixture"]
 owners = ["T10.11", "T12.10"]
+note = "The M1b forward migration is one between tagged public releases: that stage applies from the first tagged release and is not required before the first beta release."
 positive = "disabled/requires_reapproval record round-trips through export/import and stays unchanged across restart and forward migration (M1b)"
 negative = "enabled/approved create or import rejected, enabling PATCH rejected, startup/import with an active unsupported record (seeded by restore fixture) rejected without rewriting it; the same restore-fixture startup/import case after forward migration (M1b)"
 matrix_sha256 = "e21a9edc840e10b9906382c02f18bcf6a2297ecbf922a85b8600021e94a7a8c3"

@@ -7,26 +7,26 @@ not a migration.
 
 ## Conventions
 
-- **Forward-only.** A migration that has been applied anywhere is never
-  edited, renamed or removed; the runner refuses a changed checksum, and the
-  checksum covers comments too. Fix forward with a new file. There are no
-  down migrations.
+- **Forward-only** (from the first tagged public release on; before it,
+  the next item). A migration in a tagged release is never edited, renamed
+  or removed; the runner refuses a changed checksum, and the checksum
+  covers comments too. Fix forward with a new file. No down migrations.
 - **Pre-beta exception** (ruled by the user, 2026-11-23, relayed by the
   lead): "we don't need to keep data until a beta release" and "I meant db
-  migration are not needed intra releases." Until the first beta release,
-  no database upgrade path between pre-beta releases is provided or
-  tested, and an existing migration may be amended in place instead of
-  fixed forward with a new file. A database created from an earlier
-  version of the migrations is recreated, not migrated: sqlx records each
-  applied migration's checksum, so an amended migration fails validation
-  (`migrate` refuses it) on a database that applied the earlier text. The
-  forward-only rule is reinstated at the beta release (date set by the
-  maintainer). The sections below for `0001` to `0011` still call those
-  files frozen and record errata outside them; that is the record of the
-  rule when each was written, not a bar to a pre-beta amendment. Likewise,
-  their "Upgrade precondition" items describe applying a migration to a
-  populated database at an earlier version; no such upgrade is supported
-  before the beta release; until then the database is recreated instead.
+  migration are not needed intra releases." Only upgrades between tagged
+  public releases are supported, and that support begins with the first
+  tagged release, the first beta; before it there is no upgrade path. The
+  mechanism is provided and tested now: the sqlx runner, its checksum
+  refusal and the "Upgrade precondition" tests. Until then an existing
+  migration may be amended in place, and a database created from an
+  earlier text is recreated, not migrated: sqlx records each applied
+  migration's checksum, so `migrate` refuses it. The forward-only rule
+  applies from the first tagged release (date set by the maintainer). The
+  sections for `0001` to `0011` still call those files frozen and record
+  errata outside them: the rule when each was written, not a bar to a
+  pre-beta amendment. Their "Upgrade precondition" items are the contract
+  for an upgrade from the first tagged release on (the tested ones stay
+  tested); before that release the database is recreated instead.
 - **Contiguous versions:** `0001_…`, `0002_…`, and so on. A unit test checks
   this; it is a test-time rule, not something the runner enforces.
 - **One transaction per file.** sqlx wraps each file in a transaction. Never

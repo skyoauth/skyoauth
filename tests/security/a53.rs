@@ -37,7 +37,9 @@
 //! Not covered here: export and import (rejecting an enabled or
 //! reapproval-cleared record on import), startup with an active
 //! unsupported record seeded by the restore fixture, rewriting nothing on
-//! that refusal, and the M1b forward-migration stage. The database bounds
+//! that refusal, and the M1b forward-migration stage (a migration between
+//! tagged public releases: it applies from the first tagged release and is
+//! not required before the first beta release). The database bounds
 //! that fixture (docs/testing/conformance-layout.md, "Restore-state
 //! cases"): the `0004` checks refuse an active impersonation row on every
 //! insert, so it cannot be seeded as stored rows; a seeded grant and its

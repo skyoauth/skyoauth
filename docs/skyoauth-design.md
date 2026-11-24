@@ -23,7 +23,7 @@ SkyOAuth owns its public issuer/signing keys, tenants, audience authority, clien
 1. Remove static application API keys/PATs/bootstrap secrets from SPAs, CLI applications, CI jobs and workload agents.
 2. Provide **both** a TypeScript SPA library and a reusable Rust CLI library with stable, versioned contracts across human IdP migration. Their credential APIs are intentionally different.
 3. Support GitHub Actions → protected cluster APIs without cloud STS, SPIRE, sidecars or an auth-service data-plane hop.
-4. Preserve independently administered WIF sources, keysets, bindings, service policies, audience assignments and client registrations across migrations/upgrades.
+4. Preserve independently administered WIF sources, keysets, bindings, service policies, audience assignments and client registrations across human-provider migrations and across schema migrations/upgrades between tagged public releases; no upgrade is supported before the first beta release (an earlier database is recreated).
 5. Work with k3s/Kubernetes, Envoy Gateway, ConnectRPC and optional Cloudflare Tunnel/alternate gateways.
 6. Keep the Rust service narrow and auditable; separate authentication, issuance, independent operator authority and application resource authorization.
 

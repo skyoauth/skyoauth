@@ -985,9 +985,10 @@ is allowed by
 the pre-beta exception to the forward-only rule (`service/migrations/README.md`,
 "Conventions"), ruled by the user on 2026-11-23 (relayed by the lead): "we don't
 need to keep data until a beta release" and "I meant db migration are not needed
-intra releases." Until the beta release, no database upgrade path between
-pre-beta releases is provided or tested, and an existing migration may be
-amended in place; the forward-only rule is reinstated at the beta release (date
+intra releases." Upgrades are supported only between tagged public releases,
+from the first one (the first beta); before it there is no upgrade path, though
+the mechanism is provided and tested, and an existing migration may be amended
+in place; the forward-only rule applies from the first tagged release (date
 set by the maintainer). An edited `0005` changes its checksum, so a database
 created before the edit must be recreated; `migrate` refuses it otherwise. The
 implementation PR also rewrites the README's `0005` text that leaves these two
