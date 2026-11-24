@@ -788,9 +788,12 @@ below. A database created from an earlier `0005` is recreated.
   `crate::identity::canonical_public_identity` from the key's DER
   SubjectPublicKeyInfo, as `spki-sha256:` and 64 lowercase hexadecimal
   digits, and never accepts a precomputed string (lead decision,
-  2026-11-24). `bootstrap_instance` and `create_admin_credential` still
-  take the identity string from their caller today; the slices that wire
-  enrollment and authentication (S5, S7) call the function. The digests
+  2026-11-24): the operator tooling only supplies the DER key, at bootstrap
+  as at enrollment (the contract update is pending: identity-registry
+  still leaves canonicalizing to the operator tooling). `bootstrap_instance`
+  and `create_admin_credential` still take the identity string from their
+  caller today; the slices that wire enrollment and authentication (S5, S7)
+  call the function. The digests
   `request_digest`, `challenge_hash` and `replay_key_digest` are `bytea` of
   32 to 64 bytes, and the recovery public key is 1 to 8192 bytes. Every ID,
   key, reference and enumeration is `COLLATE "C"`; only `outcome` keeps the
@@ -3109,8 +3112,10 @@ over-2048-byte `public_identity` or `trust_anchor_ref`, and a `now` outside
 the `0007` range or outside the years `0000` to `9999` that the audit writer
 accepts, with the writer's bound and message (encode errors, `Other`; no
 statement runs and nothing is written). It trusts its caller otherwise:
-canonicalizing the operator's mTLS key stays with the operator tooling
-(T13.1, T13.10). Then, in order: it locks the policy row
+it takes `public_identity` as given today, and the service, not the
+operator tooling, is to derive it from the DER SubjectPublicKeyInfo that
+the operator tooling supplies (T13.1, T13.10), as the `0005` bullet above
+says. Then, in order: it locks the policy row
 (`SELECT instance_id FROM instance_security_policy FOR UPDATE`) and, in a
 statement after the lock, refuses with `AlreadyClosed` when a
 `recovery_state` row exists; it adopts a policy row found without one,

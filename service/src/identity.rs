@@ -16,7 +16,8 @@
 //! The service computes it, with [`canonical_public_identity`], from the
 //! DER bytes of the key it is given (at enrollment) or that the client
 //! presents (at mTLS authentication), and never accepts a precomputed
-//! identity string from a client.
+//! identity string from a client. At bootstrap and enrollment the operator
+//! tooling only supplies the DER key; the service derives its identity.
 //!
 //! # One identity per encoding, not per key
 //!
@@ -33,8 +34,11 @@
 //!   (long-form or zero-padded) inside the `RSAPublicKey` that the `BIT
 //!   STRING` holds, which is not decoded, and under another algorithm
 //!   `OBJECT IDENTIFIER` for the same modulus and exponent: `rsaEncryption`
-//!   (1.2.840.113549.1.1.1) or `id-RSASSA-PSS` (1.2.840.113549.1.1.10, with
-//!   its parameters absent);
+//!   (1.2.840.113549.1.1.1), `id-RSASSA-PSS` (1.2.840.113549.1.1.10, with
+//!   its parameters absent) or `id-RSAES-OAEP` (1.2.840.113549.1.1.7, with
+//!   its `RSAES-OAEP-params` `SEQUENCE` as the parameters, of which only the
+//!   DER framing is checked, as for any parameters: the hash and mask
+//!   functions it names are not read);
 //! - an Ed25519 or Ed448 key with its parameters absent or `NULL`
 //!   (`05 00`).
 //!
@@ -54,8 +58,15 @@
 //!   uncompressed point (`04`) only;
 //! - RSA: the algorithm `rsaEncryption` (1.2.840.113549.1.1.1) with `NULL`
 //!   parameters, and a DER `RSAPublicKey` inside the `BIT STRING`;
-//!   `id-RSASSA-PSS` is refused, or is the only RSA form, never both;
+//!   `id-RSASSA-PSS` and `id-RSAES-OAEP` are refused, or one of them is the
+//!   only RSA form, never several;
 //! - Ed25519 and Ed448: the parameters absent.
+//!
+//! Enrollment and authentication must agree on the same single
+//! representation of a key across all the profiles they support, since
+//! several algorithm identifiers can describe the same underlying public
+//! key (RFC 4055 section 1.2: `rsaEncryption`, `id-RSASSA-PSS` and
+//! `id-RSAES-OAEP` for one RSA key).
 //!
 //! Only then does a key have one identity and the `0005` unique key hold
 //! per key. This module stays algorithm-agnostic and does not enforce it.
@@ -79,19 +90,25 @@
 //!   ([`IdentityError::NotSpki`], also when one of these elements is
 //!   missing);
 //! - every element is DER-framed ([`IdentityError::NotDer`]): a tag in one
-//!   octet (no high-tag-number form) that DER allows (not end-of-contents
-//!   `0x00`, not a primitive `SEQUENCE` or `SET` `0x10`, `0x11`, and of the
-//!   universal constructed tags only `SEQUENCE` `0x30` and `SET` `0x31`: no
-//!   constructed string, `NULL` or `OBJECT IDENTIFIER`), a definite length
-//!   (no indefinite length `0x80`) in its shortest form (the short form below
-//!   128; in the long form no leading zero octet, and at most two length
-//!   octets, enough for the size bound), and contents within its parent
-//!   ([`IdentityError::Truncated`]); a `NULL` is empty; an `OBJECT
-//!   IDENTIFIER` is not empty and every subidentifier is minimal and
-//!   terminated. Constructed parameters are checked the same way,
-//!   recursively, to a depth of [`MAX_PARAMETERS_DEPTH`] (8): the parameters
-//!   element is at depth 1, and each element inside a constructed element
-//!   is one deeper; an element deeper than 8 is [`IdentityError::NotSpki`].
+//!   octet (no high-tag-number form); in the universal class, a tag number
+//!   and form from an explicit table of the pairs DER allows (X.690 clauses
+//!   8 and 10.2): the primitive form only for `BOOLEAN`, `INTEGER`, `BIT
+//!   STRING`, `OCTET STRING`, `NULL`, `OBJECT IDENTIFIER`,
+//!   `ObjectDescriptor`, `REAL`, `ENUMERATED`, `RELATIVE-OID`, the
+//!   restricted character strings, `UTCTime` and `GeneralizedTime`; the
+//!   constructed form only for `EXTERNAL`, `EMBEDDED PDV`, `SEQUENCE`,
+//!   `SET` and `CHARACTER STRING`; neither for end-of-contents (`0x00`),
+//!   `TIME` (14) or the reserved 15; in the other classes, either form; a
+//!   definite length (no indefinite length `0x80`) in its shortest form (the
+//!   short form below 128; in the long form no leading zero octet, and at
+//!   most two length octets, enough for the size bound), and contents
+//!   within its parent ([`IdentityError::Truncated`]); a `NULL` is empty; an
+//!   `OBJECT IDENTIFIER` or `RELATIVE-OID` is not empty and every
+//!   subidentifier is minimal and terminated. Constructed parameters are
+//!   checked the same way, recursively, to a depth of
+//!   [`MAX_PARAMETERS_DEPTH`] (8): the parameters element is at depth 1,
+//!   and each element inside a constructed element is one deeper; an
+//!   element deeper than 8 is [`IdentityError::NotSpki`].
 //!
 //! DER is a canonical encoding of a structure, and these rules refuse every
 //! other framing of the same structure: PEM text, a long-form or
@@ -107,16 +124,14 @@
 //!   is checked. A caller that needs a particular algorithm or strength (for
 //!   example the operator's mTLS key policy, T13.1) must check the key
 //!   itself; this module only names it.
-//! - DER rules inside primitive elements other than `NULL` and `OBJECT
-//!   IDENTIFIER`, and inside the key bytes: for example the minimal
-//!   encoding of an `INTEGER` or the `BOOLEAN` values in explicit curve
-//!   parameters, or the order of a `SET OF`. Such a key with a non-DER
-//!   parameter is accepted and its identity is that of its exact bytes, so
-//!   the same key spelled two ways there would have two identities; the
-//!   requirement on the callers above refuses such parameters for the
-//!   algorithms it names. A `RELATIVE-OID` (tag `0d`) in the parameters is
-//!   not read as an `OBJECT IDENTIFIER`, so it is framed but its content is
-//!   not checked.
+//! - DER rules inside primitive elements other than `NULL`, `OBJECT
+//!   IDENTIFIER` and `RELATIVE-OID`, and inside the key bytes: for example
+//!   the minimal encoding of an `INTEGER` or the `BOOLEAN` values in
+//!   explicit curve parameters, or the order of a `SET OF`. Such a key with
+//!   a non-DER parameter is accepted and its identity is that of its exact
+//!   bytes, so the same key spelled two ways there would have two
+//!   identities; the requirement on the callers above refuses such
+//!   parameters for the algorithms it names.
 //! - The identity is a name, not a proof: authentication still needs the
 //!   TLS handshake's proof of possession and the credential and role check
 //!   on every call (design section 7.2).
@@ -183,10 +198,10 @@ impl fmt::Display for IdentityError {
 impl std::error::Error for IdentityError {}
 
 const SEQUENCE: u8 = 0x30;
-const SET: u8 = 0x31;
 const BIT_STRING: u8 = 0x03;
 const OBJECT_IDENTIFIER: u8 = 0x06;
 const NULL: u8 = 0x05;
+const RELATIVE_OID: u8 = 0x0d;
 const CONSTRUCTED: u8 = 0x20;
 /// The class bits of a tag octet; 0 is the universal class.
 const CLASS: u8 = 0xc0;
@@ -218,17 +233,106 @@ struct Element<'a> {
     contents: &'a [u8],
 }
 
-/// Refuses a tag octet DER does not allow: the high-tag-number form,
-/// end-of-contents (`0x00`, `0x20`), a primitive `SEQUENCE` or `SET`
-/// (`0x10`, `0x11`), and every universal constructed tag but `SEQUENCE` and
-/// `SET` (a constructed string, `NULL` or `OBJECT IDENTIFIER`).
+/// The encoding form of an element: bit 6 of its tag octet (X.690
+/// 8.1.2.5).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Form {
+    Primitive,
+    Constructed,
+}
+
+/// The one form DER allows for the universal tag `number` (0 to 30), or
+/// `None` when this module refuses the tag in both forms. The clauses are
+/// those of X.690 (02/2021); the tag numbers those of X.680 (02/2021)
+/// section 8, table 1. No universal tag has both forms in DER: BER leaves
+/// the form to the sender only for `BIT STRING`, `OCTET STRING` and the
+/// restricted character strings, and DER 10.2 makes those primitive.
+fn der_universal_form(number: u8) -> Option<Form> {
+    use Form::{Constructed, Primitive};
+    match number {
+        // End-of-contents: only closes an indefinite length (8.1.5), which
+        // DER does not use (10.1).
+        0x00 => None,
+        // BOOLEAN (8.2.1), INTEGER (8.3.1): primitive.
+        0x01 | 0x02 => Some(Primitive),
+        // BIT STRING (8.6.1, BER either form), OCTET STRING (8.7.1, BER
+        // either form): primitive in DER (10.2).
+        0x03 | 0x04 => Some(Primitive),
+        // NULL (8.8.1), OBJECT IDENTIFIER (8.19.1): primitive.
+        0x05 | 0x06 => Some(Primitive),
+        // ObjectDescriptor: a useful type, `[UNIVERSAL 7] IMPLICIT
+        // GraphicString` (X.680), encoded as that restricted character
+        // string (8.25), so primitive in DER (10.2).
+        0x07 => Some(Primitive),
+        // EXTERNAL and INSTANCE OF: encoded as a SEQUENCE (8.18, 8.16), so
+        // constructed (8.9.1).
+        0x08 => Some(Constructed),
+        // REAL (8.5.1): primitive; ENUMERATED: encoded as an INTEGER
+        // (8.4), so primitive.
+        0x09 | 0x0a => Some(Primitive),
+        // EMBEDDED PDV: encoded as a SEQUENCE (8.17), so constructed.
+        0x0b => Some(Constructed),
+        // UTF8String: a restricted character string (8.23), primitive in
+        // DER (10.2).
+        0x0c => Some(Primitive),
+        // RELATIVE-OID (8.20.1): primitive.
+        0x0d => Some(Primitive),
+        // TIME since the 2008 editions of X.680 (reserved before), and 15,
+        // reserved: no structure a SubjectPublicKeyInfo holds uses either,
+        // and a decoder older than TIME reads 14 as reserved, so both are
+        // refused here.
+        0x0e | 0x0f => None,
+        // SEQUENCE and SEQUENCE OF (8.9.1, 8.10.1), SET and SET OF (8.11.1,
+        // 8.12.1): constructed.
+        0x10 | 0x11 => Some(Constructed),
+        // NumericString, PrintableString, TeletexString (T61String),
+        // VideotexString, IA5String: restricted character strings (8.23),
+        // primitive in DER (10.2).
+        0x12..=0x16 => Some(Primitive),
+        // UTCTime, GeneralizedTime: useful types, `IMPLICIT VisibleString`
+        // (X.680), encoded as that restricted character string (8.25,
+        // 8.26), so primitive in DER (10.2; 11.7 and 11.8 restrict their
+        // contents, which are not checked here).
+        0x17 | 0x18 => Some(Primitive),
+        // GraphicString, VisibleString (ISO646String), GeneralString,
+        // UniversalString: restricted character strings (8.23), primitive
+        // in DER (10.2).
+        0x19..=0x1c => Some(Primitive),
+        // CHARACTER STRING (unrestricted): encoded as a SEQUENCE (8.24), so
+        // constructed.
+        0x1d => Some(Constructed),
+        // BMPString: a restricted character string (8.23), primitive in
+        // DER (10.2).
+        0x1e => Some(Primitive),
+        // 31: the high-tag-number form, refused by `check_tag` first; and
+        // no other number fits in five bits.
+        _ => None,
+    }
+}
+
+/// Refuses a tag octet DER does not allow, or this module does not
+/// accept: the high-tag-number form in any class (a tag number of 31 or
+/// more, which no element of a `SubjectPublicKeyInfo` needs; below 31 it is
+/// not DER, 8.1.2.2), and in the universal class every tag and form that
+/// [`der_universal_form`] does not permit. A tag of another class
+/// (application, context-specific, private) is accepted in either form: its
+/// form follows the type it tags, which only the schema knows.
 fn check_tag(tag: u8) -> Result<(), IdentityError> {
-    match tag {
-        _ if tag & 0x1f == 0x1f => Err(IdentityError::NotDer),
-        0x00 | 0x10 | 0x11 => Err(IdentityError::NotDer),
-        SEQUENCE | SET => Ok(()),
-        _ if tag & CLASS == 0 && tag & CONSTRUCTED != 0 => Err(IdentityError::NotDer),
-        _ => Ok(()),
+    let number = tag & 0x1f;
+    if number == 0x1f {
+        return Err(IdentityError::NotDer);
+    }
+    if tag & CLASS != 0 {
+        return Ok(());
+    }
+    let form = if tag & CONSTRUCTED == 0 {
+        Form::Primitive
+    } else {
+        Form::Constructed
+    };
+    match der_universal_form(number) {
+        Some(permitted) if permitted == form => Ok(()),
+        _ => Err(IdentityError::NotDer),
     }
 }
 
@@ -297,14 +401,17 @@ fn check_element(element: &Element<'_>, depth: usize) -> Result<(), IdentityErro
     }
     match element.tag {
         NULL if !element.contents.is_empty() => Err(IdentityError::NotDer),
-        OBJECT_IDENTIFIER => check_oid(element.contents),
+        OBJECT_IDENTIFIER | RELATIVE_OID => check_oid(element.contents),
         tag if tag & CONSTRUCTED != 0 => check_elements(element.contents, depth + 1),
         _ => Ok(()),
     }
 }
 
 /// Not empty; each subidentifier minimal (no leading 0x80 octet) and
-/// terminated (the last octet has its high bit clear).
+/// terminated (the last octet has its high bit clear). The contents of an
+/// `OBJECT IDENTIFIER` (X.690 8.19.2) and of a `RELATIVE-OID` (8.20.2,
+/// which has at least one component, X.680) follow the same rules at the
+/// octet level; they differ only in what the first subidentifier means.
 fn check_oid(contents: &[u8]) -> Result<(), IdentityError> {
     let Some(&last) = contents.last() else {
         return Err(IdentityError::NotDer);
@@ -663,6 +770,45 @@ mod tests {
         }
     }
 
+    /// A RELATIVE-OID in the parameters, and nested in them, follows the
+    /// same contents rules as an OID (X.690 8.20.2).
+    #[test]
+    fn malformed_relative_oids_are_refused() {
+        let bad: [&[u8]; 5] = [
+            // Empty: a RELATIVE-OID has at least one component.
+            &[0x0d, 0x00],
+            // The first arc padded (80 01).
+            &[0x0d, 0x02, 0x80, 0x01],
+            // A later arc padded (01 80 7f).
+            &[0x0d, 0x03, 0x01, 0x80, 0x7f],
+            // Unterminated: the last octet has its high bit set.
+            &[0x0d, 0x02, 0x01, 0x81],
+            // A lone continuation octet.
+            &[0x0d, 0x01, 0x81],
+        ];
+        for relative_oid in bad {
+            for der in [
+                with_parameters(relative_oid),
+                with_parameters(&nested(1, relative_oid)),
+            ] {
+                assert_eq!(
+                    canonical_public_identity(&der),
+                    Err(IdentityError::NotDer),
+                    "{der:02x?}"
+                );
+            }
+        }
+        // One arc, a multi-octet arc (81 00, 128) and arc 0 pass.
+        for relative_oid in [
+            &[0x0d, 0x01, 0x01][..],
+            &[0x0d, 0x03, 0x01, 0x81, 0x00],
+            &[0x0d, 0x02, 0x00, 0x00],
+        ] {
+            assert!(canonical_public_identity(&with_parameters(relative_oid)).is_ok());
+            assert!(canonical_public_identity(&with_parameters(&nested(1, relative_oid))).is_ok());
+        }
+    }
+
     /// Constructed parameters, a SEQUENCE, a SET or a context-specific
     /// `[0]`, are checked element by element, the second child as well as
     /// the first.
@@ -702,29 +848,58 @@ mod tests {
         }
     }
 
-    /// The tags DER allows: no end-of-contents, no primitive SEQUENCE or
-    /// SET, and of the universal constructed tags only SEQUENCE and SET.
-    /// Checked for every universal tag in the parameters, nested in them,
-    /// and as the outer tag.
+    /// The universal tag octets DER allows, written out from X.690
+    /// (02/2021) clauses 8 and 10.2 and the tag numbers of X.680 rather
+    /// than taken from the implementation: every one of the 64 universal
+    /// octets `0x00` to `0x3f`, both forms, is listed exactly once, accepted
+    /// or refused, and checked in the parameters and nested in them.
     #[test]
     fn tags_der_does_not_allow_are_refused() {
-        for tag in 0x00..=0x3e_u8 {
-            if tag == 0x1f {
-                // The high-tag-number form, below.
-                continue;
-            }
-            let refused = matches!(tag, 0x00 | 0x10 | 0x11)
-                || (tag & 0x20 != 0 && tag != 0x30 && tag != 0x31);
-            // A minimal valid element of each tag: an OID needs contents.
-            let element: &[u8] = if tag == 0x06 {
-                &[0x06, 0x01, 0x2b]
-            } else {
-                &[tag, 0x00]
+        const ACCEPTED: [u8; 28] = [
+            // Primitive: BOOLEAN, INTEGER, BIT STRING, OCTET STRING, NULL,
+            // OBJECT IDENTIFIER, ObjectDescriptor.
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            // Primitive: REAL, ENUMERATED, UTF8String, RELATIVE-OID.
+            0x09, 0x0a, 0x0c, 0x0d,
+            // Primitive: NumericString, PrintableString, TeletexString,
+            // VideotexString, IA5String, UTCTime, GeneralizedTime,
+            // GraphicString, VisibleString, GeneralString, UniversalString,
+            // BMPString.
+            0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1e,
+            // Constructed: EXTERNAL (and INSTANCE OF), EMBEDDED PDV,
+            // SEQUENCE (OF), SET (OF), CHARACTER STRING.
+            0x28, 0x2b, 0x30, 0x31, 0x3d,
+        ];
+        const REFUSED: [u8; 36] = [
+            // Primitive: end-of-contents, EXTERNAL, EMBEDDED PDV, TIME,
+            // reserved 15, SEQUENCE, SET, CHARACTER STRING, the
+            // high-tag-number form.
+            0x00, 0x08, 0x0b, 0x0e, 0x0f, 0x10, 0x11, 0x1d, 0x1f,
+            // Constructed: end-of-contents, BOOLEAN, INTEGER, BIT STRING,
+            // OCTET STRING, NULL, OBJECT IDENTIFIER, ObjectDescriptor.
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+            // Constructed: REAL, ENUMERATED, UTF8String, RELATIVE-OID,
+            // TIME, reserved 15.
+            0x29, 0x2a, 0x2c, 0x2d, 0x2e, 0x2f,
+            // Constructed: the restricted character strings and times
+            // (0x32 to 0x3c, 0x3e), and the high-tag-number form.
+            0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3e, 0x3f,
+        ];
+        // The two lists partition the 64 universal octets.
+        let mut all: Vec<u8> = ACCEPTED.iter().chain(&REFUSED).copied().collect();
+        all.sort_unstable();
+        assert_eq!(all, (0x00..=0x3f).collect::<Vec<u8>>());
+        for tag in 0x00..=0x3f_u8 {
+            // A minimal valid element of each tag: an OID and a
+            // RELATIVE-OID need contents.
+            let element: &[u8] = match tag {
+                0x06 | 0x0d => &[tag, 0x01, 0x2b],
+                _ => &[tag, 0x00],
             };
-            let expected = if refused {
-                Err(IdentityError::NotDer)
-            } else {
+            let expected = if ACCEPTED.contains(&tag) {
                 Ok(())
+            } else {
+                Err(IdentityError::NotDer)
             };
             for der in [
                 with_parameters(element),

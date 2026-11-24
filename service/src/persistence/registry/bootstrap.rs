@@ -182,8 +182,10 @@
 //!
 //! Bootstrap trusts its caller, the deployment-local bootstrap command
 //! (ADR-013 items 5 and 7): it does not canonicalize or check the mTLS
-//! public key behind `public_identity`, which the operator tooling computes
-//! (T13.1), nor resolve `trust_anchor_ref`. Other bad input fails at a
+//! public key behind `public_identity`, which it takes as given today (the
+//! service is to derive it with `crate::identity::canonical_public_identity`
+//! from the DER key the operator tooling supplies, T13.1), nor resolve
+//! `trust_anchor_ref`. Other bad input fails at a
 //! statement as in [`create_admin_credential`] and its neighbours.
 //!
 //! # Errors and rollback
