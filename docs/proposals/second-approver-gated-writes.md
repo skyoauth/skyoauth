@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 5 merged, PR 6 in progress (#116 merged), PRs 7 and 9 merged (#120, #122), PR 10 implemented and in review, PR 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 7, 9 and 10 merged (PR 10 as #123), PR 6 in progress (#116 merged), PR 8 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all

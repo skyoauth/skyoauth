@@ -65,8 +65,16 @@ tenant preparation and instance approval (design §4.2).
    signer adapters are documented and tested per platform; unsupported
    combinations fail explicitly and never export a key as a fallback (design
    §7.2, §10.1; tasks §1; T13.3, T13.7, T13.10).
-7. **Deployment-local verifier.** The service binary keeps only the
-   deployment-local bootstrap and recovery verifier (design §7.2; tasks §1).
+7. **Deployment-local verifier.** The recovery signature is verified by the
+   library inside `restore_operator` (a combined verify-and-restore step;
+   Ed25519 via `ed25519-dalek`; weak and non-canonical keys are refused at
+   verify and at every enrollment point; user ruling, 2026-11-24). The
+   service binary keeps only the deployment-local bootstrap and the recovery
+   transport (design §7.2; tasks §1; docs/proposals/recovery-verified-response.md).
+   Accepted residual (user, 2026-11-23, Q7 of the second-approver proposal):
+   while the second-approver toggle is on, one `security_admin` can enrol a
+   second identity, grant it `security_admin` and approve through it, until
+   gating `security_admin` grants is added.
 8. **Break-glass recovery.** The restricted local service emits a
    short-lived, single-use challenge with the instance identity, the
    operation/arguments digest and the expected revision. The workstation
