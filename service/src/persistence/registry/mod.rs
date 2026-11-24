@@ -272,11 +272,14 @@
 //! (migrations README, "What 0011 adds").
 //!
 //! Since the amended `0005` the database refuses an `administrative_operation`
-//! of kind `approve` that names an operation of another tenant
-//! (`Invariant { kind: SameTenantOperation, .. }`) or of its own actor
-//! (`Invariant { kind: DistinctApprover, .. }`), and a revocation that names
-//! a revoking operation of another tenant (`SameTenantOperation`); the
-//! instance is a tenant of its own (IR-054; ruled by the user, 2026-11-23;
+//! of any kind that names an approved operation of another tenant
+//! (`Invariant { kind: SameTenantOperation, .. }`), one of kind `approve`
+//! that names an operation of its own actor
+//! (`Invariant { kind: DistinctApprover, .. }`), one that names an audit
+//! event of another tenant (`SameTenantOperation`), and a revocation that
+//! names a revoking operation of another tenant (`SameTenantOperation`); the
+//! instance is a tenant of its own (IR-054; ruled by the user, 2026-11-23,
+//! and for the audit event and the kinds other than `approve`, 2026-11-24;
 //! migrations README, "What 0005 adds"). The constraint is one of
 //! [`SAME_TENANT_OPERATION`] or [`DISTINCT_APPROVER`].
 //!

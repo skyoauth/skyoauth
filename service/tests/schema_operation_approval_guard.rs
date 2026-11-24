@@ -1,12 +1,16 @@
-//! The approval and revocation guards that `0005_operator` adds since its
-//! in-place amendment (`docs/proposals/second-approver-gated-writes.md`
-//! section 11; IR-054; D15) against a real PostgreSQL server: an operation
-//! of kind `approve` names an operation of its own tenant (`IS NOT DISTINCT
-//! FROM`, so the instance approves only the instance) and never one by its
-//! own actor; a revocation, carried by an `INSERT` or written by an
-//! `UPDATE`, names a revoking operation of the revoked row's tenant. A
-//! refusal is `23514` naming `administrative_operation_approves_same_tenant`,
-//! `administrative_operation_approver_distinct` or
+//! The approval, audit and revocation guards that `0005_operator` adds
+//! since its in-place amendments (`docs/proposals/second-approver-gated-writes.md`
+//! section 11; IR-054; D15; the 2026-11-24 ruling on the two cross-scope
+//! references) against a real PostgreSQL server: an operation of any kind
+//! that names an approved operation names one of its own tenant (`IS NOT
+//! DISTINCT FROM`, so the instance names only the instance), and one of
+//! kind `approve` never one by its own actor; every operation names an
+//! audit event of its own tenant; a revocation, carried by an `INSERT` or
+//! written by an `UPDATE`, names a revoking operation of the revoked row's
+//! tenant. A refusal is `23514` naming
+//! `administrative_operation_approves_same_tenant`,
+//! `administrative_operation_approver_distinct`,
+//! `administrative_operation_audit_same_tenant` or
 //! `administrative_operation_revokes_same_tenant`, which the registry maps to
 //! `SameTenantOperation` and `DistinctApprover`. A `route_bundle_approval` by
 //! the actor of its preparation stays allowed. The guards are `AFTER` row
@@ -70,8 +74,10 @@ const SEED: &str = r#"
          '2026-11-20 01:00Z', 'pending', 'evt_a')"#;
 
 const APPROVAL_TRIGGER: &str = "administrative_operation_approval_check";
+const AUDIT_TRIGGER: &str = "administrative_operation_audit_check";
 const REVOCATION_TRIGGER: &str = "administrative_operation_revocation_check";
 const APPROVAL_FUNCTION: &str = "skyoauth_check_operation_approval";
+const AUDIT_FUNCTION: &str = "skyoauth_check_operation_audit_event";
 const REVOCATION_FUNCTION: &str = "skyoauth_check_operation_revocation";
 
 /// A refusal of the guards: its constraint name, the column it names, its
@@ -80,6 +86,7 @@ const REVOCATION_FUNCTION: &str = "skyoauth_check_operation_revocation";
 enum Refusal {
     ApprovesOtherTenant,
     SelfApproval,
+    AuditOtherTenant,
     RevokesOtherTenant,
 }
 
@@ -88,6 +95,7 @@ impl Refusal {
         match self {
             Self::ApprovesOtherTenant => "administrative_operation_approves_same_tenant",
             Self::SelfApproval => "administrative_operation_approver_distinct",
+            Self::AuditOtherTenant => "administrative_operation_audit_same_tenant",
             Self::RevokesOtherTenant => "administrative_operation_revokes_same_tenant",
         }
     }
@@ -96,6 +104,7 @@ impl Refusal {
         match self {
             Self::ApprovesOtherTenant => "approves_operation_id",
             Self::SelfApproval => "actor_id",
+            Self::AuditOtherTenant => "audit_id",
             Self::RevokesOtherTenant => "revocation_operation_id",
         }
     }
@@ -103,10 +112,13 @@ impl Refusal {
     fn message(self) -> &'static str {
         match self {
             Self::ApprovesOtherTenant => {
-                "an approve in administrative_operation names an operation of another tenant"
+                "an operation in administrative_operation approves an operation of another tenant"
             }
             Self::SelfApproval => {
                 "an approve in administrative_operation is by the actor of the operation it approves"
+            }
+            Self::AuditOtherTenant => {
+                "an operation in administrative_operation names an audit event of another tenant"
             }
             Self::RevokesOtherTenant => {
                 "a revocation in administrative_operation names an operation of another tenant"
@@ -138,18 +150,29 @@ fn literal(value: Option<&str>) -> String {
 
 /// The values of a new operation row of the second-approver flow: no
 /// expiry for an `approve`, a `cancel` or a `reject`, an hour for any
-/// other kind.
+/// other kind; recorded by the seed's event of its own scope.
 fn row(id: &str, tenant: Option<&str>, actor: &str, kind: &str, approves: Option<&str>) -> String {
+    row_audited(id, tenant, actor, kind, approves, event(tenant))
+}
+
+/// As [`row`], recorded by the audit event `audit`.
+fn row_audited(
+    id: &str,
+    tenant: Option<&str>,
+    actor: &str,
+    kind: &str,
+    approves: Option<&str>,
+    audit: &str,
+) -> String {
     let expires = if ["approve", "cancel", "reject"].contains(&kind) {
         "NULL"
     } else {
         "'2026-11-20 01:00Z'"
     };
     format!(
-        "('{id}', {}, '{actor}', '{kind}', sha256('{id}'), 1, '{{}}', {expires}, {}, 'applied', '{}')",
+        "('{id}', {}, '{actor}', '{kind}', sha256('{id}'), 1, '{{}}', {expires}, {}, 'applied', '{audit}')",
         literal(tenant),
         literal(approves),
-        event(tenant)
     )
 }
 
@@ -171,6 +194,33 @@ fn insert(
 /// An `INSERT` of an `approve` of `approves` in `tenant` by `actor`.
 fn approve(id: &str, tenant: Option<&str>, actor: &str, approves: &str) -> String {
     insert(id, tenant, actor, "approve", Some(approves))
+}
+
+/// An `INSERT` of an operation recorded by the audit event `audit`.
+fn insert_audited(
+    id: &str,
+    tenant: Option<&str>,
+    kind: &str,
+    approves: Option<&str>,
+    audit: &str,
+) -> String {
+    format!(
+        "{COLUMNS}{}",
+        row_audited(id, tenant, "adm_2", kind, approves, audit)
+    )
+}
+
+/// The statements that append the audit event `id` of `tenant` as the next
+/// event of the chain (`sequence`), as a writer does after it locked the
+/// head: the event, then the head (`0002`).
+fn append_event(id: &str, tenant: Option<&str>, sequence: i64) -> String {
+    format!(
+        "INSERT INTO audit_event VALUES ('{id}', {}, {sequence}, '\\x{:02x}', '2026-11-20Z', \
+         'adm_2', 'administrative_operation.create', '{id}', NULL, NULL, 'pending'); \
+         UPDATE audit_chain_head SET sequence = {sequence}, head_hash = '\\x{sequence:02x}'",
+        literal(tenant),
+        sequence - 1
+    )
 }
 
 /// An `INSERT` of a revoked operation, revoked by `revoker` when inserted.
@@ -291,7 +341,7 @@ type TriggerRow = (String, String, i16, bool, String, Vec<String>, String);
 
 const SEEDED: [&str; 5] = ["op_a", "op_a2", "op_b", "op_i", "op_rp"];
 
-/// Catalog properties that behaviour tests cannot see directly: the two
+/// Catalog properties that behaviour tests cannot see directly: the three
 /// triggers (`AFTER`, each row, not deferrable, `ENABLE ALWAYS`, their
 /// events, `UPDATE OF` column and `WHEN` clause), their firing order after
 /// the immediate foreign-key checks, the functions' pinned `search_path`,
@@ -300,7 +350,7 @@ const SEEDED: [&str; 5] = ["op_a", "op_a2", "op_b", "op_i", "op_rp"];
 /// `DISTINCT_APPROVER`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn catalog_pins_the_two_triggers_and_their_functions() {
+async fn catalog_pins_the_three_triggers_and_their_functions() {
     let (db, pool) = seeded().await;
     // tgtype bits: 1 row, 2 before, 4 insert, 8 delete, 16 update.
     let mut triggers: Vec<TriggerRow> = sqlx::query_as(
@@ -314,7 +364,7 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
                AND p.pronamespace = to_regnamespace(quote_ident(current_schema()))",
     )
     .bind(
-        [APPROVAL_FUNCTION, REVOCATION_FUNCTION]
+        [APPROVAL_FUNCTION, AUDIT_FUNCTION, REVOCATION_FUNCTION]
             .map(String::from)
             .to_vec(),
     )
@@ -334,8 +384,20 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
                 "A".to_string(),
                 vec![],
                 def("administrative_operation_approval_check AFTER INSERT ON \
-                     public.administrative_operation FOR EACH ROW WHEN ((new.kind = \
-                     'approve'::text)) EXECUTE FUNCTION skyoauth_check_operation_approval()"),
+                     public.administrative_operation FOR EACH ROW WHEN \
+                     ((new.approves_operation_id IS NOT NULL)) EXECUTE FUNCTION \
+                     skyoauth_check_operation_approval()"),
+            ),
+            (
+                AUDIT_TRIGGER.to_string(),
+                AUDIT_FUNCTION.to_string(),
+                1 | 4,
+                false,
+                "A".to_string(),
+                vec![],
+                def("administrative_operation_audit_check AFTER INSERT ON \
+                     public.administrative_operation FOR EACH ROW EXECUTE FUNCTION \
+                     skyoauth_check_operation_audit_event()"),
             ),
             (
                 REVOCATION_TRIGGER.to_string(),
@@ -357,7 +419,7 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
     // The AFTER row triggers of the table, in firing (name) order, per
     // event: the foreign-key triggers, none deferrable, then the guards.
     for (event, guards) in [
-        (4, vec![APPROVAL_TRIGGER, REVOCATION_TRIGGER]),
+        (4, vec![APPROVAL_TRIGGER, AUDIT_TRIGGER, REVOCATION_TRIGGER]),
         (16, vec![REVOCATION_TRIGGER]),
     ] {
         let fired: Vec<(String, bool, bool)> = sqlx::query_as(
@@ -386,9 +448,10 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
         let after: Vec<&str> = after.iter().map(|(name, ..)| name.as_str()).collect();
         assert_eq!(after, guards, "{event}");
     }
-    // Both references the guards read are immediate foreign keys.
+    // The three references the guards read are immediate foreign keys.
     for name in [
         "administrative_operation_approves_operation_id_fkey",
+        "administrative_operation_audit_id_fkey",
         "administrative_operation_revocation_operation_id_fkey",
     ] {
         let deferrable: bool = sqlx::query_scalar(
@@ -403,12 +466,22 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
         assert!(!deferrable, "{name}");
     }
 
-    for (function, raised) in [
+    for (function, raised, read) in [
         (
             APPROVAL_FUNCTION,
             vec![Refusal::ApprovesOtherTenant, Refusal::SelfApproval],
+            "administrative_operation o",
         ),
-        (REVOCATION_FUNCTION, vec![Refusal::RevokesOtherTenant]),
+        (
+            AUDIT_FUNCTION,
+            vec![Refusal::AuditOtherTenant],
+            "audit_event e",
+        ),
+        (
+            REVOCATION_FUNCTION,
+            vec![Refusal::RevokesOtherTenant],
+            "administrative_operation o",
+        ),
     ] {
         let (config, definer, source): (Vec<String>, bool, String) = sqlx::query_as(
             "SELECT p.proconfig, p.prosecdef, p.prosrc FROM pg_proc p
@@ -422,8 +495,8 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
         assert_eq!(config, ["search_path=pg_catalog, pg_temp"], "{function}");
         assert!(!definer, "{function}: SECURITY INVOKER");
         assert!(
-            source.contains(" public.administrative_operation o")
-                && !source.contains(" administrative_operation o")
+            source.contains(&format!(" public.{read}"))
+                && !source.contains(&format!(" {read}"))
                 && !source.contains("FOR "),
             "{function}: {source}"
         );
@@ -446,6 +519,7 @@ async fn catalog_pins_the_two_triggers_and_their_functions() {
         SAME_TENANT_OPERATION,
         [
             Refusal::ApprovesOtherTenant.constraint(),
+            Refusal::AuditOtherTenant.constraint(),
             Refusal::RevokesOtherTenant.constraint()
         ]
     );
@@ -552,15 +626,53 @@ async fn an_approve_names_an_operation_of_its_own_tenant() {
     db.drop([pool]).await;
 }
 
-/// Only kind `approve` is guarded: a `route_bundle_approval` by the actor
-/// of the preparation it names is accepted (IR-054; one person may hold
-/// both roles there), and so is any other kind that names an operation,
-/// whatever its tenant. A missing approved operation is the foreign key's
-/// `23503`, not the guard's.
+/// Every kind that names an approved operation names one of its own
+/// tenant, not only `approve`: a `route_bundle_approval` naming another
+/// tenant's preparation, an instance one naming a tenant's and a tenant one
+/// naming an instance operation are refused, as is another kind
+/// (`approval`), with the approval guard's name, and write nothing. A
+/// `route_bundle_approval` naming its own tenant's preparation is accepted,
+/// also by the preparation's actor (IR-054: the actor is checked for kind
+/// `approve` only), and so is an instance one naming an instance
+/// operation. A missing approved operation is the foreign key's `23503`,
+/// not the guard's, whatever the kind.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn only_an_approve_is_guarded_and_a_missing_operation_is_the_foreign_keys() {
+async fn every_kind_that_names_an_operation_names_one_of_its_own_tenant() {
     let (db, pool) = seeded().await;
+    for (tenant, kind, approved, case) in [
+        (
+            Some("ten_b"),
+            "route_bundle_approval",
+            "op_rp",
+            "tenant to other tenant",
+        ),
+        (
+            Some("ten_a"),
+            "route_bundle_approval",
+            "op_b",
+            "tenant to other tenant",
+        ),
+        (None, "route_bundle_approval", "op_rp", "instance to tenant"),
+        (
+            Some("ten_a"),
+            "route_bundle_approval",
+            "op_i",
+            "tenant to instance",
+        ),
+        (Some("ten_b"), "approval", "op_a", "another kind"),
+        (None, "approval", "op_b", "another kind, instance to tenant"),
+    ] {
+        // By the approved operation's actor and by another: the actor does
+        // not matter for these kinds.
+        for actor in ["adm_1", "adm_2"] {
+            let err = fail(&pool, &insert("op_x", tenant, actor, kind, Some(approved))).await;
+            assert_refusal(err, Refusal::ApprovesOtherTenant, case);
+        }
+    }
+    assert_eq!(operations(&pool).await, SEEDED);
+
+    // The same tenant: accepted, by the preparation's actor too.
     run(
         &pool,
         &insert(
@@ -575,9 +687,9 @@ async fn only_an_approve_is_guarded_and_a_missing_operation_is_the_foreign_keys(
     run(
         &pool,
         &insert(
-            "op_rbb",
-            Some("ten_b"),
-            "adm_1",
+            "op_rba2",
+            Some("ten_a"),
+            "adm_2",
             "route_bundle_approval",
             Some("op_rp"),
         ),
@@ -588,25 +700,270 @@ async fn only_an_approve_is_guarded_and_a_missing_operation_is_the_foreign_keys(
         &insert("op_ap", None, "adm_1", "approval", Some("op_i")),
     )
     .await;
-    let names: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM administrative_operation WHERE approves_operation_id IS NOT NULL
-         ORDER BY id COLLATE \"C\"",
+    let names: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT o.id, o.tenant_id, o.approves_operation_id FROM administrative_operation o
+         JOIN administrative_operation a ON a.id = o.approves_operation_id
+         WHERE a.tenant_id IS NOT DISTINCT FROM o.tenant_id
+         ORDER BY o.id COLLATE \"C\"",
     )
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(names, ["op_ap", "op_rba", "op_rbb"]);
+    assert_eq!(
+        names,
+        [
+            ("op_ap".into(), None, "op_i".into()),
+            ("op_rba".into(), Some("ten_a".into()), "op_rp".into()),
+            ("op_rba2".into(), Some("ten_a".into()), "op_rp".into()),
+        ]
+    );
+
+    for kind in ["approve", "route_bundle_approval"] {
+        let err = fail(
+            &pool,
+            &insert("op_x", Some("ten_a"), "adm_2", kind, Some("op_missing")),
+        )
+        .await;
+        assert_eq!(sqlstate(&err), "23503", "{kind}: {err}");
+        assert_eq!(
+            err.as_database_error().unwrap().constraint(),
+            Some("administrative_operation_approves_operation_id_fkey"),
+            "{kind}"
+        );
+    }
+    db.drop([pool]).await;
+}
+
+/// Every operation names an audit event of its own tenant, compared
+/// `IS NOT DISTINCT FROM`: a tenant operation naming another tenant's event
+/// or an instance event, and an instance operation naming a tenant's event,
+/// are refused with the audit guard's name and write nothing, whatever the
+/// kind (a pending gated write, an `approve`, a `route_bundle_approval`, a
+/// `cancel`, a recovery challenge). The same scope is accepted in each
+/// case: an instance operation with an instance event (`tenant_id` `NULL`)
+/// and a tenant operation with one of its tenant. A missing event is the
+/// foreign key's `23503`, not the guard's.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_operation_names_an_audit_event_of_its_own_tenant() {
+    let (db, pool) = seeded().await;
+    let cases: [(Option<&str>, &str, Option<&str>); 6] = [
+        (Some("ten_a"), "service_grant.update", None),
+        (Some("ten_a"), "approve", Some("op_a")),
+        (Some("ten_a"), "route_bundle_approval", Some("op_rp")),
+        (Some("ten_b"), "cancel", None),
+        (None, "instance_security_policy.update", None),
+        (None, "approve", Some("op_i")),
+    ];
+    for (tenant, kind, approves) in cases {
+        for (audit, case) in [
+            ("evt_a", "event of ten_a"),
+            ("evt_b", "event of ten_b"),
+            ("evt_i", "instance event"),
+        ] {
+            if audit == event(tenant) {
+                continue;
+            }
+            let err = fail(
+                &pool,
+                &insert_audited("op_x", tenant, kind, approves, audit),
+            )
+            .await;
+            assert_refusal(
+                err,
+                Refusal::AuditOtherTenant,
+                &format!("{kind} {tenant:?}: {case}"),
+            );
+        }
+    }
+    // A recovery challenge is an instance operation: a tenant's event is
+    // refused, the instance event accepted.
+    let challenge = |audit: &str| {
+        format!(
+            "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, request_digest, \
+             expected_revision, immutable_plan, challenge_hash, expires_at, outcome, audit_id) \
+             VALUES ('op_ch', NULL, 'deployment_operator', 'operator_restoration', sha256('ch'), 1, \
+             '{{}}', sha256('challenge'), '2026-11-20 00:05Z', 'issued', '{audit}')"
+        )
+    };
+    let err = fail(&pool, &challenge("evt_a")).await;
+    assert_refusal(err, Refusal::AuditOtherTenant, "recovery challenge");
+    assert_eq!(operations(&pool).await, SEEDED);
+
+    for (i, (tenant, kind, approves)) in cases.into_iter().enumerate() {
+        run(
+            &pool,
+            &insert_audited(&format!("op_ok{i}"), tenant, kind, approves, event(tenant)),
+        )
+        .await;
+    }
+    run(&pool, &challenge("evt_i")).await;
+    let crossed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM administrative_operation o JOIN audit_event e ON e.id = o.audit_id
+         WHERE e.tenant_id IS DISTINCT FROM o.tenant_id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(crossed, 0);
+    assert_eq!(
+        operations(&pool).await.len(),
+        SEEDED.len() + cases.len() + 1
+    );
 
     let err = fail(
         &pool,
-        &approve("op_x", Some("ten_a"), "adm_2", "op_missing"),
+        &insert_audited(
+            "op_x",
+            Some("ten_a"),
+            "service_grant.update",
+            None,
+            "evt_missing",
+        ),
     )
     .await;
     assert_eq!(sqlstate(&err), "23503", "{err}");
     assert_eq!(
         err.as_database_error().unwrap().constraint(),
-        Some("administrative_operation_approves_operation_id_fkey")
+        Some("administrative_operation_audit_id_fkey")
     );
+    db.drop([pool]).await;
+}
+
+/// The guards fire in name order, approval, audit, revocation, after the
+/// foreign keys: a row that crosses its approved operation and its audit
+/// event is the approval refusal, and a revoked row inserted with an audit
+/// event and a revoking operation of another tenant is the audit refusal.
+/// An `approve` that crosses its audit event only, by the approved
+/// operation's actor, is the approval guard's self-approval refusal first,
+/// since that guard fires first.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_guards_refuse_in_name_order() {
+    let (db, pool) = seeded().await;
+    run(
+        &pool,
+        &insert("rev_b", Some("ten_b"), "adm_2", "reject", None),
+    )
+    .await;
+    let err = fail(
+        &pool,
+        &insert_audited(
+            "op_x",
+            Some("ten_a"),
+            "route_bundle_approval",
+            Some("op_b"),
+            "evt_b",
+        ),
+    )
+    .await;
+    assert_refusal(err, Refusal::ApprovesOtherTenant, "approval and audit");
+    let err = fail(
+        &pool,
+        &format!(
+            "{COLUMNS}{}",
+            row_audited(
+                "op_x",
+                Some("ten_a"),
+                "adm_1",
+                "approve",
+                Some("op_a"),
+                "evt_b"
+            )
+        ),
+    )
+    .await;
+    assert_refusal(err, Refusal::SelfApproval, "self-approval and audit");
+    let err = fail(
+        &pool,
+        "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, expires_at, revoked_at, revocation_operation_id, \
+         outcome, audit_id) VALUES ('op_x', 'ten_a', 'adm_1', 'service_grant.update', \
+         sha256('op_x'), 1, '{}', '2026-11-20 01:00Z', '2026-11-20 00:30Z', 'rev_b', 'rejected', \
+         'evt_b')",
+    )
+    .await;
+    assert_refusal(err, Refusal::AuditOtherTenant, "audit and revocation");
+    db.drop([pool]).await;
+}
+
+/// The audit event is inserted first: `administrative_operation_audit_id_fkey`
+/// is immediate, so an operation inserted before its event is the foreign
+/// key's `23503`, even under `SET CONSTRAINTS ALL DEFERRED` and when the
+/// transaction would insert the event next. An event inserted earlier in
+/// the same transaction, uncommitted, or earlier in the same statement (a
+/// data-modifying `WITH`), is seen: one of another scope is refused, one of
+/// the operation's own accepted.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_audit_event_is_inserted_first_and_seen_uncommitted() {
+    let (db, pool) = seeded().await;
+    let mut conn = pool.acquire().await.unwrap();
+    let op = |tenant: Option<&str>| {
+        insert_audited("op_n", tenant, "service_grant.update", None, "evt_n")
+    };
+    run(&mut *conn, "BEGIN; SET CONSTRAINTS ALL DEFERRED").await;
+    let err = fail(&mut *conn, &op(Some("ten_a"))).await;
+    assert_eq!(sqlstate(&err), "23503", "{err}");
+    assert_eq!(
+        err.as_database_error().unwrap().constraint(),
+        Some("administrative_operation_audit_id_fkey")
+    );
+    run(&mut *conn, "ROLLBACK").await;
+
+    for (event_tenant, op_tenant, ok) in [
+        (Some("ten_a"), Some("ten_a"), true),
+        (None, None, true),
+        (Some("ten_a"), Some("ten_b"), false),
+        (Some("ten_a"), None, false),
+        (None, Some("ten_a"), false),
+    ] {
+        let case = format!("{event_tenant:?} event, {op_tenant:?} operation");
+        // Separate statements of one transaction.
+        run(
+            &mut *conn,
+            &format!(
+                "BEGIN; SELECT FROM audit_chain_head FOR UPDATE; {}",
+                append_event("evt_n", event_tenant, 4)
+            ),
+        )
+        .await;
+        let result = sqlx::raw_sql(AssertSqlSafe(op(op_tenant)))
+            .execute(&mut *conn)
+            .await;
+        match result {
+            Ok(_) if ok => {}
+            Err(err) if !ok => assert_refusal(err, Refusal::AuditOtherTenant, &case),
+            other => panic!("{case}: {other:?}"),
+        }
+        run(&mut *conn, "ROLLBACK").await;
+
+        // One statement: the event in a WITH, the operation in the main
+        // statement; the head is advanced after it.
+        let one = format!(
+            "WITH e AS (INSERT INTO audit_event VALUES ('evt_n', {}, 4, '\\x03', \
+             '2026-11-20Z', 'adm_2', 'administrative_operation.create', 'op_n', NULL, NULL, \
+             'pending') RETURNING id) {}",
+            literal(event_tenant),
+            op(op_tenant)
+        );
+        run(&mut *conn, "BEGIN").await;
+        let result = sqlx::raw_sql(AssertSqlSafe(one)).execute(&mut *conn).await;
+        match result {
+            Ok(_) if ok => {
+                run(
+                    &mut *conn,
+                    "UPDATE audit_chain_head SET sequence = 4, head_hash = '\\x04'",
+                )
+                .await;
+            }
+            Err(err) if !ok => assert_refusal(err, Refusal::AuditOtherTenant, &case),
+            other => panic!("{case}, one statement: {other:?}"),
+        }
+        run(&mut *conn, "ROLLBACK").await;
+    }
+    drop(conn);
+    assert_eq!(operations(&pool).await, SEEDED);
     db.drop([pool]).await;
 }
 
@@ -695,11 +1052,12 @@ async fn a_revocation_names_an_operation_of_the_revoked_rows_tenant() {
 }
 
 /// The guards are `ENABLE ALWAYS`, so replica mode does not skip them: a
-/// self-approval, an approve of another tenant's operation and a
-/// revocation by another tenant's operation are still refused. Replica mode
-/// skips the foreign keys, so a row whose approved or revoking operation is
-/// missing is accepted (the guard finds no row and passes it): the limit
-/// README "What 0005 adds" states.
+/// self-approval, an approve or a `route_bundle_approval` of another
+/// tenant's operation, an operation naming another tenant's audit event and
+/// a revocation by another tenant's operation are still refused. Replica
+/// mode skips the foreign keys, so a row whose approved or revoking
+/// operation or audit event is missing is accepted (the guard finds no row
+/// and passes it): the limit README "What 0005 adds" states.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn replica_mode_refuses_but_passes_a_missing_reference() {
@@ -718,6 +1076,24 @@ async fn replica_mode_refuses_but_passes_a_missing_reference() {
         (
             approve("op_x", Some("ten_b"), "adm_2", "op_a"),
             Refusal::ApprovesOtherTenant,
+        ),
+        (
+            insert(
+                "op_x",
+                Some("ten_b"),
+                "adm_2",
+                "route_bundle_approval",
+                Some("op_rp"),
+            ),
+            Refusal::ApprovesOtherTenant,
+        ),
+        (
+            insert_audited("op_x", Some("ten_a"), "service_grant.update", None, "evt_b"),
+            Refusal::AuditOtherTenant,
+        ),
+        (
+            insert_audited("op_x", None, "service_grant.update", None, "evt_a"),
+            Refusal::AuditOtherTenant,
         ),
         (revoke("op_a", "rev_b"), Refusal::RevokesOtherTenant),
         (
@@ -738,21 +1114,29 @@ async fn replica_mode_refuses_but_passes_a_missing_reference() {
     run(
         &mut *conn,
         &format!(
-            "BEGIN; SET LOCAL session_replication_role = replica; {}; {}; {}",
+            "BEGIN; SET LOCAL session_replication_role = replica; {}; {}; {}; {}",
             approve("op_x", Some("ten_a"), "adm_2", "op_missing"),
             revoke("op_a", "op_missing"),
-            insert_revoked("op_y", Some("ten_a"), "op_missing")
+            insert_revoked("op_y", Some("ten_a"), "op_missing"),
+            insert_audited(
+                "op_z",
+                Some("ten_a"),
+                "service_grant.update",
+                None,
+                "evt_missing"
+            )
         ),
     )
     .await;
     let stored: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM administrative_operation
-         WHERE approves_operation_id = 'op_missing' OR revocation_operation_id = 'op_missing'",
+         WHERE approves_operation_id = 'op_missing' OR revocation_operation_id = 'op_missing'
+            OR audit_id = 'evt_missing'",
     )
     .fetch_one(&mut *conn)
     .await
     .unwrap();
-    assert_eq!(stored, 3);
+    assert_eq!(stored, 4);
     run(&mut *conn, "ROLLBACK").await;
     drop(conn);
     db.drop([pool]).await;
@@ -778,13 +1162,17 @@ async fn run_promptly(conn: &mut PgConnection, sql: &str) {
     }
 }
 
-/// The guards take no row lock. An approve and a revocation do not wait
-/// for the `FOR NO KEY UPDATE` lock an approver or a canceller holds on
-/// the operation they read (the foreign key's `FOR KEY SHARE` does not
+/// The guards take no row lock. An approve, a `route_bundle_approval` and
+/// a revocation do not wait for the `FOR NO KEY UPDATE` lock an approver or
+/// a canceller holds on the operation they read, nor for one held on the
+/// audit event they name (the foreign keys' `FOR KEY SHARE` does not
 /// conflict with it), and while they are uncommitted another transaction
-/// still takes that operation `FOR NO KEY UPDATE NOWAIT`, which a guard
+/// still takes those rows `FOR NO KEY UPDATE NOWAIT`, which a guard
 /// `FOR SHARE` read would block. Neither waits on the other, so no backend
-/// is ever blocked.
+/// is ever blocked. The audit guard does not touch the audit head: an
+/// operation naming an existing event is inserted while another
+/// transaction holds `audit_chain_head` `FOR UPDATE`, so the guards add no
+/// step to the README lock order.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_guards_take_no_row_lock() {
@@ -797,17 +1185,21 @@ async fn the_guards_take_no_row_lock() {
     let mut holder = pool.acquire().await.unwrap().detach();
     let mut writer = pool.acquire().await.unwrap().detach();
     let writer_pid = backend_pid(&mut writer).await;
-    run(
-        &mut holder,
-        "BEGIN; SELECT FROM administrative_operation WHERE id IN ('op_a', 'rev_a') \
-         FOR NO KEY UPDATE",
-    )
-    .await;
+    let lock = "SELECT FROM administrative_operation WHERE id IN ('op_a', 'op_rp', 'rev_a') \
+                FOR NO KEY UPDATE; SELECT FROM audit_event WHERE id = 'evt_a' FOR NO KEY UPDATE";
+    run(&mut holder, &format!("BEGIN; {lock}")).await;
     run_promptly(
         &mut writer,
         &format!(
-            "BEGIN; {}; {}",
+            "BEGIN; {}; {}; {}",
             approve("op_x", Some("ten_a"), "adm_2", "op_a"),
+            insert(
+                "op_rba",
+                Some("ten_a"),
+                "adm_2",
+                "route_bundle_approval",
+                Some("op_rp")
+            ),
             revoke("op_a2", "rev_a")
         ),
     )
@@ -824,8 +1216,10 @@ async fn the_guards_take_no_row_lock() {
     // conflicts with FOR NO KEY UPDATE on the rows they read.
     run_promptly(
         &mut holder,
-        "BEGIN; SELECT FROM administrative_operation WHERE id IN ('op_a', 'rev_a') \
-         FOR NO KEY UPDATE NOWAIT; ROLLBACK",
+        &format!(
+            "BEGIN; {}; ROLLBACK",
+            lock.replace("UPDATE", "UPDATE NOWAIT")
+        ),
     )
     .await;
     run(&mut writer, "COMMIT").await;
@@ -833,6 +1227,23 @@ async fn the_guards_take_no_row_lock() {
         revocation(&pool, "op_a2").await,
         (Some("rev_a".to_string()), 2)
     );
+
+    // The audit head held by another transaction: an operation naming an
+    // existing event does not wait for it.
+    run(
+        &mut holder,
+        "BEGIN; SELECT FROM audit_chain_head FOR UPDATE",
+    )
+    .await;
+    run_promptly(
+        &mut writer,
+        &format!(
+            "BEGIN; {}; ROLLBACK",
+            insert("op_h", Some("ten_b"), "adm_2", "service_grant.update", None)
+        ),
+    )
+    .await;
+    run(&mut holder, "ROLLBACK").await;
     holder.close().await.unwrap();
     writer.close().await.unwrap();
     db.drop([pool]).await;
@@ -840,9 +1251,15 @@ async fn the_guards_take_no_row_lock() {
 
 /// The guards read the referenced row with the writer's privileges
 /// (`SECURITY INVOKER`): a role that may insert operations needs `SELECT`
-/// on `administrative_operation`'s `id`, `tenant_id` and `actor_id` to
-/// insert an `approve`, and on `id` and `tenant_id` to write a revocation;
-/// otherwise `42501`. An operation that names nothing needs no `SELECT`.
+/// on `audit_event`'s `id` and `tenant_id` for every insert (the audit
+/// guard), on `administrative_operation`'s `id`, `tenant_id` and
+/// `actor_id` to insert an `approve`, and on `id` and `tenant_id` only to
+/// insert any other kind that names an approved operation (a
+/// `route_bundle_approval`, say: the guard reads no `actor_id` for it) or
+/// to write a revocation; otherwise `42501`. With `id` and `tenant_id` a
+/// crossing by such a kind is the tenant guard's `23514`, not `42501`. An
+/// operation that names no other operation needs no `SELECT` on
+/// `administrative_operation`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_guards_read_with_the_writers_privileges() {
@@ -859,18 +1276,43 @@ async fn the_guards_read_with_the_writers_privileges() {
     )
     .await;
     let mut writer = PgConnection::connect_with(&connect).await.unwrap();
-    // Names nothing: no guard reads.
-    run(
-        &mut writer,
-        &format!(
-            "BEGIN; {}; ROLLBACK",
-            insert("op_x", Some("ten_a"), "adm_1", "service_grant.update", None)
-        ),
-    )
-    .await;
-    for (select, approve_ok, revoke_ok) in [
+    // Names no other operation: only the audit guard reads, audit_event.
+    let plain = insert("op_x", Some("ten_a"), "adm_1", "service_grant.update", None);
+    for (select, allowed) in [
+        (None, false),
+        (Some("SELECT (id)"), false),
+        (Some("SELECT (tenant_id)"), false),
+        (Some("SELECT (id, tenant_id)"), true),
+    ] {
+        if let Some(select) = select {
+            run(
+                &pool,
+                &format!(
+                    "REVOKE SELECT ON audit_event FROM {role};
+                     GRANT {select} ON audit_event TO {role}"
+                ),
+            )
+            .await;
+        }
+        let result = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {plain}")))
+            .execute(&mut writer)
+            .await;
+        if allowed {
+            result.unwrap_or_else(|err| panic!("{select:?}: {err}"));
+        } else {
+            let err = result.expect_err(&plain);
+            assert_eq!(sqlstate(&err), "42501", "{select:?}: {err}");
+            assert_eq!(
+                err.as_database_error().unwrap().message(),
+                "permission denied for table audit_event"
+            );
+        }
+        run(&mut writer, "ROLLBACK").await;
+    }
+    for (select, approve_ok, other_ok) in [
         (None, false, false),
         (Some("SELECT (id)"), false, false),
+        (Some("SELECT (tenant_id)"), false, false),
         (Some("SELECT (id, tenant_id)"), false, true),
         (Some("SELECT (id, actor_id)"), false, false),
         (Some("SELECT (id, tenant_id, actor_id)"), true, true),
@@ -887,7 +1329,21 @@ async fn the_guards_read_with_the_writers_privileges() {
         }
         for (sql, allowed) in [
             (approve("op_x", Some("ten_a"), "adm_2", "op_a"), approve_ok),
-            (insert_revoked("op_x", Some("ten_a"), "rev_a"), revoke_ok),
+            (
+                insert(
+                    "op_x",
+                    Some("ten_a"),
+                    "adm_1",
+                    "route_bundle_approval",
+                    Some("op_rp"),
+                ),
+                other_ok,
+            ),
+            (
+                insert("op_x", Some("ten_a"), "adm_2", "approval", Some("op_a")),
+                other_ok,
+            ),
+            (insert_revoked("op_x", Some("ten_a"), "rev_a"), other_ok),
         ] {
             let result = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}")))
                 .execute(&mut writer)
@@ -904,6 +1360,25 @@ async fn the_guards_read_with_the_writers_privileges() {
             }
             run(&mut writer, "ROLLBACK").await;
         }
+        // A crossing by a kind other than approve: the tenant guard's
+        // refusal once the role may read id and tenant_id.
+        let crossing = insert(
+            "op_x",
+            Some("ten_b"),
+            "adm_1",
+            "route_bundle_approval",
+            Some("op_rp"),
+        );
+        let err = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {crossing}")))
+            .execute(&mut writer)
+            .await
+            .expect_err(&crossing);
+        if other_ok {
+            assert_refusal(err, Refusal::ApprovesOtherTenant, &format!("{select:?}"));
+        } else {
+            assert_eq!(sqlstate(&err), "42501", "{select:?}: {err}");
+        }
+        run(&mut writer, "ROLLBACK").await;
     }
     drop(writer);
     db.drop([pool]).await;

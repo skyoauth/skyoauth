@@ -30,7 +30,7 @@ const GUARD: &str = "SK001";
 /// `0008` and `0009` name them, the constraint names that the `0010`
 /// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), the two names the
 /// `0011` egress guard trigger raises ([`EGRESS_ENTRY_ENABLED`]), and the
-/// three names the `0005` approval and revocation guards raise
+/// four names the `0005` approval, audit and revocation guards raise
 /// ([`SAME_TENANT_OPERATION`] and [`DISTINCT_APPROVER`]), sorted
 /// byte-wise. A unique, foreign key or check violation maps to a typed
 /// variant only for a name listed here. The database test
@@ -87,6 +87,9 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "administrative_operation_approves_self_check",
     "administrative_operation_audit_id_fkey",
     "administrative_operation_audit_id_octet_length_check",
+    // Raised by the `0005` audit guard, not a catalog constraint
+    // ([`SAME_TENANT_OPERATION`]).
+    "administrative_operation_audit_same_tenant",
     "administrative_operation_challenge_expiry_check",
     "administrative_operation_challenge_hash_octet_length_check",
     "administrative_operation_consumed_at_range_check",
@@ -434,19 +437,25 @@ pub const EGRESS_ENTRY_ENABLED: [&str; 2] = [
     "trust_source_token_review_endpoint_egress_enabled",
 ];
 
-/// The constraint names that the `0005` approval and revocation guards of
-/// `administrative_operation` raise with a `check_violation` (`23514`) when
-/// an `approve` names an operation of another tenant, or a revoked row names
-/// a revoking operation of another tenant (IR-054; the tenants compare with
-/// `IS NOT DISTINCT FROM`, so the instance, `NULL`, is a tenant of its own).
-/// Ruled by the user, 2026-11-23, folded into `0005`
-/// (`docs/proposals/second-approver-gated-writes.md`, D15); the names are
-/// the proposal's. They are not catalog constraints; both are in
-/// [`KNOWN_CONSTRAINTS`]. They map to [`InvariantKind::SameTenantOperation`],
-/// not to [`InvariantKind::Check`] (inferred: a kind of their own, as the
-/// `0010` and `0011` guard names have).
-pub const SAME_TENANT_OPERATION: [&str; 2] = [
+/// The constraint names that the `0005` approval, audit and revocation
+/// guards of `administrative_operation` raise with a `check_violation`
+/// (`23514`) when an operation of any kind names an approved operation of
+/// another tenant, an operation names an audit event of another tenant, or
+/// a revoked row names a revoking operation of another tenant (IR-054; the
+/// tenants compare with `IS NOT DISTINCT FROM`, so the instance, `NULL`, is
+/// a tenant of its own). The approve and revocation names were ruled by the
+/// user on 2026-11-23 (`docs/proposals/second-approver-gated-writes.md`,
+/// D15; the names are the proposal's), the audit name and the approval
+/// guard's other kinds on 2026-11-24 (relayed by the lead; provisional),
+/// all folded into `0005`. They are not catalog constraints; all three are
+/// in [`KNOWN_CONSTRAINTS`]. They map to
+/// [`InvariantKind::SameTenantOperation`], not to [`InvariantKind::Check`]
+/// (inferred: a kind of their own, as the `0010` and `0011` guard names
+/// have; the audit name shares it, since it is the same rule on another
+/// reference of the operation).
+pub const SAME_TENANT_OPERATION: [&str; 3] = [
     "administrative_operation_approves_same_tenant",
+    "administrative_operation_audit_same_tenant",
     "administrative_operation_revokes_same_tenant",
 ];
 
@@ -607,11 +616,13 @@ pub enum InvariantKind {
     /// pick, 2026-11-22). The service refuses such a write first, with its
     /// own error; this is what a registry writer or raw SQL gets.
     EgressEntryEnabled,
-    /// `23514` from a `0005` approval or revocation guard of
-    /// `administrative_operation` ([`SAME_TENANT_OPERATION`]): an `approve`
-    /// names an operation of another tenant, or a revocation a revoking
-    /// operation of another tenant (the instance counts as a tenant of its
-    /// own). A missing operation is [`Self::ForeignKey`] instead.
+    /// `23514` from a `0005` approval, audit or revocation guard of
+    /// `administrative_operation` ([`SAME_TENANT_OPERATION`]): an operation
+    /// of any kind names an approved operation of another tenant, an
+    /// operation names an audit event of another tenant, or a revocation a
+    /// revoking operation of another tenant (the instance counts as a tenant
+    /// of its own). A missing operation or audit event is
+    /// [`Self::ForeignKey`] instead.
     SameTenantOperation,
     /// `23514` from the `0005` approval guard of `administrative_operation`
     /// ([`DISTINCT_APPROVER`]): an `approve` whose actor is the actor of the
@@ -1086,7 +1097,7 @@ mod tests {
         }
     }
 
-    /// The `0005` approval and revocation guards' `23514` names map to
+    /// The `0005` approval, audit and revocation guards' `23514` names map to
     /// `SameTenantOperation` and `DistinctApprover`, never `Check`; a
     /// `40001` or `40P01` naming one is still `Retry`, and the foreign keys
     /// and the other checks of the same columns keep their kinds.

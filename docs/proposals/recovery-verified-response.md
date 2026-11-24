@@ -8,7 +8,10 @@ review are accepted as implementation choices that ordinary review can change.
 Other choices are marked "(inferred)". The ADRs are ratified separately
 (T00.8–T00.17, Gate M0); this text ratifies no ADR and ticks no task. It
 changes no code: the implementation PR does, and edits the places under
-"Reconciliation". Line numbers refer to `main` at `3028360`.
+"Reconciliation". Line numbers refer to `main` at `3028360`, except those into
+`service/migrations/README.md`, `registry/mod.rs`, `registry_recovery.rs` and
+the second-approver proposal, retargeted after the 2026-11-24 amendment of
+`0005` moved them.
 
 The combined shape is ruled: `restore_operator` takes the signed response
 itself and verifies it against the rows it has locked (section 1). The
@@ -17,7 +20,7 @@ earlier "verified response" value design is kept, with its conditions, under
 alternative.
 
 It answers the open decision "the recovery writers" of
-`docs/proposals/second-approver-gated-writes.md` (:2232-2247), in a file of its
+`docs/proposals/second-approver-gated-writes.md` (:2259-2275), in a file of its
 own because that proposal is about the second-approver flow for trust writes
 and records its PRs as implemented.
 
@@ -33,7 +36,7 @@ structs. So any crate that links the library and holds a `READ COMMITTED`
 transaction can call `issue_recovery_challenge` (`:925`) and then
 `restore_operator` with the binding it just chose, and enroll a
 `security_admin` with no signature. Both are public
-(`service/src/persistence/registry/mod.rs:479-485`), and so is
+(`service/src/persistence/registry/mod.rs:482-488`), and so is
 `bootstrap_instance` (`bootstrap.rs:481`);
 `service/tests/ungated_writes_private.rs:190-201` keeps all three public on
 purpose, pending this decision.
@@ -291,7 +294,7 @@ recovery" (tasks :36, `src/admin/`).
 **A module cycle (a consequence, and a choice).** `registry::recovery` would
 use `crate::operation::DigestEnvelope` (re-exported at `operation/mod.rs:229`),
 while `operation::digest` imports `JsonObject`, `floor_to_microsecond` and
-`push_string` from the registry (`digest.rs:28`). Rust accepts the cycle. The
+`push_string` from the registry (`digest.rs:29`). Rust accepts the cycle. The
 cleaner choice is to move the canonical writer and its prefix into the
 registry and keep `operation`'s public names as re-exports (inferred; the
 implementation PR picks).
@@ -323,7 +326,7 @@ The implementation PR adds or adapts (a list, not code):
 - the probe above;
 - known answers: RFC 8032 test vector 1 through the verify helper; a pinned `C`
   and `M` for a fixed challenge, so the workstation can conform;
-- a signed response restores (`registry_recovery.rs:1639`, adapted);
+- a signed response restores (`registry_recovery.rs:1659`, adapted);
 - bad signature (one bit flipped, all zeros, 63 and 65 bytes), wrong key
   (another key, the plan's new key, the retired key after a rotation), wrong
   message (over `challenge_hash`, over `C` without the prefix, over the
@@ -334,7 +337,7 @@ The implementation PR adds or adapts (a list, not code):
   keys and an undecodable one are refused at bootstrap and as a plan's new key
   at issue;
 - replay: the same response twice; two restores at once, exactly one wins
-  (`:1496`, adapted); a response after a rotation;
+  (`:1516`, adapted); a response after a rotation;
 - issue refusals: an extra plan member, a fraction, an integer above
   `i64::MAX`, a reserved `admin_id`, the string bounds, a weak or equal new key;
 - a raw-inserted row (`insert_raw`, `:361`) whose hash or digest is not the
@@ -347,7 +350,7 @@ The implementation PR adds or adapts (a list, not code):
 - `registry_recovery.rs` moves to a test signing key: the helpers `plan_for`
   (:105), `issue_request` (:129), `binding` (:142), `restore_request` (:154)
   and `other_request` (:174); the tests of caller-supplied digest and hash
-  lengths (:641, :1279, :1299, :1348) go, since those inputs disappear.
+  lengths (:641, :1299, :1319, :1368) go, since those inputs disappear.
   `every_consume_miss_is_the_same_not_restorable` (:927) inserts 14 raw rows
   (:973-1075); their columns are immutable, so most of them cannot be made to
   carry a valid signature and become reason cases of step 3;
@@ -450,23 +453,23 @@ lead's. This proposal edits none of them.
 | `recovery.rs:19-25`                                           | "The registry does not verify signatures: that belongs to the future operator crate"                                            | the restore verifies; `skyoauth-operator` only signs; the binary carries the response      |
 | `recovery.rs:88-91`, `:121-124`                               | other plan members "are the caller's"; `challenge_hash` "computed by the caller"; "the registry still does not hash"            | closed plan; the library hashes                                                            |
 | `recovery.rs:547-549`, `:569-581`                             | `IssueChallenge::challenge_hash` "computed by the caller"; `ChallengeBinding`                                                   | removed                                                                                    |
-| `service/src/persistence/registry/mod.rs:349-352`, `:363-364` | the recovery writers stay public, "an open decision"; "does not verify a recovery signature (the verifier does"                 | the restore verifies                                                                       |
+| `service/src/persistence/registry/mod.rs:352-355`, `:366-367` | the recovery writers stay public, "an open decision"; "does not verify a recovery signature (the verifier does"                 | the restore verifies                                                                       |
 | `service/src/persistence/registry/operator.rs:37-39`          | nothing stops "enrolling a `security_admin` while ... `issue_recovery_challenge` and `restore_operator` stay public"            | only `bootstrap_instance` remains, before closure                                          |
 | `service/tests/ungated_writes_private.rs:190-201`             | kept public, "whose verifier is the open decision"                                                                              | section 8                                                                                  |
-| `service/migrations/README.md:3131-3132`                      | "the registry still does not hash"                                                                                              | the library hashes                                                                         |
-| `service/migrations/README.md:3149-3150`                      | "The registry does not verify the recovery signature: the caller verifies it first"                                             | the restore verifies                                                                       |
+| `service/migrations/README.md:3184-3185`                      | "the registry still does not hash"                                                                                              | the library hashes                                                                         |
+| `service/migrations/README.md:3202-3203`                      | "The registry does not verify the recovery signature: the caller verifies it first"                                             | the restore verifies                                                                       |
 | `docs/contracts/identity-registry.md:328-332`, `:342-344`     | the caller verifies; "The registry still does not hash"                                                                         | the restore verifies over `M` rebuilt from the row; the library hashes                     |
 | `identity-registry.md:274-276`, `:548-549`                    | the key's length only, "it does not check the bytes further"; "the signature check is not implemented yet"                      | the weak-key checks; the restore's check                                                   |
 | `tests/security/a32.rs:188-199`, `:238-245`, `:2260-2262`     | "the registry neither hashes nor verifies"; "The verifier is the only check"; that the hash is signed is "the local verifier's" | the test session rewords                                                                   |
 | `service/tests/operation_approval.rs:837-839`                 | "The registry does not verify the recovery key's signature; the digest and challenge hash are the caller's bytes"               | signs with a test key                                                                      |
 | `service/tests/source_approval.rs:1079-1081`                  | the same                                                                                                                        | the same                                                                                   |
-| `docs/proposals/second-approver-gated-writes.md:2232-2247`    | the open decision; quotes "belongs to the future operator crate"                                                                | points here; closed once ruled                                                             |
+| `docs/proposals/second-approver-gated-writes.md:2259-2275`    | the open decision; quotes "belongs to the future operator crate"                                                                | points here; closed once ruled                                                             |
 | `docs/skyoauth-design.md:666`                                 | "The service binary retains only the deployment-local bootstrap/recovery verifier"                                              | none if "binary" means the package; else the lead adds "(library check, binary transport)" |
 | `docs/skyoauth-design.md:724`                                 | verifier home: "Existing `skyoauth-service` subcommands"                                                                        | none: the subcommands are the entry point                                                  |
 | `docs/skyoauth-tasks.md:30`                                   | "`src/main.rs` Process/listener wiring; M1a local bootstrap/recovery verifier"                                                  | the lead may add that the check is in the library (tasks :36)                              |
 | `docs/skyoauth-tasks.md:84`, `:189`; ADR-013 :68-69 (item 7)  | the service binary keeps the verifier                                                                                           | as design :666                                                                             |
 
 Not affected: "operator tooling" at identity-registry :278, `bootstrap.rs:181`
-and the migrations README (:3047) names who canonicalizes an mTLS key, not the
+and the migrations README (:3100) names who canonicalizes an mTLS key, not the
 recovery check. The string "operator crate" occurs only at `recovery.rs:23`
-and in the second-approver proposal (:2243).
+and in the second-approver proposal (:2271).
