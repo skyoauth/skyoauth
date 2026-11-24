@@ -9,7 +9,8 @@
 //! their results as not counted, and they are no claim. They run through
 //! the typed registry API (`skyoauth_service::persistence::registry`:
 //! [`bootstrap_instance`], [`issue_recovery_challenge`],
-//! [`restore_operator`], [`get_recovery_state`], the operator getters,
+//! [`preview_recovery_response`], [`restore_operator`],
+//! [`get_recovery_state`], the operator getters,
 //! `disable_admin_identity` and `revoke_admin_credential`,
 //! [`authorize_operator`], [`get_instance_security_policy`] and
 //! [`verify_audit_chain`]; and, through `registry::test_support`, a
@@ -33,8 +34,10 @@
 //! ([`ids`]), and each bootstrap runs in a transaction of its own that
 //! commits on `Ok` and rolls back on every `Err`, as the caller must
 //! ([`bootstrap`]). Likewise every recovery ([`recovery`]) is valid for the
-//! instance and epoch it names and has a digest, a hash, a replacement, a
-//! new key and event IDs of its own, and each issue and restore runs in a
+//! instance and epoch it names, its response is signed by the recovery key
+//! of that epoch over the `M` its issue returns ([`issue`]), as the
+//! workstation would sign it, and it has a replacement, a new recovery key
+//! and event IDs of its own; each issue and restore runs in a
 //! transaction of its own, committed on `Ok` and rolled back on `Err`
 //! ([`issue_on`], [`restore`]); a restore's transaction is
 //! `READ COMMITTED`, the session default. The exceptions are in the
@@ -43,13 +46,15 @@
 //! after its `Err` ([`end_claim`]), which the registry allows, and an issue
 //! whose event ID is taken, whose caller also commits after its `Err`. The
 //! registry reads no clock: every `now` is the test's and fixed
-//! ([`issued_at`], [`restored_at`]).
+//! ([`issued_at`], [`restored_at`]). Every key is an Ed25519 test key
+//! derived from a fixed seed ([`test_key`]), so every signature is the same
+//! on every run.
 //!
 //! - **Bootstrap, positive.** One bootstrap on an empty database: the IDs of its
 //!   outcome are the rows the getters read back, the instance
 //!   `security_admin` it enrolls authorizes with exactly those IDs, and the
 //!   audit chain is intact at sequence 1. As a cheap extra check, the
-//!   recovery public key (as plain text, hex or base64) and the instance
+//!   recovery public key (as hex or base64) and the instance
 //!   ID, presented as an operator credential's `public_identity`, authorize
 //!   no role (`a32_pos_one_bootstrap_enrolls_one_operator_and_closes`).
 //! - **Bootstrap, negative.** Of 8 replicas that bootstrap at once with requests that
@@ -81,7 +86,10 @@
 //! - **Recovery, positive.** After a bootstrap, with its operator enrolled
 //!   (and given a second credential) or locked out (identity disabled,
 //!   first credential revoked, binding disabled, so no key authorizes a
-//!   `security_admin`), a challenge is issued and restored: the replacement
+//!   `security_admin`), a challenge is issued, its `M` binds exactly the
+//!   operation, the plan, the expected revision and the expiry, and its
+//!   response, signed by the bootstrap recovery key, is previewed (which
+//!   grants nothing, though its caller commits) and restored: the replacement
 //!   its plan names (its six members) is enrolled and authorizes with
 //!   exactly the plan's IDs; every operator credential still unrevoked is
 //!   revoked at the restore's `now` and no old key authorizes any role,
@@ -92,33 +100,41 @@
 //!   closed, also on a fresh pool
 //!   (`a32_pos_signed_recovery_restores_a_replacement_operator`).
 //! - **Recovery, negative.** A replay is `NotRestorable` and writes nothing,
-//!   on the restoring pool and on a fresh one: the identical request (the
-//!   retry of an uncertain commit), the same challenge later with event IDs
-//!   of its own or bound to the rotated state, and a second challenge issued
-//!   before the rotation, so for the retired key; no challenge is issued for
-//!   the retired epoch, a restore rolled back before it left the challenge
-//!   restorable, and a challenge of the new epoch then restores
-//!   (`a32_neg_a_replayed_recovery_is_refused`). A restore that differs from
-//!   its challenge in any of the six plan members, in its operation ID,
-//!   digest, challenge hash, instance, epoch or expected revision, or that
-//!   splices two issued challenges, is `NotRestorable` and enrolls nothing,
-//!   and a challenge for another instance is not issued; the untouched
-//!   challenge then restores and the other is retired
+//!   on the restoring pool and on a fresh one: the identical response and
+//!   request (the retry of an uncertain commit), the same response later
+//!   with event IDs of its own and the same challenge signed by the rotated
+//!   key are `Consumed`, and a second challenge issued before the rotation,
+//!   so for the retired key, is `NotBound`, signed by either key; no
+//!   challenge is issued for the retired epoch, a restore rolled back before
+//!   it left the challenge restorable, and a challenge of the new epoch,
+//!   signed by the new key, then restores
+//!   (`a32_neg_a_replayed_recovery_is_refused`). A response whose signature
+//!   is not the current recovery key's over its challenge's `M` (signed over
+//!   that challenge with any one member of its plan, its operation ID, its
+//!   expected revision or its expiry changed, over another challenge, over
+//!   `C` without the prefix or under the request-digest prefix, by another
+//!   key, or altered, malleated or zero) is `NotRestorable`
+//!   (`BadSignature`) at the restore and at the preview and enrolls nothing,
+//!   one for no challenge is `NotFound`, and a challenge for another
+//!   instance is not issued; the untouched challenge then restores and the
+//!   other is retired (`NotBound`)
 //!   (`a32_neg_a_restore_must_be_the_one_its_challenge_names`). At the
 //!   shortest, default and longest TTL, a restore at `expires_at`, a
-//!   microsecond after and a longest TTL after is `NotRestorable` and one a
-//!   microsecond before restores, over three successive epochs
+//!   microsecond after and a longest TTL after is `NotRestorable`
+//!   (`Expired`) and one a microsecond before restores, over three
+//!   successive epochs, each signed by the key of its epoch
 //!   (`a32_neg_an_expired_challenge_is_refused`). Replicas whose sessions
 //!   default to `REPEATABLE READ`, `SERIALIZABLE` or `READ UNCOMMITTED` get
 //!   `UnsupportedIsolation`, keep a usable transaction and commit nothing,
 //!   and the challenge then restores at `READ COMMITTED`
 //!   (`a32_neg_a_restore_outside_read_committed_writes_nothing`). Of 8
 //!   replicas that restore at once, one challenge for all or one each,
-//!   exactly one restores and 7 are `NotRestorable`, in 4 fresh databases
+//!   exactly one restores and 7 are `NotRestorable` (`Consumed` for the one
+//!   challenge, `NotBound` for their own), in 4 fresh databases
 //!   (`a32_neg_concurrent_restores_across_replicas_have_one_winner`); 4
 //!   replicas seen blocked behind a holder's uncommitted restore all get
-//!   `NotRestorable` after its commit, and exactly one of them restores
-//!   after its rollback
+//!   `NotRestorable` (`Consumed`) after its commit, and exactly one of them
+//!   restores after its rollback
 //!   (`a32_neg_blocked_restores_follow_the_holder_commit_or_rollback`). An
 //!   issue whose event ID is taken is `AlreadyExists` and writes nothing,
 //!   also when its caller commits after the `Err`, and the chain stays
@@ -130,7 +146,7 @@
 //!   taken (its first event is appended; its caller then commits) or with
 //!   its session terminated: it writes nothing, neither its first event nor
 //!   its advance of the head is left, exactly one replica restores and 3
-//!   are `NotRestorable`, and the chain is intact
+//!   are `NotRestorable` (`Consumed`), and the chain is intact
 //!   (`a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing`).
 //!
 //! The lost store of those two tests is a session that the server
@@ -146,7 +162,8 @@
 //! Their harness piece is the `pg` environment's planned fault-injecting
 //! repository (conformance layout §1.1; compare A11's "store down → 503");
 //! if ruled into A32, they belong with its end-to-end parts, the bootstrap
-//! command and the local verifier on UC (T13.3, T13.4). A failed audit
+//! command and the service binary's recovery subcommand on UC (T13.3,
+//! T13.4). A failed audit
 //! append is pinned only where it fails, with a
 //! taken event ID or a lost session; an append that fails in Rust after
 //! the head lock is left to the service tests (below).
@@ -158,18 +175,25 @@
 //! lead rulings or inferred in identity-registry section 5.2 and in
 //! `registry::recovery` and provisional until the ADRs are ratified:
 //! registry behaviour, not the spec's. The plan's members (the new key as
-//! 64 lowercase hexadecimal digits); the byte-wise comparison of the
-//! replacement and of the instance; the binding to the challenge hash,
-//! compared byte-wise (inferred); the binding to the recovery key epoch;
-//! that the expected revision is the recovery state's (inferred); the
-//! refusal of every level but
+//! 64 lowercase hexadecimal digits); `M`, the bytes signed, as the prefix
+//! `skyoauth.recovery_challenge.v1` and a newline followed by `C`, the
+//! canonical JSON of the challenge (its ID, the actor `deployment_operator`,
+//! the kind, the expected revision, `expires_at` in whole microseconds,
+//! the plan and no tenant; members sorted, no whitespace); the signature as
+//! pure Ed25519 over `M` (not its hash) with the raw 32-byte key of the
+//! current epoch, an `S` at or above the group order refused; the binding
+//! to the recovery key epoch; that the expected revision is the recovery
+//! state's (inferred); the refusal of every level but
 //! `READ COMMITTED`, by name, so `READ UNCOMMITTED` too; the TTL minimum of
 //! 1 second; the issue event `administrative_operation.create` by
 //! `deployment_operator`, with the operation as its object and
 //! `new_revision` 1; the restore events' actor `recovery_key:<epoch>` of the
 //! key that signed, the epoch before the rotation, and the rotation event's
-//! revisions; every refusal of a restore as the one `NotRestorable`, matched
-//! by variant and `Debug` text, not by its `Display` text; and a
+//! revisions; every refusal of a restore as `NotRestorable` with the
+//! reason its first failed check names (`registry::recovery` "Restore",
+//! step 3: a consumed challenge is `Consumed` before it is `NotBound`, and
+//! an expired one `Expired`), matched by variant, reason and `Debug` text,
+//! not by its `Display` text; and a
 //! restoration that revokes every unrevoked credential but leaves the
 //! replaced operator's identity and binding enabled. The TTL default and
 //! maximum (5 and 15 minutes; LT-107, OQ-LT-17) and the actions
@@ -182,22 +206,22 @@
 //! challenge a microsecond before `expires_at` after a restore at
 //! `expires_at` was refused, and a `now` earlier than the issue time is
 //! accepted as well (not asserted). LT-107's "the challenge expires" holds
-//! only when `now` is taken from the local verifier's own clock (T13.3) and
+//! only when `now` is taken from the service binary's own clock (T13.3) and
 //! is tested with A64's injected clocks on its hermetic leg, not here.
 //!
-//! Two obligations therefore rest on the local verifier (T13.3), not on the
-//! registry; they are gaps of these tests, and the lead's rulings behind
-//! them are provisional. First, the restore's binding carries the
-//! challenge's `challenge_hash` and the consume compares it byte-wise with
-//! the stored one, but the registry neither hashes nor verifies the
-//! recovery signature, so the verifier must check the signature over the
-//! challenge whose hash it passes (the operation's stored challenge, or
-//! one recomputed from exactly the values it passes to
-//! [`restore_operator`]), never over a hash taken from the response or
-//! from the operator; no registry getter returns the operation row.
-//! Second, `now` must come from the verifier's own clock immediately
-//! before the call, never from the response or the operator.
-//! Neither [`issue_recovery_challenge`] nor [`restore_operator`] takes an
+//! The restore checks the recovery signature itself (the user's ruling,
+//! 2026-11-24, `docs/proposals/recovery-verified-response.md`;
+//! `registry::recovery` "Restore", step 3): over `M` rebuilt from the
+//! challenge row it has locked, with the recovery key of the state it has
+//! locked, so the replacement, the binding and the key all come from the
+//! database, never from the caller. These tests therefore sign the `M`
+//! that [`issue_recovery_challenge`] returns, and test the refusals of a
+//! signature that is not the current key's over that `M`. One obligation
+//! still rests on the service binary's recovery subcommand (T13.3), not on
+//! the registry, and is a gap of these tests: `now` must come from its own
+//! clock immediately before the call, never from the response or the
+//! operator; a library caller that holds a captured response can pass any
+//! `now` (`registry::recovery` "Time"). Neither [`issue_recovery_challenge`] nor [`restore_operator`] takes an
 //! operator identity (the issue is recorded by `deployment_operator`, the
 //! restore by the recovery key), so "a revoked or disabled operator cannot
 //! issue or restore" has no registry test; the positive's locked-out round
@@ -221,7 +245,9 @@
 //! matched by variant only, not by its `Display` text, "bootstrap is
 //! already closed", which the spec does not define. Invalid requests (a
 //! reserved admin ID, an instance ID that is not a lowercase UUIDv7, a
-//! recovery key that is not 32 bytes, an empty or over-long key or anchor,
+//! recovery key that is not 32 bytes, does not decode to a point, is not
+//! canonically encoded or is of small order, an empty or over-long key or
+//! anchor,
 //! a `now` out of range) are refused before any statement, whatever the
 //! state, so they reveal only whether the input is valid, never whether
 //! bootstrap is open; they are not tested here
@@ -232,17 +258,15 @@
 //! yet, with the owner of each part:
 //!
 //! - The deployment-local bootstrap command and its Unix socket, owned by
-//!   the service UID with mode 0600 (T13.4, OQ-TM-9), and the service-local
-//!   bootstrap/recovery verifier behind them (design §7.2, ADR-013 item 7;
-//!   T13.3 builds it): the "local verifier" harness component of the row.
-//!   Nothing here goes through a command, a socket or the verifier. The
-//!   verifier is the only check of the recovery signature: the registry
-//!   verifies none and hashes nothing (`registry::recovery` "Flow"). A
-//!   restore carries the challenge's `challenge_hash` and the consume
-//!   compares it byte-wise with the stored one, which binds the restore to
-//!   the hash issued, not to a signature, so a restore here stands for one
-//!   whose signed challenge, the one whose hash it carries, the verifier
-//!   has checked against the key [`get_recovery_state`] returns.
+//!   the service UID with mode 0600 (T13.4, OQ-TM-9), and the service
+//!   binary's recovery subcommand behind them (design §7.2, ADR-013 item 7;
+//!   T13.3 builds it), which carries the plan to the issue, `M` to the
+//!   workstation and the signed response back to the restore, with `now`
+//!   from its own clock: with the restore's own check of the signature,
+//!   which is tested here, the "local verifier" harness component of the
+//!   row. Nothing here goes through a command, a socket or the binary: the
+//!   tests call the registry functions in its place and sign `M`
+//!   themselves, with fixed test keys, in the workstation's place.
 //! - The restart and configuration-omission half of "durably closes" (T13.4)
 //!   beyond a fresh pool: no service starts or restarts here, and no
 //!   configuration is read; a new pool on the same database is all that is
@@ -251,7 +275,8 @@
 //!   whose key the bootstrap enrolls and that presents it afterwards, and
 //!   that presents the replacement's key after a restoration.
 //! - The signed offline recovery tooling: the portable workstation that
-//!   signs the challenge with the offline recovery key, with its SoftHSM2,
+//!   parses and re-encodes `C` before it displays and signs `M` with the
+//!   offline recovery key (ADR-013 item 8), with its SoftHSM2,
 //!   hermetic and recovery-offline legs, injected clocks and the three
 //!   operating systems, which belong to A64. A48 owns the full chain with
 //!   no SQL through the OP client and the local verifier. Both are
@@ -286,30 +311,36 @@
 //! repeated here: the columns of the operation row (`consumed_at`, its
 //! revision and `outcome`), which no getter reads; a challenge consumed,
 //! revoked or failed by other means, and the database guards that refuse a
-//! second consume; malformed plans, the issue's input checks and the TTL
-//! bounds of an issue; `RecoveryKeyUnchanged`, reserved admin IDs, key
-//! lengths and the bounds of `now`; a replacement whose ID or key is taken
+//! second consume; malformed plans, the issue's input checks (the closed
+//! plan, and a plan's new key that is weak, not canonically encoded or not
+//! a point) and the TTL bounds of an issue; a known-answer `C` and `M`;
+//! signatures that are not 64 bytes, over the challenge hash, with a
+//! non-canonical `R`, and the retired key after a rotation; a weak current
+//! recovery key, which no public path can enroll (bootstrap refuses it);
+//! a row whose stored digest or hash is not the library's encoding
+//! (`NotLibraryEncoding`) and a plan changed after the issue;
+//! `RecoveryKeyUnchanged`, reserved admin IDs, key lengths and the bounds
+//! of `now`; a replacement whose ID or key is taken
 //! (`AlreadyExists`); a failed restore or issue that the caller commits,
 //! other than the restore here whose second event ID is taken and the
 //! issue here whose event ID is taken (a taken first event ID, the
 //! writer's error in Rust after the head lock, an issue whose operation ID
 //! is taken); a lock timeout; the lock order, the waits between a restore, an issue and
-//! the operator writes, and the deadlock that fails closed; and that a
-//! restore changes no other table. Through the public API every consume
-//! is a restore that also advances the epoch and the revision, so a replay
-//! here is refused by its binding to the retired state whether or not the
-//! single-use predicates of the consume hold. And a challenge can only be
-//! issued for the current instance, epoch and revision, so the consume
-//! compares each of them twice, the stored plan instance, plan epoch and
-//! expected revision with the binding and the binding with the recovery
-//! state, and through the public API the two copies are always equal. A
-//! consume that no longer sets `consumed_at`; no longer requires it unset
-//! and the outcome `issued`; no longer compares the plan's instance, the
-//! plan's epoch or the stored expected revision with the binding; or no
-//! longer compares the binding with the recovery state's instance, epoch or
-//! revision is therefore caught only by the service tests, whose rows are
-//! written by other means. So is a restore that no longer locks the
-//! credentials first, which needs a concurrent operator write.
+//! the operator writes, and the deadlock that fails closed; the preview's
+//! own refusals beyond those of the tamper test; and that a restore changes
+//! no other table. A restore checks the locked challenge row (unconsumed,
+//! unrevoked, still `issued`, unexpired, its plan's instance and epoch and
+//! its expected revision the recovery state's) before its consume, whose
+//! statement repeats those predicates under the same locks, so through the
+//! public API the consume can never miss after the checks passed. A replay
+//! here is refused by the checks, with their reason: a consume that no
+//! longer sets `consumed_at` leaves the row unconsumed but `restored`, so a
+//! replay is refused for the wrong reason and the reason checks here catch
+//! it; a consume that no longer requires it unset or the outcome `issued`,
+//! or that no longer compares the plan's instance or epoch, the expected
+//! revision or the recovery state, is caught only by the service tests, if
+//! at all. So is a restore that no longer locks the credentials first,
+//! which needs a concurrent operator write.
 //!
 //! Overlap with `service/tests/registry_recovery.rs`, which calls the same
 //! public functions: each recovery test here repeats some of its checks and
@@ -317,13 +348,16 @@
 //! `a_restore_enrolls_a_replacement_revokes_every_credential_and_rotates_the_key`
 //! and adds the path from bootstrap through public reads only, a locked-out
 //! operator and bootstrap closed after the restore, also on a fresh pool.
-//! The replay test repeats `a_challenge_is_consumed_once` and adds the
-//! identical retry, a fresh pool, the rolled-back restore and the retired
-//! epoch at issue and at restore. The tamper test's per-member and binding
-//! refusals repeat `a_restore_must_name_the_planned_*` and
-//! `every_consume_miss_is_the_same_not_restorable` one for one; it adds the
-//! splices of two issued challenges, a challenge hash that differs from the
-//! issued one only in case, and one challenge that survives every refusal. The expiry test repeats `a_challenge_expires_at_its_expiry`
+//! The positive's preview repeats
+//! `a_preview_checks_as_a_restore_does_and_grants_nothing` with a committed
+//! preview. The replay test repeats `a_challenge_is_consumed_once` and
+//! adds the identical retry, a fresh pool, the rolled-back restore, a
+//! replay signed by the rotated key and the retired epoch at issue and at
+//! restore. The tamper test's signature refusals repeat
+//! `a_restore_needs_a_signature_by_the_current_key_over_m` in kind; it adds
+//! a signature over the challenge with each one member of `C` changed, the
+//! splices of two issued challenges, the preview of each refusal, and one
+//! challenge that survives every refusal. The expiry test repeats `a_challenge_expires_at_its_expiry`
 //! (default TTL) and adds the shortest and longest TTL over successive
 //! epochs. The isolation test repeats `a_restore_runs_only_at_read_committed`
 //! (a level set per transaction) with the level as a replica's session
@@ -335,6 +369,7 @@
 //! [`bootstrap_instance`]: registry::bootstrap_instance
 //! [`issue_recovery_challenge`]: registry::issue_recovery_challenge
 //! [`restore_operator`]: registry::restore_operator
+//! [`preview_recovery_response`]: registry::preview_recovery_response
 //! [`get_recovery_state`]: registry::get_recovery_state
 //! [`authorize_operator`]: registry::authorize_operator
 //! [`get_instance_security_policy`]: registry::get_instance_security_policy
@@ -350,6 +385,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{Value, json};
 use skyoauth_scenarios::{
     pg::TestDb,
@@ -360,11 +396,12 @@ use skyoauth_service::persistence::{
     registry::{
         self, AdminCredential, AdminIdentity, AdminRole, AdminRoleBinding, AdminRoleBindingChanges,
         AuditActor, AuditEvent, AuthorizedOperator, BootstrapError, BootstrapOutcome,
-        BootstrapRequest, ChainVerdict, ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL,
+        BootstrapRequest, ChainVerdict, ChallengeError, DEFAULT_CHALLENGE_TTL,
         DEPLOYMENT_OPERATOR_ACTOR, IssueChallenge, JsonObject, MAX_CHALLENGE_TTL,
         MIN_CHALLENGE_TTL, NewAdminCredential, NewAdminIdentity, NewAuditEvent,
-        OPERATOR_RESTORATION, OperatorRequest, OperatorScope, RecoveryChallenge, RecoveryState,
-        RegistryError, RestoreError, RestoreRequest, Restored, Status, bootstrap_instance,
+        NotRestorableReason, OPERATOR_RESTORATION, OperatorRequest, OperatorScope,
+        RecoveryChallenge, RecoveryPreview, RecoveryState, RegistryError, RestoreError,
+        RestoreRequest, Restored, SignedRecoveryResponse, Status, bootstrap_instance,
         restore_operator,
     },
 };
@@ -397,6 +434,9 @@ struct Ids {
     public_identity: String,
     trust_anchor_ref: String,
     binding_id: String,
+    /// The private half of the recovery key: it signs the challenges of
+    /// epoch 1.
+    recovery_key: SigningKey,
     recovery_public_key: Vec<u8>,
     audit_event_id: String,
 }
@@ -417,12 +457,32 @@ impl Ids {
     }
 }
 
+/// The Ed25519 test key number `n` of the family `tag`: its 32-byte seed is
+/// `tag` followed by `n` (little-endian), so keys of different tags or
+/// numbers differ. Fixed, so every run signs with the same keys.
+fn test_key(tag: &[u8; 24], n: usize) -> SigningKey {
+    let mut seed = [0; 32];
+    seed[..24].copy_from_slice(tag);
+    seed[24..].copy_from_slice(&u64::try_from(n).unwrap().to_le_bytes());
+    SigningKey::from_bytes(&seed)
+}
+
+/// The raw 32-byte public half of `key`, the form the registry stores.
+fn public_key(key: &SigningKey) -> Vec<u8> {
+    let public = key.verifying_key();
+    // A key derived from a seed is a point of large order, canonically
+    // encoded: the registry's key checks accept it.
+    assert!(!public.is_weak());
+    public.to_bytes().to_vec()
+}
+
 /// Valid request material number `n`, sharing nothing with any other `n`:
 /// a lowercase hyphenated UUIDv7 instance ID (version `7`, variant `9`),
-/// a non-reserved admin ID, a credential key and IDs of its own, and a
-/// recovery key of exactly 32 bytes, printable so that its plain-text form
-/// is the key itself.
+/// a non-reserved admin ID, a credential key and IDs of its own, and an
+/// Ed25519 recovery key pair of its own ([`test_key`]), whose public half
+/// is the 32 bytes bootstrap enrolls.
 fn ids(n: usize) -> Ids {
+    let recovery_key = test_key(b"a32 bootstrap recovery..", n);
     let ids = Ids {
         instance_id: format!("019a9f3c-5b2e-7c41-9d8e-{n:012x}"),
         admin_id: format!("adm_a32_{n}"),
@@ -430,7 +490,8 @@ fn ids(n: usize) -> Ids {
         public_identity: format!("spki-sha256:a32-operator-{n}"),
         trust_anchor_ref: "deployment/operator-ca".into(),
         binding_id: format!("rb_a32_{n}"),
-        recovery_public_key: format!("a32-recovery-key-{n:015}").into_bytes(),
+        recovery_public_key: public_key(&recovery_key),
+        recovery_key,
         audit_event_id: format!("aud_a32_bootstrap_{n}"),
     };
     assert_eq!(
@@ -816,21 +877,13 @@ async fn a32_pos_one_bootstrap_enrolls_one_operator_and_closes() {
     // The recovery key is not an operator key, in any form a caller might
     // present it, and neither is the instance ID.
     let key = &first.recovery_public_key[..];
-    let plain = std::str::from_utf8(key).unwrap().to_owned();
     let (lower, upper) = hex(key);
     let (standard, url) = base64(key);
     assert_eq!(
         base64(b"\xfb\xff\x00"),
         ("+/8A".to_owned(), "-_8A".to_owned())
     );
-    for form in [
-        plain,
-        lower,
-        upper,
-        standard,
-        url,
-        first.instance_id.clone(),
-    ] {
+    for form in [lower, upper, standard, url, first.instance_id.clone()] {
         assert_ne!(form, first.public_identity);
         for role in ROLES {
             assert_eq!(
@@ -1466,10 +1519,22 @@ async fn a32_neg_a_bootstrap_failing_at_its_audit_append_writes_nothing() {
 }
 
 // Registry-level recovery (T13.5): `issue_recovery_challenge`,
-// `restore_operator` and `get_recovery_state`, after a bootstrap.
+// `preview_recovery_response`, `restore_operator` and `get_recovery_state`,
+// after a bootstrap.
 
-/// The `Debug` text of every refused restore here but the isolation one.
-const NOT_RESTORABLE: &str = "Err(NotRestorable)";
+/// The prefix of `M`, the bytes the recovery key signs: `M` is this prefix
+/// followed by `C`, the canonical JSON of the challenge (`registry::recovery`
+/// "What is signed").
+const CHALLENGE_PREFIX: &[u8] = b"skyoauth.recovery_challenge.v1\n";
+
+/// The prefix of the request digest, `SHA-256(prefix || C)`: a signature
+/// over `C` under it is not one over `M`.
+const DIGEST_PREFIX: &[u8] = b"skyoauth.administrative_operation.v1\n";
+
+/// The `Debug` text of a restore refused for `reason`.
+fn refused(reason: NotRestorableReason) -> String {
+    format!("Err(NotRestorable({reason:?}))")
+}
 
 /// The issue time of a challenge: a second after bootstrap. Whole
 /// seconds, so no stored time is truncated.
@@ -1482,16 +1547,21 @@ fn restored_at() -> SystemTime {
     now() + Duration::from_secs(2)
 }
 
-/// The material of one recovery, owned: the challenge the local verifier
-/// issues (its operation, digest and hash, and what it is bound to: the
-/// instance, the epoch of the key that signs and the recovery state's
-/// revision), the replacement its plan names, and the restore's event IDs.
+/// `time` in whole microseconds since the Unix epoch, as `C` carries
+/// `expires_at`.
+fn micros(time: SystemTime) -> i64 {
+    i64::try_from(time.duration_since(UNIX_EPOCH).unwrap().as_micros()).unwrap()
+}
+
+/// The material of one recovery, owned: the challenge the service binary
+/// would ask for (its operation and what its plan binds: the instance and
+/// the epoch of the key that signs, and the recovery state's revision it
+/// expects), the replacement its plan names, the key that signs, the
+/// response once the challenge is issued, and the restore's event IDs.
 #[derive(Debug, Clone)]
 struct Recovery {
     operation_id: String,
     issue_event_id: String,
-    request_digest: Vec<u8>,
-    challenge_hash: Vec<u8>,
     instance_id: String,
     recovery_key_epoch: i64,
     expected_revision: i64,
@@ -1500,23 +1570,34 @@ struct Recovery {
     binding_id: String,
     public_identity: String,
     trust_anchor_ref: String,
+    /// The private half of the new recovery key: it signs the challenges
+    /// of the next epoch once this recovery has restored.
+    new_recovery_key: SigningKey,
     new_recovery_public_key: Vec<u8>,
+    /// The recovery key of `recovery_key_epoch`, which signs this
+    /// challenge, as the offline workstation would.
+    signer: SigningKey,
+    /// `M` as [`issue`] returned it; empty before the issue.
+    challenge: Vec<u8>,
+    /// The response's signature: the signer's over `challenge`, set by
+    /// [`issue`]; empty before the issue.
+    signature: Vec<u8>,
     restore_event_id: String,
     rotation_event_id: String,
 }
 
 /// Valid recovery material number `n` for `first`'s instance at `epoch`,
-/// sharing nothing with any other `n` or with any bootstrap of [`ids`]: a
-/// 32-byte digest, a 48-byte challenge hash, a replacement with IDs and a
-/// key of its own, and a new 32-byte recovery key. The expected revision is
-/// the epoch: bootstrap writes both as 1 and every restore advances both by
-/// one, and nothing else here changes the recovery state.
-fn recovery(n: usize, first: &Ids, epoch: i64) -> Recovery {
+/// signed by `signer`, the recovery key of that epoch, sharing nothing with
+/// any other `n` or with any bootstrap of [`ids`]: a replacement with IDs
+/// and a key of its own, and a new recovery key pair of its own
+/// ([`test_key`]). The expected revision is the epoch: bootstrap writes
+/// both as 1 and every restore advances both by one, and nothing else here
+/// changes the recovery state.
+fn recovery(n: usize, first: &Ids, epoch: i64, signer: &SigningKey) -> Recovery {
+    let new_recovery_key = test_key(b"a32 new recovery key....", n);
     let recovery = Recovery {
         operation_id: format!("op_a32_restore_{n}"),
         issue_event_id: format!("aud_a32_issue_{n}"),
-        request_digest: format!("a32-request-digest-{n:013}").into_bytes(),
-        challenge_hash: format!("a32-challenge-hash-{n:029}").into_bytes(),
         instance_id: first.instance_id.clone(),
         recovery_key_epoch: epoch,
         expected_revision: epoch,
@@ -1525,17 +1606,17 @@ fn recovery(n: usize, first: &Ids, epoch: i64) -> Recovery {
         binding_id: format!("rb_a32_restored_{n}"),
         public_identity: format!("spki-sha256:a32-restored-{n}"),
         trust_anchor_ref: "deployment/operator-ca".into(),
-        new_recovery_public_key: format!("a32-new-recovery-key-{n:011}").into_bytes(),
+        new_recovery_public_key: public_key(&new_recovery_key),
+        new_recovery_key,
+        signer: signer.clone(),
+        challenge: Vec::new(),
+        signature: Vec::new(),
         restore_event_id: format!("aud_a32_restore_{n}"),
         rotation_event_id: format!("aud_a32_rotate_{n}"),
     };
     assert_eq!(
-        (
-            recovery.request_digest.len(),
-            recovery.challenge_hash.len(),
-            recovery.new_recovery_public_key.len(),
-        ),
-        (32, 48, registry::RECOVERY_PUBLIC_KEY_LENGTH)
+        recovery.new_recovery_public_key.len(),
+        registry::RECOVERY_PUBLIC_KEY_LENGTH
     );
     recovery
 }
@@ -1543,6 +1624,11 @@ fn recovery(n: usize, first: &Ids, epoch: i64) -> Recovery {
 /// `bytes` in lowercase hexadecimal, the plan's form of a key.
 fn lower_hex(bytes: &[u8]) -> String {
     hex(bytes).0
+}
+
+/// `key`'s Ed25519 signature over `message`, 64 bytes.
+fn sign(key: &SigningKey, message: &[u8]) -> Vec<u8> {
+    key.sign(message).to_bytes().to_vec()
 }
 
 impl Recovery {
@@ -1574,44 +1660,44 @@ impl Recovery {
         IssueChallenge {
             operation_id: &self.operation_id,
             kind: OPERATOR_RESTORATION,
-            request_digest: &self.request_digest,
             immutable_plan: plan,
-            challenge_hash: &self.challenge_hash,
             ttl,
             now: at,
             audit_event_id: &self.issue_event_id,
         }
     }
 
-    /// The restore of this challenge at `at`, naming its replacement.
+    /// The signed response the workstation returns for this challenge.
+    fn response(&self) -> SignedRecoveryResponse<'_> {
+        SignedRecoveryResponse {
+            operation_id: &self.operation_id,
+            signature: &self.signature,
+        }
+    }
+
+    /// The restore's event IDs and `now`, `at`.
     fn request(&self, at: SystemTime) -> RestoreRequest<'_> {
         RestoreRequest {
-            operation_id: &self.operation_id,
-            binding: ChallengeBinding {
-                request_digest: &self.request_digest,
-                challenge_hash: &self.challenge_hash,
-                instance_id: &self.instance_id,
-                expected_revision: self.expected_revision,
-                recovery_key_epoch: self.recovery_key_epoch,
-            },
-            admin_id: &self.admin_id,
-            credential_id: &self.credential_id,
-            binding_id: &self.binding_id,
-            public_identity: &self.public_identity,
-            trust_anchor_ref: &self.trust_anchor_ref,
-            new_recovery_public_key: &self.new_recovery_public_key,
             audit_event_id: &self.restore_event_id,
             rotation_audit_event_id: &self.rotation_event_id,
             now: at,
         }
     }
 
-    /// The same challenge and replacement with event IDs of its own,
+    /// The same challenge and response with event IDs of their own,
     /// numbered `n`, as another replica's attempt would carry.
     fn with_events(&self, n: usize) -> Recovery {
         Recovery {
             restore_event_id: format!("{}_{n}", self.restore_event_id),
             rotation_event_id: format!("{}_{n}", self.rotation_event_id),
+            ..self.clone()
+        }
+    }
+
+    /// The same challenge with `signature` in its response.
+    fn with_signature(&self, signature: Vec<u8>) -> Recovery {
+        Recovery {
+            signature,
             ..self.clone()
         }
     }
@@ -1632,28 +1718,34 @@ async fn issue_on(
     issued
 }
 
-/// Issues `recovery`'s challenge with `ttl` at `at`.
+/// Issues `recovery`'s challenge with `ttl` at `at`, and signs the `M` it
+/// returns with `recovery`'s signer, as the workstation would: the
+/// signature is `recovery`'s response from then on.
 async fn issue(
     pool: &PgPool,
-    recovery: &Recovery,
+    recovery: &mut Recovery,
     ttl: Duration,
     at: SystemTime,
 ) -> RecoveryChallenge {
     let plan = recovery.plan();
-    issue_on(pool, &recovery.issue_request(&plan, ttl, at))
+    let challenge = issue_on(pool, &recovery.issue_request(&plan, ttl, at))
         .await
-        .unwrap()
+        .unwrap();
+    recovery.signature = sign(&recovery.signer, &challenge.challenge);
+    recovery.challenge.clone_from(&challenge.challenge);
+    challenge
 }
 
-/// Restores in a transaction of its own on `conn` (`READ COMMITTED`, the
-/// session default): commits on `Ok` and rolls back on every `Err`, as the
-/// caller of `restore_operator` must.
+/// Restores `recovery`'s response at `at` in a transaction of its own on
+/// `conn` (`READ COMMITTED`, the session default): commits on `Ok` and
+/// rolls back on every `Err`, as the caller of `restore_operator` must.
 async fn restore(
     conn: &mut PgConnection,
-    request: &RestoreRequest<'_>,
+    recovery: &Recovery,
+    at: SystemTime,
 ) -> Result<Restored, RestoreError> {
     let mut tx = conn.begin().await.unwrap();
-    let restored = restore_operator(&mut tx, request).await;
+    let restored = restore_operator(&mut tx, &recovery.response(), &recovery.request(at)).await;
     match restored {
         Ok(_) => tx.commit().await.unwrap(),
         Err(_) => tx.rollback().await.unwrap(),
@@ -1661,20 +1753,43 @@ async fn restore(
     restored
 }
 
-async fn restore_on(pool: &PgPool, request: &RestoreRequest<'_>) -> Result<Restored, RestoreError> {
-    restore(&mut pool.acquire().await.unwrap(), request).await
+async fn restore_on(
+    pool: &PgPool,
+    recovery: &Recovery,
+    at: SystemTime,
+) -> Result<Restored, RestoreError> {
+    restore(&mut pool.acquire().await.unwrap(), recovery, at).await
 }
 
-/// `result` is `NotRestorable`, matched by variant; returns its `Debug`
-/// text ([`NOT_RESTORABLE`]) for the callers' tallies of refusals.
+/// Previews `recovery`'s response at `at` in a transaction of its own,
+/// which it commits whatever the outcome: a preview grants nothing and
+/// writes nothing, even when its caller commits.
+async fn preview_on(
+    pool: &PgPool,
+    recovery: &Recovery,
+    at: SystemTime,
+) -> Result<RecoveryPreview, RestoreError> {
+    let mut tx = pool.begin().await.unwrap();
+    let preview = registry::preview_recovery_response(&mut tx, &recovery.response(), at).await;
+    tx.commit().await.unwrap();
+    preview
+}
+
+/// `result` is `NotRestorable` for `reason`, matched by variant and
+/// reason; returns its `Debug` text ([`refused`]) for the callers' tallies
+/// of refusals.
 #[track_caller]
-fn not_restorable_text(result: &Result<Restored, RestoreError>, what: &str) -> String {
+fn not_restorable_text<T: std::fmt::Debug>(
+    result: &Result<T, RestoreError>,
+    reason: NotRestorableReason,
+    what: &str,
+) -> String {
     match result {
-        Err(RestoreError::NotRestorable) => {}
-        other => panic!("{what}: expected NotRestorable: {other:?}"),
+        Err(RestoreError::NotRestorable(found)) if *found == reason => {}
+        other => panic!("{what}: expected NotRestorable({reason:?}): {other:?}"),
     }
     let text = format!("{result:?}");
-    assert_eq!(text, NOT_RESTORABLE, "{what}");
+    assert_eq!(text, refused(reason), "{what}");
     text
 }
 
@@ -1760,6 +1875,28 @@ fn assert_issued(
             Some(1),
         )
     );
+    // `M`, what the workstation displays and signs: the prefix, then `C`,
+    // which binds exactly the operation, its plan (the instance, the epoch
+    // and the replacement), the expected revision and the expiry, as
+    // canonical JSON (members sorted byte-wise at every level, no
+    // whitespace: `serde_json`'s map is sorted, so re-encoding the parsed
+    // value gives the same bytes back).
+    let (prefix, canonical) = challenge.challenge.split_at(CHALLENGE_PREFIX.len());
+    assert_eq!(prefix, CHALLENGE_PREFIX);
+    let parsed: Value = serde_json::from_slice(canonical).unwrap();
+    assert_eq!(
+        parsed,
+        json!({
+            "actor_id": "deployment_operator",
+            "expected_revision": recovery.expected_revision,
+            "expires_at": micros(at + ttl),
+            "id": recovery.operation_id,
+            "kind": "operator_restoration",
+            "plan": recovery.plan(),
+            "tenant_id": null,
+        })
+    );
+    assert_eq!(serde_json::to_vec(&parsed).unwrap(), canonical);
 }
 
 /// `restored` is `recovery`'s restore at `at`: the outcome names the plan's
@@ -1949,9 +2086,12 @@ async fn assert_bootstrap_stays_closed(pool: &PgPool, first: &Ids, step: usize) 
 /// with a second credential, and once with that operator locked out (its
 /// identity disabled, its first credential revoked, its binding disabled,
 /// so no key authorizes a `security_admin`): restoration does not depend
-/// on an operator. No signature is made or checked: the registry verifies
-/// none (T13.3). In both, the challenge is issued as the event after
-/// bootstrap and changes no authority; the restore enrolls exactly the
+/// on an operator. In both, the challenge is issued as the event after
+/// bootstrap and changes no authority; its `M` (see [`assert_issued`]) is
+/// signed with the bootstrap recovery key, as the workstation would, and a
+/// preview of that response, committed, names the plan's replacement, the
+/// next epoch and the expiry and grants nothing; the restore verifies the
+/// signature and enrolls exactly the
 /// replacement the plan names, which authorizes; every operator credential
 /// still unrevoked is revoked at the restore's `now` (one revoked before
 /// keeps its time), and no old key authorizes any role; the old identity
@@ -1998,29 +2138,46 @@ async fn a32_pos_signed_recovery_restores_a_replacement_operator() {
             );
         }
 
-        let recovery = recovery(0, &first, 1);
-        let challenge = issue(&pool, &recovery, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+        let mut recovery = recovery(0, &first, 1, &first.recovery_key);
+        let challenge = issue(&pool, &mut recovery, DEFAULT_CHALLENGE_TTL, issued_at()).await;
         assert_issued(&challenge, &recovery, DEFAULT_CHALLENGE_TTL, issued_at(), 2);
-        assert_eq!(
-            state(&pool, &first).await,
-            State {
-                counts: Counts {
-                    admin_credential: 2,
-                    audit_event: 2,
-                    administrative_operation: 1,
-                    ..ONE
-                },
-                recovery_state: Some(bootstrap_state(&first)),
-                chain: ChainVerdict::Intact { last_sequence: 2 },
-            }
-        );
+        let issued = State {
+            counts: Counts {
+                admin_credential: 2,
+                audit_event: 2,
+                administrative_operation: 1,
+                ..ONE
+            },
+            recovery_state: Some(bootstrap_state(&first)),
+            chain: ChainVerdict::Intact { last_sequence: 2 },
+        };
+        assert_eq!(state(&pool, &first).await, issued);
         // The challenge alone changes no authority.
         assert_not_enrolled(&pool, &recovery).await;
         assert_eq!(read_operator(&pool, &first).await, operator);
+        // Nor does a preview of the signed response, committed.
+        let preview = preview_on(&pool, &recovery, restored_at()).await.unwrap();
+        assert_eq!(
+            (
+                &preview.admin_id[..],
+                &preview.credential_id[..],
+                &preview.binding_id[..],
+                preview.new_recovery_key_epoch,
+                preview.expires_at,
+            ),
+            (
+                &recovery.admin_id[..],
+                &recovery.credential_id[..],
+                &recovery.binding_id[..],
+                2,
+                challenge.expires_at,
+            )
+        );
+        assert_eq!(state(&pool, &first).await, issued);
+        assert_not_enrolled(&pool, &recovery).await;
+        assert_eq!(read_operator(&pool, &first).await, operator);
 
-        let restored = restore_on(&pool, &recovery.request(restored_at()))
-            .await
-            .unwrap();
+        let restored = restore_on(&pool, &recovery, restored_at()).await.unwrap();
         assert_restored(&pool, &recovery, &restored, restored_at()).await;
         assert_eq!(
             (
@@ -2099,80 +2256,102 @@ async fn a32_pos_signed_recovery_restores_a_replacement_operator() {
     }
 }
 
-/// A recovery is never replayed. Two challenges are issued at epoch 1. A
-/// restore of the first whose transaction rolls back leaves nothing and the
-/// challenge restorable, and its retry restores (the uncertain-commit rule:
-/// a restore that did not commit restores). After that restore, each replay
-/// is `NotRestorable` and changes nothing the registry shows, on the pool
-/// that restored and on a fresh one: the identical request (the retry of a
-/// restore whose commit was uncertain), the same challenge later with event
-/// IDs of its own, the same challenge bound to the rotated state (epoch 2,
-/// revision 2) with another new key, the second challenge (issued before
-/// the rotation, so signed by the retired key) with its own binding and
-/// with the rotated state's. No challenge can be issued for the retired
-/// epoch any more (`NotIssuable`). A challenge of epoch 2 then restores,
-/// revokes the first replacement and is recorded by `recovery_key:2`, and
-/// the first challenge is refused at epoch 3 too.
+/// A recovery is never replayed. Two challenges are issued at epoch 1 and
+/// signed by the bootstrap recovery key. A restore of the first whose
+/// transaction rolls back leaves nothing and the challenge restorable, and
+/// its retry restores (the uncertain-commit rule: a restore that did not
+/// commit restores). After that restore, each replay is `NotRestorable`
+/// and changes nothing the registry shows, on the pool that restored and on
+/// a fresh one: the identical response and request (the retry of a restore
+/// whose commit was uncertain), the same response later with event IDs of
+/// its own and the same challenge signed by the rotated key are
+/// `Consumed`; the second challenge (issued before the rotation, so for the
+/// retired key), signed by the retired key or by the rotated one, is
+/// `NotBound`: its plan names the retired epoch. No challenge can be issued
+/// for the retired epoch any more (`NotIssuable`). A challenge of epoch 2,
+/// signed by the key the first restore rotated to, then restores, revokes
+/// the first replacement and is recorded by `recovery_key:2`, and the first
+/// challenge signed by the key of epoch 3 is `Consumed` too.
 #[tokio::test]
 async fn a32_neg_a_replayed_recovery_is_refused() {
+    use NotRestorableReason::{Consumed, NotBound};
     let (db, pool) = fixture().await;
     let first = ids(0);
     bootstrapped(&pool, &first).await;
-    let used = recovery(1, &first, 1);
-    let stale = recovery(2, &first, 1);
-    issue(&pool, &used, DEFAULT_CHALLENGE_TTL, issued_at()).await;
-    issue(&pool, &stale, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+    let mut used = recovery(1, &first, 1, &first.recovery_key);
+    let mut stale = recovery(2, &first, 1, &first.recovery_key);
+    issue(&pool, &mut used, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+    issue(&pool, &mut stale, DEFAULT_CHALLENGE_TTL, issued_at()).await;
 
     let issued = state(&pool, &first).await;
     let mut tx = pool.begin().await.unwrap();
-    restore_operator(&mut tx, &used.request(restored_at()))
+    restore_operator(&mut tx, &used.response(), &used.request(restored_at()))
         .await
         .unwrap();
     tx.rollback().await.unwrap();
     assert_eq!(state(&pool, &first).await, issued);
     assert_not_enrolled(&pool, &used).await;
-    let restored = restore_on(&pool, &used.request(restored_at()))
-        .await
-        .unwrap();
+    let restored = restore_on(&pool, &used, restored_at()).await.unwrap();
     assert_restored(&pool, &used, &restored, restored_at()).await;
     let after = state(&pool, &first).await;
     assert_eq!(after.chain, ChainVerdict::Intact { last_sequence: 5 });
 
-    let rebound = |recovery: &Recovery, key_of: usize| Recovery {
-        recovery_key_epoch: 2,
-        expected_revision: 2,
-        new_recovery_public_key: self::recovery(key_of, &first, 2).new_recovery_public_key,
-        ..recovery.clone()
-    };
+    // The key `used` rotated to, the current one now.
+    let rotated = &used.new_recovery_key;
     let later = restored_at() + Duration::from_secs(1);
     let replays = [
-        ("the identical request", used.clone(), restored_at()),
+        (
+            "the identical response and request",
+            used.clone(),
+            restored_at(),
+            Consumed,
+        ),
         (
             "later, with event IDs of its own",
             used.with_events(1),
             later,
+            Consumed,
         ),
-        ("bound to the rotated state", rebound(&used, 3), later),
-        ("a challenge of the retired epoch", stale.clone(), later),
         (
-            "a challenge of the retired epoch, bound to the rotated state",
-            rebound(&stale, 4),
+            "signed by the rotated key",
+            used.with_signature(sign(rotated, &used.challenge)),
             later,
+            Consumed,
+        ),
+        (
+            "a challenge of the retired epoch",
+            stale.clone(),
+            later,
+            NotBound,
+        ),
+        (
+            "a challenge of the retired epoch, signed by the rotated key",
+            stale.with_signature(sign(rotated, &stale.challenge)),
+            later,
+            NotBound,
         ),
     ];
-    let retired = recovery(5, &first, 1);
+    let retired = recovery(5, &first, 1, &first.recovery_key);
     for fresh in [false, true] {
         let pool = if fresh { db.pool().await } else { pool.clone() };
         let mut refusals = Vec::new();
-        for (what, replay, at) in &replays {
+        for (what, replay, at, reason) in &replays {
             let what = format!("fresh pool {fresh}: {what}");
             refusals.push(not_restorable_text(
-                &restore_on(&pool, &replay.request(*at)).await,
+                &restore_on(&pool, replay, *at).await,
+                *reason,
                 &what,
             ));
             assert_eq!(state(&pool, &first).await, after, "{what}");
         }
-        assert_eq!(refusals, vec![NOT_RESTORABLE; replays.len()], "{fresh}");
+        assert_eq!(
+            refusals,
+            replays
+                .iter()
+                .map(|(_, _, _, reason)| refused(*reason))
+                .collect::<Vec<_>>(),
+            "{fresh}"
+        );
         let plan = retired.plan();
         let refused = issue_on(
             &pool,
@@ -2197,11 +2376,11 @@ async fn a32_neg_a_replayed_recovery_is_refused() {
         }
     }
 
-    let next = recovery(6, &first, 2);
+    let mut next = recovery(6, &first, 2, rotated);
     let next_issued = issued_at() + Duration::from_secs(10);
     let next_at = restored_at() + Duration::from_secs(10);
-    issue(&pool, &next, DEFAULT_CHALLENGE_TTL, next_issued).await;
-    let again = restore_on(&pool, &next.request(next_at)).await.unwrap();
+    issue(&pool, &mut next, DEFAULT_CHALLENGE_TTL, next_issued).await;
+    let again = restore_on(&pool, &next, next_at).await.unwrap();
     assert_restored(&pool, &next, &again, next_at).await;
     assert_eq!(
         again.revoked_credential_ids,
@@ -2213,155 +2392,215 @@ async fn a32_neg_a_replayed_recovery_is_refused() {
             None
         );
     }
-    let at_three = Recovery {
-        recovery_key_epoch: 3,
-        expected_revision: 3,
-        ..used.with_events(2)
-    };
+    let at_three = used
+        .with_events(2)
+        .with_signature(sign(&next.new_recovery_key, &used.challenge));
     let restored_twice = state(&pool, &first).await;
     assert_eq!(
         restored_twice.chain,
         ChainVerdict::Intact { last_sequence: 8 }
     );
     not_restorable_text(
-        &restore_on(&pool, &at_three.request(next_at)).await,
-        "the first challenge at epoch 3",
+        &restore_on(&pool, &at_three, next_at).await,
+        Consumed,
+        "the first challenge signed by the key of epoch 3",
     );
     assert_eq!(state(&pool, &first).await, restored_twice);
     assert_bootstrap_stays_closed(&pool, &first, 0).await;
     db.drop([pool]).await;
 }
 
-/// One change to a restore request, against the challenge it names.
-type Tamper = fn(&mut Recovery);
+/// `signature` with `S` replaced by `S + L`, `L` the order of the Ed25519
+/// base point: the same equation holds, so a verifier that does not
+/// require `S < L` accepts the malleated signature.
+fn malleate(signature: &[u8]) -> Vec<u8> {
+    const L: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+        0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let mut out = signature.to_vec();
+    let mut carry = 0_u16;
+    for (byte, add) in out[32..].iter_mut().zip(L) {
+        let sum = u16::from(*byte) + u16::from(add) + carry;
+        *byte = u8::try_from(sum & 0xff).unwrap();
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0);
+    out
+}
 
-/// A restore must be exactly the one its challenge names. Two challenges,
-/// A and B, are issued at epoch 1, each naming a replacement of its own.
-/// A's restore with any one of the six replacement members of the plan
-/// changed (`admin_id`, `credential_id`, `binding_id`, `public_identity`,
-/// `trust_anchor_ref`, `new_recovery_public_key`), or with its binding
-/// changed (the operation ID, the request digest, the challenge hash, the
-/// instance, the epoch or the expected revision), or spliced with B (A's
-/// challenge naming B's replacement, B's challenge naming A's, A's
-/// challenge with B's digest, A's challenge with B's hash), is
-/// `NotRestorable`, changes nothing the registry shows and enrolls
-/// nothing; a challenge for another instance is not issued. After all
-/// that, A's exact request restores: no refusal consumed it. B is then
-/// `NotRestorable` too, even exact: the epoch it was bound to is retired.
+/// One change to the `C` of a challenge, as parsed JSON.
+type Tamper = fn(&mut Value);
+
+/// `m`, a challenge's `M`, with `tamper` applied to its `C`, re-encoded
+/// as `C` is (see [`assert_issued`]).
+fn tampered(m: &[u8], tamper: Tamper) -> Vec<u8> {
+    let mut canonical: Value = serde_json::from_slice(&m[CHALLENGE_PREFIX.len()..]).unwrap();
+    tamper(&mut canonical);
+    let out = [CHALLENGE_PREFIX, &serde_json::to_vec(&canonical).unwrap()].concat();
+    assert_ne!(out, m);
+    out
+}
+
+/// A restore must be exactly the one its challenge names, signed by the
+/// current recovery key over that challenge's `M`. Two challenges, A and B,
+/// are issued at epoch 1, each naming a replacement of its own, and signed
+/// with the bootstrap recovery key. A's response is `NotRestorable` with
+/// `BadSignature`, changes nothing the registry shows and enrolls nothing,
+/// and its preview is refused alike, when its signature:
 ///
-/// The registry binds all six members (step 4 of `registry::recovery`
-/// "Restore") and the binding (its consume), the challenge hash byte-wise
-/// like the digest. The changed hash is A's in upper case, 48 bytes like
-/// A's, so it passes the length check made before any statement and
-/// reaches the consume: it differs from A's only in case and only in its
-/// first bytes, and sorts before it, while B's hash differs from A's only
-/// in its last byte and sorts after it: a consume that compared only the
-/// lengths would accept both, and one that compared one end only, ignored
-/// case or compared by order would accept one. The registry neither hashes
-/// nor verifies the signature: that the hash is the signed challenge's is
-/// the local verifier's (T13.3), not tested here.
+/// - is over A's challenge with one member of `C` changed, as a signer
+///   shown another plan would sign: any one of the six replacement members
+///   (`admin_id`, `credential_id`, `binding_id`, `public_identity`,
+///   `trust_anchor_ref`, `new_recovery_public_key`), the instance, the
+///   epoch, the operation ID, the expected revision or the expiry;
+/// - is over other bytes: B's `M` (A's ID with B's signature), `C` without
+///   the prefix, or `C` under the request-digest prefix;
+/// - is by another key over A's `M`: A's plan's new key, B's, or a key of
+///   its own;
+/// - is A's own signature altered: one bit flipped in `R` or in `S`, `S`
+///   replaced by `S + L` (malleated), or all zeros;
+///
+/// and B's ID with A's signature is `BadSignature` too. A's signature under
+/// an operation ID that names no challenge is `NotFound`; a challenge for
+/// another instance is not issued. After all that, A's exact response
+/// restores: no refusal consumed it. B is then `NotRestorable` too, even
+/// exact: its plan names the epoch A's restore retired (`NotBound`).
+///
+/// Every response here is what a caller can hand the public path; that the
+/// stored row itself (its plan, digest or hash) cannot be changed, and that
+/// a row whose stored digest or hash is not the library's encoding is
+/// refused, needs rows written by other means and is
+/// `service/tests/registry_recovery.rs`'s (`a_tampered_plan_is_refused`).
 #[tokio::test]
 async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
+    use NotRestorableReason::{BadSignature, NotBound, NotFound};
     let (db, pool) = fixture().await;
     let first = ids(0);
     bootstrapped(&pool, &first).await;
-    let a = recovery(1, &first, 1);
-    let b = recovery(2, &first, 1);
-    issue(&pool, &a, DEFAULT_CHALLENGE_TTL, issued_at()).await;
-    issue(&pool, &b, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+    let key = &first.recovery_key;
+    let mut a = recovery(1, &first, 1, key);
+    let mut b = recovery(2, &first, 1, key);
+    issue(&pool, &mut a, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+    issue(&pool, &mut b, DEFAULT_CHALLENGE_TTL, issued_at()).await;
     let issued = state(&pool, &first).await;
 
-    let tampers: [(&str, Tamper); 12] = [
-        ("admin_id", |r| r.admin_id = "adm_a32_tampered".into()),
-        ("credential_id", |r| {
-            r.credential_id = "crd_a32_tampered".into()
+    let tampers: [(&str, Tamper); 11] = [
+        ("admin_id", |c| {
+            c["plan"]["admin_id"] = json!("adm_a32_tampered")
         }),
-        ("binding_id", |r| r.binding_id = "rb_a32_tampered".into()),
-        ("public_identity", |r| {
-            r.public_identity = "spki-sha256:a32-tampered".into()
+        ("credential_id", |c| {
+            c["plan"]["credential_id"] = json!("crd_a32_tampered");
         }),
-        ("trust_anchor_ref", |r| {
-            r.trust_anchor_ref = "deployment/tampered-ca".into()
+        ("binding_id", |c| {
+            c["plan"]["binding_id"] = json!("rb_a32_tampered");
         }),
-        ("new_recovery_public_key", |r| {
-            r.new_recovery_public_key = b"a32-tampered-recovery-key-000000".to_vec()
+        ("public_identity", |c| {
+            c["plan"]["public_identity"] = json!("spki-sha256:a32-tampered");
         }),
-        ("operation ID", |r| {
-            r.operation_id = "op_a32_restore_unknown".into()
+        ("trust_anchor_ref", |c| {
+            c["plan"]["trust_anchor_ref"] = json!("deployment/tampered-ca");
         }),
-        ("request digest", |r| {
-            r.request_digest = b"a32-tampered-request-digest-0000".to_vec()
+        ("new_recovery_public_key", |c| {
+            let stranger = public_key(&test_key(b"a32 tampered recovery...", 0));
+            c["plan"]["new_recovery_public_key"] = json!(lower_hex(&stranger));
         }),
-        ("challenge hash", |r| {
-            r.challenge_hash.make_ascii_uppercase()
+        ("instance", |c| {
+            c["plan"]["instance_id"] = json!(ids(9).instance_id)
         }),
-        ("instance", |r| r.instance_id = ids(9).instance_id),
-        ("epoch", |r| r.recovery_key_epoch = 2),
-        ("expected revision", |r| r.expected_revision = 2),
+        ("epoch", |c| c["plan"]["recovery_key_epoch"] = json!(2)),
+        ("operation ID", |c| {
+            c["id"] = json!("op_a32_restore_unknown")
+        }),
+        ("expected revision", |c| c["expected_revision"] = json!(2)),
+        ("expiry", |c| {
+            let expires_at = c["expires_at"].as_i64().unwrap();
+            c["expires_at"] = json!(expires_at + 1);
+        }),
     ];
-    let replacement_of = |from: &Recovery, to: &Recovery| Recovery {
-        admin_id: to.admin_id.clone(),
-        credential_id: to.credential_id.clone(),
-        binding_id: to.binding_id.clone(),
-        public_identity: to.public_identity.clone(),
-        trust_anchor_ref: to.trust_anchor_ref.clone(),
-        new_recovery_public_key: to.new_recovery_public_key.clone(),
-        ..from.clone()
-    };
-    let mut attempts: Vec<(String, Recovery)> = tampers
+    let mut attempts: Vec<(String, Recovery, NotRestorableReason)> = tampers
         .iter()
         .map(|(what, tamper)| {
-            let mut attempt = a.with_events(1);
-            tamper(&mut attempt);
-            (format!("A with its {what} changed"), attempt)
+            (
+                format!("A signed over its challenge with its {what} changed"),
+                a.with_signature(sign(key, &tampered(&a.challenge, *tamper))),
+                BadSignature,
+            )
         })
         .collect();
+    let canonical = &a.challenge[CHALLENGE_PREFIX.len()..];
+    let mut flipped_r = a.signature.clone();
+    flipped_r[0] ^= 1;
+    let mut flipped_s = a.signature.clone();
+    flipped_s[40] ^= 0x10;
+    let stranger = test_key(b"a32 stranger key........", 0);
+    for (what, signature) in [
+        ("A with B's signature", b.signature.clone()),
+        ("A signed over C without the prefix", sign(key, canonical)),
+        (
+            "A signed over C under the request-digest prefix",
+            sign(key, &[DIGEST_PREFIX, canonical].concat()),
+        ),
+        (
+            "A signed by its plan's new key",
+            sign(&a.new_recovery_key, &a.challenge),
+        ),
+        (
+            "A signed by B's plan's new key",
+            sign(&b.new_recovery_key, &a.challenge),
+        ),
+        (
+            "A signed by a key of its own",
+            sign(&stranger, &a.challenge),
+        ),
+        ("A with a bit of R flipped", flipped_r),
+        ("A with a bit of S flipped", flipped_s),
+        ("A with S + L", malleate(&a.signature)),
+        ("A with a signature of zeros", vec![0; 64]),
+    ] {
+        attempts.push((what.into(), a.with_signature(signature), BadSignature));
+    }
     attempts.push((
-        "A's challenge naming B's replacement".into(),
-        replacement_of(&a, &b),
+        "B with A's signature".into(),
+        b.with_signature(a.signature.clone()),
+        BadSignature,
     ));
     attempts.push((
-        "B's challenge naming A's replacement".into(),
-        replacement_of(&b, &a),
-    ));
-    attempts.push((
-        "A's challenge with B's digest".into(),
+        "A's signature for an operation ID that names no challenge".into(),
         Recovery {
-            request_digest: b.request_digest.clone(),
-            ..a.with_events(2)
+            operation_id: "op_a32_restore_unknown".into(),
+            ..a.clone()
         },
-    ));
-    attempts.push((
-        "A's challenge with B's hash".into(),
-        Recovery {
-            challenge_hash: b.challenge_hash.clone(),
-            ..a.with_events(3)
-        },
+        NotFound,
     ));
     let mut refusals = Vec::new();
-    for (what, attempt) in &attempts {
-        assert_eq!(
-            attempt.new_recovery_public_key.len(),
-            registry::RECOVERY_PUBLIC_KEY_LENGTH,
-            "{what}"
-        );
-        assert_eq!(
-            attempt.challenge_hash.len(),
-            a.challenge_hash.len(),
-            "{what}"
+    for (what, attempt, reason) in &attempts {
+        assert_eq!(attempt.signature.len(), 64, "{what}");
+        not_restorable_text(
+            &preview_on(&pool, attempt, restored_at()).await,
+            *reason,
+            &format!("preview: {what}"),
         );
         refusals.push(not_restorable_text(
-            &restore_on(&pool, &attempt.request(restored_at())).await,
+            &restore_on(&pool, attempt, restored_at()).await,
+            *reason,
             what,
         ));
         assert_eq!(state(&pool, &first).await, issued, "{what}");
-        assert_not_enrolled(&pool, attempt).await;
+        assert_not_enrolled(&pool, &a).await;
+        assert_not_enrolled(&pool, &b).await;
     }
-    assert_eq!(refusals, vec![NOT_RESTORABLE; attempts.len()]);
+    assert_eq!(
+        refusals,
+        attempts
+            .iter()
+            .map(|(_, _, reason)| refused(*reason))
+            .collect::<Vec<_>>()
+    );
 
     let elsewhere = Recovery {
         instance_id: ids(9).instance_id,
-        ..recovery(3, &first, 1)
+        ..recovery(3, &first, 1, key)
     };
     let plan = elsewhere.plan();
     let refused = issue_on(
@@ -2375,7 +2614,7 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
     );
     assert_eq!(state(&pool, &first).await, issued);
 
-    let restored = restore_on(&pool, &a.request(restored_at())).await.unwrap();
+    let restored = restore_on(&pool, &a, restored_at()).await.unwrap();
     assert_restored(&pool, &a, &restored, restored_at()).await;
     assert_eq!(
         restored.revoked_credential_ids,
@@ -2384,7 +2623,8 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
     let after = state(&pool, &first).await;
     assert_eq!(after.chain, ChainVerdict::Intact { last_sequence: 5 });
     not_restorable_text(
-        &restore_on(&pool, &b.request(restored_at())).await,
+        &restore_on(&pool, &b, restored_at()).await,
+        NotBound,
         "B after A",
     );
     assert_eq!(state(&pool, &first).await, after);
@@ -2398,8 +2638,9 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
 /// default and the longest TTL ([`MIN_CHALLENGE_TTL`],
 /// [`DEFAULT_CHALLENGE_TTL`], [`MAX_CHALLENGE_TTL`]): each challenge's
 /// `expires_at` is its issue time plus its TTL; a restore at `expires_at`,
-/// a microsecond after it and a longest TTL after it is `NotRestorable` and
-/// changes nothing; the restore a microsecond before it restores, at the
+/// a microsecond after it and a longest TTL after it is `NotRestorable`
+/// (`Expired`) and changes nothing; the restore a microsecond before it,
+/// signed by the key of the then current epoch, restores, at the
 /// next epoch, recorded by the key of the epoch before. The chain ends
 /// intact at 10, at epoch 4, with only the last replacement authorized.
 /// The three TTLs are checked first: 5 and 15 minutes are LT-107 and
@@ -2409,8 +2650,8 @@ async fn a32_neg_a_restore_must_be_the_one_its_challenge_names() {
 /// refusal at `expires_at` is registry behaviour, not the spec's: the
 /// refusal wrote nothing and is not final, because only the caller's `now`
 /// is compared, and a `now` before the issue time is accepted too. LT-107's
-/// "the challenge expires" holds only with `now` taken from the local
-/// verifier's own clock (T13.3), which A64's hermetic leg tests with
+/// "the challenge expires" holds only with `now` taken from the service
+/// binary's own clock (T13.3), which A64's hermetic leg tests with
 /// injected clocks (see the module docs).
 #[tokio::test]
 async fn a32_neg_an_expired_challenge_is_refused() {
@@ -2427,14 +2668,17 @@ async fn a32_neg_an_expired_challenge_is_refused() {
     let first = ids(0);
     bootstrapped(&pool, &first).await;
     let mut restored = Vec::new();
+    // The recovery key of the current epoch: bootstrap's, then each
+    // restore's new one.
+    let mut signer = first.recovery_key.clone();
     for (cycle, ttl) in [MIN_CHALLENGE_TTL, DEFAULT_CHALLENGE_TTL, MAX_CHALLENGE_TTL]
         .into_iter()
         .enumerate()
     {
         let epoch = i64::try_from(cycle).unwrap() + 1;
-        let recovery = recovery(cycle, &first, epoch);
+        let mut recovery = recovery(cycle, &first, epoch, &signer);
         let at = now() + Duration::from_secs(3600 * (u64::try_from(cycle).unwrap() + 1));
-        let challenge = issue(&pool, &recovery, ttl, at).await;
+        let challenge = issue(&pool, &mut recovery, ttl, at).await;
         assert_issued(&challenge, &recovery, ttl, at, 3 * epoch - 1);
         let expires_at = challenge.expires_at;
         let before = state(&pool, &first).await;
@@ -2444,15 +2688,17 @@ async fn a32_neg_an_expired_challenge_is_refused() {
             expires_at + MAX_CHALLENGE_TTL,
         ] {
             not_restorable_text(
-                &restore_on(&pool, &recovery.request(late)).await,
+                &restore_on(&pool, &recovery, late).await,
+                NotRestorableReason::Expired,
                 &format!("{ttl:?} at {late:?}"),
             );
             assert_eq!(state(&pool, &first).await, before, "{ttl:?} at {late:?}");
         }
         assert_not_enrolled(&pool, &recovery).await;
         let last = expires_at - Duration::from_micros(1);
-        let outcome = restore_on(&pool, &recovery.request(last)).await.unwrap();
+        let outcome = restore_on(&pool, &recovery, last).await.unwrap();
         assert_restored(&pool, &recovery, &outcome, last).await;
+        signer = recovery.new_recovery_key.clone();
         restored.push(recovery);
     }
     assert_eq!(
@@ -2512,8 +2758,8 @@ async fn a32_neg_a_restore_outside_read_committed_writes_nothing() {
     let (db, pool) = fixture().await;
     let first = ids(0);
     bootstrapped(&pool, &first).await;
-    let recovery = recovery(1, &first, 1);
-    issue(&pool, &recovery, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+    let mut recovery = recovery(1, &first, 1, &first.recovery_key);
+    issue(&pool, &mut recovery, DEFAULT_CHALLENGE_TTL, issued_at()).await;
     let issued = state(&pool, &first).await;
     let mut replicas = Vec::new();
     for (level, set) in OTHER_ISOLATION {
@@ -2521,7 +2767,13 @@ async fn a32_neg_a_restore_outside_read_committed_writes_nothing() {
         let mut conn = replica.acquire().await.unwrap();
         sqlx::query(set).execute(&mut *conn).await.unwrap();
         let mut tx = conn.begin().await.unwrap();
-        match restore_operator(&mut tx, &recovery.request(restored_at())).await {
+        match restore_operator(
+            &mut tx,
+            &recovery.response(),
+            &recovery.request(restored_at()),
+        )
+        .await
+        {
             Err(err @ RestoreError::UnsupportedIsolation) => {
                 assert_eq!(format!("{err:?}"), "UnsupportedIsolation", "{level}");
             }
@@ -2545,9 +2797,7 @@ async fn a32_neg_a_restore_outside_read_committed_writes_nothing() {
         .execute(&mut *conn)
         .await
         .unwrap();
-    let restored = restore(&mut conn, &recovery.request(restored_at()))
-        .await
-        .unwrap();
+    let restored = restore(&mut conn, &recovery, restored_at()).await.unwrap();
     drop(conn);
     assert_restored(&pool, &recovery, &restored, restored_at()).await;
     assert_eq!(
@@ -2566,8 +2816,9 @@ async fn a32_neg_a_restore_outside_read_committed_writes_nothing() {
 /// restore the one issued challenge (the same replacement, event IDs of
 /// their own); in the other two, each restores a challenge of its own, all
 /// issued at epoch 1. In each database exactly one restores and the 7
-/// others are `NotRestorable`: a challenge is consumed once, and one
-/// restoration retires the epoch the others are bound to. The state is the
+/// others are `NotRestorable`: a challenge is consumed once (`Consumed`),
+/// and one restoration retires the epoch the others are bound to
+/// (`NotBound`). The state is the
 /// winner's: its replacement, the key at epoch 2, its two events after the
 /// issues and nothing of the losers'. Which replica wins is not asserted.
 #[tokio::test(flavor = "multi_thread")]
@@ -2579,17 +2830,24 @@ async fn a32_neg_concurrent_restores_across_replicas_have_one_winner() {
         bootstrapped(&pool, &first).await;
         let base = round * REPLICAS;
         let mine: Vec<Recovery> = if shared {
-            let one = recovery(base, &first, 1);
-            issue(&pool, &one, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+            let mut one = recovery(base, &first, 1, &first.recovery_key);
+            issue(&pool, &mut one, DEFAULT_CHALLENGE_TTL, issued_at()).await;
             (0..REPLICAS).map(|r| one.with_events(r)).collect()
         } else {
-            let each: Vec<Recovery> = (0..REPLICAS)
-                .map(|r| recovery(base + r, &first, 1))
+            let mut each: Vec<Recovery> = (0..REPLICAS)
+                .map(|r| recovery(base + r, &first, 1, &first.recovery_key))
                 .collect();
-            for recovery in &each {
+            for recovery in &mut each {
                 issue(&pool, recovery, DEFAULT_CHALLENGE_TTL, issued_at()).await;
             }
             each
+        };
+        // A loser finds the one challenge consumed, or its own bound to
+        // the epoch the winner retired.
+        let lost = if shared {
+            NotRestorableReason::Consumed
+        } else {
+            NotRestorableReason::NotBound
         };
         let issues = if shared { 1 } else { REPLICAS };
         let replicas = Replicas::start(&db, REPLICAS).await;
@@ -2598,7 +2856,7 @@ async fn a32_neg_concurrent_restores_across_replicas_have_one_winner() {
                 let mine = mine.clone();
                 move |replica, mut conn| {
                     let recovery = mine[replica].clone();
-                    async move { restore(&mut conn, &recovery.request(restored_at())).await }
+                    async move { restore(&mut conn, &recovery, restored_at()).await }
                 }
             })
             .await;
@@ -2608,13 +2866,11 @@ async fn a32_neg_concurrent_restores_across_replicas_have_one_winner() {
         let winner = winners[0];
         let refusals: Vec<String> = (0..REPLICAS)
             .filter(|&r| r != winner)
-            .map(|r| not_restorable_text(&outcomes[r], &format!("round {round}, replica {r}")))
+            .map(|r| {
+                not_restorable_text(&outcomes[r], lost, &format!("round {round}, replica {r}"))
+            })
             .collect();
-        assert_eq!(
-            refusals,
-            vec![NOT_RESTORABLE; REPLICAS - 1],
-            "round {round}"
-        );
+        assert_eq!(refusals, vec![refused(lost); REPLICAS - 1], "round {round}");
 
         let outcome = outcomes[winner].as_ref().unwrap();
         assert_restored(&pool, &mine[winner], outcome, restored_at()).await;
@@ -2656,9 +2912,10 @@ async fn a32_neg_concurrent_restores_across_replicas_have_one_winner() {
 /// transaction; 4 replicas start restores of the same challenge (event IDs
 /// of their own), and the harness sees all 4 blocked behind the holder
 /// (`pg_blocking_pids`, transitively) before it ends. None finishes before
-/// the holder ends. After the holder's commit all 4 are `NotRestorable` and
-/// the state is the holder's; after its rollback exactly one of the 4
-/// restores, the other 3 are `NotRestorable`, and the state is that one's.
+/// the holder ends. After the holder's commit all 4 are `NotRestorable`
+/// (`Consumed`) and the state is the holder's; after its rollback exactly
+/// one of the 4 restores, the other 3 are `NotRestorable` (`Consumed`), and
+/// the state is that one's.
 /// Each in a fresh database.
 #[tokio::test(flavor = "multi_thread")]
 async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
@@ -2667,8 +2924,8 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
         let (db, pool) = fixture().await;
         let first = ids(0);
         bootstrapped(&pool, &first).await;
-        let held = recovery(1, &first, 1);
-        issue(&pool, &held, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+        let mut held = recovery(1, &first, 1, &first.recovery_key);
+        issue(&pool, &mut held, DEFAULT_CHALLENGE_TTL, issued_at()).await;
         let holder_pool = db.pool_with_max_connections(1).await;
         let mut holder_conn = holder_pool.acquire().await.unwrap();
         let holder_pid = rep::backend_pid(&mut holder_conn).await;
@@ -2676,9 +2933,10 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
         let pids = waiters.backend_pids().await;
 
         let mut tx = Connection::begin(&mut *holder_conn).await.unwrap();
-        let held_outcome = restore_operator(&mut tx, &held.request(restored_at()))
-            .await
-            .unwrap();
+        let held_outcome =
+            restore_operator(&mut tx, &held.response(), &held.request(restored_at()))
+                .await
+                .unwrap();
         // Set just before the holder ends: a waiter that finished earlier
         // reads `false`.
         let ending = Arc::new(AtomicBool::new(false));
@@ -2703,7 +2961,7 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
                 let recovery = mine[replica].clone();
                 let ending = Arc::clone(&ending);
                 async move {
-                    let outcome = restore(&mut conn, &recovery.request(restored_at())).await;
+                    let outcome = restore(&mut conn, &recovery, restored_at()).await;
                     (outcome, ending.load(Ordering::SeqCst))
                 }
             }
@@ -2736,11 +2994,19 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
         );
         let refusals: Vec<String> = (0..WAITERS)
             .filter(|r| !winners.contains(r))
-            .map(|r| not_restorable_text(&outcomes[r], &format!("commit {commit}, replica {r}")))
+            .map(|r| {
+                not_restorable_text(
+                    &outcomes[r],
+                    NotRestorableReason::Consumed,
+                    &format!("commit {commit}, replica {r}"),
+                )
+            })
             .collect();
         assert_eq!(refusals.len(), WAITERS - winners.len(), "commit {commit}");
         assert!(
-            refusals.iter().all(|text| text == NOT_RESTORABLE),
+            refusals
+                .iter()
+                .all(|text| *text == refused(NotRestorableReason::Consumed)),
             "{refusals:?}"
         );
         assert_eq!(
@@ -2780,7 +3046,7 @@ async fn a32_neg_blocked_restores_follow_the_holder_commit_or_rollback() {
 /// with its session terminated while it waits (a store error, `57P01`). 4
 /// replicas that restore the same challenge with event IDs of their own
 /// are seen blocked behind it; after its failure exactly one of them
-/// restores, the 3 others are `NotRestorable`, and the state is the
+/// restores, the 3 others are `NotRestorable` (`Consumed`), and the state is the
 /// winner's alone: the replacement enrolled once, the key at epoch 2, its
 /// two events directly after the committed one or the issue, and the chain
 /// intact, so neither the failed restore's first event nor its advance of
@@ -2793,7 +3059,7 @@ async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
         let (db, pool) = fixture().await;
         let first = ids(0);
         bootstrapped(&pool, &first).await;
-        let challenge = recovery(1, &first, 1);
+        let mut challenge = recovery(1, &first, 1, &first.recovery_key);
         let mut taken = challenge.clone();
         taken.issue_event_id = first.audit_event_id.clone();
         let before = state(&pool, &first).await;
@@ -2809,7 +3075,7 @@ async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
         // Its caller commits after the `Err`: nothing is written.
         tx.commit().await.unwrap();
         assert_eq!(state(&pool, &first).await, before, "{what}");
-        let issued = issue(&pool, &challenge, DEFAULT_CHALLENGE_TTL, issued_at()).await;
+        let issued = issue(&pool, &mut challenge, DEFAULT_CHALLENGE_TTL, issued_at()).await;
         assert_issued(&issued, &challenge, DEFAULT_CHALLENGE_TTL, issued_at(), 2);
 
         let mut failing = challenge.with_events(100);
@@ -2819,7 +3085,12 @@ async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
         let mine: Vec<Recovery> = (0..WAITERS).map(|r| challenge.with_events(r)).collect();
         let claim = move |mut conn: PoolConnection<Postgres>, commit_after| async move {
             let mut tx = Connection::begin(&mut *conn).await.unwrap();
-            let restored = restore_operator(&mut tx, &failing.request(restored_at())).await;
+            let restored = restore_operator(
+                &mut tx,
+                &failing.response(),
+                &failing.request(restored_at()),
+            )
+            .await;
             end_claim(tx, commit_after).await;
             restored
         };
@@ -2827,7 +3098,7 @@ async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
             let mine = mine.clone();
             move |replica: usize, mut conn: PoolConnection<Postgres>| {
                 let recovery = mine[replica].clone();
-                async move { restore(&mut conn, &recovery.request(restored_at())).await }
+                async move { restore(&mut conn, &recovery, restored_at()).await }
             }
         };
         let failed = fail_at_append(&db, &pool, failure, WAITERS, claim, work).await;
@@ -2842,9 +3113,19 @@ async fn a32_neg_a_recovery_failing_at_its_audit_append_writes_nothing() {
         let winner = winners[0];
         let refusals: Vec<String> = (0..WAITERS)
             .filter(|&r| r != winner)
-            .map(|r| not_restorable_text(&outcomes[r], &format!("{what}, replica {r}")))
+            .map(|r| {
+                not_restorable_text(
+                    &outcomes[r],
+                    NotRestorableReason::Consumed,
+                    &format!("{what}, replica {r}"),
+                )
+            })
             .collect();
-        assert_eq!(refusals, vec![NOT_RESTORABLE; WAITERS - 1], "{what}");
+        assert_eq!(
+            refusals,
+            vec![refused(NotRestorableReason::Consumed); WAITERS - 1],
+            "{what}"
+        );
 
         let outcome = outcomes[winner].as_ref().unwrap();
         assert_restored(&pool, &mine[winner], outcome, restored_at()).await;
