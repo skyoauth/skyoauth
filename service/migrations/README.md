@@ -233,16 +233,21 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   `public_mtls_identity` are non-empty and at most 2048 bytes, so an
   over-long value fails with `23514` instead of the btree error `54000`;
   `audience` and `action_name` also reject whitespace and control characters
-  (`[[:space:][:cntrl:]]`, as for egress destinations). `public_mtls_identity`
-  may contain spaces, since its form is not specified and may be a subject
-  DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
+  (`[[:space:][:cntrl:]]`, as for egress destinations). The
+  database does not reject whitespace in `public_mtls_identity`: when `0003`
+  was written its form was not specified and could have been a subject DN.
+  The form the service stores (next bullet) has neither. The audience syntax stays open (OQ-IR-9), and Unicode normalization
   (NFC or NFD) of these values is a service rule: the database compares
   bytes, so two spellings of one name are two keys.
 - **`public_mtls_identity` form.** The service stores `spki-sha256:` and 64
   lowercase hexadecimal digits, which it computes from the checker key's DER
   SubjectPublicKeyInfo with `crate::identity::canonical_public_identity`
   (lead ruling, 2026-11-24; the contract wording is pending); the column
-  checks above are unchanged.
+  checks above are unchanged. The existing checker writers
+  (`create_resource_server_checker` and `update_resource_server_checker`,
+  test-support only) still take the identity string from their caller
+  today, until S3 wires `canonical_public_identity` in, as the `0005`
+  bullet says for operator credentials.
 - **ID column bounds.** Every ID column of `0003`, own IDs and reference
   columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
   are bounded by lead decision (2026-11-20), `tenant.id` with
@@ -2968,8 +2973,11 @@ and the `now` of a revocation are arguments, never the database's `now()`
 (`Guard`), `admin_credential_revoked_disabled_check` refuses an enabled
 revoked credential (`Invariant`), `admin_credential_immutable` keeps the
 key on its row, and the `0006` delete and truncate guards keep the row, so
-`admin_credential_public_identity_key` refuses the revoked key again
-(`AlreadyExists`, naming only the constraint). Only credential
+`admin_credential_public_identity_key` refuses the revoked identity again
+(`AlreadyExists`, naming only the constraint); the unique key is per
+identity, which is per DER encoding of a key, so it refuses the revoked key
+only once the callers enforce the one-form requirement of
+`crate::identity` (S3, S5, S7). Only credential
 revocation is one-way in the database. The registry has no setter that
 enables or otherwise updates an identity or a credential, and no way to
 disable a credential without revoking it (public-api §7.1 names enrollment

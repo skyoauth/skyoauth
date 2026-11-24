@@ -26,11 +26,15 @@
 //! identity of its own:
 //!
 //! - an EC key (P-256 and the other curves) with its point uncompressed
-//!   (`04`) or compressed (`02`, `03`), and with named-curve parameters (an
-//!   `OBJECT IDENTIFIER`) or explicit ones (`specifiedCurve`);
-//! - an RSA key with `NULL` parameters or with none, and with a BER length
+//!   (`04`), compressed (`02`, `03`) or hybrid (`06`, `07`), and with
+//!   named-curve parameters (an `OBJECT IDENTIFIER`) or explicit ones
+//!   (`specifiedCurve`);
+//! - an RSA key with `NULL` parameters or with none, with a BER length
 //!   (long-form or zero-padded) inside the `RSAPublicKey` that the `BIT
-//!   STRING` holds, which is not decoded;
+//!   STRING` holds, which is not decoded, and under another algorithm
+//!   `OBJECT IDENTIFIER` for the same modulus and exponent: `rsaEncryption`
+//!   (1.2.840.113549.1.1.1) or `id-RSASSA-PSS` (1.2.840.113549.1.1.10, with
+//!   its parameters absent);
 //! - an Ed25519 or Ed448 key with its parameters absent or `NULL`
 //!   (`05 00`).
 //!
@@ -45,10 +49,12 @@
 //! `SubjectPublicKeyInfo` form for each algorithm it accepts, and refuse
 //! every other form of that algorithm:
 //!
-//! - EC: the named curve (the curve's `OBJECT IDENTIFIER` as the
-//!   parameters) and the uncompressed point;
-//! - RSA: `NULL` parameters, and a DER `RSAPublicKey` inside the `BIT
-//!   STRING`;
+//! - EC: the algorithm `id-ecPublicKey` (1.2.840.10045.2.1), the named
+//!   curve (the curve's `OBJECT IDENTIFIER` as the parameters) and the
+//!   uncompressed point (`04`) only;
+//! - RSA: the algorithm `rsaEncryption` (1.2.840.113549.1.1.1) with `NULL`
+//!   parameters, and a DER `RSAPublicKey` inside the `BIT STRING`;
+//!   `id-RSASSA-PSS` is refused, or is the only RSA form, never both;
 //! - Ed25519 and Ed448: the parameters absent.
 //!
 //! Only then does a key have one identity and the `0005` unique key hold
@@ -108,7 +114,9 @@
 //!   parameter is accepted and its identity is that of its exact bytes, so
 //!   the same key spelled two ways there would have two identities; the
 //!   requirement on the callers above refuses such parameters for the
-//!   algorithms it names.
+//!   algorithms it names. A `RELATIVE-OID` (tag `0d`) in the parameters is
+//!   not read as an `OBJECT IDENTIFIER`, so it is framed but its content is
+//!   not checked.
 //! - The identity is a name, not a proof: authentication still needs the
 //!   TLS handshake's proof of possession and the credential and role check
 //!   on every call (design section 7.2).
