@@ -91,14 +91,15 @@
 //!   missing);
 //! - every element is DER-framed ([`IdentityError::NotDer`]): a tag in one
 //!   octet (no high-tag-number form); in the universal class, a tag number
-//!   and form from an explicit table of the pairs DER allows (X.690 clauses
-//!   8 and 10.2): the primitive form only for `BOOLEAN`, `INTEGER`, `BIT
+//!   and form from an explicit table of the pairs DER allows (X.690, the
+//!   BER rules and the DER restrictions): the primitive form only for `BOOLEAN`, `INTEGER`, `BIT
 //!   STRING`, `OCTET STRING`, `NULL`, `OBJECT IDENTIFIER`,
 //!   `ObjectDescriptor`, `REAL`, `ENUMERATED`, `RELATIVE-OID`, the
 //!   restricted character strings, `UTCTime` and `GeneralizedTime`; the
 //!   constructed form only for `EXTERNAL`, `EMBEDDED PDV`, `SEQUENCE`,
 //!   `SET` and `CHARACTER STRING`; neither for end-of-contents (`0x00`),
-//!   `TIME` (14) or the reserved 15; in the other classes, either form; a
+//!   tag 14 (`TIME` in X.680, not accepted in SPKI parameters) or 15
+//!   (reserved); in the other classes, either form; a
 //!   definite length (no indefinite length `0x80`) in its shortest form (the
 //!   short form below 128; in the long form no leading zero octet, and at
 //!   most two length octets, enough for the size bound), and contents
@@ -233,8 +234,7 @@ struct Element<'a> {
     contents: &'a [u8],
 }
 
-/// The encoding form of an element: bit 6 of its tag octet (X.690
-/// 8.1.2.5).
+/// The encoding form of an element: bit 6 of its tag octet (X.690).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Form {
     Primitive,
@@ -242,67 +242,63 @@ enum Form {
 }
 
 /// The one form DER allows for the universal tag `number` (0 to 30), or
-/// `None` when this module refuses the tag in both forms. The clauses are
-/// those of X.690 (02/2021); the tag numbers those of X.680 (02/2021)
-/// section 8, table 1. No universal tag has both forms in DER: BER leaves
+/// `None` when this module refuses the tag in both forms. The encoding
+/// rules are those of X.690 (BER, with the DER restrictions); the tag numbers
+/// those of X.680.
+///
+/// No clause numbers are cited: they were not checked against the
+/// recommendation text. No universal tag has both forms in DER: BER leaves
 /// the form to the sender only for `BIT STRING`, `OCTET STRING` and the
-/// restricted character strings, and DER 10.2 makes those primitive.
+/// restricted character strings, and DER makes those primitive.
 fn der_universal_form(number: u8) -> Option<Form> {
     use Form::{Constructed, Primitive};
     match number {
-        // End-of-contents: only closes an indefinite length (8.1.5), which
-        // DER does not use (10.1).
+        // End-of-contents: only closes an indefinite length which DER does not use.
         0x00 => None,
-        // BOOLEAN (8.2.1), INTEGER (8.3.1): primitive.
+        // BOOLEAN, INTEGER: primitive.
         0x01 | 0x02 => Some(Primitive),
-        // BIT STRING (8.6.1, BER either form), OCTET STRING (8.7.1, BER
-        // either form): primitive in DER (10.2).
+        // BIT STRING, OCTET STRING (BER allows either form): primitive in DER.
         0x03 | 0x04 => Some(Primitive),
-        // NULL (8.8.1), OBJECT IDENTIFIER (8.19.1): primitive.
+        // NULL, OBJECT IDENTIFIER: primitive.
         0x05 | 0x06 => Some(Primitive),
         // ObjectDescriptor: a useful type, `[UNIVERSAL 7] IMPLICIT
         // GraphicString` (X.680), encoded as that restricted character
-        // string (8.25), so primitive in DER (10.2).
+        // string, so primitive in DER.
         0x07 => Some(Primitive),
-        // EXTERNAL and INSTANCE OF: encoded as a SEQUENCE (8.18, 8.16), so
-        // constructed (8.9.1).
+        // EXTERNAL and INSTANCE OF: encoded as a SEQUENCE, so
+        // constructed.
         0x08 => Some(Constructed),
-        // REAL (8.5.1): primitive; ENUMERATED: encoded as an INTEGER
-        // (8.4), so primitive.
+        // REAL: primitive; ENUMERATED: encoded as an INTEGER, so
+        // primitive.
         0x09 | 0x0a => Some(Primitive),
-        // EMBEDDED PDV: encoded as a SEQUENCE (8.17), so constructed.
+        // EMBEDDED PDV: encoded as a SEQUENCE, so constructed.
         0x0b => Some(Constructed),
-        // UTF8String: a restricted character string (8.23), primitive in
-        // DER (10.2).
+        // UTF8String: a restricted character string, primitive in DER.
         0x0c => Some(Primitive),
-        // RELATIVE-OID (8.20.1): primitive.
+        // RELATIVE-OID: primitive.
         0x0d => Some(Primitive),
-        // TIME since the 2008 editions of X.680 (reserved before), and 15,
-        // reserved: no structure a SubjectPublicKeyInfo holds uses either,
-        // and a decoder older than TIME reads 14 as reserved, so both are
-        // refused here.
+        // 14 is TIME since the 2008 editions of X.680 (reserved before) and 15
+        // is reserved: no structure a SubjectPublicKeyInfo holds uses either,
+        // so neither is accepted in its parameters.
         0x0e | 0x0f => None,
-        // SEQUENCE and SEQUENCE OF (8.9.1, 8.10.1), SET and SET OF (8.11.1,
-        // 8.12.1): constructed.
+        // SEQUENCE and SEQUENCE OF, SET and SET OF: constructed.
         0x10 | 0x11 => Some(Constructed),
         // NumericString, PrintableString, TeletexString (T61String),
-        // VideotexString, IA5String: restricted character strings (8.23),
-        // primitive in DER (10.2).
+        // VideotexString, IA5String: restricted character strings, primitive
+        // in DER.
         0x12..=0x16 => Some(Primitive),
         // UTCTime, GeneralizedTime: useful types, `IMPLICIT VisibleString`
-        // (X.680), encoded as that restricted character string (8.25,
-        // 8.26), so primitive in DER (10.2; 11.7 and 11.8 restrict their
-        // contents, which are not checked here).
+        // (X.680), encoded as that restricted character string, so primitive in DER
+        // (DER also restricts their contents, which are not checked here).
         0x17 | 0x18 => Some(Primitive),
         // GraphicString, VisibleString (ISO646String), GeneralString,
-        // UniversalString: restricted character strings (8.23), primitive
-        // in DER (10.2).
+        // UniversalString: restricted character strings, primitive
+        // in DER.
         0x19..=0x1c => Some(Primitive),
-        // CHARACTER STRING (unrestricted): encoded as a SEQUENCE (8.24), so
+        // CHARACTER STRING (unrestricted): encoded as a SEQUENCE, so
         // constructed.
         0x1d => Some(Constructed),
-        // BMPString: a restricted character string (8.23), primitive in
-        // DER (10.2).
+        // BMPString: a restricted character string, primitive in DER.
         0x1e => Some(Primitive),
         // 31: the high-tag-number form, refused by `check_tag` first; and
         // no other number fits in five bits.
@@ -313,7 +309,7 @@ fn der_universal_form(number: u8) -> Option<Form> {
 /// Refuses a tag octet DER does not allow, or this module does not
 /// accept: the high-tag-number form in any class (a tag number of 31 or
 /// more, which no element of a `SubjectPublicKeyInfo` needs; below 31 it is
-/// not DER, 8.1.2.2), and in the universal class every tag and form that
+/// not DER), and in the universal class every tag and form that
 /// [`der_universal_form`] does not permit. A tag of another class
 /// (application, context-specific, private) is accepted in either form: its
 /// form follows the type it tags, which only the schema knows.
@@ -409,9 +405,8 @@ fn check_element(element: &Element<'_>, depth: usize) -> Result<(), IdentityErro
 
 /// Not empty; each subidentifier minimal (no leading 0x80 octet) and
 /// terminated (the last octet has its high bit clear). The contents of an
-/// `OBJECT IDENTIFIER` (X.690 8.19.2) and of a `RELATIVE-OID` (8.20.2,
-/// which has at least one component, X.680) follow the same rules at the
-/// octet level; they differ only in what the first subidentifier means.
+/// `OBJECT IDENTIFIER` and of a `RELATIVE-OID` (which has at least one
+/// component, X.680) follow the same rules at the octet level; they differ only in what the first subidentifier means.
 fn check_oid(contents: &[u8]) -> Result<(), IdentityError> {
     let Some(&last) = contents.last() else {
         return Err(IdentityError::NotDer);
@@ -771,7 +766,7 @@ mod tests {
     }
 
     /// A RELATIVE-OID in the parameters, and nested in them, follows the
-    /// same contents rules as an OID (X.690 8.20.2).
+    /// same contents rules as an OID.
     #[test]
     fn malformed_relative_oids_are_refused() {
         let bad: [&[u8]; 5] = [
@@ -849,7 +844,7 @@ mod tests {
     }
 
     /// The universal tag octets DER allows, written out from X.690
-    /// (02/2021) clauses 8 and 10.2 and the tag numbers of X.680 rather
+    /// and the tag numbers of X.680 rather
     /// than taken from the implementation: every one of the 64 universal
     /// octets `0x00` to `0x3f`, both forms, is listed exactly once, accepted
     /// or refused, and checked in the parameters and nested in them.
