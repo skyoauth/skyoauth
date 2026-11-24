@@ -3070,7 +3070,7 @@ async fn times_outside_the_range_checks_are_unreadable_timestamps_naming_the_row
         ..registry::TenantPatch::default()
     };
     assert_check(
-        registry::update_tenant(&mut *tx, "ten_inf", 1, &patch).await,
+        registry::test_support::update_tenant(&mut *tx, "ten_inf", 1, &patch).await,
         "tenant_created_at_range_check",
     );
     tx.rollback().await.unwrap();

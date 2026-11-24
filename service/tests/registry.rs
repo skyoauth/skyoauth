@@ -644,15 +644,21 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
     registry::create_audience_tenant_assignment(&pool, &new_assignment("ata_3", "rs_1", "ten_c"))
         .await
         .unwrap();
-    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
+    registry::test_support::create_resource_server_checker(
+        &pool,
+        &new_checker("chk_1", "rs_1", "sha256:aa"),
+    )
+    .await
+    .unwrap();
+    registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
         .await
         .unwrap();
-    registry::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
-        .await
-        .unwrap();
-    registry::create_resource_action(&pool, &new_action("act_1", "rs_1", "projects.get"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_action(
+        &pool,
+        &new_action("act_1", "rs_1", "projects.get"),
+    )
+    .await
+    .unwrap();
     let assignment_changes = AudienceTenantAssignmentChanges {
         allowed_profiles: vec![],
         allowed_scopes: vec![],
@@ -682,23 +688,45 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
         registry::update_audience_tenant_assignment(&pool, "ata_x", MAX, &assignment_changes).await,
     );
     assert_stale(
-        registry::update_resource_server_checker(&pool, "chk_1", MAX, &checker_changes).await,
+        registry::test_support::update_resource_server_checker(
+            &pool,
+            "chk_1",
+            MAX,
+            &checker_changes,
+        )
+        .await,
     );
     assert_not_found(
-        registry::update_resource_server_checker(&pool, "chk_x", MAX, &checker_changes).await,
-    );
-    assert_stale(registry::update_resource_action(&pool, "act_1", MAX, &action_changes).await);
-    assert_not_found(registry::update_resource_action(&pool, "act_x", MAX, &action_changes).await);
-    // ten_c could be added and ten_a removed at the checker's revision 2.
-    assert_stale(registry::add_resource_server_checker_tenant(&pool, "chk_1", MAX, "ten_c").await);
-    assert_not_found(
-        registry::add_resource_server_checker_tenant(&pool, "chk_x", MAX, "ten_c").await,
+        registry::test_support::update_resource_server_checker(
+            &pool,
+            "chk_x",
+            MAX,
+            &checker_changes,
+        )
+        .await,
     );
     assert_stale(
-        registry::remove_resource_server_checker_tenant(&pool, "chk_1", MAX, "ten_a").await,
+        registry::test_support::update_resource_action(&pool, "act_1", MAX, &action_changes).await,
     );
     assert_not_found(
-        registry::remove_resource_server_checker_tenant(&pool, "chk_x", MAX, "ten_a").await,
+        registry::test_support::update_resource_action(&pool, "act_x", MAX, &action_changes).await,
+    );
+    // ten_c could be added and ten_a removed at the checker's revision 2.
+    assert_stale(
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", MAX, "ten_c")
+            .await,
+    );
+    assert_not_found(
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_x", MAX, "ten_c")
+            .await,
+    );
+    assert_stale(
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_1", MAX, "ten_a")
+            .await,
+    );
+    assert_not_found(
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_x", MAX, "ten_a")
+            .await,
     );
 
     let server = registry::get_resource_server(&pool, "rs_1").await.unwrap();
@@ -943,9 +971,12 @@ async fn a_second_checker_tenant_change_from_the_same_revision_is_stale_after_th
     registry::create_audience_tenant_assignment(&pool, &new_assignment("ata_3", "rs_1", "ten_c"))
         .await
         .unwrap();
-    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_server_checker(
+        &pool,
+        &new_checker("chk_1", "rs_1", "sha256:aa"),
+    )
+    .await
+    .unwrap();
     let checker = |pool: PgPool| async move {
         let checker = registry::get_resource_server_checker(&pool, "chk_1")
             .await
@@ -962,14 +993,19 @@ async fn a_second_checker_tenant_change_from_the_same_revision_is_stale_after_th
     // Two adds of different tenants from revision 1.
     let mut tx = first.begin().await.unwrap();
     assert_eq!(
-        registry::add_resource_server_checker_tenant(&mut *tx, "chk_1", 1, "ten_a")
+        registry::test_support::add_resource_server_checker_tenant(&mut *tx, "chk_1", 1, "ten_a")
             .await
             .unwrap(),
         2
     );
     let waiting = tokio::spawn(async move {
-        let outcome =
-            registry::add_resource_server_checker_tenant(&mut second, "chk_1", 1, "ten_c").await;
+        let outcome = registry::test_support::add_resource_server_checker_tenant(
+            &mut second,
+            "chk_1",
+            1,
+            "ten_c",
+        )
+        .await;
         (second, outcome)
     });
     wait_until_blocked(&pool, second_pid, first_pid).await;
@@ -982,13 +1018,21 @@ async fn a_second_checker_tenant_change_from_the_same_revision_is_stale_after_th
     // Two removes of the listed tenant from revision 2.
     let mut tx = first.begin().await.unwrap();
     assert_eq!(
-        registry::remove_resource_server_checker_tenant(&mut *tx, "chk_1", 2, "ten_a")
-            .await
-            .unwrap(),
+        registry::test_support::remove_resource_server_checker_tenant(
+            &mut *tx, "chk_1", 2, "ten_a"
+        )
+        .await
+        .unwrap(),
         3
     );
     let waiting = tokio::spawn(async move {
-        registry::remove_resource_server_checker_tenant(&mut second, "chk_1", 2, "ten_a").await
+        registry::test_support::remove_resource_server_checker_tenant(
+            &mut second,
+            "chk_1",
+            2,
+            "ten_a",
+        )
+        .await
     });
     wait_until_blocked(&pool, second_pid, first_pid).await;
     assert!(!waiting.is_finished());
@@ -1004,12 +1048,18 @@ async fn a_second_checker_tenant_change_from_the_same_revision_is_stale_after_th
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
     let (db, pool) = seeded().await;
-    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
-        .await
-        .unwrap();
-    registry::create_resource_action(&pool, &new_action("act_1", "rs_1", "projects.get"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_server_checker(
+        &pool,
+        &new_checker("chk_1", "rs_1", "sha256:aa"),
+    )
+    .await
+    .unwrap();
+    registry::test_support::create_resource_action(
+        &pool,
+        &new_action("act_1", "rs_1", "projects.get"),
+    )
+    .await
+    .unwrap();
     // Assignments of rs_1 to further tenants, so concurrent adds name
     // different tenants.
     for n in 0..4 {
@@ -1078,7 +1128,8 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
                 public_mtls_identity: format!("sha256:b{n}"),
                 status: Status::Enabled,
             };
-            registry::update_resource_server_checker(&pool, "chk_1", 1, &changes).await
+            registry::test_support::update_resource_server_checker(&pool, "chk_1", 1, &changes)
+                .await
         }
     })
     .await;
@@ -1095,7 +1146,7 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
                 live_check_required: false,
                 status: Status::Enabled,
             };
-            registry::update_resource_action(&pool, "act_1", 1, &changes).await
+            registry::test_support::update_resource_action(&pool, "act_1", 1, &changes).await
         }
     })
     .await;
@@ -1106,8 +1157,13 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
     let outcome = race(move |n| {
         let pool = p.clone();
         async move {
-            registry::add_resource_server_checker_tenant(&pool, "chk_1", 2, &format!("ten_c{n}"))
-                .await
+            registry::test_support::add_resource_server_checker_tenant(
+                &pool,
+                "chk_1",
+                2,
+                &format!("ten_c{n}"),
+            )
+            .await
         }
     })
     .await;
@@ -1120,15 +1176,17 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
     // Four removes of the one listed tenant from revision 3.
     let tenant = checker.allowed_tenant_ids[0].clone();
     let p = pool.clone();
-    let outcome =
-        race(move |_| {
-            let pool = p.clone();
-            let tenant = tenant.clone();
-            async move {
-                registry::remove_resource_server_checker_tenant(&pool, "chk_1", 3, &tenant).await
-            }
-        })
-        .await;
+    let outcome = race(move |_| {
+        let pool = p.clone();
+        let tenant = tenant.clone();
+        async move {
+            registry::test_support::remove_resource_server_checker_tenant(
+                &pool, "chk_1", 3, &tenant,
+            )
+            .await
+        }
+    })
+    .await;
     assert_eq!(outcome, (1, 3), "remove checker tenant");
     let checker = registry::get_resource_server_checker(&pool, "chk_1")
         .await
@@ -1229,7 +1287,7 @@ async fn assignments_update_by_revision_and_name_their_constraints() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn checkers_update_by_revision_and_keep_their_tenant_set() {
     let (db, pool) = seeded().await;
-    let created = registry::create_resource_server_checker(
+    let created = registry::test_support::create_resource_server_checker(
         &pool,
         &new_checker("chk_1", "rs_1", "CN=checker one"),
     )
@@ -1246,7 +1304,7 @@ async fn checkers_update_by_revision_and_keep_their_tenant_set() {
     assert_not_found(registry::get_resource_server_checker(&pool, "chk_x").await);
 
     assert_eq!(
-        registry::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
             .await
             .unwrap(),
         2
@@ -1255,19 +1313,27 @@ async fn checkers_update_by_revision_and_keep_their_tenant_set() {
         public_mtls_identity: "sha256:rotated".into(),
         status: Status::Disabled,
     };
-    let updated = registry::update_resource_server_checker(&pool, "chk_1", 2, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_resource_server_checker(&pool, "chk_1", 2, &changes)
+            .await
+            .unwrap();
     assert_eq!(updated.revision, 3);
     assert_eq!(updated.public_mtls_identity, "sha256:rotated");
     assert_eq!(updated.status, Status::Disabled);
     assert_eq!(updated.allowed_tenant_ids, ["ten_a"]);
-    assert_stale(registry::update_resource_server_checker(&pool, "chk_1", 2, &changes).await);
-    assert_not_found(registry::update_resource_server_checker(&pool, "chk_x", 1, &changes).await);
+    assert_stale(
+        registry::test_support::update_resource_server_checker(&pool, "chk_1", 2, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_resource_server_checker(&pool, "chk_x", 1, &changes).await,
+    );
 
-    registry::create_resource_server_checker(&pool, &new_checker("chk_2", "rs_2", "sha256:bb"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_server_checker(
+        &pool,
+        &new_checker("chk_2", "rs_2", "sha256:bb"),
+    )
+    .await
+    .unwrap();
     let listed: Vec<_> = registry::list_resource_server_checkers(&pool, Page::first(10))
         .await
         .unwrap()
@@ -1284,7 +1350,7 @@ async fn checkers_update_by_revision_and_keep_their_tenant_set() {
 
     let create = |new: NewResourceServerChecker| {
         let pool = pool.clone();
-        async move { registry::create_resource_server_checker(&pool, &new).await }
+        async move { registry::test_support::create_resource_server_checker(&pool, &new).await }
     };
     assert_exists(
         create(new_checker("chk_1", "rs_2", "sha256:cc")).await,
@@ -1309,7 +1375,7 @@ async fn checkers_update_by_revision_and_keep_their_tenant_set() {
         status: Status::Enabled,
     };
     assert_exists(
-        registry::update_resource_server_checker(&pool, "chk_1", 3, &changes).await,
+        registry::test_support::update_resource_server_checker(&pool, "chk_1", 3, &changes).await,
         "resource_server_checker_public_mtls_identity_key",
     );
     db.drop([pool]).await;
@@ -1321,9 +1387,12 @@ async fn checkers_update_by_revision_and_keep_their_tenant_set() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
     let (db, pool) = seeded().await;
-    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_server_checker(
+        &pool,
+        &new_checker("chk_1", "rs_1", "sha256:aa"),
+    )
+    .await
+    .unwrap();
     let revision = |pool: PgPool| async move {
         registry::get_resource_server_checker(&pool, "chk_1")
             .await
@@ -1334,24 +1403,30 @@ async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
     // ten_b is assigned only to rs_2, and ten_x does not exist.
     for tenant in ["ten_b", "ten_x"] {
         assert_invariant(
-            registry::add_resource_server_checker_tenant(&pool, "chk_1", 1, tenant).await,
+            registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 1, tenant)
+                .await,
             InvariantKind::ForeignKey,
             "resource_server_checker_tenant_assignment_fkey",
         );
     }
     assert_eq!(revision(pool.clone()).await, 1);
     assert_not_found(
-        registry::add_resource_server_checker_tenant(&pool, "chk_x", 1, "ten_a").await,
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_x", 1, "ten_a")
+            .await,
     );
-    assert_stale(registry::add_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_a").await);
+    assert_stale(
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_a")
+            .await,
+    );
     assert_eq!(
-        registry::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
             .await
             .unwrap(),
         2
     );
     assert_exists(
-        registry::add_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_a").await,
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_a")
+            .await,
         "resource_server_checker_tenant_pkey",
     );
     assert_eq!(revision(pool.clone()).await, 2);
@@ -1366,7 +1441,7 @@ async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
         .await
         .unwrap();
     assert_eq!(
-        registry::add_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_c")
+        registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_c")
             .await
             .unwrap(),
         3
@@ -1378,16 +1453,24 @@ async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
 
     // Removal.
     assert_not_found(
-        registry::remove_resource_server_checker_tenant(&pool, "chk_1", 3, "ten_b").await,
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_1", 3, "ten_b")
+            .await,
     );
     assert_not_found(
-        registry::remove_resource_server_checker_tenant(&pool, "chk_x", 3, "ten_a").await,
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_x", 3, "ten_a")
+            .await,
     );
-    assert_stale(registry::remove_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_a").await);
-    assert_stale(registry::remove_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_b").await);
+    assert_stale(
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_a")
+            .await,
+    );
+    assert_stale(
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_1", 2, "ten_b")
+            .await,
+    );
     assert_eq!(revision(pool.clone()).await, 3);
     assert_eq!(
-        registry::remove_resource_server_checker_tenant(&pool, "chk_1", 3, "ten_a")
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_1", 3, "ten_a")
             .await
             .unwrap(),
         4
@@ -1400,7 +1483,8 @@ async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
         (4, &["ten_c".to_string()][..])
     );
     assert_not_found(
-        registry::remove_resource_server_checker_tenant(&pool, "chk_1", 4, "ten_a").await,
+        registry::test_support::remove_resource_server_checker_tenant(&pool, "chk_1", 4, "ten_a")
+            .await,
     );
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_server_checker_tenant")
         .fetch_one(&pool)
@@ -1429,15 +1513,20 @@ async fn checker_tenant_sets_are_returned_in_byte_order() {
         .await
         .unwrap();
     }
-    registry::create_resource_server_checker(&pool, &new_checker("chk_1", "rs_1", "sha256:aa"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_server_checker(
+        &pool,
+        &new_checker("chk_1", "rs_1", "sha256:aa"),
+    )
+    .await
+    .unwrap();
     // Neither byte order nor en_US order.
     for (revision, tenant) in [(1, "ten_c"), (2, "ten_a"), (3, "ten_B")] {
         assert_eq!(
-            registry::add_resource_server_checker_tenant(&pool, "chk_1", revision, tenant)
-                .await
-                .unwrap(),
+            registry::test_support::add_resource_server_checker_tenant(
+                &pool, "chk_1", revision, tenant
+            )
+            .await
+            .unwrap(),
             revision + 1
         );
     }
@@ -1456,9 +1545,10 @@ async fn checker_tenant_sets_are_returned_in_byte_order() {
         public_mtls_identity: "sha256:bb".into(),
         status: Status::Enabled,
     };
-    let updated = registry::update_resource_server_checker(&pool, "chk_1", 4, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_resource_server_checker(&pool, "chk_1", 4, &changes)
+            .await
+            .unwrap();
     assert_eq!(updated.allowed_tenant_ids, expected);
 
     // The order is the column's: its collation, which the ORDER BY also
@@ -1480,10 +1570,12 @@ async fn checker_tenant_sets_are_returned_in_byte_order() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn resource_actions_update_by_revision_and_name_their_constraints() {
     let (db, pool) = seeded().await;
-    let created =
-        registry::create_resource_action(&pool, &new_action("act_1", "rs_1", "projects.get"))
-            .await
-            .unwrap();
+    let created = registry::test_support::create_resource_action(
+        &pool,
+        &new_action("act_1", "rs_1", "projects.get"),
+    )
+    .await
+    .unwrap();
     assert_eq!(created.revision, 1);
     assert_eq!(created.required_resource_dimensions, ["project"]);
     assert!(created.live_check_required);
@@ -1500,7 +1592,7 @@ async fn resource_actions_update_by_revision_and_name_their_constraints() {
         live_check_required: false,
         status: Status::Disabled,
     };
-    let updated = registry::update_resource_action(&pool, "act_1", 1, &changes)
+    let updated = registry::test_support::update_resource_action(&pool, "act_1", 1, &changes)
         .await
         .unwrap();
     assert_eq!(updated.revision, 2);
@@ -1513,12 +1605,17 @@ async fn resource_actions_update_by_revision_and_name_their_constraints() {
     assert!(updated.required_resource_dimensions.is_empty());
     assert!(!updated.live_check_required);
     assert_eq!(updated.status, Status::Disabled);
-    assert_stale(registry::update_resource_action(&pool, "act_1", 1, &changes).await);
-    assert_not_found(registry::update_resource_action(&pool, "act_x", 1, &changes).await);
+    assert_stale(registry::test_support::update_resource_action(&pool, "act_1", 1, &changes).await);
+    assert_not_found(
+        registry::test_support::update_resource_action(&pool, "act_x", 1, &changes).await,
+    );
 
-    registry::create_resource_action(&pool, &new_action("act_0", "rs_2", "projects.get"))
-        .await
-        .unwrap();
+    registry::test_support::create_resource_action(
+        &pool,
+        &new_action("act_0", "rs_2", "projects.get"),
+    )
+    .await
+    .unwrap();
     let listed: Vec<_> = registry::list_resource_actions(&pool, Page::first(10))
         .await
         .unwrap()
@@ -1529,7 +1626,7 @@ async fn resource_actions_update_by_revision_and_name_their_constraints() {
 
     let create = |new: NewResourceAction| {
         let pool = pool.clone();
-        async move { registry::create_resource_action(&pool, &new).await }
+        async move { registry::test_support::create_resource_action(&pool, &new).await }
     };
     assert_exists(
         create(new_action("act_1", "rs_2", "x")).await,
@@ -1628,12 +1725,18 @@ async fn registry_functions_compose_in_a_caller_transaction() {
     )
     .await
     .unwrap();
-    registry::create_resource_server_checker(&mut *tx, &new_checker("chk_1", "rs_1", "sha256:aa"))
-        .await
-        .unwrap();
-    assert_stale(registry::add_resource_server_checker_tenant(&mut *tx, "chk_1", 5, "ten_c").await);
+    registry::test_support::create_resource_server_checker(
+        &mut *tx,
+        &new_checker("chk_1", "rs_1", "sha256:aa"),
+    )
+    .await
+    .unwrap();
+    assert_stale(
+        registry::test_support::add_resource_server_checker_tenant(&mut *tx, "chk_1", 5, "ten_c")
+            .await,
+    );
     assert_not_found(registry::get_tenant(&mut *tx, "ten_x").await);
-    registry::add_resource_server_checker_tenant(&mut *tx, "chk_1", 1, "ten_c")
+    registry::test_support::add_resource_server_checker_tenant(&mut *tx, "chk_1", 1, "ten_c")
         .await
         .unwrap();
     assert_eq!(
