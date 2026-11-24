@@ -44,8 +44,9 @@
 //            the one library build, so `target/release/<bin>` is built with
 //            `test-support`. A command is a release command when it is
 //            `cargo install` or `cargo bench`, or passes `--release`, `-r`
-//            or `--profile X` (`--cargo-profile X` for cargo-nextest, whose
-//            `--profile` is its own) for any X but `dev`, `test` and a
+//            or `--profile X` (`--cargo-profile X` for cargo-nextest and
+//            `cargo llvm-cov nextest`, whose `--profile` is nextest's own)
+//            for any X but `dev`, `test` and a
 //            profile that inherits from them: the `[profile.*]` `inherits`
 //            keys of every `Cargo.toml` and cargo configuration in the tree
 //            are followed, and a profile they do not declare (`$PROFILE`
@@ -58,17 +59,29 @@
 //            actions, shell scripts, scripts under scripts/, Dockerfiles,
 //            justfiles and Makefiles. A line ending in `\` continues on the
 //            next one; in YAML, a plain scalar continued on more indented
-//            lines and a folded block scalar (`>`, `>-`, `>+`) are one
-//            logical line, and the lines of a literal block scalar (`|`,
-//            `|-`) are shell lines, as the shell reads them. A line is split
-//            into commands at `&&`, `||`, `;` and `|` outside quotes, and
-//            each command is checked with its own arguments. This file and its
-//            self-test are not scanned: they name the flags as patterns.
-//            What the guard cannot see: a command built at run time (a
-//            flag or a subcommand in an environment variable, a Makefile
-//            variable or a recipe that calls another), a build outside the
-//            files it reads, and cargo configuration outside the
-//            repository (`$CARGO_HOME`, `CARGO_*` variables).
+//            lines and each paragraph of a folded block scalar (`>`, `>-`,
+//            `>+`; a blank line ends one) are one logical line, and the
+//            lines of a literal block scalar (`|`, `|-`) are shell lines,
+//            as the shell reads them, never YAML keys. A line is split into
+//            commands at `&&`, `||`, `;`, `|` and `&` (not a redirection's)
+//            outside quotes, a command into shell words (a quoted string is
+//            one; `(`, `)`, `<`, `>`, `[`, `]` and `,` separate words too),
+//            and the words after the first one that runs cargo (`cargo` or
+//            a path to it, not an assignment `NAME=value`) are checked as
+//            its arguments; so are the words read with quotes as
+//            separators, and the contents of each quoted string are read
+//            as a line of their own (`sh -c "..."`, `"$(...)"`). The word
+//            `cargo` starts a command wherever it is (`echo cargo ...`
+//            included): the guard does not know which programs run their
+//            arguments. This file and its self-test are not scanned: they
+//            name the flags as patterns. What the guard cannot see: a
+//            command built at run time (a flag or a subcommand in an
+//            environment variable, a Makefile variable or a recipe that
+//            calls another), a quoted string that spans lines (each line is
+//            read on its own, so a cargo command's arguments after the
+//            line break are not read with it), a build outside the files
+//            it reads, and cargo configuration outside the repository
+//            (`$CARGO_HOME`, `CARGO_*` variables).
 //
 // Errors exit 1, one line each. Usage errors and internal failures (cargo
 // not found, unparsable output or TOML) exit 2. Needs Node (>=20), cargo on
@@ -137,27 +150,48 @@ const YAML_KEY = /^(\s*(?:-\s+)?)[^\s#-][^#]*?:(?:\s+(.*?))?\s*$/;
 const indentOf = (line) => line.search(/\S/);
 
 // Logical lines of `text`: a line ending in `\` joins the next one. With
-// `yaml`, a key's plain scalar continued on more indented lines, and its
-// folded block scalar (`>`, `>-`, `>+`), join too; a literal block scalar's
-// lines (`|`) stay lines. Each carries the number of its first line.
+// `yaml`, a key's plain scalar continued on more indented lines, and each
+// paragraph of its folded block scalar (`>`, `>-`, `>+`; YAML keeps the
+// line break at a blank line), join too; a literal block scalar's lines
+// (`|`) stay lines, and none of them is read as a YAML key. Each carries
+// the number of its first line.
 export function logicalLines(text, { yaml = false } = {}) {
   const lines = text.split('\n');
   const out = [];
+  const join = (number, parts) => out.push({ line: number, text: parts.map((part) => part.replace(/\\\s*$/, '')).join(' ') });
   let current = null;
+  // The column of the key whose literal block scalar holds the line, or -1.
+  let literal = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const key = yaml && !current ? YAML_KEY.exec(line) : null;
+    if (literal >= 0 && line.trim() && indentOf(line) <= literal) literal = -1;
+    const key = yaml && !current && literal < 0 ? YAML_KEY.exec(line) : null;
     const value = key?.[2] ?? '';
-    if (value && !/^\|[-+0-9]*(?:\s+#.*)?$/.test(value)) {
+    if (/^\|[-+0-9]*(?:\s+#.*)?$/.test(value)) {
+      literal = key[1].length;
+    } else if (value) {
       const folded = /^>[-+0-9]*(?:\s+#.*)?$/.test(value);
       const column = key[1].length;
       let end = i + 1;
       // A folded scalar takes blank lines too; a plain one ends at one.
       while (end < lines.length && (lines[end].trim() ? indentOf(lines[end]) > column : folded)) end++;
-      if (folded || end > i + 1) {
-        const head = folded ? line.slice(0, line.lastIndexOf(value)) : line;
-        const parts = [head, ...lines.slice(i + 1, end)].map((part) => part.replace(/\\\s*$/, ''));
-        out.push({ line: i + 1, text: parts.join(' ') });
+      if (folded) {
+        let paragraph = { number: i + 1, parts: [line.slice(0, line.lastIndexOf(value))] };
+        for (let j = i + 1; j < end; j++) {
+          if (lines[j].trim()) {
+            paragraph ??= { number: j + 1, parts: [] };
+            paragraph.parts.push(lines[j]);
+          } else if (paragraph) {
+            join(paragraph.number, paragraph.parts);
+            paragraph = null;
+          }
+        }
+        if (paragraph) join(paragraph.number, paragraph.parts);
+        i = end - 1;
+        continue;
+      }
+      if (end > i + 1) {
+        join(i + 1, lines.slice(i, end));
         i = end - 1;
         continue;
       }
@@ -183,8 +217,64 @@ const GLOBAL_WITH_VALUE = new Set(['-C', '-Z', '--config', '--color', '--manifes
 const TEST_COMMANDS = new Set(['test', 'bench', 'nextest', 'llvm-cov']);
 const TEST_TARGETS = /^--(?:tests|benches|examples|test|bench|example|all-targets)(?:=|$)/;
 const MAX_ALIAS_DEPTH = 8;
+const MAX_QUOTE_DEPTH = 8;
 
-const tokenize = (command) => command.split(/[\s"'`[\],]+/).filter(Boolean);
+const QUOTES = `"'\``;
+// What separates shell words outside quotes: white space, and for this
+// check `(`, `)`, `<` and `>` (a subshell, `$(...)`, a redirection), `[`,
+// `]` and `,` (an exec form `["cargo", "build"]`, a feature list).
+const WORD_SEPARATOR = /[\s()<>[\],]/;
+
+// The index of the quote that closes the one at `start` of `text`, or -1:
+// a single quote ends at the next one, a double quote or backquote at the
+// next one a backslash does not escape. An unmatched quote (an apostrophe
+// in prose, or a string that continues on another line) quotes nothing.
+function closingQuote(text, start) {
+  const quote = text[start];
+  for (let i = start + 1; i < text.length; i++) {
+    if (text[i] === '\\' && quote !== "'") i++;
+    else if (text[i] === quote) return i;
+  }
+  return -1;
+}
+
+// The shell words of `command`, quotes removed (a quoted string, `--config`
+// values included, stays in one word; an unmatched quote separates words),
+// and the contents of its quoted strings, which can hold commands of their
+// own (`sh -c "..."`, `"$(...)"`). With `quoting` false, every quote
+// separates words.
+function shellWords(command, { quoting = true } = {}) {
+  const words = [];
+  const quoted = [];
+  let word = null;
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    const close = quoting && QUOTES.includes(char) ? closingQuote(command, i) : -1;
+    if (close > 0) {
+      const content = command.slice(i + 1, close);
+      const value = char === "'" ? content : content.replace(/\\(["\\$`])/g, '$1');
+      quoted.push(value);
+      word = (word ?? '') + value;
+      i = close;
+    } else if (char === '\\' && i + 1 < command.length) {
+      word = (word ?? '') + command[++i];
+    } else if (WORD_SEPARATOR.test(char) || QUOTES.includes(char)) {
+      if (word !== null) words.push(word);
+      word = null;
+    } else {
+      word = (word ?? '') + char;
+    }
+  }
+  if (word !== null) words.push(word);
+  return { words, quoted };
+}
+
+const tokenize = (command) => shellWords(command).words;
+
+// Whether the shell word `word` runs cargo: its last path component, after a
+// Makefile recipe prefix (`@`, `-`, `+`), is `cargo` (`cargo`,
+// `~/.cargo/bin/cargo`), and it is no assignment `NAME=value`.
+const isCargo = (word) => !word.includes('=') && /(?:^[@+-]*|\/)cargo$/.test(word);
 
 // Whether the profile `name` is a release profile: `release` and `bench`
 // are, `dev` and `test` are not, and a custom one is if any `inherits`
@@ -218,7 +308,9 @@ export function isBadCommand(tokens, context, depth = 0) {
   }
   const sub = BUILTIN_ALIASES[name] ?? name;
   const args = tokens.slice(at + 1);
-  const profileFlag = sub === 'nextest' ? '--cargo-profile' : '--profile';
+  // `cargo llvm-cov nextest` runs nextest too, with nextest's `--profile`.
+  const nextest = sub === 'nextest' || (sub === 'llvm-cov' && args.find((arg) => !arg.startsWith('-')) === 'nextest');
+  const profileFlag = nextest ? '--cargo-profile' : '--profile';
   let profile;
   args.forEach((arg, index) => {
     if (arg === profileFlag) profile = args[index + 1] ?? '';
@@ -231,33 +323,30 @@ export function isBadCommand(tokens, context, depth = 0) {
     (profile !== undefined ? isReleaseProfile(profile, context.profiles) : sub === 'bench');
   if (!release) return false;
   const leaking = context.leaking ?? new Set();
+  // A feature list is split at commas and white space (`-F a,b`, `--features "a b"`).
+  const names = (arg) => arg.replace(/^(?:--features=|-F=?)/, '').split(/[\s,]+/);
   return (
     TEST_COMMANDS.has(sub) ||
-    args.some((arg) => arg === '--all-features' || arg.includes(FEATURE) || TEST_TARGETS.test(arg) || leaking.has(arg.replace(/^(?:--features=|-F)/, '')))
+    args.some((arg) => arg === '--all-features' || arg.includes(FEATURE) || TEST_TARGETS.test(arg) || names(arg).some((n) => leaking.has(n)))
   );
 }
 
-// The commands of a logical line: it split at `&&`, `||`, `;` and `|`
-// outside quotes (a backslash escapes the next character outside single
-// quotes), so each cargo command is checked with its own arguments only.
+// The commands of a logical line: it split at `&&`, `||`, `;`, `|` and `&`
+// (not a redirection's: `&>`, `2>&1`) outside quotes (a backslash escapes
+// the next character outside single quotes; an unmatched quote is a
+// character), so each cargo command is checked with its own arguments only.
 export function splitCommands(line) {
   const commands = [];
   let current = '';
-  let quote = null;
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
-    if (quote) {
-      if (char === '\\' && quote === '"' && i + 1 < line.length) current += char + line[++i];
-      else {
-        if (char === quote) quote = null;
-        current += char;
-      }
+    const close = QUOTES.includes(char) ? closingQuote(line, i) : -1;
+    if (close > 0) {
+      current += line.slice(i, close + 1);
+      i = close;
     } else if (char === '\\' && i + 1 < line.length) {
       current += char + line[++i];
-    } else if (char === '"' || char === "'" || char === '`') {
-      quote = char;
-      current += char;
-    } else if (char === ';' || char === '|' || (char === '&' && line[i + 1] === '&')) {
+    } else if (char === ';' || char === '|' || (char === '&' && !/[<>]/.test(line[i - 1] ?? '') && line[i + 1] !== '>')) {
       if (line[i + 1] === char) i++;
       commands.push(current);
       current = '';
@@ -269,22 +358,34 @@ export function splitCommands(line) {
   return commands;
 }
 
+// Whether a command of the line `line` (`splitCommands`) is a bad release
+// command: the shell words (`shellWords`) after its first word that runs
+// cargo (`isCargo`), with the feature's name looked for in the whole
+// command, an environment prefix included. The words are read as the shell
+// reads them and, as well, with quotes read as separators: a quote nested
+// in another without an escape (`sh -c "cargo build -F "a b" -r"`) pairs
+// with the wrong one. The contents of each quoted string are read as a
+// line of their own.
+function lineIsBad(line, context, depth = 0) {
+  return splitCommands(line).some((segment) => {
+    const { words, quoted } = shellWords(segment);
+    const bad = [words, shellWords(segment, { quoting: false }).words].some((view) => {
+      const at = view.findIndex(isCargo);
+      if (at < 0) return false;
+      const tokens = view.slice(at + 1);
+      if (segment.includes(FEATURE)) tokens.push(FEATURE);
+      return isBadCommand(tokens, context);
+    });
+    return bad || (depth < MAX_QUOTE_DEPTH && quoted.some((content) => lineIsBad(content, context, depth + 1)));
+  });
+}
+
 // The release commands of one file that use a forbidden flag, name the
-// feature or build test targets: `[{ line, text }]`. A command is the part
-// of one of a line's commands (`splitCommands`) after the word `cargo`; the
-// feature's name is looked for in the whole command, an environment prefix
-// included.
+// feature or build test targets (`lineIsBad`): `[{ line, text }]`.
 export function badReleaseCommands(text, { yaml = false, profiles = new Map(), aliases = new Map(), leaking = new Set() } = {}) {
   const bad = [];
   for (const { line, text: logical } of logicalLines(text, { yaml })) {
-    const offending = splitCommands(logical).some((segment) => {
-      const at = segment.search(/\bcargo\b/);
-      if (at < 0) return false;
-      const tokens = tokenize(segment.slice(at + 'cargo'.length));
-      if (segment.includes(FEATURE)) tokens.push(FEATURE);
-      return isBadCommand(tokens, { profiles, aliases, leaking });
-    });
-    if (offending) bad.push({ line, text: logical.trim().replace(/\s+/g, ' ') });
+    if (lineIsBad(logical, { profiles, aliases, leaking })) bad.push({ line, text: logical.trim().replace(/\s+/g, ' ') });
   }
   return bad;
 }

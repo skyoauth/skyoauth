@@ -2248,12 +2248,17 @@ a release command (`--release`, `-r`, `--profile` with a profile that is,
 inherits from or may be `release`, `cargo install`, `cargo bench`) uses
 `--all-features` or `--all-targets`, names `test-support` or such a
 feature, or builds test, bench or example targets, with the aliases of
-every `.cargo/config*` in the tree expanded, YAML folded and continued
-scalars joined, and each line split into its commands at `&&`, `||`, `;`
-and `|` outside quotes. It still cannot see a command assembled at run
-time (a flag or a subcommand in an environment variable or a Makefile
-variable, a recipe that calls another), a build outside the files it
-reads, or cargo configuration outside the repository. A service test pins
+every `.cargo/config*` in the tree expanded, YAML continued scalars and
+each paragraph of a folded one joined (no YAML key read inside a literal
+block), each line split into its commands at `&&`, `||`, `;`, `|` and `&`
+outside quotes, and each command into shell words (a quoted string is one
+word, and is also read as a command line of its own) after the first word
+that runs cargo (`cargo` or a path to it, not an assignment). It still
+cannot see a command assembled at run time (a flag or a subcommand in an
+environment variable or a Makefile variable, a recipe that calls
+another), a quoted string that spans lines (a cargo command's arguments
+after the line break), a build outside the files it reads, or cargo
+configuration outside the repository. A service test pins
 the multi-row order of the `0005` guards (an earlier row's `23514` comes
 before a later row's `23503`).
 

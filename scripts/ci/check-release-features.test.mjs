@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { badReleaseCommands, isReleaseProfile, logicalLines, parseTree, scannedKind, splitCommands } from './check-release-features.mjs';
+import { badReleaseCommands, isBadCommand, isReleaseProfile, logicalLines, parseTree, scannedKind, splitCommands } from './check-release-features.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-release-features.mjs');
 const TOP = mkdtempSync(join(tmpdir(), 'check-release-features-test-'));
@@ -275,7 +275,8 @@ describe('the parts', () => {
     assert.deepEqual(
       logicalLines(yaml, { yaml: true }).map(({ line, text }) => [line, text.replace(/\s+/g, ' ').trim()]),
       [
-        [1, '- run: a b'],
+        [1, '- run: a'],
+        [4, 'b'],
         [5, 'env: {}'],
         [6, '- run: c d'],
         [8, '- run: |'],
@@ -285,6 +286,30 @@ describe('the parts', () => {
       ],
     );
     assert.equal(logicalLines(yaml).length, 11);
+  });
+
+  test('logicalLines ends a folded paragraph at a blank line, as YAML keeps the line break', () => {
+    // Joined to the paragraph before, the release command would follow the word `cargo` of an echo.
+    const hidden = ['- run: >', '    echo building with cargo', '', '    cargo install --path svc', '    --all-features', ''].join('\n');
+    assert.deepEqual(badReleaseCommands(hidden, { yaml: true }), [{ line: 4, text: 'cargo install --path svc --all-features' }]);
+    // Joined, the flag of the second paragraph's command would be read as the first one's.
+    const separate = ['- run: >-', '    cargo build --release', '', '    ./scripts/lint.sh --all-features', ''].join('\n');
+    assert.deepEqual(badReleaseCommands(separate, { yaml: true }), []);
+  });
+
+  test('logicalLines reads no YAML key in a literal block', () => {
+    const yaml = [
+      '- run: |',
+      '    if true; then echo note: using cargo',
+      '      cargo install --path svc --all-features',
+      '    fi',
+      '- run: |',
+      '    echo step: cargo build --release',
+      '      --all-features',
+      '  env: {}',
+      '',
+    ].join('\n');
+    assert.deepEqual(badReleaseCommands(yaml, { yaml: true }), [{ line: 3, text: 'cargo install --path svc --all-features' }]);
   });
 
   test('isReleaseProfile follows inherits and counts an undeclared profile as release', () => {
@@ -322,6 +347,80 @@ describe('the parts', () => {
   test('splitCommands splits at separators outside quotes', () => {
     assert.deepEqual(splitCommands('a && b || c; d | e'), ['a ', ' b ', ' c', ' d ', ' e']);
     assert.deepEqual(splitCommands(`a "x;y" 'p|q' \\; b`), [`a "x;y" 'p|q' \\; b`]);
+  });
+
+  test('splitCommands splits at a single & but not at a redirection, and reads an unmatched quote as a character', () => {
+    assert.deepEqual(splitCommands('a & b &> c 2>&1 >&2'), ['a ', ' b &> c 2>&1 >&2']);
+    assert.deepEqual(splitCommands("echo don't && b"), ["echo don't ", ' b']);
+  });
+
+  test('badReleaseCommands keeps a quoted word whole and still splits feature lists', () => {
+    // The quoted `--config` value is one word, so the subcommand after it is read.
+    assert.equal(badReleaseCommands(`cargo --config 'build.rustflags = ["-C", "x"]' install --path svc --all-features\n`).length, 1);
+    assert.equal(badReleaseCommands('cargo --config "build.jobs = 4" build --release --all-features\n').length, 1);
+    assert.equal(badReleaseCommands(`cargo --config 'build.rustflags = ["-C", "x"]' build -p svc\n`).length, 0);
+    const leaking = new Set(['full']);
+    for (const flag of ['-F=full', '-Ffull', '-F full', '--features=plain,full', '--features "plain full"', "--features 'plain,full'", '-F plain,full']) {
+      assert.equal(badReleaseCommands(`cargo build --release ${flag}\n`, { leaking }).length, 1, flag);
+    }
+    assert.equal(badReleaseCommands('cargo build --release --features "plain fast"\n', { leaking }).length, 0);
+    // A feature list given as one word, as the shell passes a quoted one.
+    const context = { profiles: new Map(), aliases: new Map(), leaking };
+    for (const list of [['--features', 'plain full'], ['-F', 'plain,full'], ['--features=plain, full']]) {
+      assert.equal(isBadCommand(['build', '--release', ...list], context), true, list.join(' '));
+    }
+    assert.equal(isBadCommand(['build', '--release', '--features', 'plain fast'], context), false);
+  });
+
+  test('badReleaseCommands splits words at parentheses and redirections', () => {
+    const leaking = new Set(['full']);
+    for (const line of [
+      '(cd service && cargo build --release --all-features)',
+      'out=$(cargo build --release --all-features)',
+      'cargo build --release --all-features>build.log',
+      'cargo build --release --features full>build.log',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`, { leaking }).length, 1, line);
+    }
+    // A redirection's target is not the value of the flag before it.
+    assert.equal(badReleaseCommands('cargo test --profile dev>test.log\n').length, 0);
+  });
+
+  test('badReleaseCommands takes the command as the words after the first one named cargo', () => {
+    for (const line of [
+      '/usr/local/cargo/bin/cargo install --path service --all-features',
+      '~/.cargo/bin/cargo test --release',
+      'CARGO_TARGET_DIR=/tmp/cargo cargo install --path svc --all-features',
+      "echo cargo, don't panic && cargo install --path svc --all-features",
+      // As before: a Makefile recipe prefix, a program that runs its arguments, a quoted command, an exec form.
+      '\t@cargo build --release --all-features',
+      'sudo cargo install --path svc --all-features',
+      'sh -c "cargo build --release --all-features"',
+      // A string that the next line closes, and a quote nested in another without an escape.
+      'sh -c "cargo build --release --all-features',
+      'sh -c "cargo build --config "x=1" --release --all-features"',
+      'sh -c "echo using cargo && cargo install --path svc --all-features"',
+      'echo "$(cargo build --release --all-features)"',
+      'RUN ["cargo", "build", "--release", "--all-features"]',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`).length, 1, line);
+    }
+    // Any word cargo starts a command, as before: the guard does not know which programs run their arguments.
+    assert.equal(badReleaseCommands('echo cargo install --all-features\n').length, 1);
+    // A path that only passes through a directory named cargo is not the command.
+    assert.equal(badReleaseCommands('CARGO_HOME=/opt/cargo make build -r --all-features\n').length, 0);
+  });
+
+  test('badReleaseCommands reads nextest profiles under llvm-cov too', () => {
+    assert.equal(badReleaseCommands('cargo llvm-cov nextest --profile ci\n').length, 0);
+    assert.equal(badReleaseCommands('cargo llvm-cov nextest --profile ci --cargo-profile release\n').length, 1);
+    assert.equal(badReleaseCommands('cargo llvm-cov --profile ci\n').length, 1);
+  });
+
+  test('badReleaseCommands checks the commands around a single & on their own', () => {
+    assert.equal(badReleaseCommands('cargo build --release & cargo test --all-features\n').length, 0);
+    assert.equal(badReleaseCommands('cargo build --release --all-features & wait\n').length, 1);
+    assert.equal(badReleaseCommands('cargo build --release 2>&1 --all-features\n').length, 1);
   });
 
   test('badReleaseCommands expands cargo aliases with the arguments after them', () => {
