@@ -94,7 +94,11 @@ pub async fn list_tenants<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
-pub async fn update_tenant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_tenant<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,
@@ -120,7 +124,10 @@ pub async fn update_tenant<'e>(
 /// Creates a principal in its tenant. A name another principal of the same
 /// tenant and kind has, disabled or not, is [`RegistryError::AlreadyExists`]
 /// naming `principal_tenant_id_kind_name_key`; the same name in another
-/// tenant or of another kind is accepted (`0002`; IR-021).
+/// tenant or of another kind is accepted (`0002`; IR-021). A name with a
+/// control character is [`RegistryError::Invariant`] of kind
+/// [`InvariantKind::Check`](super::InvariantKind::Check) naming
+/// `principal_name_no_control_check`.
 pub async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
@@ -179,7 +186,11 @@ pub async fn get_principal<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
-pub async fn update_principal<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_principal<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,

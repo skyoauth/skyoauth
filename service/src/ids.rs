@@ -61,6 +61,17 @@
 //! approval. Tests use the deterministic generator
 //! `test_support::SequentialIds`, compiled only with the `test-support`
 //! feature.
+//!
+//! Generating an ID is fallible: [`IdGenerator::new_id`] returns an
+//! [`IdError`] when it has no new ID to give. The production generator will
+//! map a failure of the CSPRNG to [`IdError::SourceFailed`]; it never falls
+//! back to a weaker source (a time-seeded or user-space generator, a
+//! counter) and never panics. A write path turns the error into a server
+//! error (5xx) and writes nothing (lead decision, 2026-11-24).
+//! `SequentialIds` returns [`IdError::Exhausted`] once a kind's counter is
+//! used up, rather than panic or repeat an ID.
+
+use std::fmt;
 
 /// Crockford's base32 alphabet, lowercase: the digits, then the letters
 /// without `i`, `l`, `o` and `u`.
@@ -178,13 +189,49 @@ impl IdKind {
     }
 }
 
-/// Generates the IDs of new objects. Every call returns a new ID; a write
-/// path takes a `&dyn IdGenerator` (or a generic one) so tests can pass a
-/// deterministic generator.
+/// Generates the IDs of new objects. Every successful call returns a new
+/// ID; a write path takes a `&dyn IdGenerator` (or a generic one) so tests
+/// can pass a deterministic generator.
 pub trait IdGenerator: Send + Sync {
     /// A new ID of `kind`, in the format of [`encode_id`].
-    fn new_id(&self, kind: IdKind) -> String;
+    ///
+    /// # Errors
+    ///
+    /// [`IdError`] when the generator cannot give a new ID: its source of
+    /// randomness failed, or it is exhausted. The write path writes nothing
+    /// and answers with a server error (see "Generators" in the module
+    /// documentation); it does not retry with another source.
+    fn new_id(&self, kind: IdKind) -> Result<String, IdError>;
 }
+
+/// Why an [`IdGenerator`] gave no ID.
+///
+/// `Display` is fixed text per variant and `Debug` the variant's name: no
+/// variant carries a detail of its cause (an operating-system error, a
+/// counter, the kind), so neither can leak one into a response or a log. A
+/// later generator may add a variant, so the enum is `#[non_exhaustive]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IdError {
+    /// The source of randomness failed: for the production generator, the
+    /// operating system's CSPRNG. Never answered by falling back to a
+    /// weaker source.
+    SourceFailed,
+    /// The generator has no new ID left: a `test_support::SequentialIds`
+    /// counter reached `u64::MAX`.
+    Exhausted,
+}
+
+impl fmt::Display for IdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::SourceFailed => "the ID generator's source of randomness failed",
+            Self::Exhausted => "the ID generator is exhausted",
+        })
+    }
+}
+
+impl std::error::Error for IdError {}
 
 /// The ID of `kind` whose body encodes `random`: [`IdKind::prefix`], `_`
 /// and the 26 lowercase Crockford base32 digits of the 16 bytes read as a
@@ -215,7 +262,7 @@ pub fn encode_id(kind: IdKind, random: &[u8; 16]) -> String {
 pub mod test_support {
     use std::sync::{Mutex, PoisonError};
 
-    use super::{IdGenerator, IdKind, encode_id};
+    use super::{IdError, IdGenerator, IdKind, encode_id};
 
     /// A counter per [`IdKind`], starting at 1: the `n`th ID of a kind
     /// encodes the 16 bytes `seed` (8 bytes, big-endian) followed by `n`
@@ -244,6 +291,15 @@ pub mod test_support {
                 counters: Mutex::new([0; IdKind::ALL.len()]),
             }
         }
+
+        /// A generator with seed 0 whose last count of `kind` is `last`,
+        /// so the unit tests reach the end of the counter.
+        #[cfg(test)]
+        pub(super) fn with_last_count(kind: IdKind, last: u64) -> Self {
+            let ids = Self::new();
+            ids.counters.lock().unwrap_or_else(PoisonError::into_inner)[kind as usize] = last;
+            ids
+        }
     }
 
     impl Default for SequentialIds {
@@ -255,22 +311,22 @@ pub mod test_support {
     impl IdGenerator for SequentialIds {
         /// The next ID of `kind`.
         ///
-        /// # Panics
+        /// # Errors
         ///
-        /// After `u64::MAX` IDs of one kind, rather than repeat one.
-        fn new_id(&self, kind: IdKind) -> String {
+        /// [`IdError::Exhausted`] after `u64::MAX` IDs of one kind, rather
+        /// than panic or repeat one; the counter stays at the end, so every
+        /// later call for that kind fails too. Never fails otherwise.
+        fn new_id(&self, kind: IdKind) -> Result<String, IdError> {
             let count = {
                 let mut counters = self.counters.lock().unwrap_or_else(PoisonError::into_inner);
                 let counter = &mut counters[kind as usize];
-                *counter = counter
-                    .checked_add(1)
-                    .expect("SequentialIds: counter exhausted");
+                *counter = counter.checked_add(1).ok_or(IdError::Exhausted)?;
                 *counter
             };
             let mut bytes = [0u8; 16];
             bytes[..8].copy_from_slice(&self.seed.to_be_bytes());
             bytes[8..].copy_from_slice(&count.to_be_bytes());
-            encode_id(kind, &bytes)
+            Ok(encode_id(kind, &bytes))
         }
     }
 }
@@ -434,22 +490,28 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     mod sequential {
-        use super::super::{IdGenerator, IdKind, test_support::SequentialIds};
+        use super::super::{IdError, IdGenerator, IdKind, test_support::SequentialIds};
         use std::collections::HashSet;
 
         #[test]
         fn counts_per_kind_from_one() {
             let ids = SequentialIds::new();
-            assert_eq!(ids.new_id(IdKind::Tenant), "ten_00000000000000000000000001");
             assert_eq!(
-                ids.new_id(IdKind::WorkloadPrincipal),
+                ids.new_id(IdKind::Tenant).unwrap(),
+                "ten_00000000000000000000000001"
+            );
+            assert_eq!(
+                ids.new_id(IdKind::WorkloadPrincipal).unwrap(),
                 "wld_00000000000000000000000001"
             );
-            assert_eq!(ids.new_id(IdKind::Tenant), "ten_00000000000000000000000002");
+            assert_eq!(
+                ids.new_id(IdKind::Tenant).unwrap(),
+                "ten_00000000000000000000000002"
+            );
             let seeded = SequentialIds::with_seed(1);
             // The seed is the high 64 bits: 2^64 + 1.
             assert_eq!(
-                seeded.new_id(IdKind::Tenant),
+                seeded.new_id(IdKind::Tenant).unwrap(),
                 "ten_0000000000000g000000000001"
             );
         }
@@ -458,12 +520,14 @@ mod tests {
         fn is_reproducible_whatever_the_interleaving() {
             let first = SequentialIds::with_seed(7);
             let second = SequentialIds::with_seed(7);
-            let a: Vec<String> = (0..5).map(|_| first.new_id(IdKind::ServiceGrant)).collect();
+            let a: Vec<String> = (0..5)
+                .map(|_| first.new_id(IdKind::ServiceGrant).unwrap())
+                .collect();
             // Other kinds in between do not move the grant counter.
             let mut b = Vec::new();
             for _ in 0..5 {
-                second.new_id(IdKind::AuditEvent);
-                b.push(second.new_id(IdKind::ServiceGrant));
+                second.new_id(IdKind::AuditEvent).unwrap();
+                b.push(second.new_id(IdKind::ServiceGrant).unwrap());
             }
             assert_eq!(a, b);
         }
@@ -475,13 +539,32 @@ mod tests {
                 let ids = SequentialIds::with_seed(seed);
                 for kind in IdKind::ALL {
                     for _ in 0..50 {
-                        let id = ids.new_id(kind);
+                        let id = ids.new_id(kind).unwrap();
                         assert!(id.starts_with(kind.prefix()), "{id}");
                         assert!(seen.insert(id.clone()), "{id}");
                     }
                 }
             }
             assert_eq!(seen.len(), 3 * IdKind::ALL.len() * 50);
+        }
+
+        /// At the end of a kind's counter the generator returns
+        /// `Exhausted`, again on every later call, instead of panicking or
+        /// wrapping to an ID it gave before; the other kinds go on.
+        #[test]
+        fn an_exhausted_counter_is_an_error_not_a_panic_or_a_repeat() {
+            let ids = SequentialIds::with_last_count(IdKind::Tenant, u64::MAX - 1);
+            assert_eq!(
+                ids.new_id(IdKind::Tenant),
+                Ok("ten_0000000000000fzzzzzzzzzzzz".to_owned())
+            );
+            for _ in 0..2 {
+                assert_eq!(ids.new_id(IdKind::Tenant), Err(IdError::Exhausted));
+            }
+            assert_eq!(
+                ids.new_id(IdKind::AuditEvent),
+                Ok("evt_00000000000000000000000001".to_owned())
+            );
         }
 
         #[test]

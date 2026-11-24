@@ -33,6 +33,20 @@
 //! before it enrolls anyone, and `issue_recovery_challenge` enrolls no one
 //! (`docs/proposals/recovery-verified-response.md`).
 //!
+//! The checker writers [`create_resource_server_checker`],
+//! [`update_resource_server_checker`],
+//! [`add_resource_server_checker_tenant`] and
+//! [`remove_resource_server_checker_tenant`], the action writers
+//! [`create_resource_action`] and [`update_resource_action`], and
+//! [`update_tenant`] and [`update_principal`] admit a tenant to a checker,
+//! define what an action requires, or rename or re-enable a tenant or a
+//! principal, with no authorization and no audit event. Nothing in the
+//! crate calls them, so they are visible only within the registry
+//! (`pub(super)`) and dead code without the `test-support` feature, which
+//! each one's `expect(dead_code)` states, as for
+//! `update_admin_role_binding` (the survey under "Still open after PRs 7, 9
+//! and 10" of the same proposal; inferred: the narrowest visibility).
+//!
 //! The integration tests under `service/tests` and the scenario tests of
 //! `skyoauth-scenarios` (`tests/`) are crates of their own and use these
 //! writers to set up rows and to test the registry floor itself, so this
@@ -54,9 +68,11 @@ use sqlx::{PgExecutor, Postgres, Transaction};
 use super::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges,
     AdministrativeOperation, AuditEvent, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
-    NewAdministrativeOperation, NewAuditEvent, NewTrustKeysetVersion, NewTrustSource,
-    RegistryError, Status, TrustKeysetVersion, TrustSource, TrustSourceChanges, events, operation,
-    operator, trust,
+    NewAdministrativeOperation, NewAuditEvent, NewResourceAction, NewResourceServerChecker,
+    NewTrustKeysetVersion, NewTrustSource, Principal, PrincipalPatch, RegistryError,
+    ResourceAction, ResourceActionChanges, ResourceServerChecker, ResourceServerCheckerChanges,
+    Status, Tenant, TenantPatch, TrustKeysetVersion, TrustSource, TrustSourceChanges, audience,
+    events, operation, operator, tenant, trust,
 };
 
 /// The `pub(crate)` registry `create_trust_keyset_version`: the unchecked
@@ -181,4 +197,102 @@ pub async fn revoke_administrative_operation(
 ) -> Result<i64, RegistryError> {
     operation::revoke_administrative_operation(transaction, id, revoking_operation_id, now, outcome)
         .await
+}
+
+/// The registry's `create_resource_server_checker` (`pub(super)`, no
+/// caller in the crate): a checker, unauthorized and unaudited. Tests only.
+pub async fn create_resource_server_checker<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewResourceServerChecker,
+) -> Result<ResourceServerChecker, RegistryError> {
+    audience::create_resource_server_checker(executor, new).await
+}
+
+/// The registry's `update_resource_server_checker` (`pub(super)`, no
+/// caller in the crate): a checker's identity or status, a re-enable
+/// included, unauthorized and unaudited. Tests only.
+pub async fn update_resource_server_checker<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    changes: &ResourceServerCheckerChanges,
+) -> Result<ResourceServerChecker, RegistryError> {
+    audience::update_resource_server_checker(executor, id, expected_revision, changes).await
+}
+
+/// The registry's `add_resource_server_checker_tenant` (`pub(super)`, no
+/// caller in the crate): a tenant admitted to a checker, unauthorized and
+/// unaudited. Tests only.
+pub async fn add_resource_server_checker_tenant<'e>(
+    executor: impl PgExecutor<'e>,
+    checker_id: &str,
+    expected_revision: i64,
+    tenant_id: &str,
+) -> Result<i64, RegistryError> {
+    audience::add_resource_server_checker_tenant(executor, checker_id, expected_revision, tenant_id)
+        .await
+}
+
+/// The registry's `remove_resource_server_checker_tenant` (`pub(super)`,
+/// no caller in the crate): a tenant removed from a checker, unauthorized
+/// and unaudited. Tests only.
+pub async fn remove_resource_server_checker_tenant<'e>(
+    executor: impl PgExecutor<'e>,
+    checker_id: &str,
+    expected_revision: i64,
+    tenant_id: &str,
+) -> Result<i64, RegistryError> {
+    audience::remove_resource_server_checker_tenant(
+        executor,
+        checker_id,
+        expected_revision,
+        tenant_id,
+    )
+    .await
+}
+
+/// The registry's `create_resource_action` (`pub(super)`, no caller in the
+/// crate): an action rule, unauthorized and unaudited. Tests only.
+pub async fn create_resource_action<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewResourceAction,
+) -> Result<ResourceAction, RegistryError> {
+    audience::create_resource_action(executor, new).await
+}
+
+/// The registry's `update_resource_action` (`pub(super)`, no caller in the
+/// crate): an action rule's mutable columns, a re-enable included,
+/// unauthorized and unaudited. Tests only.
+pub async fn update_resource_action<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    changes: &ResourceActionChanges,
+) -> Result<ResourceAction, RegistryError> {
+    audience::update_resource_action(executor, id, expected_revision, changes).await
+}
+
+/// The registry's `update_tenant` (`pub(super)`, no caller in the crate): a
+/// tenant's name or status, a re-enable included, unauthorized and
+/// unaudited. Tests only.
+pub async fn update_tenant<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    patch: &TenantPatch,
+) -> Result<Tenant, RegistryError> {
+    tenant::update_tenant(executor, id, expected_revision, patch).await
+}
+
+/// The registry's `update_principal` (`pub(super)`, no caller in the
+/// crate): a principal's name or status, a re-enable included,
+/// unauthorized and unaudited. Tests only.
+pub async fn update_principal<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    patch: &PrincipalPatch,
+) -> Result<Principal, RegistryError> {
+    tenant::update_principal(executor, tenant_id, id, expected_revision, patch).await
 }

@@ -96,11 +96,18 @@ ALTER TABLE tenant ENABLE ALWAYS TRIGGER tenant_immutable;
 -- btree limit); unlike them it may contain whitespace (lead decision,
 -- 2026-11-24: a human principal's name is a display label). It keeps the database collation,
 -- whose equality is byte-wise for any deterministic collation.
+-- Like the 0004 names it has no control character (lead decision,
+-- 2026-11-24, the same in-place amendment), judged under "C" whatever the
+-- collation: [:cntrl:] is U+0000-U+001F and U+007F-U+009F, so a newline or
+-- an escape sequence is refused. Format characters such as U+202E and
+-- U+200B are not controls and pass; a display surface escapes them.
 CREATE TABLE principal (
     id          text COLLATE "C" PRIMARY KEY CHECK (id <> ''),
     tenant_id   text COLLATE "C" NOT NULL REFERENCES tenant (id),
     kind        text COLLATE "C" NOT NULL CHECK (kind IN ('human', 'workload', 'service')),
     name        text        NOT NULL CHECK (name <> '')
+        CONSTRAINT principal_name_no_control_check
+        CHECK ((name COLLATE "C") !~ '[[:cntrl:]]')
         CONSTRAINT principal_name_octet_length_check
         CHECK (octet_length(name) <= 2048),
     status      text COLLATE "C" NOT NULL CHECK (status IN ('enabled', 'disabled')),

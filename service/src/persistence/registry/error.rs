@@ -196,6 +196,7 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "principal_id_octet_length_check",
     "principal_kind_check",
     "principal_name_check",
+    "principal_name_no_control_check",
     "principal_name_octet_length_check",
     "principal_pkey",
     "principal_revision_check",
@@ -1049,8 +1050,8 @@ mod tests {
     }
 
     /// A principal name taken in its tenant and kind is `AlreadyExists`
-    /// naming the `0002` key, as every other unique name; its bound is a
-    /// named check.
+    /// naming the `0002` key, as every other unique name; its bound and its
+    /// control-character rule are named checks.
     #[test]
     fn principal_name_constraints_map_by_name() {
         let error = map(Some("23505"), Some("principal_tenant_id_kind_name_key"));
@@ -1068,18 +1069,27 @@ mod tests {
             "registry row already exists (unique principal_tenant_id_kind_name_key)"
         );
         assert_redacted(&error);
-        let error = map(Some("23514"), Some("principal_name_octet_length_check"));
-        assert!(
-            matches!(
-                error,
-                RegistryError::Invariant {
-                    kind: InvariantKind::Check,
-                    constraint: Some("principal_name_octet_length_check")
-                }
-            ),
-            "{error:?}"
-        );
-        assert_redacted(&error);
+        for constraint in [
+            "principal_name_octet_length_check",
+            "principal_name_no_control_check",
+        ] {
+            let error = map(Some("23514"), Some(constraint));
+            assert!(
+                matches!(
+                    error,
+                    RegistryError::Invariant {
+                        kind: InvariantKind::Check,
+                        constraint: Some(name)
+                    } if name == constraint
+                ),
+                "{error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("registry write violates check constraint {constraint}")
+            );
+            assert_redacted(&error);
+        }
     }
 
     /// The `0011` egress guard's `23514` names a destination column and

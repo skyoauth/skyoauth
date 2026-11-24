@@ -62,8 +62,8 @@
 //!   [`crate::ids`] (not wired yet). Rows are created at revision 1 (the
 //!   database's default).
 //! - An update replaces every mutable column of the row with the caller's
-//!   values (read, modify, then write back); [`update_tenant`] and
-//!   [`update_principal`] instead take a patch of the columns to change
+//!   values (read, modify, then write back); `update_tenant` and
+//!   `update_principal` instead take a patch of the columns to change
 //!   (lead ruling, 2026-11-21). Every update is a compare-and-set on the
 //!   revision: the caller passes the expected revision, and the statement
 //!   sets `revision = revision + 1` where `revision = expected`, so the row
@@ -98,15 +98,15 @@
 //!   tenant's and a principal's `name` and `status` are mutable (lead
 //!   ruling, 2026-11-21). Of a keyset version only `status` changes, with
 //!   `update_trust_keyset_version`.
-//! - [`update_tenant`] and [`update_principal`] take a patch: only the
+//! - `update_tenant` and `update_principal` take a patch: only the
 //!   columns set in it change. An empty patch is an encode error,
 //!   [`RegistryError::Other`], before any statement runs, so it neither
 //!   reaches the database nor advances the revision (lead ruling,
 //!   2026-11-21). A patch that sets a column to its current value still
 //!   advances the revision (inferred).
 //! - A checker's tenant set (`allowed_tenant_ids`) changes one row at a time
-//!   with [`add_resource_server_checker_tenant`] and
-//!   [`remove_resource_server_checker_tenant`]. Each is a compare-and-set on
+//!   with `add_resource_server_checker_tenant` and
+//!   `remove_resource_server_checker_tenant`. Each is a compare-and-set on
 //!   the checker's revision and advances it in the same statement, since the
 //!   rows have no revision of their own (`0003`).
 //! - The `0004` list sets change the same way, each a compare-and-set on its
@@ -193,8 +193,8 @@
 //! `22003` (lead ruling, 2026-11-21). A list stops at the first such row
 //! (inferred).
 //!
-//! An update that leaves such a column untouched ([`update_tenant`],
-//! [`update_principal`] and `update_trust_keyset_version`, none of which
+//! An update that leaves such a column untouched (`update_tenant`,
+//! `update_principal` and `update_trust_keyset_version`, none of which
 //! writes a timestamp) behaves in one of two ways:
 //!
 //! - With a range check in force but `NOT VALID`, PostgreSQL checks the
@@ -327,9 +327,11 @@
 //! # Writers kept crate-private
 //!
 //! Some writers check nothing the database does not, authorize no one and,
-//! but for the audit append itself, write no audit event, and have a
-//! caller in the crate that does those things, so they are not public
-//! (`docs/proposals/second-approver-gated-writes.md`, PRs 9 and 10):
+//! but for the audit append itself, write no audit event, and either have
+//! a caller in the crate that does those things or no caller in the crate
+//! at all, so they are not public
+//! (`docs/proposals/second-approver-gated-writes.md`, PRs 9 and 10, and
+//! the survey under "Still open after PRs 7, 9 and 10"):
 //!
 //! - the trust keyset version and trust source writers (`pub(crate)`,
 //!   PR 9; see "IDs, revisions and updates");
@@ -347,7 +349,16 @@
 //!   and `revoke_administrative_operation` (`pub(crate)`, PR 10): the
 //!   audited writes of this registry, of [`crate::trust`] and of
 //!   [`crate::operation`] call the append, and [`crate::operation`] the
-//!   operation-row writers, so they cannot be narrower.
+//!   operation-row writers, so they cannot be narrower;
+//! - the checker writers `create_resource_server_checker`,
+//!   `update_resource_server_checker`,
+//!   `add_resource_server_checker_tenant` and
+//!   `remove_resource_server_checker_tenant`, the action writers
+//!   `create_resource_action` and `update_resource_action`, and
+//!   `update_tenant` and `update_principal` (a re-enable included), all
+//!   `pub(super)` with no caller in the crate, so each carries the same
+//!   `expect(dead_code)` as `update_admin_role_binding` (inferred: the
+//!   narrowest visibility; no scenario test names them).
 //!
 //! Tests, which are crates of their own, reach each through a wrapper of
 //! the same name in the `#[doc(hidden)]` module `test_support`, compiled
@@ -363,8 +374,12 @@
 //! [`bootstrap_instance`] remains callable without a signature, and only
 //! before the instance is bootstrapped (a separate decision).
 //! [`disable_admin_identity`] and [`revoke_admin_credential`], which only
-//! narrow, stay public, and so do the other bare writers of the grant,
-//! audience, tenant, principal and trust keyset tables.
+//! narrow, stay public. So, for now, do the other bare writers of the
+//! principal binding, service identity, grant, resource server, audience
+//! assignment, tenant, principal and trust keyset tables, and the replay
+//! records' [`consume_assertion`] and [`consume_assertion_set`]: the
+//! scenario tests under `tests/security` name each at its public path, and
+//! moving them to `test_support` is a separate change.
 //!
 //! # Not done here
 //!
@@ -408,8 +423,9 @@ mod recovery;
 mod selection;
 mod tenant;
 // Off in a normal build: for tests only, the bare registry trust writers
-// (second-approver proposal, PR 9) and the operator writers, the audit
-// append and the operation-row writers (PR 10); see the module.
+// (second-approver proposal, PR 9), the operator writers, the audit append
+// and the operation-row writers (PR 10), and the checker, action, tenant
+// and principal writers that no code in the crate calls; see the module.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
@@ -419,13 +435,10 @@ pub use assertion::{
     Consumption, MAX_ASSERTION_SET, NewConsumedAssertion, consume_assertion, consume_assertion_set,
 };
 pub use audience::{
-    add_resource_server_checker_tenant, create_audience_tenant_assignment, create_resource_action,
-    create_resource_server, create_resource_server_checker, get_audience_tenant_assignment,
+    create_audience_tenant_assignment, create_resource_server, get_audience_tenant_assignment,
     get_resource_action, get_resource_server, get_resource_server_checker,
     list_audience_tenant_assignments, list_resource_actions, list_resource_server_checkers,
-    list_resource_servers, remove_resource_server_checker_tenant,
-    update_audience_tenant_assignment, update_resource_action, update_resource_server,
-    update_resource_server_checker,
+    list_resource_servers, update_audience_tenant_assignment, update_resource_server,
 };
 pub use bootstrap::{
     BootstrapError, BootstrapOutcome, BootstrapRequest, RECOVERY_PUBLIC_KEY_LENGTH,
@@ -500,7 +513,6 @@ pub use recovery::{
 pub use selection::{Selection, SelectionError, select_grant};
 pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
-    update_principal, update_tenant,
 };
 pub(crate) use trust::{
     KeysetVersionText, create_trust_keyset_version, create_trust_source,
