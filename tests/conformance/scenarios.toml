@@ -4,7 +4,7 @@
 # Hand-edit gates_passed, the scenario columns and the stages. The generator
 # rewrites the entry order, matrix_sha256, the contracts and the comments.
 
-gates_passed = []
+gates_passed = ["M0"]
 
 [[scenario]]
 id = "A01"
