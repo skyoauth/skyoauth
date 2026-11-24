@@ -45,19 +45,25 @@
 //!   written (the tenant's sources read back unchanged and the ID is
 //!   `NotFound`). As a control, `single_use` with `on_demand_jwt` on
 //!   `oidc_discovery` and on `uploaded_jwks` is then accepted in the same
-//!   tenant, so the refusal is of the shape, not of `single_use` itself
+//!   tenant, so the refusal is of the shape, not of `single_use` itself.
+//!   A `single_use` TokenReview source with `on_demand_jwt` or
+//!   `reusable_jwt` breaks two checks, the replay check and
+//!   `trust_source_token_review_profile_check`; it is refused, by either
+//!   (which one the database reports is not pinned)
 //!   (`a54_neg_single_use_create_on_token_review_or_projected_source_is_refused`).
 //! - **Negative, update.** A stored `reusable` source of each shape
 //!   updated to `single_use` (alone, and together with a disable) is
 //!   refused with the same error, and the stored row keeps its revision
-//!   and every column. A stored `single_use` `on_demand_jwt` source on
+//!   and every column; made `single_use` with a non-projected profile, the
+//!   TokenReview source is refused by either check, as on create. A stored `single_use` `on_demand_jwt` source on
 //!   `oidc_discovery` or `uploaded_jwks` (the control above) updated to the
 //!   `projected_service_account` profile while staying `single_use` is
 //!   refused the same way, so the check holds on the profile as well as on
 //!   the replay mode
 //!   (`a54_neg_single_use_update_on_token_review_or_projected_source_is_refused`).
 //! - **Negative, gated write, gate off.** The gated create of each shape
-//!   with `single_use`, and the gated update of a stored `reusable` source
+//!   with `single_use` (an enabled source: the gated creates send no
+//!   disabled one), and the gated update of a stored `reusable` source
 //!   of each shape to `single_use`, return
 //!   `SourceWriteError::Registry(Invariant { Check,
 //!   trust_source_single_use_replay_check })`; no source is written or
@@ -65,22 +71,25 @@
 //!   left nothing behind
 //!   (`a54_neg_gated_single_use_write_is_refused_and_writes_nothing`).
 //! - **Negative, gated write, gate on.** With `widening_second_approver`
-//!   on, the same create and update are refused either at the request with
-//!   that error, or, if the request is pending, at the approval, with
-//!   `ApprovalError::Source(SourceWriteError::Registry(Invariant { Check,
-//!   trust_source_single_use_replay_check }))`. Either way no source is
-//!   written or changed, and a refused approval leaves the operation
-//!   pending (neither consumed nor revoked) and appends no event. As a
-//!   control, the reusable create of each shape goes through the same flow
-//!   and is written as requested
+//!   on, the same create (enabled sources only) and update are refused
+//!   either at the request with that error, or, if the request is pending,
+//!   at the approval, with `ApprovalError::Source(SourceWriteError::Registry(
+//!   Invariant { Check, trust_source_single_use_replay_check }))`. Either
+//!   way no source is written or changed. A refused request appends no
+//!   audit event and writes no operation; a refused approval appends no
+//!   event and leaves the operation pending, neither consumed nor revoked
+//!   (D14). As controls, the reusable create of each shape and a reusable
+//!   update (a rename) of each stored source go pending through the same
+//!   flow, change nothing until approved, and are then written as
+//!   requested, the update at revision 2
 //!   (`a54_neg_gated_single_use_write_is_refused_by_the_second_approver_flow`).
-//!   The test accepts both refusal points on purpose: today the request
-//!   pre-validates only the plainly typed checks (D27) and leaves the kind,
+//!   The test accepts both refusal points on purpose. Today the request
+//!   pre-validates only the plainly typed checks and leaves the kind,
 //!   profile and replay checks to the database (`trust::source`, "The
 //!   gate"), so a `single_use` TokenReview request goes pending and is
-//!   refused at its approval. That is the registry's current behaviour, not
-//!   a spec rule; refusing it at the request instead would keep this test
-//!   green.
+//!   refused at its approval. That split is D27's explicit pick, accepted
+//!   as an implementation choice; a later D27 extension that refuses it at
+//!   the request would keep this test green.
 //!
 //! # Spec and registry picks
 //!
@@ -667,6 +676,27 @@ fn refusal<T: Debug>(result: Result<T, RegistryError>) -> Refusal {
     }
 }
 
+/// The `0004` check that keeps a TokenReview source to the
+/// `projected_service_account` profile.
+const TOKEN_REVIEW_PROFILE_CHECK: &str = "trust_source_token_review_profile_check";
+
+/// Asserts that `refused` is a check refusal by either check that a
+/// `single_use` TokenReview source with another profile breaks: the replay
+/// check or the TokenReview profile check. Which one the database reports
+/// is not pinned.
+#[track_caller]
+fn assert_single_use_or_profile_refusal(refused: &Refusal, label: &str) {
+    assert!(
+        refused.kind == InvariantKind::Check
+            && [SINGLE_USE_CHECK, TOKEN_REVIEW_PROFILE_CHECK].contains(&refused.constraint),
+        "{label}: {refused:?}"
+    );
+}
+
+/// The profiles a TokenReview source may not have.
+const NON_PROJECTED: [AssertionProfile; 2] =
+    [AssertionProfile::OnDemandJwt, AssertionProfile::ReusableJwt];
+
 #[track_caller]
 fn source_refusal<T: Debug>(result: Result<T, SourceWriteError>) -> Refusal {
     match result {
@@ -790,6 +820,24 @@ async fn a54_neg_single_use_create_on_token_review_or_projected_source_is_refuse
         }
     }
 
+    // A single_use TokenReview source with a profile other than
+    // projected_service_account (on_demand_jwt included, the one profile
+    // the replay check would allow on a local-key kind): refused, by the
+    // replay check or by the TokenReview profile check.
+    for profile in NON_PROJECTED {
+        let new = NewTrustSource {
+            assertion_profile: profile,
+            ..Shape::TokenReview.single_use("np")
+        };
+        let label = format!("TokenReview, {profile:?}");
+        assert_single_use_or_profile_refusal(
+            &refusal(registry::test_support::create_trust_source(&pool, &new).await),
+            &label,
+        );
+        assert_not_found(registry::get_trust_source(&pool, TENANT, &new.id).await);
+        assert_eq!(sources(&pool).await, before, "{label}");
+    }
+
     // The control: `single_use` with `on_demand_jwt` on the two local-key
     // kinds is accepted in the same tenant, so the refusal above is of the
     // shape, not of `single_use`.
@@ -842,6 +890,32 @@ async fn a54_neg_single_use_update_on_token_review_or_projected_source_is_refuse
             );
             assert_eq!(sources(&pool).await, before, "{shape:?}, {label}");
         }
+    }
+
+    // The stored TokenReview source made single_use with a profile other
+    // than projected_service_account: refused by either check.
+    let source = stored(&Shape::TokenReview.source("upd"), 1);
+    for profile in NON_PROJECTED {
+        let update = TrustSourceChanges {
+            assertion_profile: profile,
+            replay_mode: ReplayMode::SingleUse,
+            ..changes(&source)
+        };
+        let label = format!("TokenReview, {profile:?}");
+        assert_single_use_or_profile_refusal(
+            &refusal(
+                registry::test_support::update_trust_source(
+                    &pool,
+                    TENANT,
+                    &source.id,
+                    source.revision,
+                    &update,
+                )
+                .await,
+            ),
+            &label,
+        );
+        assert_eq!(sources(&pool).await, before, "{label}");
     }
 
     // A stored single_use on-demand source made projected while staying
@@ -924,19 +998,31 @@ async fn a54_neg_gated_single_use_write_is_refused_and_writes_nothing() {
     db.drop([pool]).await;
 }
 
-/// The outcome of a `single_use` write through the gate on: refused at
-/// the request, or pending and then refused at the approval. Either way
-/// it returns the refusal; for a pending request it also checks that the
-/// approval appended no event and left the operation pending.
+/// The outcome of a `single_use` write `op` through the gate on, whose
+/// request was made when the audit chain's head was `head_before`: refused
+/// at the request, or pending and then refused at the approval. Either way
+/// it returns the refusal. A refused request must have appended no event
+/// and written no operation; a refused approval must have appended no
+/// event and left the operation pending (D14).
 async fn refused_through_the_gate(
     pool: &PgPool,
     label: &str,
+    (op, head_before): (&str, i64),
     outcome: Result<Gated<TrustSource>, SourceWriteError>,
     kind: OperationKind,
     approve_at: SystemTime,
 ) -> Refusal {
     match outcome {
-        Err(err) => source_refusal::<()>(Err(err)),
+        Err(err) => {
+            assert_eq!(audit_head(pool).await, head_before, "{label}");
+            let mut transaction = pool.begin().await.unwrap();
+            let row = lock_administrative_operation(&mut transaction, op)
+                .await
+                .unwrap();
+            transaction.rollback().await.unwrap();
+            assert!(row.is_none(), "{label}: a refused request wrote {row:?}");
+            source_refusal::<()>(Err(err))
+        }
         Ok(Gated::Pending(pending)) => {
             assert_eq!(pending.kind, kind, "{label}");
             let head = audit_head(pool).await;
@@ -971,11 +1057,14 @@ async fn a54_neg_gated_single_use_write_is_refused_by_the_second_approver_flow()
         let step = u64::try_from(step).unwrap();
         let new = shape.single_use("gated");
         let label = format!("{shape:?} create");
-        let outcome = gated_create(&pool, &format!("op_c{step}"), at(10 + step), &new).await;
+        let op = format!("op_c{step}");
+        let head_before = audit_head(&pool).await;
+        let outcome = gated_create(&pool, &op, at(10 + step), &new).await;
         assert_eq!(
             refused_through_the_gate(
                 &pool,
                 &label,
+                (&op, head_before),
                 outcome,
                 OperationKind::TrustSourceCreate,
                 at(100 + step),
@@ -993,12 +1082,14 @@ async fn a54_neg_gated_single_use_write_is_refused_by_the_second_approver_flow()
             let index = u64::try_from(index).unwrap();
             let label = format!("{shape:?} update to {what}");
             let n = 2 * step + index;
-            let outcome =
-                gated_update(&pool, &format!("op_u{n}"), at(20 + n), source, &update).await;
+            let op = format!("op_u{n}");
+            let head_before = audit_head(&pool).await;
+            let outcome = gated_update(&pool, &op, at(20 + n), source, &update).await;
             assert_eq!(
                 refused_through_the_gate(
                     &pool,
                     &label,
+                    (&op, head_before),
                     outcome,
                     OperationKind::TrustSourceUpdate,
                     at(200 + n),
@@ -1037,6 +1128,62 @@ async fn a54_neg_gated_single_use_write_is_refused_by_the_second_approver_flow()
             .unwrap();
         assert_eq!(written, stored(&new, 1), "{shape:?}");
         expected.push(written);
+    }
+
+    // The control of the updates: a reusable update of each stored source
+    // (a rename) goes pending, changes nothing until it is approved, and is
+    // then written at revision 2.
+    for (step, (shape, source)) in stored_sources.iter().enumerate() {
+        let step = u64::try_from(step).unwrap();
+        let renamed = TrustSourceChanges {
+            name: format!("{}-renamed", source.name),
+            ..changes(source)
+        };
+        let outcome = gated_update(
+            &pool,
+            &format!("op_ru{step}"),
+            at(40 + step),
+            source,
+            &renamed,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{shape:?}: {err:?}"));
+        let Gated::Pending(pending) = outcome else {
+            panic!("{shape:?}: the reusable update is not pending: {outcome:?}");
+        };
+        assert_eq!(pending.kind, OperationKind::TrustSourceUpdate, "{shape:?}");
+        assert_eq!(
+            registry::get_trust_source(&pool, TENANT, &source.id)
+                .await
+                .unwrap(),
+            *source,
+            "{shape:?}"
+        );
+        approve(
+            &pool,
+            ApprovalScope::Tenant(TENANT),
+            &pending,
+            at(400 + step),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{shape:?}: {err:?}"));
+        let written = registry::get_trust_source(&pool, TENANT, &source.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            written,
+            TrustSource {
+                name: renamed.name.clone(),
+                revision: 2,
+                ..source.clone()
+            },
+            "{shape:?}"
+        );
+        let slot = expected
+            .iter_mut()
+            .find(|row| row.id == source.id)
+            .unwrap_or_else(|| panic!("{shape:?}: not listed"));
+        *slot = written;
     }
     expected.sort_by(|a, b| a.id.cmp(&b.id));
     assert_eq!(sources(&pool).await, expected);
