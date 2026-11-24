@@ -1,6 +1,6 @@
 # ADR-010: Live revocation, leases and stream continuation
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.6 (lifetimes and leases; it names ADR-010 for the
   full-origin apply interruption and cleanup independence) and T00.2 (errors,
   capacity results and retry budgets). Implementation: T26.1–T26.6, T31.6,

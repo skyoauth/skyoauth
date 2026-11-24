@@ -1,6 +1,6 @@
 # ADR-002: Signer isolation and recovery
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.8 (signer parts). Implementation: T20.2 (public
   signer/JWKS, M2), T32.14 (internal signer group, M3), T50.3, T52.5.
 - **Baseline (tasks §11):** "Public signer/JWKS M2; shared internal

@@ -1,6 +1,6 @@
 # ADR-023: Human enrollment and migration continuity
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.16 ("enrollment policy/hold") (inferred: tasks §2
   names no ADR in T00.16). Implementation: T30.4, T30.8, T13.8, T13.9, T51.4,
   T51.11.

@@ -1,6 +1,6 @@
 # ADR-024: Delivery scope and milestone order
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them, and OQ-ADR024-1 stays open and deferred (user, 2026-11-24).
 - **Tasks:** ratified with T00.17 ("M1a/M1b dependencies ... deferring active
   impersonation and optional UX/subsystems") (inferred: tasks §2 names no ADR in
   T00.17). Implementation: the milestone order of tasks §9 and the definitions
@@ -27,7 +27,7 @@ v0.1 boundary.
 ### Order
 
 1. **M0.** Contracts, ADRs, threat model and the complete logical model are
-   reviewed together before implementation (tasks §9; design §11). In fact M1a ran ahead under provisional picks, and the maintainer's ratification follows it (user, 2026-11-24).
+   reviewed together before implementation (tasks §9; design §11). Historical note: in fact M1a ran ahead under provisional picks, and the maintainer's ratification followed it (user, 2026-11-24). The directional ratification of 2026-11-24 closes that gap; the picks made meanwhile stay implementation choices that ordinary review can change.
 2. **M1a then usable M2.** M1a delivers workload principals, trust, grants,
    tenant, audience and checker authority, independent operator bootstrap and
    recovery with the portable `skyoauth-operator` client, and durable replay. M2

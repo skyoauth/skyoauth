@@ -1,6 +1,6 @@
 # ADR-016: Replay and constraints
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.12. Implementation: T11.11, T12.2, T12.6,
   T12.9, T21.5, T21.6, T21.8, T22.7, T23.5, T23.6.
 - **Baseline (tasks §11):** "Reusable default/projected tokens; single-use

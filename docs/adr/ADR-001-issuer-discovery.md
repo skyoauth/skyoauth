@@ -1,6 +1,6 @@
 # ADR-001: Issuer and discovery
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.1 and T00.4 (inferred: tasks §2 names no ADR in
   either task; T00.1 freezes the public issuer/token/JWKS boundary and T00.4
   freezes the issuer). Implementation: T20.1, T20.2, T20.4, T51.10.

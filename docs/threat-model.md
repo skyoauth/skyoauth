@@ -1,6 +1,6 @@
 # SkyOAuth threat model
 
-- **Status:** proposed, M0. Not implemented; not yet reviewed or ratified.
+- **Status:** reviewed, M0 (T00.7). The ADRs it cites are ratified directionally (maintainer, 2026-11-24; [status values](adr/README.md#status-values)): its lead decisions and provisional lead picks are implementation choices that ordinary review can change, and its open questions stay open. What is implemented is tracked per conformance stage ([tests/conformance](../tests/conformance/README.md)), not by this line.
 - **Task covered:** T00.7 ([tasks](skyoauth-tasks.md) §2).
 - **Derived from:** [design](skyoauth-design.md) §1.2, §1.3, §2 (C04, C08,
   C09, C10), §3, §3.1, §4, §4.1, §4.2, §5.1, §5.1.1, §5.2, §5.2.1, §5.2.2,
@@ -1458,7 +1458,7 @@ the contract amendments; what is still open is named in the entry:
 - **OQ-TM-7:** design §7.2, §7.3 and §8; API-148; the link operation
   (API-155); T13.9,
   T51.1. Still open (OQ-ADR012-3, ADR-012): whether a switch signed with the
-  recovery key through the local recovery verifier while the IdP is
+  recovery key through the local recovery transport (where its signature is verified is open, OQ-ADR012-4; inferred: inside the provider-transition transaction, as for operator restoration) while the IdP is
   unavailable needs the second approver or takes an audited single-actor
   exception; the lead decides before M1b. Spec follow-up against design §7.2
   and §7.3, T13.5, T13.9 and OQ-TM-7. Contracts: `single_actor_mode` is the
@@ -1467,9 +1467,9 @@ the contract amendments; what is still open is named in the entry:
   IR-052 and IR-054 (with OQ-ADR008-3).
 - **OQ-TM-8:** design §7.2; T13.5; API-152 and T13.4 (scope of the recovery
   transaction: replacement `security_admin` credential, operator-credential
-  revocation, replacement recovery public key). Still open: whether setting
-  `single_actor_mode` is a further recovery transaction kind that also
-  replaces the recovery key (identity-registry OQ-IR-13).
+  revocation, replacement recovery public key). Whether setting
+  `single_actor_mode` is a further recovery transaction kind that also replaces the recovery key was open (identity-registry OQ-IR-13),
+  superseded by the confirmed 2026-11-24 reading (the user, 2026-11-24, relayed by the lead; ADR-008 item 12): `single_actor_mode` changes only by deployment configuration applied at restart and audited at startup; API-152 / identity-registry wording pending the contract PR.
 - **OQ-TM-9:** design §7.2 (recovery socket owned by the service UID, mode
   0600; `pods/exec` on the SkyOAuth namespace restricted to trusted
   infrastructure administrators); T13.4; T50.1.

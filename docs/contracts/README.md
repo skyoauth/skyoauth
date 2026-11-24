@@ -44,8 +44,11 @@ not implement any of them.
 Design §12 applies: ratifying or changing a decision updates the design, the
 tasks plan, these contracts, the shared fixtures and the affected tests
 together. Protocol behavior must not depend on pull-request discussion. The
-T00 checkboxes in the tasks plan stay unchecked until the contracts are
-reviewed.
+contracts are reviewed (T00.1–T00.6 are ticked in the tasks plan), and the
+ADRs they cite are ratified directionally (maintainer, 2026-11-24;
+[status values](../adr/README.md#status-values)): their lead decisions and
+provisional lead picks are implementation choices that ordinary review can
+change.
 
 The remaining T00 tasks (T00.7–T00.17: the threat model, planned as a
 separate document, and the remaining ratifications and ADRs) are not covered

@@ -1,6 +1,6 @@
 # ADR-012: Human-provider migration
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.16 (exclusive provider semantic transitions,
   enrollment hold) (inferred: tasks §2 names no ADR in T00.16). Implementation:
   T13.9, T51.1–T51.11, T41.5.
@@ -36,8 +36,8 @@ only writer is ADR-021, and the enrollment hold it sets is ADR-023.
    signer mutation is rejected (design §8 step 3; T51.3).
 3. **Operator independence.** Operators authenticate independently of the
    upstream provider; a switch or rollback works during an IdP outage through
-   the portable operator client and the local recovery verifier, with no
-   upstream-admin link (design §7.2, §8 step 2; T51.11). Under OQ-TM-7 every
+   the portable operator client and the local recovery transport, with no
+   upstream-admin link (where a signed switch or rollback is verified is open, OQ-ADR012-4; inferred: inside the provider-transition transaction, as `restore_operator` verifies an operator restoration, ADR-013 item 7) (design §7.2, §8 step 2; T51.11). Under OQ-TM-7 every
    plan commit except a disable-only commit needs a distinct second `adm_*`
    approver unless an explicit audited instance policy allows single-actor
    mode. Whether a switch signed with the recovery key during an IdP outage
@@ -157,11 +157,12 @@ New questions raised by this ADR:
 - **OQ-ADR012-3 — Recovery-signed switch and the second approver.** OQ-TM-7
   requires a distinct second `adm_*` approver for every plan commit except a
   disable-only commit. When the IdP is unavailable and a switch is signed with
-  the recovery key through the local recovery verifier (item 3), the sources do
+  the recovery key through the local recovery transport (item 3), the sources do
   not say whether the commit still needs a second approver or takes an audited
   single-actor exception. Open; the lead decides before M1b (lead decision,
   2026-11-19). Spec amendment follow-up: design §7.2 and §7.3, T13.5, T13.9
   and threat-model OQ-TM-7.
+- **OQ-ADR012-4 — Where a recovery-signed switch or rollback is verified.** The library's check inside `restore_operator` (ADR-013 item 7; user ruling, 2026-11-24) covers only M1a operator restoration: `restore_operator` accepts only an operator-restoration challenge and revokes every operator credential, while a provider switch or rollback must keep them. The sources do not say where M1b verifies the signature of a recovery-signed provider transition (inferred: inside the provider-transition transaction, as for operator restoration). Open; to be settled before M1b (inferred: M1b is where the recovery-signed switch and rollback are first permitted). Spec amendment follow-up: T13.5, T13.9, T51.11 and threat-model OQ-TM-7.
 
 ## Tests
 

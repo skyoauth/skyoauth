@@ -1,12 +1,12 @@
 # Proposal: verify the recovery signature inside `restore_operator` (T13.5)
 
 Status: Accepted (user, 2026-11-24, relayed by the lead: the user accepted the
-lead's recommendations); implementation pending (T13.5). Drafted the same day
+lead's recommendations); implementation pending (T13.5). ADRs ratified directionally (maintainer, 2026-11-24). Drafted the same day
 for the lead's review and the user's decision. The choices the user accepted
 are those marked "provisional lead pick, 2026-11-24" below; Q2 to Q6 of the
 review are accepted as implementation choices that ordinary review can change.
-Other choices are marked "(inferred)". The ADRs are ratified separately
-(T00.8–T00.17, Gate M0); this text ratifies no ADR and ticks no task. It
+Other choices are marked "(inferred)". The ADRs were ratified separately,
+directionally, by the maintainer on 2026-11-24 (T00.8–T00.17; Gate M0 is left to the lead's separate PR); the provisional lead picks below are accepted as implementation choices, not frozen, that ordinary review can change. This text ratifies no ADR and ticks no task. It
 changes no code: the implementation PR does, and edits the places under
 "Reconciliation". Line numbers refer to `main` at `3028360`, except those into
 `service/migrations/README.md`, `registry/mod.rs`, `registry_recovery.rs` and

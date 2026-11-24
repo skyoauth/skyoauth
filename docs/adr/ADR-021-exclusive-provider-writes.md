@@ -1,6 +1,6 @@
 # ADR-021: Exclusive provider writes and credential-only rotation
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.16 ("exclusive provider semantic transitions
   versus credential-only rotation") (inferred: tasks §2 names no ADR in T00.16).
   Implementation: T13.9, T30.9, T10.7, T51.1, T51.11.
