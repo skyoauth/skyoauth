@@ -407,8 +407,9 @@ pub struct NewTenant {
     pub status: Status,
 }
 
-/// The columns [`update_tenant`](super::update_tenant) changes: each one
-/// that is set (lead ruling, 2026-11-21). At least one must be set.
+/// The columns the registry-private `update_tenant` changes (tests reach
+/// it through the `test-support` feature): each one that is set (lead
+/// ruling, 2026-11-21). At least one must be set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TenantPatch {
     pub name: Option<String>,
@@ -468,8 +469,9 @@ pub struct NewPrincipal {
     pub status: Status,
 }
 
-/// The columns [`update_principal`](super::update_principal) changes: each
-/// one that is set (lead ruling, 2026-11-21). At least one must be set.
+/// The columns the registry-private `update_principal` changes (tests
+/// reach it through the `test-support` feature): each one that is set (lead
+/// ruling, 2026-11-21). At least one must be set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrincipalPatch {
     pub name: Option<String>,
@@ -616,10 +618,9 @@ impl FromRow<'_, PgRow> for ResourceServerChecker {
     }
 }
 
-/// The input of
-/// [`create_resource_server_checker`](super::create_resource_server_checker).
-/// The checker starts with no tenants; see
-/// [`add_resource_server_checker_tenant`](super::add_resource_server_checker_tenant).
+/// The input of the registry-private `create_resource_server_checker`
+/// (tests reach it through the `test-support` feature). The checker starts
+/// with no tenants; see `add_resource_server_checker_tenant`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewResourceServerChecker {
     pub id: String,
@@ -628,9 +629,10 @@ pub struct NewResourceServerChecker {
     pub status: Status,
 }
 
-/// The mutable columns of a checker, all replaced by
-/// [`update_resource_server_checker`](super::update_resource_server_checker).
-/// The identity may be rotated (inferred in `0003`).
+/// The mutable columns of a checker, all replaced by the registry-private
+/// `update_resource_server_checker` (tests only, through the
+/// `test-support` feature). The identity may be rotated (inferred in
+/// `0003`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceServerCheckerChanges {
     pub public_mtls_identity: String,
@@ -667,7 +669,8 @@ impl FromRow<'_, PgRow> for ResourceAction {
     }
 }
 
-/// The input of [`create_resource_action`](super::create_resource_action).
+/// The input of the registry-private `create_resource_action` (tests reach
+/// it through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewResourceAction {
     pub id: String,
@@ -680,8 +683,9 @@ pub struct NewResourceAction {
     pub status: Status,
 }
 
-/// The mutable columns of an action rule, all replaced by
-/// [`update_resource_action`](super::update_resource_action).
+/// The mutable columns of an action rule, all replaced by the
+/// registry-private `update_resource_action` (tests only, through the
+/// `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceActionChanges {
     pub required_scopes: Vec<String>,

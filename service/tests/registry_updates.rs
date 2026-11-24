@@ -185,7 +185,7 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
     let created = registry::get_tenant(&pool, "ten_a").await.unwrap();
     assert_eq!(created.revision, 1);
 
-    let renamed = registry::update_tenant(&pool, "ten_a", 1, &name("Renamed"))
+    let renamed = registry::test_support::update_tenant(&pool, "ten_a", 1, &name("Renamed"))
         .await
         .unwrap();
     assert_eq!((&renamed.name[..], renamed.revision), ("Renamed", 2));
@@ -199,9 +199,10 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
         ),
         ("ten_a", "ns_ten_a", Status::Enabled, created.created_at)
     );
-    let disabled = registry::update_tenant(&pool, "ten_a", 2, &status(Status::Disabled))
-        .await
-        .unwrap();
+    let disabled =
+        registry::test_support::update_tenant(&pool, "ten_a", 2, &status(Status::Disabled))
+            .await
+            .unwrap();
     assert_eq!(
         (&disabled.name[..], disabled.status, disabled.revision),
         ("Renamed", Status::Disabled, 3)
@@ -211,7 +212,7 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
         name: Some("Both".into()),
         status: Some(Status::Enabled),
     };
-    let reenabled = registry::update_tenant(&pool, "ten_a", 3, &both)
+    let reenabled = registry::test_support::update_tenant(&pool, "ten_a", 3, &both)
         .await
         .unwrap();
     assert_eq!(
@@ -219,7 +220,7 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
         ("Both", Status::Enabled, 4)
     );
     // Setting a column to its current value still advances the revision.
-    let same = registry::update_tenant(&pool, "ten_a", 4, &name("Both"))
+    let same = registry::test_support::update_tenant(&pool, "ten_a", 4, &name("Both"))
         .await
         .unwrap();
     assert_eq!(same.revision, 5);
@@ -230,13 +231,17 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
     assert_eq!(listed[0], same);
 
     for expected in [1, 4, 6, i64::MAX, i64::MIN] {
-        assert_stale(registry::update_tenant(&pool, "ten_a", expected, &name("Stale")).await);
+        assert_stale(
+            registry::test_support::update_tenant(&pool, "ten_a", expected, &name("Stale")).await,
+        );
     }
     for expected in [1, 5, i64::MAX] {
-        assert_not_found(registry::update_tenant(&pool, "ten_x", expected, &name("X")).await);
+        assert_not_found(
+            registry::test_support::update_tenant(&pool, "ten_x", expected, &name("X")).await,
+        );
     }
     assert_check(
-        registry::update_tenant(&pool, "ten_a", 5, &name("")).await,
+        registry::test_support::update_tenant(&pool, "ten_a", 5, &name("")).await,
         "tenant_name_check",
     );
     assert_eq!(registry::get_tenant(&pool, "ten_a").await.unwrap(), same);
@@ -246,10 +251,10 @@ async fn tenants_change_the_patched_columns_by_revision_compare_and_set() {
         1
     );
     // A name-only patch keeps a disabled tenant disabled.
-    registry::update_tenant(&pool, "ten_b", 1, &status(Status::Disabled))
+    registry::test_support::update_tenant(&pool, "ten_b", 1, &status(Status::Disabled))
         .await
         .unwrap();
-    let renamed = registry::update_tenant(&pool, "ten_b", 2, &name("Dormant"))
+    let renamed = registry::test_support::update_tenant(&pool, "ten_b", 2, &name("Dormant"))
         .await
         .unwrap();
     assert_eq!(
@@ -310,7 +315,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     );
 
     // Tenant names: a rename to a name in use succeeds.
-    let renamed = registry::update_tenant(&pool, "ten_b", 1, &name("Tenant ten_a"))
+    let renamed = registry::test_support::update_tenant(&pool, "ten_b", 1, &name("Tenant ten_a"))
         .await
         .unwrap();
     assert_eq!(renamed.name, "Tenant ten_a");
@@ -321,7 +326,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     };
     // The same name of another kind in the same tenant: the human `usr_1`
     // takes the workload `wld_1`'s name.
-    let renamed = registry::update_principal(
+    let renamed = registry::test_support::update_principal(
         &pool,
         "ten_a",
         "usr_1",
@@ -367,7 +372,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     // A rename into a taken name of the same kind is refused and changes
     // nothing.
     assert_name_taken(
-        registry::update_principal(
+        registry::test_support::update_principal(
             &pool,
             "ten_a",
             "wld_3",
@@ -384,7 +389,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
         ("Principal WLD_1", 1)
     );
     // A disabled principal keeps its name: it is still taken.
-    registry::update_principal(
+    registry::test_support::update_principal(
         &pool,
         "ten_a",
         "wld_1",
@@ -401,7 +406,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
         .await,
     );
     // A principal may be renamed to its own name.
-    let same = registry::update_principal(
+    let same = registry::test_support::update_principal(
         &pool,
         "ten_a",
         "wld_1",
@@ -435,8 +440,14 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
         );
         assert_not_found(registry::get_principal(&pool, "ten_a", "wld_2").await);
         assert_check(
-            registry::update_principal(&pool, "ten_a", "wld_1", 1, &principal_patch(name(refused)))
-                .await,
+            registry::test_support::update_principal(
+                &pool,
+                "ten_a",
+                "wld_1",
+                1,
+                &principal_patch(name(refused)),
+            )
+            .await,
             "principal_name_no_control_check",
         );
     }
@@ -463,7 +474,7 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
             accepted
         );
     }
-    let renamed = registry::update_principal(
+    let renamed = registry::test_support::update_principal(
         &pool,
         "ten_a",
         "wld_1",
@@ -487,10 +498,15 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         .await
         .unwrap();
     assert_eq!(created.revision, 1);
-    let renamed =
-        registry::update_principal(&pool, "ten_a", "wld_1", 1, &principal_patch(name("deploy")))
-            .await
-            .unwrap();
+    let renamed = registry::test_support::update_principal(
+        &pool,
+        "ten_a",
+        "wld_1",
+        1,
+        &principal_patch(name("deploy")),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (
             &renamed.id[..],
@@ -511,7 +527,7 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
             2
         )
     );
-    let disabled = registry::update_principal(
+    let disabled = registry::test_support::update_principal(
         &pool,
         "ten_a",
         "wld_1",
@@ -524,7 +540,7 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         (&disabled.name[..], disabled.status, disabled.revision),
         ("deploy", Status::Disabled, 3)
     );
-    let reenabled = registry::update_principal(
+    let reenabled = registry::test_support::update_principal(
         &pool,
         "ten_a",
         "wld_1",
@@ -541,7 +557,7 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         reenabled
     );
     // Kind-agnostic: a human principal changes the same way.
-    let human = registry::update_principal(
+    let human = registry::test_support::update_principal(
         &pool,
         "ten_a",
         "usr_1",
@@ -562,7 +578,7 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
     // stale, which would tell the caller it exists.
     for expected in [1, 4, 5, i64::MAX] {
         assert_not_found(
-            registry::update_principal(
+            registry::test_support::update_principal(
                 &pool,
                 "ten_b",
                 "wld_1",
@@ -572,7 +588,7 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
             .await,
         );
         assert_not_found(
-            registry::update_principal(
+            registry::test_support::update_principal(
                 &pool,
                 "ten_a",
                 "wld_b",
@@ -583,14 +599,28 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         );
     }
     assert_not_found(
-        registry::update_principal(&pool, "ten_a", "prn_x", 1, &principal_patch(name("x"))).await,
+        registry::test_support::update_principal(
+            &pool,
+            "ten_a",
+            "prn_x",
+            1,
+            &principal_patch(name("x")),
+        )
+        .await,
     );
     assert_not_found(
-        registry::update_principal(&pool, "ten_x", "wld_1", 4, &principal_patch(name("x"))).await,
+        registry::test_support::update_principal(
+            &pool,
+            "ten_x",
+            "wld_1",
+            4,
+            &principal_patch(name("x")),
+        )
+        .await,
     );
     for expected in [1, 3, 5, i64::MAX] {
         assert_stale(
-            registry::update_principal(
+            registry::test_support::update_principal(
                 &pool,
                 "ten_a",
                 "wld_1",
@@ -601,7 +631,14 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         );
     }
     assert_check(
-        registry::update_principal(&pool, "ten_a", "wld_1", 4, &principal_patch(name(""))).await,
+        registry::test_support::update_principal(
+            &pool,
+            "ten_a",
+            "wld_1",
+            4,
+            &principal_patch(name("")),
+        )
+        .await,
         "principal_name_check",
     );
     assert_eq!(
@@ -618,19 +655,29 @@ async fn principals_change_within_their_tenant_whatever_their_kind() {
         1
     );
     // A name-only patch keeps a disabled principal disabled.
-    let renamed =
-        registry::update_principal(&pool, "ten_a", "usr_1", 2, &principal_patch(name("bob")))
-            .await
-            .unwrap();
+    let renamed = registry::test_support::update_principal(
+        &pool,
+        "ten_a",
+        "usr_1",
+        2,
+        &principal_patch(name("bob")),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (&renamed.name[..], renamed.status, renamed.revision),
         ("bob", Status::Disabled, 3)
     );
     // Setting a column to its current value still advances the revision.
-    let same =
-        registry::update_principal(&pool, "ten_a", "usr_1", 3, &principal_patch(name("bob")))
-            .await
-            .unwrap();
+    let same = registry::test_support::update_principal(
+        &pool,
+        "ten_a",
+        "usr_1",
+        3,
+        &principal_patch(name("bob")),
+    )
+    .await
+    .unwrap();
     let mut expected = renamed.clone();
     expected.revision = 4;
     assert_eq!(same, expected);
@@ -831,7 +878,7 @@ async fn times_at_the_range_check_bounds_read_back_exactly() {
     for (id, micros) in [("ten_early", EARLIEST), ("ten_late", LATEST)] {
         let tenant = registry::get_tenant(&pool, id).await.unwrap();
         assert_eq!(tenant.created_at, at(micros), "{id}");
-        let updated = registry::update_tenant(&pool, id, 1, &name("renamed"))
+        let updated = registry::test_support::update_tenant(&pool, id, 1, &name("renamed"))
             .await
             .unwrap();
         assert_eq!(updated.created_at, at(micros), "{id}");
@@ -848,7 +895,7 @@ async fn times_at_the_range_check_bounds_read_back_exactly() {
         .await
         .unwrap();
     assert_eq!(principal.created_at, at(LATEST));
-    let updated = registry::update_principal(
+    let updated = registry::test_support::update_principal(
         &pool,
         "ten_late",
         "wld_late",
@@ -869,25 +916,40 @@ async fn empty_patches_fail_before_any_statement() {
         .connect_lazy("postgres://registry-test.invalid/none")
         .unwrap();
     pool.close().await;
-    assert_empty_patch(registry::update_tenant(&pool, "ten_a", 1, &TenantPatch::default()).await);
     assert_empty_patch(
-        registry::update_principal(&pool, "ten_a", "wld_1", 1, &PrincipalPatch::default()).await,
+        registry::test_support::update_tenant(&pool, "ten_a", 1, &TenantPatch::default()).await,
+    );
+    assert_empty_patch(
+        registry::test_support::update_principal(
+            &pool,
+            "ten_a",
+            "wld_1",
+            1,
+            &PrincipalPatch::default(),
+        )
+        .await,
     );
     // The same calls with a column set do reach the pool.
     for err in [
-        registry::update_tenant(&pool, "ten_a", 1, &name("x"))
+        registry::test_support::update_tenant(&pool, "ten_a", 1, &name("x"))
             .await
             .unwrap_err(),
-        registry::update_principal(&pool, "ten_a", "wld_1", 1, &principal_patch(name("x")))
-            .await
-            .unwrap_err(),
+        registry::test_support::update_principal(
+            &pool,
+            "ten_a",
+            "wld_1",
+            1,
+            &principal_patch(name("x")),
+        )
+        .await
+        .unwrap_err(),
     ] {
         assert!(
             matches!(err, RegistryError::Other(sqlx::Error::PoolClosed)),
             "{err:?}"
         );
     }
-    let err = registry::update_tenant(&pool, "ten_a", 1, &TenantPatch::default())
+    let err = registry::test_support::update_tenant(&pool, "ten_a", 1, &TenantPatch::default())
         .await
         .unwrap_err();
     assert_eq!(err.to_string(), "registry database error");
@@ -904,11 +966,20 @@ async fn empty_patches_leave_the_row_and_its_revision_unchanged() {
         .unwrap();
     // Also for a missing row: the patch is checked first.
     for id in ["ten_a", "ten_x"] {
-        assert_empty_patch(registry::update_tenant(&pool, id, 1, &TenantPatch::default()).await);
+        assert_empty_patch(
+            registry::test_support::update_tenant(&pool, id, 1, &TenantPatch::default()).await,
+        );
     }
     for id in ["wld_1", "prn_x"] {
         assert_empty_patch(
-            registry::update_principal(&pool, "ten_a", id, 1, &PrincipalPatch::default()).await,
+            registry::test_support::update_principal(
+                &pool,
+                "ten_a",
+                id,
+                1,
+                &PrincipalPatch::default(),
+            )
+            .await,
         );
     }
     assert_eq!(registry::get_tenant(&pool, "ten_a").await.unwrap(), tenant);
@@ -940,10 +1011,12 @@ impl Target {
         to: Status,
     ) -> Result<(Status, i64), RegistryError> {
         match self {
-            Self::Tenant => registry::update_tenant(executor, "ten_a", 1, &status(to))
-                .await
-                .map(|row| (row.status, row.revision)),
-            Self::Principal => registry::update_principal(
+            Self::Tenant => {
+                registry::test_support::update_tenant(executor, "ten_a", 1, &status(to))
+                    .await
+                    .map(|row| (row.status, row.revision))
+            }
+            Self::Principal => registry::test_support::update_principal(
                 executor,
                 "ten_a",
                 "wld_1",

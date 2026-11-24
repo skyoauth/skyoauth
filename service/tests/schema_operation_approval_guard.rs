@@ -887,6 +887,49 @@ async fn the_guards_refuse_in_name_order() {
     db.drop([pool]).await;
 }
 
+/// In a multi-row `INSERT` the rows are checked in order, each row's
+/// foreign-key check and then its guards before the next row's (migrations
+/// README, "What 0005 adds", "Triggers and timing"): with a row that
+/// crosses its audit event first and a row whose audit event is missing
+/// second, the statement is the audit guard's `23514`; with the same two
+/// rows the other way round, it is the foreign key's `23503`. Neither
+/// writes anything.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn in_a_multi_row_insert_the_earlier_rows_refusal_comes_first() {
+    let (db, pool) = seeded().await;
+    let crossing = row_audited(
+        "op_x",
+        Some("ten_a"),
+        "adm_2",
+        "service_grant.update",
+        None,
+        "evt_b",
+    );
+    let missing = row_audited(
+        "op_y",
+        Some("ten_a"),
+        "adm_2",
+        "service_grant.update",
+        None,
+        "evt_missing",
+    );
+
+    let err = fail(&pool, &format!("{COLUMNS}{crossing}, {missing}")).await;
+    assert_refusal(err, Refusal::AuditOtherTenant, "the crossing row first");
+
+    let err = fail(&pool, &format!("{COLUMNS}{missing}, {crossing}")).await;
+    assert_eq!(sqlstate(&err), "23503", "the missing event first: {err}");
+    assert_eq!(
+        err.as_database_error().unwrap().constraint(),
+        Some("administrative_operation_audit_id_fkey"),
+        "the missing event first"
+    );
+
+    assert_eq!(operations(&pool).await, SEEDED);
+    db.drop([pool]).await;
+}
+
 /// The audit event is inserted first: `administrative_operation_audit_id_fkey`
 /// is immediate, so an operation inserted before its event is the foreign
 /// key's `23503`, even under `SET CONSTRAINTS ALL DEFERRED` and when the

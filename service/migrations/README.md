@@ -3429,8 +3429,10 @@ audited write path of a trust keyset version (T11.3, T11.9; see its module
 documentation for the full rules). Library-level only: no endpoint calls
 it and nothing wires it at startup.
 The picks are the lead's (provisional lead pick, 2026-11-22) unless marked
-inferred, and the `jwk` picks dated 2026-11-21 it relies on stay
-provisional until Gate M0:
+inferred, and so are the `jwk` picks dated 2026-11-21 it relies on. The
+maintainer ratified the ADRs directionally on 2026-11-24 and Gate M0 passed
+in #140: the lead picks stay implementation choices that ordinary review
+can change, and a change to a user ruling goes back to the user:
 
 - A keyset version write (a create, an enable, a re-enable) counts as
   widening and needs an IR-054 approval by a second approver while

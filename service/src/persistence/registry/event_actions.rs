@@ -2,8 +2,10 @@
 //! OQ-IR-15).
 //!
 //! [`AUDIT_ACTIONS`] is the closed set of action names and the one place
-//! they live (lead decision, 2026-11-21, provisional until the maintainer
-//! ratifies the ADRs, T00.8 to T00.17, Gate M0; OQ-IR-15). IR-059's
+//! they live (lead decision, 2026-11-21; OQ-IR-15). The maintainer ratified
+//! the ADRs directionally on 2026-11-24 and Gate M0 passed in #140, so the
+//! set and the picks below stay implementation choices that ordinary review
+//! can change; a change to a user ruling goes back to the user. IR-059's
 //! three-row table gives examples, all of them in the set; every other name
 //! is (inferred), named here as OQ-IR-15 asks the audit writer to do:
 //!

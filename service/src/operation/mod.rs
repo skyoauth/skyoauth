@@ -10,9 +10,11 @@
 //! trust source kinds, whose requests are its `submit_create_source` and
 //! `submit_update_source` (PR 5).
 //!
-//! Every pick below is the proposal's (a provisional lead pick, 2026-11-23,
-//! D1 to D29) unless marked (inferred); all of them stay provisional until
-//! the maintainer ratifies the ADRs (T00.8 to T00.17, Gate M0).
+//! Every pick below is the proposal's (a lead pick, 2026-11-23, D1 to D29)
+//! unless marked (inferred). The maintainer ratified the ADRs directionally
+//! on 2026-11-24 and Gate M0 passed in #140: the lead picks stay
+//! implementation choices that ordinary review can change, and a change to
+//! a user ruling goes back to the user.
 //!
 //! # Not wired
 //!
