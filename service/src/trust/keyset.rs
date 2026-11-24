@@ -13,10 +13,12 @@
 //! commit nor roll it back. The upload is validated before that
 //! transaction, by [`validate_upload`]. The picks below are the lead's
 //! (provisional lead pick, 2026-11-22; the gate's, 2026-11-23) unless
-//! marked (inferred); all are provisional until the maintainer ratifies the
-//! ADRs (T00.8 to T00.17, Gate M0), and so are the [`crate::jwk`] picks
-//! dated 2026-11-21 that this module relies on. The widening ruling below
-//! is the user's, not a provisional pick.
+//! marked (inferred), and so are the [`crate::jwk`] picks dated 2026-11-21
+//! that this module relies on. The maintainer ratified the ADRs
+//! directionally on 2026-11-24 and Gate M0 passed in #140: the lead picks
+//! stay implementation choices that ordinary review can change, and a
+//! change to a user ruling goes back to the user. The widening ruling below
+//! is the user's, not a lead pick.
 //!
 //! # Not wired, and the one write path
 //!
