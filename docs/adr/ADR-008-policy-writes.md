@@ -100,7 +100,10 @@ design §7.2 and identity-registry §5.2.
     optional and off by default. It is the instance policy setting
     `widening_second_approver`; turning it on or off is itself an audited write
     that needs a distinct second `security_admin` approver, or one actor when
-    the audited single-actor instance policy `single_actor_mode` is on. That
+    the audited single-actor instance policy `single_actor_mode` is on.
+    Turning it off is a widening write: without the widening flag it is
+    rejected like every other widening write (the user's ruling,
+    2026-11-24; T13.3 implements it). That
     policy (default false) is deployment configuration, set at install, so no
     online admin can enable it alone; the database mirrors it read-only, with
     an audit event on change. Whether the local signed recovery transaction can
