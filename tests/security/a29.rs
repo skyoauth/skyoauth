@@ -62,8 +62,8 @@
 //!     another scope, by the audit guard
 //!     `administrative_operation_audit_same_tenant` (trigger
 //!     `administrative_operation_audit_check`): a pending gated write, an
-//!     approve of its own scope's operation and a `route_bundle_approval`
-//!     of it, each otherwise valid
+//!     approve of its own scope's operation, a `route_bundle_approval` of
+//!     it, a `cancel` and a `reject`, each otherwise valid
 //!     (`a29_neg_operation_names_other_tenants_audit_event`,
 //!     `a29_neg_audit_event_across_instance_and_tenant`);
 //!   - an operation of a kind other than `approve` whose
@@ -76,7 +76,8 @@
 //!     `a29_neg_other_kind_names_operation_across_instance_and_tenant`).
 //!
 //!   A row that crosses both is refused by the approval guard, whose
-//!   trigger fires first (name order; `0005`, inferred):
+//!   trigger fires first (PostgreSQL fires same-event triggers in name
+//!   order; `0005`, README "Triggers and timing"):
 //!   `a29_neg_double_crossing_reports_the_approval_guard`. The controls:
 //!   the same writes within each tenant and the instance are written
 //!   (`a29_pos_same_scope_audit_event_and_named_operation_are_written`), and
@@ -141,10 +142,13 @@
 //! `registry::test_support`). Not on the list, and left to the service
 //! tests (`service/tests/schema_operation_approval_guard.rs`):
 //! `administrative_operation_approver_distinct`, an actor rule and not a
-//! crossing; the revocation guard's `INSERT` leg (above); and the order of
-//! the guards across the rows of one statement (an earlier row's `23514`
-//! before a later row's `23503`), which no public path reaches, since the
-//! registry inserts one operation per statement.
+//! crossing; and the revocation guard's `INSERT` leg (above). Not on the
+//! list and pinned by no test: the order of the guards across the rows of
+//! one statement (`0005`: an earlier row's `23514` before a later row's
+//! `23503`). It is unobservable through the public path, since the
+//! registry inserts one operation per statement; the behaviour has been
+//! probed, but every missing-reference case of the service tests is a
+//! single-row statement, so a service test that pins it is a follow-up.
 
 use std::{
     fmt::Debug,
@@ -1275,9 +1279,9 @@ impl Scope {
 
 /// A new operation `id` of `kind` in `scope` by `actor`, recorded by the
 /// event `evt_<id>`: a pending one (an hour to expiry) unless it is an
-/// `approve`, a `cancel` or a `route_bundle_approval`, which has no expiry
-/// (proposal section 2; inferred for the `route_bundle_approval`, which no
-/// guard reads the expiry of).
+/// `approve`, a `cancel`, a `reject` or a `route_bundle_approval`, which
+/// has no expiry (proposal section 2; inferred for the
+/// `route_bundle_approval`, which no guard reads the expiry of).
 fn new_operation(
     scope: Scope,
     id: String,
@@ -1285,7 +1289,7 @@ fn new_operation(
     kind: &str,
     approves: Option<String>,
 ) -> NewAdministrativeOperation {
-    let pending = !["approve", "cancel", ROUTE_BUNDLE_APPROVAL].contains(&kind);
+    let pending = !["approve", "cancel", "reject", ROUTE_BUNDLE_APPROVAL].contains(&kind);
     NewAdministrativeOperation {
         audit_id: format!("evt_{id}"),
         immutable_plan: object(json!({"id": id, "status": "enabled"})),
@@ -1641,11 +1645,14 @@ fn attempt_id(base: &str, owner: Scope, intruder: Scope) -> String {
     format!("op_{base}_{}_{}", intruder.suffix, owner.suffix)
 }
 
-/// The audit crossings of `intruder` into `owner`: three operations of
+/// The audit crossings of `intruder` into `owner`: five operations of
 /// `intruder`'s scope that name nothing of another scope, each recorded by
 /// an event of `owner`'s: a pending gated write, an approve of `intruder`'s
-/// pending operation by [`APPROVER`] (which passes the approval guard), and
-/// a route bundle approval of it by its requester.
+/// pending operation by [`APPROVER`] (which passes the approval guard), a
+/// route bundle approval of it by its requester, and a `cancel` by the
+/// requester and a `reject` by [`APPROVER`], inserted as the flow inserts
+/// them, without an approved operation or an expiry (the revocation that
+/// links them to a revoked row is a later `UPDATE`, not made here).
 fn audit_crossings(owner: Scope, intruder: Scope) -> Vec<Attempt> {
     let id = |base| attempt_id(base, owner, intruder);
     [
@@ -1670,6 +1677,14 @@ fn audit_crossings(owner: Scope, intruder: Scope) -> Vec<Attempt> {
             ROUTE_BUNDLE_APPROVAL,
             Some(intruder.pending()),
         ),
+        new_operation(
+            intruder,
+            id("evt_cncl"),
+            intruder.requester(),
+            "cancel",
+            None,
+        ),
+        new_operation(intruder, id("evt_rjct"), APPROVER.into(), "reject", None),
     ]
     .map(|new| (new, owner))
     .into()
@@ -1801,9 +1816,11 @@ async fn a29_neg_other_kind_names_operation_across_instance_and_tenant() {
 
 /// A row that crosses both references is refused by the approval guard:
 /// `administrative_operation_approval_check` fires before
-/// `administrative_operation_audit_check` (trigger name order; inferred in
-/// `0005`), so the first that fails decides. The registry inserts one row
-/// per statement, so the multi-row order of `0005` is not reachable here.
+/// `administrative_operation_audit_check` (PostgreSQL fires same-event
+/// triggers in name order; `0005`, README "Triggers and timing"), and the
+/// first that fails refuses the row. The registry inserts one row per
+/// statement, so the order across the rows of one statement is not
+/// observable here (see the module documentation).
 #[tokio::test]
 async fn a29_neg_double_crossing_reports_the_approval_guard() {
     let crossings: Vec<(Scope, Scope)> = TENANT_CROSSINGS
@@ -1844,13 +1861,13 @@ async fn chain_head(pool: &PgPool) -> i64 {
 }
 
 /// The control of the audit and named-operation tests above: in each
-/// tenant and in the instance, the five writes of those tests made within
+/// tenant and in the instance, the seven writes of those tests made within
 /// the scope, each recorded by an event of the scope and naming, if
 /// anything, the scope's own pending operation (a pending gated write
 /// naming nothing, an approve by [`APPROVER`], a route bundle approval by
-/// the pending operation's requester, twice, and a pending gated write
-/// naming the pending operation), are written, each with its event, the
-/// chain intact.
+/// the pending operation's requester, twice, a `cancel` by the requester, a
+/// `reject` by [`APPROVER`] and a pending gated write naming the pending
+/// operation), are written, each with its event, the chain intact.
 #[tokio::test]
 async fn a29_pos_same_scope_audit_event_and_named_operation_are_written() {
     let (db, pool) = two_tenants_with_operations().await;
@@ -1868,7 +1885,7 @@ async fn a29_pos_same_scope_audit_event_and_named_operation_are_written() {
             written += 1;
         }
     }
-    assert_eq!(written, 15);
+    assert_eq!(written, 21);
     assert_eq!(chain_head(&pool).await, head + written);
     db.drop([pool]).await;
 }
