@@ -2,7 +2,10 @@
 //! neither exposes nor calls the ungated trust writes, and exposes none of
 //! the bare registry trust writers, operator writers, audit append or
 //! operation-row writers (second-approver proposal,
-//! `docs/proposals/second-approver-gated-writes.md`, PRs 7, 9 and 10).
+//! `docs/proposals/second-approver-gated-writes.md`, PRs 7, 9 and 10), nor
+//! the checker, action, tenant and principal writers that nothing in the
+//! crate calls (the proposal's survey under "Still open after PRs 7, 9 and
+//! 10").
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
 //! apply a write without the second-approver gate, so they are visible only
@@ -18,54 +21,61 @@
 //! only within the registry (`pub(super)`), whose `bootstrap_instance` and
 //! `restore_operator` (once it has verified the recovery signature itself,
 //! `docs/proposals/recovery-verified-response.md`) call them;
-//! `update_admin_role_binding` is
-//! `pub(super)` too and has no caller in the crate, so it carries PR 7's
-//! `expect(dead_code)`; `append_audit_event` and the operation-row writers
-//! `insert_administrative_operation`, `consume_administrative_operation`
-//! and `revoke_administrative_operation` are `pub(crate)`, called by
-//! `crate::operation` and `crate::trust` as well. Only the `#[doc(hidden)]`
-//! modules `trust::test_support` and `persistence::registry::test_support`,
-//! compiled with the feature, expose them to tests. Every test target of
-//! this package is built with the feature (the package's dev-dependency on
-//! itself), and so is every test target of `skyoauth-scenarios` (its
-//! dev-dependency on this package), so a test cannot simply name the
-//! writers and expect a compile error. This test therefore checks the
-//! library without the feature, as a dependent crate would see it: it runs
-//! `cargo check` on the workspace's libraries and binaries (a build that
-//! turns no dev-dependency feature on, and that a workspace member enabling
-//! the feature through a normal or build dependency would change), in a
-//! target directory of its own, and then:
+//! `update_admin_role_binding` is `pub(super)` too and has no caller in the
+//! crate, so it carries PR 7's `expect(dead_code)`; `append_audit_event`
+//! and the operation-row writers `insert_administrative_operation`,
+//! `consume_administrative_operation` and `revoke_administrative_operation`
+//! are `pub(crate)`, called by `crate::operation` and `crate::trust` as
+//! well. The checker writers, the action writers, `update_tenant` and
+//! `update_principal` of the registry have no caller in the crate either,
+//! so they take `update_admin_role_binding`'s form ([`REGISTRY_DEAD`]).
+//! Only the `#[doc(hidden)]` modules `trust::test_support` and
+//! `persistence::registry::test_support`, compiled with the feature, expose
+//! them to tests. Every test target of this package is built with the
+//! feature (the package's dev-dependency on itself), and so is every test
+//! target of `skyoauth-scenarios` (its dev-dependency on this package), so
+//! a test cannot simply name the writers and expect a compile error. This
+//! test therefore checks the library without the feature, as a dependent
+//! crate would see it: it runs `cargo check` on the workspace's libraries
+//! and binaries (a build that turns no dev-dependency feature on, and that
+//! a workspace member enabling the feature through a normal or build
+//! dependency would change), in a target directory of its own, and then:
 //!
 //! - asserts that `skyoauth-service`'s library was built with no feature;
 //! - asserts that the library emitted no warning. Without the feature each
-//!   `trust` writer and `update_admin_role_binding` carry
+//!   `trust` writer and each registry writer of [`REGISTRY_DEAD`] carry
 //!   `expect(dead_code)`, so a caller in their visibility, a public
 //!   forwarder included, makes the expectation unfulfilled, which is a
 //!   warning (a caller outside it is a privacy error in every build);
 //! - compiles small probe crates against the library's metadata with
 //!   `rustc`. A probe that names an ungated writer, a bare registry writer,
-//!   a registry writer that PR 10 made crate-private or one of the
-//!   crate-private steps below at any of its paths must fail as a private
+//!   a registry writer that PR 10 or the hardening after it made
+//!   crate-private, one of the crate-private steps below or one of their
+//!   callers at any of its paths must fail as a private
 //!   (E0603) or unresolved (E0432) path, and a probe that names the public
 //!   writes and registry items, the registry writers that deliberately stay
 //!   public included, must compile, so a probe that fails for an unrelated
 //!   reason (a toolchain mismatch, a missing crate) or a narrowing of what
 //!   must stay public fails this test instead of passing it.
 //!
-//! The registry writers but `update_admin_role_binding` are called in every
+//! The registry writers but those of [`REGISTRY_DEAD`] are called in every
 //! build, and so are the six crate-private steps of `trust` that apply a
 //! write without authorizing, gating or auditing it themselves
 //! (`insert_create_version`, `apply_create_version`,
 //! `apply_enable_version`, `apply_status`, `apply_create_source`,
 //! `apply_locked_update`; PR 7's `expect(dead_code)` covers only the four
 //! `pub(super)` writers, not these), so no dead-code guard fits them. A
-//! source check stands in for it: outside comments and string and
-//! character literals, the library names each writer and each step only at
-//! the places a table lists (the definition, the crate-private re-export,
-//! the test-support wrapper, the `use`s, and the callers in
-//! `trust::keyset`, `trust::source`, `crate::operation` and the registry's
-//! bootstrap and recovery), each keyed by the item that holds it (a
-//! top-level item, or an `impl` block at any depth) with that item's
+//! source check stands in for it: outside comments and string and character
+//! literals, the library names each writer and each step only at the places
+//! a table lists (the definition, the crate-private re-export, the
+//! test-support wrapper, the `use`s, and the callers in `trust::keyset`,
+//! `trust::source`, `crate::operation` and the registry's bootstrap and
+//! recovery), and, one level up, each of those callers ([`CALLERS`]:
+//! `bootstrap_steps`, `insert_pending`, each `append_stamped` and the rest,
+//! and `trust::keyset`'s `set_status`, the one caller of a caller that is
+//! not public or itself guarded, counted in its own module only
+//! ([`SCOPED`]: it is private there)), each keyed by the item that holds it
+//! (a top-level item, or an `impl` block at any depth) with that item's
 //! visibility and counted. So a forwarder of another name, a new caller, a
 //! widened definition or caller and a public method of an `impl` nested in
 //! a function body each change a key or a count. The check also refuses
@@ -73,9 +83,10 @@
 //! `#[path]`, `include!`, and a level set for `non_local_definitions`, the
 //! warning a nested `impl` draws, or for `warnings`, in the source, the
 //! manifests or the workspace's cargo configuration) and a writer or step
-//! imported or cast under another name (`<name> as`; inferred). The probes also require each step to be
-//! unreachable from outside the crate, and each PR 10 writer's path through
-//! its defining module to be private (E0603), not missing. The source check
+//! imported or cast under another name (`<name> as`; inferred). The probes
+//! also require each step and each caller to be unreachable from outside
+//! the crate, and each writer of [`REGISTRY_PRIVATE`]'s path through its
+//! defining module to be private (E0603), not missing. The source check
 //! reads text, not the compiled crate, and does not see everything: the
 //! second-approver proposal, "PR 10 as implemented", records the mutants it
 //! was run against and what still escapes it.
@@ -124,13 +135,16 @@ const REGISTRY_UNGATED: [&str; 4] = [
     "update_trust_source",
 ];
 
-/// The registry writers that PR 10 made crate-private, by the private
-/// module of `persistence::registry` that defines them: the operator
-/// writers (`pub(super)`: the three creates are called only by the
-/// registry's `bootstrap` and `recovery`, the update by nothing in the
-/// crate), the audit append and the operation-row writers (`pub(crate)`:
-/// `crate::operation` and `crate::trust` call them too).
-const REGISTRY_PRIVATE: [(&str, &str); 8] = [
+/// The registry writers that PR 10 and the checker, action, tenant and
+/// principal hardening after it made crate-private, by the private module
+/// of `persistence::registry` that defines them: the operator writers
+/// (`pub(super)`: the three creates are called only by the registry's
+/// `bootstrap` and `recovery`, the update by nothing in the crate), the
+/// audit append and the operation-row writers (`pub(crate)`:
+/// `crate::operation` and `crate::trust` call them too), and the checker,
+/// action, tenant and principal writers that nothing in the crate calls
+/// (`pub(super)`, each with the update's `expect(dead_code)`).
+const REGISTRY_PRIVATE: [(&str, &str); 16] = [
     ("operator", "create_admin_identity"),
     ("operator", "create_admin_credential"),
     ("operator", "create_admin_role_binding"),
@@ -139,6 +153,44 @@ const REGISTRY_PRIVATE: [(&str, &str); 8] = [
     ("operation", "insert_administrative_operation"),
     ("operation", "consume_administrative_operation"),
     ("operation", "revoke_administrative_operation"),
+    ("audience", "create_resource_server_checker"),
+    ("audience", "update_resource_server_checker"),
+    ("audience", "add_resource_server_checker_tenant"),
+    ("audience", "remove_resource_server_checker_tenant"),
+    ("audience", "create_resource_action"),
+    ("audience", "update_resource_action"),
+    ("tenant", "update_tenant"),
+    ("tenant", "update_principal"),
+];
+
+/// The registry writers of [`REGISTRY_PRIVATE`] that nothing in the crate
+/// calls, so that each carries the `expect(dead_code)` guard, by their
+/// file under `src`.
+const REGISTRY_DEAD: [(&str, &str); 9] = [
+    (
+        "persistence/registry/operator.rs",
+        "update_admin_role_binding",
+    ),
+    (
+        "persistence/registry/audience.rs",
+        "create_resource_server_checker",
+    ),
+    (
+        "persistence/registry/audience.rs",
+        "update_resource_server_checker",
+    ),
+    (
+        "persistence/registry/audience.rs",
+        "add_resource_server_checker_tenant",
+    ),
+    (
+        "persistence/registry/audience.rs",
+        "remove_resource_server_checker_tenant",
+    ),
+    ("persistence/registry/audience.rs", "create_resource_action"),
+    ("persistence/registry/audience.rs", "update_resource_action"),
+    ("persistence/registry/tenant.rs", "update_tenant"),
+    ("persistence/registry/tenant.rs", "update_principal"),
 ];
 
 /// The crate-private steps of the trust write path that apply a write
@@ -159,9 +211,68 @@ const STEPS: [(&str, &str); 6] = [
     ("source", "apply_locked_update"),
 ];
 
+/// The callers one level up: each function of the library, other than the
+/// [`STEPS`], that names a bare registry writer, a writer of
+/// [`REGISTRY_PRIVATE`] or a step, by the module that defines it (from the
+/// crate root) and the module that re-exports it, if any. Each authorizes,
+/// gates, verifies or audits for its own public caller (the registry's
+/// `bootstrap_steps`, `issue_steps` and `restore_steps`; `crate::trust`'s
+/// `append_stamped` and `*_steps`; `crate::operation`'s approval steps,
+/// `toggle_steps` and `insert_pending`, the pending branch of every gated
+/// `submit_*`), so a public forwarder of one of them, under another name,
+/// would reach an ungated write as surely as a forwarder of the writer: the
+/// source check counts where each is named too, and the probes require each
+/// to be unreachable from outside the crate.
+const CALLERS: [(&str, &str, &str); 22] = [
+    (
+        "persistence::registry::bootstrap",
+        "persistence::registry",
+        "bootstrap_steps",
+    ),
+    (
+        "persistence::registry::recovery",
+        "persistence::registry",
+        "issue_steps",
+    ),
+    (
+        "persistence::registry::recovery",
+        "persistence::registry",
+        "restore_steps",
+    ),
+    ("operation::toggle", "operation", "insert_pending"),
+    ("operation::toggle", "operation", "toggle_steps"),
+    ("operation::approval", "operation", "approve_steps"),
+    ("operation::approval", "operation", "revoke_steps"),
+    ("operation::approval", "operation", "apply_create"),
+    ("operation::approval", "operation", "apply_enable"),
+    ("operation::approval", "operation", "apply_source_create"),
+    ("operation::approval", "operation", "apply_source_update"),
+    ("trust::keyset", "trust", "append_stamped"),
+    ("trust::keyset", "trust", "create_steps"),
+    ("trust::keyset", "trust", "submit_create_steps"),
+    ("trust::keyset", "trust", "status_steps"),
+    ("trust::keyset", "trust", "submit_enable_steps"),
+    ("trust::keyset", "trust", "set_status"),
+    ("trust::source", "trust", "append_stamped"),
+    ("trust::source", "trust", "create_steps"),
+    ("trust::source", "trust", "submit_create_steps"),
+    ("trust::source", "trust", "update_steps"),
+    ("trust::source", "trust", "submit_update_steps"),
+];
+
+/// Names the source check counts only in the files of the module that
+/// defines them (its file, and the files of its submodules), as a path
+/// under `src/` without `.rs`. `trust::keyset`'s `set_status` is private,
+/// so only that module and its descendants can name it: the same name
+/// elsewhere is another item (a method of another type, say), not a
+/// forwarder. Widening it changes the key of its definition in
+/// `trust/keyset.rs`, which the count still catches, and a new caller can
+/// only be in these files.
+const SCOPED: [(&str, &str); 1] = [("set_status", "trust/keyset")];
+
 /// The registry items of the same tables that stay public: the readers,
 /// and the row and input types the test-support wrappers take and return.
-const REGISTRY_PUBLIC: [&str; 25] = [
+const REGISTRY_PUBLIC: [&str; 43] = [
     "get_trust_keyset_version",
     "list_trust_keyset_versions",
     "get_trust_source",
@@ -187,6 +298,24 @@ const REGISTRY_PUBLIC: [&str; 25] = [
     "NewAdministrativeOperation",
     "AdministrativeOperation",
     "lock_administrative_operation",
+    "get_resource_server_checker",
+    "list_resource_server_checkers",
+    "NewResourceServerChecker",
+    "ResourceServerCheckerChanges",
+    "ResourceServerChecker",
+    "get_resource_action",
+    "list_resource_actions",
+    "NewResourceAction",
+    "ResourceActionChanges",
+    "ResourceAction",
+    "get_tenant",
+    "list_tenants",
+    "TenantPatch",
+    "Tenant",
+    "get_principal",
+    "list_principals",
+    "PrincipalPatch",
+    "Principal",
 ];
 
 /// The registry writers that deliberately stay public (the proposal's
@@ -227,26 +356,36 @@ const RECOVERY_PUBLIC: [&str; 12] = [
 const REGISTRY_REMOVED: [&str; 1] = ["ChallengeBinding"];
 
 /// Where the library's source, comments and literals aside, names a bare
-/// registry writer, a writer of [`REGISTRY_PRIVATE`] or a step of
-/// [`STEPS`], one entry per line: the file under `src`, the first line of
-/// the item that holds the mention (the top-level item, or an `impl` block
-/// at any depth that follows it: the `seed` of `trust::keyset`'s tests
-/// comes after their `impl Drop for Db`), the name, and how many times,
-/// separated by ` | `. The trust writers are defined and re-exported `pub(crate)`, each
-/// wrapper is compiled only with `test-support`, and the callers are the
-/// trust write path's own steps and `crate::operation`'s approval, none of
-/// them public. Of PR 10's writers, the operator writers are defined
-/// `pub(super)` and the three creates re-exported privately, to
-/// `bootstrap_steps` and `restore_steps` (and the `seed` of a database
-/// unit test in `trust::keyset`, through `test_support`);
-/// `update_admin_role_binding` is named only by its definition and its
-/// wrapper; the audit append and the operation-row writers are defined and
-/// re-exported `pub(crate)`, and called by the audited steps of the
-/// registry (`bootstrap_steps`, `issue_steps`, `restore_steps`), of
-/// `crate::trust` (each module's private `append_stamped`) and of
-/// `crate::operation` (the approval's `approve_steps` and `revoke_steps`,
-/// the toggle's `toggle_steps`, and `insert_pending`, which the gated
-/// `submit_*` writes call).
+/// registry writer, a writer of [`REGISTRY_PRIVATE`], a step of [`STEPS`]
+/// or a caller of [`CALLERS`], one entry per line: the file under `src`,
+/// the first line of the item that holds the mention (the top-level item,
+/// or an `impl` block at any depth that follows it: the `seed` of
+/// `trust::keyset`'s tests comes after their `impl Drop for Db`), the name,
+/// and how many times, separated by ` | `. The trust writers are defined
+/// and re-exported `pub(crate)`, each wrapper is compiled only with
+/// `test-support`, and the callers are the trust write path's own steps and
+/// `crate::operation`'s approval, none of them public. Of PR 10's writers,
+/// the operator writers are defined `pub(super)` and the three creates
+/// re-exported privately, to `bootstrap_steps` and `restore_steps` (and the
+/// `seed` of a database unit test in `trust::keyset`, through
+/// `test_support`); `update_admin_role_binding` is named only by its
+/// definition and its wrapper; the audit append and the operation-row
+/// writers are defined and re-exported `pub(crate)`, and called by the
+/// audited steps of the registry (`bootstrap_steps`, `issue_steps`,
+/// `restore_steps`), of `crate::trust` (each module's private
+/// `append_stamped`) and of `crate::operation` (the approval's
+/// `approve_steps` and `revoke_steps`, the toggle's `toggle_steps`, and
+/// `insert_pending`, which the gated `submit_*` writes call). The other
+/// writers of [`REGISTRY_DEAD`] are, like `update_admin_role_binding`,
+/// named only by their definition and their wrapper. The last rows list
+/// where each caller of [`CALLERS`] is named: its definition, the `use`s
+/// and the crate-private re-export of `insert_pending`, the other callers,
+/// and the public entry points that call it (`bootstrap_instance`,
+/// `issue_recovery_challenge`, `restore_operator`, `approve_operation`,
+/// `cancel_operation`, `reject_operation`, `submit_widening_toggle`, the
+/// gated `submit_*` of `crate::trust` and the narrowing `disable_version`),
+/// and the ungated `pub(super)` writers of `crate::trust`, which their
+/// `expect(dead_code)` guards.
 const MENTIONS: &str = "
 persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_keyset_version | 1
 persistence/registry/mod.rs | pub(crate) use trust::{ | update_trust_keyset_version | 1
@@ -354,6 +493,81 @@ trust/keyset.rs |         impl Drop for Db { | create_admin_credential | 1
 trust/keyset.rs |         impl Drop for Db { | create_admin_role_binding | 1
 trust/source.rs | use crate::persistence::registry::{ | append_audit_event | 1
 trust/source.rs | async fn append_stamped( | append_audit_event | 1
+persistence/registry/audience.rs | pub(super) async fn create_resource_server_checker<'e>( | create_resource_server_checker | 1
+persistence/registry/audience.rs | pub(super) async fn update_resource_server_checker<'e>( | update_resource_server_checker | 1
+persistence/registry/audience.rs | pub(super) async fn add_resource_server_checker_tenant<'e>( | add_resource_server_checker_tenant | 1
+persistence/registry/audience.rs | pub(super) async fn remove_resource_server_checker_tenant<'e>( | remove_resource_server_checker_tenant | 1
+persistence/registry/audience.rs | pub(super) async fn create_resource_action<'e>( | create_resource_action | 1
+persistence/registry/audience.rs | pub(super) async fn update_resource_action<'e>( | update_resource_action | 1
+persistence/registry/tenant.rs | pub(super) async fn update_tenant<'e>( | update_tenant | 1
+persistence/registry/tenant.rs | pub(super) async fn update_principal<'e>( | update_principal | 1
+persistence/registry/test_support.rs | pub async fn create_resource_server_checker<'e>( | create_resource_server_checker | 2
+persistence/registry/test_support.rs | pub async fn update_resource_server_checker<'e>( | update_resource_server_checker | 2
+persistence/registry/test_support.rs | pub async fn add_resource_server_checker_tenant<'e>( | add_resource_server_checker_tenant | 2
+persistence/registry/test_support.rs | pub async fn remove_resource_server_checker_tenant<'e>( | remove_resource_server_checker_tenant | 2
+persistence/registry/test_support.rs | pub async fn create_resource_action<'e>( | create_resource_action | 2
+persistence/registry/test_support.rs | pub async fn update_resource_action<'e>( | update_resource_action | 2
+persistence/registry/test_support.rs | pub async fn update_tenant<'e>( | update_tenant | 2
+persistence/registry/test_support.rs | pub async fn update_principal<'e>( | update_principal | 2
+operation/approval.rs | async fn apply_create( | apply_create | 1
+operation/approval.rs | async fn apply_enable( | apply_enable | 1
+operation/approval.rs | async fn apply_source_create( | apply_source_create | 1
+operation/approval.rs | async fn apply_source_update( | apply_source_update | 1
+operation/approval.rs | async fn approve_steps( | apply_create | 1
+operation/approval.rs | async fn approve_steps( | apply_enable | 1
+operation/approval.rs | async fn approve_steps( | apply_source_create | 1
+operation/approval.rs | async fn approve_steps( | apply_source_update | 1
+operation/approval.rs | async fn approve_steps( | approve_steps | 1
+operation/approval.rs | async fn revoke_steps( | revoke_steps | 1
+operation/approval.rs | pub async fn approve_operation( | approve_steps | 1
+operation/approval.rs | pub async fn cancel_operation( | revoke_steps | 1
+operation/approval.rs | pub async fn reject_operation( | revoke_steps | 1
+operation/mod.rs | pub(crate) use toggle::{PendingRequest, encode_error, insert_pending}; | insert_pending | 1
+operation/toggle.rs | async fn toggle_steps( | insert_pending | 1
+operation/toggle.rs | async fn toggle_steps( | toggle_steps | 1
+operation/toggle.rs | pub async fn submit_widening_toggle( | toggle_steps | 1
+operation/toggle.rs | pub(crate) async fn insert_pending<E: From<RegistryError>>( | insert_pending | 1
+persistence/registry/bootstrap.rs | async fn bootstrap_steps( | bootstrap_steps | 1
+persistence/registry/bootstrap.rs | pub async fn bootstrap_instance( | bootstrap_steps | 1
+persistence/registry/recovery.rs | async fn issue_steps( | issue_steps | 1
+persistence/registry/recovery.rs | async fn restore_steps( | restore_steps | 1
+persistence/registry/recovery.rs | pub async fn issue_recovery_challenge( | issue_steps | 1
+persistence/registry/recovery.rs | pub async fn restore_operator( | restore_steps | 1
+trust/keyset.rs | async fn append_stamped( | append_stamped | 1
+trust/keyset.rs | async fn create_steps( | append_stamped | 1
+trust/keyset.rs | async fn create_steps( | create_steps | 1
+trust/keyset.rs | async fn set_status( | set_status | 1
+trust/keyset.rs | async fn set_status( | status_steps | 1
+trust/keyset.rs | async fn status_steps( | append_stamped | 1
+trust/keyset.rs | async fn status_steps( | status_steps | 1
+trust/keyset.rs | async fn submit_create_steps( | append_stamped | 1
+trust/keyset.rs | async fn submit_create_steps( | insert_pending | 1
+trust/keyset.rs | async fn submit_create_steps( | submit_create_steps | 1
+trust/keyset.rs | async fn submit_enable_steps( | append_stamped | 1
+trust/keyset.rs | async fn submit_enable_steps( | insert_pending | 1
+trust/keyset.rs | async fn submit_enable_steps( | submit_enable_steps | 1
+trust/keyset.rs | pub async fn disable_version( | set_status | 1
+trust/keyset.rs | pub async fn submit_create_version( | submit_create_steps | 1
+trust/keyset.rs | pub async fn submit_enable_version( | submit_enable_steps | 1
+trust/keyset.rs | pub(super) async fn create_version( | create_steps | 1
+trust/keyset.rs | pub(super) async fn enable_version( | set_status | 1
+trust/keyset.rs | use crate::operation::{ | insert_pending | 1
+trust/source.rs | async fn append_stamped( | append_stamped | 1
+trust/source.rs | async fn create_steps( | append_stamped | 1
+trust/source.rs | async fn create_steps( | create_steps | 1
+trust/source.rs | async fn submit_create_steps( | append_stamped | 1
+trust/source.rs | async fn submit_create_steps( | insert_pending | 1
+trust/source.rs | async fn submit_create_steps( | submit_create_steps | 1
+trust/source.rs | async fn submit_update_steps( | append_stamped | 1
+trust/source.rs | async fn submit_update_steps( | insert_pending | 1
+trust/source.rs | async fn submit_update_steps( | submit_update_steps | 1
+trust/source.rs | async fn update_steps( | append_stamped | 1
+trust/source.rs | async fn update_steps( | update_steps | 1
+trust/source.rs | pub async fn submit_create_source( | submit_create_steps | 1
+trust/source.rs | pub async fn submit_update_source( | submit_update_steps | 1
+trust/source.rs | pub(super) async fn create_source( | create_steps | 1
+trust/source.rs | pub(super) async fn update_source( | update_steps | 1
+trust/source.rs | use crate::operation::{ | insert_pending | 1
 ";
 
 /// Text that would let source escape the item keys of [`MENTIONS`], none of
@@ -575,8 +789,9 @@ fn probe_unreachable(library: &PlainLibrary, probes: &Path, name: &str, path: &s
 /// that a build without the feature turns into a warning once anything
 /// calls the writer. Without this, removing the attribute and adding a
 /// public forwarder of another name in the same change would pass. The
-/// four ungated trust writers (PR 7) and `update_admin_role_binding`
-/// (PR 10), by their file under `src` and the start of their item.
+/// four ungated trust writers (PR 7) and the registry writers of
+/// [`REGISTRY_DEAD`], by their file under `src` and the start of their
+/// item.
 #[test]
 fn each_ungated_writer_keeps_its_visibility_and_dead_code_guard() {
     const GUARD: &str = "#[cfg_attr(
@@ -586,11 +801,8 @@ fn each_ungated_writer_keeps_its_visibility_and_dead_code_guard() {
 ";
     let trust =
         UNGATED.map(|(module, writer)| (format!("trust/{module}.rs"), format!("{writer}(")));
-    let operator = (
-        "persistence/registry/operator.rs".to_owned(),
-        "update_admin_role_binding<'e>(".to_owned(),
-    );
-    for (file, writer) in trust.into_iter().chain([operator]) {
+    let registry = REGISTRY_DEAD.map(|(file, writer)| (file.to_owned(), format!("{writer}<'e>(")));
+    for (file, writer) in trust.into_iter().chain(registry) {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
         let source = fs::read_to_string(&path).unwrap();
         let item = format!("async fn {writer}");
@@ -726,6 +938,94 @@ fn stripping_keeps_code_and_blanks_comments_and_literals() {
     assert_eq!(stripped.lines().count(), source.lines().count());
 }
 
+/// Whether the source check counts `name` in `file` (under `src/`,
+/// `/`-separated): everywhere, but a name of [`SCOPED`] only in the files
+/// of its module.
+fn counted_in(name: &str, file: &str) -> bool {
+    SCOPED
+        .iter()
+        .filter(|(scoped, _)| *scoped == name)
+        .all(|(_, module)| {
+            file == format!("{module}.rs") || file.starts_with(&format!("{module}/"))
+        })
+}
+
+/// A mention's key: the file, the first line of the item that holds it, and
+/// the name.
+type MentionKey = (String, String, String);
+
+/// Adds to `found` the mentions of `names` in `source`, the file `relative`
+/// (under `src/`), outside comments and literals, keyed by the item that
+/// holds each (see
+/// [`each_writer_and_step_is_crate_private_and_named_only_where_expected`]);
+/// a name of [`SCOPED`] only in its module's files.
+fn count_mentions(
+    relative: &str,
+    source: &str,
+    names: &BTreeSet<&str>,
+    found: &mut BTreeMap<MentionKey, usize>,
+) {
+    let stripped = strip_comments_and_literals(source);
+    let names: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| counted_in(name, relative))
+        .collect();
+    let mut item = String::from("<the file's start>");
+    for (line, stripped_line) in source.lines().zip(stripped.lines()) {
+        let continues = ["/", "#", "}", ")", "]", "{", "where"];
+        let starts_item = stripped_line
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace())
+            && !continues
+                .iter()
+                .any(|prefix| stripped_line.starts_with(prefix));
+        let starts_item = starts_item || is_nested_impl(stripped_line);
+        if starts_item {
+            item = line.to_owned();
+        }
+        for name in &names {
+            let count = identifier_count(stripped_line, name);
+            if count > 0 {
+                *found
+                    .entry((relative.to_owned(), item.clone(), (*name).to_owned()))
+                    .or_insert(0) += count;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_scoped_name_is_counted_only_in_its_module() {
+    let names = BTreeSet::from(["set_status", "append_stamped"]);
+    let lamp = "struct Lamp;\n\nimpl Lamp {\n    pub fn set_status(&self) {}\n}\n";
+    let mut found = BTreeMap::new();
+    // An unrelated method of the same name, in another module or a module
+    // whose name only starts with `keyset`, is not a mention.
+    count_mentions("operation/lamp.rs", lamp, &names, &mut found);
+    count_mentions("trust/keyset_lamp.rs", lamp, &names, &mut found);
+    assert!(found.is_empty(), "{found:?}");
+    // In the module's file or a submodule's, it is.
+    count_mentions("trust/keyset.rs", lamp, &names, &mut found);
+    count_mentions("trust/keyset/lamp.rs", lamp, &names, &mut found);
+    // A name that is not scoped is counted everywhere.
+    count_mentions(
+        "operation/lamp.rs",
+        "fn f() {\n    append_stamped();\n}\n",
+        &names,
+        &mut found,
+    );
+    let key =
+        |file: &str, item: &str, name: &str| (file.to_owned(), item.to_owned(), name.to_owned());
+    let expected = BTreeMap::from([
+        (key("operation/lamp.rs", "fn f() {", "append_stamped"), 1),
+        (key("trust/keyset.rs", "impl Lamp {", "set_status"), 1),
+        (key("trust/keyset/lamp.rs", "impl Lamp {", "set_status"), 1),
+    ]);
+    assert_eq!(found, expected);
+}
+
 /// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -741,29 +1041,33 @@ fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
 /// The stand-in for `expect(dead_code)` where the writers and steps are
 /// called in every build: outside comments and string and character
 /// literals, the library names each bare registry writer, each writer of
-/// [`REGISTRY_PRIVATE`] and each step of [`STEPS`] exactly as [`MENTIONS`]
-/// lists. A mention is keyed by the first line of the item that holds it:
-/// the top-level item (a line that starts in column 0 and is not an
-/// attribute or the rest of an item), or the `impl` block, at any depth,
-/// that follows it, so a definition or a caller made `pub` changes the key,
-/// a forwarder or a caller of any other name, a public method of an `impl`
-/// nested in a function body included, adds one or a mention to a key, and
-/// a name moved into a comment or a literal to keep a count is not counted.
-/// `rustfmt` puts every top-level item in column 0, so the check also
-/// refuses the [`LAYOUT_ESCAPES`] that could keep one out of it and the
-/// [`LINT_ESCAPES`] that could silence a nested `impl` a macro expands, and
-/// it refuses `<name> as` (whitespace removed, outside comments and
-/// literals), an import or a cast under another name, which no count can
-/// follow.
+/// [`REGISTRY_PRIVATE`], each step of [`STEPS`] and each caller of
+/// [`CALLERS`] exactly as [`MENTIONS`] lists. A mention is keyed by the
+/// first line of the item that holds it: the top-level item (a line that
+/// starts in column 0 and is not an attribute or the rest of an item), or
+/// the `impl` block, at any depth, that follows it, so a definition or a
+/// caller made `pub` changes the key, a forwarder or a caller of any other
+/// name, a public method of an `impl` nested in a function body included,
+/// adds one or a mention to a key, and a name moved into a comment or a
+/// literal to keep a count is not counted. `rustfmt` puts every top-level
+/// item in column 0, so the check also refuses the [`LAYOUT_ESCAPES`] that
+/// could keep one out of it and the [`LINT_ESCAPES`] that could silence a
+/// nested `impl` a macro expands, and it refuses `<name> as` (whitespace
+/// removed, outside comments and literals), an import or a cast under
+/// another name, which no count can follow.
 #[test]
 fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&src, &mut files);
-    let names: Vec<&str> = REGISTRY_UNGATED
+    // A set: `append_stamped`, `create_steps` and `submit_create_steps` each
+    // name a function of `trust::keyset` and one of `trust::source`, and a
+    // name listed twice would be counted twice.
+    let names: BTreeSet<&str> = REGISTRY_UNGATED
         .into_iter()
         .chain(REGISTRY_PRIVATE.iter().map(|(_, writer)| *writer))
         .chain(STEPS.iter().map(|(_, step)| *step))
+        .chain(CALLERS.iter().map(|(_, _, caller)| *caller))
         .collect();
     let mut escapes = Vec::new();
     let mut aliases = Vec::new();
@@ -785,35 +1089,12 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
             }
         }
         let code: String = stripped.chars().filter(|c| !c.is_whitespace()).collect();
-        for name in &names {
+        for name in names.iter().filter(|name| counted_in(name, &relative)) {
             if code.contains(&format!("{name}as")) {
                 aliases.push(format!("{relative}: `{name} as`"));
             }
         }
-        let mut item = String::from("<the file's start>");
-        for (line, stripped_line) in source.lines().zip(stripped.lines()) {
-            let continues = ["/", "#", "}", ")", "]", "{", "where"];
-            let starts_item = stripped_line
-                .chars()
-                .next()
-                .is_some_and(|c| !c.is_whitespace())
-                && !continues
-                    .iter()
-                    .any(|prefix| stripped_line.starts_with(prefix));
-            let starts_item = starts_item || is_nested_impl(stripped_line);
-            if starts_item {
-                item = line.to_owned();
-            }
-            let code = &stripped_line;
-            for name in &names {
-                let count = identifier_count(code, name);
-                if count > 0 {
-                    *found
-                        .entry((relative.clone(), item.clone(), (*name).to_owned()))
-                        .or_insert(0) += count;
-                }
-            }
-        }
+        count_mentions(&relative, &source, &names, &mut found);
     }
     // The same lint levels set for the whole build: in a `[lints]` table of
     // the package or the workspace, or as `rustflags` (`-A`,
@@ -840,7 +1121,7 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
     );
     assert!(
         aliases.is_empty(),
-        "the library imports or casts a crate-private registry writer or a step under \
+        "the library imports or casts a crate-private registry writer, a step or a caller under \
          another name, which this source check cannot follow:\n{}",
         aliases.join("\n")
     );
@@ -869,7 +1150,7 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
         .collect();
     assert!(
         unexpected.is_empty() && missing.is_empty(),
-        "a crate-private registry writer or a step is named where it should not be, under \
+        "a crate-private registry writer, a step or a caller is named where it should not be, under \
          another visibility, or a different number of times (file | item | name | \
          count). Update MENTIONS only if this is a deliberate narrowing or rename; \
          a new caller or a wider visibility is what this test exists to refuse.\n\
@@ -959,6 +1240,18 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
         let paths = [format!("trust::{module}::{step}"), format!("trust::{step}")];
         for (index, path) in paths.iter().enumerate() {
             let name = format!("probe_step_{step}_{index}");
+            assert_unreachable(&library, &probes, &name, path);
+        }
+    }
+
+    for (module, parent, caller) in CALLERS {
+        // The defining module and the parent's re-export.
+        let paths = [format!("{module}::{caller}"), format!("{parent}::{caller}")];
+        for (index, path) in paths.iter().enumerate() {
+            let name = format!(
+                "probe_caller_{}_{caller}_{index}",
+                module.replace("::", "_")
+            );
             assert_unreachable(&library, &probes, &name, path);
         }
     }

@@ -71,8 +71,9 @@
 //!
 //! - an action that does not have the `<resource>.<verb>` syntax of IR-059
 //!   or is not in [`AUDIT_ACTIONS`](super::AUDIT_ACTIONS), a closed list
-//!   (lead decision, 2026-11-21, provisional until the maintainer ratifies
-//!   the ADRs, T00.8 to T00.17, Gate M0);
+//!   (lead decision, 2026-11-21: an implementation choice that ordinary
+//!   review can change; the maintainer ratified the ADRs directionally on
+//!   2026-11-24 and Gate M0 passed in #140);
 //! - an operator actor with an empty ID (inferred);
 //! - a revision above `2^53 - 1` (see "Envelope");
 //! - a timestamp outside the years `0000` to `9999` (see "Envelope"), a
@@ -111,8 +112,10 @@
 //! `prev_hash`): `id`, `tenant_id`, `sequence`, `timestamp`, `actor`,
 //! `action`, `object_id`, `previous_revision`, `new_revision` and `outcome`,
 //! serialized as RFC 8785 (JCS) canonical JSON in UTF-8. Lead decision,
-//! 2026-11-21, provisional until the maintainer ratifies the ADRs (T00.8 to
-//! T00.17, Gate M0; OQ-IR-15):
+//! 2026-11-21 (OQ-IR-15), an implementation choice that ordinary review can
+//! change (the maintainer ratified the ADRs directionally on 2026-11-24 and
+//! Gate M0 passed in #140; a change to a user ruling goes back to the
+//! user):
 //!
 //! - Every member is always present; an absent value (`tenant_id`,
 //!   `previous_revision`, `new_revision`) is an explicit JSON `null`, so an
@@ -214,9 +217,10 @@ fn time_of_microseconds(microseconds: i64) -> Option<SystemTime> {
     (microseconds_since_epoch(time).ok()? == microseconds).then_some(time)
 }
 
-/// The actor of an audit event (IR-058; lead decision, 2026-11-21,
-/// provisional until the maintainer ratifies the ADRs, T00.8 to T00.17,
-/// Gate M0). There is no variant for bootstrap or break-glass recovery yet;
+/// The actor of an audit event (IR-058; lead decision, 2026-11-21, an
+/// implementation choice that ordinary review can change: the maintainer
+/// ratified the ADRs directionally on 2026-11-24 and Gate M0 passed in
+/// #140). There is no variant for bootstrap or break-glass recovery yet;
 /// their reserved IDs are written as [`Operator`](Self::Operator) actors
 /// (identity-registry IR-058).
 #[derive(Debug, Clone, PartialEq, Eq)]
