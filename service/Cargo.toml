@@ -46,7 +46,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # `update_resource_server_checker`, `add_resource_server_checker_tenant`,
 # `remove_resource_server_checker_tenant`, `create_resource_action`,
 # `update_resource_action`, `update_tenant`, `update_principal`)
-# to those tests and to the scenario tests of `skyoauth-scenarios`. Off in
+# to those tests and to the scenario tests of `skyoauth-scenarios`, and
+# `ids::test_support`, the deterministic ID generator `SequentialIds`. Off in
 # a normal build, where those writes are crate-private; the dev-dependency
 # on this package below, and the one in `tests/Cargo.toml`, turn it on for
 # test targets only (inferred: the mechanism; second-approver proposal,

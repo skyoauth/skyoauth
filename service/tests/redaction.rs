@@ -10,7 +10,9 @@
 //! or its hashes, a key) must not appear in the `Display` or `Debug` of a
 //! `RestoreError`, a `SignedRecoveryResponse` or a `RecoveryPreview`
 //! (`persistence::registry::recovery`, "Restore";
-//! `docs/proposals/recovery-verified-response.md`).
+//! `docs/proposals/recovery-verified-response.md`). An `IdError` of an ID
+//! generator carries no detail of its cause either (`crate::ids`,
+//! "Generators").
 //!
 //! The unreachable-host and refused-connection tests need no server. The
 //! TLS, wrong-password and approval tests need `SKYOAUTH_IT_DATABASE_URL`
@@ -32,6 +34,7 @@ use common::TestDb;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::json;
 use skyoauth_service::{
+    ids::IdError,
     jwk::DEFAULT_ALLOWED_ALGORITHMS,
     operation::{
         ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, Gated, PendingOperation,
@@ -737,6 +740,31 @@ fn every_not_restorable_reason_is_fixed_text() {
             assert_eq!(err == RestoreError::from(other), reason == other);
         }
     }
+}
+
+/// Each `IdError`'s `Display` is fixed text and its `Debug` the variant's
+/// name alone, so no cause (an operating-system error, a counter, the kind)
+/// reaches a response or a log; the error has no source.
+#[test]
+fn every_id_error_is_fixed_text() {
+    for (err, text, debug) in [
+        (
+            IdError::SourceFailed,
+            "the ID generator's source of randomness failed",
+            "SourceFailed",
+        ),
+        (
+            IdError::Exhausted,
+            "the ID generator is exhausted",
+            "Exhausted",
+        ),
+    ] {
+        assert_eq!(err.to_string(), text);
+        assert_eq!(format!("{err:?}"), debug);
+        assert_eq!(format!("{err:#?}"), debug);
+        assert!(err.source().is_none());
+    }
+    assert_ne!(IdError::SourceFailed, IdError::Exhausted);
 }
 
 /// The `Debug` of a response and of a preview prints none of their values.
