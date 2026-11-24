@@ -531,7 +531,7 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
         // An update of the other binding moves its revision, not the
         // selected one's; an update of the selected binding moves its own.
         for (updated, base) in [(&higher, "bnd_m2"), (&lowest, "bnd_m1")] {
-            registry::update_principal_binding(
+            registry::test_support::update_principal_binding(
                 &pool,
                 t,
                 &updated.id,

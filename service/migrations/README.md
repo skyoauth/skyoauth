@@ -2782,6 +2782,17 @@ audit events (T13.x; bootstrap, below, is the exception), check the rules
 listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
 
+Since the second-approver proposal's registry hardening PR and its
+follow-up, the writers of tenants, principals, resource servers, audience
+tenant assignments, checkers, actions, principal bindings, service
+identities, grants and trust keysets (each create, update and list-set
+change) are private to the registry (`pub(super)`): nothing in the crate
+calls them outside tests, and the integration and scenario tests reach
+them through the `#[doc(hidden)]` `persistence::registry::test_support`,
+compiled only with the `test-support` feature. The readers stay public, and
+so do `consume_assertion` and `consume_assertion_set` below, which only
+insert replay records.
+
 Consumed assertions (T10.9; ADR-016 items 6 and 7): `consume_assertion`
 inserts one row with `ON CONFLICT DO NOTHING` and returns `Consumed`, or
 `Replay` when the key exists, leaving that row unchanged. The clause names

@@ -108,7 +108,7 @@ fn principal_patch(patch: TenantPatch) -> PrincipalPatch {
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for tenant in ["ten_a", "ten_b"] {
-        registry::create_tenant(&pool, &new_tenant(tenant))
+        registry::test_support::create_tenant(&pool, &new_tenant(tenant))
             .await
             .unwrap();
     }
@@ -117,12 +117,12 @@ async fn seeded() -> (TestDb, PgPool) {
         ("ten_a", "usr_1", PrincipalKind::Human),
         ("ten_b", "wld_b", PrincipalKind::Workload),
     ] {
-        registry::create_principal(&pool, &new_principal(tenant, id, kind))
+        registry::test_support::create_principal(&pool, &new_principal(tenant, id, kind))
             .await
             .unwrap();
     }
     for (tenant, keyset, version) in [("ten_a", "ks_1", "kv_1"), ("ten_b", "ks_b", "kv_b")] {
-        registry::create_trust_keyset(
+        registry::test_support::create_trust_keyset(
             &pool,
             &NewTrustKeyset {
                 id: keyset.into(),
@@ -572,7 +572,7 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
         .await
         .unwrap();
     assert_eq!(keyset.revision, 1);
-    registry::update_trust_keyset(
+    registry::test_support::update_trust_keyset(
         &pool,
         "ten_a",
         "ks_1",

@@ -813,8 +813,10 @@ async fn fixture() -> (TestDb, PgPool) {
     let pool = db.pool().await;
     for side in [A, B] {
         let t = side.tenant;
-        registry::create_tenant(&pool, &tenant(side)).await.unwrap();
-        registry::create_principal(
+        registry::test_support::create_tenant(&pool, &tenant(side))
+            .await
+            .unwrap();
+        registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: side.workload(),
@@ -827,7 +829,7 @@ async fn fixture() -> (TestDb, PgPool) {
         .await
         .unwrap();
         for (id, name) in [(side.keyset(), "partner"), (side.other_keyset(), "other")] {
-            registry::create_trust_keyset(&pool, &keyset(side, id, name))
+            registry::test_support::create_trust_keyset(&pool, &keyset(side, id, name))
                 .await
                 .unwrap();
         }
@@ -839,7 +841,7 @@ async fn fixture() -> (TestDb, PgPool) {
         registry::test_support::create_trust_source(&pool, &uploaded_source(side))
             .await
             .unwrap();
-        registry::create_principal_binding(
+        registry::test_support::create_principal_binding(
             &pool,
             &NewPrincipalBinding {
                 id: side.binding(),
@@ -855,7 +857,7 @@ async fn fixture() -> (TestDb, PgPool) {
         )
         .await
         .unwrap();
-        registry::create_service_grant(
+        registry::test_support::create_service_grant(
             &pool,
             &NewServiceGrant {
                 id: side.grant(),
@@ -1105,10 +1107,15 @@ async fn a04_pos_rotation_overlaps_versions_and_keeps_every_id() {
             name: before.keyset.name.clone(),
             status,
         };
-        let disabled =
-            registry::update_trust_keyset(&pool, t, &side.keyset(), 1, &changes(Status::Disabled))
-                .await
-                .unwrap();
+        let disabled = registry::test_support::update_trust_keyset(
+            &pool,
+            t,
+            &side.keyset(),
+            1,
+            &changes(Status::Disabled),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             disabled,
             TrustKeyset {
@@ -1118,10 +1125,15 @@ async fn a04_pos_rotation_overlaps_versions_and_keeps_every_id() {
             }
         );
         assert_eq!(versions(&pool, side, &side.keyset()).await, rotated);
-        let reenabled =
-            registry::update_trust_keyset(&pool, t, &side.keyset(), 2, &changes(Status::Enabled))
-                .await
-                .unwrap();
+        let reenabled = registry::test_support::update_trust_keyset(
+            &pool,
+            t,
+            &side.keyset(),
+            2,
+            &changes(Status::Enabled),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             reenabled,
             TrustKeyset {
@@ -1630,7 +1642,7 @@ async fn a04_neg_stale_or_foreign_rotation_steps_change_nothing() {
     // applies and moves only the version's, and its replay is stale.
     for side in [A, B] {
         let t = side.tenant;
-        let parent = registry::update_trust_keyset(
+        let parent = registry::test_support::update_trust_keyset(
             &pool,
             t,
             &side.keyset(),

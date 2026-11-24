@@ -386,7 +386,7 @@ async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     for (id, namespace) in [(TEN_A, "ns_a"), (TEN_B, "ns_b")] {
-        registry::create_tenant(&pool, &tenant(id, namespace))
+        registry::test_support::create_tenant(&pool, &tenant(id, namespace))
             .await
             .unwrap();
     }
@@ -395,7 +395,7 @@ async fn fixture() -> (TestDb, PgPool) {
         (TEN_A, SVC_A, PrincipalKind::Service, "deploy-api"),
         (TEN_B, "wld_b", PrincipalKind::Workload, "ci"),
     ] {
-        registry::create_principal(&pool, &principal(tenant, id, kind, name))
+        registry::test_support::create_principal(&pool, &principal(tenant, id, kind, name))
             .await
             .unwrap();
     }
@@ -408,11 +408,14 @@ async fn fixture() -> (TestDb, PgPool) {
         registry::test_support::create_trust_source(&pool, &new)
             .await
             .unwrap();
-        registry::create_principal_binding(&pool, &binding(tenant, binding_id, source, workload))
-            .await
-            .unwrap();
+        registry::test_support::create_principal_binding(
+            &pool,
+            &binding(tenant, binding_id, source, workload),
+        )
+        .await
+        .unwrap();
     }
-    registry::create_resource_server(
+    registry::test_support::create_resource_server(
         &pool,
         &NewResourceServer {
             id: RS.into(),
@@ -430,11 +433,11 @@ async fn fixture() -> (TestDb, PgPool) {
         assignment(ATA_A, TEN_A, &ATA_A_SCOPES),
         assignment(ATA_B, TEN_B, &ATA_B_SCOPES),
     ] {
-        registry::create_audience_tenant_assignment(&pool, &new)
+        registry::test_support::create_audience_tenant_assignment(&pool, &new)
             .await
             .unwrap();
     }
-    registry::create_service_identity(
+    registry::test_support::create_service_identity(
         &pool,
         &NewServiceIdentity {
             id: SVC_A.into(),
@@ -462,7 +465,9 @@ async fn fixture() -> (TestDb, PgPool) {
             ..grant_a(GRT_B, false, &[], None)
         },
     ] {
-        registry::create_service_grant(&pool, &new).await.unwrap();
+        registry::test_support::create_service_grant(&pool, &new)
+            .await
+            .unwrap();
     }
     (db, pool)
 }
@@ -613,7 +618,7 @@ async fn set_defaults<'e>(
         default_scopes: defaults.map(strings),
         ..grant_changes(current)
     };
-    let updated = registry::update_service_grant(
+    let updated = registry::test_support::update_service_grant(
         executor,
         &current.tenant_id,
         &current.id,
@@ -651,7 +656,7 @@ async fn set_assignment_scopes<'e>(
     let current = registry::get_audience_tenant_assignment(pool, id)
         .await
         .unwrap();
-    let updated = registry::update_audience_tenant_assignment(
+    let updated = registry::test_support::update_audience_tenant_assignment(
         executor,
         id,
         current.revision,
@@ -670,7 +675,7 @@ async fn set_assignment_scopes<'e>(
 
 async fn set_server_scopes(pool: &PgPool, scopes: &[&str]) -> i64 {
     let current = registry::get_resource_server(pool, RS).await.unwrap();
-    let updated = registry::update_resource_server(
+    let updated = registry::test_support::update_resource_server(
         pool,
         RS,
         current.revision,
@@ -692,7 +697,7 @@ async fn set_service_scopes(pool: &PgPool, scopes: &[&str]) -> i64 {
     let current = registry::get_service_identity(pool, TEN_A, SVC_A)
         .await
         .unwrap();
-    let updated = registry::update_service_identity(
+    let updated = registry::test_support::update_service_identity(
         pool,
         TEN_A,
         SVC_A,
@@ -868,7 +873,7 @@ async fn a26_neg_empty_or_out_of_grant_defaults_are_refused_at_write() {
         for delegation in [false, true] {
             let new = grant_a("grt_new", delegation, &GRANT_SCOPES, Some(defaults));
             assert_check(
-                registry::create_service_grant(&pool, &new).await,
+                registry::test_support::create_service_grant(&pool, &new).await,
                 constraint,
             );
             let read = registry::get_service_grant(&pool, TEN_A, "grt_new").await;
@@ -886,7 +891,14 @@ async fn a26_neg_empty_or_out_of_grant_defaults_are_refused_at_write() {
             ..grant_changes(&before)
         };
         assert_check(
-            registry::update_service_grant(&pool, TEN_A, DIRECT, before.revision, &changes).await,
+            registry::test_support::update_service_grant(
+                &pool,
+                TEN_A,
+                DIRECT,
+                before.revision,
+                &changes,
+            )
+            .await,
             constraint,
         );
         assert_eq!(get_grant(&pool, TEN_A, DIRECT).await, before, "{case}");
@@ -896,7 +908,14 @@ async fn a26_neg_empty_or_out_of_grant_defaults_are_refused_at_write() {
         ..grant_changes(&before)
     };
     assert_check(
-        registry::update_service_grant(&pool, TEN_A, DIRECT, before.revision, &narrowed).await,
+        registry::test_support::update_service_grant(
+            &pool,
+            TEN_A,
+            DIRECT,
+            before.revision,
+            &narrowed,
+        )
+        .await,
         DEFAULTS_CHECK,
     );
 
@@ -1075,7 +1094,9 @@ async fn a26_neg_defaults_outside_a_narrowed_ceiling_are_invalid_not_trimmed() {
         ("grt_dlg_deploy", true, "deploy:write"),
     ] {
         let new = grant_a(id, delegation, &GRANT_SCOPES, Some(&["read", outside]));
-        let stored = registry::create_service_grant(&pool, &new).await.unwrap();
+        let stored = registry::test_support::create_service_grant(&pool, &new)
+            .await
+            .unwrap();
         assert_eq!(stored.default_scopes, new.default_scopes);
         let loaded = assert_loaded_exactly(&pool, TEN_A, id).await;
         assert_invalid(decide(&loaded, &ScopeRequest::Omitted), id);

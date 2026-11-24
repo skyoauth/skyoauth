@@ -417,6 +417,72 @@ describe('the parts', () => {
     assert.equal(badReleaseCommands('cargo llvm-cov --profile ci\n').length, 1);
   });
 
+  test('badReleaseCommands expands short-option clusters letter by letter', () => {
+    const leaking = new Set(['full', 'x']);
+    for (const line of [
+      'cargo build -qr --all-features',
+      'cargo build -vr --all-features',
+      'cargo build -rF x',
+      'cargo build -rFfull',
+      'cargo build -rF full',
+      'cargo build -rF=full',
+      'cargo build -rF test-support',
+      'cargo build -vrj4 --all-targets',
+      'cargo b -qrp svc --all-features',
+      'cargo test -qr',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`, { leaking }).length, 1, line);
+    }
+    // A letter that takes a value takes the rest of the word: `-pr` is the package `r`, `-Fr` the feature `r`.
+    // The words after `--` are the program's: `-Dwarnings` holds no `-r`.
+    for (const line of [
+      'cargo build -pr --all-features',
+      'cargo build -Fr --all-features',
+      'cargo build -qv --all-features',
+      'cargo build -j4 --all-features',
+      'cargo build -rF plain',
+      'cargo rustc --all-features -- -Dwarnings',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`, { leaking }).length, 0, line);
+    }
+  });
+
+  test('badReleaseCommands reads cargo-SUB run directly as cargo SUB', () => {
+    for (const line of [
+      'cargo-nextest nextest run --cargo-profile release',
+      'cargo-nextest run -r',
+      'cargo-nextest nextest archive -r --archive-file a.tar.zst',
+      'cargo-llvm-cov llvm-cov --release',
+      'cargo-llvm-cov llvm-cov --profile ci',
+      '/usr/local/cargo/bin/cargo-llvm-cov llvm-cov nextest --cargo-profile release',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`).length, 1, line);
+    }
+    for (const line of ['cargo-nextest nextest run --profile ci', 'cargo-llvm-cov llvm-cov nextest --profile ci', 'cargo-nextest nextest run --all-features']) {
+      assert.equal(badReleaseCommands(`${line}\n`).length, 0, line);
+    }
+  });
+
+  test('badReleaseCommands reads no option value as the subcommand or the cargo word', () => {
+    for (const line of [
+      'cargo llvm-cov --color always nextest --profile ci',
+      'cargo llvm-cov nextest-archive --profile ci --archive-file a.tar.zst',
+      'make -C /opt/cargo build -r --all-features',
+      'make -C/opt/cargo build -r --all-features',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`).length, 0, line);
+    }
+    for (const line of [
+      'cargo llvm-cov --color always nextest --profile ci --cargo-profile release',
+      'cargo llvm-cov nextest-archive --cargo-profile release',
+      'cargo llvm-cov --color always --profile ci',
+      'env -C /opt/cargo cargo build -r --all-features',
+      'make -C /opt/cargo && cargo build -r --all-features',
+    ]) {
+      assert.equal(badReleaseCommands(`${line}\n`).length, 1, line);
+    }
+  });
+
   test('badReleaseCommands checks the commands around a single & on their own', () => {
     assert.equal(badReleaseCommands('cargo build --release & cargo test --all-features\n').length, 0);
     assert.equal(badReleaseCommands('cargo build --release --all-features & wait\n').length, 1);

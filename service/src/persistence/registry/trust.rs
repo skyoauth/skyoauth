@@ -41,7 +41,11 @@ macro_rules! source_columns {
 pub(super) use source_columns;
 
 /// Creates a keyset at revision 1.
-pub async fn create_trust_keyset<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_trust_keyset<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTrustKeyset,
 ) -> Result<TrustKeyset, RegistryError> {
@@ -94,7 +98,11 @@ pub async fn list_trust_keysets<'e>(
 
 /// Replaces the mutable columns of a keyset of `tenant_id` at
 /// `expected_revision` and advances its revision by one.
-pub async fn update_trust_keyset<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_trust_keyset<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,

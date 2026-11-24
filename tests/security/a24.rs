@@ -170,7 +170,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     for side in [A, B] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: side.tenant.into(),

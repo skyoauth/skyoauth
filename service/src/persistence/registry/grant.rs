@@ -159,7 +159,11 @@ async fn change_list<'e>(
 /// `claim_match_policy` must have every predicate its profile requires
 /// ([`validate_claim_match_policy`], checked before the statement; an unmet
 /// one is [`RegistryError::RequiredPredicate`]).
-pub async fn create_principal_binding<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_principal_binding<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipalBinding,
 ) -> Result<PrincipalBinding, RegistryError> {
@@ -224,7 +228,11 @@ pub async fn list_principal_bindings<'e>(
 /// the binding exists).
 /// Removing an optional predicate widens the binding; reviewing that stays
 /// with the service (ADR-016 item 2).
-pub async fn update_principal_binding<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_principal_binding<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,
@@ -262,7 +270,11 @@ pub async fn update_principal_binding<'e>(
 /// order).
 ///
 /// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
-pub async fn create_service_identity<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_service_identity<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewServiceIdentity,
 ) -> Result<ServiceIdentity, RegistryError> {
@@ -327,7 +339,11 @@ pub async fn list_service_identities<'e>(
 /// Replaces the mutable columns of a service identity of `tenant_id` at
 /// `expected_revision` and advances its revision by one. Its audiences are
 /// unchanged.
-pub async fn update_service_identity<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_service_identity<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,
@@ -368,7 +384,11 @@ pub async fn update_service_identity<'e>(
 /// after this call (migrations README, "What 0010 adds").
 ///
 /// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
-pub async fn add_service_identity_resource_server<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn add_service_identity_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     service_id: &str,
@@ -396,7 +416,11 @@ pub async fn add_service_identity_resource_server<'e>(
 /// of `tenant_id` at `expected_revision` and advances its revision by one,
 /// returning the new revision. An audience not listed is
 /// [`RegistryError::NotFound`] and changes nothing.
-pub async fn remove_service_identity_resource_server<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn remove_service_identity_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     service_id: &str,
@@ -442,7 +466,11 @@ pub async fn remove_service_identity_resource_server<'e>(
 /// transaction.
 ///
 /// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
-pub async fn create_service_grant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_service_grant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewServiceGrant,
 ) -> Result<ServiceGrant, RegistryError> {
@@ -525,7 +553,11 @@ pub async fn list_service_grants<'e>(
 /// Replaces the mutable columns of a grant of `tenant_id` at
 /// `expected_revision` and advances its revision by one. Its actor, target,
 /// mode, bindings and audiences are unchanged.
-pub async fn update_service_grant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_service_grant<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,
@@ -562,7 +594,11 @@ pub async fn update_service_grant<'e>(
 /// `service_grant_binding_binding_id_fkey`. One already listed is
 /// [`RegistryError::AlreadyExists`] with `service_grant_binding_pkey`.
 /// Neither error changes the revision.
-pub async fn add_service_grant_binding<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn add_service_grant_binding<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     grant_id: &str,
@@ -595,7 +631,11 @@ pub async fn add_service_grant_binding<'e>(
 /// ([`RegistryError::Guard`]): at once on an executor that commits at once,
 /// at the caller's commit inside a transaction, unless a binding is added
 /// before it.
-pub async fn remove_service_grant_binding<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn remove_service_grant_binding<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     grant_id: &str,
@@ -632,7 +672,11 @@ pub async fn remove_service_grant_binding<'e>(
 /// event.
 ///
 /// [`InvariantKind::AssignmentActive`]: super::InvariantKind::AssignmentActive
-pub async fn add_service_grant_resource_server<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn add_service_grant_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     grant_id: &str,
@@ -660,7 +704,11 @@ pub async fn add_service_grant_resource_server<'e>(
 /// `tenant_id` at `expected_revision` and advances its revision by one,
 /// returning the new revision. An audience not listed is
 /// [`RegistryError::NotFound`] and changes nothing.
-pub async fn remove_service_grant_resource_server<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn remove_service_grant_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     grant_id: &str,

@@ -415,7 +415,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     for side in [A, B] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: side.tenant.into(),
@@ -431,11 +431,11 @@ async fn two_tenants() -> (TestDb, PgPool) {
             (side.service(), PrincipalKind::Service, "deploy-api"),
             (side.spare(), PrincipalKind::Service, "spare"),
         ] {
-            registry::create_principal(&pool, &principal(side, id, kind, name))
+            registry::test_support::create_principal(&pool, &principal(side, id, kind, name))
                 .await
                 .unwrap();
         }
-        registry::create_resource_server(
+        registry::test_support::create_resource_server(
             &pool,
             &NewResourceServer {
                 id: side.audience(),
@@ -449,7 +449,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
         )
         .await
         .unwrap();
-        registry::create_audience_tenant_assignment(
+        registry::test_support::create_audience_tenant_assignment(
             &pool,
             &NewAudienceTenantAssignment {
                 id: side.id("ata"),
@@ -463,7 +463,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
         )
         .await
         .unwrap();
-        registry::create_trust_keyset(&pool, &keyset(side, side.keyset(), "partner"))
+        registry::test_support::create_trust_keyset(&pool, &keyset(side, side.keyset(), "partner"))
             .await
             .unwrap();
         registry::test_support::create_trust_keyset_version(
@@ -482,7 +482,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
                 .await
                 .unwrap();
         }
-        registry::create_principal_binding(
+        registry::test_support::create_principal_binding(
             &pool,
             &binding(
                 side,
@@ -494,13 +494,13 @@ async fn two_tenants() -> (TestDb, PgPool) {
         )
         .await
         .unwrap();
-        registry::create_service_identity(
+        registry::test_support::create_service_identity(
             &pool,
             &service_identity(side, side.service(), "deploy-api", vec![side.audience()]),
         )
         .await
         .unwrap();
-        registry::create_service_grant(
+        registry::test_support::create_service_grant(
             &pool,
             &direct_grant(
                 side,
@@ -707,7 +707,8 @@ async fn a29_pos_tenants_reuse_object_names() {
     for side in [A, B] {
         let dup = |base: &str| side.id(&format!("{base}_dup"));
         assert_name_taken(
-            registry::create_trust_keyset(&pool, &keyset(side, dup("ks"), "partner")).await,
+            registry::test_support::create_trust_keyset(&pool, &keyset(side, dup("ks"), "partner"))
+                .await,
             "trust_keyset_tenant_id_name_key",
         );
         assert_name_taken(
@@ -719,7 +720,7 @@ async fn a29_pos_tenants_reuse_object_names() {
             "trust_source_tenant_id_name_key",
         );
         assert_name_taken(
-            registry::create_principal_binding(
+            registry::test_support::create_principal_binding(
                 &pool,
                 &binding(side, dup("bnd"), "release", side.github(), side.workload()),
             )
@@ -727,7 +728,7 @@ async fn a29_pos_tenants_reuse_object_names() {
             "principal_binding_tenant_id_name_key",
         );
         assert_name_taken(
-            registry::create_service_identity(
+            registry::test_support::create_service_identity(
                 &pool,
                 &service_identity(side, side.spare(), "deploy-api", vec![]),
             )
@@ -735,7 +736,7 @@ async fn a29_pos_tenants_reuse_object_names() {
             "service_identity_tenant_id_name_key",
         );
         assert_name_taken(
-            registry::create_service_grant(
+            registry::test_support::create_service_grant(
                 &pool,
                 &direct_grant(
                     side,
@@ -807,7 +808,7 @@ async fn a29_neg_binding_on_other_tenants_source() {
         for source in [owner.github(), owner.uploaded(), owner.kubernetes()] {
             let id = intruder.id("bnd_cross");
             assert_crossing_refused(
-                registry::create_principal_binding(
+                registry::test_support::create_principal_binding(
                     &pool,
                     &binding(intruder, id.clone(), "cross", source, intruder.workload()),
                 )
@@ -830,7 +831,7 @@ async fn a29_neg_binding_of_other_tenants_workload() {
     for (owner, intruder) in DIRECTIONS {
         let id = intruder.id("bnd_cross");
         assert_crossing_refused(
-            registry::create_principal_binding(
+            registry::test_support::create_principal_binding(
                 &pool,
                 &binding(
                     intruder,
@@ -859,7 +860,7 @@ async fn a29_neg_service_identity_of_other_tenants_principal() {
         // The owner's service principal has no identity yet, so only the
         // tenant of the reference is wrong.
         assert_crossing_refused(
-            registry::create_service_identity(
+            registry::test_support::create_service_identity(
                 &pool,
                 &service_identity(intruder, owner.spare(), "cross", vec![]),
             )
@@ -883,7 +884,7 @@ async fn a29_neg_service_identity_audience_of_other_tenant() {
     for (owner, intruder) in DIRECTIONS {
         // On create: the whole statement fails, no identity is left.
         assert_crossing_refused(
-            registry::create_service_identity(
+            registry::test_support::create_service_identity(
                 &pool,
                 &service_identity(intruder, intruder.spare(), "cross", vec![owner.audience()]),
             )
@@ -897,7 +898,7 @@ async fn a29_neg_service_identity_audience_of_other_tenant() {
         }
         // Added to an existing identity: its revision and audiences stay.
         assert_crossing_refused(
-            registry::add_service_identity_resource_server(
+            registry::test_support::add_service_identity_resource_server(
                 &pool,
                 intruder.tenant,
                 &intruder.service(),
@@ -922,7 +923,7 @@ async fn a29_neg_grant_for_other_tenants_actor() {
         // at commit, after the actor's foreign key has failed the statement.
         let id = intruder.id("grt_cross");
         assert_crossing_refused(
-            registry::create_service_grant(
+            registry::test_support::create_service_grant(
                 &pool,
                 &direct_grant(
                     intruder,
@@ -963,7 +964,7 @@ async fn a29_neg_grant_targeting_other_tenants_service() {
             )
         };
         assert_crossing_refused(
-            registry::create_service_grant(&pool, &grant).await,
+            registry::test_support::create_service_grant(&pool, &grant).await,
             "service_grant_target_service_id_fkey",
         );
         for side in [A, B] {
@@ -982,7 +983,7 @@ async fn a29_neg_grant_allowing_other_tenants_binding() {
         // On create: the binding row fails, so the grant is not created.
         let id = intruder.id("grt_cross");
         assert_crossing_refused(
-            registry::create_service_grant(
+            registry::test_support::create_service_grant(
                 &pool,
                 &direct_grant(
                     intruder,
@@ -1001,7 +1002,7 @@ async fn a29_neg_grant_allowing_other_tenants_binding() {
         }
         // Added to an existing grant: its revision and bindings stay.
         assert_crossing_refused(
-            registry::add_service_grant_binding(
+            registry::test_support::add_service_grant_binding(
                 &pool,
                 intruder.tenant,
                 &intruder.grant(),
@@ -1023,7 +1024,7 @@ async fn a29_neg_grant_audience_of_other_tenant() {
     for (owner, intruder) in DIRECTIONS {
         let id = intruder.id("grt_cross");
         assert_crossing_refused(
-            registry::create_service_grant(
+            registry::test_support::create_service_grant(
                 &pool,
                 &direct_grant(
                     intruder,
@@ -1041,7 +1042,7 @@ async fn a29_neg_grant_audience_of_other_tenant() {
             assert_not_found(registry::get_service_grant(&pool, side.tenant, &id).await);
         }
         assert_crossing_refused(
-            registry::add_service_grant_resource_server(
+            registry::test_support::add_service_grant_resource_server(
                 &pool,
                 intruder.tenant,
                 &intruder.grant(),
@@ -1070,7 +1071,7 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
             .await
             .unwrap();
         assert_not_found(
-            registry::update_trust_keyset(
+            registry::test_support::update_trust_keyset(
                 &pool,
                 t,
                 &keyset.id,
@@ -1115,7 +1116,7 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
             .await
             .unwrap();
         assert_not_found(
-            registry::update_principal_binding(
+            registry::test_support::update_principal_binding(
                 &pool,
                 t,
                 &bound.id,
@@ -1138,7 +1139,7 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
             .await
             .unwrap();
         assert_not_found(
-            registry::update_service_identity(
+            registry::test_support::update_service_identity(
                 &pool,
                 t,
                 &service.id,
@@ -1156,7 +1157,7 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
             .await
             .unwrap();
         assert_not_found(
-            registry::update_service_grant(
+            registry::test_support::update_service_grant(
                 &pool,
                 t,
                 &grant.id,
@@ -1178,26 +1179,64 @@ async fn a29_neg_writes_to_other_tenants_records_find_nothing() {
         // removing the owner's.
         let (svc, grt) = (owner.service(), owner.grant());
         assert_not_found(
-            registry::add_service_identity_resource_server(&pool, t, &svc, 1, &intruder.audience())
-                .await,
+            registry::test_support::add_service_identity_resource_server(
+                &pool,
+                t,
+                &svc,
+                1,
+                &intruder.audience(),
+            )
+            .await,
         );
         assert_not_found(
-            registry::remove_service_identity_resource_server(&pool, t, &svc, 1, &owner.audience())
-                .await,
+            registry::test_support::remove_service_identity_resource_server(
+                &pool,
+                t,
+                &svc,
+                1,
+                &owner.audience(),
+            )
+            .await,
         );
         assert_not_found(
-            registry::add_service_grant_binding(&pool, t, &grt, 1, &intruder.binding()).await,
+            registry::test_support::add_service_grant_binding(
+                &pool,
+                t,
+                &grt,
+                1,
+                &intruder.binding(),
+            )
+            .await,
         );
         assert_not_found(
-            registry::remove_service_grant_binding(&pool, t, &grt, 1, &owner.binding()).await,
+            registry::test_support::remove_service_grant_binding(
+                &pool,
+                t,
+                &grt,
+                1,
+                &owner.binding(),
+            )
+            .await,
         );
         assert_not_found(
-            registry::add_service_grant_resource_server(&pool, t, &grt, 1, &intruder.audience())
-                .await,
+            registry::test_support::add_service_grant_resource_server(
+                &pool,
+                t,
+                &grt,
+                1,
+                &intruder.audience(),
+            )
+            .await,
         );
         assert_not_found(
-            registry::remove_service_grant_resource_server(&pool, t, &grt, 1, &owner.audience())
-                .await,
+            registry::test_support::remove_service_grant_resource_server(
+                &pool,
+                t,
+                &grt,
+                1,
+                &owner.audience(),
+            )
+            .await,
         );
     }
     assert_eq!(snapshots(&pool).await, before);

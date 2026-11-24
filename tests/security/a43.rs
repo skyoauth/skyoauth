@@ -530,7 +530,9 @@ async fn tenants() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     for side in [A, B] {
-        registry::create_tenant(&pool, &tenant(side)).await.unwrap();
+        registry::test_support::create_tenant(&pool, &tenant(side))
+            .await
+            .unwrap();
     }
     (db, pool)
 }
@@ -541,10 +543,12 @@ async fn tenants() -> (TestDb, PgPool) {
 async fn fixture() -> (TestDb, PgPool) {
     let (db, pool) = tenants().await;
     for new in servers() {
-        registry::create_resource_server(&pool, &new).await.unwrap();
+        registry::test_support::create_resource_server(&pool, &new)
+            .await
+            .unwrap();
     }
     for new in assignments() {
-        registry::create_audience_tenant_assignment(&pool, &new)
+        registry::test_support::create_audience_tenant_assignment(&pool, &new)
             .await
             .unwrap();
     }
@@ -554,7 +558,7 @@ async fn fixture() -> (TestDb, PgPool) {
             (side.service(), PrincipalKind::Service, "deploy-api"),
             (side.spare(), PrincipalKind::Service, "spare"),
         ] {
-            registry::create_principal(&pool, &principal(side, id, kind, name))
+            registry::test_support::create_principal(&pool, &principal(side, id, kind, name))
                 .await
                 .unwrap();
         }
@@ -562,7 +566,7 @@ async fn fixture() -> (TestDb, PgPool) {
         registry::test_support::create_trust_source(&pool, &github_source(side))
             .await
             .unwrap();
-        registry::create_principal_binding(
+        registry::test_support::create_principal_binding(
             &pool,
             &NewPrincipalBinding {
                 id: side.binding(),
@@ -578,15 +582,18 @@ async fn fixture() -> (TestDb, PgPool) {
         .await
         .unwrap();
         let own = side.audience();
-        registry::create_service_identity(
+        registry::test_support::create_service_identity(
             &pool,
             &service_identity(side, side.service(), "deploy-api", &[&own]),
         )
         .await
         .unwrap();
-        registry::create_service_grant(&pool, &direct_grant(side, side.grant(), "deploy", &[&own]))
-            .await
-            .unwrap();
+        registry::test_support::create_service_grant(
+            &pool,
+            &direct_grant(side, side.grant(), "deploy", &[&own]),
+        )
+        .await
+        .unwrap();
     }
     (db, pool)
 }
@@ -711,13 +718,13 @@ async fn a43_pos_tenant_references_its_own_assigned_audiences() {
         // An identity created with both of its audiences, listed in byte
         // order whatever the order given.
         let second = side.id("svc2");
-        registry::create_principal(
+        registry::test_support::create_principal(
             &pool,
             &principal(side, second.clone(), PrincipalKind::Service, "billing-api"),
         )
         .await
         .unwrap();
-        let created = registry::create_service_identity(
+        let created = registry::test_support::create_service_identity(
             &pool,
             &service_identity(side, second.clone(), "billing-api", &[SHARED, &own]),
         )
@@ -734,9 +741,15 @@ async fn a43_pos_tenant_references_its_own_assigned_audiences() {
         // The shared audience added to the fixture's identity and grant,
         // which name the own audience.
         assert_eq!(
-            registry::add_service_identity_resource_server(&pool, t, &side.service(), 1, SHARED)
-                .await
-                .unwrap(),
+            registry::test_support::add_service_identity_resource_server(
+                &pool,
+                t,
+                &side.service(),
+                1,
+                SHARED
+            )
+            .await
+            .unwrap(),
             2
         );
         let identity = registry::get_service_identity(&pool, t, &side.service())
@@ -747,9 +760,15 @@ async fn a43_pos_tenant_references_its_own_assigned_audiences() {
             (both.clone(), 2)
         );
         assert_eq!(
-            registry::add_service_grant_resource_server(&pool, t, &side.grant(), 1, SHARED)
-                .await
-                .unwrap(),
+            registry::test_support::add_service_grant_resource_server(
+                &pool,
+                t,
+                &side.grant(),
+                1,
+                SHARED
+            )
+            .await
+            .unwrap(),
             2
         );
         let grant = registry::get_service_grant(&pool, t, &side.grant())
@@ -766,7 +785,7 @@ async fn a43_pos_tenant_references_its_own_assigned_audiences() {
             target_service_id: Some(second.clone()),
             ..direct_grant(side, side.id("grt_dlg"), "delegate", &[SHARED, &own])
         };
-        let created = registry::create_service_grant(&pool, &delegation)
+        let created = registry::test_support::create_service_grant(&pool, &delegation)
             .await
             .unwrap();
         assert_eq!(created.resource_server_ids, both);
@@ -866,7 +885,7 @@ async fn a43_neg_reference_outside_own_assignment_is_one_refusal() {
             let refusals = [
                 (
                     refusal(
-                        registry::create_service_identity(
+                        registry::test_support::create_service_identity(
                             &pool,
                             &service_identity(intruder, intruder.spare(), "cross", &[named]),
                         )
@@ -876,7 +895,7 @@ async fn a43_neg_reference_outside_own_assignment_is_one_refusal() {
                 ),
                 (
                     refusal(
-                        registry::add_service_identity_resource_server(
+                        registry::test_support::add_service_identity_resource_server(
                             &pool,
                             t,
                             &intruder.service(),
@@ -889,7 +908,7 @@ async fn a43_neg_reference_outside_own_assignment_is_one_refusal() {
                 ),
                 (
                     refusal(
-                        registry::create_service_grant(
+                        registry::test_support::create_service_grant(
                             &pool,
                             &direct_grant(intruder, grant_id.clone(), "cross", &[named]),
                         )
@@ -899,7 +918,7 @@ async fn a43_neg_reference_outside_own_assignment_is_one_refusal() {
                 ),
                 (
                     refusal(
-                        registry::add_service_grant_resource_server(
+                        registry::test_support::add_service_grant_resource_server(
                             &pool,
                             t,
                             &intruder.grant(),
@@ -923,7 +942,7 @@ async fn a43_neg_reference_outside_own_assignment_is_one_refusal() {
             let own = intruder.audience();
             assert_eq!(
                 refusal(
-                    registry::create_service_grant(
+                    registry::test_support::create_service_grant(
                         &pool,
                         &direct_grant(intruder, grant_id.clone(), "cross", &[&own, named]),
                     )
@@ -967,15 +986,18 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
             ..server(&format!("rs_competing_{index}"), &audience)
         };
         assert_eq!(
-            already_exists(registry::create_resource_server(&pool, &competing).await),
+            already_exists(registry::test_support::create_resource_server(&pool, &competing).await),
             AUDIENCE_KEY,
             "{audience}"
         );
     }
     assert_eq!(
         already_exists(
-            registry::create_resource_server(&pool, &server(&A.audience(), "https://new.example"))
-                .await
+            registry::test_support::create_resource_server(
+                &pool,
+                &server(&A.audience(), "https://new.example")
+            )
+            .await
         ),
         "resource_server_pkey"
     );
@@ -989,7 +1011,7 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
     ] {
         assert_eq!(
             already_exists(
-                registry::create_audience_tenant_assignment(
+                registry::test_support::create_audience_tenant_assignment(
                     &pool,
                     &assignment(id, &resource_server_id, tenant, true),
                 )
@@ -1001,7 +1023,7 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
     }
     assert_eq!(
         already_exists(
-            registry::create_audience_tenant_assignment(
+            registry::test_support::create_audience_tenant_assignment(
                 &pool,
                 &assignment(&A.assignment(), FREE, B.tenant, true),
             )
@@ -1016,7 +1038,7 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
     let original = registry::get_resource_server(&pool, &A.audience())
         .await
         .unwrap();
-    registry::update_resource_server(
+    registry::test_support::update_resource_server(
         &pool,
         &original.id,
         original.revision,
@@ -1033,7 +1055,7 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
     let held = registry::get_audience_tenant_assignment(&pool, &A.assignment())
         .await
         .unwrap();
-    registry::update_audience_tenant_assignment(
+    registry::test_support::update_audience_tenant_assignment(
         &pool,
         &held.id,
         held.revision,
@@ -1049,7 +1071,7 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
     let disabled = snapshot(&pool).await;
     assert_eq!(
         already_exists(
-            registry::create_resource_server(
+            registry::test_support::create_resource_server(
                 &pool,
                 &server("rs_competing_disabled", &A.audience_string())
             )
@@ -1059,7 +1081,7 @@ async fn a43_neg_competing_registration_of_an_audience_is_refused() {
     );
     assert_eq!(
         already_exists(
-            registry::create_audience_tenant_assignment(
+            registry::test_support::create_audience_tenant_assignment(
                 &pool,
                 &assignment("ata_second_disabled", &A.audience(), A.tenant, true),
             )
@@ -1094,7 +1116,13 @@ async fn a43_neg_audience_variants_are_distinct_or_refused() {
         format!("{original}\u{85}"),
     ] {
         assert_eq!(
-            refusal(registry::create_resource_server(&pool, &server("rs_variant", &variant)).await),
+            refusal(
+                registry::test_support::create_resource_server(
+                    &pool,
+                    &server("rs_variant", &variant)
+                )
+                .await
+            ),
             Refusal {
                 kind: InvariantKind::Check,
                 constraint: NO_SPACE_CHECK,
@@ -1124,7 +1152,9 @@ async fn a43_neg_audience_variants_are_distinct_or_refused() {
     ];
     for (id, variant) in &variants {
         let new = server(id, variant);
-        let created = registry::create_resource_server(&pool, &new).await.unwrap();
+        let created = registry::test_support::create_resource_server(&pool, &new)
+            .await
+            .unwrap();
         assert_eq!(created, stored_server(&new), "{variant:?}");
         let read = registry::get_resource_server(&pool, id).await.unwrap();
         assert_eq!(read.audience.as_bytes(), variant.as_bytes(), "{variant:?}");
@@ -1133,7 +1163,7 @@ async fn a43_neg_audience_variants_are_distinct_or_refused() {
     for (index, (_, variant)) in variants.iter().enumerate() {
         assert_eq!(
             already_exists(
-                registry::create_resource_server(
+                registry::test_support::create_resource_server(
                     &pool,
                     &server(&format!("rs_v_again_{index}"), variant)
                 )
@@ -1176,7 +1206,7 @@ async fn a43_neg_concurrent_registrations_have_one_winner_per_key() {
         let outcomes = replicas
             .race(|replica, mut conn| async move {
                 let new = server(&format!("rs_race_{replica}"), CONTESTED_AUDIENCE);
-                registry::create_resource_server(&mut *conn, &new).await
+                registry::test_support::create_resource_server(&mut *conn, &new).await
             })
             .await;
         let winners: Vec<usize> = (0..REPLICAS).filter(|&r| outcomes[r].is_ok()).collect();
@@ -1221,7 +1251,10 @@ async fn a43_neg_concurrent_registrations_have_one_winner_per_key() {
             let request = request.clone();
             move |replica, mut conn: PoolConnection<Postgres>| {
                 let new = request(replica);
-                async move { registry::create_audience_tenant_assignment(&mut *conn, &new).await }
+                async move {
+                    registry::test_support::create_audience_tenant_assignment(&mut *conn, &new)
+                        .await
+                }
             }
         };
         let outcomes = replicas.race(assign).await;
@@ -1292,12 +1325,13 @@ impl Contested {
 
     async fn register(self, conn: &mut sqlx::PgConnection, n: usize) -> Outcome {
         match self {
-            Contested::Audience => {
-                registry::create_resource_server(conn, &server(&self.id(n), CONTESTED_AUDIENCE))
-                    .await
-                    .map(|row| row.id)
-            }
-            Contested::Assignment => registry::create_audience_tenant_assignment(
+            Contested::Audience => registry::test_support::create_resource_server(
+                conn,
+                &server(&self.id(n), CONTESTED_AUDIENCE),
+            )
+            .await
+            .map(|row| row.id),
+            Contested::Assignment => registry::test_support::create_audience_tenant_assignment(
                 conn,
                 &assignment(&self.id(n), "rs_contested", A.tenant, n.is_multiple_of(2)),
             )
@@ -1342,7 +1376,7 @@ async fn a43_neg_blocked_registrations_follow_the_holder_commit_or_rollback() {
         for commit in [true, false] {
             let (db, pool) = tenants().await;
             if let Contested::Assignment = contested {
-                registry::create_resource_server(
+                registry::test_support::create_resource_server(
                     &pool,
                     &server("rs_contested", CONTESTED_AUDIENCE),
                 )
@@ -1492,7 +1526,7 @@ async fn references_fixture() -> (TestDb, PgPool) {
     let (db, pool) = fixture().await;
     for reference in Reference::all() {
         let side = reference.side;
-        registry::create_principal(
+        registry::test_support::create_principal(
             &pool,
             &principal(
                 side,
@@ -1504,7 +1538,7 @@ async fn references_fixture() -> (TestDb, PgPool) {
         .await
         .unwrap();
         if reference.carrier_identity != side.service() {
-            registry::create_principal(
+            registry::test_support::create_principal(
                 &pool,
                 &principal(
                     side,
@@ -1515,7 +1549,7 @@ async fn references_fixture() -> (TestDb, PgPool) {
             )
             .await
             .unwrap();
-            registry::create_service_identity(
+            registry::test_support::create_service_identity(
                 &pool,
                 &service_identity(
                     side,
@@ -1526,7 +1560,7 @@ async fn references_fixture() -> (TestDb, PgPool) {
             )
             .await
             .unwrap();
-            registry::create_service_grant(
+            registry::test_support::create_service_grant(
                 &pool,
                 &direct_grant(
                     side,
@@ -1552,7 +1586,7 @@ async fn set_assignment_status(
     let held = registry::get_audience_tenant_assignment(pool, id)
         .await
         .unwrap();
-    let updated = registry::update_audience_tenant_assignment(
+    let updated = registry::test_support::update_audience_tenant_assignment(
         pool,
         id,
         held.revision,
@@ -1584,7 +1618,7 @@ async fn assert_reference_accepted(pool: &PgPool, reference: &Reference) {
     let t = side.tenant;
     let target = reference.target.as_str();
     let label = format!("{t} naming {target} ({})", reference.label);
-    let created = registry::create_service_identity(
+    let created = registry::test_support::create_service_identity(
         pool,
         &service_identity(
             side,
@@ -1608,7 +1642,7 @@ async fn assert_reference_accepted(pool: &PgPool, reference: &Reference) {
         "{label}"
     );
     assert_eq!(
-        registry::add_service_identity_resource_server(
+        registry::test_support::add_service_identity_resource_server(
             pool,
             t,
             &reference.carrier_identity,
@@ -1628,7 +1662,7 @@ async fn assert_reference_accepted(pool: &PgPool, reference: &Reference) {
         (reference.both(), 2),
         "{label}"
     );
-    let created = registry::create_service_grant(
+    let created = registry::test_support::create_service_grant(
         pool,
         &direct_grant(
             side,
@@ -1652,9 +1686,15 @@ async fn assert_reference_accepted(pool: &PgPool, reference: &Reference) {
         "{label}"
     );
     assert_eq!(
-        registry::add_service_grant_resource_server(pool, t, &reference.carrier_grant, 1, target)
-            .await
-            .unwrap(),
+        registry::test_support::add_service_grant_resource_server(
+            pool,
+            t,
+            &reference.carrier_grant,
+            1,
+            target
+        )
+        .await
+        .unwrap(),
         2,
         "{label}"
     );
@@ -1689,7 +1729,7 @@ async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
     let refusals = [
         (
             refusal(
-                registry::create_service_identity(
+                registry::test_support::create_service_identity(
                     pool,
                     &service_identity(side, reference.new_identity.clone(), &name, &[target]),
                 )
@@ -1699,7 +1739,7 @@ async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
         ),
         (
             refusal(
-                registry::add_service_identity_resource_server(
+                registry::test_support::add_service_identity_resource_server(
                     pool,
                     t,
                     &reference.carrier_identity,
@@ -1712,7 +1752,7 @@ async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
         ),
         (
             refusal(
-                registry::create_service_grant(
+                registry::test_support::create_service_grant(
                     pool,
                     &direct_grant(side, reference.new_grant.clone(), &name, &[target]),
                 )
@@ -1722,7 +1762,7 @@ async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
         ),
         (
             refusal(
-                registry::add_service_grant_resource_server(
+                registry::test_support::add_service_grant_resource_server(
                     pool,
                     t,
                     &reference.carrier_grant,
@@ -1737,7 +1777,7 @@ async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
         // still fails as a whole.
         (
             refusal(
-                registry::create_service_identity(
+                registry::test_support::create_service_identity(
                     pool,
                     &service_identity(
                         side,
@@ -1752,7 +1792,7 @@ async fn assert_reference_refused(pool: &PgPool, reference: &Reference) {
         ),
         (
             refusal(
-                registry::create_service_grant(
+                registry::test_support::create_service_grant(
                     pool,
                     &direct_grant(side, reference.new_grant.clone(), &name, &[other, target]),
                 )
@@ -1825,7 +1865,7 @@ async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
             // refusal: the guard runs after it.
             assert_eq!(
                 already_exists(
-                    registry::add_service_identity_resource_server(
+                    registry::test_support::add_service_identity_resource_server(
                         &pool,
                         side.tenant,
                         &side.service(),
@@ -1838,7 +1878,7 @@ async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
             );
             assert_eq!(
                 already_exists(
-                    registry::add_service_grant_resource_server(
+                    registry::test_support::add_service_grant_resource_server(
                         &pool,
                         side.tenant,
                         &side.grant(),
@@ -1857,7 +1897,7 @@ async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
             // the fixture) and a new grant: the guard reads the writing
             // tenant's own assignment.
             let peer = if side.suffix == A.suffix { B } else { A };
-            let created = registry::create_service_identity(
+            let created = registry::test_support::create_service_identity(
                 &pool,
                 &service_identity(peer, peer.spare(), "peer", &[SHARED]),
             )
@@ -1878,7 +1918,7 @@ async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
                 created
             );
             let peer_grant = peer.id("grt_peer");
-            let created = registry::create_service_grant(
+            let created = registry::test_support::create_service_grant(
                 &pool,
                 &direct_grant(peer, peer_grant.clone(), "peer", &[SHARED]),
             )
@@ -1907,13 +1947,13 @@ async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
         let still = format!("still-{}", reference.label);
         let still_identity = side.id(&format!("svc_still_{}", reference.label));
         let still_grant = side.id(&format!("grt_still_{}", reference.label));
-        registry::create_principal(
+        registry::test_support::create_principal(
             &pool,
             &principal(side, still_identity.clone(), PrincipalKind::Service, &still),
         )
         .await
         .unwrap();
-        let created = registry::create_service_identity(
+        let created = registry::test_support::create_service_identity(
             &pool,
             &service_identity(side, still_identity.clone(), &still, &[&reference.other]),
         )
@@ -1932,7 +1972,7 @@ async fn a43_neg_reference_through_a_disabled_assignment_is_refused() {
                 .unwrap(),
             created
         );
-        let created = registry::create_service_grant(
+        let created = registry::test_support::create_service_grant(
             &pool,
             &direct_grant(side, still_grant.clone(), &still, &[&reference.other]),
         )

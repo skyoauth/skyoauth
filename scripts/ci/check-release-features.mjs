@@ -45,8 +45,8 @@
 //            `test-support`. A command is a release command when it is
 //            `cargo install` or `cargo bench`, or passes `--release`, `-r`
 //            or `--profile X` (`--cargo-profile X` for cargo-nextest and
-//            `cargo llvm-cov nextest`, whose `--profile` is nextest's own)
-//            for any X but `dev`, `test` and a
+//            `cargo llvm-cov nextest` or `nextest-archive`, whose
+//            `--profile` is nextest's own) for any X but `dev`, `test` and a
 //            profile that inherits from them: the `[profile.*]` `inherits`
 //            keys of every `Cargo.toml` and cargo configuration in the tree
 //            are followed, and a profile they do not declare (`$PROFILE`
@@ -67,21 +67,27 @@
 //            outside quotes, a command into shell words (a quoted string is
 //            one; `(`, `)`, `<`, `>`, `[`, `]` and `,` separate words too),
 //            and the words after the first one that runs cargo (`cargo` or
-//            a path to it, not an assignment `NAME=value`) are checked as
-//            its arguments; so are the words read with quotes as
-//            separators, and the contents of each quoted string are read
-//            as a line of their own (`sh -c "..."`, `"$(...)"`). The word
-//            `cargo` starts a command wherever it is (`echo cargo ...`
-//            included): the guard does not know which programs run their
-//            arguments. This file and its self-test are not scanned: they
-//            name the flags as patterns. What the guard cannot see: a
-//            command built at run time (a flag or a subcommand in an
-//            environment variable, a Makefile variable or a recipe that
-//            calls another), a quoted string that spans lines (each line is
-//            read on its own, so a cargo command's arguments after the
-//            line break are not read with it), a build outside the files
-//            it reads, and cargo configuration outside the repository
-//            (`$CARGO_HOME`, `CARGO_*` variables).
+//            a path to it, not an assignment `NAME=value` nor the value of
+//            a `-C`, as in `make -C /opt/cargo`; `cargo-SUB` run directly,
+//            such as `cargo-nextest` or `cargo-llvm-cov`, is `cargo SUB`)
+//            are checked as its arguments; so are the words read with
+//            quotes as separators, and the contents of each quoted string
+//            are read as a line of their own (`sh -c "..."`, `"$(...)"`).
+//            A short-option cluster before `--` is read letter by letter,
+//            as cargo reads it (`-qr` is `-q -r`, `-rFfull` is
+//            `-r -F full`): `F`, `p`, `j`, `Z` and `C` take the rest of the
+//            word or the next word, so `-pr` names the package `r` and is
+//            no release flag. The word `cargo` starts a command wherever it
+//            is (`echo cargo ...` included): the guard does not know which
+//            programs run their arguments. This file and its self-test are
+//            not scanned: they name the flags as patterns. What the guard
+//            cannot see: a command built at run time (a flag or a
+//            subcommand in an environment variable, a Makefile variable or
+//            a recipe that calls another), a quoted string that spans lines
+//            (each line is read on its own, so a cargo command's arguments
+//            after the line break are not read with it), a build outside
+//            the files it reads, and cargo configuration outside the
+//            repository (`$CARGO_HOME`, `CARGO_*` variables).
 //
 // Errors exit 1, one line each. Usage errors and internal failures (cargo
 // not found, unparsable output or TOML) exit 2. Needs Node (>=20), cargo on
@@ -216,6 +222,14 @@ const GLOBAL_WITH_VALUE = new Set(['-C', '-Z', '--config', '--color', '--manifes
 // Subcommands that build test or bench targets.
 const TEST_COMMANDS = new Set(['test', 'bench', 'nextest', 'llvm-cov']);
 const TEST_TARGETS = /^--(?:tests|benches|examples|test|bench|example|all-targets)(?:=|$)/;
+// The letters of a short option that take a value, the rest of the word or
+// the next word (`-Ffull`, `-F full`; `-p`, `-j`, `-Z`, `-C`); every other
+// letter is a flag (`-r` is `--release`, `-q` and `-v` change nothing here).
+const SHORT_WITH_VALUE = new Set(['F', 'p', 'j', 'Z', 'C']);
+// The llvm-cov subcommands that run nextest, whose `--profile` is
+// nextest's own (cargo's is `--cargo-profile`): both pass their options on
+// to cargo-nextest (cargo-llvm-cov's `docs/cargo-llvm-cov-nextest*.txt`).
+const LLVM_COV_NEXTEST = new Set(['nextest', 'nextest-archive']);
 const MAX_ALIAS_DEPTH = 8;
 const MAX_QUOTE_DEPTH = 8;
 
@@ -271,10 +285,46 @@ function shellWords(command, { quoting = true } = {}) {
 
 const tokenize = (command) => shellWords(command).words;
 
-// Whether the shell word `word` runs cargo: its last path component, after a
-// Makefile recipe prefix (`@`, `-`, `+`), is `cargo` (`cargo`,
-// `~/.cargo/bin/cargo`), and it is no assignment `NAME=value`.
-const isCargo = (word) => !word.includes('=') && /(?:^[@+-]*|\/)cargo$/.test(word);
+// The cargo subcommand that the shell word `word` runs, or null if it runs
+// no cargo: its last path component, after a Makefile recipe prefix (`@`,
+// `-`, `+`), is `cargo` (`cargo`, `~/.cargo/bin/cargo`: '') or `cargo-SUB`,
+// a subcommand run directly (`cargo-nextest`: `nextest`), and it is no
+// assignment `NAME=value` nor a short option with its value attached
+// (`-C/opt/cargo`).
+export function cargoWord(word) {
+  if (word.includes('=') || (/^-[A-Za-z]/.test(word) && !/^[@+-]*cargo/.test(word))) return null;
+  const match = /(?:^[@+-]*|\/)cargo(?:-([\w-]+))?$/.exec(word);
+  return match ? (match[1] ?? '') : null;
+}
+
+// `tokens` with each short-option cluster (`-qr`, `-rF x`, `-rFfull`)
+// expanded letter by letter: a letter of `SHORT_WITH_VALUE` takes the rest
+// of the word (an `=` after it dropped) or, when nothing follows it, the
+// next word, as cargo reads it, so `-pr` is the package `r`, not
+// `--release`. The words after `--` are the program's, not cargo's, and stay
+// as they are (`-- -Dwarnings`).
+export function expandShortOptions(tokens) {
+  const end = tokens.indexOf('--');
+  const head = end < 0 ? tokens : tokens.slice(0, end);
+  const expanded = head.flatMap((token) => {
+    if (!/^-[A-Za-z]{2,}/.test(token)) return [token];
+    const out = [];
+    for (let i = 1; i < token.length; i++) {
+      if (!/[A-Za-z]/.test(token[i])) {
+        out.push(token.slice(i));
+        break;
+      }
+      out.push(`-${token[i]}`);
+      if (SHORT_WITH_VALUE.has(token[i])) {
+        const value = token.slice(i + 1).replace(/^=/, '');
+        if (value) out.push(value);
+        break;
+      }
+    }
+    return out;
+  });
+  return end < 0 ? expanded : [...expanded, ...tokens.slice(end)];
+}
 
 // Whether the profile `name` is a release profile: `release` and `bench`
 // are, `dev` and `test` are not, and a custom one is if any `inherits`
@@ -295,7 +345,8 @@ export function isReleaseProfile(name, profiles, seen = new Set()) {
 // the values declared for it, each a token list) and `leaking`, the
 // features that turn the feature on (`F` and `PKG/F`, `leakingFeatures`):
 // a release command's argument that is one of them is refused as well.
-export function isBadCommand(tokens, context, depth = 0) {
+export function isBadCommand(command, context, depth = 0) {
+  const tokens = expandShortOptions(command);
   let at = 0;
   while (at < tokens.length && (tokens[at].startsWith('+') || tokens[at].startsWith('-'))) {
     at += GLOBAL_WITH_VALUE.has(tokens[at]) ? 2 : 1;
@@ -308,8 +359,11 @@ export function isBadCommand(tokens, context, depth = 0) {
   }
   const sub = BUILTIN_ALIASES[name] ?? name;
   const args = tokens.slice(at + 1);
-  // `cargo llvm-cov nextest` runs nextest too, with nextest's `--profile`.
-  const nextest = sub === 'nextest' || (sub === 'llvm-cov' && args.find((arg) => !arg.startsWith('-')) === 'nextest');
+  // `cargo llvm-cov nextest` (and `nextest-archive`) runs nextest too, with
+  // nextest's `--profile`. Its subcommand is the first word that is no
+  // option and no value of a global option (`--color always nextest`).
+  const llvmCovSub = args.find((arg, index) => !arg.startsWith('-') && !GLOBAL_WITH_VALUE.has(args[index - 1]));
+  const nextest = sub === 'nextest' || (sub === 'llvm-cov' && LLVM_COV_NEXTEST.has(llvmCovSub));
   const profileFlag = nextest ? '--cargo-profile' : '--profile';
   let profile;
   args.forEach((arg, index) => {
@@ -360,7 +414,7 @@ export function splitCommands(line) {
 
 // Whether a command of the line `line` (`splitCommands`) is a bad release
 // command: the shell words (`shellWords`) after its first word that runs
-// cargo (`isCargo`), with the feature's name looked for in the whole
+// cargo (`cargoWord`), with the feature's name looked for in the whole
 // command, an environment prefix included. The words are read as the shell
 // reads them and, as well, with quotes read as separators: a quote nested
 // in another without an escape (`sh -c "cargo build -F "a b" -r"`) pairs
@@ -370,9 +424,13 @@ function lineIsBad(line, context, depth = 0) {
   return splitCommands(line).some((segment) => {
     const { words, quoted } = shellWords(segment);
     const bad = [words, shellWords(segment, { quoting: false }).words].some((view) => {
-      const at = view.findIndex(isCargo);
+      // A value of `-C` (`make -C /opt/cargo`) is a directory, not cargo.
+      const at = view.findIndex((word, index) => cargoWord(word) !== null && view[index - 1] !== '-C');
       if (at < 0) return false;
       const tokens = view.slice(at + 1);
+      // `cargo-SUB` run directly is `cargo SUB`; cargo passes it `SUB` first.
+      const sub = cargoWord(view[at]);
+      if (sub && tokens[0] !== sub) tokens.unshift(sub);
       if (segment.includes(FEATURE)) tokens.push(FEATURE);
       return isBadCommand(tokens, context);
     });

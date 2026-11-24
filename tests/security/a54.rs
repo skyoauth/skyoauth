@@ -407,7 +407,7 @@ fn single_use_updates(source: &TrustSource) -> [(&'static str, TrustSourceChange
 async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         &pool,
         &NewTenant {
             id: TENANT.into(),
@@ -418,7 +418,7 @@ async fn fixture() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
-    registry::create_trust_keyset(
+    registry::test_support::create_trust_keyset(
         &pool,
         &NewTrustKeyset {
             id: KEYSET.into(),

@@ -1579,7 +1579,7 @@ async fn every_refusal_has_its_reason() {
         expected.push((id, reason));
     }
     // A tenant's operation with every other value right.
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         &pool,
         &NewTenant {
             id: "ten_a".into(),
@@ -2420,7 +2420,7 @@ async fn of_two_concurrent_restores_of_one_challenge_exactly_one_wins() {
 /// (disabled) with an enabled credential and an instance `auditor`
 /// binding.
 async fn more_operators(pool: &PgPool) {
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         pool,
         &NewTenant {
             id: "ten_a".into(),
@@ -2781,7 +2781,7 @@ async fn a_restore_enrolls_a_replacement_revokes_every_credential_and_rotates_th
 async fn a_restore_changes_nothing_else() {
     let (db, pool) = bootstrapped().await;
     more_operators(&pool).await;
-    registry::create_principal(
+    registry::test_support::create_principal(
         &pool,
         &NewPrincipal {
             id: "prn_a".into(),
@@ -3833,7 +3833,7 @@ async fn a_restore_holds_the_recovery_state_until_it_commits() {
 /// The tenant `ten_a` and a disabled instance `auditor` binding `rb_off`
 /// of `adm_first`, for the operator writes below.
 async fn write_targets(pool: &PgPool) {
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         pool,
         &NewTenant {
             id: "ten_a".into(),

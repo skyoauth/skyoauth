@@ -201,7 +201,7 @@ async fn seeded() -> (TestDb, PgPool) {
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
     for tenant in ["ten_a", "ten_b"] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: tenant.into(),
@@ -214,7 +214,7 @@ async fn seeded() -> (TestDb, PgPool) {
         .unwrap();
     }
     for (id, tenant) in [("ks_1", "ten_a"), ("ks_2", "ten_a"), ("ks_b", "ten_b")] {
-        registry::create_trust_keyset(
+        registry::test_support::create_trust_keyset(
             &pool,
             &NewTrustKeyset {
                 id: id.into(),

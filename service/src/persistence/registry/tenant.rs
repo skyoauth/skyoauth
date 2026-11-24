@@ -35,7 +35,11 @@ fn empty_patch() -> RegistryError {
 }
 
 /// Creates a tenant with the caller's ID and secret namespace.
-pub async fn create_tenant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_tenant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTenant,
 ) -> Result<Tenant, RegistryError> {
@@ -122,7 +126,11 @@ pub(super) async fn update_tenant<'e>(
 }
 
 /// Creates a principal in its tenant.
-pub async fn create_principal<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
 ) -> Result<Principal, RegistryError> {

@@ -342,7 +342,7 @@ fn grant_changes(grant: &ServiceGrant) -> ServiceGrantChanges {
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for tenant in ["ten_a", "ten_b"] {
-        registry::create_tenant(&pool, &new_tenant(tenant))
+        registry::test_support::create_tenant(&pool, &new_tenant(tenant))
             .await
             .unwrap();
     }
@@ -355,12 +355,12 @@ async fn seeded() -> (TestDb, PgPool) {
         ("ten_b", "wld_b", PrincipalKind::Workload),
         ("ten_b", "svc_b", PrincipalKind::Service),
     ] {
-        registry::create_principal(&pool, &new_principal(tenant, id, kind))
+        registry::test_support::create_principal(&pool, &new_principal(tenant, id, kind))
             .await
             .unwrap();
     }
     for id in ["rs_1", "rs_2", "rs_3"] {
-        registry::create_resource_server(&pool, &new_server(id))
+        registry::test_support::create_resource_server(&pool, &new_server(id))
             .await
             .unwrap();
     }
@@ -369,12 +369,15 @@ async fn seeded() -> (TestDb, PgPool) {
         ("ata_2", "rs_2", "ten_b"),
         ("ata_3", "rs_3", "ten_a"),
     ] {
-        registry::create_audience_tenant_assignment(&pool, &new_assignment(id, rs, tenant))
-            .await
-            .unwrap();
+        registry::test_support::create_audience_tenant_assignment(
+            &pool,
+            &new_assignment(id, rs, tenant),
+        )
+        .await
+        .unwrap();
     }
     for (tenant, id) in [("ten_a", "ks_1"), ("ten_b", "ks_b")] {
-        registry::create_trust_keyset(&pool, &new_keyset(tenant, id, "partner"))
+        registry::test_support::create_trust_keyset(&pool, &new_keyset(tenant, id, "partner"))
             .await
             .unwrap();
     }
@@ -406,17 +409,26 @@ async fn seeded() -> (TestDb, PgPool) {
         ("ten_a", "bnd_3", "src_k8s", "wld_2"),
         ("ten_b", "bnd_b", "src_b", "wld_b"),
     ] {
-        registry::create_principal_binding(&pool, &new_binding(tenant, id, source, principal))
-            .await
-            .unwrap();
+        registry::test_support::create_principal_binding(
+            &pool,
+            &new_binding(tenant, id, source, principal),
+        )
+        .await
+        .unwrap();
     }
-    registry::create_service_identity(&pool, &new_service("ten_a", "svc_1", &["rs_1"]))
-        .await
-        .unwrap();
-    registry::create_service_identity(&pool, &new_service("ten_b", "svc_b", &["rs_2"]))
-        .await
-        .unwrap();
-    registry::create_service_grant(
+    registry::test_support::create_service_identity(
+        &pool,
+        &new_service("ten_a", "svc_1", &["rs_1"]),
+    )
+    .await
+    .unwrap();
+    registry::test_support::create_service_identity(
+        &pool,
+        &new_service("ten_b", "svc_b", &["rs_2"]),
+    )
+    .await
+    .unwrap();
+    registry::test_support::create_service_grant(
         &pool,
         &direct_grant("ten_a", "grt_1", "wld_1", &["bnd_2", "bnd_1"]),
     )
@@ -424,7 +436,7 @@ async fn seeded() -> (TestDb, PgPool) {
     .unwrap();
     let mut grant_b = direct_grant("ten_b", "grt_b", "wld_b", &["bnd_b"]);
     grant_b.resource_server_ids = strings(&["rs_2"]);
-    registry::create_service_grant(&pool, &grant_b)
+    registry::test_support::create_service_grant(&pool, &grant_b)
         .await
         .unwrap();
     (db, pool)
@@ -487,9 +499,12 @@ async fn grant_of(pool: &PgPool, id: &str) -> ServiceGrant {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn keysets_are_tenant_local_and_update_by_revision() {
     let (db, pool) = seeded().await;
-    let created = registry::create_trust_keyset(&pool, &new_keyset("ten_a", "ks_2", "rotation"))
-        .await
-        .unwrap();
+    let created = registry::test_support::create_trust_keyset(
+        &pool,
+        &new_keyset("ten_a", "ks_2", "rotation"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         (
             &created.id[..],
@@ -527,7 +542,7 @@ async fn keysets_are_tenant_local_and_update_by_revision() {
         name: "rotated".into(),
         status: Status::Disabled,
     };
-    let updated = registry::update_trust_keyset(&pool, "ten_a", "ks_2", 1, &changes)
+    let updated = registry::test_support::update_trust_keyset(&pool, "ten_a", "ks_2", 1, &changes)
         .await
         .unwrap();
     assert_eq!(
@@ -536,11 +551,16 @@ async fn keysets_are_tenant_local_and_update_by_revision() {
     );
     for expected in [1, 3, 0, -1] {
         assert_stale(
-            registry::update_trust_keyset(&pool, "ten_a", "ks_2", expected, &changes).await,
+            registry::test_support::update_trust_keyset(&pool, "ten_a", "ks_2", expected, &changes)
+                .await,
         );
     }
-    assert_not_found(registry::update_trust_keyset(&pool, "ten_b", "ks_2", 2, &changes).await);
-    assert_not_found(registry::update_trust_keyset(&pool, "ten_a", "ks_x", 1, &changes).await);
+    assert_not_found(
+        registry::test_support::update_trust_keyset(&pool, "ten_b", "ks_2", 2, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_trust_keyset(&pool, "ten_a", "ks_x", 1, &changes).await,
+    );
     assert_eq!(
         registry::get_trust_keyset(&pool, "ten_a", "ks_2")
             .await
@@ -550,7 +570,7 @@ async fn keysets_are_tenant_local_and_update_by_revision() {
 
     let create = |new: NewTrustKeyset| {
         let pool = pool.clone();
-        async move { registry::create_trust_keyset(&pool, &new).await }
+        async move { registry::test_support::create_trust_keyset(&pool, &new).await }
     };
     // The same name in another tenant is fine.
     create(new_keyset("ten_b", "ks_3", "rotated"))
@@ -595,7 +615,7 @@ async fn keysets_are_tenant_local_and_update_by_revision() {
         status: Status::Enabled,
     };
     assert_exists(
-        registry::update_trust_keyset(&pool, "ten_a", "ks_2", 2, &rename).await,
+        registry::test_support::update_trust_keyset(&pool, "ten_a", "ks_2", 2, &rename).await,
         "trust_keyset_tenant_id_name_key",
     );
     db.drop([pool]).await;
@@ -648,7 +668,7 @@ async fn keyset_versions_are_created_read_and_listed_per_keyset() {
         .await
         .unwrap();
     assert_eq!(nanos.effective_at, at(5));
-    registry::create_trust_keyset(&pool, &new_keyset("ten_a", "ks_2", "other"))
+    registry::test_support::create_trust_keyset(&pool, &new_keyset("ten_a", "ks_2", "other"))
         .await
         .unwrap();
     registry::test_support::create_trust_keyset_version(
@@ -1294,9 +1314,10 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
         ]),
         status: Status::Disabled,
     };
-    let updated = registry::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes)
+            .await
+            .unwrap();
     assert_eq!(updated.revision, 2);
     assert_eq!(
         (&updated.name[..], updated.profile, updated.status),
@@ -1314,12 +1335,17 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
         ),
         ("src_k8s", "wld_2")
     );
-    assert_stale(registry::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes).await);
-    assert_not_found(
-        registry::update_principal_binding(&pool, "ten_b", "bnd_3", 2, &changes).await,
+    assert_stale(
+        registry::test_support::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes)
+            .await,
     );
     assert_not_found(
-        registry::update_principal_binding(&pool, "ten_a", "bnd_x", 1, &changes).await,
+        registry::test_support::update_principal_binding(&pool, "ten_b", "bnd_3", 2, &changes)
+            .await,
+    );
+    assert_not_found(
+        registry::test_support::update_principal_binding(&pool, "ten_a", "bnd_x", 1, &changes)
+            .await,
     );
     let listed: Vec<_> = registry::list_principal_bindings(&pool, "ten_a", Page::first(2))
         .await
@@ -1338,7 +1364,7 @@ async fn bindings_map_a_same_tenant_source_to_a_workload() {
 
     let create = |new: NewPrincipalBinding| {
         let pool = pool.clone();
-        async move { registry::create_principal_binding(&pool, &new).await }
+        async move { registry::test_support::create_principal_binding(&pool, &new).await }
     };
     assert_exists(
         create(new_binding("ten_a", "bnd_1", "src_gh", "wld_2")).await,
@@ -1426,10 +1452,12 @@ async fn service_identities_carry_their_assigned_audiences() {
     assert_not_found(registry::get_service_identity(&pool, "ten_b", "svc_1").await);
 
     // Created with several audiences in one statement, listed sorted.
-    let created =
-        registry::create_service_identity(&pool, &new_service("ten_a", "svc_2", &["rs_3", "rs_1"]))
-            .await
-            .unwrap();
+    let created = registry::test_support::create_service_identity(
+        &pool,
+        &new_service("ten_a", "svc_2", &["rs_3", "rs_1"]),
+    )
+    .await
+    .unwrap();
     assert_eq!(created.resource_server_ids, ["rs_1", "rs_3"]);
     assert_eq!(
         registry::get_service_identity(&pool, "ten_a", "svc_2")
@@ -1457,9 +1485,10 @@ async fn service_identities_carry_their_assigned_audiences() {
         max_resource_constraints: JsonObject::new(),
         status: Status::Disabled,
     };
-    let updated = registry::update_service_identity(&pool, "ten_a", "svc_1", 1, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_service_identity(&pool, "ten_a", "svc_1", 1, &changes)
+            .await
+            .unwrap();
     assert_eq!(
         (
             &updated.name[..],
@@ -1470,50 +1499,79 @@ async fn service_identities_carry_their_assigned_audiences() {
         ("deployer", 0, Status::Disabled, 2)
     );
     assert_eq!(updated.resource_server_ids, ["rs_1"]);
-    assert_stale(registry::update_service_identity(&pool, "ten_a", "svc_1", 1, &changes).await);
-    assert_not_found(registry::update_service_identity(&pool, "ten_b", "svc_1", 2, &changes).await);
+    assert_stale(
+        registry::test_support::update_service_identity(&pool, "ten_a", "svc_1", 1, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_service_identity(&pool, "ten_b", "svc_1", 2, &changes).await,
+    );
 
     // Audience rows.
     assert_eq!(
-        registry::add_service_identity_resource_server(&pool, "ten_a", "svc_1", 2, "rs_3")
-            .await
-            .unwrap(),
+        registry::test_support::add_service_identity_resource_server(
+            &pool, "ten_a", "svc_1", 2, "rs_3"
+        )
+        .await
+        .unwrap(),
         3
     );
     assert_exists(
-        registry::add_service_identity_resource_server(&pool, "ten_a", "svc_1", 3, "rs_3").await,
+        registry::test_support::add_service_identity_resource_server(
+            &pool, "ten_a", "svc_1", 3, "rs_3",
+        )
+        .await,
         "service_identity_resource_server_pkey",
     );
     // rs_2 is assigned to ten_b only; rs_x does not exist.
     for rs in ["rs_2", "rs_x"] {
         assert_foreign_key(
-            registry::add_service_identity_resource_server(&pool, "ten_a", "svc_1", 3, rs).await,
+            registry::test_support::add_service_identity_resource_server(
+                &pool, "ten_a", "svc_1", 3, rs,
+            )
+            .await,
             "service_identity_resource_server_assignment_fkey",
         );
     }
     assert_stale(
-        registry::add_service_identity_resource_server(&pool, "ten_a", "svc_1", 2, "rs_2").await,
+        registry::test_support::add_service_identity_resource_server(
+            &pool, "ten_a", "svc_1", 2, "rs_2",
+        )
+        .await,
     );
     assert_not_found(
-        registry::add_service_identity_resource_server(&pool, "ten_b", "svc_1", 3, "rs_2").await,
+        registry::test_support::add_service_identity_resource_server(
+            &pool, "ten_b", "svc_1", 3, "rs_2",
+        )
+        .await,
     );
     assert_not_found(
-        registry::remove_service_identity_resource_server(&pool, "ten_a", "svc_1", 3, "rs_2").await,
+        registry::test_support::remove_service_identity_resource_server(
+            &pool, "ten_a", "svc_1", 3, "rs_2",
+        )
+        .await,
     );
     assert_not_found(
-        registry::remove_service_identity_resource_server(&pool, "ten_b", "svc_1", 3, "rs_1").await,
+        registry::test_support::remove_service_identity_resource_server(
+            &pool, "ten_b", "svc_1", 3, "rs_1",
+        )
+        .await,
     );
     assert_stale(
-        registry::remove_service_identity_resource_server(&pool, "ten_a", "svc_1", 2, "rs_1").await,
+        registry::test_support::remove_service_identity_resource_server(
+            &pool, "ten_a", "svc_1", 2, "rs_1",
+        )
+        .await,
     );
     for rs in ["rs_1", "rs_3"] {
         let revision = registry::get_service_identity(&pool, "ten_a", "svc_1")
             .await
             .unwrap()
             .revision;
-        registry::remove_service_identity_resource_server(&pool, "ten_a", "svc_1", revision, rs)
-            .await
-            .unwrap();
+        registry::test_support::remove_service_identity_resource_server(
+            &pool, "ten_a", "svc_1", revision, rs,
+        )
+        .await
+        .unwrap();
     }
     // An empty audience set is allowed (it allows nothing).
     let emptied = registry::get_service_identity(&pool, "ten_a", "svc_1")
@@ -1526,7 +1584,7 @@ async fn service_identities_carry_their_assigned_audiences() {
 
     let create = |new: NewServiceIdentity| {
         let pool = pool.clone();
-        async move { registry::create_service_identity(&pool, &new).await }
+        async move { registry::test_support::create_service_identity(&pool, &new).await }
     };
     assert_exists(
         create(new_service("ten_a", "svc_2", &[])).await,
@@ -1534,7 +1592,7 @@ async fn service_identities_carry_their_assigned_audiences() {
     );
     // A workload, a human, another tenant's service principal and a
     // missing principal are not service principals of the tenant.
-    registry::create_principal(
+    registry::test_support::create_principal(
         &pool,
         &new_principal("ten_b", "svc_c", PrincipalKind::Service),
     )
@@ -1546,7 +1604,7 @@ async fn service_identities_carry_their_assigned_audiences() {
             "service_identity_id_fkey",
         );
     }
-    registry::create_principal(
+    registry::test_support::create_principal(
         &pool,
         &new_principal("ten_a", "svc_3", PrincipalKind::Service),
     )
@@ -1622,7 +1680,7 @@ async fn grants_are_created_with_their_bindings_and_audiences() {
         resource_server_ids: strings(&["rs_3", "rs_1"]),
         ..direct_grant("ten_a", "grt_2", "wld_1", &["bnd_1"])
     };
-    let created = registry::create_service_grant(&pool, &delegated)
+    let created = registry::test_support::create_service_grant(&pool, &delegated)
         .await
         .unwrap();
     assert_eq!(created.target_service_id.as_deref(), Some("svc_1"));
@@ -1638,7 +1696,7 @@ async fn grants_are_created_with_their_bindings_and_audiences() {
         resource_server_ids: vec![],
         ..direct_grant("ten_a", "grt_3", "wld_2", &["bnd_3"])
     };
-    registry::create_service_grant(&pool, &dormant)
+    registry::test_support::create_service_grant(&pool, &dormant)
         .await
         .unwrap();
     let listed: Vec<_> = registry::list_service_grants(&pool, "ten_a", Page::first(10))
@@ -1671,9 +1729,10 @@ async fn grants_are_created_with_their_bindings_and_audiences() {
     changes.max_ttl = 120;
     changes.valid_until = None;
     changes.status = Status::Disabled;
-    let updated = registry::update_service_grant(&pool, "ten_a", "grt_2", 1, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_2", 1, &changes)
+            .await
+            .unwrap();
     assert_eq!(
         (
             &updated.name[..],
@@ -1688,20 +1747,27 @@ async fn grants_are_created_with_their_bindings_and_audiences() {
     assert_eq!(updated.allowed_binding_ids, ["bnd_1"]);
     assert_eq!(updated.resource_server_ids, ["rs_1", "rs_3"]);
     assert_eq!(grant_of(&pool, "grt_2").await, updated);
-    assert_stale(registry::update_service_grant(&pool, "ten_a", "grt_2", 1, &changes).await);
-    assert_not_found(registry::update_service_grant(&pool, "ten_b", "grt_2", 2, &changes).await);
-    assert_not_found(registry::update_service_grant(&pool, "ten_a", "grt_x", 1, &changes).await);
+    assert_stale(
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_2", 1, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_service_grant(&pool, "ten_b", "grt_2", 2, &changes).await,
+    );
+    assert_not_found(
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_x", 1, &changes).await,
+    );
     let mut widened = changes.clone();
     widened.default_scopes = Some(strings(&["deploy:write"]));
     assert_check(
-        registry::update_service_grant(&pool, "ten_a", "grt_2", 2, &widened).await,
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_2", 2, &widened).await,
         "service_grant_default_scopes_check",
     );
     // The dormant grant is frozen (0009): enabling it is a guard error,
     // before the 0004 check it would also fail.
     let mut woken = grant_changes(&grant_of(&pool, "grt_3").await);
     woken.status = Status::Enabled;
-    let refused = registry::update_service_grant(&pool, "ten_a", "grt_3", 1, &woken).await;
+    let refused =
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_3", 1, &woken).await;
     assert!(matches!(refused, Err(RegistryError::Guard)), "{refused:?}");
     db.drop([pool]).await;
 }
@@ -1712,7 +1778,7 @@ async fn grant_errors_name_their_constraints() {
     let (db, pool) = seeded().await;
     let create = |new: NewServiceGrant| {
         let pool = pool.clone();
-        async move { registry::create_service_grant(&pool, &new).await }
+        async move { registry::test_support::create_service_grant(&pool, &new).await }
     };
     let base = || direct_grant("ten_a", "grt_9", "wld_1", &["bnd_1"]);
     assert_exists(
@@ -1906,50 +1972,72 @@ async fn grant_errors_name_their_constraints() {
 
     // List rows of a grant: bindings of the actor and assigned audiences.
     assert_eq!(
-        registry::add_service_grant_resource_server(&pool, "ten_a", "grt_1", 1, "rs_3")
-            .await
-            .unwrap(),
+        registry::test_support::add_service_grant_resource_server(
+            &pool, "ten_a", "grt_1", 1, "rs_3"
+        )
+        .await
+        .unwrap(),
         2
     );
     assert_exists(
-        registry::add_service_grant_resource_server(&pool, "ten_a", "grt_1", 2, "rs_3").await,
+        registry::test_support::add_service_grant_resource_server(
+            &pool, "ten_a", "grt_1", 2, "rs_3",
+        )
+        .await,
         "service_grant_resource_server_pkey",
     );
     assert_foreign_key(
-        registry::add_service_grant_resource_server(&pool, "ten_a", "grt_1", 2, "rs_2").await,
+        registry::test_support::add_service_grant_resource_server(
+            &pool, "ten_a", "grt_1", 2, "rs_2",
+        )
+        .await,
         "service_grant_resource_server_assignment_fkey",
     );
     assert_not_found(
-        registry::remove_service_grant_resource_server(&pool, "ten_a", "grt_1", 2, "rs_2").await,
+        registry::test_support::remove_service_grant_resource_server(
+            &pool, "ten_a", "grt_1", 2, "rs_2",
+        )
+        .await,
     );
     assert_eq!(
-        registry::remove_service_grant_resource_server(&pool, "ten_a", "grt_1", 2, "rs_1")
-            .await
-            .unwrap(),
+        registry::test_support::remove_service_grant_resource_server(
+            &pool, "ten_a", "grt_1", 2, "rs_1"
+        )
+        .await
+        .unwrap(),
         3
     );
     assert_exists(
-        registry::add_service_grant_binding(&pool, "ten_a", "grt_1", 3, "bnd_1").await,
+        registry::test_support::add_service_grant_binding(&pool, "ten_a", "grt_1", 3, "bnd_1")
+            .await,
         "service_grant_binding_pkey",
     );
     for binding in ["bnd_3", "bnd_b", "bnd_x"] {
         assert_foreign_key(
-            registry::add_service_grant_binding(&pool, "ten_a", "grt_1", 3, binding).await,
+            registry::test_support::add_service_grant_binding(&pool, "ten_a", "grt_1", 3, binding)
+                .await,
             "service_grant_binding_binding_id_fkey",
         );
     }
-    assert_stale(registry::add_service_grant_binding(&pool, "ten_a", "grt_1", 2, "bnd_x").await);
-    assert_not_found(
-        registry::add_service_grant_binding(&pool, "ten_b", "grt_1", 3, "bnd_1").await,
+    assert_stale(
+        registry::test_support::add_service_grant_binding(&pool, "ten_a", "grt_1", 2, "bnd_x")
+            .await,
     );
     assert_not_found(
-        registry::add_service_grant_binding(&pool, "ten_a", "grt_x", 1, "bnd_1").await,
+        registry::test_support::add_service_grant_binding(&pool, "ten_b", "grt_1", 3, "bnd_1")
+            .await,
     );
     assert_not_found(
-        registry::remove_service_grant_binding(&pool, "ten_a", "grt_1", 3, "bnd_3").await,
+        registry::test_support::add_service_grant_binding(&pool, "ten_a", "grt_x", 1, "bnd_1")
+            .await,
     );
     assert_not_found(
-        registry::remove_service_grant_binding(&pool, "ten_b", "grt_1", 3, "bnd_1").await,
+        registry::test_support::remove_service_grant_binding(&pool, "ten_a", "grt_1", 3, "bnd_3")
+            .await,
+    );
+    assert_not_found(
+        registry::test_support::remove_service_grant_binding(&pool, "ten_b", "grt_1", 3, "bnd_1")
+            .await,
     );
     let grant = grant_of(&pool, "grt_1").await;
     assert_eq!(grant.revision, 3);
@@ -1967,27 +2055,36 @@ async fn a_grant_keeps_at_least_one_binding_through_the_registry() {
     let (db, pool) = seeded().await;
     // No binding, autocommit.
     assert_guard(
-        registry::create_service_grant(&pool, &direct_grant("ten_a", "grt_9", "wld_1", &[])).await,
+        registry::test_support::create_service_grant(
+            &pool,
+            &direct_grant("ten_a", "grt_9", "wld_1", &[]),
+        )
+        .await,
     );
     assert_not_found(registry::get_service_grant(&pool, "ten_a", "grt_9").await);
 
     // No binding in a transaction: the statement passes, the commit fails.
     let mut tx = pool.begin().await.unwrap();
-    let created =
-        registry::create_service_grant(&mut *tx, &direct_grant("ten_a", "grt_9", "wld_1", &[]))
-            .await
-            .unwrap();
+    let created = registry::test_support::create_service_grant(
+        &mut *tx,
+        &direct_grant("ten_a", "grt_9", "wld_1", &[]),
+    )
+    .await
+    .unwrap();
     assert!(created.allowed_binding_ids.is_empty());
     assert_guard(tx.commit().await.map_err(RegistryError::from));
     assert_not_found(registry::get_service_grant(&pool, "ten_a", "grt_9").await);
 
     // Created empty, then given a binding before the commit.
     let mut tx = pool.begin().await.unwrap();
-    registry::create_service_grant(&mut *tx, &direct_grant("ten_a", "grt_9", "wld_1", &[]))
-        .await
-        .unwrap();
+    registry::test_support::create_service_grant(
+        &mut *tx,
+        &direct_grant("ten_a", "grt_9", "wld_1", &[]),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        registry::add_service_grant_binding(&mut *tx, "ten_a", "grt_9", 1, "bnd_2")
+        registry::test_support::add_service_grant_binding(&mut *tx, "ten_a", "grt_9", 1, "bnd_2")
             .await
             .unwrap(),
         2
@@ -2001,7 +2098,10 @@ async fn a_grant_keeps_at_least_one_binding_through_the_registry() {
 
     // Removing the last binding fails at once outside a transaction, and
     // changes nothing.
-    assert_guard(registry::remove_service_grant_binding(&pool, "ten_a", "grt_9", 2, "bnd_2").await);
+    assert_guard(
+        registry::test_support::remove_service_grant_binding(&pool, "ten_a", "grt_9", 2, "bnd_2")
+            .await,
+    );
     let grant = grant_of(&pool, "grt_9").await;
     assert_eq!(
         (grant.revision, &grant.allowed_binding_ids[..]),
@@ -2011,9 +2111,11 @@ async fn a_grant_keeps_at_least_one_binding_through_the_registry() {
     // In a transaction it fails at commit, and rolls back.
     let mut tx = pool.begin().await.unwrap();
     assert_eq!(
-        registry::remove_service_grant_binding(&mut *tx, "ten_a", "grt_9", 2, "bnd_2")
-            .await
-            .unwrap(),
+        registry::test_support::remove_service_grant_binding(
+            &mut *tx, "ten_a", "grt_9", 2, "bnd_2"
+        )
+        .await
+        .unwrap(),
         3
     );
     assert!(
@@ -2032,10 +2134,10 @@ async fn a_grant_keeps_at_least_one_binding_through_the_registry() {
 
     // Replacing the last binding in one transaction commits.
     let mut tx = pool.begin().await.unwrap();
-    registry::remove_service_grant_binding(&mut *tx, "ten_a", "grt_9", 2, "bnd_2")
+    registry::test_support::remove_service_grant_binding(&mut *tx, "ten_a", "grt_9", 2, "bnd_2")
         .await
         .unwrap();
-    registry::add_service_grant_binding(&mut *tx, "ten_a", "grt_9", 3, "bnd_1")
+    registry::test_support::add_service_grant_binding(&mut *tx, "ten_a", "grt_9", 3, "bnd_1")
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -2047,7 +2149,7 @@ async fn a_grant_keeps_at_least_one_binding_through_the_registry() {
 
     // One of two bindings goes at once.
     assert_eq!(
-        registry::remove_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_1")
+        registry::test_support::remove_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_1")
             .await
             .unwrap(),
         2
@@ -2119,9 +2221,11 @@ async fn race_binding_removals(level: &str) -> RegistryError {
     let mut tx = first.begin().await.unwrap();
     sqlx::raw_sql(set_level).execute(&mut *tx).await.unwrap();
     assert_eq!(
-        registry::remove_service_grant_binding(&mut *tx, "ten_a", "grt_1", 1, "bnd_1")
-            .await
-            .unwrap(),
+        registry::test_support::remove_service_grant_binding(
+            &mut *tx, "ten_a", "grt_1", 1, "bnd_1"
+        )
+        .await
+        .unwrap(),
         2
     );
     let waiting = tokio::spawn(async move {
@@ -2133,8 +2237,10 @@ async fn race_binding_removals(level: &str) -> RegistryError {
             .await
             .unwrap();
         assert_eq!(seen.allowed_binding_ids, ["bnd_1", "bnd_2"]);
-        let result =
-            registry::remove_service_grant_binding(&mut *tx, "ten_a", "grt_1", 1, "bnd_2").await;
+        let result = registry::test_support::remove_service_grant_binding(
+            &mut *tx, "ten_a", "grt_1", 1, "bnd_2",
+        )
+        .await;
         tx.rollback().await.unwrap();
         second.close().await.unwrap();
         result
@@ -2198,11 +2304,14 @@ async fn concurrent_binding_removals_through_the_registry_under_repeatable_read(
             .revision,
         1
     );
-    registry::remove_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_1")
+    registry::test_support::remove_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_1")
         .await
         .unwrap();
     assert_stale(
-        registry::remove_service_grant_binding(&mut *late, "ten_a", "grt_1", 2, "bnd_2").await,
+        registry::test_support::remove_service_grant_binding(
+            &mut *late, "ten_a", "grt_1", 2, "bnd_2",
+        )
+        .await,
     );
     late.rollback().await.unwrap();
     assert_eq!(
@@ -2221,16 +2330,16 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
     // Four more bindings of wld_1 and four more audiences of ten_a, so
     // concurrent adds name different rows.
     for n in 0..4 {
-        registry::create_principal_binding(
+        registry::test_support::create_principal_binding(
             &pool,
             &new_binding("ten_a", &format!("bnd_c{n}"), "src_gh", "wld_1"),
         )
         .await
         .unwrap();
-        registry::create_resource_server(&pool, &new_server(&format!("rs_c{n}")))
+        registry::test_support::create_resource_server(&pool, &new_server(&format!("rs_c{n}")))
             .await
             .unwrap();
-        registry::create_audience_tenant_assignment(
+        registry::test_support::create_audience_tenant_assignment(
             &pool,
             &new_assignment(&format!("ata_c{n}"), &format!("rs_c{n}"), "ten_a"),
         )
@@ -2264,7 +2373,7 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
                 name: format!("ks-n{n}"),
                 status: Status::Enabled,
             };
-            registry::update_trust_keyset(&pool, "ten_a", "ks_1", 1, &changes).await
+            registry::test_support::update_trust_keyset(&pool, "ten_a", "ks_1", 1, &changes).await
         }
     })
     .await;
@@ -2295,7 +2404,8 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
                 claim_match_policy: claims(&[("sub", "x")]),
                 status: Status::Enabled,
             };
-            registry::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes).await
+            registry::test_support::update_principal_binding(&pool, "ten_a", "bnd_3", 1, &changes)
+                .await
         }
     })
     .await;
@@ -2311,7 +2421,8 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
                 max_resource_constraints: JsonObject::new(),
                 status: Status::Enabled,
             };
-            registry::update_service_identity(&pool, "ten_a", "svc_1", 1, &changes).await
+            registry::test_support::update_service_identity(&pool, "ten_a", "svc_1", 1, &changes)
+                .await
         }
     })
     .await;
@@ -2323,7 +2434,9 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
         let pool = p.clone();
         let mut changes = grant_changes(&grant);
         changes.name = format!("grt-n{n}");
-        async move { registry::update_service_grant(&pool, "ten_a", "grt_1", 1, &changes).await }
+        async move {
+            registry::test_support::update_service_grant(&pool, "ten_a", "grt_1", 1, &changes).await
+        }
     })
     .await;
     assert_eq!(outcome, (1, 3), "service_grant");
@@ -2334,7 +2447,7 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
     let outcome = race(move |n| {
         let pool = p.clone();
         async move {
-            registry::add_service_identity_resource_server(
+            registry::test_support::add_service_identity_resource_server(
                 &pool,
                 "ten_a",
                 "svc_1",
@@ -2356,8 +2469,10 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
         let pool = p.clone();
         let added = added.clone();
         async move {
-            registry::remove_service_identity_resource_server(&pool, "ten_a", "svc_1", 3, &added)
-                .await
+            registry::test_support::remove_service_identity_resource_server(
+                &pool, "ten_a", "svc_1", 3, &added,
+            )
+            .await
         }
     })
     .await;
@@ -2367,8 +2482,14 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
     let outcome = race(move |n| {
         let pool = p.clone();
         async move {
-            registry::add_service_grant_binding(&pool, "ten_a", "grt_1", 2, &format!("bnd_c{n}"))
-                .await
+            registry::test_support::add_service_grant_binding(
+                &pool,
+                "ten_a",
+                "grt_1",
+                2,
+                &format!("bnd_c{n}"),
+            )
+            .await
         }
     })
     .await;
@@ -2377,22 +2498,22 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
     assert_eq!((grant.revision, grant.allowed_binding_ids.len()), (3, 3));
     let added = grant.allowed_binding_ids[2].clone();
     let p = pool.clone();
-    let outcome =
-        race(move |_| {
-            let pool = p.clone();
-            let added = added.clone();
-            async move {
-                registry::remove_service_grant_binding(&pool, "ten_a", "grt_1", 3, &added).await
-            }
-        })
-        .await;
+    let outcome = race(move |_| {
+        let pool = p.clone();
+        let added = added.clone();
+        async move {
+            registry::test_support::remove_service_grant_binding(&pool, "ten_a", "grt_1", 3, &added)
+                .await
+        }
+    })
+    .await;
     assert_eq!(outcome, (1, 3), "remove grant binding");
 
     let p = pool.clone();
     let outcome = race(move |n| {
         let pool = p.clone();
         async move {
-            registry::add_service_grant_resource_server(
+            registry::test_support::add_service_grant_resource_server(
                 &pool,
                 "ten_a",
                 "grt_1",
@@ -2408,7 +2529,10 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
     let outcome = race(move |_| {
         let pool = p.clone();
         async move {
-            registry::remove_service_grant_resource_server(&pool, "ten_a", "grt_1", 5, "rs_1").await
+            registry::test_support::remove_service_grant_resource_server(
+                &pool, "ten_a", "grt_1", 5, "rs_1",
+            )
+            .await
         }
     })
     .await;
@@ -2425,7 +2549,7 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
 
     // Four removals of four different bindings from one revision: one wins,
     // so the grant keeps three.
-    registry::create_service_grant(
+    registry::test_support::create_service_grant(
         &pool,
         &direct_grant(
             "ten_a",
@@ -2440,8 +2564,14 @@ async fn concurrent_writes_from_one_revision_have_exactly_one_winner() {
     let outcome = race(move |n| {
         let pool = p.clone();
         async move {
-            registry::remove_service_grant_binding(&pool, "ten_a", "grt_4", 1, &format!("bnd_c{n}"))
-                .await
+            registry::test_support::remove_service_grant_binding(
+                &pool,
+                "ten_a",
+                "grt_4",
+                1,
+                &format!("bnd_c{n}"),
+            )
+            .await
         }
     })
     .await;
@@ -2497,7 +2627,8 @@ async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
                 status: Status::Enabled,
             };
             assert_not_found(
-                registry::update_trust_keyset(&pool, other, &keyset.id, 1, &changes).await,
+                registry::test_support::update_trust_keyset(&pool, other, &keyset.id, 1, &changes)
+                    .await,
             );
         }
         for source in &sources {
@@ -2519,7 +2650,7 @@ async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
         for service in &services {
             assert_not_found(registry::get_service_identity(&pool, other, &service.id).await);
             assert_not_found(
-                registry::remove_service_identity_resource_server(
+                registry::test_support::remove_service_identity_resource_server(
                     &pool,
                     other,
                     &service.id,
@@ -2532,11 +2663,17 @@ async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
         for grant in &grants {
             assert_not_found(registry::get_service_grant(&pool, other, &grant.id).await);
             assert_not_found(
-                registry::update_service_grant(&pool, other, &grant.id, 1, &grant_changes(grant))
-                    .await,
+                registry::test_support::update_service_grant(
+                    &pool,
+                    other,
+                    &grant.id,
+                    1,
+                    &grant_changes(grant),
+                )
+                .await,
             );
             assert_not_found(
-                registry::remove_service_grant_binding(
+                registry::test_support::remove_service_grant_binding(
                     &pool,
                     other,
                     &grant.id,
@@ -2546,8 +2683,10 @@ async fn trust_and_grant_reads_are_scoped_to_their_tenant() {
                 .await,
             );
             assert_not_found(
-                registry::add_service_grant_resource_server(&pool, other, &grant.id, 1, "rs_1")
-                    .await,
+                registry::test_support::add_service_grant_resource_server(
+                    &pool, other, &grant.id, 1, "rs_1",
+                )
+                .await,
             );
         }
     }
@@ -2609,9 +2748,12 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
     const MAX: i64 = i64::MAX;
     let (db, pool) = seeded().await;
     // A second binding of wld_1's grant actor, so it could be added.
-    registry::create_principal_binding(&pool, &new_binding("ten_a", "bnd_4", "src_gh", "wld_1"))
-        .await
-        .unwrap();
+    registry::test_support::create_principal_binding(
+        &pool,
+        &new_binding("ten_a", "bnd_4", "src_gh", "wld_1"),
+    )
+    .await
+    .unwrap();
     let before = rows_0004(&pool).await;
     let keyset_changes = TrustKeysetChanges {
         name: "renamed".into(),
@@ -2640,8 +2782,8 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
 
     // Each function at i64::MAX: the ten_a row is stale; a missing ID and
     // the ten_b row are not found in ten_a.
-    // `$function` is a path under `registry`: the test-support writer is
-    // `test_support::update_trust_source`.
+    // `$function` is a path under `registry`: each is a test-support
+    // writer, such as `test_support::update_trust_source`.
     macro_rules! at_max {
         ($($function:ident)::+, $id:literal, $other_tenant_id:literal, $argument:expr) => {
             assert_stale(registry::$($function)::+(&pool, "ten_a", $id, MAX, $argument).await);
@@ -2654,35 +2796,70 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
             );
         };
     }
-    at_max!(update_trust_keyset, "ks_1", "ks_b", &keyset_changes);
+    at_max!(
+        test_support::update_trust_keyset,
+        "ks_1",
+        "ks_b",
+        &keyset_changes
+    );
     at_max!(
         test_support::update_trust_source,
         "src_gh",
         "src_b",
         &source_changes
     );
-    at_max!(update_principal_binding, "bnd_1", "bnd_b", &binding_changes);
-    at_max!(update_service_identity, "svc_1", "svc_b", &service_changes);
-    at_max!(update_service_grant, "grt_1", "grt_b", &grant_changes);
+    at_max!(
+        test_support::update_principal_binding,
+        "bnd_1",
+        "bnd_b",
+        &binding_changes
+    );
+    at_max!(
+        test_support::update_service_identity,
+        "svc_1",
+        "svc_b",
+        &service_changes
+    );
+    at_max!(
+        test_support::update_service_grant,
+        "grt_1",
+        "grt_b",
+        &grant_changes
+    );
     // Each item could be added, or is listed and could be removed, at the
     // owner's revision 1.
     at_max!(
-        add_service_identity_resource_server,
+        test_support::add_service_identity_resource_server,
         "svc_1",
         "svc_b",
         "rs_3"
     );
     at_max!(
-        remove_service_identity_resource_server,
+        test_support::remove_service_identity_resource_server,
         "svc_1",
         "svc_b",
         "rs_1"
     );
-    at_max!(add_service_grant_binding, "grt_1", "grt_b", "bnd_4");
-    at_max!(remove_service_grant_binding, "grt_1", "grt_b", "bnd_1");
-    at_max!(add_service_grant_resource_server, "grt_1", "grt_b", "rs_3");
     at_max!(
-        remove_service_grant_resource_server,
+        test_support::add_service_grant_binding,
+        "grt_1",
+        "grt_b",
+        "bnd_4"
+    );
+    at_max!(
+        test_support::remove_service_grant_binding,
+        "grt_1",
+        "grt_b",
+        "bnd_1"
+    );
+    at_max!(
+        test_support::add_service_grant_resource_server,
+        "grt_1",
+        "grt_b",
+        "rs_3"
+    );
+    at_max!(
+        test_support::remove_service_grant_resource_server,
         "grt_1",
         "grt_b",
         "rs_1"
@@ -2692,7 +2869,7 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
     // The same calls at the current revision succeed, so the rows and
     // items above were live targets.
     assert_eq!(
-        registry::add_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_4")
+        registry::test_support::add_service_grant_binding(&pool, "ten_a", "grt_1", 1, "bnd_4")
             .await
             .unwrap(),
         2
@@ -2744,18 +2921,22 @@ async fn times_at_the_writable_bounds_round_trip_and_beyond_them_write_nothing()
     assert_out_of_range(registry::test_support::create_trust_keyset_version(&pool, &late).await);
     let mut grant = direct_grant("ten_a", "grt_2", "wld_1", &["bnd_1"]);
     grant.valid_until = Some(at(EARLIEST - 1));
-    assert_out_of_range(registry::create_service_grant(&pool, &grant).await);
+    assert_out_of_range(registry::test_support::create_service_grant(&pool, &grant).await);
     let mut changes = grant_changes(&grant_of(&pool, "grt_1").await);
     changes.valid_until = Some(at(i64::MAX));
-    assert_out_of_range(registry::update_service_grant(&pool, "ten_a", "grt_1", 1, &changes).await);
+    assert_out_of_range(
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_1", 1, &changes).await,
+    );
     assert_eq!(rows_0004(&pool).await, before);
 
     // A grant's valid_until at either bound round trips too.
     for (expected, valid_until) in [(1, EARLIEST), (2, LATEST)] {
         changes.valid_until = Some(at(valid_until));
-        let updated = registry::update_service_grant(&pool, "ten_a", "grt_1", expected, &changes)
-            .await
-            .unwrap();
+        let updated = registry::test_support::update_service_grant(
+            &pool, "ten_a", "grt_1", expected, &changes,
+        )
+        .await
+        .unwrap();
         assert_eq!(updated.valid_until, Some(at(valid_until)));
         assert_eq!(grant_of(&pool, "grt_1").await, updated);
     }
@@ -2884,13 +3065,13 @@ async fn trust_errors_do_not_repeat_request_values() {
     }
     let mut binding = new_binding("ten_a", "bnd_9", "src_gh", "wld_1");
     binding.name = "claim value-that-must-not-leak".into();
-    let err = registry::create_principal_binding(&pool, &binding)
+    let err = registry::test_support::create_principal_binding(&pool, &binding)
         .await
         .unwrap_err();
     for text in [err.to_string(), format!("{err:?}")] {
         assert!(!text.contains("must-not-leak"), "{text}");
     }
-    let err = registry::create_service_grant(
+    let err = registry::test_support::create_service_grant(
         &pool,
         &direct_grant("ten_a", "grt_9", "wld_1", &["bnd-value-not-to-leak"]),
     )
@@ -3130,7 +3311,7 @@ async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() 
     {
         let mut savepoint = tx.begin().await.unwrap();
         assert_eq!(
-            registry::add_service_grant_resource_server(
+            registry::test_support::add_service_grant_resource_server(
                 &mut *savepoint,
                 "ten_a",
                 "grt_1",
@@ -3167,7 +3348,7 @@ async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() 
     {
         let mut savepoint = tx.begin().await.unwrap();
         assert_check(
-            registry::add_service_grant_resource_server(
+            registry::test_support::add_service_grant_resource_server(
                 &mut *savepoint,
                 "ten_a",
                 "grt_1",
@@ -3182,8 +3363,14 @@ async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() 
     {
         let mut savepoint = tx.begin().await.unwrap();
         assert_check(
-            registry::remove_service_grant_binding(&mut *savepoint, "ten_a", "grt_1", 2, "bnd_2")
-                .await,
+            registry::test_support::remove_service_grant_binding(
+                &mut *savepoint,
+                "ten_a",
+                "grt_1",
+                2,
+                "bnd_2",
+            )
+            .await,
             RANGE_CHECK,
         );
         savepoint.rollback().await.unwrap();
@@ -3193,7 +3380,7 @@ async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() 
     // too.
     {
         let mut savepoint = tx.begin().await.unwrap();
-        let cleared = registry::update_service_grant(
+        let cleared = registry::test_support::update_service_grant(
             &mut *savepoint,
             "ten_a",
             "grt_1",
@@ -3208,12 +3395,15 @@ async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() 
     // Stale is still stale.
     let mut changes = grant_changes(&before);
     changes.valid_until = Some(at(1_798_859_045_000_001));
-    assert_stale(registry::update_service_grant(&mut *tx, "ten_a", "grt_1", 1, &changes).await);
+    assert_stale(
+        registry::test_support::update_service_grant(&mut *tx, "ten_a", "grt_1", 1, &changes).await,
+    );
     // A finite `valid_until` replaces the `infinity`: the update succeeds and
     // returns a readable row.
-    let repaired = registry::update_service_grant(&mut *tx, "ten_a", "grt_1", 2, &changes)
-        .await
-        .unwrap();
+    let repaired =
+        registry::test_support::update_service_grant(&mut *tx, "ten_a", "grt_1", 2, &changes)
+            .await
+            .unwrap();
     let mut expected = before.clone();
     expected.valid_until = Some(at(1_798_859_045_000_001));
     expected.revision = 3;
@@ -3232,9 +3422,11 @@ async fn a_grant_update_repairs_a_valid_until_outside_a_not_valid_range_check() 
     .await
     .unwrap();
     assert_eq!(
-        registry::add_service_grant_resource_server(&mut *tx, "ten_a", "grt_1", 3, "rs_3")
-            .await
-            .unwrap(),
+        registry::test_support::add_service_grant_resource_server(
+            &mut *tx, "ten_a", "grt_1", 3, "rs_3"
+        )
+        .await
+        .unwrap(),
         4
     );
     tx.rollback().await.unwrap();

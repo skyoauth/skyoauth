@@ -416,7 +416,7 @@ async fn the_grant_actors_binding_matches_despite_another_actors_overlap() {
     assert_eq!(match_binding(&of_a.eligible_bindings, &sub_only), None);
 
     // The selected binding's revision is the current one.
-    registry::update_principal_binding(
+    registry::test_support::update_principal_binding(
         &pool,
         "ten_a",
         "bnd_Z_env",

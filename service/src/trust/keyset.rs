@@ -2460,7 +2460,7 @@ mod tests {
         }
 
         async fn seed(pool: &PgPool) {
-            registry::create_tenant(
+            registry::test_support::create_tenant(
                 pool,
                 &NewTenant {
                     id: "ten_a".into(),
@@ -2471,7 +2471,7 @@ mod tests {
             )
             .await
             .unwrap();
-            registry::create_trust_keyset(
+            registry::test_support::create_trust_keyset(
                 pool,
                 &NewTrustKeyset {
                     id: "ks_1".into(),
