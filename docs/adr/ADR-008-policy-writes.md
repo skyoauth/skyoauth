@@ -107,7 +107,7 @@ design §7.2 and identity-registry §5.2.
     false) is deployment configuration, set at install, so no online admin
     can enable it alone; the database mirrors it read-only, with
     an audit event on change. Whether the local signed recovery transaction can
-    also set it was open (identity-registry OQ-IR-13); the interim reading is confirmed (2026-11-24, relayed by the lead):
+    also set it was open (identity-registry OQ-IR-13); the interim reading is confirmed (the user, 2026-11-24, relayed by the lead):
     `single_actor_mode` changes only by deployment configuration applied at restart and audited at startup.
     An approval is a second `AdministrativeOperation` of kind `approve` by a
     different actor, who holds `security_admin` for widening writes and
@@ -213,7 +213,7 @@ New questions raised by this ADR:
   configuration set at install, mirrored read-only in the database with an
   audit event on change (lead decision, 2026-11-19; item 12); whether the
   local signed recovery transaction can also set it was open
-  (identity-registry OQ-IR-13); the interim reading is confirmed (2026-11-24, relayed by the lead): it changes only by deployment configuration at restart. Both are in the tasks §3 schema with the M1a
+  (identity-registry OQ-IR-13); the interim reading is confirmed (the user, 2026-11-24, relayed by the lead): it changes only by deployment configuration at restart. Both are in the tasks §3 schema with the M1a
   spec amendments. Contracts: identity-registry IR-052 (the setting and its
   effect) and IR-054 (second-approver approvals), public-api API-156 and the
   `/approve` operation endpoints (OQ-API-13). Ruled by the user, 2026-11-22,

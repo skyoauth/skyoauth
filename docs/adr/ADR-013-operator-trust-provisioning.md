@@ -70,7 +70,7 @@ tenant preparation and instance approval (design §4.2).
    combinations fail explicitly and never export a key as a fallback (design
    §7.2, §10.1; tasks §1; T13.3, T13.7, T13.10).
 7. **Library-side recovery check, deployment-local transport.** The recovery signature is verified by the
-   library inside `restore_operator` (a combined verify-and-restore step;
+   library inside `restore_operator` (operator restoration, M1a; M1b provider transitions: OQ-ADR012-4) (a combined verify-and-restore step;
    Ed25519 via `ed25519-dalek`; small-order keys are refused at verify, and
    small-order, non-canonical and undecodable keys at every enrollment point; user ruling, 2026-11-24). The
    service binary keeps only the deployment-local bootstrap and the recovery

@@ -1467,9 +1467,9 @@ the contract amendments; what is still open is named in the entry:
   IR-052 and IR-054 (with OQ-ADR008-3).
 - **OQ-TM-8:** design §7.2; T13.5; API-152 and T13.4 (scope of the recovery
   transaction: replacement `security_admin` credential, operator-credential
-  revocation, replacement recovery public key). Still open: whether setting
-  `single_actor_mode` is a further recovery transaction kind that also
-  replaces the recovery key (identity-registry OQ-IR-13).
+  revocation, replacement recovery public key). Whether setting
+  `single_actor_mode` is a further recovery transaction kind that also replaces the recovery key was open (identity-registry OQ-IR-13),
+  superseded by the confirmed 2026-11-24 reading (the user, 2026-11-24, relayed by the lead; ADR-008 item 12): `single_actor_mode` changes only by deployment configuration applied at restart and audited at startup; API-152 / identity-registry wording pending the contract PR.
 - **OQ-TM-9:** design §7.2 (recovery socket owned by the service UID, mode
   0600; `pods/exec` on the SkyOAuth namespace restricted to trusted
   infrastructure administrators); T13.4; T50.1.

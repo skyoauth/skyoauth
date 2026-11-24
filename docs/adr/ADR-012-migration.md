@@ -162,7 +162,7 @@ New questions raised by this ADR:
   single-actor exception. Open; the lead decides before M1b (lead decision,
   2026-11-19). Spec amendment follow-up: design §7.2 and §7.3, T13.5, T13.9
   and threat-model OQ-TM-7.
-- **OQ-ADR012-4 — Where a recovery-signed switch or rollback is verified.** The library's check inside `restore_operator` (ADR-013 item 7; user ruling, 2026-11-24) covers only M1a operator restoration: `restore_operator` accepts only an operator-restoration challenge and revokes every operator credential, while a provider switch or rollback must keep them. The sources do not say where M1b verifies the signature of a recovery-signed provider transition (inferred: inside the provider-transition transaction, as for operator restoration). Open; to be settled before M1b. Spec amendment follow-up: T13.5, T13.9, T51.11 and threat-model OQ-TM-7.
+- **OQ-ADR012-4 — Where a recovery-signed switch or rollback is verified.** The library's check inside `restore_operator` (ADR-013 item 7; user ruling, 2026-11-24) covers only M1a operator restoration: `restore_operator` accepts only an operator-restoration challenge and revokes every operator credential, while a provider switch or rollback must keep them. The sources do not say where M1b verifies the signature of a recovery-signed provider transition (inferred: inside the provider-transition transaction, as for operator restoration). Open; to be settled before M1b (inferred: M1b is where the recovery-signed switch and rollback are first permitted). Spec amendment follow-up: T13.5, T13.9, T51.11 and threat-model OQ-TM-7.
 
 ## Tests
 
