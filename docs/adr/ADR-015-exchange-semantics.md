@@ -1,6 +1,11 @@
 # ADR-015: Exchange semantics
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.9. Implementation: T12.3, T12.7, T12.8,
   T21.1–T21.7.
 - **Baseline (tasks §11):** "RFC direct subject exchange versus private actor

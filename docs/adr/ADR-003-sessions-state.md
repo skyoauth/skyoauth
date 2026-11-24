@@ -1,6 +1,11 @@
 # ADR-003: Sessions and one-time state
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.6 (session, flow, code and epoch lifetimes) and
   the flow-cookie part of T00.16 (inferred: tasks §2 names no ADR in these tasks
   for this decision). Implementation: T10.3, T10.6, T10.9, T10.10, T30.2, T30.6,

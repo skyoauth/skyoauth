@@ -1,6 +1,11 @@
 # ADR-009: Optional upstream provider exchange
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.8, which keeps "provider vault/exchange ...
   separately scoped future features" (inferred: tasks §2 names no ADR in T00.8).
   Implementation: T41.1–T41.4 (T41.2 deferred), T30.5.

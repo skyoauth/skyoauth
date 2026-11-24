@@ -1,6 +1,11 @@
 # ADR-020: Browser routing, route admission and deployment binding
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.6 (which names ADR-020 for the full-origin apply
   interruption and cleanup independence), T00.5 (protected-scope projection,
   activation modes, apply timeout, cancel, revoke and abort authority) and

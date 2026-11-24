@@ -1,14 +1,20 @@
 # ADR-013: Operator trust and provisioning
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.10. Implementation: T13.1–T13.10, T14.9 (route
   preparation and approval contracts), T51.11, T52.5, T52.8.
 - **Baseline (tasks §11):** "Independent keys/local roles, M1a workstation
-  operator/local verifier and M1b human contracts. client_admin requests
-  immutable preparation; the M3 scoped worker finalizes the version before
-  security_admin approval. Approval binds all affected security revisions and
-  explicit reenable_targets; activation clears only named current vetoes. No
-  implicit role inheritance, generic enable PATCH or stale-plan recovery."
+  operator/local recovery transport (the library verifies) and M1b human
+  contracts. client_admin requests immutable preparation; the M3 scoped
+  worker finalizes the version before security_admin approval. Approval
+  binds all affected security revisions and explicit reenable_targets;
+  activation clears only named current vetoes. No implicit role inheritance,
+  generic enable PATCH or stale-plan recovery."
 - **Contracts:** [public-api.md](../contracts/public-api.md) §1, §7,
   [identity-registry.md](../contracts/identity-registry.md) §5.2,
   [gateway-containment.md](../contracts/gateway-containment.md) §7, §11.3,
@@ -17,9 +23,10 @@
 ## Context
 
 T00.10 asks M0 to "ratify independent adm identities, local roles, portable
-M1a workstation client, deployment-local verifier and offline-key custody.
-Split workload provisioning M1a from human provisioning M1b; upstream claims
-cannot assign operator rights." Operator authority must not depend on the
+M1a workstation client, deployment-local bootstrap/recovery transport (the
+library verifies the recovery signature) and offline-key custody. Split
+workload provisioning M1a from human provisioning M1b; upstream claims cannot
+assign operator rights." Operator authority must not depend on the
 replaceable human IdP: a provider switch or rollback must remain possible
 while that IdP is down or account linking is broken (design §2 C10, §7.2, §8).
 Design §3.1 boundary 2 states that independent `adm_*` identities cannot be

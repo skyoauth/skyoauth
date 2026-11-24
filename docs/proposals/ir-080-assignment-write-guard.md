@@ -2,15 +2,18 @@
 
 Status: accepted, implemented in 0010
 (`service/migrations/0010_assignment_write_guard.sql`; migrations README,
-"What 0010 adds"; ruled by the user, 2026-11-22, relayed by the lead). The
+"What 0010 adds"; ruled by the user, 2026-11-22, relayed by the lead); ADRs
+ratified directionally (maintainer, 2026-11-24). The
 acceptance includes reversing the migrations README rule for these two tables
 (see "Resolved" below), and the same trigger pattern is also to guard the
 IR-152 egress check (`trust_source` destinations against
 `egress_allowlist_entry`). Before that ruling the status was "proposal only",
 with all picks provisional, dated 2026-11-21, until the maintainer decides.
 Picks marked "(inferred)" are the coding session's reading; picks marked
-"lead" are lead rulings of the same date, and they stay provisional until the
-maintainer ratifies the ADRs (Gate M0). The text below is the proposal as
+"lead" are lead rulings of the same date; with the maintainer's directional
+ratification of the ADRs (2026-11-24) they, and the provisional lead picks
+below, are accepted as implementation choices that ordinary review can
+change. The text below is the proposal as
 accepted; where the implementation differs, "Implementation notes" says so.
 
 ## Problem

@@ -1,6 +1,11 @@
 # ADR-019: Human credential profiles and private JWT types
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.3 (private types and profile claim sets) and
   T00.15 (explicit HumanAccessPolicy and credential profile sources) (inferred:
   tasks §2 names no ADR in these tasks). Implementation: T20.1–T20.4, T20.8,

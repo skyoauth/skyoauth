@@ -1,6 +1,11 @@
 # ADR-014: Tenant scope
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.11. Implementation: T10.1, T10.8, T14.1, T14.2,
   T14.5, T14.7, T14.8, T52.6.
 - **Baseline (tasks §11):** "Composite references, instance audience/origin

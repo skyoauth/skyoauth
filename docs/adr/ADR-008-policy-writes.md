@@ -1,6 +1,11 @@
 # ADR-008: Policy writes, imports and approval
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
+  direction is accepted; the details, including lead decisions and text marked
+  "(inferred)", are implementation choices that ordinary review can change
+  (design §12; [status values](README.md#status-values)). Questions still
+  marked open under Open questions stay open: ratification closes none of
+  them.
 - **Tasks:** ratified with T00.10 (independent identities and roles behind every
   write) (inferred: tasks §2 names no ADR in T00.10; the README index pairs
   ADR-008 with it). Implementation: T10.4, T10.5, T10.7, T12.2, T13.2, T13.3,
@@ -103,7 +108,9 @@ design §7.2 and identity-registry §5.2.
     the audited single-actor instance policy `single_actor_mode` is on.
     Turning `widening_second_approver` off is a widening write: without the
     widening flag it is rejected like every other widening write (the user's
-    ruling, 2026-11-24; T13.3 implements it). `single_actor_mode` (default
+    ruling, 2026-11-24; the library implements it in
+    `skyoauth_service::operation` (#136), and T13.3 wires the endpoint).
+    `single_actor_mode` (default
     false) is deployment configuration, set at install, so no online admin
     can enable it alone; the database mirrors it read-only, with
     an audit event on change. Whether the local signed recovery transaction can
@@ -237,8 +244,9 @@ New questions raised by this ADR:
   second identity, grant it `security_admin` and approve through it) is
   accepted. Every request that sets `widening_second_approver` to false, a
   false to false write included, needs the widening flag like every other
-  widening write (the user, 2026-11-24, relayed by the lead; item 12; not yet
-  implemented, T13.3; see the second-approver proposal). Still open: the audit sink TLS
+  widening write (the user, 2026-11-24, relayed by the lead; item 12;
+  implemented in the library, `skyoauth_service::operation` (#136); T13.3
+  wires the endpoint; see the second-approver proposal). Still open: the audit sink TLS
   trust settings and alert routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a

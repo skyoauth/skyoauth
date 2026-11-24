@@ -1,6 +1,11 @@
 # SkyOAuth credential profiles
 
-- **Status:** proposed, M0. Not implemented; not yet reviewed or ratified.
+- **Status:** reviewed, M0 (T00.3). The ADRs it cites are ratified
+  directionally (maintainer, 2026-11-24; [status values](../adr/README.md#status-values)):
+  its lead decisions and provisional lead picks are implementation
+  choices that ordinary review can change, and its open questions stay open.
+  What is implemented is tracked per conformance stage
+  ([tests/conformance](../../tests/conformance/README.md)), not by this line.
 - **Tasks covered:** T00.3.
 - **Derived from:** [design](../skyoauth-design.md) §1, §3, §3.1, §4, §4.1,
   §5.2, §5.2.2, §5.6, §5.7, §6, §6.1, §6.1.1, §6.2, §13 (RFC 8693, RFC 8725,
