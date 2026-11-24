@@ -6,7 +6,8 @@
 //! the expected revision, the generated IDs, the audit event (its action,
 //! actor, object, tenant and revisions) and the chain, the action of an
 //! update, the principal kinds and tenant scope, the isolation level, the
-//! locked lookup, and that a refused or failed write leaves nothing behind.
+//! locked lookup, and that a refused or failed write, a generator that
+//! gives no ID included, leaves nothing behind.
 //!
 //! Every helper here commits the outer transaction even when the call
 //! returned an error, so each refusal also shows that the call's savepoint
@@ -21,7 +22,10 @@
 
 mod common;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use common::TestDb;
 use ed25519_dalek::SigningKey;
@@ -31,7 +35,7 @@ use skyoauth_service::{
         self, ActionCreate, AdminRequest, AdminWriteError, AssignmentCreate, Audited,
         CheckerCreate, PrincipalCreate, ResourceServerCreate, TenantCreate,
     },
-    ids::{IdGenerator, IdKind, test_support::SequentialIds},
+    ids::{IdError, IdGenerator, IdKind, test_support::SequentialIds},
     persistence::{
         self, PgPool,
         registry::{
@@ -272,7 +276,7 @@ async fn seeded() -> (TestDb, PgPool) {
             .unwrap();
     }
     for (id, identity) in [("chk_1", "spki-sha256:chk1"), ("chk_2", "spki-sha256:chk2")] {
-        registry::create_resource_server_checker(
+        registry::test_support::create_resource_server_checker(
             &pool,
             &NewResourceServerChecker {
                 id: id.into(),
@@ -284,11 +288,11 @@ async fn seeded() -> (TestDb, PgPool) {
         .await
         .unwrap();
     }
-    registry::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
+    registry::test_support::add_resource_server_checker_tenant(&pool, "chk_1", 1, "ten_a")
         .await
         .unwrap();
     for (id, name) in [("act_1", "projects.read"), ("act_2", "projects.list")] {
-        registry::create_resource_action(&pool, &action(id, name))
+        registry::test_support::create_resource_action(&pool, &action(id, name))
             .await
             .unwrap();
     }
@@ -840,6 +844,42 @@ fn request<'a>(key: &'a str, ids: &'a dyn IdGenerator) -> AdminRequest<'a> {
     }
 }
 
+/// A generator that gives the IDs of `inner` but fails its `fail_at`-th
+/// call, counted from 1, with `error`.
+struct FailingIds<'a> {
+    inner: &'a SequentialIds,
+    calls: AtomicUsize,
+    fail_at: usize,
+    error: IdError,
+}
+
+impl<'a> FailingIds<'a> {
+    fn new(inner: &'a SequentialIds, fail_at: usize, error: IdError) -> Self {
+        Self {
+            inner,
+            calls: AtomicUsize::new(0),
+            fail_at,
+            error,
+        }
+    }
+
+    /// How many IDs the write asked for, the failed one included.
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl IdGenerator for FailingIds<'_> {
+    fn new_id(&self, kind: IdKind) -> Result<String, IdError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.fail_at {
+            Err(self.error)
+        } else {
+            self.inner.new_id(kind)
+        }
+    }
+}
+
 #[track_caller]
 fn refused<T: std::fmt::Debug>(result: Result<T, AdminWriteError>, expected: &str) {
     match result {
@@ -968,7 +1008,8 @@ async fn every_write_applies_for_its_role_with_its_event() {
             .unwrap_or_else(|err| panic!("{write:?}: {err:?}"));
         match write.created_kind() {
             Some(kind) => {
-                assert_eq!(result.id, expected_ids.new_id(kind), "{write:?}");
+                let expected = expected_ids.new_id(kind).unwrap();
+                assert_eq!(result.id, expected, "{write:?}");
                 assert_eq!(result.revision, 1, "{write:?}");
                 created.push(result.id.clone());
             }
@@ -978,7 +1019,7 @@ async fn every_write_applies_for_its_role_with_its_event() {
                 assert_eq!(current_revision(&pool, write).await, result.revision);
             }
         }
-        let event_id = expected_ids.new_id(IdKind::AuditEvent);
+        let event_id = expected_ids.new_id(IdKind::AuditEvent).unwrap();
         let actor = AuditActor::Operator(write.admin().into());
         assert_eq!(event_count(&pool).await, count + 1, "{write:?}");
         assert_eq!(
@@ -1590,6 +1631,67 @@ async fn the_authorization_is_locked_until_the_transaction_ends() {
 
 /// No refusal's `Display` or `Debug` holds a value of the request: a key,
 /// an ID, a name, a namespace or an audience.
+/// A generator that gives no ID, at any of the calls a write makes (a
+/// create's object ID, before the registry write, and every write's event
+/// ID, after it), fails the write with `Id` and leaves nothing written,
+/// although the outer transaction then commits: the savepoint takes back
+/// the row written before the event's ID failed. The write asks for no ID
+/// after the failed one, and, with a generator that does not fail, for
+/// exactly those IDs.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_failing_generator_leaves_nothing() {
+    let (db, pool) = seeded().await;
+    let shared = SequentialIds::with_seed(7);
+    for write in WRITES {
+        let calls = if write.created_kind().is_some() { 2 } else { 1 };
+        let before = snapshot(&pool).await;
+        for fail_at in 1..=calls {
+            for error in [IdError::SourceFailed, IdError::Exhausted] {
+                let ids = FailingIds::new(&shared, fail_at, error);
+                let result = run(&pool, &ids, write, write.key(), Revision::Current).await;
+                refused(result, &format!("Id({error:?})"));
+                assert_eq!(ids.calls(), fail_at, "{write:?}");
+                assert_eq!(snapshot(&pool).await, before, "{write:?} at {fail_at}");
+            }
+        }
+        let ids = FailingIds::new(&shared, usize::MAX, IdError::SourceFailed);
+        run(&pool, &ids, write, write.key(), Revision::Current)
+            .await
+            .unwrap_or_else(|err| panic!("{write:?}: {err:?}"));
+        assert_eq!(ids.calls(), calls, "{write:?}");
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// `SequentialIds` at the end of a counter is `Exhausted`, and a write
+/// that needs an ID of that kind, for its object or its event, writes
+/// nothing.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn an_exhausted_generator_writes_nothing() {
+    let (db, pool) = seeded().await;
+    let before = snapshot(&pool).await;
+    for (write, kind) in [
+        (Write::CreateTenant, IdKind::Tenant),
+        (Write::CreateTenant, IdKind::AuditEvent),
+        (Write::CreatePrincipal, IdKind::WorkloadPrincipal),
+        (Write::CreatePrincipal, IdKind::AuditEvent),
+        (Write::CreateChecker, IdKind::Checker),
+        (Write::UpdateTenant, IdKind::AuditEvent),
+        (Write::DisablePrincipal, IdKind::AuditEvent),
+        (Write::AddCheckerTenant, IdKind::AuditEvent),
+    ] {
+        let ids = SequentialIds::with_last_count(kind, u64::MAX);
+        let result = run(&pool, &ids, write, write.key(), Revision::Current).await;
+        refused(result, "Id(Exhausted)");
+        assert_eq!(snapshot(&pool).await, before, "{write:?} {kind:?}");
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
 #[tokio::test]
 #[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
 async fn errors_omit_the_requests_values() {
@@ -1622,6 +1724,10 @@ async fn errors_omit_the_requests_values() {
     ] {
         errors.push(run(&pool, &ids, write, key, revision).await.unwrap_err());
     }
+    let failing = FailingIds::new(&ids, 2, IdError::SourceFailed);
+    let write = Write::CreateTenant;
+    let result = run(&pool, &failing, write, KEY_SEC, Revision::Current).await;
+    errors.push(result.unwrap_err());
     let sec = request(KEY_SEC, &ids);
     let trust = request(KEY_TRUST_A, &ids);
     let mut tx = pool.begin().await.unwrap();
@@ -1699,7 +1805,7 @@ async fn errors_omit_the_requests_values() {
             for marker in markers
                 .iter()
                 .map(ToString::to_string)
-                .chain([generated.new_id(IdKind::Tenant)])
+                .chain([generated.new_id(IdKind::Tenant).unwrap()])
             {
                 assert!(!text.contains(&marker), "{text:?} holds {marker:?}");
             }
@@ -1712,6 +1818,7 @@ async fn errors_omit_the_requests_values() {
             "Unauthorized",
             "Registry(StaleRevision)",
             "Registry(StaleRevision)",
+            "Id(SourceFailed)",
             "Registry(AlreadyExists { constraint: \"tenant_secret_namespace_key\" })",
             "Registry(AlreadyExists { constraint: \"principal_tenant_id_kind_name_key\" })",
             "PrincipalKindNotAllowed",

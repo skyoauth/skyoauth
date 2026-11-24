@@ -115,8 +115,12 @@
 //! rolls it back on every `Err`, so an `Err` leaves no row and no event
 //! behind and the caller's transaction usable; the caller still rolls back
 //! on `Err`, since a failed savepoint rollback leaves the rows in place. A
-//! generated ID is used up even when the write then fails. Refusals are not
-//! audited. A `40001` or `40P01` is [`RegistryError::Retry`] inside
+//! generated ID is used up even when the write then fails. A generator that
+//! gives no ID, for the new object (before the registry write) or for the
+//! event (after it, inside the savepoint), is [`AdminWriteError::Id`], and
+//! the savepoint's rollback takes back the row written before it (a server
+//! error: "Generators" in [`crate::ids`]; lead decision, 2026-11-24).
+//! Refusals are not audited. A `40001` or `40P01` is [`RegistryError::Retry`] inside
 //! [`AdminWriteError::Registry`]: retry the whole transaction.
 //! `Display` and `Debug` of an [`AdminWriteError`] never contain an ID, a
 //! public identity, a name or another value of the request.
@@ -191,7 +195,7 @@ pub mod workload;
 
 use std::{fmt, time::SystemTime};
 
-use crate::ids::IdGenerator;
+use crate::ids::{IdError, IdGenerator};
 use crate::persistence::registry::{AuditEvent, RegistryError};
 use crate::trust::write::WriteError;
 
@@ -243,11 +247,13 @@ pub struct Audited<T> {
 /// savepoint is rolled back: no row, no event.
 ///
 /// `Display` is fixed text per variant and `Debug` names the variant; the
-/// [`RegistryError`] inside [`Self::Registry`] prints only constraint,
-/// table and column names and a SQLSTATE. Neither holds an ID, a public
-/// identity, a name or another value of the request. `source()` returns
-/// the inner [`RegistryError`] only, whose own source may quote values, so
-/// logging must not walk the chain. `#[non_exhaustive]`: a later write may
+/// [`IdError`] inside [`Self::Id`] is only its variant's name, and its text
+/// is left out of `Display`; the [`RegistryError`] inside
+/// [`Self::Registry`] prints only constraint, table and column names and a
+/// SQLSTATE. Neither holds an ID, a public identity, a name or another
+/// value of the request. `source()` returns the inner [`IdError`] or
+/// [`RegistryError`] only; a registry error's own source may quote values,
+/// so logging must not walk the chain. `#[non_exhaustive]`: a later write may
 /// add a variant.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -262,6 +268,10 @@ pub enum AdminWriteError {
     /// does not change: a human principal (IR-043; the lead ruling of
     /// 2026-11-21 that only workload and service principals change here).
     PrincipalKindNotAllowed,
+    /// The generator gave no ID, for the new object or for the audit
+    /// event: a server error, not retried with another source (see
+    /// "Generators" in [`crate::ids`]; lead decision, 2026-11-24).
+    Id(IdError),
     /// A registry error: the target's outcome
     /// ([`RegistryError::NotFound`], [`RegistryError::StaleRevision`],
     /// [`RegistryError::AlreadyExists`], a constraint), a store failure, or
@@ -277,6 +287,7 @@ impl fmt::Display for AdminWriteError {
             Self::PrincipalKindNotAllowed => {
                 f.write_str("this write may not change a principal of this kind")
             }
+            Self::Id(_) => f.write_str("operator write could not generate an ID"),
             Self::Registry(err) => write!(f, "operator write failed: {err}"),
         }
     }
@@ -285,6 +296,7 @@ impl fmt::Display for AdminWriteError {
 impl std::error::Error for AdminWriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Id(err) => Some(err),
             Self::Registry(err) => Some(err),
             _ => None,
         }
@@ -294,6 +306,12 @@ impl std::error::Error for AdminWriteError {
 impl From<RegistryError> for AdminWriteError {
     fn from(err: RegistryError) -> Self {
         Self::Registry(err)
+    }
+}
+
+impl From<IdError> for AdminWriteError {
+    fn from(err: IdError) -> Self {
+        Self::Id(err)
     }
 }
 
@@ -337,6 +355,16 @@ mod tests {
             assert_eq!(err.to_string(), display);
             assert!(std::error::Error::source(&err).is_none());
         }
+        for (id, debug) in [
+            (IdError::SourceFailed, "Id(SourceFailed)"),
+            (IdError::Exhausted, "Id(Exhausted)"),
+        ] {
+            let err = AdminWriteError::from(id);
+            assert_eq!(format!("{err:?}"), debug);
+            assert_eq!(err.to_string(), "operator write could not generate an ID");
+            let source = std::error::Error::source(&err).map(ToString::to_string);
+            assert_eq!(source, Some(id.to_string()));
+        }
         let err = AdminWriteError::from(RegistryError::StaleRevision);
         assert_eq!(format!("{err:?}"), "Registry(StaleRevision)");
         assert!(err.to_string().starts_with("operator write failed: "));
@@ -347,8 +375,8 @@ mod tests {
     fn a_request_prints_no_public_identity() {
         struct NoIds;
         impl IdGenerator for NoIds {
-            fn new_id(&self, _: crate::ids::IdKind) -> String {
-                unreachable!()
+            fn new_id(&self, _: crate::ids::IdKind) -> Result<String, IdError> {
+                Err(IdError::SourceFailed)
             }
         }
         let request = AdminRequest {

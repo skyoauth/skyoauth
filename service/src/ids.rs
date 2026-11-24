@@ -293,9 +293,9 @@ pub mod test_support {
         }
 
         /// A generator with seed 0 whose last count of `kind` is `last`,
-        /// so the unit tests reach the end of the counter.
-        #[cfg(test)]
-        pub(super) fn with_last_count(kind: IdKind, last: u64) -> Self {
+        /// so tests reach the end of the counter (`u64::MAX`: the next ID
+        /// of `kind` is [`IdError::Exhausted`]).
+        pub fn with_last_count(kind: IdKind, last: u64) -> Self {
             let ids = Self::new();
             ids.counters.lock().unwrap_or_else(PoisonError::into_inner)[kind as usize] = last;
             ids

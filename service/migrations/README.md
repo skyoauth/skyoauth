@@ -2789,7 +2789,13 @@ gives `Other` with `22003` from `revision + 1`, which is unreachable in
 practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
-cursor.
+cursor. The checker writers (`create_resource_server_checker`,
+`update_resource_server_checker`, `add_resource_server_checker_tenant`,
+`remove_resource_server_checker_tenant`), the action writers
+(`create_resource_action`, `update_resource_action`), `update_tenant` and
+`update_principal` are crate-private (`pub(crate)`): the audited,
+authorized writes of `crate::admin` call them, and tests reach them through
+`persistence::registry::test_support`.
 
 Of two concurrent updates from one revision exactly one succeeds. Under
 `READ COMMITTED` the second waits for the first's row lock and then gives
@@ -2857,7 +2863,8 @@ exactly one attempt consumes holds under `READ COMMITTED`; under
 Audit events (IR-055 to IR-059; OQ-IR-14; OQ-IR-15, decided provisionally
 by the lead decision 2026-11-21; T10.1; design §7): `append_audit_event`
 (crate-private since the second-approver proposal's PR 10: the audited
-writes of the registry, `crate::trust` and `crate::operation` call it, and
+writes of the registry, `crate::trust`, `crate::operation` and
+`crate::admin` call it, and
 tests reach it through `persistence::registry::test_support`)
 appends one event in a caller transaction after the domain rows, in the
 order of "append audit events in this order" above (a write that creates an

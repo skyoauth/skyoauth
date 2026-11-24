@@ -356,9 +356,9 @@
 //!   `remove_resource_server_checker_tenant`, the action writers
 //!   `create_resource_action` and `update_resource_action`, and
 //!   `update_tenant` and `update_principal` (a re-enable included), all
-//!   `pub(super)` with no caller in the crate, so each carries the same
-//!   `expect(dead_code)` as `update_admin_role_binding` (inferred: the
-//!   narrowest visibility; no scenario test names them).
+//!   `pub(crate)`: the audited, authorized writes of [`crate::admin`] call
+//!   them, and nothing else in the crate does (inferred: the narrowest
+//!   visibility that caller allows; no scenario test names them).
 //!
 //! Tests, which are crates of their own, reach each through a wrapper of
 //! the same name in the `#[doc(hidden)]` module `test_support`, compiled
@@ -425,7 +425,7 @@ mod tenant;
 // Off in a normal build: for tests only, the bare registry trust writers
 // (second-approver proposal, PR 9), the operator writers, the audit append
 // and the operation-row writers (PR 10), and the checker, action, tenant
-// and principal writers that no code in the crate calls; see the module.
+// and principal writers that only `crate::admin` calls; see the module.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
@@ -439,6 +439,12 @@ pub use audience::{
     get_resource_action, get_resource_server, get_resource_server_checker,
     list_audience_tenant_assignments, list_resource_actions, list_resource_server_checkers,
     list_resource_servers, update_audience_tenant_assignment, update_resource_server,
+};
+// Crate-private: `crate::admin` calls them from its audited, authorized
+// writes; tests reach them through `test_support`.
+pub(crate) use audience::{
+    add_resource_server_checker_tenant, create_resource_action, create_resource_server_checker,
+    remove_resource_server_checker_tenant, update_resource_action, update_resource_server_checker,
 };
 pub use bootstrap::{
     BootstrapError, BootstrapOutcome, BootstrapRequest, RECOVERY_PUBLIC_KEY_LENGTH,
@@ -514,6 +520,7 @@ pub use selection::{Selection, SelectionError, select_grant};
 pub use tenant::{
     create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
 };
+pub(crate) use tenant::{update_principal, update_tenant};
 pub(crate) use trust::{
     KeysetVersionText, create_trust_keyset_version, create_trust_source,
     read_enabled_keyset_versions, read_keyset_version, update_trust_keyset_version,

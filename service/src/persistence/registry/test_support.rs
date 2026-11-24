@@ -40,12 +40,11 @@
 //! [`create_resource_action`] and [`update_resource_action`], and
 //! [`update_tenant`] and [`update_principal`] admit a tenant to a checker,
 //! define what an action requires, or rename or re-enable a tenant or a
-//! principal, with no authorization and no audit event. Nothing in the
-//! crate calls them, so they are visible only within the registry
-//! (`pub(super)`) and dead code without the `test-support` feature, which
-//! each one's `expect(dead_code)` states, as for
-//! `update_admin_role_binding` (the survey under "Still open after PRs 7, 9
-//! and 10" of the same proposal; inferred: the narrowest visibility).
+//! principal, with no authorization and no audit event. So they are
+//! crate-private too (the survey under "Still open after PRs 7, 9 and 10"
+//! of the same proposal): `pub(crate)`, because the audited, authorized
+//! writes of [`crate::admin`] call them, and nothing else in the crate
+//! does (inferred: the narrowest visibility that caller allows).
 //!
 //! The integration tests under `service/tests` and the scenario tests of
 //! `skyoauth-scenarios` (`tests/`) are crates of their own and use these
@@ -199,8 +198,9 @@ pub async fn revoke_administrative_operation(
         .await
 }
 
-/// The registry's `create_resource_server_checker` (`pub(super)`, no
-/// caller in the crate): a checker, unauthorized and unaudited. Tests only.
+/// The registry's `create_resource_server_checker` (`pub(crate)`,
+/// called by `crate::admin`): a checker, unauthorized and unaudited.
+/// Tests only.
 pub async fn create_resource_server_checker<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewResourceServerChecker,
@@ -208,8 +208,8 @@ pub async fn create_resource_server_checker<'e>(
     audience::create_resource_server_checker(executor, new).await
 }
 
-/// The registry's `update_resource_server_checker` (`pub(super)`, no
-/// caller in the crate): a checker's identity or status, a re-enable
+/// The registry's `update_resource_server_checker` (`pub(crate)`,
+/// called by `crate::admin`): a checker's identity or status, a re-enable
 /// included, unauthorized and unaudited. Tests only.
 pub async fn update_resource_server_checker<'e>(
     executor: impl PgExecutor<'e>,
@@ -220,9 +220,9 @@ pub async fn update_resource_server_checker<'e>(
     audience::update_resource_server_checker(executor, id, expected_revision, changes).await
 }
 
-/// The registry's `add_resource_server_checker_tenant` (`pub(super)`, no
-/// caller in the crate): a tenant admitted to a checker, unauthorized and
-/// unaudited. Tests only.
+/// The registry's `add_resource_server_checker_tenant` (`pub(crate)`,
+/// called by `crate::admin`): a tenant admitted to a checker,
+/// unauthorized and unaudited. Tests only.
 pub async fn add_resource_server_checker_tenant<'e>(
     executor: impl PgExecutor<'e>,
     checker_id: &str,
@@ -233,8 +233,8 @@ pub async fn add_resource_server_checker_tenant<'e>(
         .await
 }
 
-/// The registry's `remove_resource_server_checker_tenant` (`pub(super)`,
-/// no caller in the crate): a tenant removed from a checker, unauthorized
+/// The registry's `remove_resource_server_checker_tenant` (`pub(crate)`,
+/// called by `crate::admin`): a tenant removed from a checker, unauthorized
 /// and unaudited. Tests only.
 pub async fn remove_resource_server_checker_tenant<'e>(
     executor: impl PgExecutor<'e>,
@@ -251,8 +251,8 @@ pub async fn remove_resource_server_checker_tenant<'e>(
     .await
 }
 
-/// The registry's `create_resource_action` (`pub(super)`, no caller in the
-/// crate): an action rule, unauthorized and unaudited. Tests only.
+/// The registry's `create_resource_action` (`pub(crate)`, called by
+/// `crate::admin`): an action rule, unauthorized and unaudited. Tests only.
 pub async fn create_resource_action<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewResourceAction,
@@ -260,8 +260,8 @@ pub async fn create_resource_action<'e>(
     audience::create_resource_action(executor, new).await
 }
 
-/// The registry's `update_resource_action` (`pub(super)`, no caller in the
-/// crate): an action rule's mutable columns, a re-enable included,
+/// The registry's `update_resource_action` (`pub(crate)`, called by
+/// `crate::admin`): an action rule's mutable columns, a re-enable included,
 /// unauthorized and unaudited. Tests only.
 pub async fn update_resource_action<'e>(
     executor: impl PgExecutor<'e>,
@@ -272,7 +272,7 @@ pub async fn update_resource_action<'e>(
     audience::update_resource_action(executor, id, expected_revision, changes).await
 }
 
-/// The registry's `update_tenant` (`pub(super)`, no caller in the crate): a
+/// The registry's `update_tenant` (`pub(crate)`, called by `crate::admin`): a
 /// tenant's name or status, a re-enable included, unauthorized and
 /// unaudited. Tests only.
 pub async fn update_tenant<'e>(
@@ -284,8 +284,8 @@ pub async fn update_tenant<'e>(
     tenant::update_tenant(executor, id, expected_revision, patch).await
 }
 
-/// The registry's `update_principal` (`pub(super)`, no caller in the
-/// crate): a principal's name or status, a re-enable included,
+/// The registry's `update_principal` (`pub(crate)`, called by
+/// `crate::admin`): a principal's name or status, a re-enable included,
 /// unauthorized and unaudited. Tests only.
 pub async fn update_principal<'e>(
     executor: impl PgExecutor<'e>,

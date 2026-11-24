@@ -230,7 +230,7 @@ async fn append_event(
     change: Change<'_>,
 ) -> Result<AuditEvent, AdminWriteError> {
     let event = NewAuditEvent {
-        id: request.ids.new_id(IdKind::AuditEvent),
+        id: request.ids.new_id(IdKind::AuditEvent)?,
         tenant_id: change.tenant_id.map(Into::into),
         timestamp: request.now,
         actor: AuditActor::Operator(requester.admin_id.clone()),
@@ -296,7 +296,7 @@ pub async fn create_tenant(
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
         let new = NewTenant {
-            id: request.ids.new_id(IdKind::Tenant),
+            id: request.ids.new_id(IdKind::Tenant)?,
             name: new.name.clone(),
             secret_namespace: secret_namespace.into(),
             status: new.status,
@@ -384,7 +384,7 @@ pub async fn create_workload_principal(
     in_savepoint(transaction, async |transaction| {
         let requester = trust_admin(transaction, request, tenant_id).await?;
         let new = NewPrincipal {
-            id: request.ids.new_id(IdKind::WorkloadPrincipal),
+            id: request.ids.new_id(IdKind::WorkloadPrincipal)?,
             tenant_id: tenant_id.into(),
             kind: PrincipalKind::Workload,
             name: new.name.clone(),
@@ -503,7 +503,7 @@ pub async fn create_resource_server(
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
         let new = NewResourceServer {
-            id: request.ids.new_id(IdKind::ResourceServer),
+            id: request.ids.new_id(IdKind::ResourceServer)?,
             audience: new.audience.clone(),
             name: new.name.clone(),
             allowed_profiles: new.allowed_profiles.clone(),
@@ -604,7 +604,7 @@ pub async fn create_audience_tenant_assignment(
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
         let new = NewAudienceTenantAssignment {
-            id: request.ids.new_id(IdKind::AudienceAssignment),
+            id: request.ids.new_id(IdKind::AudienceAssignment)?,
             resource_server_id: new.resource_server_id.clone(),
             tenant_id: new.tenant_id.clone(),
             allowed_profiles: new.allowed_profiles.clone(),
@@ -710,7 +710,7 @@ pub async fn create_resource_server_checker(
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
         let new = NewResourceServerChecker {
-            id: request.ids.new_id(IdKind::Checker),
+            id: request.ids.new_id(IdKind::Checker)?,
             resource_server_id: new.resource_server_id.clone(),
             public_mtls_identity: new.public_mtls_identity.clone(),
             status: new.status,
@@ -865,7 +865,7 @@ pub async fn create_resource_action(
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
         let new = NewResourceAction {
-            id: request.ids.new_id(IdKind::ResourceAction),
+            id: request.ids.new_id(IdKind::ResourceAction)?,
             resource_server_id: new.resource_server_id.clone(),
             action_name: new.action_name.clone(),
             required_scopes: new.required_scopes.clone(),

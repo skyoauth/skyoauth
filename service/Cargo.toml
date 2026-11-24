@@ -41,8 +41,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # `update_admin_role_binding`), `append_audit_event` and the operation-row
 # writers (`insert_administrative_operation`,
 # `consume_administrative_operation`, `revoke_administrative_operation`),
-# and the checker, action, tenant and principal writers no code in the
-# crate calls (`create_resource_server_checker`,
+# and the checker, action, tenant and principal writers that only
+# `crate::admin`'s audited writes call (`create_resource_server_checker`,
 # `update_resource_server_checker`, `add_resource_server_checker_tenant`,
 # `remove_resource_server_checker_tenant`, `create_resource_action`,
 # `update_resource_action`, `update_tenant`, `update_principal`)
