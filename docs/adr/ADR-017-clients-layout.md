@@ -1,6 +1,6 @@
 # ADR-017: Client libraries and repository layout
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Every question under Open questions is already decided; ratification adds no decision.
 - **Tasks:** ratified with T00.13 (which names ADR-017) and T00.14
   (bootstrap-aware layout and gates) (the T00.14 pairing is inferred from its
   wording). Implementation: T21.9, T33.1–T33.8, T40.7, T40.9–T40.11, T13.10,

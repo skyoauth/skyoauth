@@ -1,6 +1,6 @@
 # ADR-007: Backend identity and credential containment
 
-- **Status:** Proposed, M0 — ratification pending maintainer review.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.5 (inferred: tasks §2 names no ADR in T00.5;
   design §4.1 names ADR-007 for the deferred per-route metadata alternative).
   Implementation: T25.1–T25.4, T32.1, T32.2, T32.4, T32.5, T32.13, T50.4, T52.4.
