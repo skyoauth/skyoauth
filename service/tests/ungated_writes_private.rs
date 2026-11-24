@@ -73,8 +73,9 @@
 //! recovery), and, one level up, each of those callers ([`CALLERS`]:
 //! `bootstrap_steps`, `insert_pending`, each `append_stamped` and the rest,
 //! and `trust::keyset`'s `set_status`, the one caller of a caller that is
-//! not public or itself guarded), each keyed by the item that holds it (a
-//! top-level item, or an `impl` block at any depth) with that item's
+//! not public or itself guarded, counted in its own module only
+//! ([`SCOPED`]: it is private there)), each keyed by the item that holds it
+//! (a top-level item, or an `impl` block at any depth) with that item's
 //! visibility and counted. So a forwarder of another name, a new caller, a
 //! widened definition or caller and a public method of an `impl` nested in
 //! a function body each change a key or a count. The check also refuses
@@ -258,6 +259,16 @@ const CALLERS: [(&str, &str, &str); 22] = [
     ("trust::source", "trust", "update_steps"),
     ("trust::source", "trust", "submit_update_steps"),
 ];
+
+/// Names the source check counts only in the files of the module that
+/// defines them (its file, and the files of its submodules), as a path
+/// under `src/` without `.rs`. `trust::keyset`'s `set_status` is private,
+/// so only that module and its descendants can name it: the same name
+/// elsewhere is another item (a method of another type, say), not a
+/// forwarder. Widening it changes the key of its definition in
+/// `trust/keyset.rs`, which the count still catches, and a new caller can
+/// only be in these files.
+const SCOPED: [(&str, &str); 1] = [("set_status", "trust/keyset")];
 
 /// The registry items of the same tables that stay public: the readers,
 /// and the row and input types the test-support wrappers take and return.
@@ -927,6 +938,94 @@ fn stripping_keeps_code_and_blanks_comments_and_literals() {
     assert_eq!(stripped.lines().count(), source.lines().count());
 }
 
+/// Whether the source check counts `name` in `file` (under `src/`,
+/// `/`-separated): everywhere, but a name of [`SCOPED`] only in the files
+/// of its module.
+fn counted_in(name: &str, file: &str) -> bool {
+    SCOPED
+        .iter()
+        .filter(|(scoped, _)| *scoped == name)
+        .all(|(_, module)| {
+            file == format!("{module}.rs") || file.starts_with(&format!("{module}/"))
+        })
+}
+
+/// A mention's key: the file, the first line of the item that holds it, and
+/// the name.
+type MentionKey = (String, String, String);
+
+/// Adds to `found` the mentions of `names` in `source`, the file `relative`
+/// (under `src/`), outside comments and literals, keyed by the item that
+/// holds each (see
+/// [`each_writer_and_step_is_crate_private_and_named_only_where_expected`]);
+/// a name of [`SCOPED`] only in its module's files.
+fn count_mentions(
+    relative: &str,
+    source: &str,
+    names: &BTreeSet<&str>,
+    found: &mut BTreeMap<MentionKey, usize>,
+) {
+    let stripped = strip_comments_and_literals(source);
+    let names: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| counted_in(name, relative))
+        .collect();
+    let mut item = String::from("<the file's start>");
+    for (line, stripped_line) in source.lines().zip(stripped.lines()) {
+        let continues = ["/", "#", "}", ")", "]", "{", "where"];
+        let starts_item = stripped_line
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace())
+            && !continues
+                .iter()
+                .any(|prefix| stripped_line.starts_with(prefix));
+        let starts_item = starts_item || is_nested_impl(stripped_line);
+        if starts_item {
+            item = line.to_owned();
+        }
+        for name in &names {
+            let count = identifier_count(stripped_line, name);
+            if count > 0 {
+                *found
+                    .entry((relative.to_owned(), item.clone(), (*name).to_owned()))
+                    .or_insert(0) += count;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_scoped_name_is_counted_only_in_its_module() {
+    let names = BTreeSet::from(["set_status", "append_stamped"]);
+    let lamp = "struct Lamp;\n\nimpl Lamp {\n    pub fn set_status(&self) {}\n}\n";
+    let mut found = BTreeMap::new();
+    // An unrelated method of the same name, in another module or a module
+    // whose name only starts with `keyset`, is not a mention.
+    count_mentions("operation/lamp.rs", lamp, &names, &mut found);
+    count_mentions("trust/keyset_lamp.rs", lamp, &names, &mut found);
+    assert!(found.is_empty(), "{found:?}");
+    // In the module's file or a submodule's, it is.
+    count_mentions("trust/keyset.rs", lamp, &names, &mut found);
+    count_mentions("trust/keyset/lamp.rs", lamp, &names, &mut found);
+    // A name that is not scoped is counted everywhere.
+    count_mentions(
+        "operation/lamp.rs",
+        "fn f() {\n    append_stamped();\n}\n",
+        &names,
+        &mut found,
+    );
+    let key =
+        |file: &str, item: &str, name: &str| (file.to_owned(), item.to_owned(), name.to_owned());
+    let expected = BTreeMap::from([
+        (key("operation/lamp.rs", "fn f() {", "append_stamped"), 1),
+        (key("trust/keyset.rs", "impl Lamp {", "set_status"), 1),
+        (key("trust/keyset/lamp.rs", "impl Lamp {", "set_status"), 1),
+    ]);
+    assert_eq!(found, expected);
+}
+
 /// Every `.rs` file under `dir`, recursively.
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -990,35 +1089,12 @@ fn each_writer_and_step_is_crate_private_and_named_only_where_expected() {
             }
         }
         let code: String = stripped.chars().filter(|c| !c.is_whitespace()).collect();
-        for name in &names {
+        for name in names.iter().filter(|name| counted_in(name, &relative)) {
             if code.contains(&format!("{name}as")) {
                 aliases.push(format!("{relative}: `{name} as`"));
             }
         }
-        let mut item = String::from("<the file's start>");
-        for (line, stripped_line) in source.lines().zip(stripped.lines()) {
-            let continues = ["/", "#", "}", ")", "]", "{", "where"];
-            let starts_item = stripped_line
-                .chars()
-                .next()
-                .is_some_and(|c| !c.is_whitespace())
-                && !continues
-                    .iter()
-                    .any(|prefix| stripped_line.starts_with(prefix));
-            let starts_item = starts_item || is_nested_impl(stripped_line);
-            if starts_item {
-                item = line.to_owned();
-            }
-            let code = &stripped_line;
-            for name in &names {
-                let count = identifier_count(code, name);
-                if count > 0 {
-                    *found
-                        .entry((relative.clone(), item.clone(), (*name).to_owned()))
-                        .or_insert(0) += count;
-                }
-            }
-        }
+        count_mentions(&relative, &source, &names, &mut found);
     }
     // The same lint levels set for the whole build: in a `[lints]` table of
     // the package or the workspace, or as `rustflags` (`-A`,

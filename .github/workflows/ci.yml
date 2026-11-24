@@ -499,11 +499,15 @@ jobs:
   # the ungated registry and trust writers to tests
   # (scripts/ci/check-release-features.mjs): the feature resolution of a
   # release build of each binary package, and of the workspace, turns it
-  # on for no package, and no release command in the workflows, scripts or
-  # cargo configuration uses --all-features or --all-targets or names it.
+  # on for no package; no workspace feature but `test-support` itself turns
+  # it on; and no release command in the workflows, scripts or cargo
+  # configuration (aliases expanded, profiles followed) uses --all-features
+  # or --all-targets, names it or such a feature, or builds test targets.
   # `cargo tree` and `cargo metadata` build nothing. The self-test runs the
   # guard on small path-only workspaces, offline, with the feature
-  # injected each way it could reach a release build.
+  # injected each way it could reach a release build. smol-toml (profiles,
+  # aliases) comes from the scripts/ci lockfile, installed without
+  # lifecycle scripts.
   release-features:
     name: Release build features
     needs: changes
@@ -524,6 +528,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install check dependencies
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
 
       - name: Check the release feature resolution
         run: node scripts/ci/check-release-features.mjs

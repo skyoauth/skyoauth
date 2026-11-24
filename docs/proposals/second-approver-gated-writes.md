@@ -2213,7 +2213,10 @@ generates (the library has neither, and `include!` is refused); a public
 forwarder, under another name, of a caller one level up (`bootstrap_steps`,
 `insert_pending`, `append_stamped` and the like), which the check did not
 list when PR 10 landed and now does (see "Registry hardening PR as
-implemented"); and whatever
+implemented"); a changed argument of a call the check allows (U11:
+`disable_version` passing `Status::Enabled` to `set_status` keeps every
+name and count, and is a public, ungated re-enable, which a count of names
+cannot see); and whatever
 the check's small lexer misreads, since it is not rustc's (a unit test
 covers the cases it handles).
 
@@ -2233,13 +2236,26 @@ The source check now also covers the callers one level up
 (`bootstrap_steps`, `issue_steps`, `restore_steps`, `insert_pending`,
 `toggle_steps`, `approve_steps`, `revoke_steps`, the `apply_*` steps, each
 `append_stamped` and the keyset and source `*_steps`, and keyset's private
-`set_status`), so a public forwarder of one of them is refused. A CI job
-(`release-features`, `scripts/ci/check-release-features.mjs`) fails if the
-resolved features of a binary package or of the workspace's normal
-dependencies turn on `test-support`, or if a release command uses
-`--all-features` or `--all-targets`. A service test pins the multi-row
-order of the `0005` guards (an earlier row's `23514` comes before a later
-row's `23503`).
+`set_status`, counted only in `trust::keyset`'s own files, the only
+place the private function can be named), so a public forwarder of one of
+them is refused. A CI job (`release-features`,
+`scripts/ci/check-release-features.mjs`) fails if the resolved features of
+a binary package or of the workspace's normal dependencies turn on
+`test-support`; if a workspace feature other than `test-support` itself
+turns it on (`DEP/test-support`, `DEP?/test-support`, an optional
+dependency declared with it, or another such feature, at any depth); or if
+a release command (`--release`, `-r`, `--profile` with a profile that is,
+inherits from or may be `release`, `cargo install`, `cargo bench`) uses
+`--all-features` or `--all-targets`, names `test-support` or such a
+feature, or builds test, bench or example targets, with the aliases of
+every `.cargo/config*` in the tree expanded, YAML folded and continued
+scalars joined, and each line split into its commands at `&&`, `||`, `;`
+and `|` outside quotes. It still cannot see a command assembled at run
+time (a flag or a subcommand in an environment variable or a Makefile
+variable, a recipe that calls another), a build outside the files it
+reads, or cargo configuration outside the repository. A service test pins
+the multi-row order of the `0005` guards (an earlier row's `23514` comes
+before a later row's `23503`).
 
 Still open after PRs 7, 9 and 10:
 
@@ -2299,7 +2315,10 @@ Still open after PRs 7, 9 and 10:
   binary's local verifier (design :666, :723-724; tasks :84, :189-190), so
   that comment does not match them (not changed here; PR #139 replaced it: the library verifies inside `restore_operator`, per docs/proposals/recovery-verified-response.md).
 - A release build must not pass `--all-features` or `test-support` (none
-  exists yet; the PR that adds one owns it). A `compile_error!` cannot
+  exists yet; the PR that adds one owns it, and the `release-features` CI
+  job, added by the registry hardening PR, already refuses such a command
+  in the workflows, scripts and cargo configuration, and a workspace
+  feature that turns `test-support` on). A `compile_error!` cannot
   key on the profile: cargo exposes no profile `cfg`, and
   `debug_assertions` is only a proxy that would also refuse
   `cargo test --release`, so PR 7 adds none. The same rule covers a

@@ -7,9 +7,10 @@
 // itself, as `skyoauth-service` does; `scen`, a library whose
 // dev-dependency turns it on, as `skyoauth-scenarios` does), writes its
 // lockfile offline, and runs the guard on it. The clean workspace passes;
-// each case that injects the feature into a release resolution, or a
-// release command with a forbidden flag, must fail with the expected
-// error.
+// each case that injects the feature into a release resolution, a feature
+// that turns it on, or a release command with a forbidden flag or test
+// targets, must fail with the expected error. Needs smol-toml (npm ci in
+// scripts/ci), as the guard does.
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -19,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { badReleaseCommands, logicalLines, parseTree, scannedKind } from './check-release-features.mjs';
+import { badReleaseCommands, isReleaseProfile, logicalLines, parseTree, scannedKind, splitCommands } from './check-release-features.mjs';
 
 const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), 'check-release-features.mjs');
 const TOP = mkdtempSync(join(tmpdir(), 'check-release-features-test-'));
@@ -43,11 +44,13 @@ ${extra}
 svc = { path = ".", features = ["test-support"] }
 `;
 
-const SCEN = (dependency = '') => `[package]
+const SCEN = (dependency = '', features = '') => `[package]
 name = "scen"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+${features}
 [dependencies]
 svc = { path = "../svc"${dependency} }
 
@@ -58,16 +61,17 @@ svc = { path = "../svc", features = ["test-support"] }
 let cases = 0;
 
 // A workspace with the members `svc` and `scen` (manifests `svc`, `scen`),
-// any `extra` members (name to manifest; each gets a binary), and the
-// files in `files` (path to content). Returns its root.
-function workspace({ svc = SVC(), scen = SCEN(), extra = {}, files = {} } = {}) {
+// any `extra` members (name to manifest; each gets a binary), `rootExtra`
+// after the root manifest's `[workspace]` table, and the files in `files`
+// (path to content). Returns its root.
+function workspace({ svc = SVC(), scen = SCEN(), extra = {}, files = {}, rootExtra = '' } = {}) {
   const root = join(TOP, `case-${++cases}`);
   const members = ['svc', 'scen', ...Object.keys(extra)];
   const put = (path, content) => {
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), content);
   };
-  put('Cargo.toml', `[workspace]\nmembers = [${members.map((m) => `"${m}"`).join(', ')}]\nresolver = "2"\n`);
+  put('Cargo.toml', `[workspace]\nmembers = [${members.map((m) => `"${m}"`).join(', ')}]\nresolver = "2"\n${rootExtra}`);
   put('svc/Cargo.toml', svc);
   put('svc/src/lib.rs', '');
   put('svc/src/main.rs', 'fn main() {}\n');
@@ -87,6 +91,11 @@ function guard(root) {
   return { status: result.status, out: result.stdout + result.stderr };
 }
 
+const MESSAGE =
+  'a release build must not use --all-features or --all-targets, name test-support or a feature that turns it on, or build test, bench or example targets';
+const featureError = (feature, pkg) =>
+  `error: features: feature \`${feature}\` of ${pkg} turns on \`test-support\`, so \`--features ${feature}\` or --all-features would build it into a release`;
+
 function assertErrors(result, expected) {
   const errors = result.out.split('\n').filter((line) => line.startsWith('error: '));
   assert.deepEqual(errors, expected, result.out);
@@ -103,6 +112,7 @@ describe('the guard on a workspace', () => {
   test('fails when the binary package turns it on by default', () => {
     const root = workspace({ svc: SVC('default = ["test-support"]\n') });
     assertErrors(guard(root), [
+      featureError('default', 'svc'),
       'error: resolve: `cargo build --release -p svc` would build svc with `test-support`',
       'error: resolve: `cargo build --release --workspace` would build svc with `test-support`',
     ]);
@@ -129,21 +139,113 @@ describe('the guard on a workspace', () => {
     ]);
   });
 
-  test('fails on a release command with a forbidden flag, wherever it runs', () => {
+  test('fails on a release command with a forbidden flag or test targets, wherever it runs', () => {
     const files = {
-      '.github/workflows/release.yml':
-        'jobs:\n  r:\n    steps:\n      - run: cargo build --locked --release \\\n          --all-features\n      - run: cargo build --release -p svc\n',
-      Dockerfile: 'RUN cargo build -r --all-targets\n',
-      'scripts/release.sh': '#!/bin/sh\ncargo build --profile release -F svc/test-support\n',
-      '.cargo/config.toml': '[alias]\nship = "build --release --all-features"\ncheck-all = "check --all-features --all-targets"\n',
+      '.github/workflows/release.yml': [
+        'jobs:',
+        '  r:',
+        '    steps:',
+        '      - run: cargo build --locked --release \\',
+        '          --all-features',
+        '      - run: cargo build --release -p svc',
+        '      - run: >-',
+        '          cargo build --release',
+        '          --all-features',
+        '      - run: |',
+        '          cargo build --release -p svc',
+        '          cargo test --all-features',
+        '      - run: cargo nextest run --all-features --profile ci',
+        '      - run: cargo nextest run --cargo-profile release',
+        '      - run: cargo ship2 --all-features',
+        '',
+      ].join('\n'),
+      Dockerfile: 'RUN cargo build -r --all-targets\nRUN cargo install --path svc --all-features\nRUN cargo install --path svc\n',
+      'scripts/release.sh': [
+        '#!/bin/sh',
+        'cargo build --profile release -F svc/test-support',
+        'cargo build --profile dist --all-features',
+        'cargo build --profile fast --all-features',
+        'cargo build --profile "$PROFILE" --all-features',
+        'cargo build --release --bins --tests',
+        'cargo test --release',
+        'cargo bench',
+        'cargo build --release && cargo test --all-features',
+        `RUSTFLAGS='--cfg feature="test-support"' cargo build --release`,
+        '',
+      ].join('\n'),
+      '.cargo/config.toml': '[alias]\nship = "build --release --all-features"\ncheck-all = "check --all-features --all-targets"\nship2 = "build --release"\n',
+      'svc/.cargo/config.toml': `[alias]\nship3 = ["build", "--release", "--examples"]\n\n[build]\nrustflags = ["--cfg", 'feature="test-support"']\n`,
       'docs/notes.md': 'cargo build --release --all-features\n',
     };
-    assertErrors(guard(workspace({ files })), [
-      'error: .cargo/config.toml:2: command: a release build must not use --all-features, --all-targets or test-support: ship = "build --release --all-features"',
-      'error: .github/workflows/release.yml:4: command: a release build must not use --all-features, --all-targets or test-support: - run: cargo build --locked --release --all-features',
-      'error: Dockerfile:1: command: a release build must not use --all-features, --all-targets or test-support: RUN cargo build -r --all-targets',
-      'error: scripts/release.sh:2: command: a release build must not use --all-features, --all-targets or test-support: cargo build --profile release -F svc/test-support',
+    const rootExtra = '\n[profile.dist]\ninherits = "release"\n\n[profile.fast]\ninherits = "dev"\n';
+    const bad = (where, text) => `error: ${where}: command: ${MESSAGE}: ${text}`;
+    assertErrors(guard(workspace({ files, rootExtra })), [
+      bad('.cargo/config.toml:2', 'alias ship = build --release --all-features'),
+      bad('.github/workflows/release.yml:4', '- run: cargo build --locked --release --all-features'),
+      bad('.github/workflows/release.yml:7', '- run: cargo build --release --all-features'),
+      bad('.github/workflows/release.yml:14', '- run: cargo nextest run --cargo-profile release'),
+      bad('.github/workflows/release.yml:15', '- run: cargo ship2 --all-features'),
+      bad('Dockerfile:1', 'RUN cargo build -r --all-targets'),
+      bad('Dockerfile:2', 'RUN cargo install --path svc --all-features'),
+      bad('scripts/release.sh:2', 'cargo build --profile release -F svc/test-support'),
+      bad('scripts/release.sh:3', 'cargo build --profile dist --all-features'),
+      bad('scripts/release.sh:5', 'cargo build --profile "$PROFILE" --all-features'),
+      bad('scripts/release.sh:6', 'cargo build --release --bins --tests'),
+      bad('scripts/release.sh:7', 'cargo test --release'),
+      bad('scripts/release.sh:8', 'cargo bench'),
+      bad('scripts/release.sh:10', `RUSTFLAGS='--cfg feature="test-support"' cargo build --release`),
+      bad('svc/.cargo/config.toml:2', 'alias ship3 = build --release --examples'),
+      `error: svc/.cargo/config.toml:5: command: cargo configuration applies to every build and must not name test-support: rustflags = ["--cfg", 'feature="test-support"']`,
     ]);
+  });
+
+  test('fails on a feature that turns it on, directly or through other features', () => {
+    const svc = SVC('full = ["test-support"]\n');
+    const scen = SCEN('', 'leak = ["svc/test-support"]\nall = ["more"]\nmore = ["svc/full"]\nplain = []\n');
+    assertErrors(guard(workspace({ svc, scen })), [
+      featureError('all', 'scen'),
+      featureError('leak', 'scen'),
+      featureError('more', 'scen'),
+      featureError('full', 'svc'),
+    ]);
+  });
+
+  test('fails on a non-default release selection that reaches it through a feature', () => {
+    const svc = SVC('full = ["test-support"]\n');
+    const files = { 'scripts/release.sh': 'cargo build --release -p svc --features full\ncargo build --release -F svc/full\ncargo build --release -p svc\n' };
+    assertErrors(guard(workspace({ svc, files })), [
+      `error: scripts/release.sh:1: command: ${MESSAGE}: cargo build --release -p svc --features full`,
+      `error: scripts/release.sh:2: command: ${MESSAGE}: cargo build --release -F svc/full`,
+      featureError('full', 'svc'),
+    ]);
+  });
+
+  test('fails on a feature that turns on the feature of a dependency outside the workspace', () => {
+    const ext = join(TOP, 'ext');
+    mkdirSync(join(ext, 'src'), { recursive: true });
+    writeFileSync(join(ext, 'Cargo.toml'), '[package]\nname = "ext"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ntest-support = []\n');
+    writeFileSync(join(ext, 'src', 'lib.rs'), '');
+    const app = `[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\noutside = ["ext/test-support"]\n\n[dependencies]\next = { path = ${JSON.stringify(ext)} }\n`;
+    assertErrors(guard(workspace({ extra: { app } })), [featureError('outside', 'app')]);
+  });
+
+  test('fails on a feature that turns it on through an optional dependency', () => {
+    const app = [
+      '[package]',
+      'name = "app"',
+      'version = "0.1.0"',
+      'edition = "2021"',
+      '',
+      '[features]',
+      'maybe = ["svc?/test-support"]',
+      'via-dep = ["dep:svc"]',
+      'plain = []',
+      '',
+      '[dependencies]',
+      'svc = { path = "../svc", optional = true, features = ["test-support"] }',
+      '',
+    ].join('\n');
+    assertErrors(guard(workspace({ extra: { app } })), [featureError('maybe', 'app'), featureError('via-dep', 'app')]);
   });
 });
 
@@ -168,16 +270,71 @@ describe('the parts', () => {
     ]);
   });
 
+  test('logicalLines joins YAML folded and continued plain scalars, not literal ones', () => {
+    const yaml = ['- run: >-', '    a', '', '    b', '  env: {}', '- run: c', '    d', '- run: |', '    e', '    f', 'g: h'].join('\n');
+    assert.deepEqual(
+      logicalLines(yaml, { yaml: true }).map(({ line, text }) => [line, text.replace(/\s+/g, ' ').trim()]),
+      [
+        [1, '- run: a b'],
+        [5, 'env: {}'],
+        [6, '- run: c d'],
+        [8, '- run: |'],
+        [9, 'e'],
+        [10, 'f'],
+        [11, 'g: h'],
+      ],
+    );
+    assert.equal(logicalLines(yaml).length, 11);
+  });
+
+  test('isReleaseProfile follows inherits and counts an undeclared profile as release', () => {
+    const profiles = new Map([
+      ['dist', ['release']],
+      ['fast', ['dev']],
+      ['ci', ['fast']],
+      ['loop', ['loop2']],
+      ['loop2', ['loop']],
+      ['split', ['dev', 'bench']],
+    ]);
+    for (const name of ['release', 'bench', 'dist', 'loop', 'split', 'undeclared', '$PROFILE']) assert.equal(isReleaseProfile(name, profiles), true, name);
+    for (const name of ['dev', 'test', 'fast', 'ci']) assert.equal(isReleaseProfile(name, profiles), false, name);
+  });
+
   test('badReleaseCommands needs both a release command and a forbidden flag', () => {
     assert.deepEqual(badReleaseCommands('cargo test --all-features\ncargo build --release\nrm -r --all-targets\n'), []);
     assert.equal(badReleaseCommands('cargo b -r --all-targets\n').length, 1);
     assert.equal(badReleaseCommands('build --release --all-features\n').length, 0);
-    assert.equal(badReleaseCommands('build --release --all-features\n', { cargoConfig: true }).length, 1);
+    assert.equal(badReleaseCommands('cargo +1.98.1 --locked build --release --example x\n').length, 1);
+    assert.equal(badReleaseCommands('cargo nextest run --profile ci --all-features\n').length, 0);
+    assert.equal(badReleaseCommands('cargo build --release --features full\n', { leaking: new Set(['full']) }).length, 1);
+    assert.equal(badReleaseCommands('cargo build --release --features fast\n', { leaking: new Set(['full']) }).length, 0);
+  });
+
+  test('badReleaseCommands checks each command of a line with its own arguments', () => {
+    assert.deepEqual(badReleaseCommands('cargo test --all-features && cargo build --release\n'), []);
+    assert.deepEqual(badReleaseCommands('cargo build --release; cargo test --all-targets || cargo doc --all-features | tee x\n'), []);
+    assert.equal(badReleaseCommands('cargo test --all-features && cargo build --release --all-features\n').length, 1);
+    // A separator inside quotes does not end the command.
+    assert.equal(badReleaseCommands('cargo build --release --config "x;y" --all-features\n').length, 1);
+    assert.equal(badReleaseCommands("cargo build --release --config 'a && b' --all-features\n").length, 1);
+  });
+
+  test('splitCommands splits at separators outside quotes', () => {
+    assert.deepEqual(splitCommands('a && b || c; d | e'), ['a ', ' b ', ' c', ' d ', ' e']);
+    assert.deepEqual(splitCommands(`a "x;y" 'p|q' \\; b`), [`a "x;y" 'p|q' \\; b`]);
+  });
+
+  test('badReleaseCommands expands cargo aliases with the arguments after them', () => {
+    const aliases = new Map([['ship', [['build', '--release']]]]);
+    assert.equal(badReleaseCommands('cargo ship --all-features\n', { aliases }).length, 1);
+    assert.equal(badReleaseCommands('cargo ship -p svc\n', { aliases }).length, 0);
   });
 
   test('scannedKind picks the files that run builds, not this guard', () => {
-    assert.equal(scannedKind('.github/workflows/ci.yml'), 'file');
+    assert.equal(scannedKind('.github/workflows/ci.yml'), 'yaml');
     assert.equal(scannedKind('.cargo/config.toml'), 'cargo-config');
+    assert.equal(scannedKind('service/.cargo/config'), 'cargo-config');
+    assert.equal(scannedKind('tests/Cargo.toml'), 'manifest');
     assert.equal(scannedKind('deploy/Dockerfile.release'), 'file');
     assert.equal(scannedKind('justfile'), 'file');
     assert.equal(scannedKind('scripts/ci/docs-only.sh'), 'file');

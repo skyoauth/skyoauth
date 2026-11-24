@@ -180,8 +180,9 @@ pub async fn list_audience_tenant_assignments<'e>(
 /// assignment `FOR SHARE` until its transaction ends, so this update, a
 /// disable included, waits for such an insert to commit or roll back, and
 /// an insert waits for this update. Disabling an assignment that rows
-/// already reference is not refused (provisional lead pick, 2026-11-22: the
-/// live check denies them), and enabling one revalidates nothing. A caller
+/// already reference is not refused (lead ruling, 2026-11-21, decision 4 of
+/// docs/proposals/ir-080-assignment-write-guard.md: the live check denies
+/// them), and enabling one revalidates nothing. A caller
 /// that audits the update appends its event after this call, so it locks
 /// the assignment before the audit head (migrations README, "What 0010
 /// adds").
