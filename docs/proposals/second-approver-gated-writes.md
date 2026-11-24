@@ -176,10 +176,10 @@ Without it the write is refused with `WideningNotAcknowledged`, whether
 widening flag, the expected revision and the atomic audit record" when it
 is off (identity-registry:422-424). A flag on a write that is not widening
 is accepted and ignored (D2). The toggle turned off is a widening write
-and needs the flag (the user's ruling, 2026-11-24; T13.3 implements it,
-see "Open"). Without it the write is refused with `WideningNotAcknowledged`
-before any operation goes pending, and that holds under `single_actor_mode`
-too (the write still needs `security_admin`). Ruled by the user, 2026-11-24
+and needs the flag (the user's ruling, 2026-11-24; the library implements
+it (`submit_widening_toggle`), T13.3 wires it; see "Open"). Without it the
+write is refused with `WideningNotAcknowledged` before any operation goes
+pending, under `single_actor_mode` too (the write still needs `security_admin`). Ruled by the user, 2026-11-24
 (relayed by the lead): the requirement applies to every request that sets
 `widening_second_approver` to false, whatever the current value (a same-value
 false to false write included), because widening is computed server-side
@@ -964,8 +964,8 @@ an ID, a revision, a destination, a `kid` or another value of the request
   `Expired`, `WrongKind`; `SelfApproval`; `EchoMismatch`;
   `RequesterNotAuthorized`; `PlanIntegrity` (a data-integrity error, not a
   client error); `PolicyUnavailable`; `StaleRevision` (the toggle's policy
-  row, D19); `UnsupportedIsolation`;
-  `Keyset(KeysetWriteError)`; `Source(SourceWriteError)`;
+  row, D19); `UnsupportedIsolation`; `WideningNotAcknowledged` (the toggle
+  turned off); `Keyset(KeysetWriteError)`; `Source(SourceWriteError)`;
   `Registry(RegistryError)`. `source()` returns the inner
   `RegistryError` only, as today (`keyset.rs:492-499`).
 
@@ -1600,10 +1600,10 @@ compare-and-set is the crate-private registry writer
 toggle's plan is exactly `requester_credential_id` and
 `widening_second_approver`, with no version member; any other shape is
 `PlanIntegrity`. The approve applies D24 to the toggle too: the prepared
-plan must equal the locked plan. `acknowledge_widening` is ignored by the
-toggle in PRs 3 to 7, which is always gated; the user's ruling of
-2026-11-24 is that turning it off needs the flag, for every request that
-sets false (ruled by the user, 2026-11-24, relayed by the lead; see "Open"). The toggle
+plan must equal the locked plan. `acknowledge_widening` was ignored by the
+toggle in PRs 3 to 7, which is always gated; since the user's ruling of
+2026-11-24 the toggle refuses a request that sets false without the flag
+(`WideningNotAcknowledged`; relayed by the lead; see "Open"). The toggle
 authorizes with the local instance `security_admin` lookup, not the trust writes'
 `authorize_trust_admin`.
 A cancel looks up the path's role (instance `security_admin`, tenant
@@ -1812,9 +1812,9 @@ kills them.
 
 **Left open for PR 5** (PR 5's outcome follows this paragraph). The user ruled on 2026-11-24 that `acknowledge_widening`
 applies to the toggle turned off (a widening write like any other: without
-the flag it is refused with `WideningNotAcknowledged`); T13.3 implements
-it when it wires the endpoint, and PRs 3 and 4 ignore the flag for it
-until then. Three PR 3 mutants are equivalent only because the toggle is
+the flag it is refused with `WideningNotAcknowledged`); PRs 3 and 4 ignored
+the flag for it, the library now implements it (`submit_widening_toggle`)
+and T13.3 wires it. Three PR 3 mutants are equivalent only because the toggle is
 the one kind, and become live with the trust kinds; killing them is a
 required test of PRs 4 and 5: the clock sampled between the target's lock
 and the registry write (PR 4 kills it with a keyset create, whose insert
@@ -1843,7 +1843,7 @@ inserted with tenant NULL with the source kinds too, kills the D24
 comparison dropped for both source kinds, and finds the kind-role guard
 still equivalent. Ruled after PR 5 (the user, 2026-11-24): `acknowledge_widening`
 applies to the toggle turned off, and a toggle off without it gets
-`WideningNotAcknowledged`; T13.3 implements it.
+`WideningNotAcknowledged`; `submit_widening_toggle` implements it, T13.3 wires it.
 
 **PR 7 as implemented** (`service/src/trust/`, `service/Cargo.toml`;
 picks marked inferred in the code comments). `create_version`,
@@ -2294,7 +2294,7 @@ Still open after PRs 7, 9 and 10:
   dependent crate against the library without the feature are the check.
 - Decided (the user, 2026-11-24): `acknowledge_widening` applies to the
   toggle turned off; a toggle off without it gets `WideningNotAcknowledged`,
-  like every other widening write. T13.3 implements it.
+  like every other widening write. The library implements it; T13.3 wires it.
 
 **Line numbers.** Line numbers into the code and the migrations README
 refer to `f5adb74` (before PR 1), except the PR 4 row below, recomputed

@@ -18,7 +18,7 @@ use crate::persistence::registry::{
     authorize_operator_locked, floor_to_microsecond, insert_administrative_operation,
     lock_instance_security_policy, set_widening_second_approver,
 };
-use crate::trust::write::{in_savepoint, require_read_committed};
+use crate::trust::write::{in_savepoint, require_acknowledged, require_read_committed};
 
 /// The event of a policy write (identity-registry IR-059).
 const POLICY_UPDATE_ACTION: &str = "instance_security_policy.update";
@@ -202,8 +202,11 @@ pub(crate) fn encode_error<E: From<RegistryError>>(message: &'static str) -> E {
 /// whose credential has `submission.public_identity`: applied at once under
 /// `single_actor_mode`, otherwise a pending
 /// `instance_security_policy_update` operation (see the module docs, "The
-/// toggle"). Runs in a savepoint of `transaction`, only under
-/// `READ COMMITTED`; the caller commits on `Ok` and rolls back on `Err`.
+/// toggle"). A request for `false` without
+/// `submission.acknowledge_widening` is
+/// [`ApprovalError::WideningNotAcknowledged`]. Runs in a savepoint of
+/// `transaction`, only under `READ COMMITTED`; the caller commits on `Ok`
+/// and rolls back on `Err`.
 pub async fn submit_widening_toggle(
     transaction: &mut Transaction<'_, Postgres>,
     submission: &Submission<'_>,
@@ -241,6 +244,12 @@ async fn toggle_steps(
         admin_id: operator.admin_id,
         credential_id: operator.credential_id,
     };
+    // Request step 3, as the trust writes take it: after the authorization,
+    // before the policy row's lock and any write. Setting false is widening
+    // whatever the current value (the user's ruling, 2026-11-24).
+    if !widening_second_approver {
+        require_acknowledged::<ApprovalError>(submission)?;
+    }
     let policy = lock_policy_at(transaction, expected_revision).await?;
     if policy.single_actor_mode {
         let (row, event) =
