@@ -25,7 +25,11 @@
 //!   `service/tests/registry.rs`, `principal_reads_are_scoped_to_their_tenant`
 //!   for principals). The keyset, source, binding, service identity and
 //!   grant names are unique within one tenant only: a duplicate in the same
-//!   tenant is refused by the table's `<table>_tenant_id_name_key`.
+//!   tenant is refused by the table's `<table>_tenant_id_name_key`. A
+//!   principal name is unique within one tenant and kind (the amendment of
+//!   `0002` of 2026-11-24): a second workload principal named `ci` in the
+//!   same tenant is refused by `principal_tenant_id_kind_name_key` and
+//!   writes nothing, while a human principal named `ci` there is accepted.
 //! - **Negative.** Each write-time reference from one tenant's record to
 //!   another tenant's record or audience is refused by its composite
 //!   foreign key, reported as `Invariant { ForeignKey, <constraint> }`, and
@@ -94,13 +98,15 @@
 //! tests); authorization, the enabled-assignment check (since `0010` a
 //! database guard at insert, tested in
 //! `service/tests/schema_assignment_write_guard.rs`), and the service rules
-//! the database does not enforce (scope ceilings; T14.1, T14.2). Principal
-//! and tenant names have no uniqueness rule: `0002` has no name key on
-//! `principal` (IR-021; `service/migrations/README.md`, "Not done in
-//! `0004`") nor on `tenant`, so the shared principal names (`"ci"`, …) and
-//! tenant names of `a29_pos_tenants_reuse_object_names` prove nothing about
-//! them; a same-tenant duplicate assertion for principals belongs with that
-//! key when a migration adds it.
+//! the database does not enforce (scope ceilings; T14.1, T14.2). Tenant
+//! names have no uniqueness rule: `0002` has no name key on `tenant`
+//! (IR-021; `service/migrations/README.md`, Follow-ups, "Name
+//! uniqueness"), so the shared tenant name (`"Example"`) of the fixture
+//! proves nothing about one. Principal names are unique per tenant and
+//! kind (`principal_tenant_id_kind_name_key`, the amendment of `0002` of
+//! 2026-11-24): `a29_pos_tenants_reuse_object_names` asserts the same name
+//! across tenants, the same-tenant duplicate of the same kind refused, and
+//! the same name of another kind in the same tenant accepted.
 //!
 //! The crossings are a closed list, one per composite foreign key of
 //! `0004` that a tenant-owned write can name across tenants, and the
@@ -750,6 +756,25 @@ async fn a29_pos_tenants_reuse_object_names() {
             .await,
             "service_grant_tenant_id_name_key",
         );
+        // A principal name is unique per tenant and kind: a second workload
+        // named `ci` is refused and writes nothing, while a human principal
+        // named `ci` in the same tenant is accepted.
+        assert_name_taken(
+            registry::test_support::create_principal(
+                &pool,
+                &principal(side, dup("wld"), PrincipalKind::Workload, "ci"),
+            )
+            .await,
+            "principal_tenant_id_kind_name_key",
+        );
+        assert_not_found(registry::get_principal(&pool, side.tenant, &dup("wld")).await);
+        let human = registry::test_support::create_principal(
+            &pool,
+            &principal(side, side.id("usr"), PrincipalKind::Human, "ci"),
+        )
+        .await
+        .unwrap();
+        assert_eq!((human.kind, &human.name[..]), (PrincipalKind::Human, "ci"));
     }
     db.drop([pool]).await;
 }

@@ -60,7 +60,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # `add_service_grant_resource_server`,
 # `remove_service_grant_resource_server`) and trust keysets
 # (`create_trust_keyset`, `update_trust_keyset`),
-# to those tests and to the scenario tests of `skyoauth-scenarios`. Off in
+# to those tests and to the scenario tests of `skyoauth-scenarios`, and
+# `ids::test_support`, the deterministic ID generator `SequentialIds`. Off in
 # a normal build, where those writes are crate-private; the dev-dependency
 # on this package below, and the one in `tests/Cargo.toml`, turn it on for
 # test targets only (inferred: the mechanism; second-approver proposal,
