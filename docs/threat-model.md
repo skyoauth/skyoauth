@@ -918,6 +918,15 @@ holder.
   channel.
 - One recovery key is a single point of custody in v0.1; a quorum is
   deferred (OQ-TM-8, decided).
+- Backup replay: a restored old database backup can undo a challenge's
+  single use. On a backup taken after an issue and before its restore, a
+  library caller holding the captured signed response restores again with
+  it. On a backup taken before the issue, a library caller can issue an
+  identical challenge (same ID, plan and `now`, so the same `expires_at`)
+  and replay the response. A library-generated random nonce as a ninth plan
+  member would make the second case fail (it does not stop a row inserted by
+  raw SQL); it is recorded as an option, not built (user ruling, 2026-11-24;
+  `docs/proposals/recovery-verified-response.md` section 6 and ruling 2).
 
 **Gaps.** None open. OQ-TM-8, OQ-TM-9 and OQ-TM-15 are decided.
 
