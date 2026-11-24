@@ -1,11 +1,6 @@
 # ADR-008: Policy writes, imports and approval
 
-- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
-  direction is accepted; the details, including lead decisions and text marked
-  "(inferred)", are implementation choices that ordinary review can change
-  (design §12; [status values](README.md#status-values)). Questions still
-  marked open under Open questions stay open: ratification closes none of
-  them.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.10 (independent identities and roles behind every
   write) (inferred: tasks §2 names no ADR in T00.10; the README index pairs
   ADR-008 with it). Implementation: T10.4, T10.5, T10.7, T12.2, T13.2, T13.3,
@@ -108,14 +103,12 @@ design §7.2 and identity-registry §5.2.
     the audited single-actor instance policy `single_actor_mode` is on.
     Turning `widening_second_approver` off is a widening write: without the
     widening flag it is rejected like every other widening write (the user's
-    ruling, 2026-11-24; the library implements it in
-    `skyoauth_service::operation` (#136), and T13.3 wires the endpoint).
-    `single_actor_mode` (default
+    ruling, 2026-11-24; the library implements it in `skyoauth_service::operation` (#136), and T13.3 wires the endpoint). `single_actor_mode` (default
     false) is deployment configuration, set at install, so no online admin
     can enable it alone; the database mirrors it read-only, with
     an audit event on change. Whether the local signed recovery transaction can
-    also set it is open (identity-registry OQ-IR-13; interim reading:
-    deployment configuration applied at restart and audited at startup).
+    also set it was open (identity-registry OQ-IR-13); the interim reading is confirmed (2026-11-24, relayed by the lead):
+    `single_actor_mode` changes only by deployment configuration applied at restart and audited at startup.
     An approval is a second `AdministrativeOperation` of kind `approve` by a
     different actor, who holds `security_admin` for widening writes and
     security-domain toggles (tasks §3 `InstanceSecurityPolicy`; Decided (lead
@@ -219,8 +212,8 @@ New questions raised by this ADR:
   (default false) is the audited single-actor instance policy: deployment
   configuration set at install, mirrored read-only in the database with an
   audit event on change (lead decision, 2026-11-19; item 12); whether the
-  local signed recovery transaction can also set it is open
-  (identity-registry OQ-IR-13). Both are in the tasks §3 schema with the M1a
+  local signed recovery transaction can also set it was open
+  (identity-registry OQ-IR-13); the interim reading is confirmed (2026-11-24, relayed by the lead): it changes only by deployment configuration at restart. Both are in the tasks §3 schema with the M1a
   spec amendments. Contracts: identity-registry IR-052 (the setting and its
   effect) and IR-054 (second-approver approvals), public-api API-156 and the
   `/approve` operation endpoints (OQ-API-13). Ruled by the user, 2026-11-22,
@@ -245,8 +238,7 @@ New questions raised by this ADR:
   accepted. Every request that sets `widening_second_approver` to false, a
   false to false write included, needs the widening flag like every other
   widening write (the user, 2026-11-24, relayed by the lead; item 12;
-  implemented in the library, `skyoauth_service::operation` (#136); T13.3
-  wires the endpoint; see the second-approver proposal). Still open: the audit sink TLS
+  implemented in the library, `skyoauth_service::operation` (#136); T13.3 wires the endpoint; see the second-approver proposal). Still open: the audit sink TLS
   trust settings and alert routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a

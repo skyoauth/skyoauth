@@ -3,12 +3,8 @@
 These records expand the proposed baselines in the
 [tasks plan's ADR table](../skyoauth-tasks.md#11-adr-decisions-to-ratify)
 (tasks §11), which design §12 indexes as the decisions requiring
-ratification. The maintainer ratified all 24 records directionally on
-2026-11-24 (see [Status values](#status-values)): the direction of each
-record is accepted, and its details stay changeable through ordinary review.
-A record states decided behavior, not implemented behavior; what is
-implemented is tracked per conformance stage in
-[tests/conformance](../../tests/conformance/README.md).
+ratification. The maintainer ratified all 24 records directionally on 2026-11-24 (see [Status values](#status-values)): the direction of each record is accepted; its lead decisions, text marked "(inferred)" and provisional lead picks stay changeable through ordinary review, while a change to a user ruling goes back to the user.
+A record states decided behavior, not implemented behavior; what is implemented is tracked per conformance stage in [tests/conformance](../../tests/conformance/README.md).
 
 ## Index
 
@@ -43,16 +39,8 @@ the wording of the T00 task and the ADR baseline (inferred).
 | [ADR-023](ADR-023-enrollment-continuity.md)           | Enrollment and continuity        | Ratified, M0 — directionally (maintainer, 2026-11-24) | T00.16               |
 | [ADR-024](ADR-024-delivery-scope.md)                  | Delivery scope                   | Ratified, M0 — directionally (maintainer, 2026-11-24) | T00.17               |
 
-With the ratification, T00.8–T00.17 are ticked in the tasks plan; Gate M0
-stays open until the lead's separate gate PR. T00.1–T00.7 (the contracts and
-the threat model) were ticked earlier, when those documents were reviewed and
-before any record was ratified. ADR-001, ADR-007 and ADR-010 pair only with
-those earlier tasks: ADR-001 with T00.1 and T00.4 (inferred), ADR-007 with
-T00.5 (inferred), ADR-010 with T00.6 (which names it) and T00.2 (inferred).
-No T00 box records their ratification; the maintainer's decision of
-2026-11-24, which covers all 24 records, does. The other pairings in the
-T00 column stay as read above: named for T00.6 and T00.13, inferred
-otherwise.
+With the ratification, T00.8–T00.17 are ticked in the tasks plan; Gate M0 stays open until the lead's separate gate PR.
+T00.1–T00.7 (the contracts and the threat model) were ticked earlier, when those documents were reviewed and before any record was ratified. ADR-001, ADR-007 and ADR-010 pair only with those earlier tasks: ADR-001 with T00.1 and T00.4 (inferred), ADR-007 with T00.5 (inferred), ADR-010 with T00.6 (which names it) and T00.2 (inferred). No T00 box records their ratification; the maintainer's decision of 2026-11-24, which covers all 24 records, does. The other pairings in the T00 column stay as read above: named for T00.6 and T00.13, inferred otherwise.
 
 ## Format
 
@@ -81,21 +69,8 @@ Every record has the same sections:
 
 ## Status values
 
-- **Ratified, M0 — directionally (maintainer, 2026-11-24):** the maintainer
-  accepted the direction of the record on 2026-11-24, in one decision that
-  covers all 24 records and ticks T00.8–T00.17 (see the Index). Its
-  details are not frozen sentence by sentence: the lead decisions, the text
-  marked "(inferred)" and the provisional lead picks that
-  the records, the contracts and the proposals carry (for example D1–D29 of
-  [the second-approver proposal](../proposals/second-approver-gated-writes.md)
-  and the picks of
-  [the recovery proposal](../proposals/recovery-verified-response.md)) are
-  accepted as implementation choices that ordinary review can change under
-  design §12. A question still marked open stays open: ratification decides
-  none. Every record has this status.
-- **Proposed, M0 — ratification pending maintainer review:** the record is
-  written and awaits review. Every record had this status until 2026-11-24;
-  none has it now.
+- **Ratified, M0 — directionally (maintainer, 2026-11-24):** the maintainer accepted the direction of the record on 2026-11-24, in one decision that covers all 24 records and ticks T00.8–T00.17 (see the Index). Its details are not frozen sentence by sentence: the lead decisions, the text marked "(inferred)" and the provisional lead picks that the records, the contracts and the proposals carry (for example D1–D29 of [the second-approver proposal](../proposals/second-approver-gated-writes.md) and the picks of [the recovery proposal](../proposals/recovery-verified-response.md)) are accepted as implementation choices that ordinary review can change under design §12. A ruling of the user is not such a choice: a change to it goes back to the user. A question still marked open stays open: ratification decides none. Every record has this status.
+- **Proposed, M0 — ratification pending maintainer review:** the record is written and awaits review. Every record had this status until 2026-11-24; none has it now.
 
 ## Changing a decision
 

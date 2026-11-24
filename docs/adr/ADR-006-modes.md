@@ -1,11 +1,6 @@
 # ADR-006: Grant modes and dormant impersonation
 
-- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The
-  direction is accepted; the details, including lead decisions and text marked
-  "(inferred)", are implementation choices that ordinary review can change
-  (design §12; [status values](README.md#status-values)). Questions still
-  marked open under Open questions stay open: ratification closes none of
-  them.
+- **Status:** Ratified, M0 — directionally (maintainer, 2026-11-24). The direction is accepted; lead decisions, text marked "(inferred)" and provisional lead picks stay implementation choices that ordinary review can change, while a change to a user ruling goes back to the user (design §12; [status values](README.md#status-values)). Questions still marked open under Open questions stay open: ratification closes none of them.
 - **Tasks:** ratified with T00.9 (RFC 8693 direct exchange versus the private
   service-delegation actor grant) and with the dormant-policy parts of T00.8
   and T00.16 (inferred: tasks §2 names no ADR in these tasks).

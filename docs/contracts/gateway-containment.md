@@ -1,11 +1,6 @@
 # Gateway credential containment and route admission
 
-- **Status:** reviewed, M0 (T00.5). The ADRs it cites are ratified
-  directionally (maintainer, 2026-11-24; [status values](../adr/README.md#status-values)):
-  its lead decisions and provisional lead picks are implementation
-  choices that ordinary review can change, and its open questions stay open.
-  What is implemented is tracked per conformance stage
-  ([tests/conformance](../../tests/conformance/README.md)), not by this line.
+- **Status:** reviewed, M0 (T00.5). The ADRs it cites are ratified directionally (maintainer, 2026-11-24; [status values](../adr/README.md#status-values)): its lead decisions and provisional lead picks are implementation choices that ordinary review can change, and its open questions stay open. What is implemented is tracked per conformance stage ([tests/conformance](../../tests/conformance/README.md)), not by this line.
 - **Tasks covered:** T00.5.
 - **Derived from:** [design](../skyoauth-design.md) §3.1, §4, §4.1, §4.2,
   §6, §6.1.1, §7.2, §13; [tasks](../skyoauth-tasks.md) §2 "Endpoint matrix",

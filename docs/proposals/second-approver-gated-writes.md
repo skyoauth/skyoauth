@@ -21,8 +21,7 @@ goes beyond the written spec is a "provisional lead pick, 2026-11-23" (the
 Decisions list numbers them D1 to D29); "(inferred)" marks a point where the spec is silent. The
 maintainer ratified the ADRs directionally on 2026-11-24 (T00.8–T00.17
 ticked; Gate M0 is left to the lead's separate PR): these picks, and the
-lead decisions the spec records, are accepted as implementation choices,
-not frozen, that ordinary review can change. This text ratifies no ADR. The widening ruling it builds on is the user's
+lead decisions the spec records, are accepted as implementation choices, not frozen, that ordinary review can change. This text ratifies no ADR. The widening ruling it builds on is the user's
 (2026-11-22, relayed by the lead), not a pick.
 
 ## Problem
@@ -1505,9 +1504,8 @@ OF revocation_operation_id` variant) is folded into migration `0005` itself,
 
 ## Resolved (accepted with the directional ADR ratification)
 
-Decided before this proposal and used as given, all accepted as
-implementation choices with the maintainer's directional ratification of the
-ADRs (2026-11-24; ordinary review can change them): the widening ruling for
+Decided before this proposal and used as given, no longer provisional since the maintainer's
+directional ratification of the ADRs (2026-11-24; a change to the user's ruling goes back to the user, the lead decisions stay changeable through ordinary review): the widening ruling for
 keyset versions and sources (the user's, 2026-11-22); the server's
 detection and the flag (ADR-008 item 12, OQ-ADR008-3, OQ-ADR016-2); the
 wire shape of the approve endpoints (OQ-API-13); the approver role (IR-054);
@@ -1520,9 +1518,8 @@ recommended answer to each of Q1 to Q7 ("Accept all your recommendations, except
 of `0012` was accepted in a changed form, folded into `0005` (D15); the
 read-path index of the same sketch is folded into `0005` too as a provisional
 lead pick (inferred), not ruled. Each answer below is the recommendation as
-ruled; with the directional ratification of the ADRs (maintainer,
-2026-11-24) these rulings are accepted in the same way as the 2026-11-22
-ruling: as implementation choices that ordinary review can change.
+ruled; with the directional ratification of the ADRs (maintainer, 2026-11-24) these rulings, like the 2026-11-22
+ruling, no longer wait on it: a change to any of them goes back to the user, while the provisional lead picks (D1 to D29) stay changeable through ordinary review.
 
 1. **Q1.** **Expiry and read path (OQ-API-14).** Ruled: a fixed 24-hour
    `expires_at`; `GET /admin/v1/tenants/{tenant}/operations/{operation}` and a
@@ -2309,9 +2306,7 @@ work (sqlx's lookups, tokio's own) in a test. PR 1 documents the requirement
 and checks only the worker counts against tokio's default blocking limit.
 
 **What stays unwired.** The user ruled on Q1-Q7 and on the `0005`
-trigger on 2026-11-23 (D1 to D29 otherwise stayed provisional lead picks;
-since 2026-11-24 they are accepted as implementation choices that ordinary
-review can change), so PRs 1 to
+trigger on 2026-11-23 (D1 to D29 otherwise stayed provisional lead picks; since 2026-11-24 they are accepted as implementation choices that ordinary review can change), so PRs 1 to
 5 below may start; the lead says when. Until they land, no
 endpoint calls `trust::keyset`, `trust::source` or the new functions, and
 nothing wires them at startup (`mod.rs:18-19`). Even after the PRs below
