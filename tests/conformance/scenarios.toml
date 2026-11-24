@@ -1134,12 +1134,14 @@ scope = "write"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = [
+  "nextest:skyoauth-scenarios/pg/security::a43::a43_pos_reference_through_an_enabled_assignment_is_accepted",
   "nextest:skyoauth-scenarios/pg/security::a43::a43_pos_tenant_references_its_own_assigned_audiences",
   "nextest:skyoauth-scenarios/pg/security::a43::a43_neg_audience_variants_are_distinct_or_refused",
   "nextest:skyoauth-scenarios/pg/security::a43::a43_neg_blocked_registrations_follow_the_holder_commit_or_rollback",
   "nextest:skyoauth-scenarios/pg/security::a43::a43_neg_competing_registration_of_an_audience_is_refused",
   "nextest:skyoauth-scenarios/pg/security::a43::a43_neg_concurrent_registrations_have_one_winner_per_key",
   "nextest:skyoauth-scenarios/pg/security::a43::a43_neg_reference_outside_own_assignment_is_one_refusal",
+  "nextest:skyoauth-scenarios/pg/security::a43::a43_neg_reference_through_a_disabled_assignment_is_refused",
 ]
 
 [[scenario.stage]]
