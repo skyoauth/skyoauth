@@ -5,7 +5,7 @@
       "debug"
     ]
   },
-  "test-count": 18,
+  "test-count": 25,
   "rust-suites": {
     "skyoauth-scenarios": {
       "package-name": "skyoauth-scenarios",
@@ -13,7 +13,7 @@
       "binary-name": "skyoauth_scenarios",
       "package-id": "path+file:///home/runner/work/skyoauth/skyoauth/tests#skyoauth-scenarios@0.1.0",
       "kind": "lib",
-      "binary-path": "/home/runner/work/skyoauth/skyoauth/target/debug/build/skyoauth-scenarios/719d23d9dadcec56/out/skyoauth_scenarios-719d23d9dadcec56",
+      "binary-path": "/home/runner/work/skyoauth/skyoauth/target/debug/build/skyoauth-scenarios/f7a8650c37394242/out/skyoauth_scenarios-f7a8650c37394242",
       "build-platform": "target",
       "cwd": "/home/runner/work/skyoauth/skyoauth/tests",
       "status": "listed",
@@ -25,7 +25,7 @@
       "binary-name": "pg",
       "package-id": "path+file:///home/runner/work/skyoauth/skyoauth/tests#skyoauth-scenarios@0.1.0",
       "kind": "test",
-      "binary-path": "/home/runner/work/skyoauth/skyoauth/target/debug/build/skyoauth-scenarios/49767a59f51cf1cb/out/pg-49767a59f51cf1cb",
+      "binary-path": "/home/runner/work/skyoauth/skyoauth/target/debug/build/skyoauth-scenarios/46febe2e85c6de1b/out/pg-46febe2e85c6de1b",
       "build-platform": "target",
       "cwd": "/home/runner/work/skyoauth/skyoauth/tests",
       "status": "listed",
@@ -44,6 +44,13 @@
             "status": "matches"
           }
         },
+        "security::a29::a29_neg_audit_event_across_instance_and_tenant": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
         "security::a29::a29_neg_binding_of_other_tenants_workload": {
           "kind": "test",
           "ignored": false,
@@ -52,6 +59,13 @@
           }
         },
         "security::a29::a29_neg_binding_on_other_tenants_source": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_neg_double_crossing_reports_the_approval_guard": {
           "kind": "test",
           "ignored": false,
           "filter-match": {
@@ -87,6 +101,27 @@
           }
         },
         "security::a29::a29_neg_keyset_version_on_other_tenants_keyset": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_neg_operation_names_other_tenants_audit_event": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_neg_other_kind_names_operation_across_instance_and_tenant": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_neg_other_kind_names_other_tenants_operation": {
           "kind": "test",
           "ignored": false,
           "filter-match": {
@@ -135,7 +170,21 @@
             "status": "matches"
           }
         },
+        "security::a29::a29_pos_route_bundle_approval_by_its_preparer_is_written": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
         "security::a29::a29_pos_same_scope_approve_and_revocation_are_written": {
+          "kind": "test",
+          "ignored": false,
+          "filter-match": {
+            "status": "matches"
+          }
+        },
+        "security::a29::a29_pos_same_scope_audit_event_and_named_operation_are_written": {
           "kind": "test",
           "ignored": false,
           "filter-match": {

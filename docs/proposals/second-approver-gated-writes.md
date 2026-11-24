@@ -2370,7 +2370,16 @@ correct; neither session edits it.
   the lead; provisional): `administrative_operation_audit_same_tenant`,
   and the approval guard for every kind that names an operation, so the
   section 11 sketch's "Only kind 'approve'" now holds for the actor (its
-  check and its read; README "What 0005 adds"). Not on the list yet.
+  check and its read; README "What 0005 adds"). Both are on the list
+  now, in both directions between the tenants and between the instance
+  and each tenant: `a29_neg_operation_names_other_tenants_audit_event`,
+  `a29_neg_audit_event_across_instance_and_tenant`,
+  `a29_neg_other_kind_names_other_tenants_operation`,
+  `a29_neg_other_kind_names_operation_across_instance_and_tenant` and
+  `a29_neg_double_crossing_reports_the_approval_guard`, with the controls
+  `a29_pos_same_scope_audit_event_and_named_operation_are_written` and
+  `a29_pos_route_bundle_approval_by_its_preparer_is_written` (a
+  `route_bundle_approval` by its preparer's actor is written).
 - A37 M1a (conformance-layout:149; T12.2): predicate removal through the
   same machinery, once binding writes have a service path (not here).
 - A47 M1b (conformance-layout:159): out of scope; the approve endpoint's
