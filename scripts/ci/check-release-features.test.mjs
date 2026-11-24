@@ -156,6 +156,11 @@ describe('the parts', () => {
     assert.throws(() => parseTree('[dev-dependencies]\n'), /unexpected cargo tree line/);
   });
 
+  test('parseTree ignores colour codes cargo adds when colour is forced', () => {
+    const tree = parseTree('http v1.5.0 [default,std] \x1b[33m\x1b[2m(*)\x1b[39m\x1b[22m\n');
+    assert.deepEqual([...tree.get('http')], ['default', 'std']);
+  });
+
   test('logicalLines joins continued lines and keeps the first line number', () => {
     assert.deepEqual(logicalLines('a \\\n b\nc'), [
       { line: 1, text: 'a   b' },

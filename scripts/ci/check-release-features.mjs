@@ -75,7 +75,8 @@ const TREE_LINE = /^(\S+) v\S+(?: \(.*?\))? \[([^\]]*)\](?: \(\*\))?$/;
 // The packages of a `cargo tree` resolution, each with its features.
 export function parseTree(text) {
   const features = new Map();
-  for (const line of text.split('\n')) {
+  // cargo colours the `(*)` marker when the terminal setting forces it (CI does).
+  for (const line of text.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
     if (!line.trim()) continue;
     const match = TREE_LINE.exec(line);
     if (!match) throw new InternalError(`unexpected cargo tree line: ${line}`);
@@ -87,7 +88,7 @@ export function parseTree(text) {
 }
 
 function resolution(root, selection, extra = []) {
-  const args = ['tree', '--locked', ...selection, '-e', 'no-dev', '--target', 'all'];
+  const args = ['tree', '--locked', '--color', 'never', ...selection, '-e', 'no-dev', '--target', 'all'];
   args.push('--prefix', 'none', '--format', '{p} [{f}]', ...extra);
   return parseTree(cargo(root, args));
 }
