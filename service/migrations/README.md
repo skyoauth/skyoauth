@@ -238,6 +238,11 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
   (NFC or NFD) of these values is a service rule: the database compares
   bytes, so two spellings of one name are two keys.
+- **`public_mtls_identity` form.** The service stores `spki-sha256:` and 64
+  lowercase hexadecimal digits, which it computes from the checker key's DER
+  SubjectPublicKeyInfo with `crate::identity::canonical_public_identity`
+  (lead ruling, 2026-11-24; the contract wording is pending); the column
+  checks above are unchanged.
 - **ID column bounds.** Every ID column of `0003`, own IDs and reference
   columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
   are bounded by lead decision (2026-11-20), `tenant.id` with
