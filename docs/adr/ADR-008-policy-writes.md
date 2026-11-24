@@ -218,7 +218,7 @@ New questions raised by this ADR:
   re-enable) and a trust source write count as widening, so while
   `widening_second_approver` is on they need an IR-054 approval by a second
   approver; the second-approver flow was accepted by the user on 2026-11-23 and is
-  implemented in `skyoauth_service::operation` (PRs #114-#118 and #120-#123;
+  implemented in `skyoauth_service::operation` (PRs #111, #114-#123;
   nearest task owners T13.3, T13.2, T13.8, T11.6, T10.4 and T10.2; design and
   rulings in docs/proposals/second-approver-gated-writes.md). No endpoint is
   wired before the request layer. Ruled by the user with it (2026-11-23, Q1 to
@@ -229,11 +229,13 @@ New questions raised by this ADR:
   create is widening; Q4 under `single_actor_mode` the one actor must also hold
   `security_admin`; Q5 the requester is checked again at approve; Q6 no
   fingerprint in the audit event for now (a `request_digest` member is the
-  follow-up); Q7 gating `security_admin` grants while the toggle is on is a
+  better ADR follow-up than the fingerprint); Q7 gating `security_admin` grants while the toggle is on is a
   follow-up, and until then the residual risk (one `security_admin` can enrol a
   second identity, grant it `security_admin` and approve through it) is
-  accepted. Turning `widening_second_approver` off needs the widening flag like
-  every other widening write (the user, 2026-11-24; item 12). Still open: the audit sink TLS
+  accepted. Every request that sets `widening_second_approver` to false, a
+  false to false write included, needs the widening flag like every other
+  widening write (the user, 2026-11-24, relayed by the lead; item 12; not yet
+  implemented, T13.3; see the second-approver proposal). Still open: the audit sink TLS
   trust settings and alert routing (OQ-TM-12). Original question: The OQ-ADR016-2 decision
   requires a widening flag, but the sources do not list which changes count as
   widening beyond predicate deletion (for example a wider audience ceiling, a

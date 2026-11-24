@@ -1,6 +1,6 @@
 # Proposal: second-approver flow for widening trust writes
 
-Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 7, 9 and 10 merged (PR 10 as #123), PR 6 in progress (#116 merged), PR 8 not started (see "Implementation notes").
+Status: Accepted (Q1-Q7 and the 0005 trigger ruled by the user, 2026-11-23); PRs 1 to 5, 7, 9 and 10 merged (PR 10 as #123); PR 6 in progress (#116 merged); PR 8 not started (see "Implementation notes").
 
 Drafted 2026-11-23 for the lead's review agent and then the user's
 acceptance. The user ruled on 2026-11-23 (relayed by the lead): "Accept all
@@ -12,9 +12,9 @@ in-transaction permit (PR 1), the registry operation module with the `0005`
 guard and index (PR 2), `crate::operation` with the toggle (PR 3), the
 keyset kinds (PR 4), the source kinds with the Q2 disable-only add-on
 (PR 5), the ungated entry points made crate-private (PR 7), the bare
-registry trust writers made crate-private (PR 9), and, in review, the
+registry trust writers made crate-private (PR 9), and the
 registry's operator writers, audit append and operation-row writers made
-crate-private (PR 10); the tests of PR 6 have started (#116, merged). Not
+crate-private (PR 10, #123); the tests of PR 6 have started (#116, merged). Not
 yet: the rest of the tests (PR 6), the test session's documents (PR 8),
 and any endpoint; no T00.x box is ticked. Every other choice below that
 goes beyond the written spec is a "provisional lead pick, 2026-11-23" (the
@@ -2229,8 +2229,9 @@ Still open after PRs 7, 9 and 10:
   `remove_service_grant_binding` (`grant.rs:598`) and
   `remove_service_grant_resource_server` (`grant.rs:663`) only narrow.
 
-- **Open decision (the lead's or the user's; not decided here): the
-  recovery writers.** `issue_recovery_challenge` and `restore_operator`
+- **Decided (the user, 2026-11-24, relayed by the lead; see
+  docs/proposals/recovery-verified-response.md): the recovery writers.**
+  The text below states the question as it stood. `issue_recovery_challenge` and `restore_operator`
   cannot simply be made crate-private. The design puts the
   deployment-local bootstrap and recovery verifier in the service binary
   (`skyoauth-service` subcommands, `service/src/main.rs`; design :666,
