@@ -126,22 +126,27 @@ egress rows are never deleted.
   Unicode normalization are different names. As a unique free-text key it
   is bounded by `principal_name_octet_length_check` (2048 bytes, as the
   `0004` names), so the largest key, a 255-byte tenant ID and a 2048-byte
-  name, fits the btree limit; unlike the `0004` names it has no
-  whitespace rule (lead decision, 2026-11-24: a human principal's name
-  is a display label). Like the `0004` names it has no control
-  character (lead decision, 2026-11-24, part of the same amendment):
-  `principal_name_no_control_check`,
+  name, fits the btree limit; unlike the `0004` names it has no rule on
+  spaces that are not controls, so U+0020 and U+00A0 pass (lead decision,
+  2026-11-24: a human principal's name is a display label), while TAB,
+  LF, VT, FF and CR are controls and refused by the check below. Like the
+  `0004` names it has no control character (lead decision, 2026-11-24,
+  part of the same amendment): `principal_name_no_control_check`,
   `CHECK ((name COLLATE "C") !~ '[[:cntrl:]]')`, the `0004` form without
   `[:space:]`, refuses U+0000–U+001F and U+007F–U+009F on every instance,
   so a trailing newline or an ANSI escape sequence fails with `23514`,
   which the registry maps to `Invariant` of kind `Check` naming the
-  constraint. Format characters are not controls and pass, as in `0004`:
-  a bidirectional override such as U+202E or a zero-width space (U+200B)
-  is a valid name, so every surface that displays a principal name (the
-  admin UI, the CLI, logs, audit exports) must escape them. A duplicate
-  fails with `23505` naming the key, which the registry maps to
-  `AlreadyExists` (see "Rust registry surface"). Tenant names are not
-  unique: no rule for them is decided (see Follow-ups).
+  constraint. U+0000 never reaches the check: PostgreSQL refuses it while
+  decoding the text argument, with `22021` (see "Rust registry surface").
+  Format characters are not controls and pass, as in `0004`: a
+  bidirectional override such as U+202E or a zero-width space (U+200B) is
+  a valid name. So are the line and paragraph separators U+2028 and U+2029
+  (categories Zl and Zp, not controls either). Every surface that displays
+  a principal name (the admin UI, the CLI, logs, audit exports) must
+  escape the bidirectional and other format characters and both
+  separators. A duplicate fails with `23505` naming the key, which the
+  registry maps to `AlreadyExists` (see "Rust registry surface"). Tenant
+  names are not unique: no rule for them is decided (see Follow-ups).
 
   | Constraint                          | Rule                                      |
   | ----------------------------------- | ----------------------------------------- |
@@ -2611,16 +2616,17 @@ Open for all registry tables:
   pins both and fails once a tenant-name constraint exists.
 - First-login principals of M1b (`auto_create`, design §5.1.1; T30.4).
   Since `principal_tenant_id_kind_name_key` makes a human principal's name
-  unique in its tenant, `auto_create` must give the new principal a name
-  that cannot collide: one derived from its generated ID
-  (`service/src/ids.rs`), never the IdP's display name or email, which two
-  subjects may share. First-login convergence must key on the link's
-  unique tenant/provider/issuer/subject constraint, never on a generic
-  `AlreadyExists` from `principal_tenant_id_kind_name_key`: with a name
-  taken from the IdP, concurrent first logins would fail with `23505` on
-  the name key before the link constraint is reached, and treating that
-  failure as "already created" could attach a subject to another
-  subject's principal (lead decision, 2026-11-24).
+  unique in its tenant, `auto_create` derives the candidate name from the
+  new principal's generated ID (`service/src/ids.rs`), never from the
+  IdP's display name or email, which two subjects may share. Another human
+  principal in the tenant can already hold that label (names are mutable
+  display labels), so on a name conflict
+  (`principal_tenant_id_kind_name_key`) `auto_create` retries with a fresh
+  candidate from a fresh ID. A concurrent first login for the same subject
+  is recognized by the link's unique tenant/provider/issuer/subject
+  constraint, never by the name conflict: treating a `23505` on the name
+  key as "already created" could attach a subject to another subject's
+  principal (lead decision, 2026-11-24).
 - Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
@@ -2827,6 +2833,10 @@ logging must not walk the source chain.
 PostgreSQL text and `jsonb` cannot hold U+0000: a NUL character in any
 string argument (IDs, names, the page cursor, list elements, strings inside
 `jsonb` values) gives `Other` with `22021` (`text`) or `22P05` (`jsonb`).
+The server raises it while decoding the argument, before any constraint
+runs, so a principal name with a NUL is `Other` with `22021` on create and
+on rename, not the `Invariant` of kind `Check` naming
+`principal_name_no_control_check` that the other control characters give.
 The request layer (T14.1) must reject it.
 
 The registry does not authorize writes (API-147; T14.1, T14.2), write
