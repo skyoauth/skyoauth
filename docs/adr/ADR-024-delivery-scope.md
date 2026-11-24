@@ -27,7 +27,7 @@ v0.1 boundary.
 ### Order
 
 1. **M0.** Contracts, ADRs, threat model and the complete logical model are
-   reviewed together before implementation (tasks §9; design §11).
+   reviewed together before implementation (tasks §9; design §11). In fact M1a ran ahead under provisional picks, and the maintainer's ratification follows it (user, 2026-11-24).
 2. **M1a then usable M2.** M1a delivers workload principals, trust, grants,
    tenant, audience and checker authority, independent operator bootstrap and
    recovery with the portable `skyoauth-operator` client, and durable replay. M2
@@ -111,7 +111,7 @@ New questions raised by this ADR:
   as a versioned release, which conformance rows gate it, or whether its token
   endpoint and Rust workload library are covered by the v0.1 compatibility
   contract (design §2) from that point. Open; deferred (lead decision,
-  2026-11-19).
+  2026-11-19; deferred again by the user, 2026-11-24). Coupling: schema upgrade support begins with the first tagged public release, which the docs treat as the first beta release (user, 2026-11-24: only migration across tagged public releases is supported, so no migration is needed before the first beta release).
 - **OQ-ADR024-2 — Spec amendments before slices.** Decided (lead decision,
   2026-11-19): amendments gate the start of a milestone (item 5). Original
   question: Several lead decisions (OQ-TM-12, OQ-TM-13, OQ-TM-14) require design

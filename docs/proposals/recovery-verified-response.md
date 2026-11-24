@@ -1,23 +1,20 @@
 # Proposal: verify the recovery signature inside `restore_operator` (T13.5)
 
-Status: proposal only, drafted 2026-11-24 for the lead's review and the
-user's decision; revised the same day after review. The lead's rulings of
-that review are marked "provisional lead pick, 2026-11-24"; the crate choice
-(question 1) is the user's. Other choices are marked "(inferred)". All of
-them stay provisional until the maintainer ratifies the ADRs (T00.8–T00.17,
-Gate M0); this text ratifies no ADR and ticks no task. It changes no code: the
-implementation PR does, and edits the places under "Reconciliation". Line
-numbers refer to `main` at `3028360`.
+Status: Accepted (user, 2026-11-24, relayed by the lead: the user accepted the
+lead's recommendations); implementation pending (T13.5). Drafted the same day
+for the lead's review and the user's decision. The choices the user accepted
+are those marked "provisional lead pick, 2026-11-24" below; Q2 to Q6 of the
+review are accepted as implementation choices that ordinary review can change.
+Other choices are marked "(inferred)". The ADRs are ratified separately
+(T00.8–T00.17, Gate M0); this text ratifies no ADR and ticks no task. It
+changes no code: the implementation PR does, and edits the places under
+"Reconciliation". Line numbers refer to `main` at `3028360`.
 
-> **Departs from the approved shape.** The user approved a "verified
-> response" value that only the library's verifier builds and that
-> `restore_operator` accepts. After review the lead's pick is a combined shape
-> instead: `restore_operator` takes the signed response itself and verifies it
-> against the rows it has locked (section 1). Against outside crates it is as
-> strong, and it closes the gap between a verify and a restore by
-> construction. The value-type design is kept, with its conditions, under
-> "Alternative: a `VerifiedRecoveryResponse` value". The user decides between
-> them (provisional lead pick, 2026-11-24).
+The combined shape is ruled: `restore_operator` takes the signed response
+itself and verifies it against the rows it has locked (section 1). The
+earlier "verified response" value design is kept, with its conditions, under
+"Alternative: a `VerifiedRecoveryResponse` value" as the documented rejected
+alternative.
 
 It answers the open decision "the recovery writers" of
 `docs/proposals/second-approver-gated-writes.md` (:2232-2247), in a file of its
@@ -408,21 +405,22 @@ transaction (the combined shape makes it unnecessary).
 
 ## Rulings and open questions
 
-Ruled by the lead (provisional lead pick, 2026-11-24): the library hashes;
-the format of `M`, with a closed plan and the workstation's re-encode check;
-weak-key refusal at verify and enrollment; a reason enum; the combined shape,
-subject to the user's choice over the approved one; `bootstrap_instance`
-stays public with the key checks; the raw-key pick is dated 2026-11-21
-(identity-registry :547, `bootstrap.rs:227-228`).
+Ruled by the user, 2026-11-24, relayed by the lead (the lead's recommendations
+accepted): the library hashes; the format of `M`, with a closed plan and the
+workstation's re-encode check; weak-key refusal at verify and enrollment; a
+reason enum; the combined shape (over the earlier approved value shape);
+`bootstrap_instance` stays public with the key checks; the raw-key pick is
+dated 2026-11-21 (identity-registry :547, `bootstrap.rs:227-228`).
 
-Open:
-
-1. **The Ed25519 crate (the user's).** Either is a new direct dependency, and
-   the tests need one to sign.
+1. **The Ed25519 crate: closed.** The user chose `ed25519-dalek` 3.0.0 with
+   `default-features = false`. The facts below are to be verified by cargo in
+   the implementation PR, not taken from this text. It is a new direct
+   dependency, and the tests need one to sign. The `ring` option, kept for the
+   record:
    - `ring` 0.17.14: already in the lock, so no new crate; couples its version
      to `rustls`; the small-order blocklist and the key-encoding check are
      hand-written library code.
-   - `ed25519-dalek` 3.0.0 (the reviewer's pick, for `verify_strict` and
+   - `ed25519-dalek` 3.0.0 (chosen; the reviewer's pick, for `verify_strict` and
      `is_weak`): the local registry index shows 3.0.0 with `rust_version`
      1.85 and normal dependencies `curve25519-dalek` ^5, `ed25519` ^3, `sha2`
      ^0.11 and `subtle`. The review reports a 2026-07-06 release under BSD-3,
@@ -432,9 +430,12 @@ Open:
      `-derive`, `ed25519`, `signature`, `fiat-crypto`, `rustc_version`,
      `semver`); the date, the license and the count were not checked here.
      `ed25519-dalek` 2.x would duplicate `sha2` and `digest` at 0.10.
-2. The nonce option (section 6), and its random source.
-3. The user's choice between the combined shape and the approved value shape.
-4. The spec wording of design :666 and tasks :30, :84 (the lead's; see below).
+2. **The nonce option (section 6): recorded as an option, not built.** The
+   residual risk stays in the threat model (TM-15); the user accepted that
+   default.
+3. **Combined shape or value shape: closed.** The combined shape is ruled.
+4. **Spec wording: done** (design :666, :724 and tasks :30, :84, :189 and
+   ADR-013 item 7 carry the library-verifies wording).
 
 ## Reconciliation
 
