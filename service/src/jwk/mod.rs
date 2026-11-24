@@ -36,10 +36,13 @@
 //!   (thumbprints), RFC 8037 (`OKP`, Ed25519) and RFC 8725 section 3.1
 //!   (one algorithm per key).
 //!
-//! Every pick below is a lead decision dated 2026-11-21, provisional until
-//! the maintainer ratifies the ADRs (T00.8 to T00.17), except the
+//! Every pick below is a lead decision dated 2026-11-21, except the
 //! dependency choice of the point checks, which the user ruled on (see
-//! below). A pick no source states is marked "(inferred)".
+//! below). A pick no source states is marked "(inferred)". The maintainer
+//! ratified the ADRs directionally on 2026-11-24 and Gate M0 passed in
+//! #140: the lead decisions stay implementation choices that ordinary
+//! review can change, and a change to the user's ruling goes back to the
+//! user.
 //!
 //! # Rules
 //!

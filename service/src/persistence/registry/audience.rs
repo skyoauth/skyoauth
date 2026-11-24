@@ -208,7 +208,11 @@ pub async fn update_audience_tenant_assignment<'e>(
 }
 
 /// Creates a checker at revision 1, with no tenants.
-pub async fn create_resource_server_checker<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_resource_server_checker<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewResourceServerChecker,
 ) -> Result<ResourceServerChecker, RegistryError> {
@@ -258,7 +262,11 @@ pub async fn list_resource_server_checkers<'e>(
 
 /// Replaces the mutable columns of a checker at `expected_revision` and
 /// advances its revision by one. Its tenant set is unchanged.
-pub async fn update_resource_server_checker<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_resource_server_checker<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,
@@ -287,7 +295,11 @@ pub async fn update_resource_server_checker<'e>(
 /// set is [`RegistryError::AlreadyExists`] with
 /// `resource_server_checker_tenant_pkey`. Neither error changes the
 /// revision.
-pub async fn add_resource_server_checker_tenant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn add_resource_server_checker_tenant<'e>(
     executor: impl PgExecutor<'e>,
     checker_id: &str,
     expected_revision: i64,
@@ -318,7 +330,11 @@ pub async fn add_resource_server_checker_tenant<'e>(
 /// `expected_revision` and advances the checker's revision by one, returning
 /// the new revision. A tenant not in the set is [`RegistryError::NotFound`]
 /// and changes nothing.
-pub async fn remove_resource_server_checker_tenant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn remove_resource_server_checker_tenant<'e>(
     executor: impl PgExecutor<'e>,
     checker_id: &str,
     expected_revision: i64,
@@ -352,7 +368,11 @@ pub async fn remove_resource_server_checker_tenant<'e>(
 }
 
 /// Creates an action rule at revision 1.
-pub async fn create_resource_action<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn create_resource_action<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewResourceAction,
 ) -> Result<ResourceAction, RegistryError> {
@@ -407,7 +427,11 @@ pub async fn list_resource_actions<'e>(
 
 /// Replaces the mutable columns of an action rule at `expected_revision`
 /// and advances its revision by one.
-pub async fn update_resource_action<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_resource_action<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,

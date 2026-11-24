@@ -94,7 +94,11 @@ pub async fn list_tenants<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
-pub async fn update_tenant<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_tenant<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,
@@ -173,7 +177,11 @@ pub async fn get_principal<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
-pub async fn update_principal<'e>(
+#[cfg_attr(
+    not(feature = "test-support"),
+    expect(dead_code, reason = "ungated: tests only, through test_support")
+)]
+pub(super) async fn update_principal<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,

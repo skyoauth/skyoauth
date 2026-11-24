@@ -11,10 +11,11 @@
 //! second-approver flow (`docs/proposals/second-approver-gated-writes.md`,
 //! PR 5; see "The gate"). They run in the caller's transaction and neither
 //! commit nor roll it back. The picks below are the lead's (provisional
-//! lead pick, 2026-11-22; the gate's, 2026-11-23) unless marked (inferred);
-//! all are provisional until the maintainer ratifies the ADRs (T00.8 to
-//! T00.17, Gate M0). Four rulings below are the user's, not provisional
-//! picks: canonical-form destinations as the convention (end of "Rules"),
+//! lead pick, 2026-11-22; the gate's, 2026-11-23) unless marked (inferred).
+//! The maintainer ratified the ADRs directionally on 2026-11-24 and Gate M0
+//! passed in #140: the lead picks stay implementation choices that ordinary
+//! review can change, and a change to a user ruling goes back to the user.
+//! Four rulings below are the user's, not lead picks: canonical-form destinations as the convention (end of "Rules"),
 //! source writes as widening and the database backstop (both under "Not
 //! done here"; 2026-11-22, relayed by the lead), and the class of an update
 //! (Q2, 2026-11-23; "The gate").
