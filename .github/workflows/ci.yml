@@ -495,6 +495,53 @@ jobs:
       - name: Check
         run: cargo check --locked --workspace --all-targets --all-features
 
+  # The release build's guard for `test-support`, the feature that exposes
+  # the ungated registry and trust writers to tests
+  # (scripts/ci/check-release-features.mjs): the feature resolution of a
+  # release build of each binary package, and of the workspace, turns it
+  # on for no package; no workspace feature but `test-support` itself turns
+  # it on; and no release command in the workflows, scripts or cargo
+  # configuration (aliases expanded, profiles followed) uses --all-features
+  # or --all-targets, names it or such a feature, or builds test targets.
+  # `cargo tree` and `cargo metadata` build nothing. The self-test runs the
+  # guard on small path-only workspaces, offline, with the feature
+  # injected each way it could reach a release build. smol-toml (profiles,
+  # aliases) comes from the scripts/ci lockfile, installed without
+  # lifecycle scripts.
+  release-features:
+    name: Release build features
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/ci/package-lock.json
+
+      - name: Install check dependencies
+        working-directory: scripts/ci
+        run: npm ci --ignore-scripts
+
+      - name: Check the release feature resolution
+        run: node scripts/ci/check-release-features.mjs
+
+      - name: Self-test the guard
+        if: success() || failure()
+        run: node --test scripts/ci/check-release-features.test.mjs
+
   # Conformance scenarios on PostgreSQL: env `pg`, leg string
   # `scenarios-pg/x86_64` (docs/testing/conformance-layout.md §1.1). Tests
   # reach the database through SKYOAUTH_IT_DATABASE_URL (§1.2); the
@@ -1035,6 +1082,7 @@ jobs:
       - rust-coverage
       - service-nextest
       - msrv
+      - release-features
       - scenarios-pg
       - typescript
       - typescript-coverage
