@@ -10,18 +10,19 @@
 //! revokes every operator credential, rotates the recovery key and records
 //! the audit events.
 //!
-//! Every ruling below, a lead's, a user's or an inferred one, is
-//! provisional until the maintainer ratifies the ADRs (T00.8 to T00.17,
-//! Gate M0).
+//! The maintainer ratified the ADRs directionally on 2026-11-24. The lead
+//! picks and inferred rulings below stay implementation choices that
+//! ordinary review can change; a change to a user ruling goes back to the
+//! user.
 //!
 //! # Flow
 //!
-//! 1. The service binary's recovery subcommand builds the restoration plan
-//!    the deployment operator asks for and calls [`issue_recovery_challenge`]
-//!    in a transaction of its own, which computes the request digest and
-//!    the challenge hash, records the challenge as an
-//!    `administrative_operation` row with its audit event, and returns `M`
-//!    (see "What is signed"); the binary commits.
+//! 1. The service binary's recovery subcommand (T13.3; not built yet)
+//!    builds the restoration plan the deployment operator asks for and
+//!    calls [`issue_recovery_challenge`] in a transaction of its own, which
+//!    computes the request digest and the challenge hash, records the
+//!    challenge as an `administrative_operation` row with its audit event,
+//!    and returns `M` (see "What is signed"); the binary commits.
 //! 2. The binary hands `M` to the portable workstation, which checks and
 //!    displays it and signs it with the offline recovery key
 //!    (`skyoauth-operator` only signs); the signed response comes back over
@@ -165,7 +166,9 @@
 //!    row (lead ruling). Then, against the locked rows, in this order, each
 //!    miss a [`NotRestorableReason`]: the row exists (`NotFound`); it is an
 //!    `operator_restoration` of no tenant by `deployment_operator` with
-//!    `challenge_hash` set (`WrongKind`); unconsumed (`Consumed`), unrevoked
+//!    `challenge_hash` and `expires_at` set (`WrongKind`; `0005` allows a
+//!    row without either, every approve, cancel and reject row of the
+//!    second-approver flow); unconsumed (`Consumed`), unrevoked
 //!    (`Revoked`), outcome `issued` (`WrongKind`); `now < expires_at`
 //!    (`Expired`); its plan's `instance_id` and `recovery_key_epoch` and its
 //!    `expected_revision` are the state's (`NotBound`); `C` and `M`, rebuilt
@@ -205,7 +208,9 @@
 //!    retired (OQ-TM-8; the `0005` trigger
 //!    `skyoauth_check_recovery_key_rotation` requires the epoch to advance
 //!    exactly when the key changes). No other path replaces the key
-//!    (OQ-TM-15);
+//!    (OQ-TM-15). The statement is bound to the state step 2 locked; under
+//!    that lock it cannot miss, and a miss is still `NotRestorable`
+//!    ([`NotRestorableReason::NotBound`], inferred);
 //! 9. sets the operation's `outcome` to `restored` and advances its
 //!    revision; `consumed_at` stays as the consume set it (`outcome` and
 //!    `revision` are the only plain mutable columns of the row);
@@ -258,9 +263,10 @@
 //! row's `expected_revision` as its `revision` (inferred: the challenge is
 //! bound to the revision of the state it rotates). Under the locks of steps
 //! 2 and 3 it cannot miss after step 3 passed; a miss is still
-//! `NotRestorable` ([`NotRestorableReason::Consumed`]). It writes no audit
-//! event of its own: the restore's events, in the same savepoint, record it
-//! (inferred).
+//! `NotRestorable` ([`NotRestorableReason::Consumed`]), as a missed
+//! rotation at step 8 is ([`NotRestorableReason::NotBound`]). It writes no
+//! audit event of its own: the restore's events, in the same savepoint,
+//! record it (inferred).
 //!
 //! # Locks
 //!
@@ -1299,8 +1305,11 @@ struct ChallengeRow {
     consumed: bool,
     revoked: bool,
     outcome: String,
-    /// The stored expiry in whole microseconds, as `C` carries it.
-    expires_at_us: i64,
+    /// The stored expiry in whole microseconds, as `C` carries it; `None`
+    /// for a row without one, which `0005` allows when `challenge_hash` is
+    /// NULL (every approve, cancel and reject row of the second-approver
+    /// flow).
+    expires_at_us: Option<i64>,
 }
 
 impl FromRow<'_, PgRow> for ChallengeRow {
@@ -1323,14 +1332,20 @@ impl FromRow<'_, PgRow> for ChallengeRow {
 }
 
 /// The checks of step 3 against the state and the challenge row, in the
-/// order of the module docs; shared by the restore and the preview.
+/// order of the module docs; shared by the restore and the preview. Returns
+/// the checked expiry, in whole microseconds.
 fn check_challenge(
     state: &RecoveryState,
     row: &ChallengeRow,
     signature: &[u8],
     now: PgInterval,
-) -> Result<(), NotRestorableReason> {
+) -> Result<i64, NotRestorableReason> {
     let Some(challenge_hash) = row.challenge_hash.as_deref() else {
+        return Err(NotRestorableReason::WrongKind);
+    };
+    // `0005` requires an expiry with a challenge hash; a row without one is
+    // no challenge either.
+    let Some(expires_at_us) = row.expires_at_us else {
         return Err(NotRestorableReason::WrongKind);
     };
     if row.kind != OPERATOR_RESTORATION
@@ -1348,7 +1363,7 @@ fn check_challenge(
     if row.outcome != ISSUED {
         return Err(NotRestorableReason::WrongKind);
     }
-    if now.microseconds >= row.expires_at_us {
+    if now.microseconds >= expires_at_us {
         return Err(NotRestorableReason::Expired);
     }
     if plan_binding(&row.immutable_plan) != Some((&state.instance_id[..], state.recovery_key_epoch))
@@ -1359,7 +1374,7 @@ fn check_challenge(
     let encoded = encode_challenge(
         &row.id,
         row.expected_revision,
-        row.expires_at_us,
+        expires_at_us,
         &row.immutable_plan,
     )
     .map_err(|NotCanonical| NotRestorableReason::NotLibraryEncoding)?;
@@ -1368,7 +1383,8 @@ fn check_challenge(
     {
         return Err(NotRestorableReason::NotLibraryEncoding);
     }
-    verify_signature(&state.recovery_public_key, &encoded.challenge, signature)
+    verify_signature(&state.recovery_public_key, &encoded.challenge, signature)?;
+    Ok(expires_at_us)
 }
 
 /// Checks a signed response as [`restore_operator`] would, at `now`,
@@ -1413,7 +1429,7 @@ async fn preview_steps(
     let Some(row) = row else {
         return Err(NotRestorableReason::NotFound.into());
     };
-    check_challenge(&state, &row, response.signature, now)?;
+    let expires_at_us = check_challenge(&state, &row, response.signature, now)?;
     let plan = parse_plan(&row.immutable_plan)?;
     if state.recovery_public_key[..] == plan.new_recovery_public_key[..] {
         return Err(RestoreError::RecoveryKeyUnchanged);
@@ -1423,7 +1439,7 @@ async fn preview_steps(
         .checked_add(1)
         .ok_or_else(|| encode_error("recovery key epoch out of range"))?;
     let expires_at =
-        from_micros(row.expires_at_us).ok_or_else(|| encode_error("timestamp out of range"))?;
+        from_micros(expires_at_us).ok_or_else(|| encode_error("timestamp out of range"))?;
     Ok(RecoveryPreview {
         admin_id: plan.admin_id.into(),
         credential_id: plan.credential_id.into(),

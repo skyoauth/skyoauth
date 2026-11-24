@@ -153,9 +153,7 @@ egress rows are never deleted.
   `{"type": "system", "id": "system"}`, never a principal or an operator
   identity (IR-058). `action` is a dotted lowercase `<resource>.<verb>` name
   (identity-registry IR-059). These are lead decisions (2026-11-20,
-  OQ-IR-14), provisional until the maintainer ratifies the ADRs
-  (T00.8–T00.17, Gate M0). The action names,
-  including `instance_security_policy.mirror` and
+  OQ-IR-14). The action names, including `instance_security_policy.mirror` and
   `instance_security_policy.change_sink` for these two events, are the
   closed table of the audit writer: OQ-IR-15 is decided provisionally (lead
   decision 2026-11-21; see "Rust registry surface").
@@ -972,8 +970,7 @@ below. A database created from an earlier `0005` is recreated.
   the two cross-scope references those guards left open (an operation's
   audit event, and the approved operation of a kind other than
   `approve`), each folded into `0005` in place rather than added as a new
-  file (relayed by the lead; provisional until the maintainer ratifies the
-  ADRs, T00.8–T00.17, Gate M0). Choices marked "(inferred)" are the
+  file (relayed by the lead). Choices marked "(inferred)" are the
   implementation's.
   - **Rule.** An operation of any kind that names an approved operation
     (`approves_operation_id`) names one of its own tenant, compared with
@@ -1843,8 +1840,7 @@ first (see "Rust registry surface").
 `0009_reserved_ids_and_dormant_grants.sql` adds one named check on
 `admin_identity` and three guard triggers that freeze an impersonation
 grant, two rules that only the service enforced until now (lead decisions,
-2026-11-21; provisional until the maintainer ratifies the ADRs,
-T00.8–T00.17, Gate M0). It adds two functions, three triggers and one
+2026-11-21). It adds two functions, three triggers and one
 check, and changes no column, index, constraint or existing trigger.
 Choices marked "(inferred)" are its own.
 
@@ -2068,8 +2064,7 @@ audience tenant assignment exists but is disabled (IR-080; the write half of
 T14.2 for these two tables). It implements
 `docs/proposals/ir-080-assignment-write-guard.md`, which the user accepted
 (ruling relayed by the lead, 2026-11-22). Every pick is a provisional lead
-pick, 2026-11-22, until the maintainer ratifies the ADRs (T00.8–T00.17,
-Gate M0). It changes no column, index, constraint or existing trigger.
+pick, 2026-11-22. It changes no column, index, constraint or existing trigger.
 Choices marked "(inferred)" are its own.
 
 - **The guards.** `service_identity_resource_server_assignment_active` on
@@ -2305,9 +2300,8 @@ Choices marked "(inferred)" are its own.
 IR-152 egress check of a trust source, which only the service enforced
 until now (see "Trust source writes"): one function,
 `skyoauth_check_trust_source_egress()`, and one trigger,
-`trust_source_egress_enabled` (provisional lead pick, 2026-11-22;
-provisional until the maintainer ratifies the ADRs, T00.8–T00.17, Gate
-M0). It changes no column, index, constraint or existing trigger, and it
+`trust_source_egress_enabled` (provisional lead pick, 2026-11-22). It
+changes no column, index, constraint or existing trigger, and it
 validates no existing row. Choices marked "(inferred)" are its own.
 
 - **Rule.** The service's rule, for the two destination columns of `0004`
@@ -2639,8 +2633,7 @@ Not done in `0002`:
 - A `revision` on `tenant` and `principal`: updates require
   ID, tenant and revision (tasks §3 "IDs/names"). Done in `0007`.
 - The audit writer. The service computes the event hash (lead decision,
-  2026-11-20, OQ-IR-14; identity-registry IR-056; provisional until the
-  maintainer ratifies the ADRs, T00.8–T00.17, Gate M0). The hash is SHA-256
+  2026-11-20, OQ-IR-14; identity-registry IR-056). The hash is SHA-256
   over the concatenation of:
   1. the ASCII bytes `skyoauth.audit.v1` followed by one zero byte;
   2. `prev_hash` as 32 raw bytes, or zero bytes for the first event, whose
@@ -2957,8 +2950,7 @@ and the credential revocation, which only narrow, stay public too. Rows
 are read by their own ID. Identities and credentials have no revision
 (identity-registry OQ-IR-16). Time is always the caller's: `created_at`
 and the `now` of a revocation are arguments, never the database's `now()`
-(lead pick, 2026-11-21; provisional until the maintainer ratifies the ADRs,
-T00.8–T00.17, Gate M0). A revocation sets `revoked_at` and
+(lead pick, 2026-11-21). A revocation sets `revoked_at` and
 `status = 'disabled'` in one statement; revoking a revoked credential keeps the first
 `revoked_at` (inferred). Revocation is one-way in the database:
 `admin_credential_set_once` refuses to clear or change `revoked_at`
@@ -2974,8 +2966,7 @@ and disable only): after creation an identity can only be disabled and a
 credential only revoked. The database does not forbid re-enabling either:
 no guard keeps an identity's status, or an unrevoked credential's, from
 going back to `enabled` by other means. The lead ruling that re-enabling is
-a plain status change (2026-11-21; provisional until the maintainer ratifies
-the ADRs, T00.8–T00.17, Gate M0) applies to the tables the registry
+a plain status change (2026-11-21) applies to the tables the registry
 updates: a role binding is re-enabled by an update, as `0005` intends.
 `create_admin_identity` rejects the reserved actor IDs
 `deployment_operator` and every ID beginning with `recovery_key:`
@@ -2990,8 +2981,7 @@ requires the three enabled and the credential unrevoked. No role implies
 another (API-120). Scope fails closed: an instance request needs a binding
 with no tenant and a tenant request a binding of exactly that tenant, so an
 instance `auditor` does not satisfy a tenant request nor a tenant `auditor`
-an instance one (lead pick, 2026-11-21; provisional until the maintainer
-ratifies the ADRs, T00.8–T00.17, Gate M0). Every comparison is an
+an instance one (lead pick, 2026-11-21). Every comparison is an
 equality on a `COLLATE "C"` column, byte-wise under any database
 collation, and at most one row can match. Every miss is the same
 `Ok(None)`; inputs are not validated first, as for `select_grant`, so an
@@ -3148,9 +3138,10 @@ Recovery (T13.5; design §7.2; ADR-013 item 8; identity-registry §5.2;
 LT-107): `recovery.rs` issues break-glass challenges and restores an
 operator with one, each in the caller's transaction, which it neither
 commits nor rolls back; every time is the caller's `now`, never the
-database clock. Its rulings, a lead's or inferred, are provisional until
-the maintainer ratifies the ADRs (T00.8–T00.17, Gate M0); identity-registry
-§5.2 says which is which. Inputs are checked before any statement (encode
+database clock. The maintainer ratified the ADRs directionally on
+2026-11-24: its lead picks and inferred rulings stay implementation choices
+that ordinary review can change, and a change to a user ruling goes back to
+the user; identity-registry §5.2 says which is which. Inputs are checked before any statement (encode
 errors, `Other`). Each function then runs its statements inside a
 savepoint of its own and rolls the savepoint back on every `Err`, also one
 the audit writer returns in Rust after the head lock, so a caller that

@@ -295,7 +295,7 @@ fn library(id: &str, revision: i64, plan: &JsonObject) -> Option<(Vec<u8>, Vec<u
 
 /// `M` of the stored row `id`, rebuilt (see [`encode`]).
 async fn stored_challenge(connection: &mut PgConnection, id: &str) -> Option<Vec<u8>> {
-    let row: Option<(String, i64, i64, Value)> = sqlx::query_as(
+    let row: Option<(String, i64, Option<i64>, Value)> = sqlx::query_as(
         "SELECT id, expected_revision, \
          (extract(epoch FROM expires_at) * 1000000)::bigint, immutable_plan \
          FROM administrative_operation WHERE id = $1",
@@ -305,6 +305,7 @@ async fn stored_challenge(connection: &mut PgConnection, id: &str) -> Option<Vec
     .await
     .unwrap();
     let (id, revision, expires_us, plan) = row?;
+    let expires_us = expires_us?;
     let Value::Object(plan) = plan else {
         return None;
     };
@@ -1309,7 +1310,9 @@ async fn a_revoked_challenge_is_not_restorable() {
 /// and the restore, and writes nothing. A row written by other means with
 /// every value right, the library's encoding included, is restorable, so
 /// each refusal is its one difference; every row here is signed by the
-/// current key over its own `M`, so the signature never decides.
+/// current key over its own `M`, so the signature never decides. A row
+/// without a challenge hash and an expiry (an approval, as `0005` allows)
+/// is `WrongKind`, and so is a hash without an expiry.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn every_refusal_has_its_reason() {
@@ -1619,7 +1622,22 @@ async fn every_refusal_has_its_reason() {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    // A row with neither a challenge hash nor an expiry, as `0005` allows
+    // for every approve, cancel and reject row of the second-approver flow:
+    // an approval of `op_1`, written by other means.
+    sqlx::query(
+        "INSERT INTO administrative_operation (id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, approves_operation_id, outcome, audit_id) \
+         VALUES ('raw_approve', 'adm_first', 'approve', $1, 1, $2, 'op_1', 'issued', \
+         'aud_issue_1')",
+    )
+    .bind(&good_digest)
+    .bind(json!(good_plan()))
+    .execute(&pool)
+    .await
+    .unwrap();
     expected.extend([
+        ("raw_approve", WrongKind),
         ("raw_tenant", WrongKind),
         ("op_unknown", NotFound),
         ("", NotFound),
@@ -1632,6 +1650,44 @@ async fn every_refusal_has_its_reason() {
         assert_refused_signed(&pool, id, now(), reason).await;
     }
     assert_refused_signed(&pool, "op_1", expires(), Expired).await;
+    assert_eq!(pool_snapshot(&pool).await, before);
+    // A challenge hash without an expiry, which only a schema without the
+    // `0005` check could hold (dropped here inside a transaction that rolls
+    // back): no challenge either.
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE administrative_operation \
+         DROP CONSTRAINT administrative_operation_challenge_expiry_check",
+    )
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO administrative_operation (id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, challenge_hash, outcome, audit_id) \
+         VALUES ('raw_no_expiry', 'deployment_operator', $1, $2, 1, $3, $4, 'issued', \
+         'aud_issue_1')",
+    )
+    .bind(OPERATOR_RESTORATION)
+    .bind(&good_digest)
+    .bind(json!(good_plan()))
+    .bind(&good_hash)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let signature = sign(&SEED, b"no expiry");
+    let presented = response("raw_no_expiry", &signature);
+    assert_not_restorable(
+        preview_recovery_response(&mut transaction, &presented, now()).await,
+        WrongKind,
+    );
+    assert_not_restorable(
+        restore_operator(&mut transaction, &presented, &restore_request()).await,
+        WrongKind,
+    );
+    transaction.rollback().await.unwrap();
+    drop(connection);
     assert_eq!(pool_snapshot(&pool).await, before);
     // The issued challenge is restorable, and so is the control row.
     let mut transaction = pool.begin().await.unwrap();
@@ -2086,7 +2142,7 @@ async fn a_preview_checks_as_a_restore_does_and_grants_nothing() {
     other.rollback().await.unwrap();
     assert_eq!(snapshot(&mut transaction).await, before);
     // A preview of the same response again, and a refusal, keep the
-    // transaction usable; then the restore in it succeeds.
+    // transaction usable: it still commits, and the commit writes nothing.
     assert_eq!(
         preview_recovery_response(&mut transaction, &response("op_1", &signature), now())
             .await
