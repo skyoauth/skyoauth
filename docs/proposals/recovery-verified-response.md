@@ -1,18 +1,28 @@
-# Proposal: a verified recovery response for `restore_operator` (T13.5)
+# Proposal: verify the recovery signature inside `restore_operator` (T13.5)
 
 Status: proposal only, drafted 2026-11-24 for the lead's review and the
-user's decision. The user approved the "verified response" direction (relayed
-by the lead); every design choice below is a provisional lead pick or marked
-"(inferred)", and all of them stay provisional until the maintainer ratifies
-the ADRs (T00.8–T00.17, Gate M0). This text ratifies no ADR and ticks no task.
-It changes no code: the implementation PR does, and edits the places listed
-under "Reconciliation". Line numbers refer to `main` at `3028360`.
+user's decision; revised the same day after review. The lead's rulings of
+that review are marked "provisional lead pick, 2026-11-24"; the crate choice
+(question 1) is the user's. Other choices are marked "(inferred)". All of
+them stay provisional until the maintainer ratifies the ADRs (T00.8–T00.17,
+Gate M0); this text ratifies no ADR and ticks no task. It changes no code: the
+implementation PR does, and edits the places under "Reconciliation". Line
+numbers refer to `main` at `3028360`.
+
+> **Departs from the approved shape.** The user approved a "verified
+> response" value that only the library's verifier builds and that
+> `restore_operator` accepts. After review the lead's pick is a combined shape
+> instead: `restore_operator` takes the signed response itself and verifies it
+> against the rows it has locked (section 1). Against outside crates it is as
+> strong, and it closes the gap between a verify and a restore by
+> construction. The value-type design is kept, with its conditions, under
+> "Alternative: a `VerifiedRecoveryResponse` value". The user decides between
+> them (provisional lead pick, 2026-11-24).
 
 It answers the open decision "the recovery writers" of
 `docs/proposals/second-approver-gated-writes.md` (:2232-2247), in a file of its
-own because that proposal is about the second-approver flow for trust writes,
-is accepted, and records its PRs as implemented; this is a separate decision
-about the break-glass path.
+own because that proposal is about the second-approver flow for trust writes
+and records its PRs as implemented.
 
 ## Problem
 
@@ -25,7 +35,7 @@ with a `ChallengeBinding` (`recovery.rs:572-581`, `:636-667`), are plain public
 structs. So any crate that links the library and holds a `READ COMMITTED`
 transaction can call `issue_recovery_challenge` (`:925`) and then
 `restore_operator` with the binding it just chose, and enroll a
-`security_admin` with no signature at all. Both are public
+`security_admin` with no signature. Both are public
 (`service/src/persistence/registry/mod.rs:479-485`), and so is
 `bootstrap_instance` (`bootstrap.rs:481`);
 `service/tests/ungated_writes_private.rs:190-201` keeps all three public on
@@ -35,350 +45,425 @@ PRs 7, 9 and 10 closed the same kind of gap for other writers by making them
 crate-private. That does not work here on its own: the design puts the
 deployment-local verifier in the service binary (design :666, :724; tasks
 :30, :84, :189), and `service/src/main.rs` is a crate of its own that uses the
-library as any other crate does. If the signature check lived in the binary,
-`restore_operator` would have to stay public, and the check would protect
-only the binary's own call.
+library as any other crate does. If the check lived in the binary,
+`restore_operator` would stay public, and the check would protect only the
+binary's own call.
 
 ## Proposal
 
-The library, not the binary, checks the signature, and proves it did with a
-value nobody else can make: a `VerifiedRecoveryResponse`. `restore_operator`
-takes that value instead of a caller-chosen binding. The binary keeps the
-deployment-local transport only.
-
-### 1. The type
-
-```rust
-/// A recovery response whose Ed25519 signature this module checked
-/// against the current recovery key, over the challenge it rebuilt from
-/// the stored operation row. Only `verify_recovery_response` makes one.
-#[derive(Debug)]
-pub struct VerifiedRecoveryResponse {
-    operation_id: String,
-    instance_id: String,
-    recovery_key_epoch: i64,
-    expected_revision: i64,       // the recovery_state revision it binds
-    recovery_public_key: [u8; 32], // the key the signature was checked with
-    request_digest: [u8; 32],
-    challenge_hash: [u8; 32],      // SHA-256 of the signed bytes (section 4)
-    expires_at: SystemTime,
-    verified_at: SystemTime,       // the verifier's `now`
-    replacement: Replacement,      // the plan's six members, parsed
-}
-```
-
-`Replacement` (private) holds `admin_id`, `credential_id`, `binding_id`,
-`public_identity`, `trust_anchor_ref` and the new 32-byte key, parsed from the
-stored plan. There is no tenant member: an `operator_restoration` challenge
-has none (`recovery.rs:462`); the M1b provider transition (T13.5) adds its own
-kind and fields then. The signature itself is not kept: the audit envelope has
-no member for it (`recovery.rs:181-183`), and nothing after the check needs it
-(inferred).
-
-Why only the library can build one (inferred mechanism):
-
-- every field is private, so a struct literal outside the defining module is
-  a compile error, and there is no public constructor, `Default`, `From`,
-  `TryFrom` or `Deserialize`;
-- not `Clone` or `Copy`: `restore_operator` takes it by value, so one
-  verification feeds one restore;
-- read-only accessors (`operation_id()`, `admin_id()`, the new key...) let the
-  binary show the operator what is about to happen;
-- `#[non_exhaustive]` adds nothing once a field is private, so it is not used;
-- the constructor lives in the module that owns `restore_operator`
-  (`recovery.rs`, or a child `recovery/verify.rs`, which can read its parent's
-  private fields), so the fields need no wider visibility.
-
-Privacy does not stop `unsafe` code in a dependent (the library itself has
-`#![forbid(unsafe_code)]`, `service/src/lib.rs:1`), nor SQL written with the
-rights a restore needs. The aim, as in PRs 7, 9 and 10, is that no safe call
-path of the library enrolls a `security_admin` without a checked signature.
-
-### 2. Building it: `verify_recovery_response`
+### 1. The shape
 
 ```rust
 pub struct SignedRecoveryResponse<'a> {
     pub operation_id: &'a str,
-    pub signature: &'a [u8], // 64 bytes; untrusted input
+    pub signature: &'a [u8], // untrusted input; 64 bytes
 }
 
-pub async fn verify_recovery_response(
+pub struct RestoreRequest<'a> {
+    pub audit_event_id: &'a str,
+    pub rotation_audit_event_id: &'a str,
+    pub now: SystemTime,
+}
+
+pub async fn restore_operator(
     transaction: &mut Transaction<'_, Postgres>,
     response: &SignedRecoveryResponse<'_>,
-    now: SystemTime,
-) -> Result<VerifiedRecoveryResponse, VerifyError>;
+    request: &RestoreRequest<'_>,
+) -> Result<Restored, RestoreError>;
 ```
 
-It writes nothing. Before any statement it refuses a signature that is not 64
-bytes and a `now` outside the range a restore accepts. Then:
+The library, not the binary, checks the signature, inside the restore, against
+the recovery state and the challenge row the restore has locked. The binding
+and the replacement come from the stored row, never from the caller. No value
+that stands for "verified" crosses a call boundary, so there is nothing to
+forge or to carry from one database to another (provisional lead pick,
+2026-11-24).
 
-1. reads the `recovery_state` row with the query of `get_recovery_state`
-   (`:913`), no lock: it must exist and be closed. The key is the row's,
-   never one the caller passes;
-2. reads the operation row by ID with a private query (the lead ruling that no
-   registry getter returns the row, identity-registry :343-344, stands): no
-   tenant, kind `operator_restoration`, `challenge_hash` set, unconsumed,
-   unrevoked, outcome `issued`, `now < expires_at`, the plan's `instance_id`
-   and `recovery_key_epoch` the state's, and `expected_revision` the state's
-   `revision` (the predicates of the consume, `recovery.rs:459-478`);
-3. rebuilds the signed bytes `M` from the stored row (section 4) and requires
-   SHA-256 of `M` to equal the stored `challenge_hash` and the recomputed
-   request digest to equal the stored one. A row whose hash the library did
-   not compute, an insert by raw SQL say, never verifies;
-4. parses the replacement and runs the checks `validate_restore` runs today
-   (`:886-910`: a reserved `admin_id`, a key of 32 bytes, the string bounds)
-   and the step 5 check that the new key is not the current one (`:1085`);
-5. verifies the Ed25519 signature over `M` with the state's 32-byte key,
-   strictly (section 4);
-6. returns the value, with the state's key, epoch and revision.
+An optional read-only pre-check, `preview_recovery_response(transaction,
+&SignedRecoveryResponse, now) -> Result<RecoveryPreview, RestoreError>`,
+runs the same checks without locks or writes and returns a plain summary (the
+replacement's IDs, the new key's epoch, `expires_at`) for the binary to show
+the deployment operator. It grants nothing: the restore checks everything
+again (provisional lead pick, 2026-11-24).
 
-Every miss of steps 1 to 5 is one unit refusal, `VerifyError::NotVerified`,
-with no detail, as `RestoreError::NotRestorable` (`:697`) is today (inferred;
-see open question 5); a store failure is `VerifyError::Store`.
+The aim, as in PRs 7, 9 and 10: after bootstrap is closed, and in a build
+without the `test-support` feature (whose `test_support` module exposes
+`create_admin_identity` and the other operator writers), no safe call path of
+the library enrolls a `security_admin` without a signature by the current
+recovery key. Privacy does not stop `unsafe` code in a dependent (the library
+has `#![forbid(unsafe_code)]`, `service/src/lib.rs:1`), nor SQL written with
+the rights a restore needs.
 
-### 3. Restoring with it
+### 2. The restore steps
 
-`restore_operator(transaction, verified: VerifiedRecoveryResponse, request:
-&RestoreRequest)`, where `RestoreRequest` keeps only the two audit event IDs
-and `now`. The replacement and the binding come from the value, so the caller
-cannot pass other ones. Its steps stay those of `recovery.rs:128-183`, with
-three changes:
+Before any statement, as today plus: a signature that is not 64 bytes is an
+encode error. Then, in its savepoint, the steps of `recovery.rs:128-183`
+change as follows:
 
-- step 2, after locking `recovery_state` `FOR NO KEY UPDATE`: refuse
-  (`NotRestorable`) unless the row's `instance_id`, `recovery_public_key`,
-  `recovery_key_epoch` and `revision` equal the value's. This closes the window
-  between verify and restore: a concurrent restore that rotated the key, or
-  any change of the row, is caught under the lock;
-- step 3, the consume, binds the value's digest, challenge hash, instance,
-  epoch and revision, as today's `ChallengeBinding` does, at the restore's own
-  `now`, so a challenge that expired after the verify is refused there;
-- before step 0: refuse a `now` earlier than `verified_at` (inferred; it keeps
-  a caller from running the restore on an older clock than the check).
+0. `READ COMMITTED` only, unchanged;
+1. every unrevoked credential locked, unchanged;
+2. the `recovery_state` row locked `FOR NO KEY UPDATE` (`:1069`); it must
+   exist and be closed;
+3. new: the challenge row read by ID `FOR NO KEY UPDATE` (the lock the
+   consume takes anyway, so the `0005` order holds), with a private query: the
+   lead ruling that no registry getter returns the row (identity-registry
+   :343-344) stands. Then, against the locked rows:
+   - the row is an `operator_restoration` of no tenant, `challenge_hash` set,
+     unconsumed, unrevoked, outcome `issued`, `now < expires_at`;
+   - its plan's `instance_id` and `recovery_key_epoch` and its
+     `expected_revision` are the state's;
+   - `C` and `M` (section 4), rebuilt from the row, hash to its stored
+     `request_digest` and `challenge_hash`, so a row whose stored hash or
+     digest is not the library's encoding of that row is refused;
+   - the state's key is not weak (section 4);
+   - the signature verifies over `M` with the state's key;
+4. the consume (`:459-478`), unchanged, bound to the row's own values;
+5. the replacement taken from the consumed plan and checked as
+   `validate_restore` checks it today (`:886-910`); today's step 4 comparison
+   with the request has nothing left to compare and goes;
+6. to 10. as today (`RecoveryKeyUnchanged` stays as defence; see section 3).
 
-Step 4 still compares the consumed plan with the value's replacement. The plan,
-the digest and the challenge hash cannot change after the issue: the `0005`
-trigger `administrative_operation_immutable` refuses it
-(`service/migrations/0005_operator.sql:424-431`), and `outcome` and `revision`
-are the only mutable columns (`recovery.rs:168-170`). The comparison stays as
-defence in depth (inferred).
+The key that verifies the signature is the one the restore then rotates, read
+under the same lock in the same database, so no key comparison between two
+calls is needed (review finding 1 applies only to the alternative). Every
+refusal leaves the challenge unconsumed and nothing written, as today.
 
-Replay and races, inside the one restore savepoint: the consume stays the
-only single-use mechanism (LT-107; `recovery.rs:34-43`), so a second restore
-from the same response, or from a second value verified before the first
-committed, is `NotRestorable`; after a rotation the old key is no longer
-current, so the response no longer verifies. The verify should run in the
-restore's own `READ COMMITTED` transaction just before it (inferred); the type
-does not force that, and need not, since the restore rechecks every bound
-value under its lock (so tying the value's lifetime to the transaction was
-dropped).
+### 3. The issue side
+
+`issue_recovery_challenge` computes `request_digest` and `challenge_hash`
+itself; `IssueChallenge` loses both fields, and `RecoveryChallenge` returns
+`M` for the binary to hand to the workstation. This reverses the pick that the
+registry does not hash (`recovery.rs:90-91`, `:121-124`; identity-registry
+:342-343) and matches D6 of the second-approver proposal and `0005`'s "the
+service computes it" (`service/migrations/0005_operator.sql:273-274`)
+(provisional lead pick, 2026-11-24).
+
+Both columns are immutable once inserted (`0005_operator.sql:424-431`, the
+names at :428-429), so `C` is computed before the insert from exactly the
+values the insert binds: the ID, `deployment_operator`, the kind, the
+`revision` read `FOR SHARE` at step 1, `expires_at` as `now + ttl` floored to
+the microsecond (`floor_to_microsecond`, `registry/model.rs:265`), the plan
+and no tenant. It is not recomputed from `RETURNING`.
+
+Refused before any statement, so that the issue never stores a challenge no
+restore can use (provisional lead pick, 2026-11-24):
+
+- a plan with members other than the eight it needs (`instance_id`,
+  `recovery_key_epoch`, `admin_id`, `credential_id`, `binding_id`,
+  `public_identity`, `trust_anchor_ref`, `new_recovery_public_key`), which
+  ends "Other members are the caller's" (`recovery.rs:88-90`);
+- a plan with no canonical form (`NotCanonical`, `operation/digest.rs:78-82`:
+  a fraction, or an integer above `i64::MAX`);
+- a reserved `admin_id`, an empty or over-2048-byte `public_identity` or
+  `trust_anchor_ref` (today's restore checks, moved forward);
+- a new key that is weak or not canonically encoded (section 4).
+
+After step 1 reads the state, a new key equal to the current one is
+`NotIssuable`. A restore of a library-issued challenge therefore cannot meet
+`RecoveryKeyUnchanged` (today's step 5, `:1085`): the key can become equal only
+through a rotation, which advances the epoch (`0005_operator.sql:227-231`) and
+so retires the challenge. The variant stays as defence against a row written
+by other means (inferred).
+
+`bootstrap_instance` stays public, a separate decision, but gets the same key
+checks for the key it enrolls (provisional lead pick, 2026-11-24).
+
+No migration is needed: the computed digest and hash are 32 bytes, inside the
+`0005` checks of 32 to 64, and `0005` already says the service computes the
+hash.
 
 ### 4. What is signed, and with what
 
 The signed bytes reuse the canonical request of the second-approver flow
 (`service/src/operation/digest.rs:5-18`, `DigestEnvelope` at `:97`; that
-proposal's D6 and D29), under a prefix of their own (inferred):
+proposal's D6 and D29) under a prefix of their own (provisional lead pick,
+2026-11-24):
 
 ```text
 C              = canonical JSON of {"actor_id": "deployment_operator",
-                   "expected_revision", "expires_at" (µs, as stored), "id",
+                   "expected_revision", "expires_at" (µs, as bound), "id",
                    "kind": "operator_restoration", "plan", "tenant_id": null}
 request_digest = SHA-256("skyoauth.administrative_operation.v1\n" || C)
 M              = "skyoauth.recovery_challenge.v1\n" || C
 challenge_hash = SHA-256(M)
-signature      = Ed25519(recovery private key, M)   (64 bytes)
+signature      = Ed25519(recovery private key, M)   (pure, RFC 8032; 64 bytes)
 ```
 
-- `C` already carries what the design asks the challenge to bind: the instance
-  and the key epoch (in the plan), the operation, its arguments (the plan) and
-  the expected revision (design :668; T13.5), plus the expiry the workstation
-  displays. It is JSON, so `skyoauth-operator` can parse and display it
-  before signing (design :668; ADR-013 item 8).
-- The distinct prefix separates the signed message from the request digest
-  and from any other use of the key.
-- The signature is over `M`, not over its hash, so the workstation signs what
-  it displays; the hash is only the database binding. Pure Ed25519 (RFC 8032),
-  no pre-hash or context variant (inferred).
-- `issue_recovery_challenge` computes `request_digest` and `challenge_hash`
-  itself from the row it inserts and returns `M`; `IssueChallenge` loses both
-  fields. This reverses the current pick that the registry does not hash
-  (`recovery.rs:90-91`, `:121-124`; identity-registry :342-343): see open
-  question 2.
+- `C` carries what the challenge must bind: the instance and the key epoch
+  (plan), the operation and its arguments (plan), the expected revision, and
+  the expiry the workstation displays (design :668; T13.5).
+- The prefix separates the signed message from the request digest and from
+  any other use of the key. The signature is over `M`, not its hash, so the
+  workstation signs what it displays.
+- `skyoauth-operator` parses `C`, requires the closed eight-member plan,
+  re-encodes it canonically and compares the bytes with what it received
+  before it displays and signs (design :668; ADR-013 item 8): a non-canonical
+  or extended `C` is never signed (provisional lead pick, 2026-11-24).
+- `C`'s form does not depend on `serde_json`'s map order (the writer sorts
+  members itself, `digest.rs:12-18`, `:147-149`).
 - The key is the raw 32-byte Ed25519 public key (identity-registry :273-276,
-  :545-547; lead pick 2026-11-21, provisional; `RECOVERY_PUBLIC_KEY_LENGTH`,
-  `bootstrap.rs:229`).
-- Strict verification: reject a signature whose `S` is not below the group
-  order, a non-canonical encoding of `R` or of the key, and use the cofactorless
-  equation, so a valid signature cannot be altered into another valid one.
-  Whether a small-order key is also refused, at verify or at enrollment, is
-  open question 4. The implementation PR confirms each property against the
-  chosen crate's documentation and pins it with a test.
-- `C`'s canonical form does not depend on `serde_json`'s map order (the
-  writer sorts members itself, `digest.rs:12-18`, `:147-149`), so a
-  `preserve_order` feature turned on elsewhere in the build cannot change it.
+  :545-547; `RECOVERY_PUBLIC_KEY_LENGTH`, `bootstrap.rs:227-229`; lead pick
+  dated 2026-11-21, provisional).
 
-**Dependency.** No Ed25519 crate is a direct dependency of `skyoauth-service`
-today (`service/Cargo.toml`). `ring` 0.17.14 is in `Cargo.lock` (:975), only
-through `rustls` under `sqlx`'s `tls-rustls`; there is no `ed25519-dalek`,
-`aws-lc-rs` or other Ed25519 crate. `sha2` is a direct dependency already
-(`service/Cargo.toml:19`). Verifying, and signing in tests, therefore needs a
-new direct dependency either way: open question 1. Nothing is added until the
-user decides.
+**Weak and non-canonical keys (required; provisional lead pick, 2026-11-24).**
+Today only the length is checked (identity-registry :274-276;
+`recovery.rs:890`). The review's probe showed that under `ring` 0.17.14 a
+small-order key (the identity encoding `01 00 … 00`, or its non-canonical
+`y = p + 1` form) accepts one fixed signature over any message. So the
+library refuses a small-order key at verify (step 3, failing closed), and
+refuses small-order, non-canonical and undecodable keys at enrollment: the
+bootstrap key, the plan's `new_recovery_public_key` at issue, and again at
+restore.
 
-### 5. Where the code lives
+Which property comes from where (per the review, not re-checked here; the
+implementation PR confirms each against the chosen crate's documentation and
+pins it with a test):
 
-| Option                                                         | Signature check | Can `restore_operator` require proof?                                                                                                                                                                                |
-| -------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A. The service library, in `persistence::registry::recovery`   | library         | yes: constructor and restore in one module                                                                                                                                                                           |
-| B. A separate crate (the "operator crate" of `recovery.rs:23`) | that crate      | no: its constructor would have to be public for `skyoauth-service` to receive it, so anyone could call it; and `operator/` (`skyoauth-operator`) must have no server or database dependency (design :666; tasks :84) |
-| C. The service binary, `service/src/main.rs`                   | binary          | no: `restore_operator` stays public for the binary to call it                                                                                                                                                        |
+| Property                                       | `ring` 0.17.14                         | `ed25519-dalek` 3                                                  |
+| ---------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------ |
+| `S` below the group order; canonical `R`       | crate                                  | crate (`verify_strict`)                                            |
+| small-order key refused at verify              | library code: a blocklist of encodings | crate (`verify_strict`; `is_weak` at enrollment)                   |
+| non-canonical or undecodable key at enrollment | library code (`y < p`, blocklist)      | library code: decode, re-encode, compare (`from_bytes` is ZIP-215) |
 
-Recommendation (provisional lead pick): **A**. The verify, the restore and
-the value live in `service/src/persistence/registry/recovery.rs` (or its
-child module): the signature check is in the library. The binary's recovery
-subcommand (T13.3, T13.5; not built) does only the deployment-local transport:
-the Unix socket owned by the service UID with mode 0600 (T13.4, OQ-TM-9); the
-plan the deployment operator asks for, `issue_recovery_challenge`, and `M`
-handed out; the signed response read back; `now` from its own clock; a
+**Dependency (question 1, the user's).** No Ed25519 crate is a direct
+dependency of `skyoauth-service` (`service/Cargo.toml`); `sha2` 0.11.1 is
+(`:19`). `ring` 0.17.14 is in `Cargo.lock` (:975) only through `rustls` under
+`sqlx`'s `tls-rustls`. The repository has no `deny.toml`, `cargo-vet`
+configuration or `supply-chain/` directory (checked). Nothing is added until
+the user decides.
+
+### 5. Refusals
+
+`RestoreError::NotRestorable` gains a reason, after
+`operation::NotApprovableReason` (`service/src/operation/mod.rs:485-493`), with
+fixed `Display` text per reason (as `ApprovalError`'s, `:564-574`) and a
+`Debug` that names the variant only (provisional lead pick, 2026-11-24).
+Reasons (names inferred): `NoRecoveryState`, `NotFound`, `Consumed`,
+`Revoked`, `Expired`, `WrongKind`, `NotBound` (instance, epoch or revision),
+`NotLibraryEncoding`, `WeakKey`, `BadSignature`. Neither `Display` nor `Debug`
+holds an ID, a public identity, the plan, a digest or the signature
+(`service/tests/redaction.rs:3-7`); `SignedRecoveryResponse` and
+`RecoveryPreview` get a hand-written `Debug` like `PreparedApproval`'s
+(`operation/approval.rs:134-140`, the kind only). The reasons disclose
+nothing a caller with the database rights cannot read (inferred).
+
+### 6. Time and replay
+
+`now` is the caller's (`recovery.rs:285-300`). The expiry, the TTL and the
+order of a preview before a restore bind only an honest caller's clock: a
+library caller holding a captured response can pass any `now`. Against such a
+caller the restore rests on the signature, the single consume (LT-107;
+`recovery.rs:34-43`), and the binding of `C` to the instance, the key epoch and
+the recovery state revision; the expiry tests are not security-boundary tests.
+
+A replay of a consumed response fails at the consume; after a rotation it
+fails at step 3, because the epoch and revision in `C` are no longer the
+state's. Reusing a retired key is not refused (identity-registry :353-354);
+that does not reopen a replay, since the epoch has moved.
+
+Residual (TM-15, "an old database backup", `docs/threat-model.md:876-877`):
+on a backup taken after an issue and before its restore, the captured response
+restores again. On a backup taken before the issue, a library caller can issue
+an identical challenge (same ID, plan and `now`, so the same `expires_at`) and
+replay. Option, not picked: a library-generated random nonce as a ninth plan
+member makes the second case fail (the re-issued `C` differs); it needs a
+random source, so it joins question 1, and it does not stop a row inserted by
+raw SQL. No migration either way (inferred).
+
+### 7. Where the code lives
+
+| Option                                                         | Signature check | Can the restore require a signature?                                                                                                                    |
+| -------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A. The service library, in `persistence::registry::recovery`   | library         | yes: it verifies inside                                                                                                                                 |
+| B. A separate crate (the "operator crate" of `recovery.rs:23`) | that crate      | no: its entry would be public to every crate; and `operator/` (`skyoauth-operator`) must have no server or database dependency (design :666; tasks :84) |
+| C. The service binary, `service/src/main.rs`                   | binary          | no: `restore_operator` stays public and unverified for the binary to call                                                                               |
+
+Recommendation (provisional lead pick): **A**. The binary's recovery
+subcommand (T13.3, T13.5; not built) does only deployment-local transport: the
+Unix socket owned by the service UID with mode 0600 (T13.4, OQ-TM-9); the
+plan the deployment operator asks for, `issue_recovery_challenge`, `M` handed
+out; the signed response read back; `now` from its own clock; a
 `READ COMMITTED` transaction with `lock_timeout` and `statement_timeout`
-(`recovery.rs:294-300`); then `verify_recovery_response`, `restore_operator`
-with the value, and commit. It holds no private key and verifies nothing.
-That still matches "the service binary retains only the deployment-local
-bootstrap/recovery verifier" (design :666; tasks :84; ADR-013 item 7) when
-"binary" is read as the `skyoauth-service` package, whose library is part of
-it; the tasks layout already plans a library home for "bootstrap and
-recovery" (tasks :36, `src/admin/`). A crate shared later with
-`skyoauth-operator` could hold the encoding of `C` and `M` for display, never
-the constructor (inferred).
+(`recovery.rs:294-300`); optionally the preview; `restore_operator`; commit. It
+holds no private key and verifies nothing. That matches "the service binary
+retains only the deployment-local bootstrap/recovery verifier" (design :666;
+tasks :84; ADR-013 item 7) when "binary" is read as the `skyoauth-service`
+package; the tasks layout already plans a library home for "bootstrap and
+recovery" (tasks :36, `src/admin/`).
 
-### 6. The public surface afterwards
+**A module cycle (a consequence, and a choice).** `registry::recovery` would
+use `crate::operation::DigestEnvelope` (re-exported at `operation/mod.rs:229`),
+while `operation::digest` imports `JsonObject`, `floor_to_microsecond` and
+`push_string` from the registry (`digest.rs:28`). Rust accepts the cycle. The
+cleaner choice is to move the canonical writer and its prefix into the
+registry and keep `operation`'s public names as re-exports (inferred; the
+implementation PR picks).
 
-| Item                                                                | Visibility                                                                 |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `verify_recovery_response`, `SignedRecoveryResponse`, `VerifyError` | public (new)                                                               |
-| `VerifiedRecoveryResponse`                                          | public type, private fields, no constructor                                |
-| `restore_operator`                                                  | public, safe by construction: takes the value                              |
-| `RestoreRequest`                                                    | public, IDs and `now` only                                                 |
-| `ChallengeBinding`, the replacement members of `RestoreRequest`     | removed (the value carries them)                                           |
-| `IssueChallenge::request_digest`, `::challenge_hash`                | removed (computed)                                                         |
-| `issue_recovery_challenge`, `get_recovery_state`                    | public: an issue alone writes an expiring row and an event, enrolls no one |
-| `bootstrap_instance`                                                | public, unchanged: open question 7                                         |
-| the verify steps, the row query, the encoder of `M`                 | private to `recovery`                                                      |
+### 8. The public surface afterwards
 
-Nothing becomes `pub(crate)`: the unverified restore has no form at all, so no
-`test_support` wrapper is added for it either; tests sign with a test key.
+| Item                                                                        | Visibility                                                                 |
+| --------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `restore_operator`, `SignedRecoveryResponse`, `RestoreRequest` (IDs, `now`) | public: verifies inside                                                    |
+| `preview_recovery_response`, `RecoveryPreview`                              | public, read-only, grants nothing                                          |
+| `issue_recovery_challenge`, `get_recovery_state`                            | public: an issue alone writes an expiring row and an event, enrolls no one |
+| `bootstrap_instance`                                                        | public, separate decision; gains the key checks                            |
+| `ChallengeBinding`; `IssueChallenge::request_digest`, `::challenge_hash`    | removed                                                                    |
+| the row query, the encoder of `C` and `M`, the key checks                   | private to `recovery` (or the registry, section 7)                         |
 
-`service/tests/ungated_writes_private.rs` would change as follows (the test is
-the implementation PR's, not written here): `restore_operator` and
-`issue_recovery_challenge` leave `REGISTRY_KEPT_PUBLIC` (:195-201), whose doc
-(:190-194) then names `bootstrap_instance` alone as open, and join a list of
-public items checked by the control probe (:874) with the new names; new probes
-must fail with a specific code, which needs a helper beside
-`assert_unreachable` (:513), which accepts only E0603 and E0432: a struct
-literal of the value (E0451), `.clone()` on it (E0599), `Default::default()`
-for it (E0277), and the old path `persistence::registry::ChallengeBinding`
-(E0432). The source check (`MENTIONS`, :224) gains rows so that the value's
-struct literal appears only in the verify step, once, and no `impl From`,
-`impl TryFrom`, `Clone`, `Default` or `Deserialize` names it.
+Nothing becomes `pub(crate)` and no `test_support` wrapper is added: tests sign
+with a test key. `service/tests/ungated_writes_private.rs` would change (not
+written here): `restore_operator` and `issue_recovery_challenge` leave
+`REGISTRY_KEPT_PUBLIC` (:195-201), whose doc (:190-194) then names
+`bootstrap_instance` alone, and join the control probe (:874) with the new
+public names; one new probe: `persistence::registry::ChallengeBinding` is
+unresolved (E0432, `assert_unreachable`, :513). No E0451, E0599 or E0277 probes
+are needed. That the restore verifies is a database test, not a probe.
 
 ## Tests
 
 The implementation PR adds or adapts (a list, not code):
 
-- the compile-fail probes and source rows above;
-- a known-answer test: RFC 8032 test vector 1 through the verify helper, and a
-  pinned `M` for a fixed challenge, so the workstation can conform;
-- a signed response verifies and restores (`registry_recovery.rs:1639`,
-  adapted);
-- a bad signature is `NotVerified`, writing nothing, the challenge unconsumed:
-  one bit flipped, all zeros, 63 and 65 bytes;
-- the wrong key: another key, the plan's new key, the retired key after a
-  rotation;
-- malleability: `S + L`, a non-canonical `R`; a small-order key if question 4
-  says so;
-- the wrong message: a signature over `challenge_hash`, over `C` without the
-  prefix, over the request-digest prefix;
-- replay: the same response twice; two values verified before either restore
-  commits, exactly one wins (`:1496`, adapted);
-- expiry: verify at or after `expires_at` is `NotVerified`; verify before and
-  restore after it is `NotRestorable`; a restore `now` before `verified_at`;
-- plan tampering: a raw-inserted row (`insert_raw`, `:361`) whose hash is not
-  the library's never verifies; the `0005` trigger refuses an update of the
-  plan or hash after the issue;
-- TOCTOU: verify, rotate the key or advance the revision in another
-  transaction, then restore: `NotRestorable`, nothing written;
-- isolation: a restore outside `READ COMMITTED` is refused as today;
-- the existing tests move to a test signing key: the helpers `plan_for` (:105),
-  `issue_request` (:129), `binding` (:142), `restore_request` (:154) and
-  `other_request` (:174); the tests of caller-supplied digest and hash lengths
-  (:641, :1279, :1299, :1348) are replaced, since those inputs disappear;
-  `every_consume_miss_is_the_same_not_restorable` (:927) keeps its misses
-  through raw SQL after a valid verify;
-- `tests/security/a32.rs` (the test session's file): its recovery helpers
-  (:1485 onward) sign instead of inventing `challenge_hash`; A32's M1a row
-  (conformance-layout :145) still lacks the socket and the workstation, and
-  A48 and A64 are unchanged; no stage moves.
+- the probe above;
+- known answers: RFC 8032 test vector 1 through the verify helper; a pinned `C`
+  and `M` for a fixed challenge, so the workstation can conform;
+- a signed response restores (`registry_recovery.rs:1639`, adapted);
+- bad signature (one bit flipped, all zeros, 63 and 65 bytes), wrong key
+  (another key, the plan's new key, the retired key after a rotation), wrong
+  message (over `challenge_hash`, over `C` without the prefix, over the
+  request-digest prefix), malleability (`S + L`, a non-canonical `R`): each
+  `NotRestorable` with its reason, nothing written, the challenge unconsumed;
+- weak keys: a small-order current key (the identity point and its
+  `y = p + 1` form) with the fixed signature is refused at restore; the same
+  keys and an undecodable one are refused at bootstrap and as a plan's new key
+  at issue;
+- replay: the same response twice; two restores at once, exactly one wins
+  (`:1496`, adapted); a response after a rotation;
+- issue refusals: an extra plan member, a fraction, an integer above
+  `i64::MAX`, a reserved `admin_id`, the string bounds, a weak or equal new key;
+- a raw-inserted row (`insert_raw`, `:361`) whose hash or digest is not the
+  library's encoding is refused;
+- expiry and isolation as today (expiry tests check an honest clock only,
+  section 6);
+- preview: the same refusals, no lock held, nothing written;
+- redaction: `Display` and `Debug` of every new reason and of
+  `SignedRecoveryResponse` and `RecoveryPreview` (`service/tests/redaction.rs`);
+- `registry_recovery.rs` moves to a test signing key: the helpers `plan_for`
+  (:105), `issue_request` (:129), `binding` (:142), `restore_request` (:154)
+  and `other_request` (:174); the tests of caller-supplied digest and hash
+  lengths (:641, :1279, :1299, :1348) go, since those inputs disappear.
+  `every_consume_miss_is_the_same_not_restorable` (:927) inserts 14 raw rows
+  (:973-1075); their columns are immutable, so most of them cannot be made to
+  carry a valid signature and become reason cases of step 3;
+- the other callers of `issue_recovery_challenge` and `restore_operator` sign
+  with a test key: `service/tests/operation_approval.rs` (its `restore`,
+  :837-839) and `service/tests/source_approval.rs` (:1079-1081);
+- `tests/security/a32.rs` (the test session's file): its helpers (:1485
+  onward) sign instead of inventing `challenge_hash`, which needs the Ed25519
+  crate as a dev-dependency in `tests/Cargo.toml` (`[dev-dependencies]`, :29);
+  A32's M1a row (conformance-layout :145) still lacks the socket and the
+  workstation, A48 and A64 are unchanged, and no stage moves;
+- fixture churn from the weak-key checks: fixtures that enroll arbitrary 32
+  bytes (`tests/security/a04.rs:1289`, `a48.rs:393`, and at least six files
+  under `service/`) need real public keys.
 
-## Alternatives considered
+## Alternative: a `VerifiedRecoveryResponse` value
 
-- **Keep `restore_operator` public, documented.** Today's state: any linking
-  crate enrolls a `security_admin` unverified. Rejected.
-- **Move the check into the binary.** See option C: the binary is another
-  crate, so `restore_operator` stays public. Rejected.
-- **A separate verifier or operator crate.** See option B. Rejected.
-- **A sealed-trait witness** (`restore_operator<W: Verified>` with a private
-  supertrait). As strong as private fields for outside crates, more machinery,
-  nothing gained. Rejected (inferred).
-- **One public function that verifies and restores**, with `restore_operator`
-  `pub(crate)`. Equally safe and smaller; it loses the step where the binary
-  shows the verified replacement before restoring, and the separate errors.
-  Open question 6.
+The previously approved shape. `verify_recovery_response(tx, &response, now)`
+runs step 3 without locks and returns a value with private fields (the
+operation ID, instance, epoch, revision, the key it verified with, digest,
+hash, `expires_at`, the parsed replacement), no public constructor,
+`Default`, `From`, `TryFrom`, `Deserialize`, `Clone` or `Copy`, and a
+hand-written `Debug` (section 5). `restore_operator` takes it by value. Its
+conditions, all needed for it to be as strong as the combined shape:
 
-## Open questions (for the user or the lead)
+- **The key comparison is load-bearing (review finding 1).** The value names
+  no database. An attacker builds a second database with the same instance,
+  epoch and revision but their own key, issues the same challenge on both (the
+  caller picks `now` and the TTL), verifies on theirs with their own
+  signature, and restores on the real one. Only a comparison, at restore step
+  2, of the locked row's `recovery_public_key` with the value's key refuses
+  it. Epoch and revision do not, and since a key change always moves the
+  epoch (`0005_operator.sql:227-231`), no other listed test would fail without
+  it. It is the binding between the signature and the database, and needs its
+  own test: verify on A, restore on B with the same instance, epoch and
+  revision and another key, `NotRestorable`.
+- The restore also rebinds digest, hash, instance, epoch and revision from the
+  value at its consume, and refuses a `now` before the verify's (an honest
+  clock only, section 6).
+- Probes: a struct literal (E0451), `Default` (E0277), and `Clone`. A probe
+  calling `.clone()` on `&VerifiedRecoveryResponse` compiles (it clones the
+  reference), so the `Clone` probe takes the value by value or uses a trait
+  bound (`fn f<T: Clone>() {}` with `f::<VerifiedRecoveryResponse>()`). The
+  source check (`MENTIONS`, :224) keeps the struct literal in the verify step
+  only.
 
-1. **The Ed25519 crate (the user's).** `ring` 0.17.14 is already in the lock,
-   so making it direct adds no new crate, but couples its version to
-   `rustls`; `ed25519-dalek` 2 has `verify_strict` but adds crates. Either is a
-   new direct dependency, and the tests need it to sign.
-2. Reverse the pick that the registry does not hash, so the library computes
-   `request_digest` and `challenge_hash` (section 4)?
-3. The format of `M`: the D6 canonical `C` under a recovery prefix (inferred).
-4. Refuse small-order or non-canonical recovery keys at bootstrap and at
-   rotation? Today only the length is checked (identity-registry :274-276).
-   The fixtures that enroll arbitrary 32 bytes (`tests/security/a04.rs:1289`,
-   `a48.rs:393` and at least six files under `service/`) would need real
-   keys.
-5. One `NotVerified` with no detail, or distinct refusals for the operator?
-6. Keep `restore_operator` public taking the value, or one combined function?
-7. `bootstrap_instance` stays public: it has no signature to check, the local
-   channel is its authority (design :666) and it refuses once closed. Whether
-   to narrow it is the separate decision of rank 3 in the second-approver
-   proposal's survey.
-8. The date of the raw-key pick: the docs record 2026-11-21
-   (identity-registry :547); the assignment of this proposal said 2026-11-23.
+It keeps a separate verify step for the binary, which the combined shape's
+preview gives without granting anything.
+
+Also considered and rejected: keeping `restore_operator` public and
+documented (today's gap); the check in the binary (option C); a separate
+verifier or operator crate (option B); a sealed-trait witness (as strong as
+private fields, more machinery; inferred); tying the value's lifetime to the
+transaction (the combined shape makes it unnecessary).
+
+## Rulings and open questions
+
+Ruled by the lead (provisional lead pick, 2026-11-24): the library hashes;
+the format of `M`, with a closed plan and the workstation's re-encode check;
+weak-key refusal at verify and enrollment; a reason enum; the combined shape,
+subject to the user's choice over the approved one; `bootstrap_instance`
+stays public with the key checks; the raw-key pick is dated 2026-11-21
+(identity-registry :547, `bootstrap.rs:227-228`).
+
+Open:
+
+1. **The Ed25519 crate (the user's).** Either is a new direct dependency, and
+   the tests need one to sign.
+   - `ring` 0.17.14: already in the lock, so no new crate; couples its version
+     to `rustls`; the small-order blocklist and the key-encoding check are
+     hand-written library code.
+   - `ed25519-dalek` 3.0.0 (the reviewer's pick, for `verify_strict` and
+     `is_weak`): the local registry index shows 3.0.0 with `rust_version`
+     1.85 and normal dependencies `curve25519-dalek` ^5, `ed25519` ^3, `sha2`
+     ^0.11 and `subtle`. The review reports a 2026-07-06 release under BSD-3,
+     reuse of `sha2` 0.11, `digest` 0.11, `rand_core` 0.10 and `cpufeatures`
+     0.3 (all four in `Cargo.lock` today, checked), and about eight new crates
+     with `default-features = false` (`ed25519-dalek`, `curve25519-dalek`, its
+     `-derive`, `ed25519`, `signature`, `fiat-crypto`, `rustc_version`,
+     `semver`); the date, the license and the count were not checked here.
+     `ed25519-dalek` 2.x would duplicate `sha2` and `digest` at 0.10.
+2. The nonce option (section 6), and its random source.
+3. The user's choice between the combined shape and the approved value shape.
+4. The spec wording of design :666 and tasks :30, :84 (the lead's; see below).
 
 ## Reconciliation
 
-Places that call the check the "operator crate"'s, place the verifier in the
-binary, or say the registry neither verifies nor hashes. The implementation PR
-edits the code and its own docs; the spec rows are the lead's. Nothing here
-is edited by this proposal.
+Places that call the check the "operator crate"'s, place it in the binary, or
+say the registry neither verifies nor hashes. The implementation PR edits the
+code and its own docs; the test session edits its files; the spec rows are the
+lead's. This proposal edits none of them.
 
-| Place                                                         | Says                                                                                                                                                     | Change in the implementation PR                                                                                          |
-| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `service/src/persistence/registry/recovery.rs:15-18`          | "the local recovery verifier builds the restoration plan and calls" the issue                                                                            | the binary's subcommand builds the plan; the issue computes the digest and hash and returns `M`                          |
-| `recovery.rs:19-25`                                           | "The registry does not verify signatures: that belongs to the future operator crate"                                                                     | `verify_recovery_response` in this module verifies; `skyoauth-operator` only signs; the binary only carries the response |
-| `recovery.rs:90-91`, `:121-124`                               | `challenge_hash` "computed by the caller"; "the registry still does not hash"                                                                            | the library computes both (question 2)                                                                                   |
-| `recovery.rs:547-549`, `:569-581`                             | `IssueChallenge::challenge_hash` "computed by the caller"; `ChallengeBinding`                                                                            | fields and type removed                                                                                                  |
-| `service/src/persistence/registry/mod.rs:349-352`, `:363-364` | the recovery writers "stay public (how the recovery verifier calls them is an open decision)"; "does not verify a recovery signature (the verifier does" | restore is public only through the value; the library verifies                                                           |
-| `service/tests/ungated_writes_private.rs:190-201`             | kept public, "whose verifier is the open decision"                                                                                                       | section 6                                                                                                                |
-| `docs/contracts/identity-registry.md:328-332`, `:342-344`     | the caller verifies; "The registry still does not hash"                                                                                                  | the library verifies over `M` rebuilt from the row, and hashes                                                           |
-| `identity-registry.md:548-549`                                | "the signature check is not implemented yet"                                                                                                             | names the verify function                                                                                                |
-| `tests/security/a32.rs:188-199`, `:238-245`                   | "the registry neither hashes nor verifies"; "The verifier is the only check"                                                                             | the test session rewords                                                                                                 |
-| `docs/proposals/second-approver-gated-writes.md:2232-2247`    | the open decision; quotes "belongs to the future operator crate"                                                                                         | points here; closed once ruled                                                                                           |
-| `docs/skyoauth-design.md:666`                                 | "The service binary retains only the deployment-local bootstrap/recovery verifier"                                                                       | none needed if "binary" means the package; else the lead adds "(library check, binary transport)"                        |
-| `docs/skyoauth-design.md:724`                                 | verifier home: "Existing `skyoauth-service` subcommands"                                                                                                 | none: the subcommands are the entry point                                                                                |
-| `docs/skyoauth-tasks.md:30`                                   | "`src/main.rs` Process/listener wiring; M1a local bootstrap/recovery verifier"                                                                           | the lead may add that the check is in the library (tasks :36 plans `src/admin/`)                                         |
-| `docs/skyoauth-tasks.md:84`, `:189`; ADR-013 :68-69 (item 7)  | the service binary keeps the verifier                                                                                                                    | as design :666                                                                                                           |
+| Place                                                         | Says                                                                                                                            | Change                                                                                     |
+| ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `service/src/persistence/registry/recovery.rs:15-18`          | "the local recovery verifier builds the restoration plan and calls" the issue                                                   | the binary builds the plan; the issue hashes and returns `M`                               |
+| `recovery.rs:19-25`                                           | "The registry does not verify signatures: that belongs to the future operator crate"                                            | the restore verifies; `skyoauth-operator` only signs; the binary carries the response      |
+| `recovery.rs:88-91`, `:121-124`                               | other plan members "are the caller's"; `challenge_hash` "computed by the caller"; "the registry still does not hash"            | closed plan; the library hashes                                                            |
+| `recovery.rs:547-549`, `:569-581`                             | `IssueChallenge::challenge_hash` "computed by the caller"; `ChallengeBinding`                                                   | removed                                                                                    |
+| `service/src/persistence/registry/mod.rs:349-352`, `:363-364` | the recovery writers stay public, "an open decision"; "does not verify a recovery signature (the verifier does"                 | the restore verifies                                                                       |
+| `service/src/persistence/registry/operator.rs:37-39`          | nothing stops "enrolling a `security_admin` while ... `issue_recovery_challenge` and `restore_operator` stay public"            | only `bootstrap_instance` remains, before closure                                          |
+| `service/tests/ungated_writes_private.rs:190-201`             | kept public, "whose verifier is the open decision"                                                                              | section 8                                                                                  |
+| `service/migrations/README.md:3131-3132`                      | "the registry still does not hash"                                                                                              | the library hashes                                                                         |
+| `service/migrations/README.md:3149-3150`                      | "The registry does not verify the recovery signature: the caller verifies it first"                                             | the restore verifies                                                                       |
+| `docs/contracts/identity-registry.md:328-332`, `:342-344`     | the caller verifies; "The registry still does not hash"                                                                         | the restore verifies over `M` rebuilt from the row; the library hashes                     |
+| `identity-registry.md:274-276`, `:548-549`                    | the key's length only, "it does not check the bytes further"; "the signature check is not implemented yet"                      | the weak-key checks; the restore's check                                                   |
+| `tests/security/a32.rs:188-199`, `:238-245`, `:2260-2262`     | "the registry neither hashes nor verifies"; "The verifier is the only check"; that the hash is signed is "the local verifier's" | the test session rewords                                                                   |
+| `service/tests/operation_approval.rs:837-839`                 | "The registry does not verify the recovery key's signature; the digest and challenge hash are the caller's bytes"               | signs with a test key                                                                      |
+| `service/tests/source_approval.rs:1079-1081`                  | the same                                                                                                                        | the same                                                                                   |
+| `docs/proposals/second-approver-gated-writes.md:2232-2247`    | the open decision; quotes "belongs to the future operator crate"                                                                | points here; closed once ruled                                                             |
+| `docs/skyoauth-design.md:666`                                 | "The service binary retains only the deployment-local bootstrap/recovery verifier"                                              | none if "binary" means the package; else the lead adds "(library check, binary transport)" |
+| `docs/skyoauth-design.md:724`                                 | verifier home: "Existing `skyoauth-service` subcommands"                                                                        | none: the subcommands are the entry point                                                  |
+| `docs/skyoauth-tasks.md:30`                                   | "`src/main.rs` Process/listener wiring; M1a local bootstrap/recovery verifier"                                                  | the lead may add that the check is in the library (tasks :36)                              |
+| `docs/skyoauth-tasks.md:84`, `:189`; ADR-013 :68-69 (item 7)  | the service binary keeps the verifier                                                                                           | as design :666                                                                             |
 
 Not affected: "operator tooling" at identity-registry :278, `bootstrap.rs:181`
 and the migrations README (:3047) names who canonicalizes an mTLS key, not the
