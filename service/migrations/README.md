@@ -7,26 +7,41 @@ not a migration.
 
 ## Conventions
 
-- **Forward-only** (from the first tagged public release on; before it,
-  the next item). A migration in a tagged release is never edited, renamed
-  or removed; the runner refuses a changed checksum, and the checksum
-  covers comments too. Fix forward with a new file. No down migrations.
+- **Tagged public release:** a release published under a version tag
+  (inferred definition). The docs treat the first one as the first beta
+  release. Whether an earlier slice ships as one is open: OQ-ADR024-1
+  (`docs/adr/ADR-024-delivery-scope.md`) notes that the sources do not say
+  whether the usable M2 slice "is published as a versioned release".
+- **Upgrade support** (ruled by the user, 2026-11-24): "Amend the design to
+  clarify that only migration across tagged public releases are supported,
+  i.e, there is no need to do migration before the first beta releases. The
+  db migration mechanism must be there and tested." The mechanism is
+  provided and tested now: the sqlx runner, its checksum refusal
+  (`service/tests/migrations.rs`) and the tests that run the "Upgrade
+  precondition" queries of `0007` to `0010`.
+- **Forward-only** (from the first tagged public release on; before it, the
+  pre-beta exception below). A migration contained in a tagged release is
+  never edited, renamed or removed; the runner refuses a changed checksum,
+  and the checksum covers comments too. Fix forward with a new file. After
+  the first tagged release, a migration that is merged but not yet in a
+  tagged release may still be amended in place, since no supported upgrade
+  starts from it (the 2026-11-24 ruling); a database that applied its
+  earlier text is recreated. There are no down migrations.
 - **Pre-beta exception** (ruled by the user, 2026-11-23, relayed by the
   lead): "we don't need to keep data until a beta release" and "I meant db
-  migration are not needed intra releases." Only upgrades between tagged
-  public releases are supported, and that support begins with the first
-  tagged release, the first beta; before it there is no upgrade path. The
-  mechanism is provided and tested now: the sqlx runner, its checksum
-  refusal and the "Upgrade precondition" tests. Until then an existing
-  migration may be amended in place, and a database created from an
-  earlier text is recreated, not migrated: sqlx records each applied
-  migration's checksum, so `migrate` refuses it. The forward-only rule
-  applies from the first tagged release (date set by the maintainer). The
-  sections for `0001` to `0011` still call those files frozen and record
-  errata outside them: the rule when each was written, not a bar to a
-  pre-beta amendment. Their "Upgrade precondition" items are the contract
-  for an upgrade from the first tagged release on (the tested ones stay
-  tested); before that release the database is recreated instead.
+  migration are not needed intra releases." Until the first tagged
+  release there is no upgrade path: an existing migration may be amended
+  in place, and a database created from an earlier text is recreated, not
+  migrated (sqlx records each applied migration's checksum, so `migrate`
+  refuses it). The forward-only rule applies from the first tagged release
+  (date set by the maintainer). The sections for `0001` to `0011` still
+  call those files frozen and record errata outside them: the rule when
+  each was written, not a bar to a pre-beta amendment. Their "Upgrade
+  precondition" items describe upgrades between pre-beta versions, which
+  are not supported: every tagged release will already contain `0001` to
+  `0011`. They stay as written, and the tested ones stay tested, as the
+  pattern for migrations added after the first tagged release, whose items
+  become the upgrade contract.
 - **Contiguous versions:** `0001_…`, `0002_…`, and so on. A unit test checks
   this; it is a test-time rule, not something the runner enforces.
 - **One transaction per file.** sqlx wraps each file in a transaction. Never

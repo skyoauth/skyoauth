@@ -16,12 +16,15 @@
 v0.1 requires direct workload access and attributed service delegation; it
 does not require active true impersonation (tasks §0; design §1.3). Stored WIF
 policy, including grants of a mode the release does not support, must survive
-upgrades and migrations between tagged public releases without reset (design
-§1 "Unsupported impersonation policy remains disabled, including after a
-capability upgrade", §2 C06). No upgrade is supported before the first beta
-release: an earlier database is recreated, not migrated (wording amendment
-per the user's ruling of 2026-11-23; design §1.1 goal 4;
-`service/migrations/README.md`, "Conventions").
+human-provider migrations, and schema migrations/upgrades between tagged public
+releases, without reset (design §1 "Unsupported impersonation policy remains
+disabled, including after a capability upgrade", §2 C06). No upgrade is
+supported before the first beta release: an earlier database is recreated, not
+migrated (wording amendment per the user's ruling of 2026-11-24: "Amend the
+design to clarify that only migration across tagged public releases are
+supported, i.e, there is no need to do migration before the first beta
+releases. The db migration mechanism must be there and tested."; design §1.1
+goal 4; `service/migrations/README.md`, "Conventions").
 Design §5.6 defines the modes; design §5.7 defines the two wire profiles that
 carry them. T00.9 asks M0 to specify "RFC 8693 direct subject exchange versus
 private service-delegation actor grant ... and unsupported two-token
