@@ -662,13 +662,13 @@ layers = ["conformance"]
 envs = ["pg"]
 harness = ["PG", "UC"]
 owners = ["T12.8", "T21.5"]
-positive = "omitted scope → the grant's explicit defaults, resolved from the registry's ceilings (M1a); the same at the token endpoint (M2)"
+positive = "omitted scope → the grant's explicit defaults, checked against every ceiling loaded from the registry (M1a); the same at the token endpoint (M2)"
 negative = "omitted with no defaults, empty or excessive scope → one error, never a trimmed set or the full ceiling (M1a); the same denied at the token endpoint with the wire invalid_scope; any `resource` parameter → invalid_target, an audience not in the grant's audience set or not assigned → invalid_target, an unsupported requested_token_type → invalid_request (M2)"
 matrix_sha256 = "f96a812349dd5f50643a92137aab75b92ee22867ff411870b7a8a5b5c5c23c9a"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "scope policy: an omitted scope resolves to the grant's stored explicit defaults; no defaults, an empty or excessive scope and defaults outside a ceiling give one error, never a trimmed set; another tenant's ceilings and uncommitted changes never apply (registry API)"
+scope = "scope policy: an omitted scope resolves to the grant's stored explicit defaults; no defaults, an empty or excessive scope and defaults outside a ceiling give one error, never a trimmed set; another tenant's ceilings never apply, and uncommitted changes never apply outside their transaction (registry API)"
 legs = ["scenarios-pg/x86_64"]
 status = "planned"
 tests = [
