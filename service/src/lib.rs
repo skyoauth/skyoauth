@@ -3,6 +3,7 @@
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
 
+pub mod identity;
 pub mod jwk;
 pub mod operation;
 pub mod persistence;

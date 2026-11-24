@@ -774,7 +774,13 @@ below. A database created from an earlier `0005` is recreated.
   `public_identity` is not checked for them: it is the canonical public-key
   identity of the credential, for example the SHA-256 digest of its
   SubjectPublicKeyInfo, in an encoding the service fixes; subject DNs are
-  not stored. The digests
+  not stored. The service computes that identity with
+  `crate::identity::canonical_public_identity` from the key's DER
+  SubjectPublicKeyInfo, as `spki-sha256:` and 64 lowercase hexadecimal
+  digits, and never accepts a precomputed string (lead decision,
+  2026-11-24). `bootstrap_instance` and `create_admin_credential` still
+  take the identity string from their caller today; the slices that wire
+  enrollment and authentication (S5, S7) call the function. The digests
   `request_digest`, `challenge_hash` and `replay_key_digest` are `bytea` of
   32 to 64 bytes, and the recovery public key is 1 to 8192 bytes. Every ID,
   key, reference and enumeration is `COLLATE "C"`; only `outcome` keeps the
