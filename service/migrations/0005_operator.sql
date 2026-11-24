@@ -503,15 +503,14 @@ ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operat
 -- so an instance operation (tenant_id NULL) names an instance operation:
 -- no source makes a reference to another scope legitimate (README.md). An
 -- operation of kind 'approve' is also never by the approved operation's
--- actor. Only kind 'approve': a route_bundle_approval also names its
--- preparation, and one person MAY hold both roles there (IR-054; GW-130,
--- GW-131), so its actor is not checked. Every operation names an audit
--- event (audit_id) of its own tenant, compared the same way, so an
--- instance operation names an instance event (tenant_id NULL) and a tenant
--- operation an event of that tenant. A revocation (a cancel or a reject)
--- names a revoking operation of the revoked row's tenant, checked where the
--- link is written, on the revoked row: on INSERT too, since 0005 lets an
--- insert carry a revocation, and on an UPDATE that names
+-- actor; only an approve reads actor_id. A route_bundle_approval also
+-- names its preparation, and one person MAY hold both roles there (IR-054;
+-- GW-130, GW-131), so its actor is not checked. Every operation names an
+-- audit event (audit_id) of its own tenant, compared the same way, so an
+-- instance operation names an instance event (tenant_id NULL). A
+-- revocation (a cancel or a reject) names a revoking operation of the
+-- revoked row's tenant, checked on the revoked row: on INSERT too, since
+-- 0005 lets an insert carry a revocation, and on an UPDATE that names
 -- revocation_operation_id. tenant_id, approves_operation_id and audit_id
 -- never change (administrative_operation_immutable above), so the approval
 -- and audit checks run on INSERT only. A refusal is check_violation (23514)
@@ -532,37 +531,34 @@ ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operat
 -- foreign-key checks, whose internal triggers (RI_ConstraintTrigger_c_*)
 -- sort, and so fire, before administrative_operation_approval_check,
 -- administrative_operation_audit_check and
--- administrative_operation_revocation_check, which fire in that order. So a
--- missing approved or revoking operation or audit event is still the foreign
--- key's 23503, and the guard reads the referenced row only once it is known
--- to exist; in a multi-row INSERT an earlier row's 23514 precedes a later
--- row's 23503. The names must keep sorting after "RI_". The guard finds no
--- row only where the foreign keys do not fire (session_replication_role =
--- replica) and then passes the row (inferred, as 0010 does).
+-- administrative_operation_revocation_check, which fire in that order, so
+-- the first that fails refuses the row. So a missing approved or revoking
+-- operation or audit event is still the foreign key's 23503, and the guard
+-- reads the referenced row only once it is known to exist; in a multi-row
+-- INSERT an earlier row's 23514 precedes a later row's 23503. The names
+-- must keep sorting after "RI_". The guard finds no row only where the
+-- foreign keys do not fire (session_replication_role = replica) and then
+-- passes the row (inferred, as 0010 does).
 --
 -- The guards read the referenced row without a row lock (inferred): an
--- operation's tenant_id and actor_id are immutable
--- (administrative_operation_immutable above) and its deletes are refused
--- (0006); an audit event is append-only (0002 refuses its UPDATE, DELETE
--- and TRUNCATE); and the foreign-key check already holds the row
--- FOR KEY SHARE, so no concurrent write can change what they read. Taking
--- no lock also keeps an approve from waiting for the FOR NO KEY UPDATE lock
--- that an approver or a canceller holds on the pending row, and the audit
--- check reads neither audit_chain_head nor anything else, so the guards add
--- no step to the lock order of README.md (the rows a write needs, then the
--- audit head and the event, then the operation, then the remaining
--- updates): they run inside the operation's INSERT or the revocation's
--- UPDATE and wait for nothing.
+-- operation's tenant_id and actor_id are immutable (above) and its deletes
+-- are refused (0006); an audit event is append-only (0002); and the
+-- foreign-key check already holds the row FOR KEY SHARE, so no concurrent
+-- write can change what they read. So an approve does not wait for the
+-- FOR NO KEY UPDATE lock an approver or a canceller holds on the pending
+-- row, and no guard reads audit_chain_head: they add no step to the lock
+-- order of README.md (the rows a write needs, the audit head and the
+-- event, the operation, the remaining updates) and wait for nothing.
 --
 -- The functions read administrative_operation or audit_event, so they are
 -- created as the table readers of 0010 and 0011 are: the schema is
--- resolved by current_schema() at migrate time, the table is named with
--- that schema and the body is passed as a quoted literal (%L). Their
--- search_path is pinned to pg_catalog, pg_temp (they resolve no
--- unqualified table). They are SECURITY INVOKER: a role that inserts an
--- operation needs SELECT on audit_event, and one that names an approved
--- operation or writes a revocation needs SELECT on
--- administrative_operation (README.md "What 0005 adds", "Privileges").
+-- resolved by current_schema() at migrate time and the table named with
+-- it, and the body is passed as a quoted literal (%L). search_path is
+-- pinned to pg_catalog, pg_temp. They are SECURITY INVOKER: an insert needs
+-- SELECT on audit_event's id and tenant_id; naming an approved operation or
+-- writing a revocation needs SELECT on administrative_operation's id and
+-- tenant_id, and an approve also on its actor_id (README.md "What 0005
+-- adds", "Privileges").
 DO $migration$
 DECLARE
     schema_name constant text := current_schema();
@@ -577,9 +573,13 @@ DECLARE
     approved_tenant text COLLATE "C";
     approved_actor text COLLATE "C";
 BEGIN
-    SELECT o.tenant_id, o.actor_id INTO approved_tenant, approved_actor
-        FROM @schema@.administrative_operation o
-        WHERE o.id = NEW.approves_operation_id;
+    IF NEW.kind = 'approve' THEN
+        SELECT o.tenant_id, o.actor_id INTO approved_tenant, approved_actor
+            FROM @schema@.administrative_operation o WHERE o.id = NEW.approves_operation_id;
+    ELSE
+        SELECT o.tenant_id INTO approved_tenant
+            FROM @schema@.administrative_operation o WHERE o.id = NEW.approves_operation_id;
+    END IF;
     IF NOT FOUND THEN
         RETURN NULL;
     END IF;

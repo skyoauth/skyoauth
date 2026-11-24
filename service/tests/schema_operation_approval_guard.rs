@@ -1253,10 +1253,13 @@ async fn the_guards_take_no_row_lock() {
 /// (`SECURITY INVOKER`): a role that may insert operations needs `SELECT`
 /// on `audit_event`'s `id` and `tenant_id` for every insert (the audit
 /// guard), on `administrative_operation`'s `id`, `tenant_id` and
-/// `actor_id` to insert an operation that names an approved one (an
-/// `approve` or a `route_bundle_approval`), and on `id` and `tenant_id` to
-/// write a revocation; otherwise `42501`. An operation that names no other
-/// operation needs no `SELECT` on `administrative_operation`.
+/// `actor_id` to insert an `approve`, and on `id` and `tenant_id` only to
+/// insert any other kind that names an approved operation (a
+/// `route_bundle_approval`, say: the guard reads no `actor_id` for it) or
+/// to write a revocation; otherwise `42501`. With `id` and `tenant_id` a
+/// crossing by such a kind is the tenant guard's `23514`, not `42501`. An
+/// operation that names no other operation needs no `SELECT` on
+/// `administrative_operation`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_guards_read_with_the_writers_privileges() {
@@ -1306,9 +1309,10 @@ async fn the_guards_read_with_the_writers_privileges() {
         }
         run(&mut writer, "ROLLBACK").await;
     }
-    for (select, approve_ok, revoke_ok) in [
+    for (select, approve_ok, other_ok) in [
         (None, false, false),
         (Some("SELECT (id)"), false, false),
+        (Some("SELECT (tenant_id)"), false, false),
         (Some("SELECT (id, tenant_id)"), false, true),
         (Some("SELECT (id, actor_id)"), false, false),
         (Some("SELECT (id, tenant_id, actor_id)"), true, true),
@@ -1333,9 +1337,13 @@ async fn the_guards_read_with_the_writers_privileges() {
                     "route_bundle_approval",
                     Some("op_rp"),
                 ),
-                approve_ok,
+                other_ok,
             ),
-            (insert_revoked("op_x", Some("ten_a"), "rev_a"), revoke_ok),
+            (
+                insert("op_x", Some("ten_a"), "adm_2", "approval", Some("op_a")),
+                other_ok,
+            ),
+            (insert_revoked("op_x", Some("ten_a"), "rev_a"), other_ok),
         ] {
             let result = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}")))
                 .execute(&mut writer)
@@ -1352,6 +1360,25 @@ async fn the_guards_read_with_the_writers_privileges() {
             }
             run(&mut writer, "ROLLBACK").await;
         }
+        // A crossing by a kind other than approve: the tenant guard's
+        // refusal once the role may read id and tenant_id.
+        let crossing = insert(
+            "op_x",
+            Some("ten_b"),
+            "adm_1",
+            "route_bundle_approval",
+            Some("op_rp"),
+        );
+        let err = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {crossing}")))
+            .execute(&mut writer)
+            .await
+            .expect_err(&crossing);
+        if other_ok {
+            assert_refusal(err, Refusal::ApprovesOtherTenant, &format!("{select:?}"));
+        } else {
+            assert_eq!(sqlstate(&err), "42501", "{select:?}: {err}");
+        }
+        run(&mut writer, "ROLLBACK").await;
     }
     drop(writer);
     db.drop([pool]).await;

@@ -486,14 +486,21 @@ async fn operator_catalog_pins_keys_bounds_triggers_and_search_path() {
         assert_eq!(config, &["search_path=pg_catalog, pg_temp"], "{name}");
         // The constraint names they raise start with the table name.
         let read = source.replace("'administrative_operation_", "'");
+        // The approval guard reads the approved row in one of two
+        // statements: with actor_id for an approve, without it otherwise.
+        let reads = if name == "skyoauth_check_operation_approval" {
+            2
+        } else {
+            1
+        };
         assert_eq!(
             read.matches("administrative_operation").count(),
-            1,
+            reads,
             "{name}"
         );
         assert_eq!(
             read.matches(" public.administrative_operation o").count(),
-            1,
+            reads,
             "{name}"
         );
         for table in TABLES.iter().filter(|t| **t != "administrative_operation") {

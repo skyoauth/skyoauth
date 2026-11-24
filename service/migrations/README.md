@@ -1035,8 +1035,8 @@ below. A database created from an earlier `0005` is recreated.
     `WHEN (NEW.revocation_operation_id IS NOT NULL)`) runs
     `skyoauth_check_operation_revocation()`. All three are plain row
     triggers, not deferrable and `ENABLE ALWAYS`, as those of `0010` and
-    `0011`, and fire in that (name) order, so a row that crosses two
-    references is refused for its approved operation first. They fire at the
+    `0011`, and fire in that (name) order; within a row the first that fails
+    refuses it (approval, then audit, then revocation). They fire at the
     end of the statement, row by row, after every `CHECK`, `NOT NULL` and
     unique constraint and after that row's foreign-key checks, whose internal
     triggers (`RI_ConstraintTrigger_…`) sort, and so fire, before them. So a
@@ -1069,9 +1069,9 @@ below. A database created from an earlier `0005` is recreated.
     `pg_catalog, pg_temp`, and they are `SECURITY INVOKER`. A role that
     inserts any operation needs `SELECT` on `audit_event`'s `id` and
     `tenant_id`; one that inserts an operation naming an approved
-    operation (an `approve`, a `route_bundle_approval`) needs `SELECT` on
-    `administrative_operation`'s `id`, `tenant_id` and `actor_id`; one that
-    writes a revocation needs `SELECT` on `id` and `tenant_id`; otherwise
+    operation, or writes a revocation, needs `SELECT` on
+    `administrative_operation`'s `id` and `tenant_id`, and one that inserts an
+    `approve` also on its `actor_id` (no other kind reads it); otherwise
     `42501`. The second-approver flow also takes
     the `instance_security_policy` row `FOR SHARE`, which needs `SELECT`
     on it and `UPDATE` on one of its columns: grant `UPDATE (instance_id)`,

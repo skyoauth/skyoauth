@@ -981,9 +981,9 @@ pending write returns 202 with the operation's ID, digest and `expires_at`.
 ### 11. Schema (text to merge into `0005`)
 
 _Superseded in part by the 2026-11-24 amendment of `0005`: the approval
-guard now covers every kind that names an operation, and an audit guard
-is added (README, "Approval, audit and revocation guards"); the sketch
-below and its privileges paragraph predate it._
+guard now covers every kind that names an operation, reading `actor_id`
+for an `approve` only, and an audit guard is added (README, "Approval,
+audit and revocation guards"); the sketch and its privileges predate it._
 
 No new table or column, and no new migration file. The proposal offered an
 optional migration `0012` in the `0010` and `0011` pattern: a tripwire for the
@@ -2369,8 +2369,8 @@ correct; neither session edits it.
   `0005` since its amendment of 2026-11-24 (the user's ruling, relayed by
   the lead; provisional): `administrative_operation_audit_same_tenant`,
   and the approval guard for every kind that names an operation, so the
-  section 11 sketch's "Only kind 'approve'" now holds for the actor only
-  (README "What 0005 adds"). They are not on the list yet.
+  section 11 sketch's "Only kind 'approve'" now holds for the actor (its
+  check and its read; README "What 0005 adds"). Not on the list yet.
 - A37 M1a (conformance-layout:149; T12.2): predicate removal through the
   same machinery, once binding writes have a service path (not here).
 - A47 M1b (conformance-layout:159): out of scope; the approve endpoint's

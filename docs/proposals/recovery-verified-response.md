@@ -294,7 +294,7 @@ recovery" (tasks :36, `src/admin/`).
 **A module cycle (a consequence, and a choice).** `registry::recovery` would
 use `crate::operation::DigestEnvelope` (re-exported at `operation/mod.rs:229`),
 while `operation::digest` imports `JsonObject`, `floor_to_microsecond` and
-`push_string` from the registry (`digest.rs:28`). Rust accepts the cycle. The
+`push_string` from the registry (`digest.rs:29`). Rust accepts the cycle. The
 cleaner choice is to move the canonical writer and its prefix into the
 registry and keep `operation`'s public names as re-exports (inferred; the
 implementation PR picks).
@@ -337,7 +337,7 @@ The implementation PR adds or adapts (a list, not code):
   keys and an undecodable one are refused at bootstrap and as a plan's new key
   at issue;
 - replay: the same response twice; two restores at once, exactly one wins
-  (`:1496`, adapted); a response after a rotation;
+  (`:1516`, adapted); a response after a rotation;
 - issue refusals: an extra plan member, a fraction, an integer above
   `i64::MAX`, a reserved `admin_id`, the string bounds, a weak or equal new key;
 - a raw-inserted row (`insert_raw`, `:361`) whose hash or digest is not the
@@ -350,7 +350,7 @@ The implementation PR adds or adapts (a list, not code):
 - `registry_recovery.rs` moves to a test signing key: the helpers `plan_for`
   (:105), `issue_request` (:129), `binding` (:142), `restore_request` (:154)
   and `other_request` (:174); the tests of caller-supplied digest and hash
-  lengths (:641, :1279, :1299, :1348) go, since those inputs disappear.
+  lengths (:641, :1299, :1319, :1368) go, since those inputs disappear.
   `every_consume_miss_is_the_same_not_restorable` (:927) inserts 14 raw rows
   (:973-1075); their columns are immutable, so most of them cannot be made to
   carry a valid signature and become reason cases of step 3;
@@ -470,6 +470,6 @@ lead's. This proposal edits none of them.
 | `docs/skyoauth-tasks.md:84`, `:189`; ADR-013 :68-69 (item 7)  | the service binary keeps the verifier                                                                                           | as design :666                                                                             |
 
 Not affected: "operator tooling" at identity-registry :278, `bootstrap.rs:181`
-and the migrations README (:3047) names who canonicalizes an mTLS key, not the
+and the migrations README (:3100) names who canonicalizes an mTLS key, not the
 recovery check. The string "operator crate" occurs only at `recovery.rs:23`
 and in the second-approver proposal (:2271).
