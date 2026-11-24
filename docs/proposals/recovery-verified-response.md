@@ -1,28 +1,26 @@
 # Proposal: verify the recovery signature inside `restore_operator` (T13.5)
 
-Status: proposal only, drafted 2026-11-24 for the lead's review and the
-user's decision; revised the same day after review. The lead's rulings of
-that review are marked "provisional lead pick, 2026-11-24"; the crate choice
-(question 1) is the user's. Other choices are marked "(inferred)". All of
-them stay provisional until the maintainer ratifies the ADRs (T00.8–T00.17,
-Gate M0); this text ratifies no ADR and ticks no task. It changes no code: the
-implementation PR does, and edits the places under "Reconciliation". Line
-numbers refer to `main` at `3028360`, except those into
-`service/migrations/README.md`, retargeted after the 2026-11-24 amendment of
+Status: Accepted (user, 2026-11-24, relayed by the lead: the user accepted the
+lead's recommendations); implementation pending (T13.5). Drafted the same day
+for the lead's review and the user's decision. The choices the user accepted
+are those marked "provisional lead pick, 2026-11-24" below; Q2 to Q6 of the
+review are accepted as implementation choices that ordinary review can change.
+Other choices are marked "(inferred)". The ADRs are ratified separately
+(T00.8–T00.17, Gate M0); this text ratifies no ADR and ticks no task. It
+changes no code: the implementation PR does, and edits the places under
+"Reconciliation". Line numbers refer to `main` at `3028360`, except those into
+`service/migrations/README.md`, `registry/mod.rs`, `registry_recovery.rs` and
+the second-approver proposal, retargeted after the 2026-11-24 amendment of
 `0005` moved them.
 
-> **Departs from the approved shape.** The user approved a "verified
-> response" value that only the library's verifier builds and that
-> `restore_operator` accepts. After review the lead's pick is a combined shape
-> instead: `restore_operator` takes the signed response itself and verifies it
-> against the rows it has locked (section 1). Against outside crates it is as
-> strong, and it closes the gap between a verify and a restore by
-> construction. The value-type design is kept, with its conditions, under
-> "Alternative: a `VerifiedRecoveryResponse` value". The user decides between
-> them (provisional lead pick, 2026-11-24).
+The combined shape is ruled: `restore_operator` takes the signed response
+itself and verifies it against the rows it has locked (section 1). The
+earlier "verified response" value design is kept, with its conditions, under
+"Alternative: a `VerifiedRecoveryResponse` value" as the documented rejected
+alternative.
 
 It answers the open decision "the recovery writers" of
-`docs/proposals/second-approver-gated-writes.md` (:2232-2247), in a file of its
+`docs/proposals/second-approver-gated-writes.md` (:2259-2275), in a file of its
 own because that proposal is about the second-approver flow for trust writes
 and records its PRs as implemented.
 
@@ -38,7 +36,7 @@ structs. So any crate that links the library and holds a `READ COMMITTED`
 transaction can call `issue_recovery_challenge` (`:925`) and then
 `restore_operator` with the binding it just chose, and enroll a
 `security_admin` with no signature. Both are public
-(`service/src/persistence/registry/mod.rs:479-485`), and so is
+(`service/src/persistence/registry/mod.rs:482-488`), and so is
 `bootstrap_instance` (`bootstrap.rs:481`);
 `service/tests/ungated_writes_private.rs:190-201` keeps all three public on
 purpose, pending this decision.
@@ -328,7 +326,7 @@ The implementation PR adds or adapts (a list, not code):
 - the probe above;
 - known answers: RFC 8032 test vector 1 through the verify helper; a pinned `C`
   and `M` for a fixed challenge, so the workstation can conform;
-- a signed response restores (`registry_recovery.rs:1639`, adapted);
+- a signed response restores (`registry_recovery.rs:1659`, adapted);
 - bad signature (one bit flipped, all zeros, 63 and 65 bytes), wrong key
   (another key, the plan's new key, the retired key after a rotation), wrong
   message (over `challenge_hash`, over `C` without the prefix, over the
@@ -410,21 +408,22 @@ transaction (the combined shape makes it unnecessary).
 
 ## Rulings and open questions
 
-Ruled by the lead (provisional lead pick, 2026-11-24): the library hashes;
-the format of `M`, with a closed plan and the workstation's re-encode check;
-weak-key refusal at verify and enrollment; a reason enum; the combined shape,
-subject to the user's choice over the approved one; `bootstrap_instance`
-stays public with the key checks; the raw-key pick is dated 2026-11-21
-(identity-registry :547, `bootstrap.rs:227-228`).
+Ruled by the user, 2026-11-24, relayed by the lead (the lead's recommendations
+accepted): the library hashes; the format of `M`, with a closed plan and the
+workstation's re-encode check; weak-key refusal at verify and enrollment; a
+reason enum; the combined shape (over the earlier approved value shape);
+`bootstrap_instance` stays public with the key checks; the raw-key pick is
+dated 2026-11-21 (identity-registry :547, `bootstrap.rs:227-228`).
 
-Open:
-
-1. **The Ed25519 crate (the user's).** Either is a new direct dependency, and
-   the tests need one to sign.
+1. **The Ed25519 crate: closed.** The user chose `ed25519-dalek` 3.0.0 with
+   `default-features = false`. The facts below are to be verified by cargo in
+   the implementation PR, not taken from this text. It is a new direct
+   dependency, and the tests need one to sign. The `ring` option, kept for the
+   record:
    - `ring` 0.17.14: already in the lock, so no new crate; couples its version
      to `rustls`; the small-order blocklist and the key-encoding check are
      hand-written library code.
-   - `ed25519-dalek` 3.0.0 (the reviewer's pick, for `verify_strict` and
+   - `ed25519-dalek` 3.0.0 (chosen; the reviewer's pick, for `verify_strict` and
      `is_weak`): the local registry index shows 3.0.0 with `rust_version`
      1.85 and normal dependencies `curve25519-dalek` ^5, `ed25519` ^3, `sha2`
      ^0.11 and `subtle`. The review reports a 2026-07-06 release under BSD-3,
@@ -434,9 +433,12 @@ Open:
      `-derive`, `ed25519`, `signature`, `fiat-crypto`, `rustc_version`,
      `semver`); the date, the license and the count were not checked here.
      `ed25519-dalek` 2.x would duplicate `sha2` and `digest` at 0.10.
-2. The nonce option (section 6), and its random source.
-3. The user's choice between the combined shape and the approved value shape.
-4. The spec wording of design :666 and tasks :30, :84 (the lead's; see below).
+2. **The nonce option (section 6): recorded as an option, not built.** The
+   residual risk stays in the threat model (TM-15); the user accepted that
+   default.
+3. **Combined shape or value shape: closed.** The combined shape is ruled.
+4. **Spec wording: done** (design :666, :724 and tasks :30, :84, :189 and
+   ADR-013 item 7 carry the library-verifies wording).
 
 ## Reconciliation
 
@@ -451,7 +453,7 @@ lead's. This proposal edits none of them.
 | `recovery.rs:19-25`                                           | "The registry does not verify signatures: that belongs to the future operator crate"                                            | the restore verifies; `skyoauth-operator` only signs; the binary carries the response      |
 | `recovery.rs:88-91`, `:121-124`                               | other plan members "are the caller's"; `challenge_hash` "computed by the caller"; "the registry still does not hash"            | closed plan; the library hashes                                                            |
 | `recovery.rs:547-549`, `:569-581`                             | `IssueChallenge::challenge_hash` "computed by the caller"; `ChallengeBinding`                                                   | removed                                                                                    |
-| `service/src/persistence/registry/mod.rs:349-352`, `:363-364` | the recovery writers stay public, "an open decision"; "does not verify a recovery signature (the verifier does"                 | the restore verifies                                                                       |
+| `service/src/persistence/registry/mod.rs:352-355`, `:366-367` | the recovery writers stay public, "an open decision"; "does not verify a recovery signature (the verifier does"                 | the restore verifies                                                                       |
 | `service/src/persistence/registry/operator.rs:37-39`          | nothing stops "enrolling a `security_admin` while ... `issue_recovery_challenge` and `restore_operator` stay public"            | only `bootstrap_instance` remains, before closure                                          |
 | `service/tests/ungated_writes_private.rs:190-201`             | kept public, "whose verifier is the open decision"                                                                              | section 8                                                                                  |
 | `service/migrations/README.md:3184-3185`                      | "the registry still does not hash"                                                                                              | the library hashes                                                                         |
@@ -461,7 +463,7 @@ lead's. This proposal edits none of them.
 | `tests/security/a32.rs:188-199`, `:238-245`, `:2260-2262`     | "the registry neither hashes nor verifies"; "The verifier is the only check"; that the hash is signed is "the local verifier's" | the test session rewords                                                                   |
 | `service/tests/operation_approval.rs:837-839`                 | "The registry does not verify the recovery key's signature; the digest and challenge hash are the caller's bytes"               | signs with a test key                                                                      |
 | `service/tests/source_approval.rs:1079-1081`                  | the same                                                                                                                        | the same                                                                                   |
-| `docs/proposals/second-approver-gated-writes.md:2232-2247`    | the open decision; quotes "belongs to the future operator crate"                                                                | points here; closed once ruled                                                             |
+| `docs/proposals/second-approver-gated-writes.md:2259-2275`    | the open decision; quotes "belongs to the future operator crate"                                                                | points here; closed once ruled                                                             |
 | `docs/skyoauth-design.md:666`                                 | "The service binary retains only the deployment-local bootstrap/recovery verifier"                                              | none if "binary" means the package; else the lead adds "(library check, binary transport)" |
 | `docs/skyoauth-design.md:724`                                 | verifier home: "Existing `skyoauth-service` subcommands"                                                                        | none: the subcommands are the entry point                                                  |
 | `docs/skyoauth-tasks.md:30`                                   | "`src/main.rs` Process/listener wiring; M1a local bootstrap/recovery verifier"                                                  | the lead may add that the check is in the library (tasks :36)                              |
@@ -470,4 +472,4 @@ lead's. This proposal edits none of them.
 Not affected: "operator tooling" at identity-registry :278, `bootstrap.rs:181`
 and the migrations README (:3047) names who canonicalizes an mTLS key, not the
 recovery check. The string "operator crate" occurs only at `recovery.rs:23`
-and in the second-approver proposal (:2243).
+and in the second-approver proposal (:2271).

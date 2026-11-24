@@ -1036,16 +1036,16 @@ below. A database created from an earlier `0005` is recreated.
     `skyoauth_check_operation_revocation()`. All three are plain row
     triggers, not deferrable and `ENABLE ALWAYS`, as those of `0010` and
     `0011`, and fire in that (name) order, so a row that crosses two
-    references is refused for its approved operation first. They fire at
-    the end of the statement, after every `CHECK`, `NOT NULL` and unique
-    constraint and after the foreign-key checks, whose internal triggers
-    (`RI_ConstraintTrigger_…`) sort, and so fire, before them. So a missing
-    approved or revoking operation or audit event is still the foreign
-    key's `23503`, and an operation inserted earlier in the same statement
-    is seen. `administrative_operation_audit_id_fkey` is immediate, so an
-    operation inserted before its event fails with that `23503` even when
-    the transaction inserts the event later; an event inserted earlier in
-    the same transaction, uncommitted, is seen.
+    references is refused for its approved operation first. They fire at the
+    end of the statement, row by row, after every `CHECK`, `NOT NULL` and
+    unique constraint and after that row's foreign-key checks, whose internal
+    triggers (`RI_ConstraintTrigger_…`) sort, and so fire, before them. So a
+    missing approved or revoking operation or audit event is still the foreign
+    key's `23503` (in a multi-row insert an earlier row's `23514` comes first),
+    and an operation inserted earlier in the same statement is seen.
+    `administrative_operation_audit_id_fkey` is immediate, so an operation
+    inserted before its event fails with that `23503` even if the event follows
+    in the transaction; an event inserted earlier in it, uncommitted, is seen.
   - **Locks.** The guards read the referenced row without a row lock
     (inferred): an operation's `tenant_id` and `actor_id` are immutable and
     its deletes are refused (`0006`), an audit event is append-only (`0002`

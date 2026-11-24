@@ -526,19 +526,19 @@ ALTER TABLE administrative_operation ENABLE ALWAYS TRIGGER administrative_operat
 -- stay service rules, and the audit event's action, object and actor are
 -- not compared with the operation.
 --
--- The triggers are plain (non-deferrable) AFTER ... FOR EACH ROW triggers,
--- as those of 0010 and 0011: they fire at the end of the statement, after
--- every CHECK, NOT NULL and unique constraint and after the foreign-key
--- checks, whose internal triggers (RI_ConstraintTrigger_c_*) sort, and so
--- fire, before administrative_operation_approval_check,
+-- The triggers are plain (non-deferrable) AFTER ... FOR EACH ROW triggers, as
+-- those of 0010 and 0011: they fire at the end of the statement, row by row,
+-- after every CHECK, NOT NULL and unique constraint and after that row's
+-- foreign-key checks, whose internal triggers (RI_ConstraintTrigger_c_*)
+-- sort, and so fire, before administrative_operation_approval_check,
 -- administrative_operation_audit_check and
--- administrative_operation_revocation_check, which fire in that order. So
--- a missing approved or revoking operation or audit event is still the
--- foreign key's 23503, and the guard reads the referenced row only once it
--- is known to exist. The names must keep sorting after "RI_". The guard
--- finds no row only where the foreign keys do not fire
--- (session_replication_role = replica) and then passes the row (inferred,
--- as 0010 does).
+-- administrative_operation_revocation_check, which fire in that order. So a
+-- missing approved or revoking operation or audit event is still the foreign
+-- key's 23503, and the guard reads the referenced row only once it is known
+-- to exist; in a multi-row INSERT an earlier row's 23514 precedes a later
+-- row's 23503. The names must keep sorting after "RI_". The guard finds no
+-- row only where the foreign keys do not fire (session_replication_role =
+-- replica) and then passes the row (inferred, as 0010 does).
 --
 -- The guards read the referenced row without a row lock (inferred): an
 -- operation's tenant_id and actor_id are immutable
