@@ -160,9 +160,13 @@
 //!   elsewhere, version nibble `7` and the RFC 9562 variant (`8`, `9`, `a`
 //!   or `b` at 19). The timestamp bits are not checked;
 //! - a recovery public key that is not exactly 32 bytes, the raw Ed25519
-//!   public key of the identity-registry section 5.2 pick. The bytes are
-//!   not checked further: whether they are a valid curve point is the
-//!   verifier's concern (T13.5);
+//!   public key of the identity-registry section 5.2 pick, or whose bytes
+//!   do not decode to a curve point, do not encode it canonically, or
+//!   encode a point of small order (a weak key): the checks every
+//!   enrollment of a recovery key runs (the recovery module, "Keys";
+//!   provisional lead pick, 2026-11-24), so a key that could never verify
+//!   a restoration, or one that verifies a fixed signature over any
+//!   message, is not enrolled;
 //! - an empty `public_identity` or `trust_anchor_ref`, or one longer than
 //!   2048 bytes (the `0005` bounds);
 //! - a `now` outside the `0007` range (`timestamp out of range`, as
@@ -221,6 +225,7 @@ use super::{
     events::{YEAR_OUT_OF_RANGE, in_envelope_years},
     is_reserved_actor_id,
     model::since_epoch,
+    recovery::recovery_key,
 };
 
 /// The length of a raw Ed25519 public key, the only recovery key bootstrap
@@ -283,7 +288,8 @@ pub struct BootstrapRequest<'a> {
     pub trust_anchor_ref: &'a str,
     pub binding_id: &'a str,
     /// The raw Ed25519 public key of the offline recovery key holder,
-    /// exactly [`RECOVERY_PUBLIC_KEY_LENGTH`] bytes.
+    /// exactly [`RECOVERY_PUBLIC_KEY_LENGTH`] bytes, a canonically encoded
+    /// point not of small order (see "Validation and trust").
     pub recovery_public_key: &'a [u8],
     pub audit_event_id: &'a str,
     /// The time of the operator's `created_at` and of the audit event.
@@ -404,11 +410,7 @@ fn validate(request: &BootstrapRequest<'_>) -> Result<(), BootstrapError> {
             "instance ID is not a lowercase hyphenated UUIDv7",
         ));
     }
-    if request.recovery_public_key.len() != RECOVERY_PUBLIC_KEY_LENGTH {
-        return Err(encode_error(
-            "recovery public key is not a 32-byte Ed25519 key",
-        ));
-    }
+    recovery_key(request.recovery_public_key).map_err(encode_error)?;
     if !bounded(request.public_identity) {
         return Err(encode_error("public identity is empty or over 2048 bytes"));
     }
@@ -587,7 +589,8 @@ mod tests {
     use super::*;
 
     const INSTANCE: &str = "01936f4e-8a2b-7c3d-9e4f-0123456789ab";
-    const KEY: [u8; 32] = [7; 32];
+    /// A canonically encoded point of large order.
+    const KEY: [u8; 32] = [0x11; 32];
 
     fn request(instance_id: &str) -> BootstrapRequest<'_> {
         BootstrapRequest {
@@ -676,12 +679,45 @@ mod tests {
                 "{length}"
             );
         }
-        // Any 32 bytes pass: the key is not checked further.
-        let zero = [0; 32];
-        let mut good = request(INSTANCE);
-        good.recovery_public_key = &zero;
-        assert!(validate(&good).is_ok());
+        assert!(validate(&request(INSTANCE)).is_ok());
         assert_eq!(RECOVERY_PUBLIC_KEY_LENGTH, 32);
+    }
+
+    /// The enrollment checks of the recovery module, "Keys": 32 bytes that
+    /// are no point, a non-canonical encoding, or a small-order point are
+    /// refused, each with its message.
+    #[test]
+    fn the_recovery_key_is_a_canonical_point_of_large_order() {
+        let mut identity_p_plus_1 = [0xff; 32];
+        identity_p_plus_1[0] = 0xee;
+        identity_p_plus_1[31] = 0x7f;
+        let mut large_p_plus_3 = identity_p_plus_1;
+        large_p_plus_3[0] = 0xf0;
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        for (key, message) in [
+            ([7; 32], "recovery public key is not an Ed25519 point"),
+            (
+                [0; 32],
+                "recovery public key is a small-order Ed25519 point",
+            ),
+            (
+                identity,
+                "recovery public key is a small-order Ed25519 point",
+            ),
+            (
+                identity_p_plus_1,
+                "recovery public key is not canonically encoded",
+            ),
+            (
+                large_p_plus_3,
+                "recovery public key is not canonically encoded",
+            ),
+        ] {
+            let mut bad = request(INSTANCE);
+            bad.recovery_public_key = &key;
+            assert_eq!(encode(validate(&bad)), message, "{key:?}");
+        }
     }
 
     #[test]

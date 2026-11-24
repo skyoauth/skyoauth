@@ -16,7 +16,9 @@
 //! append and operation-row writers: `create_admin_identity`,
 //! `create_admin_credential` and `create_admin_role_binding` are visible
 //! only within the registry (`pub(super)`), whose `bootstrap_instance` and
-//! `restore_operator` call them; `update_admin_role_binding` is
+//! `restore_operator` (once it has verified the recovery signature itself,
+//! `docs/proposals/recovery-verified-response.md`) call them;
+//! `update_admin_role_binding` is
 //! `pub(super)` too and has no caller in the crate, so it carries PR 7's
 //! `expect(dead_code)`; `append_audit_event` and the operation-row writers
 //! `insert_administrative_operation`, `consume_administrative_operation`
@@ -188,17 +190,41 @@ const REGISTRY_PUBLIC: [&str; 25] = [
 ];
 
 /// The registry writers that deliberately stay public (the proposal's
-/// "Still open after PRs 7, 9 and 10"): break-glass restoration and bootstrap,
-/// whose verifier is the open decision, and the two operator writers that
-/// only narrow. A change that made one of them crate-private would be a
-/// decision this test does not take; the control probe fails on it.
-const REGISTRY_KEPT_PUBLIC: [&str; 5] = [
-    "restore_operator",
-    "issue_recovery_challenge",
+/// "Still open after PRs 7, 9 and 10"): bootstrap, a separate decision, and
+/// the two operator writers that only narrow. A change that made one of
+/// them crate-private would be a decision this test does not take; the
+/// control probe fails on it.
+const REGISTRY_KEPT_PUBLIC: [&str; 3] = [
     "bootstrap_instance",
     "disable_admin_identity",
     "revoke_admin_credential",
 ];
+
+/// The public surface of break-glass restoration
+/// (`docs/proposals/recovery-verified-response.md`, section 8): the
+/// restore verifies the recovery signature inside, the preview is
+/// read-only and grants nothing, and an issue alone enrolls no one, so
+/// they are public writes, not ungated ones. The control probe resolves
+/// each.
+const RECOVERY_PUBLIC: [&str; 12] = [
+    "restore_operator",
+    "SignedRecoveryResponse",
+    "RestoreRequest",
+    "Restored",
+    "RestoreError",
+    "NotRestorableReason",
+    "preview_recovery_response",
+    "RecoveryPreview",
+    "issue_recovery_challenge",
+    "IssueChallenge",
+    "RecoveryChallenge",
+    "get_recovery_state",
+];
+
+/// Registry items that no longer exist: `ChallengeBinding`, the
+/// caller-supplied digest and hash a restore presented before it verified
+/// the signature itself (section 8 of the same proposal).
+const REGISTRY_REMOVED: [&str; 1] = ["ChallengeBinding"];
 
 /// Where the library's source, comments and literals aside, names a bare
 /// registry writer, a writer of [`REGISTRY_PRIVATE`] or a step of
@@ -866,7 +892,10 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
     let trust_uses = PUBLIC.iter().enumerate().map(|(index, path)| {
         format!("pub use skyoauth_service::trust::{path} as public_{index};\n")
     });
-    let registry_items = REGISTRY_PUBLIC.iter().chain(&REGISTRY_KEPT_PUBLIC);
+    let registry_items = REGISTRY_PUBLIC
+        .iter()
+        .chain(&REGISTRY_KEPT_PUBLIC)
+        .chain(&RECOVERY_PUBLIC);
     let registry_uses = registry_items.enumerate().map(|(index, item)| {
         format!("pub use skyoauth_service::persistence::registry::{item} as registry_{index};\n")
     });
@@ -932,5 +961,15 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
             let name = format!("probe_step_{step}_{index}");
             assert_unreachable(&library, &probes, &name, path);
         }
+    }
+
+    for item in REGISTRY_REMOVED {
+        let name = format!("probe_removed_{item}");
+        assert_unreachable(
+            &library,
+            &probes,
+            &name,
+            &format!("persistence::registry::{item}"),
+        );
     }
 }

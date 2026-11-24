@@ -96,9 +96,8 @@ the rights a restore needs.
 
 ### 2. The restore steps
 
-Before any statement, as today plus: a signature that is not 64 bytes is an
-encode error. Then, in its savepoint, the steps of `recovery.rs:128-183`
-change as follows:
+Before any statement, as today. Then, in its savepoint, the steps of
+`recovery.rs:128-183` change as follows:
 
 0. `READ COMMITTED` only, unchanged;
 1. every unrevoked credential locked, unchanged;
@@ -116,7 +115,8 @@ change as follows:
      `request_digest` and `challenge_hash`, so a row whose stored hash or
      digest is not the library's encoding of that row is refused;
    - the state's key is not weak (section 4);
-   - the signature verifies over `M` with the state's key;
+   - the signature is 64 bytes (else `BadSignature`) and verifies over `M`
+     with the state's key;
 4. the consume (`:459-478`), unchanged, bound to the row's own values;
 5. the replacement taken from the consumed plan and checked as
    `validate_restore` checks it today (`:886-910`); today's step 4 comparison

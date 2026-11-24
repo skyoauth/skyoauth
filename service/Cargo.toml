@@ -17,6 +17,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 # The audit event hash (identity-registry IR-056), `persistence::registry`.
 sha2 = { version = "0.11.1", default-features = false }
+# Ed25519 verification of the recovery response (`verify_strict`),
+# `persistence::registry::recovery`.
+ed25519-dalek = { version = "3.0.0", default-features = false }
 # Exact pin: persistence::migrate calls the `#[doc(hidden)]` `Migrator::run_direct`.
 # `json` decodes and binds the registry's jsonb columns.
 sqlx = { version = "=0.9.1", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls"] }

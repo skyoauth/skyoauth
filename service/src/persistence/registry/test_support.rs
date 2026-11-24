@@ -27,8 +27,11 @@
 //! writers are `pub(crate)`, called by the audited writes of the registry,
 //! [`crate::trust`] and [`crate::operation`]. Making the operator creates
 //! crate-private does not by itself keep another crate from enrolling a
-//! `security_admin`: `bootstrap_instance`, `issue_recovery_challenge` and
-//! `restore_operator` stay public (the proposal, "Still open").
+//! `security_admin`: `bootstrap_instance` stays public (the proposal,
+//! "Still open"), before the instance is bootstrapped. `restore_operator`
+//! stays public too but verifies the recovery key's signature itself
+//! before it enrolls anyone, and `issue_recovery_challenge` enrolls no one
+//! (`docs/proposals/recovery-verified-response.md`).
 //!
 //! The integration tests under `service/tests` and the scenario tests of
 //! `skyoauth-scenarios` (`tests/`) are crates of their own and use these

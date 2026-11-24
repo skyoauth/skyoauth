@@ -32,6 +32,7 @@ use std::{
 };
 
 use common::TestDb;
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{Value, json};
 use skyoauth_service::{
     jwk::{Algorithm, DEFAULT_ALLOWED_ALGORITHMS},
@@ -45,11 +46,11 @@ use skyoauth_service::{
         self, PgPool,
         registry::{
             self, AdminRole, AdminRoleBindingChanges, AdministrativeOperation, AssertionProfile,
-            AuditActor, BootstrapRequest, ChainVerdict, ChallengeBinding, Consumption,
-            DEFAULT_CHALLENGE_TTL, IssueChallenge, JsonObject, NewAdminCredential,
-            NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent,
-            NewConsumedAssertion, NewTenant, NewTrustKeyset, NewTrustSource, OPERATOR_RESTORATION,
-            RegistryError, ReplayMode, RestoreRequest, Restored, Status, TrustSource,
+            AuditActor, BootstrapRequest, ChainVerdict, Consumption, DEFAULT_CHALLENGE_TTL,
+            IssueChallenge, JsonObject, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
+            NewAdministrativeOperation, NewAuditEvent, NewConsumedAssertion, NewTenant,
+            NewTrustKeyset, NewTrustSource, OPERATOR_RESTORATION, RegistryError, ReplayMode,
+            RestoreRequest, Restored, SignedRecoveryResponse, Status, TrustSource,
             TrustSourceChanges, TrustSourceKind, bootstrap_instance, get_recovery_state,
             issue_recovery_challenge, lock_administrative_operation, restore_operator,
             test_support::{append_audit_event, insert_administrative_operation},
@@ -356,7 +357,7 @@ async fn seeded_with(bootstrap: bool) -> (TestDb, PgPool) {
                 public_identity: "spki-sha256:first",
                 trust_anchor_ref: "deployment/operator-ca",
                 binding_id: "rb_first",
-                recovery_public_key: &[0x11; 32],
+                recovery_public_key: &recovery_key(&RECOVERY_SEED),
                 audit_event_id: "aud_bootstrap",
                 now: at(0),
             },
@@ -1076,12 +1077,12 @@ const RESTORED_KEY: &str = "key_new";
 
 /// A break-glass restoration, committed: the challenge `op_restore` issued
 /// at `at(2)` for [`RESTORED_KEY`]'s operator, then restored at `at(3)`.
-/// It revokes every operator credential still unrevoked. The registry does
-/// not verify the recovery key's signature; the digest and challenge hash
-/// are the caller's bytes.
+/// It revokes every operator credential still unrevoked. The returned challenge `M` is signed
+/// with the test recovery key [`RECOVERY_SEED`], which bootstrap enrolled;
+/// the plan's new key is [`NEW_RECOVERY_SEED`]'s.
 async fn restore(pool: &PgPool) -> Restored {
     let state = get_recovery_state(pool).await.unwrap().unwrap();
-    let new_key = [0x22; 32];
+    let new_key = recovery_key(&NEW_RECOVERY_SEED);
     let plan = object(json!({
         "instance_id": INSTANCE_ID,
         "recovery_key_epoch": state.recovery_key_epoch,
@@ -1092,16 +1093,13 @@ async fn restore(pool: &PgPool) -> Restored {
         "trust_anchor_ref": "deployment/operator-ca",
         "new_recovery_public_key": new_key.iter().map(|b| format!("{b:02x}")).collect::<String>(),
     }));
-    let (digest, hash) = ([0xd1; 32], [0xc7; 48]);
     let mut transaction = pool.begin().await.unwrap();
-    issue_recovery_challenge(
+    let challenge = issue_recovery_challenge(
         &mut transaction,
         &IssueChallenge {
             operation_id: "op_restore",
             kind: OPERATOR_RESTORATION,
-            request_digest: &digest,
             immutable_plan: &plan,
-            challenge_hash: &hash,
             ttl: DEFAULT_CHALLENGE_TTL,
             now: at(2),
             audit_event_id: "evt_issue_restore",
@@ -1110,24 +1108,17 @@ async fn restore(pool: &PgPool) -> Restored {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    let signature = SigningKey::from_bytes(&RECOVERY_SEED)
+        .sign(&challenge.challenge)
+        .to_bytes();
     let mut transaction = pool.begin().await.unwrap();
     let restored = restore_operator(
         &mut transaction,
-        &RestoreRequest {
+        &SignedRecoveryResponse {
             operation_id: "op_restore",
-            binding: ChallengeBinding {
-                request_digest: &digest,
-                challenge_hash: &hash,
-                instance_id: INSTANCE_ID,
-                expected_revision: state.revision,
-                recovery_key_epoch: state.recovery_key_epoch,
-            },
-            admin_id: "adm_new",
-            credential_id: "crd_new",
-            binding_id: "rb_new",
-            public_identity: RESTORED_KEY,
-            trust_anchor_ref: "deployment/operator-ca",
-            new_recovery_public_key: &new_key,
+            signature: &signature,
+        },
+        &RestoreRequest {
             audit_event_id: "evt_restore",
             rotation_audit_event_id: "evt_rotate",
             now: at(3),
@@ -1137,6 +1128,17 @@ async fn restore(pool: &PgPool) -> Restored {
     .unwrap();
     transaction.commit().await.unwrap();
     restored
+}
+
+/// The seed of the test recovery key that bootstrap enrolls.
+const RECOVERY_SEED: [u8; 32] = [0x51; 32];
+
+/// The seed of the key a restoration rotates to.
+const NEW_RECOVERY_SEED: [u8; 32] = [0x52; 32];
+
+/// The Ed25519 public key of `seed`.
+fn recovery_key(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
 /// A gated create is a pending operation until a distinct

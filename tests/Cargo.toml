@@ -43,6 +43,11 @@ tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 # workspace's libraries without test targets, where such a use fails to
 # compile, and fails if a normal build turns the feature on.
 skyoauth-service = { path = "../service", features = ["test-support"] }
+# The A32 tests sign recovery challenges with test keys, as the workstation
+# would: `restore_operator` verifies the Ed25519 signature itself
+# (docs/proposals/recovery-verified-response.md). The same version and
+# features as the service's.
+ed25519-dalek = { version = "3.0.0", default-features = false }
 serde_json = "1.0.154"
 # `rt-multi-thread` so replica races run in parallel
 # (`#[tokio::test(flavor = "multi_thread")]`).

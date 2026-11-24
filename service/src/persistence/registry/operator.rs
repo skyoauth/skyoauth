@@ -35,9 +35,13 @@
 //! `test-support` feature it is dead code, which its `expect(dead_code)`
 //! states). Tests reach them through the registry's `test_support` module.
 //! That does not stop a caller outside the crate from enrolling a
-//! `security_admin` while `bootstrap_instance`, `issue_recovery_challenge`
-//! and `restore_operator` stay public. [`disable_admin_identity`] and
-//! [`revoke_admin_credential`] only narrow and stay public.
+//! `security_admin` while `bootstrap_instance` stays public, before the
+//! instance is bootstrapped; `restore_operator` enrolls only after it has
+//! verified the recovery key's signature itself, and
+//! `issue_recovery_challenge` enrolls no one
+//! (`docs/proposals/recovery-verified-response.md`).
+//! [`disable_admin_identity`] and [`revoke_admin_credential`] only narrow
+//! and stay public.
 //!
 //! A second row with the same ID, or a credential whose `public_identity`
 //! is already registered, is [`RegistryError::AlreadyExists`] naming only
@@ -80,8 +84,7 @@
 //! the `status` of an unrevoked credential (one created `disabled`), from
 //! going back to `enabled` by other means, and this module adds none (no
 //! migration in this slice). The lead ruling that re-enabling is a plain
-//! status change (2026-11-21; provisional until the maintainer ratifies the
-//! ADRs, T00.8 to T00.17, Gate M0) applies to the tables the registry
+//! status change (2026-11-21) applies to the tables the registry
 //! updates: a role binding is re-enabled rather than assigned twice
 //! (`0005`, inferred there), so [`update_admin_role_binding`] changes its
 //! status both ways.
@@ -93,8 +96,7 @@
 //! (design section 7.2; `administrative_operation.actor_id` is no foreign
 //! key for that reason). They are recorded as the actor IDs
 //! [`DEPLOYMENT_OPERATOR_ACTOR`] and [`recovery_key_actor`]`(epoch)`, with
-//! the audit actor type `operator` (lead pick, 2026-11-21; provisional
-//! until the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0;
+//! the audit actor type `operator` (lead pick, 2026-11-21;
 //! identity-registry section 5.2). So that no real operator can act under
 //! those IDs, [`create_admin_identity`] rejects `deployment_operator` and
 //! every ID that begins with `recovery_key:` with
@@ -124,8 +126,7 @@
 //!   no tenant, and [`OperatorScope::Tenant`] a binding of exactly that
 //!   tenant. An instance-scoped `auditor` does not satisfy a tenant request
 //!   and a tenant `auditor` does not satisfy an instance request
-//!   (OQ-ADR013-3; lead pick, 2026-11-21; provisional until the maintainer
-//!   ratifies the ADRs, T00.8 to T00.17, Gate M0). The schema already keeps
+//!   (OQ-ADR013-3; lead pick, 2026-11-21). The schema already keeps
 //!   `security_admin` instance-only and the three tenant roles tenant-only
 //!   (`admin_role_binding_scope_check`), so a request of the other scope
 //!   for them finds nothing.
@@ -230,8 +231,7 @@
 //! else of the registry: an issue of a recovery challenge takes it
 //! `FOR SHARE` too. Before bootstrap there is no row and nothing is locked;
 //! bootstrap's own writes find the row it inserted. The choice of lock and
-//! its order are inferred, provisional until the maintainer ratifies the
-//! ADRs (T00.8 to T00.17, Gate M0).
+//! its order are inferred.
 //!
 //! - The three creates take the lock first, before they insert (a
 //!   materialized `WITH` the insert selects from). The inserted row is new,
@@ -285,8 +285,7 @@
 //! # Time
 //!
 //! Time is always an explicit argument here, never the database's `now()`
-//! (lead pick, 2026-11-21; provisional until the maintainer ratifies the
-//! ADRs, T00.8 to T00.17, Gate M0): [`NewAdminIdentity::created_at`] and
+//! (lead pick, 2026-11-21): [`NewAdminIdentity::created_at`] and
 //! the `now` of [`revoke_admin_credential`]. Times are written as
 //! whole microseconds, truncated toward the past, and a time outside the
 //! `0007` range is [`RegistryError::Other`] before any statement runs, as
@@ -304,14 +303,12 @@ use super::{
 
 /// The actor ID of the deployment operator, who runs bootstrap (design
 /// section 7.2; T13.4). Not an operator identity; reserved, so no
-/// [`AdminIdentity`] can have it (lead pick, 2026-11-21; provisional until
-/// the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0).
+/// [`AdminIdentity`] can have it (lead pick, 2026-11-21).
 pub const DEPLOYMENT_OPERATOR_ACTOR: &str = "deployment_operator";
 
 /// The prefix of the actor ID of an offline recovery key holder, followed by
 /// the key's `recovery_key_epoch` (see [`recovery_key_actor`]). Every ID
-/// that begins with it is reserved (lead pick, 2026-11-21; provisional
-/// until the maintainer ratifies the ADRs, T00.8 to T00.17, Gate M0).
+/// that begins with it is reserved (lead pick, 2026-11-21).
 pub const RECOVERY_KEY_ACTOR_PREFIX: &str = "recovery_key:";
 
 /// The actor ID of the holder of the recovery key of `epoch`, as

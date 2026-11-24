@@ -1,9 +1,12 @@
 //! Break-glass operator restoration (`persistence::registry::recovery`;
 //! design section 7.2; ADR-013 item 8; identity-registry section 5.2;
-//! lifetimes LT-107; T13.5): the issued challenge and its audit event, the
-//! TTL bounds, single use (in the statement and in the database guards),
-//! every miss of a restore as one value, the challenge hash the binding
-//! carries, the replacement the plan binds, two concurrent restores of one
+//! lifetimes LT-107; T13.5; `docs/proposals/recovery-verified-response.md`):
+//! the issued challenge, its computed digest and hash, the `M` it returns
+//! and its audit event, the TTL bounds and the closed plan, the key checks
+//! at the issue, single use (in the statement and in the database guards),
+//! every refusal of a restore with its reason, the signature over `M` with
+//! the current recovery key (bad, wrong-key, wrong-message, malleable and
+//! weak-key signatures), the preview, two concurrent restores of one
 //! challenge, the full restoration (enroll, revoke every credential, rotate
 //! the key, two audit events last), that nothing else changes, that a
 //! failed restore rolls the consume back, that a restore runs only at
@@ -11,6 +14,11 @@
 //! without deadlock, that an operator write that adds access serializes
 //! with a restore (a colliding create waiting before its insert), and that
 //! the one remaining deadlock fails closed.
+//!
+//! The tests sign with fixed test keys ([`SEED`], [`NEW_SEED`],
+//! [`THIRD_SEED`]); they rebuild `M` from the stored row with the public
+//! [`DigestEnvelope`] and the prefix, as the workstation does, so the
+//! encoding is checked independently of the library's own.
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests, not
@@ -29,38 +37,94 @@ use std::{
 };
 
 use common::TestDb;
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::{Value, json};
-use skyoauth_service::persistence::{
-    self, PgPool,
-    registry::{
-        self, AdminRole, AdminRoleBindingChanges, AuditActor, AuthorizedOperator, BootstrapRequest,
-        ChainVerdict, ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL, InvariantKind,
-        IssueChallenge, JsonObject, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL, NewAdminCredential,
-        NewAdminIdentity, NewAdminRoleBinding, NewAuditEvent, NewPrincipal, NewTenant,
-        OPERATOR_RESTORATION, OperatorRequest, OperatorScope, PrincipalKind, RecoveryChallenge,
-        RecoveryState, RegistryError, RestoreError, RestoreRequest, Restored, Status,
-        bootstrap_instance, get_recovery_state, issue_recovery_challenge, restore_operator,
-        verify_audit_chain,
+use sha2::{Digest as _, Sha256};
+use skyoauth_service::{
+    operation::{DIGEST_PREFIX, DigestEnvelope},
+    persistence::{
+        self, PgPool,
+        registry::{
+            self, AdminRole, AdminRoleBindingChanges, AuditActor, AuthorizedOperator,
+            BootstrapRequest, ChainVerdict, ChallengeError, DEFAULT_CHALLENGE_TTL, InvariantKind,
+            IssueChallenge, JsonObject, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL, NewAdminCredential,
+            NewAdminIdentity, NewAdminRoleBinding, NewAuditEvent, NewPrincipal, NewTenant,
+            NotRestorableReason, OPERATOR_RESTORATION, OperatorRequest, OperatorScope,
+            PrincipalKind, RecoveryChallenge, RecoveryPreview, RecoveryState, RegistryError,
+            RestoreError, RestoreRequest, Restored, SignedRecoveryResponse, Status,
+            bootstrap_instance, get_recovery_state, issue_recovery_challenge,
+            preview_recovery_response, restore_operator, verify_audit_chain,
+        },
     },
 };
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Postgres, Transaction};
 
 const INSTANCE: &str = "019a9f3c-5b2e-7c41-9d8e-0123456789ab";
 const OTHER_INSTANCE: &str = "019a9f3c-5b2e-7c41-ad8e-ba9876543210";
-const KEY: [u8; 32] = [0x11; 32];
-const NEW_KEY: [u8; 32] = [0x22; 32];
-const THIRD_KEY: [u8; 32] = [0x33; 32];
-const DIGEST: [u8; 32] = [0xd1; 32];
-const OTHER_DIGEST: [u8; 32] = [0xd2; 32];
-const HASH: [u8; 48] = [0xc7; 48];
-/// Another challenge hash of [`HASH`]'s length.
-const OTHER_HASH: [u8; 48] = [0xc8; 48];
-/// A challenge hash that [`HASH`] is a prefix of.
-const LONG_HASH: [u8; 64] = [0xc7; 64];
-/// A request digest and a challenge hash of ASCII letters of both cases,
-/// so a value that differs from them only in case differs in its bytes.
-const LETTER_DIGEST: &[u8; 32] = b"Recovery-Digest-ABCDEF-abcdef-Zz";
-const LETTER_HASH: &[u8; 48] = b"Challenge-Hash-ABCDEFGHIJKL-abcdefghijkl-MnOpQrS";
+/// The seed of the bootstrap recovery key, a test key.
+const SEED: [u8; 32] = [0x51; 32];
+/// The seed of the key a restore rotates to.
+const NEW_SEED: [u8; 32] = [0x52; 32];
+/// The seed of a third key.
+const THIRD_SEED: [u8; 32] = [0x53; 32];
+/// The public key of [`SEED`] (computed independently; checked against
+/// the crate in `the_test_keys_are_their_seeds_keys`).
+const KEY: [u8; 32] = [
+    0xc0, 0x50, 0xc5, 0x63, 0x7a, 0x44, 0xfa, 0x86, 0x29, 0xff, 0xf3, 0xcc, 0xcc, 0xe2, 0x30, 0x0c,
+    0xb3, 0x62, 0xa6, 0x3d, 0x99, 0xd9, 0x5f, 0xc5, 0x41, 0x45, 0x26, 0x6f, 0x43, 0x32, 0x44, 0x5a,
+];
+/// The public key of [`NEW_SEED`].
+const NEW_KEY: [u8; 32] = [
+    0x20, 0x12, 0xcb, 0x90, 0xca, 0x60, 0xe8, 0xe5, 0xd8, 0xda, 0xf6, 0x6e, 0x22, 0x72, 0xd2, 0x23,
+    0x3e, 0x04, 0x86, 0xd5, 0x57, 0xe8, 0xc6, 0x61, 0x41, 0xed, 0x89, 0x20, 0x17, 0x7d, 0x7e, 0xb7,
+];
+/// The public key of [`THIRD_SEED`].
+const THIRD_KEY: [u8; 32] = [
+    0xf8, 0x0c, 0xcc, 0xdc, 0xe4, 0xae, 0x1c, 0x07, 0xae, 0x20, 0x8a, 0x2a, 0xdf, 0x99, 0xa3, 0x10,
+    0xae, 0x42, 0x07, 0xe0, 0x30, 0x6f, 0xa0, 0x23, 0x61, 0x10, 0xb0, 0x68, 0x27, 0xbb, 0xb8, 0xd0,
+];
+/// The prefix of `M` (the recovery module, "What is signed").
+const CHALLENGE_PREFIX: &[u8] = b"skyoauth.recovery_challenge.v1\n";
+/// The identity point, of small order, canonically encoded.
+const IDENTITY: [u8; 32] = {
+    let mut key = [0; 32];
+    key[0] = 1;
+    key
+};
+/// The identity point as `y = p + 1`: non-canonical and of small order.
+const IDENTITY_P_PLUS_1: [u8; 32] = {
+    let mut key = [0xff; 32];
+    key[0] = 0xee;
+    key[31] = 0x7f;
+    key
+};
+/// A point of large order as `y = p + 3`: non-canonical only.
+const LARGE_P_PLUS_3: [u8; 32] = {
+    let mut key = IDENTITY_P_PLUS_1;
+    key[0] = 0xf0;
+    key
+};
+/// 32 bytes that decode to no point.
+const UNDECODABLE: [u8; 32] = [7; 32];
+/// The signature that verifies over any message under a plain
+/// verification for the identity key: `R` the identity, `S` zero.
+const FIXED_SIGNATURE: [u8; 64] = {
+    let mut signature = [0; 64];
+    signature[0] = 1;
+    signature
+};
+/// A signature by [`SEED`] over `M` of `op_1` of [`issued`] (the prefix
+/// and [`op_1_canonical`]) with a small-order `R`, the identity, and
+/// `S = k * a mod L`, for the secret scalar `a` of [`SEED`] and
+/// `k = SHA-512(R || A || M)`, computed independently of this code: the
+/// plain equation `[S]B = R + [k]A` holds, so a plain verification accepts
+/// it; `verify_strict` refuses a small-order `R`.
+const SMALL_ORDER_R_SIGNATURE: [u8; 64] = [
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xe7, 0xea, 0x26, 0xa7, 0x8c, 0x0d, 0x7b, 0xe3, 0xe9, 0x39, 0x24, 0x14, 0xcf, 0xc5, 0xa2, 0x0a,
+    0x89, 0x0e, 0xa1, 0x8a, 0xdd, 0x8d, 0xaa, 0x3f, 0x8f, 0x74, 0xcc, 0x2b, 0x3e, 0x1c, 0xbe, 0x02,
+];
 const T0: u64 = 1_790_000_000_123_456;
 
 /// `micros` after `T0`.
@@ -100,26 +164,66 @@ fn object(value: Value) -> JsonObject {
     }
 }
 
-/// The plan of a challenge for `instance` and `epoch` that names the
-/// replacement of `request`.
-fn plan_for(instance: &str, epoch: Value, request: &RestoreRequest<'_>) -> JsonObject {
+/// The Ed25519 signature of `message` by the key of `seed`.
+fn sign(seed: &[u8; 32], message: &[u8]) -> Vec<u8> {
+    SigningKey::from_bytes(seed)
+        .sign(message)
+        .to_bytes()
+        .to_vec()
+}
+
+/// The replacement a plan names.
+#[derive(Debug, Clone, Copy)]
+struct Replacement<'a> {
+    admin_id: &'a str,
+    credential_id: &'a str,
+    binding_id: &'a str,
+    public_identity: &'a str,
+    trust_anchor_ref: &'a str,
+    key: &'a [u8],
+}
+
+/// The replacement of [`good_plan`]: `adm_new`, `crd_new`, `rb_new`,
+/// `spki-sha256:new`, and [`NEW_KEY`].
+const NEW: Replacement<'static> = Replacement {
+    admin_id: "adm_new",
+    credential_id: "crd_new",
+    binding_id: "rb_new",
+    public_identity: "spki-sha256:new",
+    trust_anchor_ref: "deployment/operator-ca",
+    key: &NEW_KEY,
+};
+
+/// Another replacement (`*_other`) with `key`.
+fn other(key: &[u8]) -> Replacement<'_> {
+    Replacement {
+        admin_id: "adm_other",
+        credential_id: "crd_other",
+        binding_id: "rb_other",
+        public_identity: "spki-sha256:other",
+        key,
+        ..NEW
+    }
+}
+
+/// The closed plan of a challenge for `instance` and `epoch` that names
+/// `replacement`.
+fn plan_for(instance: &str, epoch: Value, replacement: &Replacement<'_>) -> JsonObject {
     object(json!({
         "instance_id": instance,
         "recovery_key_epoch": epoch,
-        "operation": "operator_restoration",
-        "admin_id": request.admin_id,
-        "credential_id": request.credential_id,
-        "binding_id": request.binding_id,
-        "public_identity": request.public_identity,
-        "trust_anchor_ref": request.trust_anchor_ref,
-        "new_recovery_public_key": hex(request.new_recovery_public_key),
+        "admin_id": replacement.admin_id,
+        "credential_id": replacement.credential_id,
+        "binding_id": replacement.binding_id,
+        "public_identity": replacement.public_identity,
+        "trust_anchor_ref": replacement.trust_anchor_ref,
+        "new_recovery_public_key": hex(replacement.key),
     }))
 }
 
-/// The plan for `instance` and `epoch` that names [`restore_request`]'s
-/// replacement.
+/// The plan for `instance` and `epoch` that names [`NEW`].
 fn plan(instance: &str, epoch: Value) -> JsonObject {
-    plan_for(instance, epoch, &restore_request(""))
+    plan_for(instance, epoch, &NEW)
 }
 
 fn good_plan() -> JsonObject {
@@ -130,57 +234,90 @@ fn issue_request<'a>(id: &'a str, audit: &'a str, plan: &'a JsonObject) -> Issue
     IssueChallenge {
         operation_id: id,
         kind: OPERATOR_RESTORATION,
-        request_digest: &DIGEST,
         immutable_plan: plan,
-        challenge_hash: &HASH,
         ttl: DEFAULT_CHALLENGE_TTL,
         now: issue_time(),
         audit_event_id: audit,
     }
 }
 
-fn binding() -> ChallengeBinding<'static> {
-    ChallengeBinding {
-        request_digest: &DIGEST,
-        challenge_hash: &HASH,
-        instance_id: INSTANCE,
-        expected_revision: 1,
-        recovery_key_epoch: 1,
-    }
-}
-
-/// A restore of the challenge `id` with [`binding`] at `now()`, naming the
-/// replacement of [`good_plan`].
-fn restore_request(id: &str) -> RestoreRequest<'_> {
+/// The event IDs and `now()` of a restore.
+fn restore_request() -> RestoreRequest<'static> {
     RestoreRequest {
-        operation_id: id,
-        binding: binding(),
-        admin_id: "adm_new",
-        credential_id: "crd_new",
-        binding_id: "rb_new",
-        public_identity: "spki-sha256:new",
-        trust_anchor_ref: "deployment/operator-ca",
-        new_recovery_public_key: &NEW_KEY,
         audit_event_id: "aud_restore",
         rotation_audit_event_id: "aud_rotate",
         now: now(),
     }
 }
 
-/// A change to a request.
-type Change = fn(&mut RestoreRequest<'static>);
+/// The response for the operation `id` with `signature`.
+fn response<'a>(id: &'a str, signature: &'a [u8]) -> SignedRecoveryResponse<'a> {
+    SignedRecoveryResponse {
+        operation_id: id,
+        signature,
+    }
+}
 
-/// [`restore_request`] with another replacement (`*_other`) and `key`.
-fn other_request<'a>(id: &'a str, key: &'a [u8]) -> RestoreRequest<'a> {
-    RestoreRequest {
-        admin_id: "adm_other",
-        credential_id: "crd_other",
-        binding_id: "rb_other",
-        public_identity: "spki-sha256:other",
-        audit_event_id: "aud_other",
-        rotation_audit_event_id: "aud_other_rotate",
-        new_recovery_public_key: key,
-        ..restore_request(id)
+/// `C` and `M` as the workstation rebuilds them from the stored row: the
+/// row's ID, expected revision, expiry and plan, the fixed actor, kind and
+/// tenant. `None` without a row or for a plan with no canonical form.
+fn encode(
+    id: &str,
+    revision: i64,
+    expires_us: i64,
+    plan: &JsonObject,
+) -> Option<(String, Vec<u8>)> {
+    let canonical = DigestEnvelope {
+        id,
+        tenant_id: None,
+        actor_id: "deployment_operator",
+        kind: OPERATOR_RESTORATION,
+        expected_revision: revision,
+        expires_at_us: expires_us,
+        plan,
+    }
+    .canonical_json()
+    .ok()?;
+    let challenge = [CHALLENGE_PREFIX, canonical.as_bytes()].concat();
+    Some((canonical, challenge))
+}
+
+/// The request digest and the challenge hash of the challenge `id` at
+/// `revision` expiring at `expires()` with `plan`, computed here:
+/// SHA-256 of the digest prefix and `C`, and of `M`.
+fn library(id: &str, revision: i64, plan: &JsonObject) -> Option<(Vec<u8>, Vec<u8>)> {
+    let (canonical, challenge) = encode(id, revision, micros(expires()), plan)?;
+    Some((
+        Sha256::digest([DIGEST_PREFIX, canonical.as_bytes()].concat()).to_vec(),
+        Sha256::digest(&challenge).to_vec(),
+    ))
+}
+
+/// `M` of the stored row `id`, rebuilt (see [`encode`]).
+async fn stored_challenge(connection: &mut PgConnection, id: &str) -> Option<Vec<u8>> {
+    let row: Option<(String, i64, Option<i64>, Value)> = sqlx::query_as(
+        "SELECT id, expected_revision, \
+         (extract(epoch FROM expires_at) * 1000000)::bigint, immutable_plan \
+         FROM administrative_operation WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(connection)
+    .await
+    .unwrap();
+    let (id, revision, expires_us, plan) = row?;
+    let expires_us = expires_us?;
+    let Value::Object(plan) = plan else {
+        return None;
+    };
+    encode(&id, revision, expires_us, &plan).map(|(_, challenge)| challenge)
+}
+
+/// The signature by `seed` over the stored `M` of `id`, or over other
+/// bytes when there is none.
+async fn signature_by(connection: &mut PgConnection, id: &str, seed: &[u8; 32]) -> Vec<u8> {
+    match stored_challenge(connection, id).await {
+        Some(challenge) => sign(seed, &challenge),
+        None => sign(seed, b"no challenge"),
     }
 }
 
@@ -246,10 +383,16 @@ async fn issue(pool: &PgPool, id: &str, audit: &str) -> RecoveryChallenge {
         .unwrap()
 }
 
-/// Restores in a transaction of its own; commits on `Ok`.
-async fn restore_on(pool: &PgPool, request: &RestoreRequest<'_>) -> Result<Restored, RestoreError> {
+/// Restores `id` with `signature` in a transaction of its own; commits on
+/// `Ok`.
+async fn restore_with(
+    pool: &PgPool,
+    id: &str,
+    signature: &[u8],
+    request: &RestoreRequest<'_>,
+) -> Result<Restored, RestoreError> {
     let mut transaction = pool.begin().await.unwrap();
-    let restored = restore_operator(&mut transaction, request).await;
+    let restored = restore_operator(&mut transaction, &response(id, signature), request).await;
     if restored.is_ok() {
         transaction.commit().await.unwrap();
     } else {
@@ -258,12 +401,43 @@ async fn restore_on(pool: &PgPool, request: &RestoreRequest<'_>) -> Result<Resto
     restored
 }
 
-/// Restores with `restore_request(id)` in `transaction`.
+/// Restores `id` signed by `seed` over its stored `M`.
+async fn restore_by(
+    pool: &PgPool,
+    id: &str,
+    seed: &[u8; 32],
+    request: &RestoreRequest<'_>,
+) -> Result<Restored, RestoreError> {
+    let signature = signature_by(&mut pool.acquire().await.unwrap(), id, seed).await;
+    restore_with(pool, id, &signature, request).await
+}
+
+/// Restores `id` signed by the bootstrap key, [`SEED`].
+async fn restore_on(
+    pool: &PgPool,
+    id: &str,
+    request: &RestoreRequest<'_>,
+) -> Result<Restored, RestoreError> {
+    restore_by(pool, id, &SEED, request).await
+}
+
+/// Restores `id`, signed by [`SEED`], with [`restore_request`] in
+/// `transaction`.
 async fn consume_and_restore(
     transaction: &mut Transaction<'_, Postgres>,
     id: &str,
 ) -> Result<Restored, RestoreError> {
-    restore_operator(transaction, &restore_request(id)).await
+    restore_in(transaction, id, &restore_request()).await
+}
+
+/// Restores `id`, signed by [`SEED`], with `request` in `transaction`.
+async fn restore_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: &str,
+    request: &RestoreRequest<'_>,
+) -> Result<Restored, RestoreError> {
+    let signature = signature_by(&mut *transaction, id, &SEED).await;
+    restore_operator(transaction, &response(id, &signature), request).await
 }
 
 /// The whole operation row.
@@ -355,30 +529,73 @@ async fn authorize_security_admin(pool: &PgPool, key: &str) -> Option<Authorized
         .unwrap()
 }
 
-/// Inserts an operation row by other means: `kind`, `plan`, with or
-/// without a challenge hash, at `expected_revision`, expiring at
-/// `expires()`, recorded by `aud_issue_1`.
+/// What a row written by other means stores as its request digest and
+/// challenge hash.
+#[derive(Debug, Clone)]
+enum Stored {
+    /// The library's encoding of the row (see [`encode`]); a fixed value
+    /// when the plan has no canonical form.
+    Library,
+    /// These bytes, digest then hash (`None`: no hash).
+    Bytes(Vec<u8>, Option<Vec<u8>>),
+}
+
+/// Inserts an operation row by other means: `kind`, `plan`, the digest
+/// and hash of `stored`, at `expected_revision`, expiring at `expires()`,
+/// recorded by `aud_issue_1`, by `deployment_operator`.
 async fn insert_raw(
     pool: &PgPool,
     id: &str,
     kind: &str,
     plan: Value,
-    challenge_hash: bool,
+    stored: Stored,
     expected_revision: i64,
 ) {
+    insert_raw_by(
+        pool,
+        id,
+        "deployment_operator",
+        kind,
+        plan,
+        stored,
+        expected_revision,
+    )
+    .await;
+}
+
+/// [`insert_raw`] with the actor `actor`.
+async fn insert_raw_by(
+    pool: &PgPool,
+    id: &str,
+    actor: &str,
+    kind: &str,
+    plan: Value,
+    stored: Stored,
+    expected_revision: i64,
+) {
+    let (digest, hash) = match stored {
+        Stored::Library => match &plan {
+            Value::Object(members) => library(id, expected_revision, members)
+                .map_or((vec![0xd1; 32], Some(vec![0xc7; 32])), |(digest, hash)| {
+                    (digest, Some(hash))
+                }),
+            _ => (vec![0xd1; 32], Some(vec![0xc7; 32])),
+        },
+        Stored::Bytes(digest, hash) => (digest, hash),
+    };
     sqlx::query(
         "INSERT INTO administrative_operation (id, actor_id, kind, request_digest, \
          expected_revision, immutable_plan, challenge_hash, expires_at, outcome, audit_id) \
-         VALUES ($1, 'deployment_operator', $2, $3, $4, $5, CASE WHEN $6 THEN $7::bytea END, \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, \
          timestamptz 'epoch' + $8 * interval '1 microsecond', 'issued', 'aud_issue_1')",
     )
     .bind(id)
+    .bind(actor)
     .bind(kind)
-    .bind(&DIGEST[..])
+    .bind(digest)
     .bind(expected_revision)
     .bind(plan)
-    .bind(challenge_hash)
-    .bind(&HASH[..])
+    .bind(hash)
     .bind(micros(expires()))
     .execute(pool)
     .await
@@ -404,6 +621,30 @@ async fn raw_revoke(connection: &mut PgConnection, id: &str, by: &str) {
     .unwrap();
 }
 
+/// The fixed `Display` of each reason, as the redaction tests pin it.
+fn reason_text(reason: NotRestorableReason) -> &'static str {
+    match reason {
+        NotRestorableReason::NoRecoveryState => "there is no closed recovery state",
+        NotRestorableReason::NotFound => "no such recovery challenge",
+        NotRestorableReason::Consumed => "the recovery challenge was already used",
+        NotRestorableReason::Revoked => "the recovery challenge was revoked",
+        NotRestorableReason::Expired => "the recovery challenge has expired",
+        NotRestorableReason::WrongKind => {
+            "the operation is not an issued operator restoration challenge"
+        }
+        NotRestorableReason::NotBound => {
+            "the recovery challenge is not bound to the current recovery state"
+        }
+        NotRestorableReason::NotLibraryEncoding => {
+            "the recovery challenge's stored digest or hash is not its encoding"
+        }
+        NotRestorableReason::WeakKey => "the current recovery public key is not usable",
+        NotRestorableReason::BadSignature => {
+            "the signature does not verify with the current recovery key"
+        }
+    }
+}
+
 #[track_caller]
 fn assert_not_issuable<T: Debug>(result: Result<T, ChallengeError>) {
     match result {
@@ -414,18 +655,20 @@ fn assert_not_issuable<T: Debug>(result: Result<T, ChallengeError>) {
     }
 }
 
+/// Asserts `NotRestorable` with `reason`, its `Debug` naming the variant
+/// and the reason only and its `Display` the reason's fixed text.
 #[track_caller]
-fn assert_not_restorable<T: Debug>(result: Result<T, RestoreError>) -> RestoreError {
+fn assert_not_restorable<T: Debug>(
+    result: Result<T, RestoreError>,
+    reason: NotRestorableReason,
+) -> RestoreError {
     match result {
-        Err(err @ RestoreError::NotRestorable) => {
-            assert_eq!(format!("{err:?}"), "NotRestorable");
-            assert_eq!(
-                err.to_string(),
-                "no recovery challenge authorizes this restoration"
-            );
+        Err(err @ RestoreError::NotRestorable(got)) if got == reason => {
+            assert_eq!(format!("{err:?}"), format!("NotRestorable({reason:?})"));
+            assert_eq!(err.to_string(), reason_text(reason));
             err
         }
-        other => panic!("expected NotRestorable: {other:?}"),
+        other => panic!("expected NotRestorable({reason:?}): {other:?}"),
     }
 }
 
@@ -473,6 +716,75 @@ async fn counts(connection: &mut PgConnection) -> [i64; 3] {
     [row.0, row.1, row.2]
 }
 
+/// The test keys are the public keys of their seeds, canonical points of
+/// large order; the bootstrap key is the one bootstrap stored.
+#[test]
+fn the_test_keys_are_their_seeds_keys() {
+    for (seed, key) in [(SEED, KEY), (NEW_SEED, NEW_KEY), (THIRD_SEED, THIRD_KEY)] {
+        let signing = SigningKey::from_bytes(&seed);
+        assert_eq!(signing.verifying_key().to_bytes(), key);
+        assert!(!signing.verifying_key().is_weak());
+    }
+}
+
+/// Previews `id` with `signature` at `now` in a transaction of its own,
+/// rolled back.
+async fn preview_with(
+    pool: &PgPool,
+    id: &str,
+    signature: &[u8],
+    now: SystemTime,
+) -> Result<RecoveryPreview, RestoreError> {
+    let mut transaction = pool.begin().await.unwrap();
+    let preview = preview_recovery_response(&mut transaction, &response(id, signature), now).await;
+    transaction.rollback().await.unwrap();
+    preview
+}
+
+/// A preview and then a restore of `id` with `signature` at `at` are both
+/// `NotRestorable` with `reason`, and neither writes anything.
+async fn assert_refused(
+    pool: &PgPool,
+    id: &str,
+    signature: &[u8],
+    at: SystemTime,
+    reason: NotRestorableReason,
+) {
+    let before = pool_snapshot(pool).await;
+    let mut request = restore_request();
+    request.now = at;
+    assert_not_restorable(preview_with(pool, id, signature, at).await, reason);
+    assert_not_restorable(restore_with(pool, id, signature, &request).await, reason);
+    assert_eq!(pool_snapshot(pool).await, before, "{id}: {reason:?}");
+}
+
+/// [`assert_refused`] with the signature by [`SEED`] over the stored `M`
+/// of `id`.
+async fn assert_refused_signed(
+    pool: &PgPool,
+    id: &str,
+    at: SystemTime,
+    reason: NotRestorableReason,
+) {
+    let signature = signature_by(&mut pool.acquire().await.unwrap(), id, &SEED).await;
+    assert_refused(pool, id, &signature, at, reason).await;
+}
+
+/// `C` of `op_1` of [`issued`], written out by hand: the members sorted
+/// byte-wise, no whitespace, the expiry in microseconds.
+fn op_1_canonical() -> String {
+    format!(
+        "{{\"actor_id\":\"deployment_operator\",\"expected_revision\":1,\"expires_at\":{},\
+         \"id\":\"op_1\",\"kind\":\"operator_restoration\",\"plan\":{{\
+         \"admin_id\":\"adm_new\",\"binding_id\":\"rb_new\",\"credential_id\":\"crd_new\",\
+         \"instance_id\":\"{INSTANCE}\",\"new_recovery_public_key\":\"{}\",\
+         \"public_identity\":\"spki-sha256:new\",\"recovery_key_epoch\":1,\
+         \"trust_anchor_ref\":\"deployment/operator-ca\"}},\"tenant_id\":null}}",
+        micros(expires()),
+        hex(&NEW_KEY),
+    )
+}
+
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_recovery_state_is_read_after_bootstrap_only() {
@@ -495,7 +807,9 @@ async fn the_recovery_state_is_read_after_bootstrap_only() {
 }
 
 /// The event comes first, with the operation's ID as its object, and the
-/// row references it; every column of the row is exact.
+/// row references it; every column of the row is exact. The issue returns
+/// `M`, the prefix and `C`; the stored request digest is SHA-256 of the
+/// digest prefix and `C`, and the challenge hash SHA-256 of `M`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn an_issue_appends_its_event_and_then_inserts_the_operation() {
@@ -508,6 +822,16 @@ async fn an_issue_appends_its_event_and_then_inserts_the_operation() {
             challenge.expected_revision
         ),
         ("op_1", expires(), 1)
+    );
+    let canonical = op_1_canonical();
+    let m = [CHALLENGE_PREFIX, canonical.as_bytes()].concat();
+    assert_eq!(
+        String::from_utf8(challenge.challenge.clone()).unwrap(),
+        String::from_utf8(m.clone()).unwrap()
+    );
+    assert_eq!(
+        stored_challenge(&mut pool.acquire().await.unwrap(), "op_1").await,
+        Some(m.clone())
     );
     let event = &challenge.audit_event;
     assert_eq!(
@@ -550,10 +874,10 @@ async fn an_issue_appends_its_event_and_then_inserts_the_operation() {
             tenant_id: None,
             actor_id: "deployment_operator".into(),
             kind: "operator_restoration".into(),
-            request_digest: DIGEST.to_vec(),
+            request_digest: Sha256::digest([DIGEST_PREFIX, canonical.as_bytes()].concat()).to_vec(),
             expected_revision: 1,
             immutable_plan: Value::Object(good_plan()),
-            challenge_hash: Some(HASH.to_vec()),
+            challenge_hash: Some(Sha256::digest(&m).to_vec()),
             expires_us: Some(micros(expires())),
             consumed_us: None,
             revoked_us: None,
@@ -608,6 +932,12 @@ async fn the_ttl_is_one_second_to_fifteen_minutes() {
             pool_operation(&pool, &id).await.expires_us,
             Some(micros(expected))
         );
+        // `C` carries the expiry as stored.
+        assert_eq!(
+            Some(challenge.challenge),
+            stored_challenge(&mut pool.acquire().await.unwrap(), &id).await,
+            "{ttl:?}"
+        );
     }
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
@@ -632,13 +962,23 @@ async fn the_ttl_is_one_second_to_fifteen_minutes() {
     db.drop([pool]).await;
 }
 
-/// Another kind, a digest of another length, a plan without a string
-/// `instance_id` and an integer `recovery_key_epoch`, without the
-/// replacement's strings or without its key in lowercase hexadecimal are
-/// encode errors before any statement.
+#[track_caller]
+fn assert_issue_reserved<T: Debug>(result: Result<T, ChallengeError>) {
+    match result {
+        Err(ChallengeError::Store(RegistryError::ReservedActorId)) => {}
+        other => panic!("expected ReservedActorId: {other:?}"),
+    }
+}
+
+/// Another kind, a plan without a string `instance_id` and an integer
+/// `recovery_key_epoch` (an `i64`), without the replacement's strings,
+/// without its key in lowercase hexadecimal, with a member other than the
+/// eight, with a reserved `admin_id`, an empty or over-2048-byte
+/// `public_identity` or `trust_anchor_ref`, or a new key that is not a
+/// canonical point of large order, are errors before any statement.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
+async fn an_issue_checks_its_kind_and_plan_before_any_statement() {
     let (db, pool) = bootstrapped().await;
     let good = good_plan();
     let changed = |name: &str, value: Option<Value>| {
@@ -652,6 +992,8 @@ async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
     let binding_plans = [
         plan(INSTANCE, json!("1")),
         plan(INSTANCE, json!(1.0)),
+        plan(INSTANCE, json!(1.5)),
+        plan(INSTANCE, json!(9_223_372_036_854_775_808_u64)),
         plan(INSTANCE, json!(null)),
         changed("recovery_key_epoch", None),
         changed("instance_id", None),
@@ -669,11 +1011,56 @@ async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
         changed("new_recovery_public_key", Some(json!(hex(&NEW_KEY[..31])))),
         changed(
             "new_recovery_public_key",
-            Some(json!(hex(&NEW_KEY).to_uppercase().replace('2', "A"))),
+            Some(json!(hex(&NEW_KEY).to_uppercase())),
         ),
         changed("new_recovery_public_key", Some(json!(NEW_KEY.to_vec()))),
     ];
-    let short = [1; 31];
+    let open_plans = [
+        changed("operation", Some(json!("operator_restoration"))),
+        changed("nonce", Some(json!("n"))),
+        changed("", Some(json!(null))),
+    ];
+    let long = "x".repeat(2049);
+    let bound_plans = [
+        (
+            changed("public_identity", Some(json!(""))),
+            "public identity is empty or over 2048 bytes",
+        ),
+        (
+            changed("public_identity", Some(json!(long))),
+            "public identity is empty or over 2048 bytes",
+        ),
+        (
+            changed("trust_anchor_ref", Some(json!(""))),
+            "trust anchor reference is empty or over 2048 bytes",
+        ),
+        (
+            changed("trust_anchor_ref", Some(json!(long))),
+            "trust anchor reference is empty or over 2048 bytes",
+        ),
+    ];
+    let weak_plans = [
+        (
+            plan_for(INSTANCE, json!(1), &other(&IDENTITY)),
+            "recovery public key is a small-order Ed25519 point",
+        ),
+        (
+            plan_for(INSTANCE, json!(1), &other(&[0; 32])),
+            "recovery public key is a small-order Ed25519 point",
+        ),
+        (
+            plan_for(INSTANCE, json!(1), &other(&IDENTITY_P_PLUS_1)),
+            "recovery public key is not canonically encoded",
+        ),
+        (
+            plan_for(INSTANCE, json!(1), &other(&LARGE_P_PLUS_3)),
+            "recovery public key is not canonically encoded",
+        ),
+        (
+            plan_for(INSTANCE, json!(1), &other(&UNDECODABLE)),
+            "recovery public key is not an Ed25519 point",
+        ),
+    ];
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
     let before = snapshot(&mut transaction).await;
@@ -685,18 +1072,6 @@ async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
             "recovery challenge kind is not operator_restoration",
         );
     }
-    let mut request = issue_request("op_bad", "aud_bad", &good);
-    request.request_digest = &short;
-    assert_issue_encode(
-        issue_recovery_challenge(&mut transaction, &request).await,
-        "request digest is not 32 to 64 bytes",
-    );
-    let mut request = issue_request("op_bad", "aud_bad", &good);
-    request.challenge_hash = &short;
-    assert_issue_encode(
-        issue_recovery_challenge(&mut transaction, &request).await,
-        "challenge hash is not 32 to 64 bytes",
-    );
     for (plans, message) in [
         (
             &binding_plans[..],
@@ -711,6 +1086,10 @@ async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
             &key_plans[..],
             "plan new_recovery_public_key is not 64 lowercase hexadecimal digits",
         ),
+        (
+            &open_plans[..],
+            "plan has a member other than the eight of an operator restoration",
+        ),
     ] {
         for plan in plans {
             assert_issue_encode(
@@ -722,6 +1101,20 @@ async fn an_issue_checks_its_kind_digests_and_plan_before_any_statement() {
                 message,
             );
         }
+    }
+    for (plan, message) in bound_plans.iter().chain(&weak_plans) {
+        assert_issue_encode(
+            issue_recovery_challenge(&mut transaction, &issue_request("op_bad", "aud_bad", plan))
+                .await,
+            message,
+        );
+    }
+    for admin in ["deployment_operator", "recovery_key:1"] {
+        let plan = changed("admin_id", Some(json!(admin)));
+        assert_issue_reserved(
+            issue_recovery_challenge(&mut transaction, &issue_request("op_bad", "aud_bad", &plan))
+                .await,
+        );
     }
     let mut request = issue_request("op_bad", "aud_bad", &good);
     request.now = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
@@ -759,7 +1152,7 @@ async fn no_challenge_is_issued_without_a_closed_recovery_state() {
          VALUES ('019a9f3c-5b2e-7c41-9d8e-0123456789ab'); \
          INSERT INTO recovery_state (instance_id, bootstrap_closed, recovery_public_key, \
          recovery_key_epoch) VALUES ('019a9f3c-5b2e-7c41-9d8e-0123456789ab', false, \
-         '\\x1111111111111111111111111111111111111111111111111111111111111111', 1)",
+         '\\xc050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a', 1)",
     )
     .execute(&pool)
     .await
@@ -770,10 +1163,11 @@ async fn no_challenge_is_issued_without_a_closed_recovery_state() {
     db.drop([pool]).await;
 }
 
-/// A plan for another instance or another epoch is `NotIssuable`.
+/// A plan for another instance or another epoch, or whose new key is the
+/// current one, is `NotIssuable`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn no_challenge_is_issued_for_another_instance_or_epoch() {
+async fn no_challenge_is_issued_for_another_instance_or_epoch_or_the_current_key() {
     let (db, pool) = bootstrapped().await;
     let before = pool_snapshot(&pool).await;
     for plan in [
@@ -782,6 +1176,7 @@ async fn no_challenge_is_issued_for_another_instance_or_epoch() {
         plan(INSTANCE, json!(2)),
         plan(INSTANCE, json!(0)),
         plan(INSTANCE, json!(-1)),
+        plan_for(INSTANCE, json!(1), &other(&KEY)),
     ] {
         assert_not_issuable(issue_on(&pool, &issue_request("op_1", "aud_1", &plan)).await);
     }
@@ -790,7 +1185,8 @@ async fn no_challenge_is_issued_for_another_instance_or_epoch() {
 }
 
 /// `expected_revision` is the recovery state's revision when the challenge
-/// is issued, and a restore must name it.
+/// is issued, and `C` binds it: a challenge issued at an older revision is
+/// `NotBound`, even signed by the current key.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_challenge_binds_the_current_recovery_state_revision() {
@@ -803,19 +1199,13 @@ async fn a_challenge_binds_the_current_recovery_state_revision() {
     let challenge = issue(&pool, "op_1", "aud_issue_1").await;
     assert_eq!(challenge.expected_revision, 2);
     assert_eq!(pool_operation(&pool, "op_1").await.expected_revision, 2);
-    let before = pool_snapshot(&pool).await;
-    assert_not_restorable(restore_on(&pool, &restore_request("op_1")).await);
-    // A challenge issued at revision 1 is restorable neither at its own
-    // revision, which is no longer the state's, nor at the state's.
-    for revision in [1, 2] {
-        let mut stale = restore_request("op_0");
-        stale.binding.expected_revision = revision;
-        assert_not_restorable(restore_on(&pool, &stale).await);
-    }
-    assert_eq!(pool_snapshot(&pool).await, before);
-    let mut bound = restore_request("op_1");
-    bound.binding.expected_revision = 2;
-    let restored = restore_on(&pool, &bound).await.unwrap();
+    assert!(
+        String::from_utf8(challenge.challenge)
+            .unwrap()
+            .contains("\"expected_revision\":2,")
+    );
+    assert_refused_signed(&pool, "op_0", now(), NotRestorableReason::NotBound).await;
+    let restored = restore_on(&pool, "op_1", &restore_request()).await.unwrap();
     assert_eq!(restored.recovery_state_revision, 3);
     let row = pool_operation(&pool, "op_1").await;
     assert_eq!(
@@ -828,7 +1218,8 @@ async fn a_challenge_binds_the_current_recovery_state_revision() {
 
 /// The restore consumes the challenge: `consumed_at` is `now` and the
 /// revision advances; a replay, in the same transaction or after the
-/// commit, is `NotRestorable` and writes nothing.
+/// commit, signed by the old key or the new one, is `Consumed` and writes
+/// nothing.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_challenge_is_consumed_once() {
@@ -837,10 +1228,15 @@ async fn a_challenge_is_consumed_once() {
     let mut transaction = connection.begin().await.unwrap();
     consume_and_restore(&mut transaction, "op_1").await.unwrap();
     let after = snapshot(&mut transaction).await;
-    let mut replay = restore_request("op_1");
-    replay.audit_event_id = "aud_replay";
-    replay.rotation_audit_event_id = "aud_replay_rotate";
-    assert_not_restorable(restore_operator(&mut transaction, &replay).await);
+    let replay = RestoreRequest {
+        audit_event_id: "aud_replay",
+        rotation_audit_event_id: "aud_replay_rotate",
+        now: now(),
+    };
+    assert_not_restorable(
+        restore_in(&mut transaction, "op_1", &replay).await,
+        NotRestorableReason::Consumed,
+    );
     assert_eq!(snapshot(&mut transaction).await, after);
     transaction.commit().await.unwrap();
     drop(connection);
@@ -853,45 +1249,42 @@ async fn a_challenge_is_consumed_once() {
     for later in [now(), now() + Duration::from_secs(1)] {
         let mut request = replay;
         request.now = later;
-        assert_not_restorable(restore_on(&pool, &request).await);
-        // Also bound to the state the restore left.
-        request.binding.recovery_key_epoch = 2;
-        request.binding.expected_revision = 2;
-        request.new_recovery_public_key = &THIRD_KEY;
-        assert_not_restorable(restore_on(&pool, &request).await);
+        for seed in [&SEED, &NEW_SEED] {
+            assert_not_restorable(
+                restore_by(&pool, "op_1", seed, &request).await,
+                NotRestorableReason::Consumed,
+            );
+        }
     }
     assert_eq!(pool_snapshot(&pool).await, before);
     db.drop([pool]).await;
 }
 
-/// `$now < expires_at`, in the statement, against the caller's `now`.
+/// `$now < expires_at`, at step 3 and in the statement, against the
+/// caller's `now`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_challenge_expires_at_its_expiry() {
     let (db, pool) = issued().await;
-    let before = pool_snapshot(&pool).await;
     for late in [
         expires(),
         expires() + Duration::from_micros(1),
         expires() + Duration::from_secs(3600),
     ] {
-        let mut request = restore_request("op_1");
-        request.now = late;
-        assert_not_restorable(restore_on(&pool, &request).await);
+        assert_refused_signed(&pool, "op_1", late, NotRestorableReason::Expired).await;
     }
-    assert_eq!(pool_snapshot(&pool).await, before);
     // A `now` the audit event could not carry is refused before the
     // statement, not compared.
-    let mut request = restore_request("op_1");
+    let mut request = restore_request();
     request.now = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
     assert_restore_encode(
-        restore_on(&pool, &request).await,
+        restore_on(&pool, "op_1", &request).await,
         "audit timestamp outside the years 0000 to 9999",
     );
     let last = expires() - Duration::from_micros(1);
-    let mut request = restore_request("op_1");
+    let mut request = restore_request();
     request.now = last;
-    let restored = restore_on(&pool, &request).await.unwrap();
+    let restored = restore_on(&pool, "op_1", &request).await.unwrap();
     assert_eq!(restored.audit_event.timestamp, last);
     assert_eq!(
         pool_operation(&pool, "op_1").await.consumed_us,
@@ -900,31 +1293,29 @@ async fn a_challenge_expires_at_its_expiry() {
     db.drop([pool]).await;
 }
 
-/// A challenge revoked before its restore is `NotRestorable`.
+/// A challenge revoked before its restore is `Revoked`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_revoked_challenge_is_not_restorable() {
     let (db, pool) = issued().await;
     issue(&pool, "op_2", "aud_issue_2").await;
     raw_revoke(&mut pool.acquire().await.unwrap(), "op_1", "op_2").await;
-    let before = pool_snapshot(&pool).await;
-    assert_not_restorable(restore_on(&pool, &restore_request("op_1")).await);
-    assert_eq!(pool_snapshot(&pool).await, before);
+    assert_refused_signed(&pool, "op_1", now(), NotRestorableReason::Revoked).await;
     // The other one still is.
-    restore_on(&pool, &restore_request("op_2")).await.unwrap();
+    restore_on(&pool, "op_2", &restore_request()).await.unwrap();
     db.drop([pool]).await;
 }
 
-/// Every miss of the consume is the same `NotRestorable`, equal by
-/// `Debug`, `Display` and `PartialEq`, and writes nothing. A row written by
-/// other means with every value right is restorable, so each miss is its
-/// one difference. The consume compares the digest and the hash with the
-/// issued ones byte-wise: a value that differs from the issued one only in
-/// the case of its ASCII letters is a miss too, and the issued values
-/// restore.
+/// Every refusal of steps 2 and 3 has its reason, the same at the preview
+/// and the restore, and writes nothing. A row written by other means with
+/// every value right, the library's encoding included, is restorable, so
+/// each refusal is its one difference; every row here is signed by the
+/// current key over its own `M`, so the signature never decides. A row
+/// without a challenge hash and an expiry (an approval, as `0005` allows)
+/// is `WrongKind`, and so is a hash without an expiry.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn every_consume_miss_is_the_same_not_restorable() {
+async fn every_refusal_has_its_reason() {
     let (db, pool) = issued().await;
     issue(&pool, "op_revoker", "aud_issue_2").await;
     issue(&pool, "op_revoked", "aud_issue_3").await;
@@ -936,17 +1327,6 @@ async fn every_consume_miss_is_the_same_not_restorable() {
     .await;
     issue(&pool, "op_replayed", "aud_issue_4").await;
     issue(&pool, "op_failed", "aud_issue_5").await;
-    let letters_plan = good_plan();
-    issue_on(
-        &pool,
-        &IssueChallenge {
-            request_digest: LETTER_DIGEST,
-            challenge_hash: LETTER_HASH,
-            ..issue_request("op_letters", "aud_issue_6", &letters_plan)
-        },
-    )
-    .await
-    .unwrap();
     sqlx::query(
         "UPDATE administrative_operation SET outcome = 'failed', revision = revision + 1 \
          WHERE id = 'op_failed'",
@@ -970,108 +1350,233 @@ async fn every_consume_miss_is_the_same_not_restorable() {
         plan.remove(name);
         json!(plan)
     };
-    let rows: [(&str, &str, Value, bool, i64); 14] = [
-        (
-            "raw_good",
-            OPERATOR_RESTORATION,
-            json!(good_plan()),
-            true,
-            1,
-        ),
+    use NotRestorableReason::{
+        Consumed, Expired, NotBound, NotFound, NotLibraryEncoding, Revoked, WrongKind,
+    };
+    let (good_digest, good_hash) = library("raw_good", 1, &good_plan()).unwrap();
+    let other_digest = library("raw_bad_hash", 1, &good_plan()).unwrap().0;
+    let mut flipped = good_hash.clone();
+    flipped[31] ^= 1;
+    let rows: Vec<(&str, &str, Value, Stored, i64, NotRestorableReason)> = vec![
         (
             "raw_kind",
             "route_bundle_approval",
             json!(good_plan()),
-            true,
+            Stored::Library,
             1,
+            WrongKind,
         ),
         (
             "raw_no_hash",
             OPERATOR_RESTORATION,
             json!(good_plan()),
-            false,
+            Stored::Bytes(good_digest.clone(), None),
             1,
+            WrongKind,
+        ),
+        (
+            "raw_revision_0",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            Stored::Library,
+            0,
+            NotBound,
+        ),
+        (
+            "raw_revision_2",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            Stored::Library,
+            2,
+            NotBound,
         ),
         (
             "raw_epoch_string",
             OPERATOR_RESTORATION,
             with("recovery_key_epoch", json!("1")),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_epoch_float",
             OPERATOR_RESTORATION,
             with("recovery_key_epoch", json!(1.0)),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_epoch_fraction",
             OPERATOR_RESTORATION,
             with("recovery_key_epoch", json!(1.5)),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_epoch_null",
             OPERATOR_RESTORATION,
             with("recovery_key_epoch", json!(null)),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_epoch_negative",
             OPERATOR_RESTORATION,
             with("recovery_key_epoch", json!(-1)),
-            true,
+            Stored::Library,
             1,
+            NotBound,
+        ),
+        (
+            "raw_epoch_other",
+            OPERATOR_RESTORATION,
+            with("recovery_key_epoch", json!(2)),
+            Stored::Library,
+            1,
+            NotBound,
         ),
         (
             "raw_epoch_array",
             OPERATOR_RESTORATION,
             with("recovery_key_epoch", json!([1])),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_epoch_missing",
             OPERATOR_RESTORATION,
             without("recovery_key_epoch"),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_instance_missing",
             OPERATOR_RESTORATION,
             without("instance_id"),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_instance_number",
             OPERATOR_RESTORATION,
             with("instance_id", json!(1)),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_other_instance",
             OPERATOR_RESTORATION,
             json!(plan(OTHER_INSTANCE, json!(1))),
-            true,
+            Stored::Library,
             1,
+            NotBound,
         ),
         (
             "raw_upper_instance",
             OPERATOR_RESTORATION,
             json!(plan(&INSTANCE.to_uppercase(), json!(1))),
-            true,
+            Stored::Library,
             1,
+            NotBound,
+        ),
+        // The digest or the hash of another row, both of another row, the
+        // two swapped, one bit of the hash flipped, or the hash extended:
+        // each a stored value that is not the library's encoding of its
+        // row.
+        (
+            "raw_bad_digest",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            Stored::Bytes(
+                other_digest,
+                Some(library("raw_bad_digest", 1, &good_plan()).unwrap().1),
+            ),
+            1,
+            NotLibraryEncoding,
+        ),
+        (
+            "raw_bad_hash",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            Stored::Bytes(
+                library("raw_bad_hash", 1, &good_plan()).unwrap().0,
+                Some(good_hash.clone()),
+            ),
+            1,
+            NotLibraryEncoding,
+        ),
+        (
+            "raw_good_copy",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            Stored::Bytes(good_digest.clone(), Some(good_hash.clone())),
+            1,
+            NotLibraryEncoding,
+        ),
+        (
+            "raw_swapped",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            {
+                let (digest, hash) = library("raw_swapped", 1, &good_plan()).unwrap();
+                Stored::Bytes(hash, Some(digest))
+            },
+            1,
+            NotLibraryEncoding,
+        ),
+        (
+            "raw_flipped",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            Stored::Bytes(
+                library("raw_flipped", 1, &good_plan()).unwrap().0,
+                Some(flipped),
+            ),
+            1,
+            NotLibraryEncoding,
+        ),
+        (
+            "raw_long_hash",
+            OPERATOR_RESTORATION,
+            json!(good_plan()),
+            {
+                let (digest, hash) = library("raw_long_hash", 1, &good_plan()).unwrap();
+                Stored::Bytes(digest, Some([&hash[..], &[0; 32]].concat()))
+            },
+            1,
+            NotLibraryEncoding,
         ),
     ];
-    for (id, kind, plan, hash, revision) in rows {
-        insert_raw(&pool, id, kind, plan, hash, revision).await;
+    insert_raw(
+        &pool,
+        "raw_good",
+        OPERATOR_RESTORATION,
+        json!(good_plan()),
+        Stored::Library,
+        1,
+    )
+    .await;
+    insert_raw_by(
+        &pool,
+        "raw_actor",
+        "adm_first",
+        OPERATOR_RESTORATION,
+        json!(good_plan()),
+        Stored::Library,
+        1,
+    )
+    .await;
+    let mut expected = vec![("raw_actor", WrongKind)];
+    for (id, kind, plan, stored, revision, reason) in rows {
+        insert_raw(&pool, id, kind, plan, stored, revision).await;
+        expected.push((id, reason));
     }
     // A tenant's operation with every other value right.
     registry::create_tenant(
@@ -1107,177 +1612,126 @@ async fn every_consume_miss_is_the_same_not_restorable() {
     sqlx::query(
         "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, request_digest, \
          expected_revision, immutable_plan, challenge_hash, expires_at, outcome, audit_id) \
-         SELECT 'raw_tenant', 'ten_a', actor_id, kind, request_digest, expected_revision, \
-         immutable_plan, challenge_hash, expires_at, outcome, 'aud_raw_tenant' \
+         SELECT 'raw_tenant', 'ten_a', actor_id, kind, $1, expected_revision, \
+         immutable_plan, $2, expires_at, outcome, 'aud_raw_tenant' \
          FROM administrative_operation WHERE id = 'raw_good'",
     )
+    .bind(library("raw_tenant", 1, &good_plan()).unwrap().0)
+    .bind(library("raw_tenant", 1, &good_plan()).unwrap().1)
     .execute(&mut *transaction)
     .await
     .unwrap();
     transaction.commit().await.unwrap();
-
-    let bound = binding();
-    let other_digest = ChallengeBinding {
-        request_digest: &OTHER_DIGEST,
-        ..bound
-    };
-    let other_hash = ChallengeBinding {
-        challenge_hash: &OTHER_HASH,
-        ..bound
-    };
-    let prefix_hash = ChallengeBinding {
-        challenge_hash: &HASH[..32],
-        ..bound
-    };
-    let long_hash = ChallengeBinding {
-        challenge_hash: &LONG_HASH,
-        ..bound
-    };
-    let digest_as_hash = ChallengeBinding {
-        challenge_hash: &DIGEST,
-        ..bound
-    };
-    // `op_letters`'s binding, and its digest or hash with the case of
-    // every letter flipped: the same text but for case, other bytes.
-    let swap_case = |bytes: &[u8]| -> Vec<u8> {
-        bytes
-            .iter()
-            .map(|b| {
-                if b.is_ascii_alphabetic() {
-                    b ^ 0x20
-                } else {
-                    *b
-                }
-            })
-            .collect()
-    };
-    let (swapped_digest, swapped_hash) = (swap_case(LETTER_DIGEST), swap_case(LETTER_HASH));
-    for (flipped, issued) in [
-        (&swapped_digest, &LETTER_DIGEST[..]),
-        (&swapped_hash, &LETTER_HASH[..]),
-    ] {
-        assert_ne!(&flipped[..], issued);
-        assert!(flipped.eq_ignore_ascii_case(issued));
-    }
-    let letters = ChallengeBinding {
-        request_digest: LETTER_DIGEST,
-        challenge_hash: LETTER_HASH,
-        ..bound
-    };
-    let case_digest = ChallengeBinding {
-        request_digest: &swapped_digest,
-        ..letters
-    };
-    let case_hash = ChallengeBinding {
-        challenge_hash: &swapped_hash,
-        ..letters
-    };
-    let other_instance = ChallengeBinding {
-        instance_id: OTHER_INSTANCE,
-        ..bound
-    };
-    let upper_instance = ChallengeBinding {
-        instance_id: "019A9F3C-5B2E-7C41-9D8E-0123456789AB",
-        ..bound
-    };
-    let other_revision = ChallengeBinding {
-        expected_revision: 2,
-        ..bound
-    };
-    let zero_revision = ChallengeBinding {
-        expected_revision: 0,
-        ..bound
-    };
-    let other_epoch = ChallengeBinding {
-        recovery_key_epoch: 2,
-        ..bound
-    };
-    let negative_epoch = ChallengeBinding {
-        recovery_key_epoch: -1,
-        ..bound
-    };
+    // A row with neither a challenge hash nor an expiry, as `0005` allows
+    // for every approve, cancel and reject row of the second-approver flow:
+    // an approval of `op_1`, written by other means.
+    sqlx::query(
+        "INSERT INTO administrative_operation (id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, approves_operation_id, outcome, audit_id) \
+         VALUES ('raw_approve', 'adm_first', 'approve', $1, 1, $2, 'op_1', 'issued', \
+         'aud_issue_1')",
+    )
+    .bind(&good_digest)
+    .bind(json!(good_plan()))
+    .execute(&pool)
+    .await
+    .unwrap();
+    expected.extend([
+        ("raw_approve", WrongKind),
+        ("raw_tenant", WrongKind),
+        ("op_unknown", NotFound),
+        ("", NotFound),
+        ("op_revoked", Revoked),
+        ("op_replayed", Consumed),
+        ("op_failed", WrongKind),
+    ]);
     let before = pool_snapshot(&pool).await;
-    let mut misses = Vec::new();
-    for (id, binding, at) in [
-        ("op_unknown", bound, now()),
-        ("", bound, now()),
-        ("op_1", other_digest, now()),
-        ("op_1", other_hash, now()),
-        ("op_1", prefix_hash, now()),
-        ("op_1", long_hash, now()),
-        ("op_1", digest_as_hash, now()),
-        ("op_letters", case_digest, now()),
-        ("op_letters", case_hash, now()),
-        ("op_1", other_instance, now()),
-        ("op_1", upper_instance, now()),
-        ("op_1", other_revision, now()),
-        ("op_1", zero_revision, now()),
-        ("op_1", other_epoch, now()),
-        ("op_1", bound, expires()),
-        ("op_revoked", bound, now()),
-        ("op_replayed", bound, now()),
-        ("op_failed", bound, now()),
-        ("raw_kind", bound, now()),
-        ("raw_no_hash", bound, now()),
-        ("raw_tenant", bound, now()),
-        ("raw_epoch_string", bound, now()),
-        ("raw_epoch_float", bound, now()),
-        ("raw_epoch_fraction", bound, now()),
-        ("raw_epoch_null", bound, now()),
-        ("raw_epoch_negative", bound, now()),
-        // A plan whose epoch is negative matches a binding with that epoch
-        // only if the recovery state had it, which it cannot.
-        ("raw_epoch_negative", negative_epoch, now()),
-        ("raw_epoch_array", bound, now()),
-        ("raw_epoch_missing", bound, now()),
-        ("raw_instance_missing", bound, now()),
-        ("raw_instance_number", bound, now()),
-        ("raw_other_instance", bound, now()),
-        ("raw_other_instance", other_instance, now()),
-        ("raw_upper_instance", bound, now()),
-        ("raw_upper_instance", upper_instance, now()),
-    ] {
-        let mut request = restore_request(id);
-        request.binding = binding;
-        request.now = at;
-        misses.push((id, assert_not_restorable(restore_on(&pool, &request).await)));
+    for (id, reason) in expected {
+        assert_refused_signed(&pool, id, now(), reason).await;
     }
+    assert_refused_signed(&pool, "op_1", expires(), Expired).await;
     assert_eq!(pool_snapshot(&pool).await, before);
-    let (_, first) = &misses[0];
-    for (id, miss) in &misses {
-        assert_eq!(miss, first, "{id}");
-        assert_eq!(format!("{miss:?}"), format!("{first:?}"), "{id}");
-        assert_eq!(miss.to_string(), first.to_string(), "{id}");
-    }
-    // The issued challenges are restorable, and so is the control row.
+    // A challenge hash without an expiry, which only a schema without the
+    // `0005` check could hold (dropped here inside a transaction that rolls
+    // back): no challenge either.
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::raw_sql(
+        "ALTER TABLE administrative_operation \
+         DROP CONSTRAINT administrative_operation_challenge_expiry_check",
+    )
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO administrative_operation (id, actor_id, kind, request_digest, \
+         expected_revision, immutable_plan, challenge_hash, outcome, audit_id) \
+         VALUES ('raw_no_expiry', 'deployment_operator', $1, $2, 1, $3, $4, 'issued', \
+         'aud_issue_1')",
+    )
+    .bind(OPERATOR_RESTORATION)
+    .bind(&good_digest)
+    .bind(json!(good_plan()))
+    .bind(&good_hash)
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+    let signature = sign(&SEED, b"no expiry");
+    let presented = response("raw_no_expiry", &signature);
+    assert_not_restorable(
+        preview_recovery_response(&mut transaction, &presented, now()).await,
+        WrongKind,
+    );
+    assert_not_restorable(
+        restore_operator(&mut transaction, &presented, &restore_request()).await,
+        WrongKind,
+    );
+    transaction.rollback().await.unwrap();
+    drop(connection);
+    assert_eq!(pool_snapshot(&pool).await, before);
+    // The issued challenge is restorable, and so is the control row.
     let mut transaction = pool.begin().await.unwrap();
     consume_and_restore(&mut transaction, "op_1").await.unwrap();
     transaction.rollback().await.unwrap();
-    let mut request = restore_request("op_letters");
-    request.binding = letters;
-    let mut transaction = pool.begin().await.unwrap();
-    restore_operator(&mut transaction, &request).await.unwrap();
-    transaction.rollback().await.unwrap();
-    restore_on(&pool, &restore_request("raw_good"))
+    restore_on(&pool, "raw_good", &restore_request())
         .await
         .unwrap();
     db.drop([pool]).await;
 }
 
-/// Restores `op_1` of [`issued`] with the binding's `challenge_hash`
-/// `hash` and asserts the refusal: `NotRestorable`, nothing written, the
-/// challenge unconsumed and still `issued`, and the recovery state and the
-/// audit chain unchanged.
-async fn assert_hash_refused(pool: &PgPool, hash: &[u8], what: &str) {
-    let before = pool_snapshot(pool).await;
+/// `signature` with `S` replaced by `S + L`, the group order: the same
+/// point, a malleated signature.
+fn malleate(signature: &[u8]) -> Vec<u8> {
+    const L: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+        0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let mut out = signature.to_vec();
+    let mut carry = 0_u16;
+    for (byte, add) in out[32..].iter_mut().zip(L) {
+        let sum = u16::from(*byte) + u16::from(add) + carry;
+        *byte = (sum & 0xff) as u8;
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0);
+    out
+}
+
+/// `op_1` of [`issued`] presented with `signature`: `BadSignature` at the
+/// preview and the restore, nothing written, the challenge unconsumed and
+/// still `issued`, and the recovery state and the audit chain unchanged.
+async fn assert_bad_signature(pool: &PgPool, signature: &[u8], what: &str) {
     let operation = pool_operation(pool, "op_1").await;
     let state = get_recovery_state(pool).await.unwrap();
     let chain = verify(pool).await;
-    assert_eq!(chain, ChainVerdict::Intact { last_sequence: 2 });
-    let mut request = restore_request("op_1");
-    request.binding.challenge_hash = hash;
-    assert_not_restorable(restore_on(pool, &request).await);
-    assert_eq!(pool_snapshot(pool).await, before, "{what}");
+    assert_refused(
+        pool,
+        "op_1",
+        signature,
+        now(),
+        NotRestorableReason::BadSignature,
+    )
+    .await;
     let after = pool_operation(pool, "op_1").await;
     assert_eq!(
         (after.consumed_us, &after.outcome[..], after.revision),
@@ -1289,110 +1743,447 @@ async fn assert_hash_refused(pool: &PgPool, hash: &[u8], what: &str) {
     assert_eq!(verify(pool).await, chain, "{what}");
 }
 
-/// The consume compares the binding's `challenge_hash` with the issued
-/// one byte-wise: a restore presenting another hash of a valid length (a
-/// prefix of the issued hash, one the issued hash is a prefix of, or the
-/// request digest) is `NotRestorable` and writes nothing, and the
-/// challenge stays consumable: the issued hash then restores.
+/// The signature must verify over the stored `M` with the current recovery
+/// key: a signature with a bit flipped, of zeros, by another key (a third
+/// one, or the plan's new key), over other bytes (the challenge hash, `C`
+/// without the prefix, `C` under the request-digest prefix, `M` with a
+/// byte more, another challenge's `M`), with `S + L`, or with `R` replaced
+/// by a non-canonical encoding, is `BadSignature` and writes nothing; the
+/// right signature then restores.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_present_the_issued_challenge_hash() {
+async fn a_restore_needs_a_signature_by_the_current_key_over_m() {
     let (db, pool) = issued().await;
-    for (what, hash) in [
-        ("prefix", &HASH[..32]),
-        ("extended", &LONG_HASH[..]),
-        ("request digest", &DIGEST[..]),
+    issue(&pool, "op_2", "aud_issue_2").await;
+    let mut connection = pool.acquire().await.unwrap();
+    let m = stored_challenge(&mut connection, "op_1").await.unwrap();
+    let other_m = stored_challenge(&mut connection, "op_2").await.unwrap();
+    drop(connection);
+    let canonical = &m[CHALLENGE_PREFIX.len()..];
+    assert_eq!(canonical, op_1_canonical().as_bytes());
+    let good = sign(&SEED, &m);
+    let mut first = good.clone();
+    first[0] ^= 1;
+    let mut last = good.clone();
+    last[63] ^= 0x80;
+    let mut middle = good.clone();
+    middle[40] ^= 0x10;
+    let mut non_canonical_r = good.clone();
+    non_canonical_r[..32].copy_from_slice(&IDENTITY_P_PLUS_1);
+    let mut longer = m.clone();
+    longer.push(b'\n');
+    for (what, signature) in [
+        ("first bit", first),
+        ("last bit", last),
+        ("middle bit", middle),
+        ("zeros", vec![0; 64]),
+        ("ones", vec![0xff; 64]),
+        ("third key", sign(&THIRD_SEED, &m)),
+        ("plan key", sign(&NEW_SEED, &m)),
+        ("hash", sign(&SEED, &Sha256::digest(&m))),
+        ("no prefix", sign(&SEED, canonical)),
+        (
+            "digest prefix",
+            sign(&SEED, &[DIGEST_PREFIX, canonical].concat()),
+        ),
+        ("longer", sign(&SEED, &longer)),
+        ("other challenge", sign(&SEED, &other_m)),
+        ("S + L", malleate(&good)),
+        ("non-canonical R", non_canonical_r),
     ] {
-        assert_hash_refused(&pool, hash, what).await;
+        assert_bad_signature(&pool, &signature, what).await;
     }
-    let restored = restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    let restored = restore_with(&pool, "op_1", &good, &restore_request())
+        .await
+        .unwrap();
     assert_eq!(restored.recovery_key_epoch, 2);
     assert_eq!(pool_operation(&pool, "op_1").await.outcome, "restored");
+
+    // The retired key no longer signs: a challenge issued at the new
+    // epoch needs the new key.
+    let next = plan_for(INSTANCE, json!(2), &other(&THIRD_KEY));
+    let mut request = issue_request("op_3", "aud_issue_3", &next);
+    request.now = at(3_000_000);
+    issue_on(&pool, &request).await.unwrap();
+    let later = RestoreRequest {
+        audit_event_id: "aud_restore_3",
+        rotation_audit_event_id: "aud_rotate_3",
+        now: at(4_000_000),
+    };
+    let retired = signature_by(&mut pool.acquire().await.unwrap(), "op_3", &SEED).await;
+    assert_refused(
+        &pool,
+        "op_3",
+        &retired,
+        later.now,
+        NotRestorableReason::BadSignature,
+    )
+    .await;
+    let restored = restore_by(&pool, "op_3", &NEW_SEED, &later).await.unwrap();
+    assert_eq!(
+        (&restored.admin_id[..], restored.recovery_key_epoch),
+        ("adm_other", 3)
+    );
     db.drop([pool]).await;
 }
 
-/// A hash of the issued hash's length that differs in its bytes, all of
-/// them or only the first or the last, is `NotRestorable` and writes
-/// nothing; the issued hash then restores.
+/// A plain verification accepts what the restore must refuse; the current
+/// key here is a good one, so only `verify_strict` stands between
+/// [`SMALL_ORDER_R_SIGNATURE`] and a restore: it is `BadSignature` at the
+/// preview and the restore, nothing written; the right signature then
+/// restores.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_challenge_hash_of_the_same_length_with_other_bytes_is_refused() {
+async fn a_signature_only_a_plain_verification_accepts_is_refused() {
     let (db, pool) = issued().await;
-    let mut first = HASH;
-    first[0] ^= 1;
-    let mut last = HASH;
-    last[HASH.len() - 1] ^= 0x80;
-    for (what, hash) in [
-        ("other", &OTHER_HASH[..]),
-        ("first byte", &first[..]),
-        ("last byte", &last[..]),
-    ] {
-        assert_eq!(hash.len(), HASH.len());
-        assert_hash_refused(&pool, hash, what).await;
-    }
-    restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    let m = stored_challenge(&mut pool.acquire().await.unwrap(), "op_1")
+        .await
+        .unwrap();
+    assert_eq!(m, [CHALLENGE_PREFIX, op_1_canonical().as_bytes()].concat());
+    let current = VerifyingKey::from_bytes(&KEY).unwrap();
+    current
+        .verify(&m, &Signature::from_bytes(&SMALL_ORDER_R_SIGNATURE))
+        .expect("a plain verification accepts a small-order R");
+    assert!(
+        current
+            .verify_strict(&m, &Signature::from_bytes(&SMALL_ORDER_R_SIGNATURE))
+            .is_err()
+    );
+    assert_bad_signature(&pool, &SMALL_ORDER_R_SIGNATURE, "small-order R").await;
+    let restored = restore_on(&pool, "op_1", &restore_request()).await.unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
     db.drop([pool]).await;
 }
 
-/// Restores `op_1` in `transaction` with a binding `request_digest`, a
-/// `challenge_hash` or both of each length that is not 32 to 64 bytes, and
-/// asserts the issue's encode error, the digest's when both are wrong.
-async fn assert_binding_lengths_refused(transaction: &mut Transaction<'_, Postgres>) {
-    for length in [0, 1, 31, 65, 128] {
-        let bytes = vec![0xc7; length];
-        for (digest, hash, message) in [
-            (true, false, "request digest is not 32 to 64 bytes"),
-            (false, true, "challenge hash is not 32 to 64 bytes"),
-            (true, true, "request digest is not 32 to 64 bytes"),
-        ] {
-            let mut request = restore_request("op_1");
-            if digest {
-                request.binding.request_digest = &bytes;
-            }
-            if hash {
-                request.binding.challenge_hash = &bytes;
-            }
-            assert_restore_encode(restore_operator(transaction, &request).await, message);
-        }
-    }
-}
-
-/// A binding `request_digest` or `challenge_hash` that is not 32 to 64
-/// bytes is an encode error before any statement, with the issue's message,
-/// the digest's when both are: it writes nothing, leaves the transaction
-/// usable and the challenge unconsumed, and it is returned even in a
-/// transaction that has already failed, where any statement, the savepoint
-/// included, would fail. A short digest is therefore not a consume miss.
+/// A signature that is not 64 bytes, the right one cut short or extended
+/// included, is `BadSignature` at the verify step of step 3, after the
+/// locks and the checks before it, at the preview and the restore: it
+/// writes nothing and leaves the challenge unconsumed. The checks before
+/// the verify step still decide first: an unknown ID is `NotFound`, an
+/// expired challenge `Expired`, a retired one `NotBound`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_binding_of_another_length_is_refused_before_any_statement() {
+async fn a_signature_of_another_length_is_bad_signature_at_the_verify_step() {
     let (db, pool) = issued().await;
+    let good = signature_by(&mut pool.acquire().await.unwrap(), "op_1", &SEED).await;
+    let mut extended = good.clone();
+    extended.push(0);
+    let short = [
+        Vec::new(),
+        vec![0xc7],
+        good[..32].to_vec(),
+        good[..63].to_vec(),
+        extended,
+        [&good[..], &good[..]].concat(),
+    ];
+    for signature in &short {
+        assert_bad_signature(&pool, signature, &format!("{} bytes", signature.len())).await;
+        assert_refused(
+            &pool,
+            "op_unknown",
+            signature,
+            now(),
+            NotRestorableReason::NotFound,
+        )
+        .await;
+        assert_refused(
+            &pool,
+            "op_1",
+            signature,
+            expires(),
+            NotRestorableReason::Expired,
+        )
+        .await;
+    }
+    // A challenge whose recovery state moved since the issue is `NotBound`
+    // before its signature is looked at.
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
-    let before = snapshot(&mut transaction).await;
-    assert_binding_lengths_refused(&mut transaction).await;
-    assert_eq!(snapshot(&mut transaction).await, before);
-    // Still usable, and the challenge still consumable.
-    consume_and_restore(&mut transaction, "op_1").await.unwrap();
-    transaction.rollback().await.unwrap();
-
-    let mut transaction = connection.begin().await.unwrap();
-    let failed = sqlx::query("SELECT 1 / 0")
+    sqlx::query("UPDATE recovery_state SET revision = revision + 1")
         .execute(&mut *transaction)
         .await
-        .unwrap_err();
-    assert_eq!(sqlstate(&failed), "22012");
-    assert_binding_lengths_refused(&mut transaction).await;
+        .unwrap();
+    for signature in &short {
+        assert_not_restorable(
+            restore_operator(
+                &mut transaction,
+                &response("op_1", signature),
+                &restore_request(),
+            )
+            .await,
+            NotRestorableReason::NotBound,
+        );
+    }
     transaction.rollback().await.unwrap();
     drop(connection);
-    let operation = pool_operation(&pool, "op_1").await;
+    let restored = restore_with(&pool, "op_1", &good, &restore_request())
+        .await
+        .unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
+    db.drop([pool]).await;
+}
+
+/// A current recovery key that is not a canonical point of large order (a
+/// row written by other means: bootstrap refuses one) is `WeakKey`, even
+/// with the signature that a plain verification accepts for the identity
+/// key over any message.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_weak_current_key_is_refused() {
+    for (index, key) in [
+        &IDENTITY[..],
+        &[0; 32][..],
+        &IDENTITY_P_PLUS_1[..],
+        &LARGE_P_PLUS_3[..],
+        &UNDECODABLE[..],
+        &KEY[..31],
+        &[KEY, KEY].concat()[..],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (db, pool) = issued().await;
+        // The rotation trigger requires the epoch to advance with the key.
+        sqlx::query(
+            "UPDATE recovery_state SET recovery_public_key = $1, \
+             recovery_key_epoch = recovery_key_epoch + 1, revision = revision + 1",
+        )
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        insert_raw(
+            &pool,
+            "raw_weak",
+            OPERATOR_RESTORATION,
+            json!(plan(INSTANCE, json!(2))),
+            Stored::Library,
+            2,
+        )
+        .await;
+        if key == IDENTITY {
+            // What a plain verification would let through: the fixed
+            // signature over this challenge's `M`, under the identity key.
+            let m = stored_challenge(&mut pool.acquire().await.unwrap(), "raw_weak")
+                .await
+                .unwrap();
+            VerifyingKey::from_bytes(&IDENTITY)
+                .unwrap()
+                .verify(&m, &Signature::from_bytes(&FIXED_SIGNATURE))
+                .expect("a plain verification accepts the fixed signature");
+        }
+        for signature in [FIXED_SIGNATURE.to_vec(), vec![0; 64]] {
+            assert_refused(
+                &pool,
+                "raw_weak",
+                &signature,
+                now(),
+                NotRestorableReason::WeakKey,
+            )
+            .await;
+        }
+        assert_refused_signed(&pool, "raw_weak", now(), NotRestorableReason::WeakKey).await;
+        assert_eq!(
+            pool_operation(&pool, "raw_weak").await.consumed_us,
+            None,
+            "{index}"
+        );
+        db.drop([pool]).await;
+    }
+}
+
+/// A key change between the issue and the restore (by other means, or by
+/// another restore) retires the challenge: `NotBound`, signed by the old
+/// key or the new one.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_key_change_between_issue_and_restore_retires_the_challenge() {
+    let (db, pool) = issued().await;
+    sqlx::query(
+        "UPDATE recovery_state SET recovery_public_key = $1, \
+         recovery_key_epoch = recovery_key_epoch + 1, revision = revision + 1",
+    )
+    .bind(&THIRD_KEY[..])
+    .execute(&pool)
+    .await
+    .unwrap();
+    for seed in [&SEED, &THIRD_SEED] {
+        let signature = signature_by(&mut pool.acquire().await.unwrap(), "op_1", seed).await;
+        assert_refused(
+            &pool,
+            "op_1",
+            &signature,
+            now(),
+            NotRestorableReason::NotBound,
+        )
+        .await;
+    }
+    db.drop([pool]).await;
+
+    // A replay of an unused challenge after another restore rotated.
+    let (db, pool) = issued().await;
+    issue(&pool, "op_2", "aud_issue_2").await;
+    restore_on(&pool, "op_1", &restore_request()).await.unwrap();
+    for seed in [&SEED, &NEW_SEED] {
+        let signature = signature_by(&mut pool.acquire().await.unwrap(), "op_2", seed).await;
+        assert_refused(
+            &pool,
+            "op_2",
+            &signature,
+            now(),
+            NotRestorableReason::NotBound,
+        )
+        .await;
+    }
+    db.drop([pool]).await;
+}
+
+/// The restore enrolls the plan the signature covers: a row with another
+/// plan, encoded by the library, presented with `op_1`'s signature is
+/// `BadSignature`; the same row carrying `op_1`'s digest and hash is
+/// `NotLibraryEncoding`. The stored plan cannot be changed in place.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_tampered_plan_is_refused() {
+    let (db, pool) = issued().await;
+    let evil = Replacement {
+        admin_id: "adm_evil",
+        credential_id: "crd_evil",
+        binding_id: "rb_evil",
+        public_identity: "spki-sha256:evil",
+        ..other(&THIRD_KEY)
+    };
+    let evil_plan = json!(plan_for(INSTANCE, json!(1), &evil));
+    let op_1 = pool_operation(&pool, "op_1").await;
+    insert_raw(
+        &pool,
+        "raw_evil",
+        OPERATOR_RESTORATION,
+        evil_plan.clone(),
+        Stored::Library,
+        1,
+    )
+    .await;
+    insert_raw(
+        &pool,
+        "raw_evil_copied",
+        OPERATOR_RESTORATION,
+        evil_plan.clone(),
+        Stored::Bytes(op_1.request_digest.clone(), op_1.challenge_hash.clone()),
+        1,
+    )
+    .await;
+    let op_1_signature = signature_by(&mut pool.acquire().await.unwrap(), "op_1", &SEED).await;
+    assert_refused(
+        &pool,
+        "raw_evil",
+        &op_1_signature,
+        now(),
+        NotRestorableReason::BadSignature,
+    )
+    .await;
+    assert_refused(
+        &pool,
+        "raw_evil_copied",
+        &op_1_signature,
+        now(),
+        NotRestorableReason::NotLibraryEncoding,
+    )
+    .await;
+    let err =
+        sqlx::query("UPDATE administrative_operation SET immutable_plan = $1 WHERE id = 'op_1'")
+            .bind(&evil_plan)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+    assert_eq!(sqlstate(&err), "SK001");
+    // `op_1` restores its own plan.
+    let restored = restore_with(&pool, "op_1", &op_1_signature, &restore_request())
+        .await
+        .unwrap();
+    assert_eq!(restored.admin_id, "adm_new");
+    db.drop([pool]).await;
+}
+
+/// The preview checks a response as the restore does and returns what it
+/// would enroll; it takes no lock, writes nothing and grants nothing: the
+/// restore checks again, at its own `now`, with its own signature.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_preview_checks_as_a_restore_does_and_grants_nothing() {
+    let (db, pool) = issued().await;
+    let signature = signature_by(&mut pool.acquire().await.unwrap(), "op_1", &SEED).await;
+    let before = pool_snapshot(&pool).await;
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    let preview = preview_recovery_response(&mut transaction, &response("op_1", &signature), now())
+        .await
+        .unwrap();
     assert_eq!(
-        (
-            operation.consumed_us,
-            &operation.outcome[..],
-            operation.revision
-        ),
-        (None, "issued", 1)
+        preview,
+        RecoveryPreview {
+            admin_id: "adm_new".into(),
+            credential_id: "crd_new".into(),
+            binding_id: "rb_new".into(),
+            new_recovery_key_epoch: 2,
+            expires_at: expires(),
+        }
+    );
+    assert_eq!(format!("{preview:?}"), "RecoveryPreview { .. }");
+    // No lock held: another transaction takes every row a restore locks.
+    let mut other = pool.begin().await.unwrap();
+    for statement in [
+        "SELECT 1 FROM recovery_state FOR UPDATE NOWAIT",
+        "SELECT 1 FROM administrative_operation WHERE id = 'op_1' FOR UPDATE NOWAIT",
+        "SELECT 1 FROM admin_credential FOR UPDATE NOWAIT",
+    ] {
+        sqlx::query(statement).execute(&mut *other).await.unwrap();
+    }
+    other.rollback().await.unwrap();
+    assert_eq!(snapshot(&mut transaction).await, before);
+    // A preview of the same response again, and a refusal, keep the
+    // transaction usable: it still commits, and the commit writes nothing.
+    assert_eq!(
+        preview_recovery_response(&mut transaction, &response("op_1", &signature), now())
+            .await
+            .unwrap(),
+        preview
+    );
+    assert_not_restorable(
+        preview_recovery_response(&mut transaction, &response("op_1", &[0; 64]), now()).await,
+        NotRestorableReason::BadSignature,
+    );
+    transaction.commit().await.unwrap();
+    drop(connection);
+    assert_eq!(pool_snapshot(&pool).await, before);
+
+    // Grants nothing: after a good preview, a restore later than the
+    // expiry, or with another signature, is refused.
+    let mut late = restore_request();
+    late.now = expires();
+    assert_not_restorable(
+        restore_with(&pool, "op_1", &signature, &late).await,
+        NotRestorableReason::Expired,
+    );
+    assert_not_restorable(
+        restore_with(&pool, "op_1", &[0; 64], &restore_request()).await,
+        NotRestorableReason::BadSignature,
+    );
+    assert_eq!(pool_snapshot(&pool).await, before);
+    // Before bootstrap there is nothing to preview.
+    let (empty_db, empty) = migrated().await;
+    assert_not_restorable(
+        preview_with(&empty, "op_1", &signature, now()).await,
+        NotRestorableReason::NoRecoveryState,
+    );
+    empty_db.drop([empty]).await;
+    // A consumed challenge previews as `Consumed`.
+    restore_with(&pool, "op_1", &signature, &restore_request())
+        .await
+        .unwrap();
+    assert_not_restorable(
+        preview_with(&pool, "op_1", &signature, now()).await,
+        NotRestorableReason::Consumed,
     );
     db.drop([pool]).await;
 }
@@ -1412,7 +2203,7 @@ async fn the_database_refuses_a_replay_a_late_consume_and_one_after_revocation()
         "op_revoker",
     )
     .await;
-    restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    restore_on(&pool, "op_1", &restore_request()).await.unwrap();
     let before = pool_snapshot(&pool).await;
     for (id, at, expected) in [
         ("op_1", now() + Duration::from_secs(1), None),
@@ -1508,9 +2299,63 @@ async fn waits_for<T>(
     .expect("the task neither waited nor ended")
 }
 
+/// Step 3 locks the challenge row before it checks it: a restore waits for
+/// a transaction that is revoking the challenge, then checks the row as
+/// committed and is `Revoked` (it would pass the check on the old row and
+/// miss only in the consume without the lock); after a rollback it
+/// restores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_restore_checks_its_challenge_under_the_row_lock() {
+    for commit in [true, false] {
+        let (db, pool) = issued().await;
+        issue(&pool, "op_2", "aud_issue_2").await;
+        let mut first = pool.acquire().await.unwrap().detach();
+        let mut second = pool.acquire().await.unwrap().detach();
+        let (first_pid, second_pid) = (
+            backend_pid(&mut first).await,
+            backend_pid(&mut second).await,
+        );
+        let mut transaction = first.begin().await.unwrap();
+        raw_revoke(&mut transaction, "op_1", "op_2").await;
+        let signature = signature_by(&mut second, "op_1", &SEED).await;
+        let waiting = tokio::spawn(async move {
+            let mut other = second.begin().await.unwrap();
+            let restored = restore_operator(
+                &mut other,
+                &response("op_1", &signature),
+                &restore_request(),
+            )
+            .await;
+            if restored.is_ok() {
+                other.commit().await.unwrap();
+            } else {
+                other.rollback().await.unwrap();
+            }
+            second.close().await.unwrap();
+            restored
+        });
+        wait_until_blocked(&pool, second_pid, first_pid).await;
+        if commit {
+            transaction.commit().await.unwrap();
+        } else {
+            transaction.rollback().await.unwrap();
+        }
+        first.close().await.unwrap();
+        let outcome = waiting.await.unwrap();
+        if commit {
+            assert_not_restorable(outcome, NotRestorableReason::Revoked);
+            assert_eq!(pool_operation(&pool, "op_1").await.consumed_us, None);
+        } else {
+            assert_eq!(outcome.unwrap().recovery_key_epoch, 2);
+        }
+        db.drop([pool]).await;
+    }
+}
+
 /// Two restores of one challenge: the second waits for the first (on the
-/// credentials it locked); after the first commits it is `NotRestorable`,
-/// after a rollback it restores.
+/// credentials it locked); after the first commits it is `Consumed`, after
+/// a rollback it restores.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn of_two_concurrent_restores_of_one_challenge_exactly_one_wins() {
@@ -1527,9 +2372,9 @@ async fn of_two_concurrent_restores_of_one_challenge_exactly_one_wins() {
         let later = now() + Duration::from_secs(1);
         let waiting = tokio::spawn(async move {
             let mut other = second.begin().await.unwrap();
-            let mut request = restore_request("op_1");
+            let mut request = restore_request();
             request.now = later;
-            let restored = restore_operator(&mut other, &request).await;
+            let restored = restore_in(&mut other, "op_1", &request).await;
             if restored.is_ok() {
                 other.commit().await.unwrap();
             } else {
@@ -1548,7 +2393,7 @@ async fn of_two_concurrent_restores_of_one_challenge_exactly_one_wins() {
         let outcome = waiting.await.unwrap();
         let row = pool_operation(&pool, "op_1").await;
         let winner = if commit {
-            assert_not_restorable(outcome);
+            assert_not_restorable(outcome, NotRestorableReason::Consumed);
             now()
         } else {
             let restored = outcome.unwrap();
@@ -1887,27 +2732,33 @@ async fn a_restore_enrolls_a_replacement_revokes_every_credential_and_rotates_th
         ChainVerdict::Intact { last_sequence: 5 }
     );
 
-    // The retired epoch is refused for a challenge issued before, also
-    // with the new state's binding.
-    let before = pool_snapshot(&pool).await;
-    assert_not_restorable(restore_on(&pool, &other_request("op_2", &THIRD_KEY)).await);
-    assert_not_restorable(restore_on(&pool, &restore_request("op_2")).await);
-    let mut current = other_request("op_2", &THIRD_KEY);
-    current.binding.recovery_key_epoch = 2;
-    current.binding.expected_revision = 2;
-    assert_not_restorable(restore_on(&pool, &current).await);
-    assert_eq!(pool_snapshot(&pool).await, before);
-    // A challenge of the new epoch works.
-    let request = RestoreRequest {
-        operation_id: "op_3",
-        ..current
-    };
-    let plan = plan_for(INSTANCE, json!(2), &request);
+    // A challenge issued before, at the retired epoch, is refused, signed
+    // by the retired key or the new one.
+    for seed in [&SEED, &NEW_SEED] {
+        let signature = signature_by(&mut pool.acquire().await.unwrap(), "op_2", seed).await;
+        assert_refused(
+            &pool,
+            "op_2",
+            &signature,
+            now(),
+            NotRestorableReason::NotBound,
+        )
+        .await;
+    }
+    // A challenge of the new epoch works, signed by the new key.
+    let plan = plan_for(INSTANCE, json!(2), &other(&THIRD_KEY));
     let challenge = issue_on(&pool, &issue_request("op_3", "aud_issue_3", &plan))
         .await
         .unwrap();
     assert_eq!(challenge.expected_revision, 2);
-    let again = restore_on(&pool, &request).await.unwrap();
+    let request = RestoreRequest {
+        audit_event_id: "aud_other",
+        rotation_audit_event_id: "aud_other_rotate",
+        now: now(),
+    };
+    let again = restore_by(&pool, "op_3", &NEW_SEED, &request)
+        .await
+        .unwrap();
     assert_eq!(
         (
             again.recovery_key_epoch,
@@ -2005,11 +2856,11 @@ async fn a_failed_restore_commits_nothing_even_when_the_caller_commits() {
         ("aud_restore", "aud_restore"),
     ] {
         let mut transaction = pool.begin().await.unwrap();
-        let mut request = restore_request("op_1");
+        let mut request = restore_request();
         request.audit_event_id = restore_id;
         request.rotation_audit_event_id = rotation_id;
         assert_restore_exists(
-            restore_operator(&mut transaction, &request).await,
+            restore_in(&mut transaction, "op_1", &request).await,
             "audit_event_pkey",
         );
         // The transaction is usable and its commit writes nothing.
@@ -2038,7 +2889,7 @@ async fn a_failed_restore_commits_nothing_even_when_the_caller_commits() {
         .unwrap();
         let before = pool_snapshot(&pool).await;
         let mut transaction = pool.begin().await.unwrap();
-        match restore_operator(&mut transaction, &restore_request("op_1")).await {
+        match restore_in(&mut transaction, "op_1", &restore_request()).await {
             Err(RestoreError::Store(RegistryError::Other(sqlx::Error::Encode(_)))) => {}
             other => panic!("expected the writer's encode error: {other:?}"),
         }
@@ -2237,7 +3088,7 @@ async fn a_restore_that_times_out_leaves_the_transaction_usable() {
         .execute(&mut *transaction)
         .await
         .unwrap();
-    match restore_operator(&mut transaction, &restore_request("op_1")).await {
+    match restore_in(&mut transaction, "op_1", &restore_request()).await {
         Err(RestoreError::Store(RegistryError::Other(err))) => {
             let code = err
                 .as_database_error()
@@ -2256,7 +3107,7 @@ async fn a_restore_that_times_out_leaves_the_transaction_usable() {
     transaction.commit().await.unwrap();
     holder.rollback().await.unwrap();
     assert_eq!(pool_snapshot(&pool).await, before);
-    restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    restore_on(&pool, "op_1", &restore_request()).await.unwrap();
     db.drop([pool]).await;
 }
 
@@ -2269,130 +3120,228 @@ async fn a_restore_that_times_out_leaves_the_transaction_usable() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_colliding_replacement_is_already_exists() {
     let (db, pool) = issued().await;
-    let cases: [(&str, Change, &str); 6] = [
+    let cases: [(&str, Replacement<'static>, &str); 5] = [
         (
             "op_admin",
-            |request| request.admin_id = "adm_first",
+            Replacement {
+                admin_id: "adm_first",
+                ..NEW
+            },
             "admin_identity_pkey",
         ),
         (
             "op_credential",
-            |request| request.credential_id = "crd_first",
+            Replacement {
+                credential_id: "crd_first",
+                ..NEW
+            },
             "admin_credential_pkey",
         ),
         (
             "op_binding",
-            |request| request.binding_id = "rb_first",
+            Replacement {
+                binding_id: "rb_first",
+                ..NEW
+            },
             "admin_role_binding_pkey",
         ),
         (
             "op_identity",
-            |request| request.public_identity = "spki-sha256:first",
+            Replacement {
+                public_identity: "spki-sha256:first",
+                ..NEW
+            },
             "admin_credential_public_identity_key",
         ),
         (
             "op_both",
-            |request| {
-                request.credential_id = "crd_first";
-                request.public_identity = "spki-sha256:first";
+            Replacement {
+                credential_id: "crd_first",
+                public_identity: "spki-sha256:first",
+                ..NEW
             },
             // Both credential keys taken: the ID is named.
             "admin_credential_pkey",
         ),
-        (
-            "op_1",
-            |request| request.audit_event_id = "aud_bootstrap",
-            "audit_event_pkey",
-        ),
     ];
-    for (index, (id, change, constraint)) in cases.into_iter().enumerate() {
-        let mut request = restore_request(id);
-        change(&mut request);
-        if id != "op_1" {
-            let plan = plan_for(INSTANCE, json!(1), &request);
-            let audit = format!("aud_issue_{id}");
-            issue_on(&pool, &issue_request(id, &audit, &plan))
-                .await
-                .unwrap();
-        }
+    for (index, (id, replacement, constraint)) in cases.into_iter().enumerate() {
+        let plan = plan_for(INSTANCE, json!(1), &replacement);
+        let audit = format!("aud_issue_{id}");
+        issue_on(&pool, &issue_request(id, &audit, &plan))
+            .await
+            .unwrap();
         let before = pool_snapshot(&pool).await;
         let mut transaction = pool.begin().await.unwrap();
         assert_restore_exists(
-            restore_operator(&mut transaction, &request).await,
+            restore_in(&mut transaction, id, &restore_request()).await,
             constraint,
         );
         transaction.commit().await.unwrap();
         assert_eq!(pool_snapshot(&pool).await, before, "{index} {constraint}");
     }
+    let before = pool_snapshot(&pool).await;
+    let mut transaction = pool.begin().await.unwrap();
+    let mut request = restore_request();
+    request.audit_event_id = "aud_bootstrap";
+    assert_restore_exists(
+        restore_in(&mut transaction, "op_1", &request).await,
+        "audit_event_pkey",
+    );
+    transaction.commit().await.unwrap();
+    assert_eq!(pool_snapshot(&pool).await, before);
     db.drop([pool]).await;
 }
 
-/// A new key equal to the current one is `RecoveryKeyUnchanged`, a key of
-/// another length, a reserved admin ID or a time outside the audit years an
-/// encode error; none leaves anything written, and the transaction stays
+/// A stored plan that the issue would refuse (a row written by other
+/// means, encoded and signed as the library would) is refused at step 5,
+/// at the preview and the restore: a new key equal to the current one is
+/// `RecoveryKeyUnchanged`, a reserved admin ID `ReservedActorId`, and a new
+/// key that is not a canonical point of large order or not in hexadecimal,
+/// a member other than the eight, or an empty public identity an encode
+/// error. A time outside the audit years is an encode error before any
+/// statement. None leaves anything written, and the transaction stays
 /// usable for a good restore.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_refused_restore_leaves_nothing_written() {
     let (db, pool) = issued().await;
-    let mut same = restore_request("op_same");
-    same.new_recovery_public_key = &KEY;
-    let plan = plan_for(INSTANCE, json!(1), &same);
-    issue_on(&pool, &issue_request("op_same", "aud_issue_same", &plan))
-        .await
-        .unwrap();
+    let with = |name: &str, value: Value| {
+        let mut plan = good_plan();
+        plan.insert(name.into(), value);
+        json!(plan)
+    };
+    let rows = [
+        (
+            "raw_same",
+            json!(plan_for(INSTANCE, json!(1), &other(&KEY))),
+        ),
+        (
+            "raw_reserved",
+            with("admin_id", json!("deployment_operator")),
+        ),
+        (
+            "raw_recovery_actor",
+            with("admin_id", json!("recovery_key:2")),
+        ),
+        (
+            "raw_small_order",
+            json!(plan_for(INSTANCE, json!(1), &other(&IDENTITY))),
+        ),
+        (
+            "raw_non_canonical",
+            json!(plan_for(INSTANCE, json!(1), &other(&LARGE_P_PLUS_3))),
+        ),
+        (
+            "raw_undecodable",
+            json!(plan_for(INSTANCE, json!(1), &other(&UNDECODABLE))),
+        ),
+        (
+            "raw_upper_key",
+            with(
+                "new_recovery_public_key",
+                json!(hex(&NEW_KEY).to_uppercase()),
+            ),
+        ),
+        (
+            "raw_extra",
+            with("operation", json!("operator_restoration")),
+        ),
+        ("raw_empty_identity", with("public_identity", json!(""))),
+    ];
+    let mut signatures = BTreeMap::new();
+    for (id, plan) in rows {
+        insert_raw(&pool, id, OPERATOR_RESTORATION, plan, Stored::Library, 1).await;
+        signatures.insert(
+            id,
+            signature_by(&mut pool.acquire().await.unwrap(), id, &SEED).await,
+        );
+    }
     let mut connection = pool.acquire().await.unwrap();
     let mut transaction = connection.begin().await.unwrap();
     let before = snapshot(&mut transaction).await;
 
-    match restore_operator(&mut transaction, &same).await {
-        Err(err @ RestoreError::RecoveryKeyUnchanged) => {
-            assert_eq!(format!("{err:?}"), "RecoveryKeyUnchanged");
-            assert_eq!(
-                err.to_string(),
-                "the new recovery public key is the current one"
-            );
+    let same = response("raw_same", &signatures["raw_same"]);
+    for result in [
+        preview_recovery_response(&mut transaction, &same, now())
+            .await
+            .map(|_| ()),
+        restore_operator(&mut transaction, &same, &restore_request())
+            .await
+            .map(|_| ()),
+    ] {
+        match result {
+            Err(err @ RestoreError::RecoveryKeyUnchanged) => {
+                assert_eq!(format!("{err:?}"), "RecoveryKeyUnchanged");
+                assert_eq!(
+                    err.to_string(),
+                    "the new recovery public key is the current one"
+                );
+            }
+            other => panic!("expected RecoveryKeyUnchanged: {other:?}"),
         }
-        other => panic!("expected RecoveryKeyUnchanged: {other:?}"),
     }
     assert_eq!(snapshot(&mut transaction).await, before);
-    // A challenge that is not consumable is refused first (inferred order).
-    let mut request = restore_request("op_unknown");
-    request.new_recovery_public_key = &KEY;
-    assert_not_restorable(restore_operator(&mut transaction, &request).await);
-    assert_eq!(snapshot(&mut transaction).await, before);
-    // So is a replacement the plan does not name (inferred order).
-    let mut request = same;
-    request.admin_id = "adm_other";
-    assert_not_restorable(restore_operator(&mut transaction, &request).await);
-    assert_eq!(snapshot(&mut transaction).await, before);
-
-    let long = [0x22; 33];
-    for key in [&[][..], &NEW_KEY[..31], &long[..]] {
-        let mut request = restore_request("op_1");
-        request.new_recovery_public_key = key;
+    for id in ["raw_reserved", "raw_recovery_actor"] {
+        let presented = response(id, &signatures[id]);
+        for result in [
+            preview_recovery_response(&mut transaction, &presented, now())
+                .await
+                .map(|_| ()),
+            restore_operator(&mut transaction, &presented, &restore_request())
+                .await
+                .map(|_| ()),
+        ] {
+            match result {
+                Err(RestoreError::Store(RegistryError::ReservedActorId)) => {}
+                other => panic!("{id}: expected ReservedActorId: {other:?}"),
+            }
+        }
+    }
+    for (id, message) in [
+        (
+            "raw_small_order",
+            "recovery public key is a small-order Ed25519 point",
+        ),
+        (
+            "raw_non_canonical",
+            "recovery public key is not canonically encoded",
+        ),
+        (
+            "raw_undecodable",
+            "recovery public key is not an Ed25519 point",
+        ),
+        (
+            "raw_upper_key",
+            "plan new_recovery_public_key is not 64 lowercase hexadecimal digits",
+        ),
+        (
+            "raw_extra",
+            "plan has a member other than the eight of an operator restoration",
+        ),
+        (
+            "raw_empty_identity",
+            "public identity is empty or over 2048 bytes",
+        ),
+    ] {
+        let presented = response(id, &signatures[id]);
         assert_restore_encode(
-            restore_operator(&mut transaction, &request).await,
-            "recovery public key is not a 32-byte Ed25519 key",
+            preview_recovery_response(&mut transaction, &presented, now()).await,
+            message,
+        );
+        assert_restore_encode(
+            restore_operator(&mut transaction, &presented, &restore_request()).await,
+            message,
         );
     }
-    for admin in ["deployment_operator", "recovery_key:1", "recovery_key:2"] {
-        let mut request = restore_request("op_1");
-        request.admin_id = admin;
-        match restore_operator(&mut transaction, &request).await {
-            Err(RestoreError::Store(RegistryError::ReservedActorId)) => {}
-            other => panic!("{admin}: expected ReservedActorId: {other:?}"),
-        }
-    }
-    let mut request = restore_request("op_1");
+    let mut request = restore_request();
     request.now = UNIX_EPOCH + Duration::from_secs(253_402_300_800);
     assert_restore_encode(
-        restore_operator(&mut transaction, &request).await,
+        restore_in(&mut transaction, "op_1", &request).await,
         "audit timestamp outside the years 0000 to 9999",
     );
     assert_eq!(snapshot(&mut transaction).await, before);
 
-    let restored = restore_operator(&mut transaction, &restore_request("op_1"))
+    let restored = restore_in(&mut transaction, "op_1", &restore_request())
         .await
         .unwrap();
     assert_eq!(restored.recovery_key_epoch, 2);
@@ -2408,243 +3357,71 @@ async fn a_refused_restore_leaves_nothing_written() {
     db.drop([pool]).await;
 }
 
-/// A restore consumes the challenge with the consume statement against the
-/// recovery state it locked: every miss is `NotRestorable`, also for a
-/// recovery state whose `bootstrap_closed` is false (written by other
-/// means), and nothing is left written.
+/// A restore checks the challenge against the recovery state it locked,
+/// in its transaction: a state whose revision moved after the issue is
+/// `NotBound`, and one whose `bootstrap_closed` is false (written by other
+/// means) is `NoRecoveryState`, at the preview and the restore; nothing is
+/// left written. A second restore of the restored operation is `Consumed`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_needs_a_consumable_challenge_for_the_current_state() {
+async fn a_restore_needs_the_current_closed_recovery_state() {
     let (db, pool) = issued().await;
-    issue(&pool, "op_revoker", "aud_issue_2").await;
-    issue(&pool, "op_revoked", "aud_issue_3").await;
-    issue(&pool, "op_failed", "aud_issue_4").await;
-    issue(&pool, "op_consumed", "aud_issue_5").await;
-    raw_revoke(
-        &mut pool.acquire().await.unwrap(),
-        "op_revoked",
-        "op_revoker",
-    )
-    .await;
-    sqlx::query(
-        "UPDATE administrative_operation SET outcome = 'failed', revision = revision + 1 \
-         WHERE id = 'op_failed'",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(RAW_CONSUME)
-        .bind("op_consumed")
-        .bind(micros(now()))
-        .execute(&pool)
-        .await
-        .unwrap();
-    for (id, kind, plan, hash) in [
-        (
-            "raw_kind",
-            "route_bundle_approval",
-            json!(good_plan()),
-            true,
-        ),
-        (
-            "raw_no_hash",
-            OPERATOR_RESTORATION,
-            json!(good_plan()),
-            false,
-        ),
-        (
-            "raw_epoch_string",
-            OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!("1"))),
-            true,
-        ),
-        (
-            "raw_epoch_two",
-            OPERATOR_RESTORATION,
-            json!(plan(INSTANCE, json!(2))),
-            true,
-        ),
-        (
-            "raw_other_instance",
-            OPERATOR_RESTORATION,
-            json!(plan(OTHER_INSTANCE, json!(1))),
-            true,
-        ),
-    ] {
-        insert_raw(&pool, id, kind, plan, hash, 1).await;
-    }
     let committed = pool_snapshot(&pool).await;
-
-    let bound = binding();
     // The recovery state left open, by other means; the guards that would
     // refuse that write are off only inside the test's transaction.
     let reopen = "ALTER TABLE recovery_state DISABLE TRIGGER USER; \
                   UPDATE recovery_state SET bootstrap_closed = false; \
                   ALTER TABLE recovery_state ENABLE TRIGGER USER";
-    let cases: [(&str, ChallengeBinding<'_>, SystemTime, Option<&str>); 16] = [
-        ("op_unknown", bound, now(), None),
-        ("op_revoked", bound, now(), None),
-        ("op_failed", bound, now(), None),
-        ("op_consumed", bound, now(), None),
-        ("op_1", bound, expires(), None),
+    for (statement, reason) in [
         (
-            "op_1",
-            ChallengeBinding {
-                request_digest: &OTHER_DIGEST,
-                ..bound
-            },
-            now(),
-            None,
+            "UPDATE recovery_state SET revision = revision + 1",
+            NotRestorableReason::NotBound,
         ),
-        (
-            "op_1",
-            ChallengeBinding {
-                expected_revision: 2,
-                ..bound
-            },
-            now(),
-            None,
-        ),
-        (
-            "op_1",
-            ChallengeBinding {
-                instance_id: OTHER_INSTANCE,
-                ..bound
-            },
-            now(),
-            None,
-        ),
-        (
-            "op_1",
-            bound,
-            now(),
-            Some("UPDATE recovery_state SET revision = revision + 1"),
-        ),
-        ("op_1", bound, now(), Some(reopen)),
-        ("raw_kind", bound, now(), None),
-        ("raw_no_hash", bound, now(), None),
-        ("raw_epoch_string", bound, now(), None),
-        (
-            "raw_epoch_two",
-            ChallengeBinding {
-                recovery_key_epoch: 2,
-                ..bound
-            },
-            now(),
-            None,
-        ),
-        (
-            "raw_other_instance",
-            ChallengeBinding {
-                instance_id: OTHER_INSTANCE,
-                ..bound
-            },
-            now(),
-            None,
-        ),
-        ("raw_other_instance", bound, now(), None),
-    ];
-    for (id, binding, at, statement) in cases {
+        (reopen, NotRestorableReason::NoRecoveryState),
+    ] {
         let mut connection = pool.acquire().await.unwrap();
         let mut transaction = connection.begin().await.unwrap();
-        if let Some(statement) = statement {
-            sqlx::raw_sql(AssertSqlSafe(statement))
-                .execute(&mut *transaction)
-                .await
-                .unwrap();
-        }
+        sqlx::raw_sql(AssertSqlSafe(statement))
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
         let before = snapshot(&mut transaction).await;
-        let mut request = restore_request(id);
-        request.binding = binding;
-        request.now = at;
-        let refused = restore_operator(&mut transaction, &request).await;
-        assert!(
-            matches!(refused, Err(RestoreError::NotRestorable)),
-            "{id} {statement:?}: {refused:?}"
+        let signature = signature_by(&mut transaction, "op_1", &SEED).await;
+        assert_not_restorable(
+            preview_recovery_response(&mut transaction, &response("op_1", &signature), now()).await,
+            reason,
         );
-        assert_eq!(snapshot(&mut transaction).await, before, "{id}");
+        assert_not_restorable(
+            restore_in(&mut transaction, "op_1", &restore_request()).await,
+            reason,
+        );
+        assert_eq!(snapshot(&mut transaction).await, before, "{reason:?}");
         transaction.rollback().await.unwrap();
     }
     assert_eq!(pool_snapshot(&pool).await, committed);
 
     // The control, with every value right; then a second restore of the
     // restored operation.
-    restore_on(&pool, &restore_request("op_1")).await.unwrap();
+    restore_on(&pool, "op_1", &restore_request()).await.unwrap();
     let restored = pool_snapshot(&pool).await;
-    let mut request = restore_request("op_1");
-    request.audit_event_id = "aud_again";
-    request.rotation_audit_event_id = "aud_again_rotate";
-    request.binding.recovery_key_epoch = 2;
-    request.binding.expected_revision = 2;
-    assert_not_restorable(restore_on(&pool, &request).await);
+    let request = RestoreRequest {
+        audit_event_id: "aud_again",
+        rotation_audit_event_id: "aud_again_rotate",
+        now: now(),
+    };
+    assert_not_restorable(
+        restore_by(&pool, "op_1", &NEW_SEED, &request).await,
+        NotRestorableReason::Consumed,
+    );
     assert_eq!(pool_snapshot(&pool).await, restored);
     db.drop([pool]).await;
-}
-
-/// Each replacement member the plan names must be the request's: a request
-/// that differs in that one member is `NotRestorable`, and the restore and
-/// its consume roll back, also when the caller commits; the request the
-/// plan names then restores.
-async fn a_restore_must_name_the_planned(change: Change) {
-    let (db, pool) = issued().await;
-    let before = pool_snapshot(&pool).await;
-    let mut request = restore_request("op_1");
-    change(&mut request);
-    assert_ne!(request, restore_request("op_1"));
-    let mut transaction = pool.begin().await.unwrap();
-    assert_not_restorable(restore_operator(&mut transaction, &request).await);
-    transaction.commit().await.unwrap();
-    assert_eq!(pool_snapshot(&pool).await, before);
-    let row = pool_operation(&pool, "op_1").await;
-    assert_eq!((row.consumed_us, row.revision), (None, 1));
-    let restored = restore_on(&pool, &restore_request("op_1")).await.unwrap();
-    assert_eq!(restored.recovery_key_epoch, 2);
-    db.drop([pool]).await;
-}
-
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_name_the_planned_admin_id() {
-    a_restore_must_name_the_planned(|request| request.admin_id = "adm_other").await;
-}
-
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_name_the_planned_credential_id() {
-    a_restore_must_name_the_planned(|request| request.credential_id = "crd_other").await;
-}
-
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_name_the_planned_binding_id() {
-    a_restore_must_name_the_planned(|request| request.binding_id = "rb_other").await;
-}
-
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_name_the_planned_public_identity() {
-    a_restore_must_name_the_planned(|request| request.public_identity = "spki-sha256:other").await;
-}
-
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_name_the_planned_trust_anchor_ref() {
-    a_restore_must_name_the_planned(|request| request.trust_anchor_ref = "deployment/other-ca")
-        .await;
-}
-
-/// Another replacement key with the binding unchanged.
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_restore_must_name_the_planned_recovery_key() {
-    a_restore_must_name_the_planned(|request| request.new_recovery_public_key = &THIRD_KEY).await;
 }
 
 /// A restore and an issue wait for each other on the recovery state, in
 /// either order, without a deadlock: an issue after a restore sees the new
 /// epoch, and a restore after an issue retires the issued challenge's
 /// epoch. Of two concurrent restores (of two challenges) the second is
-/// `NotRestorable`.
+/// `NotBound`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_restore_and_an_issue_wait_for_each_other() {
@@ -2672,7 +3449,8 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
     transaction.commit().await.unwrap();
     first.close().await.unwrap();
     assert_not_issuable(waiting.await.unwrap());
-    let plan = plan(INSTANCE, json!(2));
+    // The new epoch's plan names a key other than the one now current.
+    let plan = plan_for(INSTANCE, json!(2), &other(&THIRD_KEY));
     issue_on(&pool, &issue_request("op_2", "aud_issue_2", &plan))
         .await
         .unwrap();
@@ -2713,7 +3491,7 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
         ),
         (2, 4, 5)
     );
-    assert_not_restorable(restore_on(&pool, &other_request("op_2", &THIRD_KEY)).await);
+    assert_refused_signed(&pool, "op_2", now(), NotRestorableReason::NotBound).await;
     assert_eq!(
         verify(&pool).await,
         ChainVerdict::Intact { last_sequence: 5 }
@@ -2722,7 +3500,7 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
 
     // Two restores.
     let (db, pool) = issued().await;
-    let plan = plan_for(INSTANCE, json!(1), &other_request("op_2", &THIRD_KEY));
+    let plan = plan_for(INSTANCE, json!(1), &other(&THIRD_KEY));
     issue_on(&pool, &issue_request("op_2", "aud_issue_2", &plan))
         .await
         .unwrap();
@@ -2736,7 +3514,12 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
     consume_and_restore(&mut transaction, "op_1").await.unwrap();
     let waiting = tokio::spawn(async move {
         let mut other = second.begin().await.unwrap();
-        let restored = restore_operator(&mut other, &other_request("op_2", &THIRD_KEY)).await;
+        let request = RestoreRequest {
+            audit_event_id: "aud_other",
+            rotation_audit_event_id: "aud_other_rotate",
+            now: now(),
+        };
+        let restored = restore_in(&mut other, "op_2", &request).await;
         other.rollback().await.unwrap();
         second.close().await.unwrap();
         restored
@@ -2744,7 +3527,7 @@ async fn a_restore_and_an_issue_wait_for_each_other() {
     wait_until_blocked(&pool, second_pid, first_pid).await;
     transaction.commit().await.unwrap();
     first.close().await.unwrap();
-    assert_not_restorable(waiting.await.unwrap());
+    assert_not_restorable(waiting.await.unwrap(), NotRestorableReason::NotBound);
     assert_eq!(
         get_recovery_state(&pool)
             .await
@@ -2891,16 +3674,12 @@ async fn a_plan_instance_is_a_json_string() {
         "INSERT INTO instance_security_policy (instance_id) VALUES ('12345'); \
          INSERT INTO recovery_state (instance_id, bootstrap_closed, recovery_public_key, \
          recovery_key_epoch) VALUES ('12345', true, \
-         '\\x1111111111111111111111111111111111111111111111111111111111111111', 1)",
+         '\\xc050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a', 1)",
     )
     .execute(&pool)
     .await
     .unwrap();
-    let bound = ChallengeBinding {
-        instance_id: "12345",
-        ..binding()
-    };
-    let string = plan_for("12345", json!(1), &restore_request(""));
+    let string = plan_for("12345", json!(1), &NEW);
     issue_on(&pool, &issue_request("op_1", "aud_issue_1", &string))
         .await
         .unwrap();
@@ -2911,33 +3690,30 @@ async fn a_plan_instance_is_a_json_string() {
         "raw_number",
         OPERATOR_RESTORATION,
         json!(number),
-        true,
+        Stored::Library,
         1,
     )
     .await;
 
-    let before = pool_snapshot(&pool).await;
-    let mut request = restore_request("raw_number");
-    request.binding = bound;
-    assert_not_restorable(restore_on(&pool, &request).await);
-    assert_eq!(pool_snapshot(&pool).await, before);
-
-    let mut request = restore_request("op_1");
-    request.binding = bound;
-    restore_on(&pool, &request).await.unwrap();
+    assert_refused_signed(&pool, "raw_number", now(), NotRestorableReason::NotBound).await;
+    restore_on(&pool, "op_1", &restore_request()).await.unwrap();
     db.drop([pool]).await;
 }
 
-/// Before bootstrap there is no recovery state, so nothing is restorable.
+/// Before bootstrap there is no recovery state, so nothing is restorable,
+/// at the preview or the restore.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn nothing_is_restorable_before_bootstrap() {
     let (db, pool) = migrated().await;
-    let before = pool_snapshot(&pool).await;
-    let mut transaction = pool.begin().await.unwrap();
-    assert_not_restorable(restore_operator(&mut transaction, &restore_request("op_1")).await);
-    transaction.rollback().await.unwrap();
-    assert_eq!(pool_snapshot(&pool).await, before);
+    assert_refused(
+        &pool,
+        "op_1",
+        &sign(&SEED, b"any"),
+        now(),
+        NotRestorableReason::NoRecoveryState,
+    )
+    .await;
     db.drop([pool]).await;
 }
 
@@ -3355,7 +4131,7 @@ async fn a_restore_runs_only_at_read_committed() {
         .await
         .unwrap();
         let inside = snapshot(&mut transaction).await;
-        match restore_operator(&mut transaction, &restore_request("op_1")).await {
+        match restore_in(&mut transaction, "op_1", &restore_request()).await {
             Err(err @ RestoreError::UnsupportedIsolation) => {
                 assert_eq!(format!("{err:?}"), "UnsupportedIsolation");
                 assert_eq!(
@@ -3514,7 +4290,7 @@ async fn documented_order_deadlock(restore_waits_first: bool) {
                 ChainVerdict::Intact { last_sequence: 2 }
             );
             // The retry restores and revokes the enrolled credential.
-            let retried = restore_on(&pool, &restore_request("op_1")).await.unwrap();
+            let retried = restore_on(&pool, "op_1", &restore_request()).await.unwrap();
             assert_eq!(retried.revoked_credential_ids, ["crd_first", "crd_late"]);
         }
         // The writer was the victim: it wrote nothing, and the restore
