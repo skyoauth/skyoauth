@@ -414,6 +414,71 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     db.drop([pool]).await;
 }
 
+/// A principal name with a control character, such as a trailing newline
+/// or an ANSI escape sequence, is refused on create and on rename by
+/// `0002`'s `principal_name_no_control_check`, mapped to `Invariant` of
+/// kind `Check` naming it, and nothing changes. Format characters are not
+/// controls: a right-to-left override (U+202E) and a zero-width space
+/// (U+200B) are accepted and read back unchanged.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn principal_names_refuse_control_characters_not_format_characters() {
+    let (db, pool) = seeded().await;
+    let principal = |id: &str, name: &str| NewPrincipal {
+        name: name.into(),
+        ..new_principal("ten_a", id, PrincipalKind::Workload)
+    };
+    for refused in ["deployer\n", "\u{1b}[31mdeployer\u{1b}[0m"] {
+        assert_check(
+            registry::create_principal(&pool, &principal("wld_2", refused)).await,
+            "principal_name_no_control_check",
+        );
+        assert_not_found(registry::get_principal(&pool, "ten_a", "wld_2").await);
+        assert_check(
+            registry::update_principal(&pool, "ten_a", "wld_1", 1, &principal_patch(name(refused)))
+                .await,
+            "principal_name_no_control_check",
+        );
+    }
+    let unchanged = registry::get_principal(&pool, "ten_a", "wld_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&unchanged.name[..], unchanged.revision),
+        ("principal wld_1", 1)
+    );
+    for (id, accepted) in [
+        ("wld_rlo", "deploy\u{202e}er"),
+        ("wld_zwsp", "deploy\u{200b}er"),
+    ] {
+        let created = registry::create_principal(&pool, &principal(id, accepted))
+            .await
+            .unwrap();
+        assert_eq!(created.name, accepted);
+        assert_eq!(
+            registry::get_principal(&pool, "ten_a", id)
+                .await
+                .unwrap()
+                .name,
+            accepted
+        );
+    }
+    let renamed = registry::update_principal(
+        &pool,
+        "ten_a",
+        "wld_1",
+        1,
+        &principal_patch(name("\u{202e}1 dlw lapicnirp")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (&renamed.name[..], renamed.revision),
+        ("\u{202e}1 dlw lapicnirp", 2)
+    );
+    db.drop([pool]).await;
+}
+
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn principals_change_within_their_tenant_whatever_their_kind() {

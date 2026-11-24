@@ -431,7 +431,10 @@ pub struct Principal {
     /// Immutable.
     pub kind: PrincipalKind,
     /// Mutable, and unique within the tenant and kind, disabled principals
-    /// included (`0002` `principal_tenant_id_kind_name_key`; IR-021).
+    /// included (`0002` `principal_tenant_id_kind_name_key`; IR-021). Holds
+    /// no control character (`principal_name_no_control_check`), but may
+    /// hold whitespace and format characters such as U+202E, which a display
+    /// surface escapes.
     pub name: String,
     pub status: Status,
     /// Immutable.

@@ -25,7 +25,10 @@
 //! and `revoke_administrative_operation` are `pub(crate)`, called by
 //! `crate::operation` and `crate::trust` as well. Only the `#[doc(hidden)]`
 //! modules `trust::test_support` and `persistence::registry::test_support`,
-//! compiled with the feature, expose them to tests. Every test target of
+//! compiled with the feature, expose them to tests. The same feature gates
+//! `ids::test_support`, whose `SequentialIds` generates predictable IDs:
+//! the probes below require it to be unreachable too, next to a control
+//! that the public `ids` items resolve. Every test target of
 //! this package is built with the feature (the package's dev-dependency on
 //! itself), and so is every test target of `skyoauth-scenarios` (its
 //! dev-dependency on this package), so a test cannot simply name the
@@ -225,6 +228,16 @@ const RECOVERY_PUBLIC: [&str; 12] = [
 /// caller-supplied digest and hash a restore presented before it verified
 /// the signature itself (section 8 of the same proposal).
 const REGISTRY_REMOVED: [&str; 1] = ["ChallengeBinding"];
+
+/// The ID items a normal build keeps public (`crate::ids`), compiled by the
+/// control probe, so that the probe of [`IDS_TEST_ONLY`] fails for the
+/// feature gate, not for a missing or renamed `ids` module.
+const IDS_PUBLIC: [&str; 4] = ["IdGenerator", "IdError", "IdKind", "encode_id"];
+
+/// The deterministic ID generator of tests and its module, compiled only
+/// with the feature (`ids::test_support`): a normal build has no
+/// predictable ID generator for a write path to take.
+const IDS_TEST_ONLY: [&str; 2] = ["test_support::SequentialIds", "test_support"];
 
 /// Where the library's source, comments and literals aside, names a bare
 /// registry writer, a writer of [`REGISTRY_PRIVATE`] or a step of
@@ -899,7 +912,11 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
     let registry_uses = registry_items.enumerate().map(|(index, item)| {
         format!("pub use skyoauth_service::persistence::registry::{item} as registry_{index};\n")
     });
-    let uses: String = trust_uses.chain(registry_uses).collect();
+    let ids_uses = IDS_PUBLIC
+        .iter()
+        .enumerate()
+        .map(|(index, item)| format!("pub use skyoauth_service::ids::{item} as ids_{index};\n"));
+    let uses: String = trust_uses.chain(registry_uses).chain(ids_uses).collect();
     let control = compile_probe(&library, &probes, "control", &uses);
     assert!(
         control.status.success(),
@@ -971,5 +988,10 @@ fn a_build_without_test_support_exposes_no_ungated_write() {
             &name,
             &format!("persistence::registry::{item}"),
         );
+    }
+
+    for (index, item) in IDS_TEST_ONLY.iter().enumerate() {
+        let name = format!("probe_ids_{index}");
+        assert_unreachable(&library, &probes, &name, &format!("ids::{item}"));
     }
 }

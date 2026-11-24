@@ -120,7 +120,10 @@ pub async fn update_tenant<'e>(
 /// Creates a principal in its tenant. A name another principal of the same
 /// tenant and kind has, disabled or not, is [`RegistryError::AlreadyExists`]
 /// naming `principal_tenant_id_kind_name_key`; the same name in another
-/// tenant or of another kind is accepted (`0002`; IR-021).
+/// tenant or of another kind is accepted (`0002`; IR-021). A name with a
+/// control character is [`RegistryError::Invariant`] of kind
+/// [`InvariantKind::Check`](super::InvariantKind::Check) naming
+/// `principal_name_no_control_check`.
 pub async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
