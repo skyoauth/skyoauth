@@ -822,8 +822,9 @@ async fn empty_oversized_and_duplicate_sets_fail_before_any_statement() {
 /// `a24_neg_consume_names_other_tenants_source` in `tests/security/a24.rs`,
 /// listed in the A24 M1a stage of `tests/conformance/scenarios.toml`. The
 /// A29 closed list has no entry for this crossing: it covers `0004` and the
-/// two `0005` operation guards, and `tests/security/a29.rs` says this `0005`
-/// foreign key is covered by that A24 scenario instead.
+/// three `0005` operation guards (approves, audit, revokes), and
+/// `tests/security/a29.rs` says this `0005` foreign key is covered by that
+/// A24 scenario instead.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn consume_naming_another_tenants_source_is_refused() {

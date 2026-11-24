@@ -2315,6 +2315,15 @@ async fn the_toggles_refusals_write_nothing_and_release_the_policy_row() {
             request_in(&mut transaction, "key_req", "op_x", 1, true, at(0)).await,
             "UnsupportedIsolation",
         );
+        // The isolation comes before the authorization and the
+        // acknowledgement: turning the setting off without it, by a
+        // `security_admin` or by a credential without the role.
+        for key in ["key_req", "key_trust"] {
+            refused(
+                submit_in(&mut transaction, key, "op_x", 1, false, false, at(0)).await,
+                "UnsupportedIsolation",
+            );
+        }
         refused(
             approve_in(
                 &mut transaction,
