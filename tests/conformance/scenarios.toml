@@ -137,7 +137,14 @@ milestone = "M1a"
 scope = "upload, token-header and egress-allowlist rejection"
 legs = ["scenarios-hermetic/x86_64", "scenarios-hermetic/aarch64", "scenarios-pg/x86_64"]
 status = "planned"
-tests = []
+tests = [
+  "nextest:skyoauth-scenarios/pg/security::a05::a05_pos_destination_with_an_enabled_matching_egress_entry_is_accepted",
+  "nextest:skyoauth-scenarios/pg/security::a05::a05_pos_public_only_jwks_upload_is_accepted",
+  "nextest:skyoauth-scenarios/pg/security::a05::a05_neg_source_change_without_an_enabled_matching_egress_entry_is_refused",
+  "nextest:skyoauth-scenarios/pg/security::a05::a05_neg_source_create_without_an_enabled_matching_egress_entry_is_refused",
+  "nextest:skyoauth-scenarios/pg/security::a05::a05_neg_upload_with_key_reference_members_is_refused",
+  "nextest:skyoauth-scenarios/pg/security::a05::a05_neg_upload_with_private_members_is_refused",
+]
 
 [[scenario.stage]]
 milestone = "M2"
