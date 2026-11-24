@@ -32,7 +32,14 @@
 //!   matching entry, with `Invariant { EgressEntryEnabled,
 //!   trust_source_discovery_url_egress_enabled }` or `Invariant {
 //!   EgressEntryEnabled, trust_source_token_review_endpoint_egress_enabled
-//!   }`.
+//!   }`;
+//! - the gated write path of a trust source, `trust::submit_create_source`
+//!   and `trust::submit_update_source`, by `adm_trust` with
+//!   `widening_second_approver` off (applied at once), whose own checks
+//!   refuse first, with `SourceWriteError::InvalidDestination` or
+//!   `EgressNotAllowed` naming the member; and with the gate on, the
+//!   approval of a pending create by a distinct instance `security_admin`
+//!   (`operation::prepare_approval` and `operation::approve_operation`).
 //!
 //! Every refusal is compared by its typed fields (variant, member, key
 //! index, invariant kind, constraint), never by message text.
@@ -70,8 +77,9 @@
 //!   `kubernetes_token_review` source whose destination an enabled entry
 //!   of the member's purpose lists byte for byte are created at revision 1
 //!   and moved to a second such destination at revision 2. Once that
-//!   entry is disabled, a rename and a disable that leave the member
-//!   unchanged are accepted (IR-152: rejected "on create or change" only)
+//!   entry is disabled, a rename, a disable and a re-enable that leave the
+//!   member unchanged are accepted, at revisions 3, 4 and 5 (IR-152:
+//!   rejected "on create or change" only)
 //!   (`a05_pos_destination_with_an_enabled_matching_egress_entry_is_accepted`).
 //! - **Negative, egress create.** For each member, a create, enabled or
 //!   disabled, whose destination has no enabled matching entry is refused
@@ -87,6 +95,24 @@
 //!   refused the same way, and the stored row keeps its revision and every
 //!   column
 //!   (`a05_neg_source_change_without_an_enabled_matching_egress_entry_is_refused`).
+//! - **Negative, gated write.** The same table through the gated create
+//!   (enabled or disabled) and the gated update (alone, with a disable,
+//!   with a rename), gate off: each is refused with `EgressNotAllowed`
+//!   naming the member, except the near misses that are not in canonical
+//!   form, another letter case for both members and the TokenReview URL
+//!   without its path, which the syntax rule refuses first with
+//!   `InvalidDestination` naming the member. No source is written or
+//!   changed and the audit chain has no new event. As a control, a gated
+//!   create to a listed destination is applied
+//!   (`a05_neg_gated_source_write_without_an_enabled_matching_egress_entry_is_refused`).
+//! - **Negative, approval.** With the gate on, a create on a listed
+//!   destination goes pending; its entry is then disabled (a stand-in, see
+//!   below), and the approval is refused with `ApprovalError::Source`
+//!   (`EgressNotAllowed` naming the member): no source is written, the
+//!   operation stays pending and the audit chain has no new event. As a
+//!   control, a create on a destination whose entry stays enabled is
+//!   approved and written as requested
+//!   (`a05_neg_approval_after_its_egress_entry_is_disabled_is_refused`).
 //!
 //! # Stand-ins (§1.3)
 //!
@@ -96,12 +122,11 @@
 //! fixture `skyoauth_scenarios::egress`: the enabled entries of the
 //! member's own purpose through that fixture, and in this module
 //! ([`seed_entry`], [`disable_entry`]) the enabled entries of another
-//! purpose, the disabled entries (inserted as `disabled`), and one entry
-//! disabled by an `UPDATE` after a source was written on it. These are
-//! stand-ins in the sense of §1.3 "Deployment-configuration stand-ins",
-//! listed here; they stretch that carve-out, which names IR-053 deployment
-//! configuration only, to entries that the egress allowlist writer will
-//! create once it exists. They are replaced by that writer when it lands.
+//! purpose, the disabled entries (inserted as `disabled`), and entries
+//! disabled by an `UPDATE` after a source was written on them or a request
+//! went pending on them. These are IR-152 rows the API will create, not
+//! deployment configuration: the seeds are listed in §1.3's stand-ins, and
+//! the PR that adds the egress allowlist writer replaces them with it.
 //!
 //! # Spec and registry picks
 //!
@@ -115,11 +140,21 @@
 //! `provenance` naming a private member is refused (inferred in
 //! `trust::keyset`); that "exactly match" is byte equality with no
 //! normalization of case, port or trailing slash (inferred in
-//! `trust::source`); and the error shapes. Egress entries are
-//! instance-global (`0002`: no tenant column; the instance `security_admin`
-//! owns them, identity-registry §2), so an entry "of another tenant" does
-//! not exist and is not tested: any enabled entry of the purpose with
-//! exactly that destination allows a source of any tenant.
+//! `trust::source`); that a disable that also moves the member to a
+//! destination with no enabled entry is refused (the "with a disable"
+//! updates; inferred in `trust::source`, "When": IR-152 says a disable
+//! must not be rejected and exempts "a disable" and a write that leaves
+//! both members unchanged, and such a write is neither alone, so a ruling
+//! the other way turns those cases red); that a re-enable that leaves both
+//! members unchanged is accepted through a disabled entry (IR-152's
+//! unchanged-write rule, applied by the `0011` guard and `trust::source` to
+//! every update); that the gated path refuses a non-canonical destination
+//! before its entry check (`trust::source`, "Syntax"); and the error
+//! shapes. Egress entries are instance-global (`0002`: no tenant column;
+//! the instance `security_admin` owns them, identity-registry §2), so an
+//! entry "of another tenant" does not exist and is not tested: any enabled
+//! entry of the purpose with exactly that destination allows a source of
+//! any tenant.
 //!
 //! # Not tested here, and what stays open
 //!
@@ -131,9 +166,9 @@
 //!   embedded `jwk` is not trusted (T11.5, T11.7, T24.3); the verifier
 //!   does not exist.
 //! - **Unsafe key URL.** A key URL that is not a safe `https` destination
-//!   (T11.2, T11.8); no fetcher exists, and the write-time syntax rule of
-//!   `trust::source` refuses a non-canonical destination in the gated path,
-//!   which these registry-floor tests do not use.
+//!   (T11.2, T11.8); no fetcher exists. The write-time syntax rule of
+//!   `trust::source` is reached here only by the two non-canonical near
+//!   misses of the gated table; its own cases are the service tests'.
 //! - **Discovered `jwks_uri`.** A `jwks_uri` from a discovery document with
 //!   no enabled `jwks` entry is not fetched (IR-152; T11.2, T11.8).
 //! - **Disabled entry at fetch.** No new discovery or JWKS fetch through an
@@ -144,23 +179,22 @@
 //! - **A05's M2 stage** ("generic issuer keysets"): disallowed issuer or
 //!   algorithm, conflicting `kid`, cross-tenant keyset.
 //! - **Endpoints.** No admin endpoint writes a keyset version or a trust
-//!   source yet (T13.8); the gated egress check of
-//!   `trust::submit_create_source` and `submit_update_source`
-//!   (`SourceWriteError::EgressNotAllowed`, which refuses before the
-//!   `0011` guard is reached) has service tests only
-//!   (`service/tests/trust_source_egress.rs` and `source_approval.rs`).
+//!   source yet (T13.8); the gated functions here are the library that one
+//!   will call.
 //!
 //! # Overlap
 //!
 //! The service tests already pin each refusal of `jwk` on single keys
 //! (`service/tests/jwk.rs`), the upload and provenance refusals of the
 //! keyset write path (`service/tests/trust_keyset_version.rs`) and the
-//! `0011` guard in SQL (`service/tests/schema_trust_source_egress_guard.rs`)
-//! and through the registry (`service/tests/trust_source_egress.rs`). A05 adds
-//! the scenario's view: every member of each family through the upload
-//! path, inside a set with a good key, the floor's refusal of the same
-//! sets, and the egress guard's create and change refusals for each
-//! missing-entry shape through the registry.
+//! `0011` guard in SQL (`service/tests/schema_trust_source_egress_guard.rs`),
+//! the egress check through the registry and the gated path
+//! (`service/tests/trust_source_egress.rs`) and the approval refused after
+//! its entry is disabled (`service/tests/source_approval.rs`). A05 adds the
+//! scenario's view: every member of each family through the upload path,
+//! inside a set with a good key, the floor's refusal of the same sets, and
+//! the create and change refusals of each missing-entry shape through both
+//! the `0011` guard and the gated path.
 
 use std::{
     fmt::Debug,
@@ -170,7 +204,10 @@ use std::{
 use serde_json::{Value, json};
 use skyoauth_scenarios::{egress, pg::TestDb};
 use skyoauth_service::jwk::{DEFAULT_ALLOWED_ALGORITHMS, JwkError, JwkSetError, ValidatedKeyset};
-use skyoauth_service::operation::{Gated, Submission};
+use skyoauth_service::operation::{
+    ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, Gated, OperationKind,
+    PendingOperation, Submission, approve_operation, prepare_approval, submit_widening_toggle,
+};
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -178,11 +215,12 @@ use skyoauth_service::persistence::{
         JsonObject, MAX_PAGE_SIZE, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
         NewTenant, NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, RegistryError,
         ReplayMode, Status, TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind,
-        bootstrap_instance, verify_audit_chain,
+        bootstrap_instance, lock_administrative_operation, verify_audit_chain,
     },
 };
 use skyoauth_service::trust::{
-    KeysetWriteError, NewKeysetVersion, submit_create_version, validate_upload,
+    KeysetWriteError, NewKeysetVersion, SourceWriteError, submit_create_source,
+    submit_create_version, submit_update_source, validate_upload,
 };
 
 /// The tenant of every row.
@@ -190,9 +228,11 @@ const TENANT: &str = "ten_a";
 /// The keyset every upload goes to.
 const KEYSET: &str = "ks_a";
 
-/// The operators' keys: `adm_first` bootstraps the instance and `adm_trust`
-/// is the `trust_admin` of [`TENANT`] (the uploader).
+/// The operators' keys: `adm_first` bootstraps the instance, `adm_sec` is a
+/// second instance `security_admin` (the approver) and `adm_trust` the
+/// `trust_admin` of [`TENANT`] (the uploader and requester).
 const FIRST_KEY: &str = "spki-sha256:first";
+const SEC_KEY: &str = "spki-sha256:sec";
 const TRUST_KEY: &str = "spki-sha256:trust-a";
 
 /// The fixture's clock origin, in microseconds from the Unix epoch.
@@ -363,11 +403,13 @@ async fn operator(pool: &PgPool, admin: &str, key: &str, role: AdminRole, tenant
     .unwrap();
 }
 
-/// [`base_fixture`], then the instance bootstrapped by `adm_first` (the
-/// policy row with both flags off, so a gated write is applied at once) and
-/// `adm_trust`, the `trust_admin` of [`TENANT`].
-async fn upload_fixture() -> (TestDb, PgPool) {
-    let (db, pool) = base_fixture().await;
+/// The instance bootstrapped by `adm_first` (the policy row with both
+/// flags off), `adm_sec` (a second instance `security_admin`, the approver)
+/// and `adm_trust` (the `trust_admin` of [`TENANT`], the requester). With
+/// `gate`, `widening_second_approver` is then turned on through the flow:
+/// `adm_first` requests it and `adm_sec` approves it. Without it, a gated
+/// write is applied at once.
+async fn operators(pool: &PgPool, gate: bool) {
     let mut transaction = pool.begin().await.unwrap();
     bootstrap_instance(
         &mut transaction,
@@ -386,20 +428,119 @@ async fn upload_fixture() -> (TestDb, PgPool) {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+    operator(pool, "adm_sec", SEC_KEY, AdminRole::SecurityAdmin, None).await;
     operator(
-        &pool,
+        pool,
         "adm_trust",
         TRUST_KEY,
         AdminRole::TrustAdmin,
         Some(TENANT),
     )
     .await;
-    let policy = registry::get_instance_security_policy(&pool).await.unwrap();
+    if gate {
+        let mut transaction = pool.begin().await.unwrap();
+        let toggle = submit_widening_toggle(
+            &mut transaction,
+            &Submission {
+                public_identity: FIRST_KEY,
+                acknowledge_widening: true,
+                operation_id: "op_gate",
+                event_id: "evt_op_gate",
+                now: at(1),
+            },
+            1,
+            true,
+        )
+        .await
+        .unwrap();
+        transaction.commit().await.unwrap();
+        let Gated::Pending(toggle) = toggle else {
+            panic!("the toggle is not pending: {toggle:?}");
+        };
+        approve(pool, ApprovalScope::Instance, &toggle, at(2))
+            .await
+            .unwrap();
+    }
+    let policy = registry::get_instance_security_policy(pool).await.unwrap();
     assert_eq!(
         (policy.widening_second_approver, policy.single_actor_mode),
-        (false, false)
+        (gate, false)
     );
+}
+
+/// [`base_fixture`] and [`operators`] with the gate off.
+async fn upload_fixture() -> (TestDb, PgPool) {
+    let (db, pool) = base_fixture().await;
+    operators(&pool, false).await;
     (db, pool)
+}
+
+/// The approve's clock, set by the test.
+struct FixedClock(SystemTime);
+
+impl Clock for FixedClock {
+    fn now(&self) -> SystemTime {
+        self.0
+    }
+}
+
+/// Prepares (one microsecond before `now`) and approves `pending` on
+/// `scope` by `adm_sec`, with the clock at `now`, and commits the
+/// transaction whatever the outcome, so a refusal also shows that the
+/// approval's savepoint left nothing behind.
+async fn approve(
+    pool: &PgPool,
+    scope: ApprovalScope<'_>,
+    pending: &PendingOperation,
+    now: SystemTime,
+) -> Result<(), ApprovalError> {
+    let op = pending.id.as_str();
+    let prepared = prepare_approval(
+        pool,
+        SEC_KEY,
+        scope,
+        op,
+        DEFAULT_ALLOWED_ALGORITHMS,
+        now - Duration::from_micros(1),
+    )
+    .await?;
+    let (approve_operation_id, approve_event_id, write_event_id) = (
+        format!("appr_{op}"),
+        format!("evt_appr_{op}"),
+        format!("evt_write_{op}"),
+    );
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = approve_operation(
+        &mut transaction,
+        SEC_KEY,
+        scope,
+        &prepared,
+        &ApprovalEcho {
+            request_digest: pending.request_digest,
+            expected_revision: pending.expected_revision,
+        },
+        &ApprovalIds {
+            approve_operation_id: &approve_operation_id,
+            approve_event_id: &approve_event_id,
+            write_event_id: &write_event_id,
+        },
+        &FixedClock(now),
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    outcome.map(drop)
+}
+
+/// Whether the operation `op` is still pending: neither consumed nor
+/// revoked.
+async fn still_pending(pool: &PgPool, op: &str) -> bool {
+    let mut transaction = pool.begin().await.unwrap();
+    let row = lock_administrative_operation(&mut transaction, op)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("no operation {op}"));
+    transaction.rollback().await.unwrap();
+    row.consumed_at.is_none() && row.revoked_at.is_none()
 }
 
 /// The keyset's versions, every column.
@@ -1001,6 +1142,109 @@ async fn egress_fixture() -> (TestDb, PgPool) {
     (db, pool)
 }
 
+/// [`egress_fixture`] and [`operators`]: the gated source writes of
+/// `adm_trust`, applied at once (`gate` off) or pending until `adm_sec`
+/// approves them (`gate` on).
+async fn gated_egress_fixture(gate: bool) -> (TestDb, PgPool) {
+    let (db, pool) = egress_fixture().await;
+    operators(&pool, gate).await;
+    (db, pool)
+}
+
+/// A refusal of the gated source write path, as its typed fields.
+#[derive(Debug, PartialEq, Eq)]
+enum GatedRefusal {
+    /// `SourceWriteError::InvalidDestination { member }`.
+    InvalidDestination(&'static str),
+    /// `SourceWriteError::EgressNotAllowed { member }`.
+    EgressNotAllowed(&'static str),
+}
+
+#[track_caller]
+fn gated_refusal(err: SourceWriteError) -> GatedRefusal {
+    match err {
+        SourceWriteError::InvalidDestination { member } => GatedRefusal::InvalidDestination(member),
+        SourceWriteError::EgressNotAllowed { member } => GatedRefusal::EgressNotAllowed(member),
+        other => panic!("expected InvalidDestination or EgressNotAllowed: {other:?}"),
+    }
+}
+
+impl Member {
+    /// The member's name in the gated path's errors, written out here.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery_url",
+            Self::TokenReview => "token_review_endpoint",
+        }
+    }
+
+    /// The gated path's refusal of the missing-entry case `label`. Its
+    /// syntax rule refuses a destination that is not in canonical form
+    /// first (`trust::source`, "Syntax"): another letter case of the host
+    /// (the parser lowercases it) and a TokenReview URL without its path
+    /// (the parser adds `/`). Every other case is canonical and has no
+    /// enabled matching entry.
+    fn gated_refusal(self, label: &str) -> GatedRefusal {
+        match (self, label) {
+            (_, "another case") | (Self::TokenReview, "a prefix") => {
+                GatedRefusal::InvalidDestination(self.name())
+            }
+            _ => GatedRefusal::EgressNotAllowed(self.name()),
+        }
+    }
+}
+
+/// The submission of `adm_trust` as operation `op` (event `evt_<op>`) at
+/// `now`, acknowledged as widening.
+fn submission<'a>(op: &'a str, event: &'a str, now: SystemTime) -> Submission<'a> {
+    Submission {
+        public_identity: TRUST_KEY,
+        acknowledge_widening: true,
+        operation_id: op,
+        event_id: event,
+        now,
+    }
+}
+
+/// The gated create of `new` by `adm_trust`, committed whatever the
+/// outcome.
+async fn gated_create(
+    pool: &PgPool,
+    op: &str,
+    now: SystemTime,
+    new: &NewTrustSource,
+) -> Result<Gated<TrustSource>, SourceWriteError> {
+    let event = format!("evt_{op}");
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = submit_create_source(&mut transaction, &submission(op, &event, now), new).await;
+    transaction.commit().await.unwrap();
+    outcome
+}
+
+/// The gated update of the stored `source` to `changes` by `adm_trust`,
+/// committed whatever the outcome.
+async fn gated_update(
+    pool: &PgPool,
+    op: &str,
+    now: SystemTime,
+    source: &TrustSource,
+    changes: &TrustSourceChanges,
+) -> Result<Gated<TrustSource>, SourceWriteError> {
+    let event = format!("evt_{op}");
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = submit_update_source(
+        &mut transaction,
+        &submission(op, &event, now),
+        &source.tenant_id,
+        &source.id,
+        source.revision,
+        changes,
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    outcome
+}
+
 /// `new` as stored at `revision`.
 fn stored(new: &NewTrustSource, revision: i64) -> TrustSource {
     TrustSource {
@@ -1093,7 +1337,7 @@ async fn a05_pos_destination_with_an_enabled_matching_egress_entry_is_accepted()
         assert_eq!(moved, member.moved(&written, next, 2), "{member:?}");
 
         // Its entry disabled: writes that leave the member unchanged are
-        // still accepted (IR-152), a rename and then a disable.
+        // still accepted (IR-152), a rename, a disable and a re-enable.
         disable_entry(&pool, member.purpose(), next).await;
         let renamed = update(
             &pool,
@@ -1133,7 +1377,25 @@ async fn a05_pos_destination_with_an_enabled_matching_egress_entry_is_accepted()
             },
             "{member:?}"
         );
-        expected.push(disabled);
+        let enabled = update(
+            &pool,
+            &disabled,
+            &TrustSourceChanges {
+                status: Status::Enabled,
+                ..changes(&disabled)
+            },
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{member:?} re-enable: {err:?}"));
+        assert_eq!(
+            enabled,
+            TrustSource {
+                revision: 5,
+                ..renamed.clone()
+            },
+            "{member:?}"
+        );
+        expected.push(enabled);
     }
     expected.sort_by(|a, b| a.id.cmp(&b.id));
     assert_eq!(sources(&pool).await, expected);
@@ -1210,6 +1472,195 @@ async fn a05_neg_source_change_without_an_enabled_matching_egress_entry_is_refus
                 assert_eq!(sources(&pool).await, before, "{member:?}, {label}, {what}");
             }
         }
+    }
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a05_neg_gated_source_write_without_an_enabled_matching_egress_entry_is_refused() {
+    let (db, pool) = gated_egress_fixture(false).await;
+    let mut stored_sources = Vec::new();
+    for member in MEMBERS {
+        let new = member.source(&format!("{member:?}").to_lowercase(), member.allowed().0);
+        stored_sources.push((
+            member,
+            registry::test_support::create_trust_source(&pool, &new)
+                .await
+                .unwrap_or_else(|err| panic!("{member:?}: {err:?}")),
+        ));
+    }
+    let before = sources(&pool).await;
+    let head = audit_head(&pool).await;
+    let mut step = 0_u64;
+
+    // The gated create, enabled or disabled.
+    for member in MEMBERS {
+        for (n, &(label, destination, _)) in member.missing().iter().enumerate() {
+            for status in [Status::Enabled, Status::Disabled] {
+                step += 1;
+                let new = NewTrustSource {
+                    status,
+                    ..member.source(&format!("gated_{member:?}_{n}").to_lowercase(), destination)
+                };
+                let outcome =
+                    gated_create(&pool, &format!("op_c{step}"), at(10 + step), &new).await;
+                let err = outcome
+                    .map(drop)
+                    .expect_err(&format!("{member:?}, {label}, {status:?}: accepted"));
+                assert_eq!(
+                    gated_refusal(err),
+                    member.gated_refusal(label),
+                    "{member:?}, {label}, {status:?}"
+                );
+                assert_not_found(registry::get_trust_source(&pool, TENANT, &new.id).await);
+                assert_eq!(
+                    sources(&pool).await,
+                    before,
+                    "{member:?}, {label}, {status:?}"
+                );
+                assert_eq!(
+                    audit_head(&pool).await,
+                    head,
+                    "{member:?}, {label}, {status:?}"
+                );
+            }
+        }
+    }
+
+    // The gated update of a stored source: alone, with a disable, with a
+    // rename.
+    for (member, source) in &stored_sources {
+        for &(label, destination, _) in member.missing() {
+            let pointed = member.pointed(changes(source), destination);
+            for (what, update_to) in [
+                ("alone", pointed.clone()),
+                (
+                    "with a disable",
+                    TrustSourceChanges {
+                        status: Status::Disabled,
+                        ..pointed.clone()
+                    },
+                ),
+                (
+                    "with a rename",
+                    TrustSourceChanges {
+                        name: format!("{}-moved", source.name),
+                        ..pointed
+                    },
+                ),
+            ] {
+                step += 1;
+                let outcome = gated_update(
+                    &pool,
+                    &format!("op_u{step}"),
+                    at(10 + step),
+                    source,
+                    &update_to,
+                )
+                .await;
+                let err = outcome
+                    .map(drop)
+                    .expect_err(&format!("{member:?}, {label}, {what}: accepted"));
+                assert_eq!(
+                    gated_refusal(err),
+                    member.gated_refusal(label),
+                    "{member:?}, {label}, {what}"
+                );
+                assert_eq!(sources(&pool).await, before, "{member:?}, {label}, {what}");
+                assert_eq!(audit_head(&pool).await, head, "{member:?}, {label}, {what}");
+            }
+        }
+    }
+
+    // The control: the gated create to a listed destination is applied.
+    for member in MEMBERS {
+        step += 1;
+        let new = member.source(
+            &format!("gated_{member:?}_ok").to_lowercase(),
+            member.allowed().1,
+        );
+        let outcome = gated_create(&pool, &format!("op_ok{step}"), at(10 + step), &new)
+            .await
+            .unwrap_or_else(|err| panic!("{member:?}: {err:?}"));
+        let Gated::Applied(row) = outcome else {
+            panic!("{member:?}: the create is not applied: {outcome:?}");
+        };
+        assert_eq!(row, stored(&new, 1), "{member:?}");
+    }
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a05_neg_approval_after_its_egress_entry_is_disabled_is_refused() {
+    let (db, pool) = gated_egress_fixture(true).await;
+    let before = sources(&pool).await;
+    let mut expected = before.clone();
+    for (step, member) in MEMBERS.into_iter().enumerate() {
+        let step = u64::try_from(step).unwrap();
+        let (allowed, next) = member.allowed();
+
+        // A create on `next` goes pending while its entry is enabled; the
+        // entry is then disabled; the approval is refused.
+        let refused = member.source(&format!("{member:?}_refused").to_lowercase(), next);
+        let op = format!("op_refused_{step}");
+        let outcome = gated_create(&pool, &op, at(10 + step), &refused)
+            .await
+            .unwrap_or_else(|err| panic!("{member:?}: {err:?}"));
+        let Gated::Pending(pending) = outcome else {
+            panic!("{member:?}: the create is not pending: {outcome:?}");
+        };
+        assert_eq!(pending.kind, OperationKind::TrustSourceCreate, "{member:?}");
+        disable_entry(&pool, member.purpose(), next).await;
+        let head = audit_head(&pool).await;
+        match approve(
+            &pool,
+            ApprovalScope::Tenant(TENANT),
+            &pending,
+            at(100 + step),
+        )
+        .await
+        {
+            Err(ApprovalError::Source(err)) => assert_eq!(
+                gated_refusal(err),
+                GatedRefusal::EgressNotAllowed(member.name()),
+                "{member:?}"
+            ),
+            other => panic!("{member:?}: expected ApprovalError::Source: {other:?}"),
+        }
+        assert!(still_pending(&pool, &op).await, "{member:?}");
+        assert_eq!(audit_head(&pool).await, head, "{member:?}");
+        assert_not_found(registry::get_trust_source(&pool, TENANT, &refused.id).await);
+        assert_eq!(sources(&pool).await, expected, "{member:?}");
+
+        // The control: the same flow on `allowed`, whose entry stays
+        // enabled, is approved and written as requested.
+        let approved = member.source(&format!("{member:?}_approved").to_lowercase(), allowed);
+        let outcome = gated_create(
+            &pool,
+            &format!("op_approved_{step}"),
+            at(20 + step),
+            &approved,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{member:?}: {err:?}"));
+        let Gated::Pending(pending) = outcome else {
+            panic!("{member:?}: the control is not pending: {outcome:?}");
+        };
+        approve(
+            &pool,
+            ApprovalScope::Tenant(TENANT),
+            &pending,
+            at(200 + step),
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{member:?}: {err:?}"));
+        let written = registry::get_trust_source(&pool, TENANT, &approved.id)
+            .await
+            .unwrap();
+        assert_eq!(written, stored(&approved, 1), "{member:?}");
+        expected.push(written);
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(sources(&pool).await, expected, "{member:?}");
     }
     db.drop([pool]).await;
 }
