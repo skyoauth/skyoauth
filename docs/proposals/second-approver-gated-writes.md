@@ -112,7 +112,7 @@ What the spec fixes:
   expiry and approved operation (`:425-431`), set-once consumption and
   revocation (`:453-457`; a repeat with the same value is not refused), no consume after revoke (`:459-464`) and
   `consumed_at < expires_at` (`:328-329`). The service rules the database
-  leaves open are in `service/migrations/README.md:1064-1088` (a distinct
+  leaves open are in `service/migrations/README.md:1079-1103` (a distinct
   approver, the digest echo, the tenant, an expiry, no secrets in the
   plan).
 
@@ -481,7 +481,7 @@ approve-time. A savepoint dry run of the write at the request is rejected (D7).
    `administrative_operation.approve`, the approve operation insert, the
    domain event, and the update of the pending row (`consumed_at` the
    step 6 sample, `outcome = 'applied'`, revision + 1), whose row step 4
-   already holds, so it does not wait (README:1166-1172). The waits inside
+   already holds, so it does not wait (README:1181-1187). The waits inside
    the append (the tenant row `FOR KEY SHARE` and the audit head) come
    after the sample and are not covered (Limits).
 
@@ -496,7 +496,7 @@ check as in approve; the operator rows `FOR SHARE`; the operation row
 `FOR NO KEY UPDATE` (consumed or already revoked: `NotApprovable`); then
 the head: `administrative_operation.cancel` or `.reject`, the revoking
 operation insert, the update of the pending row. This is the `0005`
-revocation order exactly (README:1166-1172). A cancel authorizes the
+revocation order exactly (README:1181-1187). A cancel authorizes the
 operation's `actor_id` through any enabled, unrevoked credential of that
 identity, not only the submitting one.
 
@@ -985,13 +985,18 @@ is allowed by
 the pre-beta exception to the forward-only rule (`service/migrations/README.md`,
 "Conventions"), ruled by the user on 2026-11-23 (relayed by the lead): "we don't
 need to keep data until a beta release" and "I meant db migration are not needed
-intra releases." Until the beta release, no database upgrade path between
-pre-beta releases is provided or tested, and an existing migration may be
-amended in place; the forward-only rule is reinstated at the beta release (date
-set by the maintainer). An edited `0005` changes its checksum, so a database
-created before the edit must be recreated; `migrate` refuses it otherwise. The
+intra releases." On 2026-11-24 the user ruled: "Amend the design to clarify
+that only migration across tagged public releases are supported, i.e, there is
+no need to do migration before the first beta releases. The db migration
+mechanism must be there and tested." Upgrades are supported only between
+tagged public releases, from the first one (the first beta); before it there is
+no upgrade path, though the mechanism is provided and tested, and an existing
+migration may be amended in place; the forward-only rule applies from the
+first tagged release (date set by the maintainer). An edited `0005` changes
+its checksum, so a database created before the edit must be recreated;
+`migrate` refuses it otherwise. The
 implementation PR also rewrites the README's `0005` text that leaves these two
-rules to the service (README:1066-1077) and adds the new names to
+rules to the service (README:1081-1092) and adds the new names to
 `KNOWN_CONSTRAINTS`.
 
 The sketch below is corrected to what `0005` now holds (PR 2): the first

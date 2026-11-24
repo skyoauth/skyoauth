@@ -14,11 +14,14 @@
 //!   is newer than the binary);
 //! - an earlier migration was left partially applied.
 //!
-//! Until the first beta release there is no database upgrade path: an
-//! existing migration may be amended in place, so a database that applied an
-//! earlier text of an amended migration fails the checksum check above and is
-//! recreated, not migrated. The forward-only rule (applied files are never
-//! edited; fix forward with a new file) applies again from the beta release
+//! Upgrades are supported only between tagged public releases, starting with
+//! the first tagged release (the first beta). The runner and the refusals
+//! above are provided and tested now, as the upgrade contract from that
+//! release on. Before it there is no upgrade path: an existing migration may
+//! be amended in place, so a database that applied an earlier text of an
+//! amended migration fails the checksum check above and is recreated, not
+//! migrated. The forward-only rule (a migration in a tagged release is never
+//! edited; fix forward with a new file) applies from the first tagged release
 //! (`service/migrations/README.md`, "Conventions").
 //!
 //! Concurrent runners, such as several replicas started at once, serialize on
@@ -205,7 +208,8 @@ mod tests {
     /// Like the transaction lint, a test-time rule: the runner would accept
     /// gaps, down migrations and `-- no-transaction` files. "Forward-only"
     /// here means no down migrations; it says nothing about amending an
-    /// applied file, which is allowed before the beta release (module docs).
+    /// applied file, which is allowed before the first tagged release (module
+    /// docs).
     #[test]
     fn migrations_are_forward_only_contiguous_and_transactional() {
         let migrations: Vec<_> = MIGRATOR.iter().collect();
