@@ -1,7 +1,7 @@
 # Proposal: verify the recovery signature inside `restore_operator` (T13.5)
 
 Status: Accepted (user, 2026-11-24, relayed by the lead: the user accepted the
-lead's recommendations); implementation pending (T13.5). ADRs ratified directionally (maintainer, 2026-11-24). Drafted the same day
+lead's recommendations); implemented in the library by PR #139 (`issue_recovery_challenge` hashes, `preview_recovery_response`, `restore_operator` verifies inside), while the binary's transport and its wiring stay pending (T13.3, T13.5). ADRs ratified directionally (maintainer, 2026-11-24). Drafted the same day
 for the lead's review and the user's decision. The choices the user accepted
 are those marked "provisional lead pick, 2026-11-24" below; Q2 to Q6 of the
 review are accepted as implementation choices that ordinary review can change.
