@@ -1055,7 +1055,8 @@ async fn now_outside_the_audit_years_writes_nothing() {
 
 /// Input checked before any statement: the transaction stays usable and
 /// holds nothing. Every one of these would otherwise bootstrap, since the
-/// database accepts any non-empty instance ID and a key of 1 to 8192 bytes.
+/// database accepts any non-empty instance ID and a key of 1 to 8192 bytes,
+/// a point or not.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn bad_input_is_refused_before_any_statement() {
@@ -1103,6 +1104,49 @@ async fn bad_input_is_refused_before_any_statement() {
             bootstrap_instance(&mut transaction, &bad).await,
             "recovery public key is not a 32-byte Ed25519 key",
         );
+        usable_and_empty(&mut transaction).await;
+    }
+
+    // 32 bytes that are not a canonically encoded point of large order: the
+    // identity, the point of order 2, the order-4 point `y = 0`, the
+    // identity as `y = p + 1`, a point of large order as `y = p + 3`, and
+    // bytes that decode to no point.
+    let mut identity = [0; 32];
+    identity[0] = 1;
+    let mut order_two = [0xff; 32];
+    order_two[0] = 0xec;
+    order_two[31] = 0x7f;
+    let mut identity_p_plus_1 = [0xff; 32];
+    identity_p_plus_1[0] = 0xee;
+    identity_p_plus_1[31] = 0x7f;
+    let mut large_p_plus_3 = identity_p_plus_1;
+    large_p_plus_3[0] = 0xf0;
+    for (key, message) in [
+        (
+            identity,
+            "recovery public key is a small-order Ed25519 point",
+        ),
+        (
+            order_two,
+            "recovery public key is a small-order Ed25519 point",
+        ),
+        (
+            [0; 32],
+            "recovery public key is a small-order Ed25519 point",
+        ),
+        (
+            identity_p_plus_1,
+            "recovery public key is not canonically encoded",
+        ),
+        (
+            large_p_plus_3,
+            "recovery public key is not canonically encoded",
+        ),
+        ([7; 32], "recovery public key is not an Ed25519 point"),
+    ] {
+        let mut bad = request(INSTANCE);
+        bad.recovery_public_key = &key;
+        assert_encode(bootstrap_instance(&mut transaction, &bad).await, message);
         usable_and_empty(&mut transaction).await;
     }
 

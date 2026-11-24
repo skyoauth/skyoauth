@@ -3092,7 +3092,10 @@ Before any statement it refuses a reserved `admin_id`
 (`ReservedActorId`, the check of `create_admin_identity`), an
 `instance_id` that is not a lowercase hyphenated UUIDv7 with version `7`
 and the RFC 9562 variant (IR-057), a recovery public key that is not
-exactly 32 bytes (raw Ed25519, identity-registry §5.2), an empty or
+exactly 32 bytes (raw Ed25519, identity-registry §5.2) or that is not a
+canonically encoded point of large order (it must decode, re-encode to the
+same bytes and not be of small order; provisional lead pick, 2026-11-24,
+`docs/proposals/recovery-verified-response.md`), an empty or
 over-2048-byte `public_identity` or `trust_anchor_ref`, and a `now` outside
 the `0007` range or outside the years `0000` to `9999` that the audit writer
 accepts, with the writer's bound and message (encode errors, `Other`; no
@@ -3155,52 +3158,65 @@ commits after an `Err` commits none of its rows; the caller still rolls
 back on `Err`. Inserts are plain, and a taken key is the insert's `23505`,
 `AlreadyExists` naming the constraint. `get_recovery_state` reads the one
 `recovery_state` row, if any. `issue_recovery_challenge` takes the closed
-kind `operator_restoration`, a request digest and a challenge hash of 32
-to 64 bytes, a plan object with a string `instance_id`, an integer
-`recovery_key_epoch`, the replacement's strings `admin_id`,
-`credential_id`, `binding_id`, `public_identity` and `trust_anchor_ref`
-and its `new_recovery_public_key` as 64 lowercase hexadecimal digits, and
-a TTL of `MIN_CHALLENGE_TTL` (1 second) to `MAX_CHALLENGE_TTL` (15
-minutes; `DEFAULT_CHALLENGE_TTL` is 5; OQ-LT-17). It reads
-`recovery_state` `FOR SHARE` and refuses with `NotIssuable` when there is
-none, when its `bootstrap_closed` is false, or when the plan names another
-instance or epoch; then it appends the event
-`administrative_operation.create` (actor `deployment_operator`, `object_id`
-the operation's ID, new revision 1), first, since `audit_id` references it,
-and inserts the operation (a taken ID is `AlreadyExists` on
-`administrative_operation_pkey`), `expected_revision` the `recovery_state`
-revision, `expires_at` `now` plus the TTL and outcome `issued`. Later
-T13.3 operation inserts will write the same action name; a consumer joins
-the event's `object_id` to the operation and reads its `kind`.
-`restore_operator` refuses a reserved `admin_id`, a key that is not 32
-bytes and a binding request digest or challenge hash that is not 32 to 64
-bytes before any statement, the digest first and with the issue's messages
-(the lead's follow-up, inferred pick, provisional, 2026-11-21), locks the unrevoked `admin_credential` rows
-`FOR NO KEY UPDATE` in ID order and then `recovery_state`, and consumes the
-challenge against the locked state with one `UPDATE` that sets
-`consumed_at` to `now` only when every predicate holds: no tenant, the
-kind, a challenge hash, not consumed, not revoked, outcome `issued`,
-`now < expires_at`, the request digest, the challenge hash (byte-wise;
-the binding covers both, inferred pick, provisional, 2026-11-21, and the
-registry still does not hash), the expected revision, and a plan
-whose `instance_id` (a JSON string, compared `COLLATE "C"`) and
-`recovery_key_epoch` (a JSON number) are the binding's, with a closed
-`recovery_state` row of that instance, epoch and revision. The consume is
-no function of its own and writes no event; the `0005` set-once,
+kind `operator_restoration`, a closed plan object of exactly eight members
+(a string `instance_id`, an integer `recovery_key_epoch` that is an `i64`,
+the replacement's strings `admin_id`, `credential_id`, `binding_id`,
+`public_identity` and `trust_anchor_ref`, and its `new_recovery_public_key`
+as 64 lowercase hexadecimal digits), refusing a reserved `admin_id`, an
+empty or over-2048-byte `public_identity` or `trust_anchor_ref` and a new
+key that fails bootstrap's key checks, and a TTL of `MIN_CHALLENGE_TTL` (1
+second) to `MAX_CHALLENGE_TTL` (15 minutes; `DEFAULT_CHALLENGE_TTL` is 5;
+OQ-LT-17). It reads `recovery_state` `FOR SHARE` and refuses with
+`NotIssuable` when there is none, when its `bootstrap_closed` is false, when
+the plan names another instance or epoch, or when the new key is the
+current one; then it computes the request digest and the challenge hash
+itself (the library hashes; provisional lead pick, 2026-11-24): `C` is the
+canonical request of the second-approver flow over the row's ID, the
+`recovery_state` revision, the expiry and the plan, the request digest
+SHA-256 of `skyoauth.administrative_operation.v1\n` and `C`, `M` the prefix
+`skyoauth.recovery_challenge.v1\n` and `C`, and the challenge hash SHA-256
+of `M`. It appends the event `administrative_operation.create` (actor
+`deployment_operator`, `object_id` the operation's ID, new revision 1),
+first, since `audit_id` references it, and inserts the operation (a taken ID
+is `AlreadyExists` on `administrative_operation_pkey`), `expected_revision`
+the `recovery_state` revision, `expires_at` `now` plus the TTL and outcome
+`issued`, and returns `M` for the recovery key to sign. Later T13.3
+operation inserts will write the same action name; a consumer joins the
+event's `object_id` to the operation and reads its `kind`.
+`restore_operator` takes the signed response (the operation ID and a
+64-byte Ed25519 signature) and the event IDs and `now`, never a replacement:
+it refuses a signature of another length before any statement, locks the
+unrevoked `admin_credential` rows `FOR NO KEY UPDATE` in ID order, then
+`recovery_state`, then the challenge row (`FOR NO KEY UPDATE`, the lock the
+consume takes), and checks against the locked rows, each miss a
+`NotRestorable` reason: a closed state, the row, its kind, tenant, actor
+and hash, not consumed, not revoked, outcome `issued`, `now < expires_at`,
+its plan's `instance_id` and `recovery_key_epoch` and its expected revision
+the state's, its stored digest and hash the library's encoding of the row,
+the current key a canonical point of large order, and the signature over
+`M`, rebuilt from the row, verified with that key (`verify_strict`; the
+user's ruling, 2026-11-24: the restore verifies). It then consumes the
+challenge with one `UPDATE` that sets `consumed_at` to `now` only when every
+predicate holds (no tenant, the kind, a challenge hash, not consumed, not
+revoked, outcome `issued`, `now < expires_at`, the digest, hash and expected
+revision as checked, and a plan whose `instance_id`, a JSON string compared
+`COLLATE "C"`, and `recovery_key_epoch`, a JSON number, are those of a
+closed `recovery_state` row of that instance, epoch and revision). The
+consume is no function of its own and writes no event; the `0005` set-once,
 consume-after-revoke and `consumed_before_expiry_check` guards back it. It
-then compares the plan's replacement with the request, member by member.
-Any miss so far, or no state, is the unit `NotRestorable`, and the
-savepoint rollback undoes the consume. It refuses a new key equal to the
-current one (`RecoveryKeyUnchanged`), revokes every unrevoked credential in
-one statement, creates the replacement operator, credential and instance
-`security_admin` binding with `create_admin_identity`,
-`create_admin_credential` and `create_admin_role_binding`, rotates the key
-to the next epoch, sets the outcome `restored`, and appends
-`admin_identity.restore` (`object_id` the new operator, no revisions) and
-then `recovery_state.rotate_key` (`object_id` the `instance_id`, the
-`recovery_state` revisions before and after), both last and both with the
-actor `recovery_key:<old epoch>`. The registry does not verify the
-recovery signature: the caller verifies it first. Its locks follow the
+takes the replacement from the consumed plan and checks it as the issue
+does. Any refusal so far rolls the savepoint back, the consume included. It
+refuses a new key equal to the current one (`RecoveryKeyUnchanged`),
+revokes every unrevoked credential in one statement, creates the
+replacement operator, credential and instance `security_admin` binding
+with `create_admin_identity`, `create_admin_credential` and
+`create_admin_role_binding`, rotates the key to the next epoch, sets the
+outcome `restored`, and appends `admin_identity.restore` (`object_id` the
+new operator, no revisions) and then `recovery_state.rotate_key`
+(`object_id` the `instance_id`, the `recovery_state` revisions before and
+after), both last and both with the actor `recovery_key:<old epoch>`.
+`preview_recovery_response` runs the same checks without locks in a
+savepoint it always rolls back and grants nothing. Its locks follow the
 `0005` order (credentials, recovery state, operation) with the audit head
 last. An issue waits for a restoration's `recovery_state` lock and sees the
 new epoch; a restoration waits for an issue's share lock. The operator
@@ -3234,12 +3250,12 @@ the expiry with its `now`; the caller takes `now` immediately before the
 call and sets `lock_timeout` and `statement_timeout`, which bound the
 overshoot (inferred). When a commit's outcome is unknown, the
 uncertain-commit rule of bootstrap applies to `restore_operator` too: the caller
-keeps the request's material (IDs, signed challenge and binding, the
-replacement's credential, the new recovery key), reconnects, reconciles the
+keeps the request's material (the response and the event IDs),
+reconnects, reconciles the
 durable state (operation `restored` and the new epoch, or the challenge
 unconsumed) and retries the same request: a restoration that committed is
 then `NotRestorable`, one that did not restores, and one whose challenge
-expired meanwhile is `NotRestorable` too, so the verifier issues a new
+expired meanwhile is `NotRestorable` too, so the binary issues a new
 challenge. The `administrative_operation` constraint names are in
 `KNOWN_CONSTRAINTS`, and `service/tests/registry_recovery.rs` tests the
 surface. No migration is added.

@@ -5,7 +5,12 @@
 //! `Display` or `Debug` of an `ApprovalError` that the second-approver flow
 //! returns, of the `RegistryError` it wraps, or in the `Debug` of a
 //! prepared approval or a digest (`crate::operation`, "Errors and
-//! rollback"; proposal section 10).
+//! rollback"; proposal section 10). Likewise a value of a recovery
+//! response (the operation ID, the signature, the plan, the challenge `M`
+//! or its hashes, a key) must not appear in the `Display` or `Debug` of a
+//! `RestoreError`, a `SignedRecoveryResponse` or a `RecoveryPreview`
+//! (`persistence::registry::recovery`, "Restore";
+//! `docs/proposals/recovery-verified-response.md`).
 //!
 //! The unreachable-host and refused-connection tests need no server. The
 //! TLS, wrong-password and approval tests need `SKYOAUTH_IT_DATABASE_URL`
@@ -24,6 +29,7 @@ use std::{
 };
 
 use common::TestDb;
+use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::json;
 use skyoauth_service::{
     jwk::DEFAULT_ALLOWED_ALGORITHMS,
@@ -35,9 +41,11 @@ use skyoauth_service::{
     persistence::{
         self, DatabaseConfig, PgPool,
         registry::{
-            self, AdminRole, AuditActor, BootstrapRequest, NewAdminCredential, NewAdminIdentity,
-            NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent, Status,
-            bootstrap_instance,
+            self, AdminRole, AuditActor, BootstrapRequest, DEFAULT_CHALLENGE_TTL, IssueChallenge,
+            NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation,
+            NewAuditEvent, NotRestorableReason, OPERATOR_RESTORATION, RecoveryPreview,
+            RestoreError, RestoreRequest, SignedRecoveryResponse, Status, bootstrap_instance,
+            issue_recovery_challenge, preview_recovery_response, restore_operator,
             test_support::{append_audit_event, insert_administrative_operation},
         },
     },
@@ -666,5 +674,309 @@ async fn approval_errors_omit_the_requests_values() {
         "RequesterNotAuthorized",
         &markers,
     );
+    db.drop([pool]).await;
+}
+
+/// Every reason of `RestoreError::NotRestorable`: its fixed `Display` and
+/// a `Debug` that names the variant and the reason only.
+const REASONS: [(NotRestorableReason, &str); 10] = [
+    (
+        NotRestorableReason::NoRecoveryState,
+        "there is no closed recovery state",
+    ),
+    (NotRestorableReason::NotFound, "no such recovery challenge"),
+    (
+        NotRestorableReason::Consumed,
+        "the recovery challenge was already used",
+    ),
+    (
+        NotRestorableReason::Revoked,
+        "the recovery challenge was revoked",
+    ),
+    (
+        NotRestorableReason::Expired,
+        "the recovery challenge has expired",
+    ),
+    (
+        NotRestorableReason::WrongKind,
+        "the operation is not an issued operator restoration challenge",
+    ),
+    (
+        NotRestorableReason::NotBound,
+        "the recovery challenge is not bound to the current recovery state",
+    ),
+    (
+        NotRestorableReason::NotLibraryEncoding,
+        "the recovery challenge's stored digest or hash is not its encoding",
+    ),
+    (
+        NotRestorableReason::WeakKey,
+        "the current recovery public key is not usable",
+    ),
+    (
+        NotRestorableReason::BadSignature,
+        "the signature does not verify with the current recovery key",
+    ),
+];
+
+/// Each reason's `Display` is fixed text and its `Debug` the variant and
+/// the reason; equal reasons compare equal and others do not; the error
+/// has no source.
+#[test]
+fn every_not_restorable_reason_is_fixed_text() {
+    for (reason, text) in REASONS {
+        let err = RestoreError::from(reason);
+        assert_eq!(err.to_string(), text);
+        assert_eq!(format!("{err:?}"), format!("NotRestorable({reason:?})"));
+        assert_eq!(
+            format!("{err:#?}"),
+            format!("NotRestorable(\n    {reason:?},\n)")
+        );
+        assert!(err.source().is_none());
+        for (other, _) in REASONS {
+            assert_eq!(err == RestoreError::from(other), reason == other);
+        }
+    }
+}
+
+/// The `Debug` of a response and of a preview prints none of their values.
+#[test]
+fn a_recovery_response_and_preview_print_no_values() {
+    let response = SignedRecoveryResponse {
+        operation_id: RECOVERY_OP,
+        signature: &[0xa7; 64],
+    };
+    let preview = RecoveryPreview {
+        admin_id: RECOVERY_ADMIN.into(),
+        credential_id: "crd_redact_restore_31f0".into(),
+        binding_id: "rb_redact_restore_aa42".into(),
+        new_recovery_key_epoch: 7,
+        expires_at: at(1),
+    };
+    let markers = recovery_markers(&[&[0xa7; 64]]);
+    for (what, text) in [
+        ("response", format!("{response:?}")),
+        ("response alternate", format!("{response:#?}")),
+        ("preview", format!("{preview:?}")),
+        ("preview alternate", format!("{preview:#?}")),
+    ] {
+        assert_omits(what, &text, &markers);
+    }
+    assert_eq!(format!("{response:?}"), "SignedRecoveryResponse { .. }");
+    assert_eq!(format!("{preview:?}"), "RecoveryPreview { .. }");
+}
+
+const RECOVERY_OP: &str = "op_redact_restore_7c19";
+const RECOVERY_OTHER_OP: &str = "op_redact_restore_other_0b6d";
+const RECOVERY_ADMIN: &str = "adm_redact_restore_e2a8";
+const RECOVERY_KEY: &str = "spki-sha256:redact-restore-5f17";
+/// The seed of the test recovery key bootstrap enrolls.
+const RECOVERY_SEED: [u8; 32] = [0x51; 32];
+/// The seed of the key the plan names.
+const NEW_RECOVERY_SEED: [u8; 32] = [0x52; 32];
+
+fn public_key(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
+}
+
+/// The values a recovery error must not show: the IDs and identity of the
+/// plan, and every form of the keys and of `bytes` (signatures, `M`'s
+/// hashes).
+fn recovery_markers(bytes: &[&[u8]]) -> Vec<String> {
+    let mut markers: Vec<String> = [
+        RECOVERY_OP,
+        RECOVERY_OTHER_OP,
+        RECOVERY_ADMIN,
+        RECOVERY_KEY,
+        "crd_redact_restore_31f0",
+        "rb_redact_restore_aa42",
+    ]
+    .map(String::from)
+    .into();
+    let keys = [public_key(&RECOVERY_SEED), public_key(&NEW_RECOVERY_SEED)];
+    for value in bytes.iter().copied().chain(keys.iter().map(|key| &key[..])) {
+        markers.extend(digest_forms(value));
+    }
+    markers
+}
+
+#[track_caller]
+fn assert_restore_omits<T: Debug>(
+    result: Result<T, RestoreError>,
+    reason: NotRestorableReason,
+    markers: &[String],
+) {
+    match result {
+        Err(err @ RestoreError::NotRestorable(got)) if got == reason => {
+            for (what, text) in [
+                ("Display", err.to_string()),
+                ("Debug", format!("{err:?}")),
+                ("Debug alternate", format!("{err:#?}")),
+            ] {
+                assert_omits(&format!("{reason:?} {what}"), &text, markers);
+            }
+        }
+        other => panic!("expected NotRestorable({reason:?}): {other:?}"),
+    }
+}
+
+/// The refusals of a real preview and restore show none of the response's
+/// values: an unknown ID, a bad signature, an expired challenge, a
+/// consumed one and one the rotation retired.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn recovery_errors_omit_the_responses_values() {
+    let db = TestDb::create().await;
+    let pool = db.pool().await;
+    persistence::migrate(&pool).await.unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    bootstrap_instance(
+        &mut transaction,
+        &BootstrapRequest {
+            instance_id: INSTANCE_ID,
+            admin_id: "adm_first",
+            credential_id: "crd_first",
+            public_identity: "spki-sha256:first",
+            trust_anchor_ref: "deployment/operator-ca",
+            binding_id: "rb_first",
+            recovery_public_key: &public_key(&RECOVERY_SEED),
+            audit_event_id: "aud_bootstrap",
+            now: at(0),
+        },
+    )
+    .await
+    .unwrap();
+    let new_key: String = public_key(&NEW_RECOVERY_SEED)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let serde_json::Value::Object(plan) = json!({
+        "instance_id": INSTANCE_ID,
+        "recovery_key_epoch": 1,
+        "admin_id": RECOVERY_ADMIN,
+        "credential_id": "crd_redact_restore_31f0",
+        "binding_id": "rb_redact_restore_aa42",
+        "public_identity": RECOVERY_KEY,
+        "trust_anchor_ref": "deployment/operator-ca",
+        "new_recovery_public_key": new_key,
+    }) else {
+        unreachable!()
+    };
+    let mut challenges = Vec::new();
+    for (id, event) in [
+        (RECOVERY_OP, "evt_redact_issue_1"),
+        (RECOVERY_OTHER_OP, "evt_redact_issue_2"),
+    ] {
+        challenges.push(
+            issue_recovery_challenge(
+                &mut transaction,
+                &IssueChallenge {
+                    operation_id: id,
+                    kind: OPERATOR_RESTORATION,
+                    immutable_plan: &plan,
+                    ttl: DEFAULT_CHALLENGE_TTL,
+                    now: at(1),
+                    audit_event_id: event,
+                },
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    transaction.commit().await.unwrap();
+    let signer = SigningKey::from_bytes(&RECOVERY_SEED);
+    let signature = signer.sign(&challenges[0].challenge).to_bytes();
+    let other_signature = signer.sign(&challenges[1].challenge).to_bytes();
+    let mut hashes: Vec<[u8; 32]> = Vec::new();
+    for challenge in &challenges {
+        use sha2::Digest as _;
+        hashes.push(sha2::Sha256::digest(&challenge.challenge).into());
+    }
+    let mut bytes: Vec<&[u8]> = vec![&signature, &other_signature];
+    bytes.extend(hashes.iter().map(|hash| &hash[..]));
+    let mut markers = recovery_markers(&bytes);
+    // `M` itself, and the plan as JSON.
+    for challenge in &challenges {
+        markers.push(String::from_utf8(challenge.challenge.clone()).unwrap());
+    }
+    markers.push(json!(plan).to_string());
+
+    let request = |now| RestoreRequest {
+        audit_event_id: "evt_redact_restore",
+        rotation_audit_event_id: "evt_redact_rotate",
+        now,
+    };
+    let refuse = |id: &'static str, signature: [u8; 64], now, reason| {
+        let pool = pool.clone();
+        let markers = markers.clone();
+        async move {
+            let response = SignedRecoveryResponse {
+                operation_id: id,
+                signature: &signature,
+            };
+            let mut transaction = pool.begin().await.unwrap();
+            assert_restore_omits(
+                preview_recovery_response(&mut transaction, &response, now).await,
+                reason,
+                &markers,
+            );
+            assert_restore_omits(
+                restore_operator(&mut transaction, &response, &request(now)).await,
+                reason,
+                &markers,
+            );
+            transaction.rollback().await.unwrap();
+        }
+    };
+    refuse(
+        "op_redact_restore_unknown_44c2",
+        signature,
+        at(2),
+        NotRestorableReason::NotFound,
+    )
+    .await;
+    let mut flipped = signature;
+    flipped[0] ^= 1;
+    refuse(
+        RECOVERY_OP,
+        flipped,
+        at(2),
+        NotRestorableReason::BadSignature,
+    )
+    .await;
+    refuse(
+        RECOVERY_OP,
+        other_signature,
+        at(2),
+        NotRestorableReason::BadSignature,
+    )
+    .await;
+    refuse(
+        RECOVERY_OP,
+        signature,
+        at(1) + DEFAULT_CHALLENGE_TTL,
+        NotRestorableReason::Expired,
+    )
+    .await;
+    let mut transaction = pool.begin().await.unwrap();
+    restore_operator(
+        &mut transaction,
+        &SignedRecoveryResponse {
+            operation_id: RECOVERY_OP,
+            signature: &signature,
+        },
+        &request(at(2)),
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    refuse(RECOVERY_OP, signature, at(3), NotRestorableReason::Consumed).await;
+    refuse(
+        RECOVERY_OTHER_OP,
+        other_signature,
+        at(3),
+        NotRestorableReason::NotBound,
+    )
+    .await;
     db.drop([pool]).await;
 }

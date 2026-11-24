@@ -26,12 +26,14 @@
 //! in the caller's transaction (design section 7.2; T13.4, T13.6; see its
 //! module for the adopt rule and closure). [`issue_recovery_challenge`] and
 //! [`restore_operator`] are break-glass operator restoration: an expiring
-//! single-use challenge, and a restore that consumes it and, in the same
-//! savepoint, enrolls the replacement `security_admin` it names, revokes
-//! every operator credential and rotates the recovery key, with their audit
-//! events, in a `READ COMMITTED` transaction only ([`get_recovery_state`]
-//! reads the key and its epoch; design section 7.2; T13.5; see its module
-//! for the flow and what stays with the verifier).
+//! single-use challenge whose bytes the recovery key signs, and a restore
+//! that verifies that signature itself, consumes the challenge and, in the
+//! same savepoint, enrolls the replacement `security_admin` it names,
+//! revokes every operator credential and rotates the recovery key, with
+//! their audit events, in a `READ COMMITTED` transaction only
+//! ([`get_recovery_state`] reads the key and its epoch;
+//! [`preview_recovery_response`] checks a response without writing; design
+//! section 7.2; T13.5; see its module for the flow and what is signed).
 //! `insert_administrative_operation` and the functions beside it are the
 //! unwired registry floor of the second-approver flow: the operation rows
 //! of a pending gated write, an approval and a revocation, the policy row
@@ -349,13 +351,18 @@
 //! the same name in the `#[doc(hidden)]` module `test_support`, compiled
 //! only with the `test-support` feature, which only test targets turn on
 //! (`service/tests/ungated_writes_private.rs` checks that a normal build
-//! exposes none of them). This does not stop another crate from enrolling a
-//! `security_admin`: [`bootstrap_instance`], [`issue_recovery_challenge`]
-//! and [`restore_operator`] stay public (how the recovery verifier calls
-//! them is an open decision), and so do [`disable_admin_identity`] and
-//! [`revoke_admin_credential`], which only narrow, and the other bare
-//! writers of the grant, audience, tenant, principal and trust keyset
-//! tables.
+//! exposes none of them). [`restore_operator`] stays public because it
+//! verifies the recovery key's Ed25519 signature itself, against the
+//! challenge row and the recovery state it has locked, before it enrolls
+//! anyone; [`issue_recovery_challenge`] enrolls no one, and
+//! [`preview_recovery_response`] writes nothing
+//! (`docs/proposals/recovery-verified-response.md`; the user's ruling,
+//! 2026-11-24). Of the writers that enroll a `security_admin`, only
+//! [`bootstrap_instance`] remains callable without a signature, and only
+//! before the instance is bootstrapped (a separate decision).
+//! [`disable_admin_identity`] and [`revoke_admin_credential`], which only
+//! narrow, stay public, and so do the other bare writers of the grant,
+//! audience, tenant, principal and trust keyset tables.
 //!
 //! # Not done here
 //!
@@ -363,8 +370,9 @@
 //! T14.1 and T14.2), does not write audit events (T13.x; the caller writes
 //! the event in the same transaction; [`bootstrap_instance`],
 //! [`issue_recovery_challenge`] and [`restore_operator`] are the
-//! exceptions), does not verify a recovery signature (the verifier does,
-//! before the restore), does not check rules the database
+//! exceptions), verifies no signature but the recovery key's, which
+//! [`restore_operator`] checks itself, does not check
+//! rules the database
 //! does not enforce (scope and profile vocabulary, leaving a disabled
 //! assignment's tenant out of a checker's effective set; migrations README,
 //! "What 0003 adds"; an enabled assignment behind a service identity's or a
@@ -480,11 +488,12 @@ pub use operator::{
 use operator::{create_admin_credential, create_admin_identity, create_admin_role_binding};
 pub use predicate::{GITHUB_JOB_WORKFLOW_REF, required_claims, validate_claim_match_policy};
 pub use recovery::{
-    ChallengeBinding, ChallengeError, DEFAULT_CHALLENGE_TTL, IssueChallenge, MAX_CHALLENGE_TTL,
-    MIN_CHALLENGE_TTL, OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID,
+    ChallengeError, DEFAULT_CHALLENGE_TTL, IssueChallenge, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL,
+    NotRestorableReason, OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID,
     PLAN_INSTANCE_ID, PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
-    PLAN_TRUST_ANCHOR_REF, RecoveryChallenge, RecoveryState, RestoreError, RestoreRequest,
-    Restored, get_recovery_state, issue_recovery_challenge, restore_operator,
+    PLAN_TRUST_ANCHOR_REF, RecoveryChallenge, RecoveryPreview, RecoveryState, RestoreError,
+    RestoreRequest, Restored, SignedRecoveryResponse, get_recovery_state, issue_recovery_challenge,
+    preview_recovery_response, restore_operator,
 };
 pub use selection::{Selection, SelectionError, select_grant};
 pub use tenant::{

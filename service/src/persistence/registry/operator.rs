@@ -35,9 +35,13 @@
 //! `test-support` feature it is dead code, which its `expect(dead_code)`
 //! states). Tests reach them through the registry's `test_support` module.
 //! That does not stop a caller outside the crate from enrolling a
-//! `security_admin` while `bootstrap_instance`, `issue_recovery_challenge`
-//! and `restore_operator` stay public. [`disable_admin_identity`] and
-//! [`revoke_admin_credential`] only narrow and stay public.
+//! `security_admin` while `bootstrap_instance` stays public, before the
+//! instance is bootstrapped; `restore_operator` enrolls only after it has
+//! verified the recovery key's signature itself, and
+//! `issue_recovery_challenge` enrolls no one
+//! (`docs/proposals/recovery-verified-response.md`).
+//! [`disable_admin_identity`] and [`revoke_admin_credential`] only narrow
+//! and stay public.
 //!
 //! A second row with the same ID, or a credential whose `public_identity`
 //! is already registered, is [`RegistryError::AlreadyExists`] naming only
