@@ -37,7 +37,7 @@ use std::{
 };
 
 use common::TestDb;
-use ed25519_dalek::{Signer as _, SigningKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use skyoauth_service::{
@@ -113,6 +113,18 @@ const FIXED_SIGNATURE: [u8; 64] = {
     signature[0] = 1;
     signature
 };
+/// A signature by [`SEED`] over `M` of `op_1` of [`issued`] (the prefix
+/// and [`op_1_canonical`]) with a small-order `R`, the identity, and
+/// `S = k * a mod L`, for the secret scalar `a` of [`SEED`] and
+/// `k = SHA-512(R || A || M)`, computed independently of this code: the
+/// plain equation `[S]B = R + [k]A` holds, so a plain verification accepts
+/// it; `verify_strict` refuses a small-order `R`.
+const SMALL_ORDER_R_SIGNATURE: [u8; 64] = [
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xe7, 0xea, 0x26, 0xa7, 0x8c, 0x0d, 0x7b, 0xe3, 0xe9, 0x39, 0x24, 0x14, 0xcf, 0xc5, 0xa2, 0x0a,
+    0x89, 0x0e, 0xa1, 0x8a, 0xdd, 0x8d, 0xaa, 0x3f, 0x8f, 0x74, 0xcc, 0x2b, 0x3e, 0x1c, 0xbe, 0x02,
+];
 const T0: u64 = 1_790_000_000_123_456;
 
 /// `micros` after `T0`.
@@ -1759,62 +1771,99 @@ async fn a_restore_needs_a_signature_by_the_current_key_over_m() {
     db.drop([pool]).await;
 }
 
-/// Presents `op_1` with signatures that are not 64 bytes, at the preview
-/// and the restore, in `transaction`, and asserts the encode error.
-async fn assert_signature_lengths_refused(transaction: &mut Transaction<'_, Postgres>) {
-    for length in [0, 1, 32, 63, 65, 128] {
-        let signature = vec![0xc7; length];
-        assert_restore_encode(
-            preview_recovery_response(transaction, &response("op_1", &signature), now()).await,
-            "recovery signature is not 64 bytes",
-        );
-        assert_restore_encode(
+/// A plain verification accepts what the restore must refuse; the current
+/// key here is a good one, so only `verify_strict` stands between
+/// [`SMALL_ORDER_R_SIGNATURE`] and a restore: it is `BadSignature` at the
+/// preview and the restore, nothing written; the right signature then
+/// restores.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_signature_only_a_plain_verification_accepts_is_refused() {
+    let (db, pool) = issued().await;
+    let m = stored_challenge(&mut pool.acquire().await.unwrap(), "op_1")
+        .await
+        .unwrap();
+    assert_eq!(m, [CHALLENGE_PREFIX, op_1_canonical().as_bytes()].concat());
+    let current = VerifyingKey::from_bytes(&KEY).unwrap();
+    current
+        .verify(&m, &Signature::from_bytes(&SMALL_ORDER_R_SIGNATURE))
+        .expect("a plain verification accepts a small-order R");
+    assert!(
+        current
+            .verify_strict(&m, &Signature::from_bytes(&SMALL_ORDER_R_SIGNATURE))
+            .is_err()
+    );
+    assert_bad_signature(&pool, &SMALL_ORDER_R_SIGNATURE, "small-order R").await;
+    let restored = restore_on(&pool, "op_1", &restore_request()).await.unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
+    db.drop([pool]).await;
+}
+
+/// A signature that is not 64 bytes, the right one cut short or extended
+/// included, is `BadSignature` at the verify step of step 3, after the
+/// locks and the checks before it, at the preview and the restore: it
+/// writes nothing and leaves the challenge unconsumed. The checks before
+/// the verify step still decide first: an unknown ID is `NotFound`, an
+/// expired challenge `Expired`, a retired one `NotBound`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_signature_of_another_length_is_bad_signature_at_the_verify_step() {
+    let (db, pool) = issued().await;
+    let good = signature_by(&mut pool.acquire().await.unwrap(), "op_1", &SEED).await;
+    let mut extended = good.clone();
+    extended.push(0);
+    let short = [
+        Vec::new(),
+        vec![0xc7],
+        good[..32].to_vec(),
+        good[..63].to_vec(),
+        extended,
+        [&good[..], &good[..]].concat(),
+    ];
+    for signature in &short {
+        assert_bad_signature(&pool, signature, &format!("{} bytes", signature.len())).await;
+        assert_refused(
+            &pool,
+            "op_unknown",
+            signature,
+            now(),
+            NotRestorableReason::NotFound,
+        )
+        .await;
+        assert_refused(
+            &pool,
+            "op_1",
+            signature,
+            expires(),
+            NotRestorableReason::Expired,
+        )
+        .await;
+    }
+    // A challenge whose recovery state moved since the issue is `NotBound`
+    // before its signature is looked at.
+    let mut connection = pool.acquire().await.unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::query("UPDATE recovery_state SET revision = revision + 1")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    for signature in &short {
+        assert_not_restorable(
             restore_operator(
-                transaction,
-                &response("op_1", &signature),
+                &mut transaction,
+                &response("op_1", signature),
                 &restore_request(),
             )
             .await,
-            "recovery signature is not 64 bytes",
+            NotRestorableReason::NotBound,
         );
     }
-}
-
-/// A signature that is not 64 bytes is an encode error before any
-/// statement: it writes nothing, leaves the transaction usable and the
-/// challenge unconsumed, and it is returned even in a transaction that has
-/// already failed, where any statement, the savepoint included, would fail.
-#[tokio::test]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_signature_of_another_length_is_refused_before_any_statement() {
-    let (db, pool) = issued().await;
-    let mut connection = pool.acquire().await.unwrap();
-    let mut transaction = connection.begin().await.unwrap();
-    let before = snapshot(&mut transaction).await;
-    assert_signature_lengths_refused(&mut transaction).await;
-    assert_eq!(snapshot(&mut transaction).await, before);
-    // Still usable, and the challenge still consumable.
-    consume_and_restore(&mut transaction, "op_1").await.unwrap();
-    transaction.rollback().await.unwrap();
-
-    let mut transaction = connection.begin().await.unwrap();
-    let failed = sqlx::query("SELECT 1 / 0")
-        .execute(&mut *transaction)
-        .await
-        .unwrap_err();
-    assert_eq!(sqlstate(&failed), "22012");
-    assert_signature_lengths_refused(&mut transaction).await;
     transaction.rollback().await.unwrap();
     drop(connection);
-    let operation = pool_operation(&pool, "op_1").await;
-    assert_eq!(
-        (
-            operation.consumed_us,
-            &operation.outcome[..],
-            operation.revision
-        ),
-        (None, "issued", 1)
-    );
+    let restored = restore_with(&pool, "op_1", &good, &restore_request())
+        .await
+        .unwrap();
+    assert_eq!(restored.recovery_key_epoch, 2);
     db.drop([pool]).await;
 }
 
@@ -1856,6 +1905,17 @@ async fn a_weak_current_key_is_refused() {
             2,
         )
         .await;
+        if key == IDENTITY {
+            // What a plain verification would let through: the fixed
+            // signature over this challenge's `M`, under the identity key.
+            let m = stored_challenge(&mut pool.acquire().await.unwrap(), "raw_weak")
+                .await
+                .unwrap();
+            VerifyingKey::from_bytes(&IDENTITY)
+                .unwrap()
+                .verify(&m, &Signature::from_bytes(&FIXED_SIGNATURE))
+                .expect("a plain verification accepts the fixed signature");
+        }
         for signature in [FIXED_SIGNATURE.to_vec(), vec![0; 64]] {
             assert_refused(
                 &pool,
@@ -3584,19 +3644,20 @@ async fn a_plan_instance_is_a_json_string() {
     db.drop([pool]).await;
 }
 
-/// Before bootstrap there is no recovery state, so nothing is restorable.
+/// Before bootstrap there is no recovery state, so nothing is restorable,
+/// at the preview or the restore.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn nothing_is_restorable_before_bootstrap() {
     let (db, pool) = migrated().await;
-    let before = pool_snapshot(&pool).await;
-    let mut transaction = pool.begin().await.unwrap();
-    assert_not_restorable(
-        restore_in(&mut transaction, "op_1", &restore_request()).await,
+    assert_refused(
+        &pool,
+        "op_1",
+        &sign(&SEED, b"any"),
+        now(),
         NotRestorableReason::NoRecoveryState,
-    );
-    transaction.rollback().await.unwrap();
-    assert_eq!(pool_snapshot(&pool).await, before);
+    )
+    .await;
     db.drop([pool]).await;
 }
 

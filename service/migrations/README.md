@@ -3185,17 +3185,17 @@ operation inserts will write the same action name; a consumer joins the
 event's `object_id` to the operation and reads its `kind`.
 `restore_operator` takes the signed response (the operation ID and a
 64-byte Ed25519 signature) and the event IDs and `now`, never a replacement:
-it refuses a signature of another length before any statement, locks the
-unrevoked `admin_credential` rows `FOR NO KEY UPDATE` in ID order, then
-`recovery_state`, then the challenge row (`FOR NO KEY UPDATE`, the lock the
-consume takes), and checks against the locked rows, each miss a
-`NotRestorable` reason: a closed state, the row, its kind, tenant, actor
+it locks the unrevoked `admin_credential` rows `FOR NO KEY UPDATE` in ID
+order, then `recovery_state`, then the challenge row (`FOR NO KEY UPDATE`,
+the lock the consume takes), and checks against the locked rows, each miss
+a `NotRestorable` reason: a closed state, the row, its kind, tenant, actor
 and hash, not consumed, not revoked, outcome `issued`, `now < expires_at`,
 its plan's `instance_id` and `recovery_key_epoch` and its expected revision
 the state's, its stored digest and hash the library's encoding of the row,
-the current key a canonical point of large order, and the signature over
-`M`, rebuilt from the row, verified with that key (`verify_strict`; the
-user's ruling, 2026-11-24: the restore verifies). It then consumes the
+the current key a canonical point of large order, and the signature, 64
+bytes, over `M`, rebuilt from the row, verified with that key
+(`verify_strict`; a signature of another length is `BadSignature` there;
+the user's ruling, 2026-11-24: the restore verifies). It then consumes the
 challenge with one `UPDATE` that sets `consumed_at` to `now` only when every
 predicate holds (no tenant, the kind, a challenge hash, not consumed, not
 revoked, outcome `issued`, `now < expires_at`, the digest, hash and expected

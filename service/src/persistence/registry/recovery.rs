@@ -172,8 +172,8 @@
 //!    from the row, hash to its stored `request_digest` and `challenge_hash`,
 //!    so a row whose stored digest or hash is not the library's encoding of
 //!    that row is refused (`NotLibraryEncoding`); the state's key passes the
-//!    checks of "Keys" (`WeakKey`); the signature verifies over `M` with the
-//!    state's key (`BadSignature`);
+//!    checks of "Keys" (`WeakKey`); the signature is 64 bytes and verifies
+//!    over `M` with the state's key (`BadSignature`);
 //! 4. consumes the challenge (see "Consume"), at `now`, bound to the row's
 //!    own values, against the state it holds;
 //! 5. takes the replacement from the consumed plan and checks it as the
@@ -341,7 +341,6 @@
 //!   `public_identity` or `trust_anchor_ref`; a new key refused under
 //!   "Keys"; a `ttl` below [`MIN_CHALLENGE_TTL`] or above
 //!   [`MAX_CHALLENGE_TTL`];
-//! - restore and preview: a signature that is not 64 bytes;
 //! - all three: a `now` outside the `0007` range, or outside the years
 //!   `0000` to `9999` the audit event can carry.
 //!
@@ -738,7 +737,8 @@ impl From<sqlx::Error> for ChallengeError {
 pub struct SignedRecoveryResponse<'a> {
     /// The restoration challenge the signature answers.
     pub operation_id: &'a str,
-    /// The Ed25519 signature over the challenge's `M`, 64 bytes.
+    /// The Ed25519 signature over the challenge's `M`, 64 bytes; any other
+    /// length is [`NotRestorableReason::BadSignature`] at step 3.
     pub signature: &'a [u8],
 }
 
@@ -830,8 +830,8 @@ pub enum NotRestorableReason {
     /// The current recovery key is not usable: not 32 bytes, not a
     /// canonically encoded point, or of small order.
     WeakKey,
-    /// The signature does not verify over the challenge with the current
-    /// recovery key.
+    /// The signature is not 64 bytes, or does not verify over the
+    /// challenge with the current recovery key.
     BadSignature,
 }
 
@@ -984,14 +984,17 @@ pub(super) fn recovery_key(bytes: &[u8]) -> Result<VerifyingKey, &'static str> {
 
 /// Whether `signature` verifies over `message` with the recovery key
 /// `key` (step 3 of a restore): [`NotRestorableReason::WeakKey`] for a key
-/// [`recovery_key`] refuses, [`NotRestorableReason::BadSignature`] for a
-/// signature `verify_strict` refuses.
+/// [`recovery_key`] refuses, then [`NotRestorableReason::BadSignature`]
+/// for a signature that is not 64 bytes or that `verify_strict` refuses.
 fn verify_signature(
     key: &[u8],
     message: &[u8],
-    signature: &[u8; SIGNATURE_LENGTH],
+    signature: &[u8],
 ) -> Result<(), NotRestorableReason> {
     let key = recovery_key(key).map_err(|_| NotRestorableReason::WeakKey)?;
+    let signature: &[u8; SIGNATURE_LENGTH] = signature
+        .try_into()
+        .map_err(|_| NotRestorableReason::BadSignature)?;
     key.verify_strict(message, &Signature::from_bytes(signature))
         .map_err(|_| NotRestorableReason::BadSignature)
 }
@@ -1177,19 +1180,6 @@ fn validate_issue<'a>(
     Ok((since_epoch(expires_at)?, plan))
 }
 
-/// The checks of a restore or a preview that run before any statement: the
-/// signature as 64 bytes and `now` as an interval.
-fn validate_response(
-    response: &SignedRecoveryResponse<'_>,
-    now: SystemTime,
-) -> Result<([u8; SIGNATURE_LENGTH], PgInterval), RegistryError> {
-    let signature = response
-        .signature
-        .try_into()
-        .map_err(|_| encode_error("recovery signature is not 64 bytes"))?;
-    Ok((signature, audit_time(now)?))
-}
-
 /// Reads the recovery state, or `None` before bootstrap. Takes no lock.
 pub async fn get_recovery_state<'e>(
     executor: impl PgExecutor<'e>,
@@ -1337,7 +1327,7 @@ impl FromRow<'_, PgRow> for ChallengeRow {
 fn check_challenge(
     state: &RecoveryState,
     row: &ChallengeRow,
-    signature: &[u8; SIGNATURE_LENGTH],
+    signature: &[u8],
     now: PgInterval,
 ) -> Result<(), NotRestorableReason> {
     let Some(challenge_hash) = row.challenge_hash.as_deref() else {
@@ -1391,9 +1381,10 @@ pub async fn preview_recovery_response(
     response: &SignedRecoveryResponse<'_>,
     now: SystemTime,
 ) -> Result<RecoveryPreview, RestoreError> {
-    let (signature, now) = validate_response(response, now)?;
+    // Before any statement: `now` as an interval.
+    let now = audit_time(now)?;
     let mut savepoint = transaction.begin().await?;
-    let preview = preview_steps(&mut savepoint, response, &signature, now).await;
+    let preview = preview_steps(&mut savepoint, response, now).await;
     // Read-only: nothing to keep. The step's error says more than a failed
     // rollback.
     let rolled_back = savepoint.rollback().await;
@@ -1407,7 +1398,6 @@ pub async fn preview_recovery_response(
 async fn preview_steps(
     transaction: &mut Transaction<'_, Postgres>,
     response: &SignedRecoveryResponse<'_>,
-    signature: &[u8; SIGNATURE_LENGTH],
     now: PgInterval,
 ) -> Result<RecoveryPreview, RestoreError> {
     let state: Option<RecoveryState> = sqlx::query_as(READ_RECOVERY_STATE)
@@ -1423,7 +1413,7 @@ async fn preview_steps(
     let Some(row) = row else {
         return Err(NotRestorableReason::NotFound.into());
     };
-    check_challenge(&state, &row, signature, now)?;
+    check_challenge(&state, &row, response.signature, now)?;
     let plan = parse_plan(&row.immutable_plan)?;
     if state.recovery_public_key[..] == plan.new_recovery_public_key[..] {
         return Err(RestoreError::RecoveryKeyUnchanged);
@@ -1476,9 +1466,10 @@ pub async fn restore_operator(
     response: &SignedRecoveryResponse<'_>,
     request: &RestoreRequest<'_>,
 ) -> Result<Restored, RestoreError> {
-    let (signature, now) = validate_response(response, request.now)?;
+    // Before any statement: `now` as an interval.
+    let now = audit_time(request.now)?;
     let mut savepoint = transaction.begin().await?;
-    match restore_steps(&mut savepoint, response, &signature, request, now).await {
+    match restore_steps(&mut savepoint, response, request, now).await {
         Ok(restored) => {
             savepoint.commit().await?;
             Ok(restored)
@@ -1495,7 +1486,6 @@ pub async fn restore_operator(
 async fn restore_steps(
     transaction: &mut Transaction<'_, Postgres>,
     response: &SignedRecoveryResponse<'_>,
-    signature: &[u8; SIGNATURE_LENGTH],
     request: &RestoreRequest<'_>,
     now: PgInterval,
 ) -> Result<Restored, RestoreError> {
@@ -1525,7 +1515,7 @@ async fn restore_steps(
     let Some(row) = row else {
         return Err(NotRestorableReason::NotFound.into());
     };
-    check_challenge(&state, &row, signature, now)?;
+    check_challenge(&state, &row, response.signature, now)?;
     // Step 4: consume it, bound to the row's own values.
     let Some(consumed_plan) = consume(transaction, &state, &row, now).await? else {
         return Err(NotRestorableReason::Consumed.into());
@@ -1737,13 +1727,6 @@ mod tests {
             ttl: DEFAULT_CHALLENGE_TTL,
             now: now(),
             audit_event_id: "aud_1",
-        }
-    }
-
-    fn response(signature: &[u8]) -> SignedRecoveryResponse<'_> {
-        SignedRecoveryResponse {
-            operation_id: "op_1",
-            signature,
         }
     }
 
@@ -2133,12 +2116,12 @@ mod tests {
         );
         for key in UNDECODABLE {
             assert_eq!(
-                verify_signature(&key, b"", &bytes(RFC_SIGNATURE)),
+                verify_signature(&key, b"", &bytes::<64>(RFC_SIGNATURE)),
                 Err(NotRestorableReason::WeakKey)
             );
         }
         assert_eq!(
-            verify_signature(&public[..31], b"", &bytes(RFC_SIGNATURE)),
+            verify_signature(&public[..31], b"", &bytes::<64>(RFC_SIGNATURE)),
             Err(NotRestorableReason::WeakKey)
         );
     }
@@ -2217,7 +2200,6 @@ mod tests {
         const EARLIEST: u64 = 62_167_219_200_000_000;
         const LATEST: u64 = 253_402_300_799_999_999;
         let plan = good_plan();
-        let signature = [0; 64];
         for time in [
             UNIX_EPOCH - Duration::from_micros(EARLIEST),
             UNIX_EPOCH + Duration::from_micros(LATEST) + Duration::from_nanos(999),
@@ -2226,7 +2208,6 @@ mod tests {
             request.now = time;
             assert!(validate_issue(&request).is_ok(), "{time:?}");
             assert!(audit_time(time).is_ok(), "{time:?}");
-            assert!(validate_response(&response(&signature), time).is_ok());
         }
         for time in [
             UNIX_EPOCH - Duration::from_micros(EARLIEST + 1),
@@ -2237,27 +2218,39 @@ mod tests {
             let message = "audit timestamp outside the years 0000 to 9999";
             assert_eq!(encode(validate_issue(&request)), message);
             assert_eq!(encode(audit_time(time)), message);
-            assert_eq!(
-                encode(validate_response(&response(&signature), time)),
-                message
-            );
         }
         let far = UNIX_EPOCH + Duration::from_micros(u64::try_from(i64::MAX).unwrap());
         assert_eq!(encode(audit_time(far)), "timestamp out of range");
     }
 
+    /// A signature of another length is `BadSignature` at the verify
+    /// step, the RFC signature cut short or extended included; a weak key
+    /// is `WeakKey` first, whatever the signature's length.
     #[test]
     fn a_signature_is_64_bytes() {
-        let signature = [5; 64];
-        let (checked, at) = validate_response(&response(&signature), now()).unwrap();
-        assert_eq!(checked, signature);
-        assert_eq!(at.microseconds, since_epoch(now()).unwrap().microseconds);
-        for length in [0, 1, 32, 63, 65, 128] {
-            let signature = vec![5; length];
+        let public: [u8; 32] = bytes(RFC_PUBLIC);
+        let signature: [u8; 64] = bytes(RFC_SIGNATURE);
+        assert_eq!(verify_signature(&public, b"", &signature), Ok(()));
+        let extended = [&signature[..], &[0]].concat();
+        for wrong in [
+            &[][..],
+            &[5][..],
+            &signature[..32],
+            &signature[..63],
+            &extended[..],
+            &[signature, signature].concat()[..],
+        ] {
             assert_eq!(
-                encode(validate_response(&response(&signature), now())),
-                "recovery signature is not 64 bytes",
-                "{length}"
+                verify_signature(&public, b"", wrong),
+                Err(NotRestorableReason::BadSignature),
+                "{}",
+                wrong.len()
+            );
+            assert_eq!(
+                verify_signature(&bytes::<32>(SMALL_ORDER[0]), b"", wrong),
+                Err(NotRestorableReason::WeakKey),
+                "{}",
+                wrong.len()
             );
         }
     }
