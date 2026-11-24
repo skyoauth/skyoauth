@@ -52,14 +52,15 @@
 //! # Generators
 //!
 //! [`IdGenerator`] is the interface a write path takes. **It has no
-//! production caller yet**: no registry writer or endpoint generates an ID
-//! today, and the registry writers still take caller-supplied IDs
-//! (migrations README, "Rust registry surface"). Slice S3a of M1a wires the
-//! generator into the create paths. The production generator, which fills
-//! the 16 bytes from the operating system's CSPRNG and calls [`encode_id`],
-//! is not here yet either: it needs a dependency that awaits approval. Tests
-//! use the deterministic generator `test_support::SequentialIds`, compiled
-//! only with the `test-support` feature.
+//! production caller yet**: the registry writers still take caller-supplied
+//! IDs (migrations README, "Rust registry surface"), and the audited
+//! workload writes of [`crate::admin`], which take a `&dyn IdGenerator` for
+//! every ID they create, have no endpoint yet. The production generator,
+//! which fills the 16 bytes from the operating system's CSPRNG and calls
+//! [`encode_id`], is not here yet either: it needs a dependency that awaits
+//! approval. Tests use the deterministic generator
+//! `test_support::SequentialIds`, compiled only with the `test-support`
+//! feature.
 
 /// Crockford's base32 alphabet, lowercase: the digits, then the letters
 /// without `i`, `l`, `o` and `u`.

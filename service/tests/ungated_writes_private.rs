@@ -246,7 +246,8 @@ const REGISTRY_REMOVED: [&str; 1] = ["ChallengeBinding"];
 /// `crate::trust` (each module's private `append_stamped`) and of
 /// `crate::operation` (the approval's `approve_steps` and `revoke_steps`,
 /// the toggle's `toggle_steps`, and `insert_pending`, which the gated
-/// `submit_*` writes call).
+/// `submit_*` writes call), and of `crate::admin` (`admin::workload`'s
+/// private `append_event`, after the authorized workload write).
 const MENTIONS: &str = "
 persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_keyset_version | 1
 persistence/registry/mod.rs | pub(crate) use trust::{ | update_trust_keyset_version | 1
@@ -354,6 +355,8 @@ trust/keyset.rs |         impl Drop for Db { | create_admin_credential | 1
 trust/keyset.rs |         impl Drop for Db { | create_admin_role_binding | 1
 trust/source.rs | use crate::persistence::registry::{ | append_audit_event | 1
 trust/source.rs | async fn append_stamped( | append_audit_event | 1
+admin/workload.rs | use crate::persistence::registry::{ | append_audit_event | 1
+admin/workload.rs | async fn append_event( | append_audit_event | 1
 ";
 
 /// Text that would let source escape the item keys of [`MENTIONS`], none of
