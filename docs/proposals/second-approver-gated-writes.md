@@ -179,8 +179,8 @@ is accepted and ignored (D2). The toggle turned off is a widening write
 and needs the flag (the user's ruling, 2026-11-24; T13.3 implements it,
 see "Open"). Without it the write is refused with `WideningNotAcknowledged`
 before any operation goes pending, and that holds under `single_actor_mode`
-too (the write still needs `security_admin`). Provisional pick of the lead,
-flagged for the user: the requirement applies to every request that sets
+too (the write still needs `security_admin`). Ruled by the user, 2026-11-24
+(relayed by the lead): the requirement applies to every request that sets
 `widening_second_approver` to false, whatever the current value (a same-value
 false to false write included), because widening is computed server-side
 from the kind of write (the user's ruling, 2026-11-22) and `prepare_approval`
@@ -1562,18 +1562,18 @@ way as the 2026-11-22 ruling.
 
 ## Open
 
-No question of this proposal is open, except one pick awaiting the user.
+No question of this proposal is open.
 
-**Provisional (the lead's pick, for the user to confirm):** the 2026-11-24
-ruling that turning `widening_second_approver` off needs `acknowledge_widening`
-is taken to apply to every request that sets it to false, whatever the
-current value, a same-value false to false write included. The reasons are
+**Ruled by the user, 2026-11-24, relayed by the lead:** the ruling that
+turning `widening_second_approver` off needs `acknowledge_widening` applies
+to every request that sets it to false, whatever the current value, a
+same-value false to false write included. The reasons are
 that widening is computed server-side from the kind of write (the user's
 ruling, 2026-11-22) and that `prepare_approval` authorizes before it reads
 state; a request that sets true is never widening. Omitting the flag
 returns `WideningNotAcknowledged` before any operation goes pending, also
 under `single_actor_mode`. The contract text (IR-052, API-156) is not
-changed by this PR and waits for the user's permission.
+changed by this PR; those edits are deferred to a follow-up PR.
 
 **Not decided here** (for the lead): how an approver learns of a pending
 operation (notification); metrics, including whether `SelfApproval` and
@@ -1598,7 +1598,7 @@ toggle's plan is exactly `requester_credential_id` and
 plan must equal the locked plan. `acknowledge_widening` is ignored by the
 toggle in PRs 3 to 7, which is always gated; the user's ruling of
 2026-11-24 is that turning it off needs the flag, for every request that
-sets false (the lead's provisional pick; see "Open"). The toggle
+sets false (ruled by the user, 2026-11-24, relayed by the lead; see "Open"). The toggle
 authorizes with the local instance `security_admin` lookup, not the trust writes'
 `authorize_trust_admin`.
 A cancel looks up the path's role (instance `security_admin`, tenant
