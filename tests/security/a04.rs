@@ -1308,7 +1308,9 @@ async fn gate_on(pool: &PgPool) {
         &mut transaction,
         &Submission {
             public_identity: FIRST_KEY,
-            // Ignored by the toggle; `true` holds under D2 either way.
+            // Turning the setting off needs it (the user's ruling,
+            // 2026-11-24); this request turns it on, which is never
+            // widening, so the flag is accepted and ignored (D2).
             acknowledge_widening: true,
             operation_id: "op_gate",
             event_id: "evt_op_gate",
