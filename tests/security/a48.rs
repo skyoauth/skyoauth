@@ -130,6 +130,21 @@
 //!   roles is applied at once with the outcome `success_single_actor` and
 //!   no operation (proposal Q4, ruled)
 //!   (`a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone`).
+//! - **Negative, the toggle off without the acknowledgement.** Turning
+//!   `widening_second_approver` off is a widening write (the user's ruling,
+//!   2026-11-24): a request that sets it to false without
+//!   `acknowledge_widening`, false to false included, is
+//!   `WideningNotAcknowledged` and writes nothing (no operation, no event,
+//!   the policy row and its revision unchanged), with `single_actor_mode`
+//!   off (`a48_neg_a_toggle_off_without_the_acknowledgement_is_refused`)
+//!   and on
+//!   (`a48_neg_a_single_actor_toggle_off_without_the_acknowledgement_is_refused`).
+//!   It comes after the authorization (an operator without instance
+//!   `security_admin` is `Unauthorized`) and before the policy row and any
+//!   write (a stale revision, or an operation and event ID already taken,
+//!   is still `WideningNotAcknowledged`). A request that turns it on
+//!   without the flag is not refused, and with the flag a toggle off goes
+//!   pending, or applies at once under `single_actor_mode`, as before.
 //!
 //! # Spec and flow picks
 //!
@@ -154,16 +169,23 @@
 //! under `single_actor_mode` the one actor must hold instance
 //! `security_admin` (proposal Q4), that both events of an approve carry
 //! its one clock sample (D28), and the refusal order and its error names
-//! (D20, section 3; `ApprovalError`). `acknowledge_widening` is sent `true`
-//! on every request: the toggle ignores it, and D2 ignores the flag on a
-//! non-widening write and rejected refusing it, so `true` holds whichever
-//! way the toggle is classed.
+//! (D20, section 3; `ApprovalError`). Turning the setting off is a
+//! widening write and needs `acknowledge_widening` (the user's ruling,
+//! 2026-11-24), so [`request`] sends `true` on every request; on one that
+//! turns it on, never widening, the flag is accepted and ignored (D2). Only
+//! the acknowledgement tests leave it out, through [`submit`].
 //!
 //! These tests pin those picks by exact name or value; a change of a pick
 //! must touch the tests listed with it:
 //!
 //! - the refusal order (D20): `a48_neg_refusals_come_in_the_flows_order`,
 //!   and the error each refusal test expects;
+//! - the toggle off refused without the acknowledgement, after the
+//!   authorization and before the policy row's revision check and any write
+//!   (section 3, request step 3; the refusal itself is the user's ruling of
+//!   2026-11-24): both acknowledgement tests. The lock order is pinned by the
+//!   service test
+//!   `the_acknowledgement_is_checked_after_the_authorization_before_any_lock_or_write`;
 //! - a cancel by another operator on the instance path is `Unauthorized`
 //!   (proposal Q1's instance-path rule; `NotFound` on a tenant path):
 //!   `a48_neg_a_cancelled_or_rejected_toggle_never_applies`;
@@ -431,9 +453,9 @@ async fn fixture(policy: Policy) -> (TestDb, PgPool) {
     (db, pool)
 }
 
-/// Requests the toggle to `value` at the policy's `revision` with `key`,
-/// as the operation `op` recorded by the event `evt_<op>`, at `now`, in a
-/// transaction committed either way.
+/// [`submit`] with `acknowledge_widening`: turning the setting off needs it
+/// (the user's ruling, 2026-11-24); a request that turns it on is never
+/// widening, so there the flag is accepted and ignored (D2).
 async fn request(
     pool: &PgPool,
     key: &str,
@@ -442,14 +464,29 @@ async fn request(
     value: bool,
     now: SystemTime,
 ) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError> {
+    submit(pool, key, op, revision, value, true, now).await
+}
+
+/// Requests the toggle to `value` at the policy's `revision` with `key`,
+/// as the operation `op` recorded by the event `evt_<op>`, with
+/// `acknowledge_widening` set to `acknowledge`, at `now`, in a transaction
+/// committed either way.
+async fn submit(
+    pool: &PgPool,
+    key: &str,
+    op: &str,
+    revision: i64,
+    value: bool,
+    acknowledge: bool,
+    now: SystemTime,
+) -> Result<Gated<InstanceSecurityPolicy>, ApprovalError> {
     let event_id = format!("evt_{op}");
     let mut transaction = pool.begin().await.unwrap();
     let result = submit_widening_toggle(
         &mut transaction,
         &Submission {
             public_identity: key,
-            // Ignored by the toggle; `true` holds under D2 either way.
-            acknowledge_widening: true,
+            acknowledge_widening: acknowledge,
             operation_id: op,
             event_id: &event_id,
             now,
@@ -1540,6 +1577,138 @@ async fn a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone() {
             ),
         ]
     );
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a48_neg_a_toggle_off_without_the_acknowledgement_is_refused() {
+    let (db, pool) = fixture(Policy::Bootstrapped).await;
+    let empty = written(&pool).await;
+    assert_eq!(flag(&empty.0), (1, false));
+
+    // False to false: refused all the same.
+    refused(
+        submit(&pool, REQ, "op_x", 1, false, false, at(0)).await,
+        "WideningNotAcknowledged",
+    );
+    assert_eq!(written(&pool).await, empty);
+
+    // Turning it on needs no acknowledgement: pending, then approved.
+    let Ok(Gated::Pending(on)) = submit(&pool, REQ, "op_on", 1, true, false, at(1)).await else {
+        panic!("the toggle on without the acknowledgement is not pending");
+    };
+    let prepared = prepare(&pool, SEC, "op_on", at(2)).await.unwrap();
+    approve(&pool, SEC, &prepared, &on, at(3)).await.unwrap();
+    assert_eq!(flag(&policy(&pool).await), (2, true));
+    let unchanged = written(&pool).await;
+
+    // True to false: refused after the authorization, and before the policy
+    // row and any write.
+    for (key, op, revision, expected) in [
+        (REQ, "op_off", 2, "WideningNotAcknowledged"),
+        (REQ_B, "op_off", 2, "WideningNotAcknowledged"),
+        // A stale revision.
+        (REQ, "op_off", 1, "WideningNotAcknowledged"),
+        // An operation and event ID already taken.
+        (REQ, "op_on", 2, "WideningNotAcknowledged"),
+        // Without the role.
+        (TRUST, "op_off", 2, "Unauthorized"),
+        (UNKNOWN, "op_off", 2, "Unauthorized"),
+    ] {
+        refused(
+            submit(&pool, key, op, revision, false, false, at(4)).await,
+            expected,
+        );
+    }
+    assert_eq!(written(&pool).await, unchanged);
+    assert_eq!(find_operation(&pool, "op_off").await, None);
+
+    // With it, the toggle off is gated as before.
+    let off = pending(&pool, REQ, "op_off", 2, false, at(5)).await;
+    assert_eq!(policy(&pool).await, unchanged.0);
+    let prepared = prepare(&pool, SEC, "op_off", at(6)).await.unwrap();
+    approve(&pool, SEC, &prepared, &off, at(7)).await.unwrap();
+    assert_eq!(flag(&policy(&pool).await), (3, false));
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a48_neg_a_single_actor_toggle_off_without_the_acknowledgement_is_refused() {
+    let (db, pool) = fixture(Policy::Seeded {
+        single_actor_mode: true,
+    })
+    .await;
+    let empty = written(&pool).await;
+    assert_eq!(flag(&empty.0), (1, false));
+    assert!(empty.0.single_actor_mode);
+
+    // False to false: refused, not applied at once.
+    refused(
+        submit(&pool, REQ, "op_x", 1, false, false, at(0)).await,
+        "WideningNotAcknowledged",
+    );
+    assert_eq!(written(&pool).await, empty);
+
+    // Turning it on needs no acknowledgement: applied at once.
+    let Ok(Gated::Applied(on)) = submit(&pool, REQ, "op_on", 1, true, false, at(1)).await else {
+        panic!("the toggle on without the acknowledgement is not applied at once");
+    };
+    assert_eq!(flag(&on), (2, true));
+    let unchanged = written(&pool).await;
+
+    // True to false: refused after the authorization, and before the policy
+    // row and any write.
+    for (key, op, revision, expected) in [
+        (REQ, "op_off", 2, "WideningNotAcknowledged"),
+        // A stale revision.
+        (REQ, "op_off", 1, "WideningNotAcknowledged"),
+        // An event ID already taken.
+        (REQ, "op_on", 2, "WideningNotAcknowledged"),
+        // Without the role.
+        (TRUST, "op_off", 2, "Unauthorized"),
+    ] {
+        refused(
+            submit(&pool, key, op, revision, false, false, at(2)).await,
+            expected,
+        );
+    }
+    assert_eq!(written(&pool).await, unchanged);
+
+    // With it, applied at once as before.
+    let Ok(Gated::Applied(off)) = request(&pool, REQ, "op_off", 2, false, at(3)).await else {
+        panic!("the toggle off with the acknowledgement is not applied at once");
+    };
+    assert_eq!(off, policy(&pool).await);
+    assert_eq!(flag(&off), (3, false));
+    assert_eq!(deployment(&off), deployment(&empty.0));
+    assert_eq!(
+        events(&pool).await,
+        [
+            event(
+                "evt_op_on",
+                "adm_req",
+                "instance_security_policy.update",
+                INSTANCE_ID,
+                Some(1),
+                Some(2),
+                "success_single_actor",
+                1
+            ),
+            event(
+                "evt_op_off",
+                "adm_req",
+                "instance_security_policy.update",
+                INSTANCE_ID,
+                Some(2),
+                Some(3),
+                "success_single_actor",
+                3
+            ),
+        ]
+    );
+    assert_eq!(operation_ids(&pool).await, Vec::<String>::new());
     assert_chain_intact(&pool).await;
     db.drop([pool]).await;
 }
