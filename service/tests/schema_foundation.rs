@@ -487,7 +487,9 @@ async fn principal_name_is_unique_per_tenant_and_kind_and_bounded() {
 /// `principal_name_no_control_check`, judged under `"C"`. Format
 /// characters are not controls and pass, as in `0004`: a right-to-left
 /// override (U+202E) and a zero-width space (U+200B), which display
-/// surfaces must escape. Whitespace has no rule.
+/// surfaces must escape. So are the line and paragraph separators U+2028
+/// and U+2029 (categories Zl and Zp), accepted on insert and on rename.
+/// Spaces that are not controls have no rule.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn principal_name_has_no_control_character_but_may_hold_format_characters() {
@@ -565,9 +567,20 @@ async fn principal_name_has_no_control_character_but_may_hold_format_characters(
             "'deploy' || chr(8203) || 'er'",
             "deploy\u{200b}er",
         ),
+        // U+2028 LINE SEPARATOR (Zl) and U+2029 PARAGRAPH SEPARATOR (Zp).
+        (
+            "wld_ls",
+            "'deploy' || chr(8232) || 'er'",
+            "deploy\u{2028}er",
+        ),
+        (
+            "wld_ps",
+            "'deploy' || chr(8233) || 'er'",
+            "deploy\u{2029}er",
+        ),
         // U+00A0, the first code point after the C1 controls.
         ("wld_nbsp", "'deploy' || chr(160) || 'er'", "deploy\u{a0}er"),
-        // Whitespace has no rule.
+        // Spaces that are not controls have no rule.
         ("wld_space", "' deploy er '", " deploy er "),
     ] {
         sqlx::raw_sql(AssertSqlSafe(format!(
@@ -576,12 +589,23 @@ async fn principal_name_has_no_control_character_but_may_hold_format_characters(
         .execute(&pool)
         .await
         .unwrap();
-        let stored: String = sqlx::query_scalar("SELECT name FROM principal WHERE id = $1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(stored, expected, "{id}");
+        // A rename of `wld_1` to the value followed by `1` (the value itself
+        // is taken).
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "UPDATE principal SET name = {value} || '1', revision = revision + 1 \
+             WHERE id = 'wld_1'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, expected) in [(id, expected.to_owned()), ("wld_1", format!("{expected}1"))] {
+            let stored: String = sqlx::query_scalar("SELECT name FROM principal WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(stored, expected, "{id}");
+        }
     }
     db.drop([pool]).await;
 }

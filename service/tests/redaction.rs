@@ -10,9 +10,10 @@
 //! or its hashes, a key) must not appear in the `Display` or `Debug` of a
 //! `RestoreError`, a `SignedRecoveryResponse` or a `RecoveryPreview`
 //! (`persistence::registry::recovery`, "Restore";
-//! `docs/proposals/recovery-verified-response.md`). An `IdError` of an ID
-//! generator carries no detail of its cause either (`crate::ids`,
-//! "Generators").
+//! `docs/proposals/recovery-verified-response.md`). Nor may the bytes of a
+//! refused public key appear in an `IdentityError` (`crate::identity`). An
+//! `IdError` of an ID generator carries no detail of its cause either
+//! (`crate::ids`, "Generators").
 //!
 //! The unreachable-host and refused-connection tests need no server. The
 //! TLS, wrong-password and approval tests need `SKYOAUTH_IT_DATABASE_URL`
@@ -34,6 +35,7 @@ use common::TestDb;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::json;
 use skyoauth_service::{
+    identity::{IdentityError, MAX_SPKI_DER_BYTES, canonical_public_identity},
     ids::IdError,
     jwk::DEFAULT_ALLOWED_ALGORITHMS,
     operation::{
@@ -738,6 +740,92 @@ fn every_not_restorable_reason_is_fixed_text() {
         assert!(err.source().is_none());
         for (other, _) in REASONS {
             assert_eq!(err == RestoreError::from(other), reason == other);
+        }
+    }
+}
+
+/// Every `IdentityError` (`crate::identity`): its fixed `Display`; a `Debug`
+/// that names the variant only.
+const IDENTITY_ERRORS: [(IdentityError, &str, &str); 6] = [
+    (IdentityError::Empty, "Empty", "the public key is empty"),
+    (
+        IdentityError::TooLarge,
+        "TooLarge",
+        "the public key is too large",
+    ),
+    (
+        IdentityError::Truncated,
+        "Truncated",
+        "the public key encoding is truncated",
+    ),
+    (
+        IdentityError::NotDer,
+        "NotDer",
+        "the public key is not in DER encoding",
+    ),
+    (
+        IdentityError::TrailingBytes,
+        "TrailingBytes",
+        "the public key encoding has trailing bytes",
+    ),
+    (
+        IdentityError::NotSpki,
+        "NotSpki",
+        "the public key is not a SubjectPublicKeyInfo",
+    ),
+];
+
+/// Each identity error's `Display` is fixed text and its `Debug` the
+/// variant name, plain and alternate; it has no source.
+#[test]
+fn every_identity_error_is_fixed_text() {
+    for (err, name, text) in IDENTITY_ERRORS {
+        assert_eq!(err.to_string(), text);
+        assert_eq!(format!("{err:?}"), name);
+        assert_eq!(format!("{err:#?}"), name);
+        assert!(err.source().is_none());
+    }
+}
+
+/// An identity refused for each reason prints none of the presented key's
+/// bytes, nor the identity the key would have had.
+#[test]
+fn a_refused_public_key_prints_none_of_its_bytes() {
+    // The Ed25519 key of RFC 8410 section 10.1, as DER.
+    let mut key = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    key.extend([0xc3; 32]);
+    let identity = canonical_public_identity(&key).unwrap();
+    let mut markers = digest_forms(&key[12..]);
+    markers.extend(digest_forms(&key));
+    markers.push(identity.clone());
+    markers.push(identity["spki-sha256:".len()..].to_string());
+    let mut trailing = key.clone();
+    trailing.push(0xc3);
+    let mut long_form = vec![0x30, 0x81, 0x2a];
+    long_form.extend_from_slice(&key[2..]);
+    let mut in_a_set = vec![0x31, 0x2a];
+    in_a_set.extend_from_slice(&key[2..]);
+    let mut oversize = key.clone();
+    oversize.resize(MAX_SPKI_DER_BYTES + 1, 0xc3);
+    let cases: [(&[u8], IdentityError); 6] = [
+        (&[], IdentityError::Empty),
+        (&oversize, IdentityError::TooLarge),
+        (&key[..40], IdentityError::Truncated),
+        (&long_form, IdentityError::NotDer),
+        (&trailing, IdentityError::TrailingBytes),
+        (&in_a_set, IdentityError::NotSpki),
+    ];
+    for (input, expected) in cases {
+        let err = canonical_public_identity(input).unwrap_err();
+        assert_eq!(err, expected);
+        for (what, text) in [
+            ("Display", err.to_string()),
+            ("Debug", format!("{err:?}")),
+            ("Debug alternate", format!("{err:#?}")),
+        ] {
+            assert_omits(&format!("{expected:?} {what}"), &text, &markers);
         }
     }
 }

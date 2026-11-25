@@ -2,7 +2,7 @@
 //! credential carries, from the request's `scope` and the grant's
 //! `default_scopes`, within every applicable ceiling (IR-062, IR-063,
 //! IR-066; ADR-015 items 7 and 9; errors-retry ERR-024; design section
-//! 5.7; T12.8; groundwork for T21.5; conformance A26, M1a "policy").
+//! 5.7; T12.8; groundwork for T21.5; conformance A26, M1a "scope policy ... (registry API)").
 //!
 //! This module is pure: it reads nothing and writes nothing.
 //! `load_scope_ceilings` (in `persistence::registry`) loads the ceilings

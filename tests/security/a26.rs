@@ -4,10 +4,10 @@
 //! IR-063, IR-066; ADR-015 items 7 and 9; errors-retry ERR-024; design
 //! §5.7).
 //!
-//! **A26 partial: the registry and policy slice only; A26 M1a stays
-//! planned (scope "policy").** These tests are registered on A26's planned
-//! M1a stage, so they are no evidence for it: the reporter lists their
-//! results as not counted, and they are no claim. They run through the
+//! **A26 M1a: the registry and policy API, `implemented`.** These tests
+//! are A26's M1a stage, whose scope is the scope policy through the
+//! registry API (re-scoped from "policy" on 2026-11-24); the token endpoint
+//! and the wire `invalid_scope` are A26's M2 stage. They run through the
 //! public API of `skyoauth_service` against a real PostgreSQL, one fresh
 //! database per test, with no SQL of their own: the registry writes and
 //! reads (`skyoauth_service::persistence::registry`; the trust source
@@ -55,7 +55,7 @@
 //!   defaults were cleared, resolves an omitted scope to
 //!   [`ScopeError::Invalid`], although its own scopes and the intersection
 //!   of its ceilings would resolve if asked for: neither is a fallback
-//!   (`a26_neg_omitted_scope_without_defaults_is_invalid_scope`).
+//!   (`a26_neg_omitted_scope_without_defaults_gives_the_one_scope_error`).
 //! - **Negative, refused at write.** The registry refuses empty defaults
 //!   and defaults outside the grant's own `scopes`, on create and on
 //!   update, and a `scopes` update that leaves a default outside, each by
@@ -74,7 +74,7 @@
 //!   these tests cannot tell the policy's grammar check from its ceiling
 //!   check. The grammar check itself is pinned only by the unit tests of
 //!   `policy::scope`
-//!   (`a26_neg_explicit_empty_or_excessive_scope_is_invalid_scope`).
+//!   (`a26_neg_explicit_empty_or_excessive_scope_gives_the_one_scope_error`).
 //! - **Negative, shrunken ceiling.** Defaults that a ceiling other than
 //!   the grant's own no longer contains (the assignment, the resource
 //!   server, the target service, each narrowed through its registry
@@ -137,10 +137,9 @@
 //! a check above the registry would not turn it red, since the test calls
 //! the registry directly.
 //!
-//! **Missing, so not a claim.** A26 M1a needs its row through the
-//! in-process service (UC); these tests reach only the registry and the
-//! pure policy function below it. Still needed, with the owner of each
-//! part:
+//! **Not in A26's M1a stage.** The rest of A26's row needs the in-process
+//! service (UC); these tests reach only the registry and the pure policy
+//! function below it. Still needed, with the owner of each part:
 //!
 //! - The token endpoint calling the loader and [`resolve_scopes`] for a
 //!   WIF exchange, and mapping [`ScopeError::Invalid`] to the wire
@@ -813,7 +812,7 @@ async fn a26_pos_omitted_scope_resolves_to_the_stored_explicit_defaults() {
 }
 
 #[tokio::test]
-async fn a26_neg_omitted_scope_without_defaults_is_invalid_scope() {
+async fn a26_neg_omitted_scope_without_defaults_gives_the_one_scope_error() {
     let (db, pool) = fixture().await;
 
     // Stored without defaults. Its own scopes are exactly the intersection
@@ -910,7 +909,7 @@ async fn a26_neg_empty_or_out_of_grant_defaults_are_refused_at_write() {
 }
 
 #[tokio::test]
-async fn a26_neg_explicit_empty_or_excessive_scope_is_invalid_scope() {
+async fn a26_neg_explicit_empty_or_excessive_scope_gives_the_one_scope_error() {
     let (db, pool) = fixture().await;
     let direct = load(&pool, TEN_A, DIRECT).await;
     let delegation = load(&pool, TEN_A, DLG).await;

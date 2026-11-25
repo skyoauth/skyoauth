@@ -84,6 +84,7 @@ const rowHash = (rel, id) => sha256(specLine(readFileSync(join(REPO, rel), 'utf8
 const A24_HASH = rowHash(TASKS, 'A24');
 // A24's committed M1a scope, read from the registry for the same reason.
 const A24_SCOPE = scenarioValue(readFileSync(join(REPO, SCENARIOS), 'utf8'), 'A24', 'scope', 'M1a');
+const A26_SCOPE = scenarioValue(readFileSync(join(REPO, SCENARIOS), 'utf8'), 'A26', 'scope', 'M1a');
 
 describe('committed registry', () => {
   test('--check passes on the repository', () => {
@@ -397,8 +398,8 @@ describe('spec errors stop generation', () => {
   test('stage order and the "full row" scope', () => {
     failsBothModes(a26('milestone = "M2"', 'milestone = "M1a"'), /duplicate stage A26 M1a/);
     failsBothModes(a26('milestone = "M1a"', 'milestone = "M3"'), /A26 M2: stage M2 comes after M3; stage milestones must increase/);
-    failsBothModes(a26('scope = "policy"', 'scope = "full row"'), /A26 M1a: scope "full row" is the scope of a single-stage entry, and only of one/);
-    failsBothModes(a26('scope = "policy"', 'scope = "po|icy"'), /A26 M1a: scope must be table text/);
+    failsBothModes(a26(`scope = "${A26_SCOPE}"`, 'scope = "full row"'), /A26 M1a: scope "full row" is the scope of a single-stage entry, and only of one/);
+    failsBothModes(a26(`scope = "${A26_SCOPE}"`, 'scope = "po|icy"'), /A26 M1a: scope must be table text/);
     const one = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A24', `scope = "${A24_SCOPE}"`, 'scope = "full row"') : t));
     failsBothModes(one, /A24 M1a: scope "full row" is the scope of a single-stage entry/);
     const single = fixture((rel, t) => (rel === SCENARIOS ? editStage(t, 'scenario', 'A23', 'scope = "full row"', 'scope = "exchange"') : t));

@@ -424,7 +424,8 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
 /// `0002`'s `principal_name_no_control_check`, mapped to `Invariant` of
 /// kind `Check` naming it, and nothing changes. Format characters are not
 /// controls: a right-to-left override (U+202E) and a zero-width space
-/// (U+200B) are accepted and read back unchanged.
+/// (U+200B) are accepted and read back unchanged, and so are the line and
+/// paragraph separators U+2028 and U+2029, on create and on rename.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn principal_names_refuse_control_characters_not_format_characters() {
@@ -461,6 +462,8 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
     for (id, accepted) in [
         ("wld_rlo", "deploy\u{202e}er"),
         ("wld_zwsp", "deploy\u{200b}er"),
+        ("wld_ls", "deploy\u{2028}er"),
+        ("wld_ps", "deploy\u{2029}er"),
     ] {
         let created = registry::create_principal(&pool, &principal(id, accepted))
             .await
@@ -486,6 +489,76 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
     assert_eq!(
         (&renamed.name[..], renamed.revision),
         ("\u{202e}1 dlw lapicnirp", 2)
+    );
+    for (revision, accepted) in [
+        (2, "line\u{2028}separator"),
+        (3, "paragraph\u{2029}separator"),
+    ] {
+        let renamed = registry::test_support::update_principal(
+            &pool,
+            "ten_a",
+            "wld_1",
+            revision,
+            &principal_patch(name(accepted)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (&renamed.name[..], renamed.revision),
+            (accepted, revision + 1)
+        );
+        assert_eq!(
+            registry::get_principal(&pool, "ten_a", "wld_1")
+                .await
+                .unwrap()
+                .name,
+            accepted
+        );
+    }
+    db.drop([pool]).await;
+}
+
+/// A NUL (U+0000) in a principal name never reaches
+/// `principal_name_no_control_check`: PostgreSQL refuses it while decoding
+/// the text argument, so create and rename give `Other` with SQLSTATE
+/// `22021`, not the named check, and nothing changes.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_nul_in_a_principal_name_is_a_store_error_not_the_named_check() {
+    let (db, pool) = seeded().await;
+    let nul = "deploy\0er";
+    let created = registry::create_principal(
+        &pool,
+        &NewPrincipal {
+            name: nul.into(),
+            ..new_principal("ten_a", "wld_2", PrincipalKind::Workload)
+        },
+    )
+    .await;
+    let renamed = registry::test_support::update_principal(
+        &pool,
+        "ten_a",
+        "wld_1",
+        1,
+        &principal_patch(name(nul)),
+    )
+    .await;
+    for err in [created.map(drop), renamed.map(drop)] {
+        match err {
+            Err(RegistryError::Other(sqlx::Error::Database(err))) => {
+                assert_eq!(err.code().as_deref(), Some("22021"), "{err}");
+                assert_eq!(err.constraint(), None, "{err}");
+            }
+            other => panic!("expected Other with 22021: {other:?}"),
+        }
+    }
+    assert_not_found(registry::get_principal(&pool, "ten_a", "wld_2").await);
+    let unchanged = registry::get_principal(&pool, "ten_a", "wld_1")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&unchanged.name[..], unchanged.revision),
+        ("principal wld_1", 1)
     );
     db.drop([pool]).await;
 }

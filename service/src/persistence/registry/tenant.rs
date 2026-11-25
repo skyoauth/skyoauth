@@ -121,9 +121,12 @@ pub(crate) async fn update_tenant<'e>(
 /// tenant and kind has, disabled or not, is [`RegistryError::AlreadyExists`]
 /// naming `principal_tenant_id_kind_name_key`; the same name in another
 /// tenant or of another kind is accepted (`0002`; IR-021). A name with a
-/// control character is [`RegistryError::Invariant`] of kind
+/// control character other than NUL is [`RegistryError::Invariant`] of kind
 /// [`InvariantKind::Check`](super::InvariantKind::Check) naming
-/// `principal_name_no_control_check`.
+/// `principal_name_no_control_check`. A NUL (U+0000) never reaches that
+/// check: PostgreSQL refuses it while decoding the text argument, so it is
+/// [`RegistryError::Other`] with SQLSTATE `22021`; the request layer must
+/// reject it first (T14.1).
 pub async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
@@ -171,8 +174,12 @@ pub async fn get_principal<'e>(
 /// (lead ruling, 2026-11-21). A name is unique within the tenant and kind:
 /// a rename to a name another principal of the same tenant and kind has,
 /// disabled or not, is [`RegistryError::AlreadyExists`] naming
-/// `principal_tenant_id_kind_name_key` and changes nothing. An empty patch
-/// is an encode error,
+/// `principal_tenant_id_kind_name_key` and changes nothing. A name with a
+/// control character other than NUL is [`RegistryError::Invariant`] of kind
+/// [`InvariantKind::Check`](super::InvariantKind::Check) naming
+/// `principal_name_no_control_check` and changes nothing; a NUL is
+/// [`RegistryError::Other`] with SQLSTATE `22021`, as for
+/// [`create_principal`]. An empty patch is an encode error,
 /// [`RegistryError::Other`], before any statement runs. Re-enabling a
 /// disabled principal is a plain status change here; whether it needs an
 /// approval, and any other widening rule, belongs to the service layer

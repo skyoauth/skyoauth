@@ -126,22 +126,27 @@ egress rows are never deleted.
   Unicode normalization are different names. As a unique free-text key it
   is bounded by `principal_name_octet_length_check` (2048 bytes, as the
   `0004` names), so the largest key, a 255-byte tenant ID and a 2048-byte
-  name, fits the btree limit; unlike the `0004` names it has no
-  whitespace rule (lead decision, 2026-11-24: a human principal's name
-  is a display label). Like the `0004` names it has no control
-  character (lead decision, 2026-11-24, part of the same amendment):
-  `principal_name_no_control_check`,
+  name, fits the btree limit; unlike the `0004` names it has no rule on
+  spaces that are not controls, so U+0020 and U+00A0 pass (lead decision,
+  2026-11-24: a human principal's name is a display label), while TAB,
+  LF, VT, FF and CR are controls and refused by the check below. Like the
+  `0004` names it has no control character (lead decision, 2026-11-24,
+  part of the same amendment): `principal_name_no_control_check`,
   `CHECK ((name COLLATE "C") !~ '[[:cntrl:]]')`, the `0004` form without
   `[:space:]`, refuses U+0000–U+001F and U+007F–U+009F on every instance,
   so a trailing newline or an ANSI escape sequence fails with `23514`,
   which the registry maps to `Invariant` of kind `Check` naming the
-  constraint. Format characters are not controls and pass, as in `0004`:
-  a bidirectional override such as U+202E or a zero-width space (U+200B)
-  is a valid name, so every surface that displays a principal name (the
-  admin UI, the CLI, logs, audit exports) must escape them. A duplicate
-  fails with `23505` naming the key, which the registry maps to
-  `AlreadyExists` (see "Rust registry surface"). Tenant names are not
-  unique: no rule for them is decided (see Follow-ups).
+  constraint. U+0000 never reaches the check: PostgreSQL refuses it while
+  decoding the text argument, with `22021` (see "Rust registry surface").
+  Format characters are not controls and pass, as in `0004`: a
+  bidirectional override such as U+202E or a zero-width space (U+200B) is
+  a valid name. So are the line and paragraph separators U+2028 and U+2029
+  (categories Zl and Zp, not controls either). Every surface that displays
+  a principal name (the admin UI, the CLI, logs, audit exports) must
+  escape the bidirectional and other format characters and both
+  separators. A duplicate fails with `23505` naming the key, which the
+  registry maps to `AlreadyExists` (see "Rust registry surface"). Tenant
+  names are not unique: no rule for them is decided (see Follow-ups).
 
   | Constraint                          | Rule                                      |
   | ----------------------------------- | ----------------------------------------- |
@@ -269,11 +274,21 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   `public_mtls_identity` are non-empty and at most 2048 bytes, so an
   over-long value fails with `23514` instead of the btree error `54000`;
   `audience` and `action_name` also reject whitespace and control characters
-  (`[[:space:][:cntrl:]]`, as for egress destinations). `public_mtls_identity`
-  may contain spaces, since its form is not specified and may be a subject
-  DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
+  (`[[:space:][:cntrl:]]`, as for egress destinations). The
+  database does not reject whitespace in `public_mtls_identity`: when `0003`
+  was written its form was not specified and could have been a subject DN.
+  The form the service stores (next bullet) has neither. The audience syntax stays open (OQ-IR-9), and Unicode normalization
   (NFC or NFD) of these values is a service rule: the database compares
   bytes, so two spellings of one name are two keys.
+- **`public_mtls_identity` form.** The service stores `spki-sha256:` and 64
+  lowercase hexadecimal digits, which it computes from the checker key's DER
+  SubjectPublicKeyInfo with `crate::identity::canonical_public_identity`
+  (lead ruling, 2026-11-24; the contract wording is pending); the column
+  checks above are unchanged. The existing checker writers
+  (`create_resource_server_checker` and `update_resource_server_checker`,
+  test-support only) still take the identity string from their caller
+  today, until S3 wires `canonical_public_identity` in, as the `0005`
+  bullet says for operator credentials.
 - **ID column bounds.** Every ID column of `0003`, own IDs and reference
   columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
   are bounded by lead decision (2026-11-20), `tenant.id` with
@@ -810,7 +825,16 @@ below. A database created from an earlier `0005` is recreated.
   `public_identity` is not checked for them: it is the canonical public-key
   identity of the credential, for example the SHA-256 digest of its
   SubjectPublicKeyInfo, in an encoding the service fixes; subject DNs are
-  not stored. The digests
+  not stored. The service computes that identity with
+  `crate::identity::canonical_public_identity` from the key's DER
+  SubjectPublicKeyInfo, as `spki-sha256:` and 64 lowercase hexadecimal
+  digits, and never accepts a precomputed string (lead decision,
+  2026-11-24): the operator tooling only supplies the DER key, at bootstrap
+  as at enrollment (the contract update is pending: identity-registry
+  still leaves canonicalizing to the operator tooling). `bootstrap_instance`
+  and `create_admin_credential` still take the identity string from their
+  caller today; the slices that wire enrollment and authentication (S5, S7)
+  call the function. The digests
   `request_digest`, `challenge_hash` and `replay_key_digest` are `bytea` of
   32 to 64 bytes, and the recovery public key is 1 to 8192 bytes. Every ID,
   key, reference and enumeration is `COLLATE "C"`; only `outcome` keeps the
@@ -2611,16 +2635,17 @@ Open for all registry tables:
   pins both and fails once a tenant-name constraint exists.
 - First-login principals of M1b (`auto_create`, design §5.1.1; T30.4).
   Since `principal_tenant_id_kind_name_key` makes a human principal's name
-  unique in its tenant, `auto_create` must give the new principal a name
-  that cannot collide: one derived from its generated ID
-  (`service/src/ids.rs`), never the IdP's display name or email, which two
-  subjects may share. First-login convergence must key on the link's
-  unique tenant/provider/issuer/subject constraint, never on a generic
-  `AlreadyExists` from `principal_tenant_id_kind_name_key`: with a name
-  taken from the IdP, concurrent first logins would fail with `23505` on
-  the name key before the link constraint is reached, and treating that
-  failure as "already created" could attach a subject to another
-  subject's principal (lead decision, 2026-11-24).
+  unique in its tenant, `auto_create` derives the candidate name from the
+  new principal's generated ID (`service/src/ids.rs`), never from the
+  IdP's display name or email, which two subjects may share. Another human
+  principal in the tenant can already hold that label (names are mutable
+  display labels), so on a name conflict
+  (`principal_tenant_id_kind_name_key`) `auto_create` retries with a fresh
+  candidate from a fresh ID. A concurrent first login for the same subject
+  is recognized by the link's unique tenant/provider/issuer/subject
+  constraint, never by the name conflict: treating a `23505` on the name
+  key as "already created" could attach a subject to another subject's
+  principal (lead decision, 2026-11-24).
 - Runtime-role privileges (the T10.1 runtime-role follow-up). The deferred
   binding-set check runs with the caller's privileges: creating a grant
   needs, besides `INSERT`, `UPDATE` and `SELECT` on `service_grant` (the
@@ -2833,6 +2858,10 @@ logging must not walk the source chain.
 PostgreSQL text and `jsonb` cannot hold U+0000: a NUL character in any
 string argument (IDs, names, the page cursor, list elements, strings inside
 `jsonb` values) gives `Other` with `22021` (`text`) or `22P05` (`jsonb`).
+The server raises it while decoding the argument, before any constraint
+runs, so a principal name with a NUL is `Other` with `22021` on create and
+on rename, not the `Invariant` of kind `Check` naming
+`principal_name_no_control_check` that the other control characters give.
 The request layer (T14.1) must reject it.
 
 The registry does not authorize writes (API-147; T14.1, T14.2), write
@@ -3016,8 +3045,11 @@ and the `now` of a revocation are arguments, never the database's `now()`
 (`Guard`), `admin_credential_revoked_disabled_check` refuses an enabled
 revoked credential (`Invariant`), `admin_credential_immutable` keeps the
 key on its row, and the `0006` delete and truncate guards keep the row, so
-`admin_credential_public_identity_key` refuses the revoked key again
-(`AlreadyExists`, naming only the constraint). Only credential
+`admin_credential_public_identity_key` refuses the revoked identity again
+(`AlreadyExists`, naming only the constraint); the unique key is per
+identity, which is per DER encoding of a key, so it refuses the revoked key
+only once the callers enforce the one-form requirement of
+`crate::identity` (S3, S5, S7). Only credential
 revocation is one-way in the database. The registry has no setter that
 enables or otherwise updates an identity or a credential, and no way to
 disable a credential without revoking it (public-api §7.1 names enrollment
@@ -3149,8 +3181,10 @@ over-2048-byte `public_identity` or `trust_anchor_ref`, and a `now` outside
 the `0007` range or outside the years `0000` to `9999` that the audit writer
 accepts, with the writer's bound and message (encode errors, `Other`; no
 statement runs and nothing is written). It trusts its caller otherwise:
-canonicalizing the operator's mTLS key stays with the operator tooling
-(T13.1, T13.10). Then, in order: it locks the policy row
+it takes `public_identity` as given today, and the service, not the
+operator tooling, is to derive it from the DER SubjectPublicKeyInfo that
+the operator tooling supplies (T13.1, T13.10), as the `0005` bullet above
+says. Then, in order: it locks the policy row
 (`SELECT instance_id FROM instance_security_policy FOR UPDATE`) and, in a
 statement after the lock, refuses with `AlreadyClosed` when a
 `recovery_state` row exists; it adopts a policy row found without one,
