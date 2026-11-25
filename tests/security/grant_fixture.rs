@@ -101,7 +101,7 @@ fn strings(values: &[&str]) -> Vec<String> {
 pub(super) async fn tenant() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         &pool,
         &NewTenant {
             id: TENANT.into(),
@@ -116,7 +116,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
         (ACTOR, PrincipalKind::Workload, "ci"),
         (SERVICE, PrincipalKind::Service, "deploy-api"),
     ] {
-        registry::create_principal(
+        registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: id.into(),
@@ -156,7 +156,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
     registry::test_support::create_trust_source(&pool, &source)
         .await
         .unwrap();
-    registry::create_principal_binding(
+    registry::test_support::create_principal_binding(
         &pool,
         &NewPrincipalBinding {
             id: BINDING.into(),
@@ -171,7 +171,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
-    registry::create_service_identity(
+    registry::test_support::create_service_identity(
         &pool,
         &NewServiceIdentity {
             id: SERVICE.into(),
@@ -185,7 +185,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
-    registry::create_resource_server(
+    registry::test_support::create_resource_server(
         &pool,
         &NewResourceServer {
             id: AUDIENCE.into(),
@@ -199,7 +199,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
-    registry::create_audience_tenant_assignment(
+    registry::test_support::create_audience_tenant_assignment(
         &pool,
         &NewAudienceTenantAssignment {
             id: "ata_a".into(),
@@ -316,7 +316,9 @@ async fn listed(pool: &PgPool, id: &str) -> Option<ServiceGrant> {
 /// the record `new` describes.
 pub(super) async fn assert_stored(pool: &PgPool, new: &NewServiceGrant) -> ServiceGrant {
     let want = record(new, 1);
-    let created = registry::create_service_grant(pool, new).await.unwrap();
+    let created = registry::test_support::create_service_grant(pool, new)
+        .await
+        .unwrap();
     assert_eq!(created, want);
     assert_eq!(created.revision, 1);
     assert_eq!(
@@ -344,7 +346,10 @@ pub(super) fn assert_check<T: Debug>(result: Result<T, RegistryError>, constrain
 /// Creating `new` is refused by `constraint`, and nothing is stored: the
 /// grant is neither found nor listed.
 pub(super) async fn assert_create_refused(pool: &PgPool, new: &NewServiceGrant, constraint: &str) {
-    assert_check(registry::create_service_grant(pool, new).await, constraint);
+    assert_check(
+        registry::test_support::create_service_grant(pool, new).await,
+        constraint,
+    );
     let read = registry::get_service_grant(pool, TENANT, &new.id).await;
     assert!(matches!(read, Err(RegistryError::NotFound)), "{read:?}");
     assert_eq!(listed(pool, &new.id).await, None);
@@ -359,7 +364,7 @@ pub(super) async fn assert_update_refused(
     status: Status,
     activation_state: ActivationState,
 ) {
-    let result = registry::update_service_grant(
+    let result = registry::test_support::update_service_grant(
         pool,
         TENANT,
         &grant.id,

@@ -281,7 +281,7 @@ async fn seeded_with(bootstrap: bool) -> (TestDb, PgPool) {
         transaction.commit().await.unwrap();
     }
     for (id, ns) in [("ten_a", "ns_a"), ("ten_b", "ns_b")] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: id.into(),
@@ -294,7 +294,7 @@ async fn seeded_with(bootstrap: bool) -> (TestDb, PgPool) {
         .unwrap();
     }
     for (id, tenant_id) in [("ks_1", "ten_a"), ("ks_2", "ten_a"), ("ks_b", "ten_b")] {
-        registry::create_trust_keyset(
+        registry::test_support::create_trust_keyset(
             &pool,
             &NewTrustKeyset {
                 id: id.into(),

@@ -397,8 +397,9 @@ impl FromRow<'_, PgRow> for Tenant {
     }
 }
 
-/// The input of [`create_tenant`](super::create_tenant). `created_at` is
-/// set by the database.
+/// The input of the registry-private `create_tenant` (tests reach it
+/// through the `test-support` feature). `created_at` is set by the
+/// database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTenant {
     pub id: String,
@@ -460,7 +461,8 @@ impl FromRow<'_, PgRow> for Principal {
     }
 }
 
-/// The input of [`create_principal`](super::create_principal).
+/// The input of the registry-private `create_principal` (tests reach it
+/// through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPrincipal {
     pub id: String,
@@ -516,7 +518,8 @@ impl FromRow<'_, PgRow> for ResourceServer {
     }
 }
 
-/// The input of [`create_resource_server`](super::create_resource_server).
+/// The input of the registry-private `create_resource_server` (tests reach
+/// it through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewResourceServer {
     pub id: String,
@@ -528,8 +531,9 @@ pub struct NewResourceServer {
     pub status: Status,
 }
 
-/// The mutable columns of a resource server, all replaced by
-/// [`update_resource_server`](super::update_resource_server).
+/// The mutable columns of a resource server, all replaced by the
+/// registry-private `update_resource_server` (tests only, through the
+/// `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceServerChanges {
     pub name: String,
@@ -568,8 +572,8 @@ impl FromRow<'_, PgRow> for AudienceTenantAssignment {
     }
 }
 
-/// The input of
-/// [`create_audience_tenant_assignment`](super::create_audience_tenant_assignment).
+/// The input of the registry-private `create_audience_tenant_assignment`
+/// (tests reach it through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAudienceTenantAssignment {
     pub id: String,
@@ -581,8 +585,9 @@ pub struct NewAudienceTenantAssignment {
     pub status: Status,
 }
 
-/// The mutable columns of an assignment, all replaced by
-/// [`update_audience_tenant_assignment`](super::update_audience_tenant_assignment).
+/// The mutable columns of an assignment, all replaced by the
+/// registry-private `update_audience_tenant_assignment` (tests only,
+/// through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudienceTenantAssignmentChanges {
     pub allowed_profiles: Vec<Profile>,
@@ -773,7 +778,8 @@ impl FromRow<'_, PgRow> for TrustKeyset {
     }
 }
 
-/// The input of [`create_trust_keyset`](super::create_trust_keyset).
+/// The input of the registry-private `create_trust_keyset` (tests reach it
+/// through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTrustKeyset {
     pub id: String,
@@ -782,8 +788,8 @@ pub struct NewTrustKeyset {
     pub status: Status,
 }
 
-/// The mutable columns of a keyset, all replaced by
-/// [`update_trust_keyset`](super::update_trust_keyset).
+/// The mutable columns of a keyset, all replaced by the registry-private
+/// `update_trust_keyset` (tests only, through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustKeysetChanges {
     pub name: String,
@@ -999,7 +1005,8 @@ impl FromRow<'_, PgRow> for PrincipalBinding {
     }
 }
 
-/// The input of [`create_principal_binding`](super::create_principal_binding).
+/// The input of the registry-private `create_principal_binding` (tests
+/// reach it through the `test-support` feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPrincipalBinding {
     pub id: String,
@@ -1012,8 +1019,9 @@ pub struct NewPrincipalBinding {
     pub status: Status,
 }
 
-/// The mutable columns of a binding, all replaced by
-/// [`update_principal_binding`](super::update_principal_binding).
+/// The mutable columns of a binding, all replaced by the registry-private
+/// `update_principal_binding` (tests only, through the `test-support`
+/// feature).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrincipalBindingChanges {
     pub name: String,
@@ -1055,8 +1063,9 @@ impl FromRow<'_, PgRow> for ServiceIdentity {
     }
 }
 
-/// The input of [`create_service_identity`](super::create_service_identity),
-/// with the identity's initial audiences.
+/// The input of the registry-private `create_service_identity` (tests
+/// reach it through the `test-support` feature), with the identity's
+/// initial audiences.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewServiceIdentity {
     pub id: String,
@@ -1068,9 +1077,9 @@ pub struct NewServiceIdentity {
     pub status: Status,
 }
 
-/// The mutable columns of a service identity, all replaced by
-/// [`update_service_identity`](super::update_service_identity). Its
-/// audiences are unchanged.
+/// The mutable columns of a service identity, all replaced by the
+/// registry-private `update_service_identity` (tests only, through the
+/// `test-support` feature). Its audiences are unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceIdentityChanges {
     pub name: String,
@@ -1136,8 +1145,9 @@ impl FromRow<'_, PgRow> for ServiceGrant {
     }
 }
 
-/// The input of [`create_service_grant`](super::create_service_grant), with
-/// the grant's initial bindings and audiences. `allowed_binding_ids` must
+/// The input of the registry-private `create_service_grant` (tests reach
+/// it through the `test-support` feature), with the grant's initial
+/// bindings and audiences. `allowed_binding_ids` must
 /// not be empty by commit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewServiceGrant {
@@ -1158,10 +1168,10 @@ pub struct NewServiceGrant {
     pub resource_server_ids: Vec<String>,
 }
 
-/// The mutable columns of a grant, all replaced by
-/// [`update_service_grant`](super::update_service_grant). The actor,
-/// target and mode are immutable; the bindings and audiences are
-/// unchanged.
+/// The mutable columns of a grant, all replaced by the registry-private
+/// `update_service_grant` (tests only, through the `test-support`
+/// feature). The actor, target and mode are immutable; the bindings and
+/// audiences are unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServiceGrantChanges {
     pub name: String,

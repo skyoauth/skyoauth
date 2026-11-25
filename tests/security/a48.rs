@@ -420,7 +420,7 @@ async fn fixture(policy: Policy) -> (TestDb, PgPool) {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         &pool,
         &NewTenant {
             id: "ten_a".into(),
@@ -1455,7 +1455,7 @@ async fn a48_neg_single_actor_mode_does_not_let_a_trust_admin_write_alone() {
         ],
     )
     .await;
-    registry::create_trust_keyset(
+    registry::test_support::create_trust_keyset(
         &pool,
         &NewTrustKeyset {
             id: "ks_a".into(),

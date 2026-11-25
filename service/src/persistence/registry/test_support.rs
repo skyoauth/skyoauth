@@ -47,6 +47,17 @@
 //! `update_admin_role_binding` (the survey under "Still open after PRs 7, 9
 //! and 10" of the same proposal; inferred: the narrowest visibility).
 //!
+//! The remaining writers of the resource server, audience assignment,
+//! tenant, principal, principal binding, service identity, grant and trust
+//! keyset tables ([`create_resource_server`] to [`update_trust_keyset`]
+//! below) write those rows, a re-enable or a widened list set included,
+//! with no authorization and no audit event. Nothing in the crate calls
+//! them either, so they take the same form, and the scenario tests under
+//! `tests/security` reach them here too (the follow-up of the same
+//! survey). [`consume_assertion`](super::consume_assertion) and
+//! [`consume_assertion_set`](super::consume_assertion_set) stay public: they
+//! only insert replay records.
+//!
 //! The integration tests under `service/tests` and the scenario tests of
 //! `skyoauth-scenarios` (`tests/`) are crates of their own and use these
 //! writers to set up rows and to test the registry floor itself, so this
@@ -67,12 +78,17 @@ use sqlx::{PgExecutor, Postgres, Transaction};
 
 use super::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges,
-    AdministrativeOperation, AuditEvent, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
-    NewAdministrativeOperation, NewAuditEvent, NewResourceAction, NewResourceServerChecker,
-    NewTrustKeysetVersion, NewTrustSource, Principal, PrincipalPatch, RegistryError,
-    ResourceAction, ResourceActionChanges, ResourceServerChecker, ResourceServerCheckerChanges,
-    Status, Tenant, TenantPatch, TrustKeysetVersion, TrustSource, TrustSourceChanges, audience,
-    events, operation, operator, tenant, trust,
+    AdministrativeOperation, AudienceTenantAssignment, AudienceTenantAssignmentChanges, AuditEvent,
+    NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation,
+    NewAudienceTenantAssignment, NewAuditEvent, NewPrincipal, NewPrincipalBinding,
+    NewResourceAction, NewResourceServer, NewResourceServerChecker, NewServiceGrant,
+    NewServiceIdentity, NewTenant, NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource,
+    Principal, PrincipalBinding, PrincipalBindingChanges, PrincipalPatch, RegistryError,
+    ResourceAction, ResourceActionChanges, ResourceServer, ResourceServerChanges,
+    ResourceServerChecker, ResourceServerCheckerChanges, ServiceGrant, ServiceGrantChanges,
+    ServiceIdentity, ServiceIdentityChanges, Status, Tenant, TenantPatch, TrustKeyset,
+    TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges, audience, events,
+    grant, operation, operator, tenant, trust,
 };
 
 /// The `pub(crate)` registry `create_trust_keyset_version`: the unchecked
@@ -295,4 +311,272 @@ pub async fn update_principal<'e>(
     patch: &PrincipalPatch,
 ) -> Result<Principal, RegistryError> {
     tenant::update_principal(executor, tenant_id, id, expected_revision, patch).await
+}
+
+/// The registry's `create_resource_server` (`pub(super)`, no caller in the
+/// crate): a resource server (an audience), unauthorized and unaudited.
+/// Tests only.
+pub async fn create_resource_server<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewResourceServer,
+) -> Result<ResourceServer, RegistryError> {
+    audience::create_resource_server(executor, new).await
+}
+
+/// The registry's `update_resource_server` (`pub(super)`, no caller in the
+/// crate): a resource server's mutable columns, a re-enable included,
+/// unauthorized and unaudited. Tests only.
+pub async fn update_resource_server<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    changes: &ResourceServerChanges,
+) -> Result<ResourceServer, RegistryError> {
+    audience::update_resource_server(executor, id, expected_revision, changes).await
+}
+
+/// The registry's `create_audience_tenant_assignment` (`pub(super)`, no
+/// caller in the crate): a tenant's assignment to an audience, unauthorized
+/// and unaudited. Tests only.
+pub async fn create_audience_tenant_assignment<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewAudienceTenantAssignment,
+) -> Result<AudienceTenantAssignment, RegistryError> {
+    audience::create_audience_tenant_assignment(executor, new).await
+}
+
+/// The registry's `update_audience_tenant_assignment` (`pub(super)`, no
+/// caller in the crate): an assignment's mutable columns, a re-enable
+/// included, unauthorized and unaudited. Tests only.
+pub async fn update_audience_tenant_assignment<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    changes: &AudienceTenantAssignmentChanges,
+) -> Result<AudienceTenantAssignment, RegistryError> {
+    audience::update_audience_tenant_assignment(executor, id, expected_revision, changes).await
+}
+
+/// The registry's `create_principal_binding` (`pub(super)`, no caller in
+/// the crate): a principal binding, the claims of a trust source that map
+/// to a workload principal, unauthorized and unaudited. Tests only.
+pub async fn create_principal_binding<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewPrincipalBinding,
+) -> Result<PrincipalBinding, RegistryError> {
+    grant::create_principal_binding(executor, new).await
+}
+
+/// The registry's `update_principal_binding` (`pub(super)`, no caller in
+/// the crate): a binding's mutable columns, a re-enable included,
+/// unauthorized and unaudited. Tests only.
+pub async fn update_principal_binding<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    changes: &PrincipalBindingChanges,
+) -> Result<PrincipalBinding, RegistryError> {
+    grant::update_principal_binding(executor, tenant_id, id, expected_revision, changes).await
+}
+
+/// The registry's `create_service_identity` (`pub(super)`, no caller in the
+/// crate): a service identity with its audiences, unauthorized and
+/// unaudited. Tests only.
+pub async fn create_service_identity<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewServiceIdentity,
+) -> Result<ServiceIdentity, RegistryError> {
+    grant::create_service_identity(executor, new).await
+}
+
+/// The registry's `update_service_identity` (`pub(super)`, no caller in the
+/// crate): a service identity's mutable columns, a re-enable included,
+/// unauthorized and unaudited. Tests only.
+pub async fn update_service_identity<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    changes: &ServiceIdentityChanges,
+) -> Result<ServiceIdentity, RegistryError> {
+    grant::update_service_identity(executor, tenant_id, id, expected_revision, changes).await
+}
+
+/// The registry's `add_service_identity_resource_server` (`pub(super)`, no
+/// caller in the crate): an audience added to a service identity,
+/// unauthorized and unaudited. Tests only.
+pub async fn add_service_identity_resource_server<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    service_id: &str,
+    expected_revision: i64,
+    resource_server_id: &str,
+) -> Result<i64, RegistryError> {
+    grant::add_service_identity_resource_server(
+        executor,
+        tenant_id,
+        service_id,
+        expected_revision,
+        resource_server_id,
+    )
+    .await
+}
+
+/// The registry's `remove_service_identity_resource_server` (`pub(super)`,
+/// no caller in the crate): an audience removed from a service identity,
+/// unauthorized and unaudited. Tests only.
+pub async fn remove_service_identity_resource_server<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    service_id: &str,
+    expected_revision: i64,
+    resource_server_id: &str,
+) -> Result<i64, RegistryError> {
+    grant::remove_service_identity_resource_server(
+        executor,
+        tenant_id,
+        service_id,
+        expected_revision,
+        resource_server_id,
+    )
+    .await
+}
+
+/// The registry's `create_service_grant` (`pub(super)`, no caller in the
+/// crate): a service grant with its bindings and audiences, unauthorized
+/// and unaudited. Tests only.
+pub async fn create_service_grant<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewServiceGrant,
+) -> Result<ServiceGrant, RegistryError> {
+    grant::create_service_grant(executor, new).await
+}
+
+/// The registry's `update_service_grant` (`pub(super)`, no caller in the
+/// crate): a grant's mutable columns, a re-enable included, unauthorized
+/// and unaudited. Tests only.
+pub async fn update_service_grant<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    changes: &ServiceGrantChanges,
+) -> Result<ServiceGrant, RegistryError> {
+    grant::update_service_grant(executor, tenant_id, id, expected_revision, changes).await
+}
+
+/// The registry's `add_service_grant_binding` (`pub(super)`, no caller in
+/// the crate): a binding added to a grant, unauthorized and unaudited.
+/// Tests only.
+pub async fn add_service_grant_binding<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    grant_id: &str,
+    expected_revision: i64,
+    binding_id: &str,
+) -> Result<i64, RegistryError> {
+    grant::add_service_grant_binding(executor, tenant_id, grant_id, expected_revision, binding_id)
+        .await
+}
+
+/// The registry's `remove_service_grant_binding` (`pub(super)`, no caller
+/// in the crate): a binding removed from a grant, unauthorized and
+/// unaudited. Tests only.
+pub async fn remove_service_grant_binding<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    grant_id: &str,
+    expected_revision: i64,
+    binding_id: &str,
+) -> Result<i64, RegistryError> {
+    grant::remove_service_grant_binding(
+        executor,
+        tenant_id,
+        grant_id,
+        expected_revision,
+        binding_id,
+    )
+    .await
+}
+
+/// The registry's `add_service_grant_resource_server` (`pub(super)`, no
+/// caller in the crate): an audience added to a grant, unauthorized and
+/// unaudited. Tests only.
+pub async fn add_service_grant_resource_server<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    grant_id: &str,
+    expected_revision: i64,
+    resource_server_id: &str,
+) -> Result<i64, RegistryError> {
+    grant::add_service_grant_resource_server(
+        executor,
+        tenant_id,
+        grant_id,
+        expected_revision,
+        resource_server_id,
+    )
+    .await
+}
+
+/// The registry's `remove_service_grant_resource_server` (`pub(super)`, no
+/// caller in the crate): an audience removed from a grant, unauthorized and
+/// unaudited. Tests only.
+pub async fn remove_service_grant_resource_server<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    grant_id: &str,
+    expected_revision: i64,
+    resource_server_id: &str,
+) -> Result<i64, RegistryError> {
+    grant::remove_service_grant_resource_server(
+        executor,
+        tenant_id,
+        grant_id,
+        expected_revision,
+        resource_server_id,
+    )
+    .await
+}
+
+/// The registry's `create_tenant` (`pub(super)`, no caller in the crate): a
+/// tenant with its secret namespace, unauthorized and unaudited. Tests
+/// only.
+pub async fn create_tenant<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewTenant,
+) -> Result<Tenant, RegistryError> {
+    tenant::create_tenant(executor, new).await
+}
+
+/// The registry's `create_principal` (`pub(super)`, no caller in the
+/// crate): a principal of a tenant, unauthorized and unaudited. Tests only.
+pub async fn create_principal<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewPrincipal,
+) -> Result<Principal, RegistryError> {
+    tenant::create_principal(executor, new).await
+}
+
+/// The registry's `create_trust_keyset` (`pub(super)`, no caller in the
+/// crate): a trust keyset, unauthorized and unaudited. Tests only.
+pub async fn create_trust_keyset<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewTrustKeyset,
+) -> Result<TrustKeyset, RegistryError> {
+    trust::create_trust_keyset(executor, new).await
+}
+
+/// The registry's `update_trust_keyset` (`pub(super)`, no caller in the
+/// crate): a keyset's name or status, a re-enable included, unauthorized
+/// and unaudited. Tests only.
+pub async fn update_trust_keyset<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: &str,
+    id: &str,
+    expected_revision: i64,
+    changes: &TrustKeysetChanges,
+) -> Result<TrustKeyset, RegistryError> {
+    trust::update_trust_keyset(executor, tenant_id, id, expected_revision, changes).await
 }

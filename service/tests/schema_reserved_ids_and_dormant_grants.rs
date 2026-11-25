@@ -1042,13 +1042,21 @@ async fn a_grant_committed_after_the_snapshot_is_refused_by_the_foreign_key() {
             status: grant.status,
             activation_state: grant.activation_state,
         };
-        let added =
-            registry::add_service_grant_binding(&mut *writer, "ten_a", &id, 1, "bnd_2").await;
+        let added = registry::test_support::add_service_grant_binding(
+            &mut *writer,
+            "ten_a",
+            &id,
+            1,
+            "bnd_2",
+        )
+        .await;
         assert!(
             matches!(added, Err(RegistryError::NotFound)),
             "{isolation}: {added:?}"
         );
-        let updated = registry::update_service_grant(&mut *writer, "ten_a", &id, 1, &changes).await;
+        let updated =
+            registry::test_support::update_service_grant(&mut *writer, "ten_a", &id, 1, &changes)
+                .await;
         assert!(
             matches!(updated, Err(RegistryError::NotFound)),
             "{isolation}: {updated:?}"
@@ -1218,7 +1226,9 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
         allowed_binding_ids: vec!["bnd_1".into(), "bnd_2".into()],
         resource_server_ids: vec!["rs_1".into()],
     };
-    let created = registry::create_service_grant(&pool, &new).await.unwrap();
+    let created = registry::test_support::create_service_grant(&pool, &new)
+        .await
+        .unwrap();
     assert_eq!(created.revision, 1);
     assert_eq!(created.allowed_binding_ids, ["bnd_1", "bnd_2"]);
     let changes = ServiceGrantChanges {
@@ -1236,7 +1246,7 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
         assert!(matches!(err, RegistryError::Guard), "{err:?}");
     };
     guard(
-        registry::update_service_grant(&pool, "ten_a", "grt_reg", 1, &changes)
+        registry::test_support::update_service_grant(&pool, "ten_a", "grt_reg", 1, &changes)
             .await
             .map(|_| ()),
     );
@@ -1247,24 +1257,28 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
     )
     .await;
     guard(
-        registry::add_service_grant_binding(&pool, "ten_a", "grt_reg", 1, "bnd_3")
+        registry::test_support::add_service_grant_binding(&pool, "ten_a", "grt_reg", 1, "bnd_3")
             .await
             .map(|_| ()),
     );
     guard(
-        registry::remove_service_grant_binding(&pool, "ten_a", "grt_reg", 1, "bnd_2")
+        registry::test_support::remove_service_grant_binding(&pool, "ten_a", "grt_reg", 1, "bnd_2")
             .await
             .map(|_| ()),
     );
     guard(
-        registry::add_service_grant_resource_server(&pool, "ten_a", "grt_reg", 1, "rs_2")
-            .await
-            .map(|_| ()),
+        registry::test_support::add_service_grant_resource_server(
+            &pool, "ten_a", "grt_reg", 1, "rs_2",
+        )
+        .await
+        .map(|_| ()),
     );
     guard(
-        registry::remove_service_grant_resource_server(&pool, "ten_a", "grt_reg", 1, "rs_1")
-            .await
-            .map(|_| ()),
+        registry::test_support::remove_service_grant_resource_server(
+            &pool, "ten_a", "grt_reg", 1, "rs_1",
+        )
+        .await
+        .map(|_| ()),
     );
     assert_eq!(
         registry::get_service_grant(&pool, "ten_a", "grt_reg")
@@ -1275,7 +1289,7 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
     // Also in the creating transaction: a binding is added only by the
     // create call.
     let mut tx = pool.begin().await.unwrap();
-    registry::create_service_grant(
+    registry::test_support::create_service_grant(
         &mut *tx,
         &NewServiceGrant {
             id: "grt_tx".into(),
@@ -1287,7 +1301,7 @@ async fn registry_writes_to_a_dormant_grant_are_guard_errors() {
     .await
     .unwrap();
     guard(
-        registry::add_service_grant_binding(&mut *tx, "ten_a", "grt_tx", 1, "bnd_3")
+        registry::test_support::add_service_grant_binding(&mut *tx, "ten_a", "grt_tx", 1, "bnd_3")
             .await
             .map(|_| ()),
     );

@@ -111,12 +111,12 @@
 //!   rows have no revision of their own (`0003`).
 //! - The `0004` list sets change the same way, each a compare-and-set on its
 //!   owner's revision: a service identity's audiences
-//!   ([`add_service_identity_resource_server`],
-//!   [`remove_service_identity_resource_server`]), a grant's allowed
-//!   bindings ([`add_service_grant_binding`],
-//!   [`remove_service_grant_binding`]) and a grant's audiences
-//!   ([`add_service_grant_resource_server`],
-//!   [`remove_service_grant_resource_server`]). A service identity and a
+//!   (`add_service_identity_resource_server`,
+//!   `remove_service_identity_resource_server`), a grant's allowed
+//!   bindings (`add_service_grant_binding`,
+//!   `remove_service_grant_binding`) and a grant's audiences
+//!   (`add_service_grant_resource_server`,
+//!   `remove_service_grant_resource_server`). A service identity and a
 //!   grant are created with their initial sets in the same statement.
 //! - A trust keyset version is immutable but for its `status` (`0004`).
 //!   `update_trust_keyset_version` enables or disables it as a
@@ -146,13 +146,13 @@
 //! 10). The `0004` constraint trigger checks it when the transaction
 //! commits, not at the statement, and fails the commit with `SK001`:
 //!
-//! - [`create_service_grant`] inserts the grant and its binding rows in one
+//! - `create_service_grant` inserts the grant and its binding rows in one
 //!   statement, so a grant created with at least one binding passes on any
 //!   executor. With none, a call on a pool or a bare connection, which
 //!   commits at once, fails with [`RegistryError::Guard`]; inside a caller
 //!   transaction the call succeeds and the commit fails, unless the caller
 //!   adds a binding first.
-//! - [`remove_service_grant_binding`] of a grant's last binding fails the
+//! - `remove_service_grant_binding` of a grant's last binding fails the
 //!   same way: at once with [`RegistryError::Guard`] outside a transaction,
 //!   at commit inside one, unless a binding is added before.
 //!
@@ -207,13 +207,13 @@
 //!
 //! A grant's `valid_until` is different:
 //!
-//! - [`update_service_grant`] replaces `valid_until`, so it repairs such a
+//! - `update_service_grant` replaces `valid_until`, so it repairs such a
 //!   row: with the check in force (even `NOT VALID`) a revision-checked
 //!   update that sets a finite `valid_until` (or none) succeeds and returns
 //!   the readable row.
-//! - A grant list-set change ([`add_service_grant_binding`],
-//!   [`remove_service_grant_binding`], [`add_service_grant_resource_server`]
-//!   and [`remove_service_grant_resource_server`]) writes only the grant's
+//! - A grant list-set change (`add_service_grant_binding`,
+//!   `remove_service_grant_binding`, `add_service_grant_resource_server`
+//!   and `remove_service_grant_resource_server`) writes only the grant's
 //!   revision, so with the check in force it still fails with `23514`. With
 //!   the check dropped it applies and returns only the new revision: it
 //!   does not read the timestamp column.
@@ -250,9 +250,9 @@
 //! `StaleRevision`.
 //!
 //! Since `0010` the database refuses a new audience row of a service
-//! identity or a grant ([`create_service_identity`],
-//! [`add_service_identity_resource_server`], [`create_service_grant`],
-//! [`add_service_grant_resource_server`]) whose audience tenant assignment
+//! identity or a grant (`create_service_identity`,
+//! `add_service_identity_resource_server`, `create_service_grant`,
+//! `add_service_grant_resource_server`) whose audience tenant assignment
 //! exists but is not enabled (IR-080; provisional lead pick, 2026-11-22):
 //! `Invariant { kind: AssignmentActive, constraint }`, the constraint one
 //! of [`ASSIGNMENT_ACTIVE`], the name of the guard trigger that raised it.
@@ -358,7 +358,23 @@
 //!   `update_tenant` and `update_principal` (a re-enable included), all
 //!   `pub(super)` with no caller in the crate, so each carries the same
 //!   `expect(dead_code)` as `update_admin_role_binding` (inferred: the
-//!   narrowest visibility; no scenario test names them).
+//!   narrowest visibility);
+//! - the other writers of the resource server, audience assignment,
+//!   tenant, principal, principal binding, service identity, grant and
+//!   trust keyset tables: `create_resource_server`,
+//!   `update_resource_server`, `create_audience_tenant_assignment`,
+//!   `update_audience_tenant_assignment`, `create_tenant`,
+//!   `create_principal`, `create_principal_binding`,
+//!   `update_principal_binding`, `create_service_identity`,
+//!   `update_service_identity`, `add_service_identity_resource_server`,
+//!   `remove_service_identity_resource_server`, `create_service_grant`,
+//!   `update_service_grant`, `add_service_grant_binding`,
+//!   `remove_service_grant_binding`, `add_service_grant_resource_server`,
+//!   `remove_service_grant_resource_server`, `create_trust_keyset` and
+//!   `update_trust_keyset`, also `pub(super)` with no caller in the crate
+//!   and the same `expect(dead_code)` (the follow-up of the same survey;
+//!   the scenario tests under `tests/security` name them through
+//!   `test_support` too).
 //!
 //! Tests, which are crates of their own, reach each through a wrapper of
 //! the same name in the `#[doc(hidden)]` module `test_support`, compiled
@@ -374,12 +390,9 @@
 //! [`bootstrap_instance`] remains callable without a signature, and only
 //! before the instance is bootstrapped (a separate decision).
 //! [`disable_admin_identity`] and [`revoke_admin_credential`], which only
-//! narrow, stay public. So, for now, do the other bare writers of the
-//! principal binding, service identity, grant, resource server, audience
-//! assignment, tenant, principal and trust keyset tables, and the replay
-//! records' [`consume_assertion`] and [`consume_assertion_set`]: the
-//! scenario tests under `tests/security` name each at its public path, and
-//! moving them to `test_support` is a separate change.
+//! narrow, stay public, and so do the replay records' [`consume_assertion`]
+//! and [`consume_assertion_set`], which only insert replay records: they
+//! can refuse a replay and never widen access.
 //!
 //! # Not done here
 //!
@@ -424,8 +437,8 @@ mod selection;
 mod tenant;
 // Off in a normal build: for tests only, the bare registry trust writers
 // (second-approver proposal, PR 9), the operator writers, the audit append
-// and the operation-row writers (PR 10), and the checker, action, tenant
-// and principal writers that no code in the crate calls; see the module.
+// and the operation-row writers (PR 10), and the other registry writers
+// that no code in the crate calls; see the module.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
@@ -435,10 +448,9 @@ pub use assertion::{
     Consumption, MAX_ASSERTION_SET, NewConsumedAssertion, consume_assertion, consume_assertion_set,
 };
 pub use audience::{
-    create_audience_tenant_assignment, create_resource_server, get_audience_tenant_assignment,
-    get_resource_action, get_resource_server, get_resource_server_checker,
-    list_audience_tenant_assignments, list_resource_actions, list_resource_server_checkers,
-    list_resource_servers, update_audience_tenant_assignment, update_resource_server,
+    get_audience_tenant_assignment, get_resource_action, get_resource_server,
+    get_resource_server_checker, list_audience_tenant_assignments, list_resource_actions,
+    list_resource_server_checkers, list_resource_servers,
 };
 pub use bootstrap::{
     BootstrapError, BootstrapOutcome, BootstrapRequest, RECOVERY_PUBLIC_KEY_LENGTH,
@@ -456,13 +468,8 @@ pub use events::{
 };
 pub(crate) use events::{append_audit_event, push_string};
 pub use grant::{
-    add_service_grant_binding, add_service_grant_resource_server,
-    add_service_identity_resource_server, create_principal_binding, create_service_grant,
-    create_service_identity, get_principal_binding, get_service_grant, get_service_identity,
-    list_principal_bindings, list_service_grants, list_service_identities,
-    remove_service_grant_binding, remove_service_grant_resource_server,
-    remove_service_identity_resource_server, update_principal_binding, update_service_grant,
-    update_service_identity,
+    get_principal_binding, get_service_grant, get_service_identity, list_principal_bindings,
+    list_service_grants, list_service_identities,
 };
 pub use instance::{
     get_egress_allowlist_entry, get_instance_security_policy, list_egress_allowlist_entries,
@@ -511,17 +518,15 @@ pub use recovery::{
     preview_recovery_response, restore_operator,
 };
 pub use selection::{Selection, SelectionError, select_grant};
-pub use tenant::{
-    create_principal, create_tenant, get_principal, get_tenant, list_principals, list_tenants,
-};
+pub use tenant::{get_principal, get_tenant, list_principals, list_tenants};
 pub(crate) use trust::{
     KeysetVersionText, create_trust_keyset_version, create_trust_source,
     read_enabled_keyset_versions, read_keyset_version, update_trust_keyset_version,
     update_trust_source,
 };
 pub use trust::{
-    create_trust_keyset, get_trust_keyset, get_trust_keyset_version, get_trust_source,
-    list_trust_keyset_versions, list_trust_keysets, list_trust_sources, update_trust_keyset,
+    get_trust_keyset, get_trust_keyset_version, get_trust_source, list_trust_keyset_versions,
+    list_trust_keysets, list_trust_sources,
 };
 
 use sqlx::{FromRow, Row, postgres::PgRow};

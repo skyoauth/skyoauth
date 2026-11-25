@@ -108,7 +108,7 @@ fn principal_patch(patch: TenantPatch) -> PrincipalPatch {
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for tenant in ["ten_a", "ten_b"] {
-        registry::create_tenant(&pool, &new_tenant(tenant))
+        registry::test_support::create_tenant(&pool, &new_tenant(tenant))
             .await
             .unwrap();
     }
@@ -117,12 +117,12 @@ async fn seeded() -> (TestDb, PgPool) {
         ("ten_a", "usr_1", PrincipalKind::Human),
         ("ten_b", "wld_b", PrincipalKind::Workload),
     ] {
-        registry::create_principal(&pool, &new_principal(tenant, id, kind))
+        registry::test_support::create_principal(&pool, &new_principal(tenant, id, kind))
             .await
             .unwrap();
     }
     for (tenant, keyset, version) in [("ten_a", "ks_1", "kv_1"), ("ten_b", "ks_b", "kv_b")] {
-        registry::create_trust_keyset(
+        registry::test_support::create_trust_keyset(
             &pool,
             &NewTrustKeyset {
                 id: keyset.into(),
@@ -337,7 +337,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     .unwrap();
     assert_eq!(renamed.name, "principal wld_1");
     // The same name and kind in another tenant.
-    let created = registry::create_principal(
+    let created = registry::test_support::create_principal(
         &pool,
         &principal(
             "ten_b",
@@ -356,14 +356,17 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
         ("usr_2", PrincipalKind::Human),
     ] {
         assert_name_taken(
-            registry::create_principal(&pool, &principal("ten_a", id, kind, "principal wld_1"))
-                .await,
+            registry::test_support::create_principal(
+                &pool,
+                &principal("ten_a", id, kind, "principal wld_1"),
+            )
+            .await,
         );
         assert_not_found(registry::get_principal(&pool, "ten_a", id).await);
     }
     // A name differing only in case is another name: the comparison is
     // byte-wise.
-    registry::create_principal(
+    registry::test_support::create_principal(
         &pool,
         &principal("ten_a", "wld_3", PrincipalKind::Workload, "Principal WLD_1"),
     )
@@ -399,7 +402,7 @@ async fn principal_names_are_unique_per_tenant_and_kind_tenant_names_are_not() {
     .await
     .unwrap();
     assert_name_taken(
-        registry::create_principal(
+        registry::test_support::create_principal(
             &pool,
             &principal("ten_a", "wld_4", PrincipalKind::Workload, "principal wld_1"),
         )
@@ -436,7 +439,7 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
     };
     for refused in ["deployer\n", "\u{1b}[31mdeployer\u{1b}[0m"] {
         assert_check(
-            registry::create_principal(&pool, &principal("wld_2", refused)).await,
+            registry::test_support::create_principal(&pool, &principal("wld_2", refused)).await,
             "principal_name_no_control_check",
         );
         assert_not_found(registry::get_principal(&pool, "ten_a", "wld_2").await);
@@ -465,7 +468,7 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
         ("wld_ls", "deploy\u{2028}er"),
         ("wld_ps", "deploy\u{2029}er"),
     ] {
-        let created = registry::create_principal(&pool, &principal(id, accepted))
+        let created = registry::test_support::create_principal(&pool, &principal(id, accepted))
             .await
             .unwrap();
         assert_eq!(created.name, accepted);
@@ -527,7 +530,7 @@ async fn principal_names_refuse_control_characters_not_format_characters() {
 async fn a_nul_in_a_principal_name_is_a_store_error_not_the_named_check() {
     let (db, pool) = seeded().await;
     let nul = "deploy\0er";
-    let created = registry::create_principal(
+    let created = registry::test_support::create_principal(
         &pool,
         &NewPrincipal {
             name: nul.into(),
@@ -829,7 +832,7 @@ async fn keyset_versions_change_only_status_by_their_own_revision() {
         .await
         .unwrap();
     assert_eq!(keyset.revision, 1);
-    registry::update_trust_keyset(
+    registry::test_support::update_trust_keyset(
         &pool,
         "ten_a",
         "ks_1",

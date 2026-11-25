@@ -198,7 +198,7 @@ async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     for (tenant, namespace) in TENANTS.into_iter().zip(["ns_a", "ns_b"]) {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: tenant.into(),
@@ -634,7 +634,7 @@ async fn a22_neg_other_registries_identities_never_authorize() {
     }
     for tenant in TENANTS {
         others.push(tenant.into());
-        let workload = registry::create_principal(
+        let workload = registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: format!("wld_{tenant}"),
@@ -647,7 +647,7 @@ async fn a22_neg_other_registries_identities_never_authorize() {
         .await
         .unwrap();
         others.push(workload.id);
-        let human = registry::create_principal(
+        let human = registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: format!("hum_{tenant}"),
