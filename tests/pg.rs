@@ -10,7 +10,7 @@
 //! (layout §3). `security::grant_fixture` is a helper module of the A38 and
 //! A53 tests, and `security::selection_fixture` one of the A02, A25 and
 //! A50 tests; neither is a scenario. The A04, A05, A22, A32, A37, A43,
-//! A48, A53 and A54 tests are partial: they are registered on their
+//! A48, A49, A53 and A54 tests are partial: they are registered on their
 //! scenario's planned M1a stage and count for nothing (see each module's
 //! docs). `harness::pg_teardown`
 //! tests the harness's own database teardown (`src/pg.rs`); its tests are
@@ -44,6 +44,8 @@ mod security {
     mod a43;
     #[path = "a48.rs"]
     mod a48;
+    #[path = "a49.rs"]
+    mod a49;
     #[path = "a50.rs"]
     mod a50;
     #[path = "a53.rs"]
