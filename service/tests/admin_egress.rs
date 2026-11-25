@@ -1189,6 +1189,42 @@ async fn a_destination_must_be_an_exact_canonical_https_url() {
     db.drop([pool]).await;
 }
 
+/// A create checks the gate before the destination: with an invalid
+/// destination, the gate on is `SecondApproverRequired` and no
+/// acknowledgement is `WideningNotAcknowledged`, never `InvalidDestination`;
+/// with the gate off and the acknowledgement given it is
+/// `InvalidDestination`. Nothing is written and no ID is taken.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_create_checks_the_gate_before_the_destination() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::with_seed(25);
+    let sec = request(KEY_SEC, &ids);
+    for status in [Status::Enabled, Status::Disabled] {
+        let new = EgressEntryCreate {
+            status,
+            ..created("http://invalid.example/")
+        };
+        for (gate, acknowledge, expected) in [
+            (false, false, "WideningNotAcknowledged"),
+            (false, true, "InvalidDestination"),
+            (true, true, "SecondApproverRequired"),
+            (true, false, "WideningNotAcknowledged"),
+        ] {
+            set_policy(&pool, gate, false).await;
+            let before = snapshot(&pool).await;
+            let result = committed(&pool, async |tx| {
+                admin::create_egress_entry(tx, &sec, &new, acknowledge).await
+            })
+            .await;
+            refused(result, expected);
+            assert_eq!(snapshot(&pool).await, before, "{expected}");
+        }
+    }
+    no_id_taken(&ids, 25);
+    db.drop([pool]).await;
+}
+
 /// A literal `*` in the path or in the query is taken by every writer, as
 /// by a source (byte equality: never a wildcard there): a create, enabled
 /// and disabled, and the enable of the disabled one, which checks its
