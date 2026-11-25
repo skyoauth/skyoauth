@@ -4,11 +4,11 @@
 //! satisfied by pull request, dispatch, comment or `workflow_run` context
 //! (tasks §8; T12.2, T12.7, T22.5, T52.2).
 //!
-//! **A02 partial: these tests are registered on A02's planned M1a stage
-//! ("policy on verified-claim fixtures"), so they are no evidence for it:
-//! the reporter lists their results as not counted, and the stage stays
-//! `planned` with no stamp.** They test the policy half of the stage only:
-//! `registry::select_grant`, then `policy::match_binding` (ADR-015 item 4
+//! **A02 M1a: these tests are registered on A02's M1a stage ("policy
+//! matcher decision over claim maps supplied as evidence"), which stays
+//! `planned` until its own promotion PR, so for now they are no evidence:
+//! the reporter lists their results as not counted.** They test exactly
+//! that scope, with no signed token: `registry::select_grant`, then `policy::match_binding` (ADR-015 item 4
 //! steps 1, 3 and 4; design section 5.3 and section 5.7; ADR-016 item 1)
 //! against a real PostgreSQL, one fresh database per test, seeded through
 //! the typed registry API by the shared fixture
@@ -92,11 +92,11 @@
 //! (`service/tests/registry_selection.rs`); that a `github_production`
 //! binding cannot omit its required predicates is A37's.
 //!
-//! **What this partial covers, and what it does not.** It covers the
-//! policy matcher over hand-written claim maps: the mutation table above.
-//! Whether such maps meet the stage's scope, "policy on verified-claim
-//! fixtures", is for the lead to rule; until then the stage stays
-//! `planned`, with no stamp and no row edit. Not covered here: the
+//! **What this covers, and what it does not.** It covers the policy
+//! matcher over hand-written claim maps: the mutation table above. The maps
+//! are not verified signed-token output, so the M1a claim is the matcher's
+//! decision over evidence supplied to it, not a claim about verified
+//! tokens. Not covered here: the
 //! reusable-workflow identity (`job_workflow_ref`; ADR-016 item 3), which
 //! no `github_production` binding of the fixture names, so no case changes
 //! it; and the whole-token shape, since each case changes only the claims
