@@ -4,11 +4,12 @@
 //! satisfied by pull request, dispatch, comment or `workflow_run` context
 //! (tasks §8; T12.2, T12.7, T22.5, T52.2).
 //!
-//! **A02 partial: these tests are registered on A02's planned M1a stage
-//! ("policy on verified-claim fixtures"), so they are no evidence for it:
-//! the reporter lists their results as not counted, and the stage stays
-//! `planned` with no stamp.** They test the policy half of the stage only:
-//! `registry::select_grant`, then `policy::match_binding` (ADR-015 item 4
+//! **A02 M1a: these tests are registered on A02's M1a stage ("policy
+//! matcher decision over claim maps supplied as evidence ..."), which stays
+//! `planned` until its own promotion PR, so for now they are no evidence:
+//! the reporter lists their results as not counted.** They test exactly
+//! that scope, with no signed token: `registry::select_grant`, then
+//! `policy::match_binding` (ADR-015 item 4
 //! steps 1, 3 and 4; design section 5.3 and section 5.7; ADR-016 item 1)
 //! against a real PostgreSQL, one fresh database per test, seeded through
 //! the typed registry API by the shared fixture
@@ -77,6 +78,14 @@
 //!   workflow file, the same file at another ref, at a ref that extends the
 //!   bound one (`@refs/heads/main-next`) or in another repository, or no
 //!   `workflow_ref` (`a02_neg_wrong_workflow_against_push_binding`).
+//! - **Reusable-workflow identity.** A `github_production` binding that
+//!   also pins `job_workflow_ref` (ADR-016 item 3; the optional predicate of
+//!   `predicate.rs` `GITHUB_JOB_WORKFLOW_REF`) matches the exact pinned value
+//!   as stored, and gives no binding for another reusable workflow, an
+//!   absent or empty `job_workflow_ref`, a value that only extends the
+//!   pinned one or a case variant. It is written through the registry API and
+//!   matched directly, without `select_grant`, in both tenants
+//!   (`a02_neg_reusable_workflow_identity_pinned_by_binding`).
 //!
 //! Byte-wise exact comparison (the case-variant `event_name` and
 //! environment, the short `main`, and the values that only extend the
@@ -92,19 +101,21 @@
 //! (`service/tests/registry_selection.rs`); that a `github_production`
 //! binding cannot omit its required predicates is A37's.
 //!
-//! **What this partial covers, and what it does not.** It covers the
-//! policy matcher over hand-written claim maps: the mutation table above.
-//! Whether such maps meet the stage's scope, "policy on verified-claim
-//! fixtures", is for the lead to rule; until then the stage stays
-//! `planned`, with no stamp and no row edit. Not covered here: the
-//! reusable-workflow identity (`job_workflow_ref`; ADR-016 item 3), which
-//! no `github_production` binding of the fixture names, so no case changes
-//! it; and the whole-token shape, since each case changes only the claims
-//! it names, while a realistic `pull_request` token also differs in `ref`,
-//! `event_name` and other claims.
+//! **What this covers, and what it does not.** It covers the policy
+//! matcher over hand-written claim maps: the mutation table above. The maps
+//! are not verified signed-token output, so the M1a claim is the matcher's
+//! decision over evidence supplied to it, not a claim about verified
+//! tokens. Not covered here: the whole-token shape, since each case changes
+//! only the claims it names, while a realistic `pull_request` token also
+//! differs in `ref`, `event_name` and other claims; and a token whose
+//! `job_workflow_ref` differs from its `workflow_ref` matched against a
+//! binding that does not pin it (matching should require a pin then;
+//! `predicate.rs` `GITHUB_JOB_WORKFLOW_REF`; A37 records the current
+//! acceptance), which is T22.2's reusable-workflow context.
 //!
 //! Tracked in M2: signed-token verification and the claim shapes it
-//! produces (T22.2), from whose output these maps must then be rebuilt;
+//! produces (T22.2), from whose output these maps must then be rebuilt,
+//! with the whole-token shape and the reusable-workflow context;
 //! mock GitHub token issuance (the GH harness component); the fork and
 //! pull-request context of T22.5 beyond `event_name`; the exchange and its
 //! wire denial (`invalid_grant`); and the live negative, the real token of
@@ -116,7 +127,7 @@ use std::collections::BTreeMap;
 use skyoauth_service::{
     persistence::{
         PgPool,
-        registry::{self, BindingProfile, Selection, Status, select_grant},
+        registry::{self, BindingProfile, NewPrincipalBinding, Selection, Status, select_grant},
     },
     policy::{EligibleBinding, Evidence, match_binding},
 };
@@ -536,4 +547,92 @@ async fn a02_neg_wrong_workflow_against_push_binding() {
         ("workflow_ref absent", &[Change::Remove("workflow_ref")]),
     ])
     .await;
+}
+
+/// The reusable-workflow identity a binding pins in
+/// [`a02_neg_reusable_workflow_identity_pinned_by_binding`].
+const JOB_WORKFLOW_REF: &str = "example/release/.github/workflows/reusable.yml@refs/heads/main";
+
+/// A `github_production` binding that pins `job_workflow_ref` (ADR-016
+/// item 3; the optional predicate of `predicate.rs`
+/// `GITHUB_JOB_WORKFLOW_REF`) in addition to the push claim set matches
+/// only a token whose `job_workflow_ref` is exactly the pinned value: a
+/// different, absent, empty, case-variant or only-extended value gives no
+/// binding, in both tenants. The binding is written through the registry
+/// API and matched directly (`policy::match_binding`), without
+/// `select_grant`, since the shared fixture's grants list only its own
+/// bindings. The control is the pinned value, which matches the binding as
+/// stored.
+#[tokio::test]
+async fn a02_neg_reusable_workflow_identity_pinned_by_binding() {
+    let (db, pool) = two_tenants().await;
+    for side in [A, B] {
+        let mut policy = claims(&PUSH_CLAIMS);
+        policy.insert("job_workflow_ref".into(), JOB_WORKFLOW_REF.into());
+        registry::test_support::create_principal_binding(
+            &pool,
+            &NewPrincipalBinding {
+                id: side.id("bnd_a02_reusable"),
+                tenant_id: side.tenant.into(),
+                name: "a02-reusable".into(),
+                trust_source_id: Source::Github.id(side),
+                profile: BindingProfile::GithubProduction,
+                claim_match_policy: policy,
+                workload_principal_id: side.id("wld_a"),
+                status: Status::Enabled,
+            },
+        )
+        .await
+        .unwrap();
+        let stored =
+            registry::get_principal_binding(&pool, side.tenant, &side.id("bnd_a02_reusable"))
+                .await
+                .unwrap();
+        assert_eq!(
+            stored.claim_match_policy["job_workflow_ref"], JOB_WORKFLOW_REF,
+            "{}",
+            side.tenant
+        );
+        let binding = EligibleBinding {
+            id: stored.id,
+            claim_match_policy: stored.claim_match_policy,
+            revision: stored.revision,
+        };
+        let eligible = std::slice::from_ref(&binding);
+        for (base_name, base) in bases() {
+            let label = format!("{} {base_name}", side.tenant);
+            let with = |change: Option<&str>| {
+                let mut claims = base.clone();
+                match change {
+                    Some(value) => claims.insert("job_workflow_ref".into(), value.into()),
+                    None => claims.remove("job_workflow_ref"),
+                };
+                Evidence::new(claims)
+            };
+            assert_eq!(
+                match_binding(eligible, &with(Some(JOB_WORKFLOW_REF))),
+                Some(&binding),
+                "{label}: control"
+            );
+            let longer = format!("{JOB_WORKFLOW_REF}2");
+            let upper = JOB_WORKFLOW_REF.to_uppercase();
+            for (name, value) in [
+                (
+                    "a different reusable workflow",
+                    Some("example/release/.github/workflows/other.yml@refs/heads/main"),
+                ),
+                ("absent", None),
+                ("empty", Some("")),
+                ("only extends the pinned value", Some(longer.as_str())),
+                ("case variant", Some(upper.as_str())),
+            ] {
+                assert_eq!(
+                    match_binding(eligible, &with(value)),
+                    None,
+                    "{label} {name}"
+                );
+            }
+        }
+    }
+    db.drop([pool]).await;
 }
