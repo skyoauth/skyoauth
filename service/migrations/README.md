@@ -2537,7 +2537,9 @@ validates no existing row. Choices marked "(inferred)" are its own.
   `service/tests/trust_source_egress.rs` covers both layers. Tests and
   scenarios that write trust sources with raw SQL or the bare registry
   writers first insert an enabled entry for each destination
-  (`tests/src/egress.rs`, `allow_destinations`).
+  (`tests/src/egress.rs`, `allow_destinations`), except A05, which writes
+  its entries through the audited egress allowlist writer
+  (`crate::admin::egress`).
 - **Frozen comments.** The `0004` comment on the destination columns ("a
   write that leaves them unchanged must not be rejected for a missing or
   disabled entry") still holds: the guard checks only a changed member.
@@ -2802,8 +2804,9 @@ Not done in `0005`:
 the registry tables of `0002` and `0003`: create, get, list and
 revision-checked update for `tenant`, `principal`, `resource_server`,
 `audience_tenant_assignment`, `resource_server_checker` (with its tenant
-rows) and `resource_action`; and reads of `instance_security_policy` and
-`egress_allowlist_entry`. The revisions of `tenant` and `principal` are the
+rows) and `resource_action`; create, get, list and a revision-checked
+status update for `egress_allowlist_entry`, whose other columns are
+immutable; and reads of `instance_security_policy`. The revisions of `tenant` and `principal` are the
 ones `0007` adds. Their updates, `update_tenant` and `update_principal`,
 take a patch (`TenantPatch`, `PrincipalPatch`) and change only the columns
 set in it, `name` and `status` (lead ruling, 2026-11-21); the other updates
@@ -2830,7 +2833,7 @@ gives `Other` with `22003` from `revision + 1`, which is unreachable in
 practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
-cursor. Fourteen writers are crate-private (`pub(crate)`): the tenant
+cursor. Sixteen writers are crate-private (`pub(crate)`): the tenant
 and principal writers (`create_tenant`, `update_tenant`,
 `create_principal`, `update_principal`), the resource server writers
 (`create_resource_server`, `update_resource_server`), the assignment
@@ -2839,8 +2842,10 @@ writers (`create_audience_tenant_assignment`,
 (`create_resource_server_checker`, `update_resource_server_checker`,
 `add_resource_server_checker_tenant`,
 `remove_resource_server_checker_tenant`) and the action writers
-(`create_resource_action`, `update_resource_action`). The audited,
-authorized writes of `crate::admin` call them, and tests reach them through
+(`create_resource_action`, `update_resource_action`) and the egress
+allowlist writers (`create_egress_allowlist_entry`,
+`update_egress_allowlist_entry`; the latter sets only `status`). The
+audited, authorized writes of `crate::admin` call them, and tests reach them through
 `persistence::registry::test_support`.
 
 Of two concurrent updates from one revision exactly one succeeds. Under
@@ -2892,10 +2897,11 @@ enforce these rules" above, generate IDs or run migrations.
 
 Since the second-approver proposal's registry hardening PR and its
 follow-up, no writer of tenants, principals, resource servers, audience
-tenant assignments, checkers, actions, principal bindings, service
-identities, grants or trust keysets (each create, update and list-set
-change) is public. The fourteen writers of tenants, principals, resource
-servers, assignments, checkers and actions listed above are crate-private
+tenant assignments, checkers, actions, egress allowlist entries,
+principal bindings, service identities, grants or trust keysets (each
+create, update and list-set change) is public. The sixteen writers of
+tenants, principals, resource servers, assignments, checkers, actions and
+egress allowlist entries listed above are crate-private
 (`pub(crate)`), called by the audited, authorized writes of
 `crate::admin`. The rest, the writers of principal bindings, service
 identities, grants and trust keysets, stay private to the registry

@@ -24,9 +24,10 @@ const GUARD: &str = "SK001";
 /// `principal`, `audit_event` and `audit_chain_head`, the five `0003`
 /// tables, the nine `0004` tables, `consumed_assertion` and the operator
 /// tables `admin_identity`, `admin_credential` and `admin_role_binding` of
-/// `0005`, `instance_security_policy` and `recovery_state`, which
-/// bootstrap writes, and `administrative_operation`, which the recovery
-/// challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
+/// `0005`, `egress_allowlist_entry`, which the egress writes of
+/// [`crate::admin::egress`] write, `instance_security_policy` and
+/// `recovery_state`, which bootstrap writes, and `administrative_operation`,
+/// which the recovery challenges write) and of the three list domains, as migrations `0002` to `0005`, `0007`,
 /// `0008` and `0009` name them, the constraint names that the `0010`
 /// assignment guards raise ([`ASSIGNMENT_ACTIVE`]), the two names the
 /// `0011` egress guard trigger raises ([`EGRESS_ENTRY_ENABLED`]), and the
@@ -158,6 +159,18 @@ pub const KNOWN_CONSTRAINTS: &[&str] = &[
     "consumed_assertion_tenant_id_octet_length_check",
     "consumed_assertion_trust_source_id_fkey",
     "consumed_assertion_trust_source_id_octet_length_check",
+    // The egress allowlist (`0002`, `0005`), written by `crate::admin::egress`
+    // (`instance.rs`).
+    "egress_allowlist_entry_exact_destination_check",
+    "egress_allowlist_entry_exact_destination_check1",
+    "egress_allowlist_entry_exact_destination_check2",
+    "egress_allowlist_entry_id_check",
+    "egress_allowlist_entry_id_octet_length_check",
+    "egress_allowlist_entry_pkey",
+    "egress_allowlist_entry_purpose_check",
+    "egress_allowlist_entry_purpose_exact_destination_key",
+    "egress_allowlist_entry_revision_check",
+    "egress_allowlist_entry_status_check",
     // The policy row and the recovery state, written by bootstrap
     // (`bootstrap.rs`). Their single-row unique indexes are not
     // constraints; bootstrap maps a `23505` on them itself.

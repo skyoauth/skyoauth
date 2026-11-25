@@ -49,6 +49,11 @@
 //! proposal, and its follow-up): `pub(crate)`, because the audited,
 //! authorized writes of [`crate::admin`] call them, and nothing else in the
 //! crate does (inferred: the narrowest visibility that caller allows).
+//! [`create_egress_allowlist_entry`] and [`update_egress_allowlist_entry`]
+//! add, re-enable or disable an instance egress destination with no
+//! authorization, no destination syntax check and no audit event, so they
+//! are `pub(crate)` for the same reason: the audited, authorized writes of
+//! [`crate::admin::egress`] call them, and nothing else in the crate does.
 //!
 //! The remaining writers of the principal binding, service identity, grant
 //! and trust keyset tables ([`create_principal_binding`] to
@@ -84,16 +89,16 @@ use sqlx::{PgExecutor, Postgres, Transaction};
 use super::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges,
     AdministrativeOperation, AudienceTenantAssignment, AudienceTenantAssignmentChanges, AuditEvent,
-    NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation,
-    NewAudienceTenantAssignment, NewAuditEvent, NewPrincipal, NewPrincipalBinding,
-    NewResourceAction, NewResourceServer, NewResourceServerChecker, NewServiceGrant,
-    NewServiceIdentity, NewTenant, NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource,
-    Principal, PrincipalBinding, PrincipalBindingChanges, PrincipalPatch, RegistryError,
-    ResourceAction, ResourceActionChanges, ResourceServer, ResourceServerChanges,
-    ResourceServerChecker, ResourceServerCheckerChanges, ServiceGrant, ServiceGrantChanges,
-    ServiceIdentity, ServiceIdentityChanges, Status, Tenant, TenantPatch, TrustKeyset,
-    TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges, audience, events,
-    grant, operation, operator, tenant, trust,
+    EgressAllowlistEntry, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
+    NewAdministrativeOperation, NewAudienceTenantAssignment, NewAuditEvent,
+    NewEgressAllowlistEntry, NewPrincipal, NewPrincipalBinding, NewResourceAction,
+    NewResourceServer, NewResourceServerChecker, NewServiceGrant, NewServiceIdentity, NewTenant,
+    NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Principal, PrincipalBinding,
+    PrincipalBindingChanges, PrincipalPatch, RegistryError, ResourceAction, ResourceActionChanges,
+    ResourceServer, ResourceServerChanges, ResourceServerChecker, ResourceServerCheckerChanges,
+    ServiceGrant, ServiceGrantChanges, ServiceIdentity, ServiceIdentityChanges, Status, Tenant,
+    TenantPatch, TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource,
+    TrustSourceChanges, audience, events, grant, instance, operation, operator, tenant, trust,
 };
 
 /// The `pub(crate)` registry `create_trust_keyset_version`: the unchecked
@@ -586,4 +591,26 @@ pub async fn update_trust_keyset<'e>(
     changes: &TrustKeysetChanges,
 ) -> Result<TrustKeyset, RegistryError> {
     trust::update_trust_keyset(executor, tenant_id, id, expected_revision, changes).await
+}
+
+/// The registry's `create_egress_allowlist_entry` (`pub(crate)`, called by
+/// `crate::admin::egress`): an egress allowlist entry, enabled or not, with
+/// no destination syntax check, unauthorized and unaudited. Tests only.
+pub async fn create_egress_allowlist_entry<'e>(
+    executor: impl PgExecutor<'e>,
+    new: &NewEgressAllowlistEntry,
+) -> Result<EgressAllowlistEntry, RegistryError> {
+    instance::create_egress_allowlist_entry(executor, new).await
+}
+
+/// The registry's `update_egress_allowlist_entry` (`pub(crate)`, called by
+/// `crate::admin::egress`): an entry's status, a re-enable included,
+/// unauthorized and unaudited. Tests only.
+pub async fn update_egress_allowlist_entry<'e>(
+    executor: impl PgExecutor<'e>,
+    id: &str,
+    expected_revision: i64,
+    status: Status,
+) -> Result<EgressAllowlistEntry, RegistryError> {
+    instance::update_egress_allowlist_entry(executor, id, expected_revision, status).await
 }

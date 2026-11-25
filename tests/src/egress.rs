@@ -9,6 +9,12 @@
 //! `trust_source_token_review_endpoint_egress_enabled`). A scenario that
 //! creates sources with `registry::test_support::create_trust_source` first allows their
 //! destinations with [`allow_destinations`].
+//!
+//! The insert is a stand-in (conformance layout §1.3) for the audited
+//! egress allowlist writer, `skyoauth_service::admin::create_egress_entry`,
+//! which needs a bootstrapped instance `security_admin` that most callers
+//! do not set up before they write a source, and an ID generator that this
+//! library may not take from `test_support`. A05 uses the writer itself.
 
 use skyoauth_service::persistence::{PgPool, registry::NewTrustSource};
 

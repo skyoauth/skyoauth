@@ -1198,10 +1198,11 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
   by auditors.
 - Not covered here, though the same machinery applies: binding and grant
   writes and deletes (tasks:151-152; A37); the egress entry writer, whose
-  add and re-enable are widening-class (IR-052; tasks:148); and the parent
-  keyset's create and re-enable, a widening keyset write under the ruling
-  whose kinds this proposal does not define; none has a service write path
-  yet.
+  add and re-enable are widening-class (IR-052; tasks:148), and which
+  `crate::admin::egress` implements ungated, behind the D3 seams of
+  `crate::admin`; and the parent keyset's create and re-enable, a widening
+  keyset write under the ruling whose kinds this proposal does not define;
+  none but the egress writer has a service write path yet.
 - Distinctness is per `admin_id`, not per person. A single instance
   `security_admin` can enrol a second operator identity and grant it
   `security_admin` (tasks:183; design:660), then approve its own requests
@@ -2367,7 +2368,8 @@ Still open after PRs 7, 9 and 10:
 
   Not listed: `set_widening_second_approver` (`operation.rs:452`) is
   already `pub(crate)`; the egress allowlist and the instance policy have
-  no public registry writer (`instance.rs` only reads); `consume_assertion`
+  no public registry writer (`instance.rs` reads the policy; its two egress
+  writers are `pub(crate)`, called only by `crate::admin::egress`); `consume_assertion`
   and `consume_assertion_set` only insert replay records; and
   `disable_admin_identity`, `revoke_admin_credential`,
   `remove_resource_server_checker_tenant` (`audience.rs:321`; crate-private since the hardening PR, `pub(crate)` since T13.3, called only by `crate::admin`'s audited, authorized removal),
