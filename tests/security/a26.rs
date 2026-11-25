@@ -216,7 +216,7 @@
 
 use std::{fmt::Debug, time::Duration};
 
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -233,6 +233,8 @@ use skyoauth_service::{
     policy::{ScopeError, ScopeRequest, resolve_scopes},
 };
 use sqlx::PgExecutor;
+
+use super::egress_fixture::Egress;
 
 const GITHUB_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
@@ -385,10 +387,13 @@ fn grant_a(
     }
 }
 
-/// The fixture of the module docs, written through the registry API only.
+/// The fixture of the module docs, written through the registry API only;
+/// the sources' destination is allowed by the egress fixture, on the
+/// instance it bootstraps.
 async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
+    let egress = Egress::bootstrap(&pool).await;
     for (id, namespace) in [(TEN_A, "ns_a"), (TEN_B, "ns_b")] {
         registry::test_support::create_tenant(&pool, &tenant(id, namespace))
             .await
@@ -408,7 +413,7 @@ async fn fixture() -> (TestDb, PgPool) {
         (TEN_B, "src_b", "bnd_b", "wld_b"),
     ] {
         let new = github_source(tenant, source);
-        egress::allow_destinations(&pool, &new).await;
+        egress.allow_destinations(&pool, &new).await;
         registry::test_support::create_trust_source(&pool, &new)
             .await
             .unwrap();

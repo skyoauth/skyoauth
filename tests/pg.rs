@@ -8,8 +8,13 @@
 //! `security::a29::a29_neg_binding_on_other_tenants_source`, and its
 //! registry test ID is `nextest:skyoauth-scenarios/pg/<that name>`
 //! (layout §3). `security::grant_fixture` is a helper module of the A38 and
-//! A53 tests, and `security::selection_fixture` one of the A02, A25 and
-//! A50 tests; neither is a scenario. The A04, A05, A22, A32, A37, A43,
+//! A53 tests, `security::selection_fixture` one of the A02, A25 and A50
+//! tests, and `security::egress_fixture` one of every test that writes
+//! trust sources through the bare registry writers (A02, A22, A24, A25,
+//! A26, A29, A37, A38, A43, A50, A53 and A54): it bootstraps the instance,
+//! or adopts one the test bootstrapped, and writes the sources' egress
+//! allowlist entries through the audited egress allowlist writer. None of
+//! them is a scenario. The A04, A05, A22, A32, A37, A43,
 //! A48, A49, A53 and A54 tests are partial: they are registered on their
 //! scenario's planned M1a stage and count for nothing (see each module's
 //! docs). `harness::pg_teardown`
@@ -52,6 +57,8 @@ mod security {
     mod a53;
     #[path = "a54.rs"]
     mod a54;
+    #[path = "egress_fixture.rs"]
+    mod egress_fixture;
     #[path = "grant_fixture.rs"]
     mod grant_fixture;
     #[path = "selection_fixture.rs"]

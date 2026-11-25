@@ -11,8 +11,10 @@
 //! tests are registered on A54's planned M1a stage, so they are no
 //! evidence for it: the reporter lists their results as not counted, and
 //! they are no claim. They run against a real PostgreSQL, one fresh
-//! database per test, through two library paths with no SQL of their own
-//! beyond the egress allowlist fixture (`skyoauth_scenarios::egress`):
+//! database per test, through two library paths with no SQL of their own;
+//! the egress allowlist entries of the sources' destinations are written
+//! by the shared egress fixture (`security::egress_fixture`) through the
+//! audited egress allowlist writer, as the bootstrapped `adm_first`:
 //!
 //! - the registry floor, `registry::test_support::create_trust_source` and
 //!   `update_trust_source` (crate-private in a normal build; reached here
@@ -137,7 +139,7 @@ use std::{
 };
 
 use serde_json::json;
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::jwk::DEFAULT_ALLOWED_ALGORITHMS;
 use skyoauth_service::operation::{
     ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, Gated, OperationKind,
@@ -154,6 +156,8 @@ use skyoauth_service::persistence::{
     },
 };
 use skyoauth_service::trust::{SourceWriteError, submit_create_source, submit_update_source};
+
+use super::egress_fixture::Egress;
 
 /// The tenant of every source.
 const TENANT: &str = "ten_a";
@@ -402,8 +406,10 @@ fn single_use_updates(source: &TrustSource) -> [(&'static str, TrustSourceChange
     ]
 }
 
-/// The tenant [`TENANT`] with the keyset [`KEYSET`], and an enabled egress
-/// entry for every destination a source here sets.
+/// The tenant [`TENANT`] with the keyset [`KEYSET`], the instance
+/// bootstrapped by `adm_first` (the policy row with both flags off), and an
+/// enabled egress entry for every destination a source here sets, written
+/// by the egress fixture as `adm_first` while the gate is off.
 async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
@@ -429,12 +435,31 @@ async fn fixture() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    bootstrap_instance(
+        &mut transaction,
+        &BootstrapRequest {
+            instance_id: "019a9f3c-5b2e-7c41-9d8e-0123456789ab",
+            admin_id: "adm_first",
+            credential_id: "crd_first",
+            public_identity: FIRST_KEY,
+            trust_anchor_ref: "deployment/operator-ca",
+            binding_id: "rb_first",
+            recovery_public_key: &[0x11; 32],
+            audit_event_id: "aud_bootstrap",
+            now: at(0),
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    let egress = Egress::adopt(FIRST_KEY);
     for source in [
         Shape::TokenReview.source("x"),
         Shape::ProjectedOidc.source("x"),
         on_demand(false),
     ] {
-        egress::allow_destinations(&pool, &source).await;
+        egress.allow_destinations(&pool, &source).await;
     }
     (db, pool)
 }
@@ -478,31 +503,13 @@ async fn operator(pool: &PgPool, admin: &str, key: &str, role: AdminRole, tenant
     .unwrap();
 }
 
-/// [`fixture`], then the instance bootstrapped by `adm_first` (the policy
-/// row with both flags off), `adm_sec` (instance `security_admin`) and
-/// `adm_trust` (`trust_admin` of [`TENANT`]). With `gate`,
-/// `widening_second_approver` is then turned on through the flow:
-/// `adm_first` requests it and `adm_sec` approves it.
+/// [`fixture`] (the instance bootstrapped by `adm_first`), then `adm_sec`
+/// (instance `security_admin`) and `adm_trust` (`trust_admin` of
+/// [`TENANT`]). With `gate`, `widening_second_approver` is then turned on
+/// through the flow, after the egress entries: `adm_first` requests it and
+/// `adm_sec` approves it.
 async fn gated_fixture(gate: bool) -> (TestDb, PgPool) {
     let (db, pool) = fixture().await;
-    let mut transaction = pool.begin().await.unwrap();
-    bootstrap_instance(
-        &mut transaction,
-        &BootstrapRequest {
-            instance_id: "019a9f3c-5b2e-7c41-9d8e-0123456789ab",
-            admin_id: "adm_first",
-            credential_id: "crd_first",
-            public_identity: FIRST_KEY,
-            trust_anchor_ref: "deployment/operator-ca",
-            binding_id: "rb_first",
-            recovery_public_key: &[0x11; 32],
-            audit_event_id: "aud_bootstrap",
-            now: at(0),
-        },
-    )
-    .await
-    .unwrap();
-    transaction.commit().await.unwrap();
     operator(&pool, "adm_sec", SEC_KEY, AdminRole::SecurityAdmin, None).await;
     operator(
         &pool,
