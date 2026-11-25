@@ -6,9 +6,10 @@
 //!
 //! [`append_audit_event`] is crate-private (`pub(crate)`; second-approver
 //! proposal, PR 10): it appends a well-chained event of its caller's
-//! choosing, so only the audited writes of the registry, `crate::trust` and
-//! `crate::operation` call it, and tests reach it through the registry's
-//! `test_support` module, compiled only with the `test-support` feature.
+//! choosing, so only the audited writes of the registry, `crate::trust`,
+//! `crate::operation` and `crate::admin` call it, and tests reach it
+//! through the registry's `test_support` module, compiled only with the
+//! `test-support` feature.
 //!
 //! It is the last step of the audited transaction: the caller writes the
 //! domain rows first, then appends the event, then commits. The exception

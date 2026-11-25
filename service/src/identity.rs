@@ -1,8 +1,9 @@
 //! The canonical public identity of an mTLS public key: the value of
 //! `AdminCredential.public_identity` (design section 7.2; tasks T13.1;
-//! identity-registry section 5.2) and, when its writer lands,
+//! identity-registry section 5.2) and
 //! `ResourceServerChecker.public_mtls_identity` (identity-registry section
-//! 7.3, IR-090). The format and the rules below are a lead decision,
+//! 7.3, IR-090), which the checker writers of [`crate::admin`] derive with
+//! it. The format and the rules below are a lead decision,
 //! 2026-11-24.
 //!
 //! # Format
@@ -71,9 +72,15 @@
 //! Only then does a key have one identity and the `0005` unique key hold
 //! per key. This module stays algorithm-agnostic and does not enforce it.
 //!
-//! Nothing calls this module yet: `bootstrap_instance` and the operator
-//! writers still take the identity string from their caller, and the slices
-//! that wire enrollment and authentication (S5, S7) call it.
+//! The checker writer calls this: [`crate::admin`]'s
+//! `create_resource_server_checker` and a key rotation through its
+//! `update_resource_server_checker` take the key's DER and store the
+//! identity this function derives (lead decision, 2026-11-25). The
+//! per-algorithm form rule above is still outstanding, so the checker
+//! writers must not be exposed on any HTTP surface until it lands. Nothing
+//! else calls this module yet: `bootstrap_instance` and the operator
+//! writers still take the identity string from their caller, and the
+//! slices that wire enrollment and authentication (S5, S7) call it.
 //!
 //! # What is checked
 //!

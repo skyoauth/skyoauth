@@ -397,9 +397,9 @@ impl FromRow<'_, PgRow> for Tenant {
     }
 }
 
-/// The input of the registry-private `create_tenant` (tests reach it
-/// through the `test-support` feature). `created_at` is set by the
-/// database.
+/// The input of the crate-private `create_tenant` (called by
+/// `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`). `created_at` is set by the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewTenant {
     pub id: String,
@@ -408,9 +408,10 @@ pub struct NewTenant {
     pub status: Status,
 }
 
-/// The columns the registry-private `update_tenant` changes (tests reach
-/// it through the `test-support` feature): each one that is set (lead
-/// ruling, 2026-11-21). At least one must be set.
+/// The columns the crate-private `update_tenant` changes (called by
+/// `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`): each one that is set (lead ruling,
+/// 2026-11-21). At least one must be set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TenantPatch {
     pub name: Option<String>,
@@ -461,8 +462,9 @@ impl FromRow<'_, PgRow> for Principal {
     }
 }
 
-/// The input of the registry-private `create_principal` (tests reach it
-/// through the `test-support` feature).
+/// The input of the crate-private `create_principal` (called by
+/// `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPrincipal {
     pub id: String,
@@ -472,9 +474,10 @@ pub struct NewPrincipal {
     pub status: Status,
 }
 
-/// The columns the registry-private `update_principal` changes (tests
-/// reach it through the `test-support` feature): each one that is set (lead
-/// ruling, 2026-11-21). At least one must be set.
+/// The columns the crate-private `update_principal` changes (called by
+/// `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`): each one that is set (lead ruling,
+/// 2026-11-21). At least one must be set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrincipalPatch {
     pub name: Option<String>,
@@ -518,8 +521,9 @@ impl FromRow<'_, PgRow> for ResourceServer {
     }
 }
 
-/// The input of the registry-private `create_resource_server` (tests reach
-/// it through the `test-support` feature).
+/// The input of the crate-private `create_resource_server` (called by
+/// `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewResourceServer {
     pub id: String,
@@ -532,8 +536,8 @@ pub struct NewResourceServer {
 }
 
 /// The mutable columns of a resource server, all replaced by the
-/// registry-private `update_resource_server` (tests only, through the
-/// `test-support` feature).
+/// crate-private `update_resource_server` (called by `crate::admin`; tests
+/// reach it through the `test-support` feature's `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceServerChanges {
     pub name: String,
@@ -572,8 +576,9 @@ impl FromRow<'_, PgRow> for AudienceTenantAssignment {
     }
 }
 
-/// The input of the registry-private `create_audience_tenant_assignment`
-/// (tests reach it through the `test-support` feature).
+/// The input of the crate-private `create_audience_tenant_assignment`
+/// (called by `crate::admin`; tests reach it through the `test-support`
+/// feature's `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAudienceTenantAssignment {
     pub id: String,
@@ -585,9 +590,9 @@ pub struct NewAudienceTenantAssignment {
     pub status: Status,
 }
 
-/// The mutable columns of an assignment, all replaced by the
-/// registry-private `update_audience_tenant_assignment` (tests only,
-/// through the `test-support` feature).
+/// The mutable columns of an assignment, all replaced by the crate-private
+/// `update_audience_tenant_assignment` (called by `crate::admin`; tests
+/// reach it through the `test-support` feature's `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudienceTenantAssignmentChanges {
     pub allowed_profiles: Vec<Profile>,
@@ -624,9 +629,10 @@ impl FromRow<'_, PgRow> for ResourceServerChecker {
     }
 }
 
-/// The input of the registry-private `create_resource_server_checker`
-/// (tests reach it through the `test-support` feature). The checker starts
-/// with no tenants; see `add_resource_server_checker_tenant`.
+/// The input of the crate-private `create_resource_server_checker` (called
+/// by `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`). The checker starts with no tenants; see
+/// `add_resource_server_checker_tenant`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewResourceServerChecker {
     pub id: String,
@@ -635,10 +641,10 @@ pub struct NewResourceServerChecker {
     pub status: Status,
 }
 
-/// The mutable columns of a checker, all replaced by the registry-private
-/// `update_resource_server_checker` (tests only, through the
-/// `test-support` feature). The identity may be rotated (inferred in
-/// `0003`).
+/// The mutable columns of a checker, all replaced by the crate-private
+/// `update_resource_server_checker` (called by `crate::admin`; tests reach
+/// it through the `test-support` feature's `registry::test_support`). The
+/// identity may be rotated (inferred in `0003`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceServerCheckerChanges {
     pub public_mtls_identity: String,
@@ -675,8 +681,9 @@ impl FromRow<'_, PgRow> for ResourceAction {
     }
 }
 
-/// The input of the registry-private `create_resource_action` (tests reach
-/// it through the `test-support` feature).
+/// The input of the crate-private `create_resource_action` (called by
+/// `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewResourceAction {
     pub id: String,
@@ -690,8 +697,8 @@ pub struct NewResourceAction {
 }
 
 /// The mutable columns of an action rule, all replaced by the
-/// registry-private `update_resource_action` (tests only, through the
-/// `test-support` feature).
+/// crate-private `update_resource_action` (called by `crate::admin`; tests
+/// reach it through the `test-support` feature's `registry::test_support`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceActionChanges {
     pub required_scopes: Vec<String>,

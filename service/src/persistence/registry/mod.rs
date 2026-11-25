@@ -347,34 +347,36 @@
 //! - `append_audit_event` and the operation-row writers
 //!   `insert_administrative_operation`, `consume_administrative_operation`
 //!   and `revoke_administrative_operation` (`pub(crate)`, PR 10): the
-//!   audited writes of this registry, of [`crate::trust`] and of
-//!   [`crate::operation`] call the append, and [`crate::operation`] the
-//!   operation-row writers, so they cannot be narrower;
+//!   audited writes of this registry, of [`crate::trust`], of
+//!   [`crate::operation`] and of [`crate::admin`] call the append, and
+//!   [`crate::operation`] the operation-row writers, so they cannot be
+//!   narrower;
 //! - the checker writers `create_resource_server_checker`,
 //!   `update_resource_server_checker`,
 //!   `add_resource_server_checker_tenant` and
 //!   `remove_resource_server_checker_tenant`, the action writers
-//!   `create_resource_action` and `update_resource_action`, and
-//!   `update_tenant` and `update_principal` (a re-enable included), all
-//!   `pub(super)` with no caller in the crate, so each carries the same
-//!   `expect(dead_code)` as `update_admin_role_binding` (inferred: the
-//!   narrowest visibility);
-//! - the other writers of the resource server, audience assignment,
-//!   tenant, principal, principal binding, service identity, grant and
-//!   trust keyset tables: `create_resource_server`,
-//!   `update_resource_server`, `create_audience_tenant_assignment`,
-//!   `update_audience_tenant_assignment`, `create_tenant`,
-//!   `create_principal`, `create_principal_binding`,
+//!   `create_resource_action` and `update_resource_action`, the resource
+//!   server writers `create_resource_server` and `update_resource_server`,
+//!   the assignment writers `create_audience_tenant_assignment` and
+//!   `update_audience_tenant_assignment`, and `create_tenant`,
+//!   `update_tenant`, `create_principal` and `update_principal` (a
+//!   re-enable included), all `pub(crate)`: the audited, authorized writes
+//!   of [`crate::admin`] call them, and nothing else in the crate does
+//!   (inferred: the narrowest visibility that caller allows; the scenario
+//!   tests under `tests/security` name them through `test_support`);
+//! - the other writers of the principal binding, service identity, grant
+//!   and trust keyset tables: `create_principal_binding`,
 //!   `update_principal_binding`, `create_service_identity`,
 //!   `update_service_identity`, `add_service_identity_resource_server`,
 //!   `remove_service_identity_resource_server`, `create_service_grant`,
 //!   `update_service_grant`, `add_service_grant_binding`,
 //!   `remove_service_grant_binding`, `add_service_grant_resource_server`,
 //!   `remove_service_grant_resource_server`, `create_trust_keyset` and
-//!   `update_trust_keyset`, also `pub(super)` with no caller in the crate
-//!   and the same `expect(dead_code)` (the follow-up of the same survey;
-//!   the scenario tests under `tests/security` name them through
-//!   `test_support` too).
+//!   `update_trust_keyset`, `pub(super)` with no caller in the crate, so
+//!   each carries the same `expect(dead_code)` as
+//!   `update_admin_role_binding` (inferred: the narrowest visibility; the
+//!   follow-up of the same survey; the scenario tests under
+//!   `tests/security` name them through `test_support` too).
 //!
 //! Tests, which are crates of their own, reach each through a wrapper of
 //! the same name in the `#[doc(hidden)]` module `test_support`, compiled
@@ -437,8 +439,9 @@ mod selection;
 mod tenant;
 // Off in a normal build: for tests only, the bare registry trust writers
 // (second-approver proposal, PR 9), the operator writers, the audit append
-// and the operation-row writers (PR 10), and the other registry writers
-// that no code in the crate calls; see the module.
+// and the operation-row writers (PR 10), the registry writers that only
+// `crate::admin` calls, and those that no code in the crate calls; see the
+// module.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
@@ -451,6 +454,14 @@ pub use audience::{
     get_audience_tenant_assignment, get_resource_action, get_resource_server,
     get_resource_server_checker, list_audience_tenant_assignments, list_resource_actions,
     list_resource_server_checkers, list_resource_servers,
+};
+// Crate-private: `crate::admin` calls them from its audited, authorized
+// writes; tests reach them through `test_support`.
+pub(crate) use audience::{
+    add_resource_server_checker_tenant, create_audience_tenant_assignment, create_resource_action,
+    create_resource_server, create_resource_server_checker, remove_resource_server_checker_tenant,
+    update_audience_tenant_assignment, update_resource_action, update_resource_server,
+    update_resource_server_checker,
 };
 pub use bootstrap::{
     BootstrapError, BootstrapOutcome, BootstrapRequest, RECOVERY_PUBLIC_KEY_LENGTH,
@@ -519,6 +530,9 @@ pub use recovery::{
 };
 pub use selection::{Selection, SelectionError, select_grant};
 pub use tenant::{get_principal, get_tenant, list_principals, list_tenants};
+// Crate-private: `crate::admin` calls them from its audited, authorized
+// writes; tests reach them through `test_support`.
+pub(crate) use tenant::{create_principal, create_tenant, update_principal, update_tenant};
 pub(crate) use trust::{
     KeysetVersionText, create_trust_keyset_version, create_trust_source,
     read_enabled_keyset_versions, read_keyset_version, update_trust_keyset_version,

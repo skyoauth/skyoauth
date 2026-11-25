@@ -35,11 +35,7 @@ fn empty_patch() -> RegistryError {
 }
 
 /// Creates a tenant with the caller's ID and secret namespace.
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(dead_code, reason = "ungated: tests only, through test_support")
-)]
-pub(super) async fn create_tenant<'e>(
+pub(crate) async fn create_tenant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTenant,
 ) -> Result<Tenant, RegistryError> {
@@ -98,11 +94,7 @@ pub async fn list_tenants<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(dead_code, reason = "ungated: tests only, through test_support")
-)]
-pub(super) async fn update_tenant<'e>(
+pub(crate) async fn update_tenant<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,
@@ -135,11 +127,7 @@ pub(super) async fn update_tenant<'e>(
 /// check: PostgreSQL refuses it while decoding the text argument, so it is
 /// [`RegistryError::Other`] with SQLSTATE `22021`; the request layer must
 /// reject it first (T14.1).
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(dead_code, reason = "ungated: tests only, through test_support")
-)]
-pub(super) async fn create_principal<'e>(
+pub(crate) async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
 ) -> Result<Principal, RegistryError> {
@@ -201,11 +189,7 @@ pub async fn get_principal<'e>(
 /// with `23514` while the checks are in force; with them dropped, the write
 /// applies and the call returns [`RegistryError::UnreadableTimestamp`] (see
 /// the module documentation, "Timestamps").
-#[cfg_attr(
-    not(feature = "test-support"),
-    expect(dead_code, reason = "ungated: tests only, through test_support")
-)]
-pub(super) async fn update_principal<'e>(
+pub(crate) async fn update_principal<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: &str,
     id: &str,

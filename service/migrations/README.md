@@ -235,7 +235,23 @@ The database does not enforce these rules; the service must:
   grant's audience row also locks its audience tenant assignment
   `FOR SHARE` (an `AFTER INSERT` guard trigger, at the end of the insert
   statement); that lock is one of the domain rows' and comes before the
-  tenant and head locks too ("What 0010 adds", "Lock order"). A write
+  tenant and head locks too ("What 0010 adds", "Lock order"). The
+  audited operator writes of `crate::admin` (T13.3) take one more lock
+  before their domain rows: after the operator rows (`FOR SHARE`, in the
+  order of "What 0005 adds"), a write in a tenant other than the tenant
+  itself (a principal create, update or disable; an assignment create,
+  update or disable; a checker tenant set addition or removal) locks that
+  tenant row `FOR SHARE` (`SELECT … FOR SHARE`, which also refuses a
+  missing tenant), then writes its domain rows and appends its event, so
+  the tenant-then-head order holds and the append's `FOR KEY SHARE` on the
+  same row (a principal's event) adds no wait. The lock is held until the transaction ends once
+  the write succeeds, and released with the write's savepoint when it
+  fails; a tenant status write (`FOR NO KEY UPDATE` with its `UPDATE`)
+  waits for it, and it for the status write, and neither holds the head
+  while it waits. A gated version of such a write would follow steps 1 to
+  3 of "What 0005 adds" instead, which put `tenant` after the domain
+  tables; `crate::admin` ("Not gated: the D3 seams") notes the
+  reconciliation it then needs. A write
   that creates an `administrative_operation` is the exception to "domain rows first": it
   follows steps 1 to 3 of "What 0005 adds", and its event precedes the
   operation, since `audit_id` is an immediate (not deferrable) foreign key.
@@ -2814,7 +2830,18 @@ gives `Other` with `22003` from `revision + 1`, which is unreachable in
 practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
-cursor.
+cursor. Fourteen writers are crate-private (`pub(crate)`): the tenant
+and principal writers (`create_tenant`, `update_tenant`,
+`create_principal`, `update_principal`), the resource server writers
+(`create_resource_server`, `update_resource_server`), the assignment
+writers (`create_audience_tenant_assignment`,
+`update_audience_tenant_assignment`), the checker writers
+(`create_resource_server_checker`, `update_resource_server_checker`,
+`add_resource_server_checker_tenant`,
+`remove_resource_server_checker_tenant`) and the action writers
+(`create_resource_action`, `update_resource_action`). The audited,
+authorized writes of `crate::admin` call them, and tests reach them through
+`persistence::registry::test_support`.
 
 Of two concurrent updates from one revision exactly one succeeds. Under
 `READ COMMITTED` the second waits for the first's row lock and then gives
@@ -2864,15 +2891,21 @@ listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
 
 Since the second-approver proposal's registry hardening PR and its
-follow-up, the writers of tenants, principals, resource servers, audience
+follow-up, no writer of tenants, principals, resource servers, audience
 tenant assignments, checkers, actions, principal bindings, service
-identities, grants and trust keysets (each create, update and list-set
-change) are private to the registry (`pub(super)`): nothing in the crate
-calls them outside tests, and the integration and scenario tests reach
+identities, grants or trust keysets (each create, update and list-set
+change) is public. The fourteen writers of tenants, principals, resource
+servers, assignments, checkers and actions listed above are crate-private
+(`pub(crate)`), called by the audited, authorized writes of
+`crate::admin`. The rest, the writers of principal bindings, service
+identities, grants and trust keysets, stay private to the registry
+(`pub(super)`): nothing in the crate calls them outside tests, so each
+carries an `expect(dead_code)` guard in a build without the
+`test-support` feature. The integration and scenario tests reach all of
 them through the `#[doc(hidden)]` `persistence::registry::test_support`,
-compiled only with the `test-support` feature. The readers stay public, and
-so do `consume_assertion` and `consume_assertion_set` below, which only
-insert replay records.
+compiled only with that feature. The readers stay public, and so do
+`consume_assertion` and `consume_assertion_set` below, which only insert
+replay records.
 
 Consumed assertions (T10.9; ADR-016 items 6 and 7): `consume_assertion`
 inserts one row with `ON CONFLICT DO NOTHING` and returns `Consumed`, or
@@ -2897,7 +2930,8 @@ exactly one attempt consumes holds under `READ COMMITTED`; under
 Audit events (IR-055 to IR-059; OQ-IR-14; OQ-IR-15, decided provisionally
 by the lead decision 2026-11-21; T10.1; design §7): `append_audit_event`
 (crate-private since the second-approver proposal's PR 10: the audited
-writes of the registry, `crate::trust` and `crate::operation` call it, and
+writes of the registry, `crate::trust`, `crate::operation` and
+`crate::admin` call it, and
 tests reach it through `persistence::registry::test_support`)
 appends one event in a caller transaction after the domain rows, in the
 order of "append audit events in this order" above (a write that creates an
