@@ -134,7 +134,7 @@ envs = ["hermetic", "pg"]
 harness = ["UC", "FX"]
 owners = ["T11.2", "T11.3", "T11.5", "T11.8", "T24.3", "T52.1"]
 positive = "public-only JWK"
-negative = "private members, jku, x5u, embedded jwk, unsafe key URL; a `discovery_url` or `token_review_endpoint` with no enabled matching egress allowlist entry rejected on create or change, a discovered `jwks_uri` with no enabled `jwks` entry not fetched, no new discovery or JWKS fetch through a disabled entry (IR-152); M2 adds disallowed issuer/alg, conflicting kid, cross-tenant keyset"
+negative = "private members, jku, x5u, embedded jwk, unsafe key URL; a `discovery_url` or `token_review_endpoint` with no enabled matching egress allowlist entry rejected on create or change, a discovered `jwks_uri` with no enabled `jwks` entry not fetched, no new discovery or JWKS fetch through a disabled entry (IR-152); M2 adds disallowed issuer/alg, conflicting kid across a fetched issuer keyset's versions (verifier, T24.3; the upload-time kid check at create and enable is A04's, T11.3), cross-tenant keyset"
 matrix_sha256 = "38d5da59b73f237d10ec57d4518aa8ab0522c6bbf67c5abb4affab307d9e1dc8"
 
 [[scenario.stage]]
