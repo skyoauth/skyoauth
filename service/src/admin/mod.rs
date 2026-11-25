@@ -66,10 +66,50 @@
 //! credential and role binding `FOR SHARE`, in the `0005` order, until the
 //! transaction ends, so a revocation, a disable or a binding change waits
 //! for the write's commit or rollback (identity-registry section 5.2,
-//! "Point in time or locked"). Tenant status is not part of it: a write in
-//! a disabled tenant is not refused here (identity-registry section 5.2
-//! leaves that check to where a write needs it; none of these writes names
-//! it, so none checks it; inferred).
+//! "Point in time or locked"). Tenant status is not part of it: the
+//! writes check it themselves, after the authorization (see "Disabled
+//! tenants").
+//!
+//! # Disabled tenants
+//!
+//! The contracts do not say which operator writes a disabled tenant
+//! refuses: ADR-014 item 11 (OQ-ADR014-1) lists issuance, live checks,
+//! admission and refresh as what it denies, and identity-registry
+//! section 5.2 ("Fail-closed scope") notes that it does not name operator
+//! writes and leaves the check to T14 "where an operator write needs it".
+//! The rule here is the lead decision, 2026-11-24: in a disabled tenant
+//! every write that is not disable-only is
+//! [`AdminWriteError::TenantDisabled`] and writes nothing. A write is
+//! disable-only when its new `status` is `disabled` and every other
+//! mutable column keeps the stored value (the effect, as for the
+//! disable-only trust source update of ADR-008's OQ-ADR008-3, Q2), a
+//! repeated disable included. The writes in a tenant:
+//!
+//! | Write | Its tenant | In a disabled tenant |
+//! | ----- | ---------- | -------------------- |
+//! | [`workload::update_tenant`] | the tenant itself | only a status-only change (an enable or a disable; the name kept) |
+//! | [`workload::disable_tenant`] | the tenant itself | allowed |
+//! | [`workload::create_workload_principal`] | the principal's | refused |
+//! | [`workload::update_principal`] | the principal's | only disable-only |
+//! | [`workload::disable_principal`] | the principal's | allowed |
+//! | [`workload::create_audience_tenant_assignment`] | the assignment's `tenant_id` | refused, a disabled assignment too |
+//! | [`workload::update_audience_tenant_assignment`] | the assignment's `tenant_id` | only disable-only |
+//! | [`workload::disable_audience_tenant_assignment`] | the assignment's `tenant_id` | allowed |
+//! | [`workload::add_resource_server_checker_tenant`] | the tenant added | refused: adding it widens the checker |
+//! | [`workload::remove_resource_server_checker_tenant`] | the tenant removed | allowed: removing it narrows |
+//!
+//! The resource server, checker (create, update, disable) and action
+//! writes are in no tenant and do not check one. The tenant itself is
+//! enabled again only by a status-only update, which stays allowed. The
+//! check comes after the authorization, so it tells nothing to an
+//! operator the write refuses: a principal write's `trust_admin` holds
+//! that very tenant, and an instance `security_admin` reads every tenant
+//! anyway. For a write in a tenant other than the tenant itself, the
+//! tenant row is locked `FOR SHARE` until the transaction ends, so a
+//! tenant disable waits for the write's commit and the write for the
+//! disable's; for the tenant itself, its compare-and-set holds the status
+//! it read. A tenant that does not exist is not refused by the check: the
+//! registry write then refuses as before.
 //!
 //! # Audit events
 //!
@@ -88,17 +128,47 @@
 //! classification, the verb of a no-op write and of a repeated disable).
 //! Principal events carry the principal's tenant as `tenant_id`; the events
 //! of the instance-owned objects (tenants, resource servers, assignments,
-//! checkers, actions) are instance events, with no tenant (inferred: they
-//! are writes of instance `security_admin`, whose events a tenant
-//! `auditor` does not read, tasks section 2, `/admin/v1/tenants/{tenant}/audit`).
-//! The event has no member for the changed values (no `audit_event` detail
-//! column), so it records none.
+//! checkers, actions) are instance events, with no tenant (lead decision,
+//! 2026-11-24: they are writes of instance `security_admin`, whose events
+//! a tenant `auditor` does not read, tasks section 2,
+//! `/admin/v1/tenants/{tenant}/audit`). The event has no member for the
+//! changed values (no `audit_event` detail column), so it records none.
+//!
+//! The actions these writes append, all of [`AUDIT_ACTIONS`], for the
+//! audit event catalogue ("status-only" is a write whose only changed
+//! column is `status`; a write that changes nothing is `update`):
+//!
+//! | Write | Action | Event `tenant_id` |
+//! | ----- | ------ | ----------------- |
+//! | [`workload::create_tenant`] | `tenant.create` | none |
+//! | [`workload::update_tenant`] | `tenant.enable` or `tenant.disable` when status-only, else `tenant.update` | none |
+//! | [`workload::disable_tenant`] | `tenant.disable`, also when already disabled | none |
+//! | [`workload::create_workload_principal`] | `principal.create` | the principal's |
+//! | [`workload::update_principal`] | `principal.enable` or `principal.disable` when status-only, else `principal.update` | the principal's |
+//! | [`workload::disable_principal`] | `principal.disable`, also when already disabled | the principal's |
+//! | [`workload::create_resource_server`] | `resource_server.create` | none |
+//! | [`workload::update_resource_server`] | `resource_server.enable` or `resource_server.disable` when status-only, else `resource_server.update` | none |
+//! | [`workload::disable_resource_server`] | `resource_server.disable`, also when already disabled | none |
+//! | [`workload::create_audience_tenant_assignment`] | `audience_tenant_assignment.create` | none |
+//! | [`workload::update_audience_tenant_assignment`] | `audience_tenant_assignment.enable` or `audience_tenant_assignment.disable` when status-only, else `audience_tenant_assignment.update` | none |
+//! | [`workload::disable_audience_tenant_assignment`] | `audience_tenant_assignment.disable`, also when already disabled | none |
+//! | [`workload::create_resource_server_checker`] | `resource_server_checker.create` | none |
+//! | [`workload::update_resource_server_checker`] | `resource_server_checker.enable` or `resource_server_checker.disable` when status-only, else `resource_server_checker.update` | none |
+//! | [`workload::disable_resource_server_checker`] | `resource_server_checker.disable`, also when already disabled | none |
+//! | [`workload::add_resource_server_checker_tenant`] | `resource_server_checker.update` | none |
+//! | [`workload::remove_resource_server_checker_tenant`] | `resource_server_checker.update` | none |
+//! | [`workload::create_resource_action`] | `resource_action.create` | none |
+//! | [`workload::update_resource_action`] | `resource_action.enable` or `resource_action.disable` when status-only, else `resource_action.update` | none |
+//! | [`workload::disable_resource_action`] | `resource_action.disable`, also when already disabled | none |
 //!
 //! # Order and locks
 //!
 //! In a savepoint of the caller's transaction: the isolation check, the
 //! operator rows `FOR SHARE` (`0005` order), the stored row without a lock
-//! (an update), the registry write with its own locks (the target row's
+//! (an update), the tenant row `FOR SHARE` (a write in a tenant other than
+//! the tenant itself, "Disabled tenants"; it is taken before the domain
+//! rows and the head stays last, so the order of the audit append
+//! holds), the registry write with its own locks (the target row's
 //! compare-and-set; a create's or a tenant set addition's foreign-key
 //! checks take `FOR KEY SHARE` on the rows they reference), then the audit
 //! append, which locks a principal's tenant row `FOR KEY SHARE` and then
@@ -177,10 +247,14 @@
 //!   server-generated opaque value, and [`crate::ids`] has no kind for it
 //!   yet (its character set awaits a ruling), so [`workload::create_tenant`]
 //!   takes it from its caller, which must generate it, never accept it from
-//!   a request.
+//!   a request. This is interim (lead decision, 2026-11-24):
+//!   [`workload::create_tenant`] must not be exposed on any HTTP surface
+//!   until an IR-034 generator or ID kind is ruled.
 //! - A service principal create: a service principal is created
 //!   atomically with its service identity (identity-registry section 5.1),
-//!   a write of the service identity path, not of this module.
+//!   a write of the service identity path, not of this module (lead
+//!   decision, 2026-11-24: it lands with the service identity in slice
+//!   S3b).
 //! - The scope, profile and constraint vocabulary of a resource server, an
 //!   assignment or an action, and the T14.4 range rules of an action
 //!   (IR-101); leaving a disabled assignment's tenant out of a checker's
@@ -268,6 +342,10 @@ pub enum AdminWriteError {
     /// does not change: a human principal (IR-043; the lead ruling of
     /// 2026-11-21 that only workload and service principals change here).
     PrincipalKindNotAllowed,
+    /// The write's tenant is disabled and the write is not disable-only
+    /// (see the module docs, "Disabled tenants"; lead decision,
+    /// 2026-11-24). Checked after the authorization.
+    TenantDisabled,
     /// The generator gave no ID, for the new object or for the audit
     /// event: a server error, not retried with another source (see
     /// "Generators" in [`crate::ids`]; lead decision, 2026-11-24).
@@ -286,6 +364,9 @@ impl fmt::Display for AdminWriteError {
             Self::UnsupportedIsolation => f.write_str("operator writes run only at READ COMMITTED"),
             Self::PrincipalKindNotAllowed => {
                 f.write_str("this write may not change a principal of this kind")
+            }
+            Self::TenantDisabled => {
+                f.write_str("this write is refused while its tenant is disabled")
             }
             Self::Id(_) => f.write_str("operator write could not generate an ID"),
             Self::Registry(err) => write!(f, "operator write failed: {err}"),
@@ -348,6 +429,11 @@ mod tests {
                 AdminWriteError::PrincipalKindNotAllowed,
                 "PrincipalKindNotAllowed",
                 "this write may not change a principal of this kind",
+            ),
+            (
+                AdminWriteError::TenantDisabled,
+                "TenantDisabled",
+                "this write is refused while its tenant is disabled",
             ),
         ];
         for (err, debug, display) in cases {

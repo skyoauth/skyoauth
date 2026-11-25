@@ -192,7 +192,9 @@ fn action(id: &str, action_name: &str) -> NewResourceAction {
 /// instance `security_admin`), and, written with the bare registry
 /// writers:
 ///
-/// - the tenants `ten_a` and `ten_b`;
+/// - the tenants `ten_a` and `ten_b`, and `ten_c`, which holds nothing (the
+///   target of the tenant disable, so that the writes after it run in
+///   enabled tenants);
 /// - in `ten_a` the workload principals `wld_a` and `wld_a2`, the service
 ///   principal `svc_a` and the human principal `usr_a`; in `ten_b` the
 ///   workload principal `wld_b`;
@@ -224,7 +226,7 @@ async fn seeded() -> (TestDb, PgPool) {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
-    for (id, ns) in [("ten_a", "ns_a"), ("ten_b", "ns_b")] {
+    for (id, ns) in [("ten_a", "ns_a"), ("ten_b", "ns_b"), ("ten_c", "ns_c")] {
         registry::create_tenant(
             &pool,
             &NewTenant {
@@ -456,7 +458,7 @@ impl Write {
     fn target(self) -> &'static str {
         match self {
             Self::UpdateTenant => "ten_a",
-            Self::DisableTenant => "ten_b",
+            Self::DisableTenant => "ten_c",
             Self::UpdatePrincipal => "wld_a",
             Self::DisablePrincipal => "wld_a2",
             Self::UpdateResourceServer => "rs_1",
@@ -1052,7 +1054,7 @@ async fn every_write_applies_for_its_role_with_its_event() {
         .unwrap();
     assert_eq!(checker.allowed_tenant_ids, ["ten_b"]);
     assert_eq!(checker.public_mtls_identity, "spki-sha256:chk1-rotated");
-    let tenant = registry::get_tenant(&pool, "ten_b").await.unwrap();
+    let tenant = registry::get_tenant(&pool, "ten_c").await.unwrap();
     assert_eq!(tenant.status, Status::Disabled);
     let tenant = registry::get_tenant(&pool, &created[0]).await.unwrap();
     assert_eq!(tenant.secret_namespace, "ns_created");
@@ -1282,17 +1284,17 @@ async fn an_update_names_its_action_from_what_it_changes() {
         .await
         .unwrap();
     actions.push(t.event.action);
-    let t = admin::disable_tenant(tx, &sec, "ten_b", 1).await.unwrap();
+    let rename_and_disable = TenantPatch {
+        name: Some("other".into()),
+        status: Some(Status::Disabled),
+    };
+    let t = admin::update_tenant(tx, &sec, "ten_b", 1, &rename_and_disable)
+        .await
+        .unwrap();
     actions.push(t.event.action);
     let t = admin::disable_tenant(tx, &sec, "ten_b", 2).await.unwrap();
     actions.push(t.event.action);
-    let rename_and_disable = TenantPatch {
-        name: Some("other".into()),
-        status: Some(Status::Enabled),
-    };
-    let t = admin::update_tenant(tx, &sec, "ten_b", 3, &rename_and_disable)
-        .await
-        .unwrap();
+    let t = admin::disable_tenant(tx, &sec, "ten_b", 3).await.unwrap();
     actions.push(t.event.action);
     // Principals.
     let p = admin::update_principal(
@@ -1432,9 +1434,9 @@ async fn an_update_names_its_action_from_what_it_changes() {
             "tenant.enable",
             "tenant.update",
             "tenant.update",
-            "tenant.disable",
-            "tenant.disable",
             "tenant.update",
+            "tenant.disable",
+            "tenant.disable",
             "principal.disable",
             "principal.update",
             "resource_server.disable",
@@ -1624,6 +1626,418 @@ async fn the_authorization_is_locked_until_the_transaction_ends() {
             .unwrap_err();
         assert!(format!("{err:?}").contains("55P03"), "{err:?}");
         revoke.rollback().await.unwrap();
+        tx.rollback().await.unwrap();
+    }
+    db.drop([pool]).await;
+}
+
+/// Runs `steps` in a transaction of its own and commits it, also after an
+/// error, so a refusal shows that the write's savepoint left nothing.
+async fn committed<T>(
+    pool: &PgPool,
+    steps: impl AsyncFnOnce(&mut Transaction<'_, Postgres>) -> Result<T, AdminWriteError>,
+) -> Result<T, AdminWriteError> {
+    let mut transaction = pool.begin().await.unwrap();
+    let result = steps(&mut transaction).await;
+    transaction.commit().await.unwrap();
+    result
+}
+
+/// Disables `tenant_id` with the bare registry writer: a fixture step, not
+/// a write under test.
+async fn disable_tenant_row(pool: &PgPool, tenant_id: &str) {
+    let revision = registry::get_tenant(pool, tenant_id)
+        .await
+        .unwrap()
+        .revision;
+    let patch = TenantPatch {
+        name: None,
+        status: Some(Status::Disabled),
+    };
+    registry::test_support::update_tenant(pool, tenant_id, revision, &patch)
+        .await
+        .unwrap();
+}
+
+fn tenant_patch(name: Option<&str>, status: Option<Status>) -> TenantPatch {
+    TenantPatch {
+        name: name.map(Into::into),
+        status,
+    }
+}
+
+fn principal_patch(name: Option<&str>, status: Option<Status>) -> PrincipalPatch {
+    PrincipalPatch {
+        name: name.map(Into::into),
+        status,
+    }
+}
+
+/// The tenant itself, once disabled, takes only a status-only write: a
+/// rename, with or without an enable, is `TenantDisabled` and writes
+/// nothing; a repeated disable, a status-only disable that names the
+/// stored name and an enable apply; once enabled, a rename applies again.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_disabled_tenant_takes_only_status_only_writes_of_its_own() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::with_seed(21);
+    let sec = request(KEY_SEC, &ids);
+    let done = committed(&pool, async |tx| {
+        admin::disable_tenant(tx, &sec, "ten_a", 1).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "tenant.disable");
+    let before = snapshot(&pool).await;
+    for patch in [
+        tenant_patch(Some("renamed"), None),
+        tenant_patch(Some("renamed"), Some(Status::Enabled)),
+        tenant_patch(Some("renamed"), Some(Status::Disabled)),
+    ] {
+        let result = committed(&pool, async |tx| {
+            admin::update_tenant(tx, &sec, "ten_a", 2, &patch).await
+        })
+        .await;
+        refused(result, "TenantDisabled");
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    let done = committed(&pool, async |tx| {
+        admin::disable_tenant(tx, &sec, "ten_a", 2).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "tenant.disable");
+    let patch = tenant_patch(Some("Tenant ten_a"), Some(Status::Disabled));
+    committed(&pool, async |tx| {
+        admin::update_tenant(tx, &sec, "ten_a", 3, &patch).await
+    })
+    .await
+    .unwrap();
+    let patch = tenant_patch(None, Some(Status::Enabled));
+    let done = committed(&pool, async |tx| {
+        admin::update_tenant(tx, &sec, "ten_a", 4, &patch).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "tenant.enable");
+    assert_eq!(done.row.status, Status::Enabled);
+    let patch = tenant_patch(Some("renamed"), None);
+    let done = committed(&pool, async |tx| {
+        admin::update_tenant(tx, &sec, "ten_a", 5, &patch).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.row.name, "renamed");
+    let patch = tenant_patch(Some("renamed b"), None);
+    committed(&pool, async |tx| {
+        admin::update_tenant(tx, &sec, "ten_b", 1, &patch).await
+    })
+    .await
+    .unwrap();
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// In a disabled tenant a principal create (even of a disabled principal),
+/// a rename, a re-enable and a rename with a disable are `TenantDisabled`,
+/// write nothing and take no ID; a disable-only update, a disable and a
+/// repeated disable apply. Another tenant's principals are unaffected, and
+/// once the tenant is enabled again the refused re-enable applies. Every
+/// operator that may not write in the tenant is `Unauthorized`, before the
+/// tenant's status is read.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_disabled_tenant_takes_only_disable_only_principal_writes() {
+    let (db, pool) = seeded().await;
+    disable_tenant_row(&pool, "ten_a").await;
+    let ids = SequentialIds::with_seed(22);
+    let trust = request(KEY_TRUST_A, &ids);
+    let before = snapshot(&pool).await;
+    // The authorization comes first: an operator that may not write in the
+    // tenant learns nothing of its status.
+    for key in NEITHER.into_iter().chain([KEY_SEC, KEY_TRUST_B]) {
+        let other = request(key, &ids);
+        let new = PrincipalCreate {
+            name: "principal-new".into(),
+            status: Status::Enabled,
+        };
+        let result = committed(&pool, async |tx| {
+            admin::create_workload_principal(tx, &other, "ten_a", &new).await
+        })
+        .await;
+        refused(result, "Unauthorized");
+        let patch = principal_patch(Some("renamed"), None);
+        let result = committed(&pool, async |tx| {
+            admin::update_principal(tx, &other, "ten_a", "wld_a", 1, &patch).await
+        })
+        .await;
+        refused(result, "Unauthorized");
+    }
+    for status in [Status::Enabled, Status::Disabled] {
+        let new = PrincipalCreate {
+            name: "principal-new".into(),
+            status,
+        };
+        let result = committed(&pool, async |tx| {
+            admin::create_workload_principal(tx, &trust, "ten_a", &new).await
+        })
+        .await;
+        refused(result, "TenantDisabled");
+    }
+    for patch in [
+        principal_patch(Some("renamed"), None),
+        principal_patch(Some("renamed"), Some(Status::Disabled)),
+        principal_patch(None, Some(Status::Enabled)),
+    ] {
+        let result = committed(&pool, async |tx| {
+            admin::update_principal(tx, &trust, "ten_a", "wld_a", 1, &patch).await
+        })
+        .await;
+        refused(result, "TenantDisabled");
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    let fresh = SequentialIds::with_seed(22);
+    for kind in IdKind::ALL {
+        assert_eq!(ids.new_id(kind), fresh.new_id(kind), "{kind:?}");
+    }
+    let patch = principal_patch(Some("principal-wld_a"), Some(Status::Disabled));
+    let done = committed(&pool, async |tx| {
+        admin::update_principal(tx, &trust, "ten_a", "wld_a", 1, &patch).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "principal.disable");
+    let done = committed(&pool, async |tx| {
+        admin::disable_principal(tx, &trust, "ten_a", "svc_a", 1).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "principal.disable");
+    let done = committed(&pool, async |tx| {
+        admin::disable_principal(tx, &trust, "ten_a", "wld_a", 2).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.row.revision, 3);
+    let patch = principal_patch(None, Some(Status::Enabled));
+    let result = committed(&pool, async |tx| {
+        admin::update_principal(tx, &trust, "ten_a", "wld_a", 3, &patch).await
+    })
+    .await;
+    refused(result, "TenantDisabled");
+    let trust_b = request(KEY_TRUST_B, &ids);
+    let new = PrincipalCreate {
+        name: "principal-new".into(),
+        status: Status::Enabled,
+    };
+    committed(&pool, async |tx| {
+        admin::create_workload_principal(tx, &trust_b, "ten_b", &new).await
+    })
+    .await
+    .unwrap();
+    let sec = request(KEY_SEC, &ids);
+    let enable = tenant_patch(None, Some(Status::Enabled));
+    committed(&pool, async |tx| {
+        admin::update_tenant(tx, &sec, "ten_a", 2, &enable).await
+    })
+    .await
+    .unwrap();
+    let done = committed(&pool, async |tx| {
+        admin::update_principal(tx, &trust, "ten_a", "wld_a", 3, &patch).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "principal.enable");
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// The assignment changes for `before` with `status` and, when `widen`,
+/// one more scope.
+fn assignment_changes(
+    before: &AudienceTenantAssignment,
+    status: Status,
+    widen: bool,
+) -> AudienceTenantAssignmentChanges {
+    let mut allowed_scopes = before.allowed_scopes.clone();
+    if widen {
+        allowed_scopes.push("projects:write".into());
+    }
+    AudienceTenantAssignmentChanges {
+        allowed_profiles: before.allowed_profiles.clone(),
+        allowed_scopes,
+        constraint_versions: before.constraint_versions.clone(),
+        status,
+    }
+}
+
+/// An assignment's writes follow its tenant: in a disabled tenant a create
+/// (even of a disabled assignment), a widening, a widening with a disable
+/// and a re-enable are `TenantDisabled` and write nothing; a disable-only
+/// update and a disable apply; another tenant's assignments are
+/// unaffected. Every other operator is `Unauthorized` first.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_disabled_tenant_takes_only_disable_only_assignment_writes() {
+    let (db, pool) = seeded().await;
+    disable_tenant_row(&pool, "ten_a").await;
+    let ids = SequentialIds::with_seed(23);
+    let sec = request(KEY_SEC, &ids);
+    let before = snapshot(&pool).await;
+    let create = |tenant_id: &str, status| AssignmentCreate {
+        resource_server_id: "rs_2".into(),
+        tenant_id: tenant_id.into(),
+        allowed_profiles: vec![Profile::Wif],
+        allowed_scopes: vec!["projects:read".into()],
+        constraint_versions: vec![],
+        status,
+    };
+    for key in NEITHER.into_iter().chain([KEY_TRUST_A]) {
+        let other = request(key, &ids);
+        let new = create("ten_a", Status::Enabled);
+        let result = committed(&pool, async |tx| {
+            admin::create_audience_tenant_assignment(tx, &other, &new).await
+        })
+        .await;
+        refused(result, "Unauthorized");
+    }
+    for status in [Status::Enabled, Status::Disabled] {
+        let new = create("ten_a", status);
+        let result = committed(&pool, async |tx| {
+            admin::create_audience_tenant_assignment(tx, &sec, &new).await
+        })
+        .await;
+        refused(result, "TenantDisabled");
+    }
+    let asgn_a = registry::get_audience_tenant_assignment(&pool, "asgn_a")
+        .await
+        .unwrap();
+    for (status, widen) in [(Status::Enabled, true), (Status::Disabled, true)] {
+        let changes = assignment_changes(&asgn_a, status, widen);
+        let result = committed(&pool, async |tx| {
+            admin::update_audience_tenant_assignment(tx, &sec, "asgn_a", 1, &changes).await
+        })
+        .await;
+        refused(result, "TenantDisabled");
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    let changes = assignment_changes(&asgn_a, Status::Disabled, false);
+    let done = committed(&pool, async |tx| {
+        admin::update_audience_tenant_assignment(tx, &sec, "asgn_a", 1, &changes).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "audience_tenant_assignment.disable");
+    let done = committed(&pool, async |tx| {
+        admin::disable_audience_tenant_assignment(tx, &sec, "asgn_a3", 1).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "audience_tenant_assignment.disable");
+    let asgn_a3 = registry::get_audience_tenant_assignment(&pool, "asgn_a3")
+        .await
+        .unwrap();
+    let changes = assignment_changes(&asgn_a3, Status::Enabled, false);
+    let result = committed(&pool, async |tx| {
+        admin::update_audience_tenant_assignment(tx, &sec, "asgn_a3", 2, &changes).await
+    })
+    .await;
+    refused(result, "TenantDisabled");
+    let new = create("ten_b", Status::Enabled);
+    committed(&pool, async |tx| {
+        admin::create_audience_tenant_assignment(tx, &sec, &new).await
+    })
+    .await
+    .unwrap();
+    let asgn_b = registry::get_audience_tenant_assignment(&pool, "asgn_b")
+        .await
+        .unwrap();
+    let changes = assignment_changes(&asgn_b, Status::Enabled, true);
+    committed(&pool, async |tx| {
+        admin::update_audience_tenant_assignment(tx, &sec, "asgn_b", 1, &changes).await
+    })
+    .await
+    .unwrap();
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// Adding a disabled tenant to a checker's tenant set is `TenantDisabled`
+/// and writes nothing; removing one applies; an enabled tenant is added.
+/// The writes in no tenant (resource servers, checkers, actions) apply
+/// while a tenant is disabled.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_disabled_tenant_is_never_added_to_a_checker_and_instance_writes_go_on() {
+    let (db, pool) = seeded().await;
+    disable_tenant_row(&pool, "ten_a").await;
+    let ids = SequentialIds::with_seed(24);
+    let sec = request(KEY_SEC, &ids);
+    let before = snapshot(&pool).await;
+    let result = committed(&pool, async |tx| {
+        admin::add_resource_server_checker_tenant(tx, &sec, "chk_2", 1, "ten_a").await
+    })
+    .await;
+    refused(result, "TenantDisabled");
+    assert_eq!(snapshot(&pool).await, before);
+    committed(&pool, async |tx| {
+        admin::remove_resource_server_checker_tenant(tx, &sec, "chk_1", 2, "ten_a").await
+    })
+    .await
+    .unwrap();
+    committed(&pool, async |tx| {
+        admin::add_resource_server_checker_tenant(tx, &sec, "chk_2", 1, "ten_b").await
+    })
+    .await
+    .unwrap();
+    for write in WRITES.into_iter().filter(|write| {
+        !matches!(
+            write,
+            Write::CreateTenant
+                | Write::UpdateTenant
+                | Write::DisableTenant
+                | Write::CreatePrincipal
+                | Write::UpdatePrincipal
+                | Write::DisablePrincipal
+                | Write::CreateAssignment
+                | Write::UpdateAssignment
+                | Write::DisableAssignment
+                | Write::AddCheckerTenant
+                | Write::RemoveCheckerTenant
+        )
+    }) {
+        run(&pool, &ids, write, write.key(), Revision::Current)
+            .await
+            .unwrap_or_else(|err| panic!("{write:?}: {err:?}"));
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// A write in a tenant holds the tenant row `FOR SHARE` until its
+/// transaction ends: a tenant disable waits for it (here, until its lock
+/// timeout).
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn the_tenant_check_is_locked_until_the_transaction_ends() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::new();
+    for write in [Write::CreatePrincipal, Write::CreateAssignment] {
+        let mut tx = pool.begin().await.unwrap();
+        call(&mut tx, &ids, write, write.key(), 0).await.unwrap();
+        let mut other = pool.acquire().await.unwrap();
+        let mut disable = Connection::begin(&mut *other).await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '200ms'")
+            .execute(&mut *disable)
+            .await
+            .unwrap();
+        let patch = tenant_patch(None, Some(Status::Disabled));
+        let err = registry::test_support::update_tenant(&mut *disable, "ten_a", 1, &patch)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("55P03"), "{write:?}: {err:?}");
+        disable.rollback().await.unwrap();
         tx.rollback().await.unwrap();
     }
     db.drop([pool]).await;

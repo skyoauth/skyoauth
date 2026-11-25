@@ -222,6 +222,29 @@ fn check_revision(stored: i64, expected: i64) -> Result<(), AdminWriteError> {
     }
 }
 
+/// Step 3 of a write in a tenant: refuses it with
+/// [`AdminWriteError::TenantDisabled`] when `tenant_id` is disabled and the
+/// write is not `narrowing` (see the module docs, "Disabled tenants"). The
+/// tenant row is locked `FOR SHARE` until the transaction ends, whatever
+/// the outcome, so a tenant enable or disable waits for this write, and
+/// this write for it. A tenant that does not exist passes: the registry
+/// write then gives its own refusal, as before this check.
+async fn check_tenant(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    narrowing: bool,
+) -> Result<(), AdminWriteError> {
+    let disabled: Option<bool> =
+        sqlx::query_scalar("SELECT status <> 'enabled' FROM tenant WHERE id = $1 FOR SHARE")
+            .bind(tenant_id)
+            .fetch_optional(&mut **transaction)
+            .await?;
+    if disabled == Some(true) && !narrowing {
+        return Err(AdminWriteError::TenantDisabled);
+    }
+    Ok(())
+}
+
 /// Step 6: the write's event, last, with a generated ID.
 async fn append_event(
     transaction: &mut Transaction<'_, Postgres>,
@@ -324,6 +347,13 @@ pub async fn update_tenant(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_tenant(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
+        // The tenant itself: a disabled tenant takes a status-only write (an
+        // enable or a disable) and nothing else. The compare-and-set below
+        // holds the status read here.
+        let status_only = patch.name.as_ref().is_none_or(|name| *name == before.name);
+        if before.status != Status::Enabled && !status_only {
+            return Err(AdminWriteError::TenantDisabled);
+        }
         let row = registry::update_tenant(&mut **transaction, id, expected_revision, patch).await?;
         let status_only = row.name == before.name;
         let action = TENANT.of_update(status_only, before.status, row.status);
@@ -383,6 +413,7 @@ pub async fn create_workload_principal(
 ) -> Result<Audited<Principal>, AdminWriteError> {
     in_savepoint(transaction, async |transaction| {
         let requester = trust_admin(transaction, request, tenant_id).await?;
+        check_tenant(transaction, tenant_id, false).await?;
         let new = NewPrincipal {
             id: request.ids.new_id(IdKind::WorkloadPrincipal)?,
             tenant_id: tenant_id.into(),
@@ -433,6 +464,9 @@ pub async fn update_principal(
     in_savepoint(transaction, async |transaction| {
         let requester = trust_admin(transaction, request, tenant_id).await?;
         let before = stored_principal(transaction, tenant_id, id, expected_revision).await?;
+        let disable_only = patch.status.unwrap_or(before.status) == Status::Disabled
+            && patch.name.as_ref().is_none_or(|name| *name == before.name);
+        check_tenant(transaction, tenant_id, disable_only).await?;
         let row =
             registry::update_principal(&mut **transaction, tenant_id, id, expected_revision, patch)
                 .await?;
@@ -464,6 +498,7 @@ pub async fn disable_principal(
     in_savepoint(transaction, async |transaction| {
         let requester = trust_admin(transaction, request, tenant_id).await?;
         stored_principal(transaction, tenant_id, id, expected_revision).await?;
+        check_tenant(transaction, tenant_id, true).await?;
         let patch = PrincipalPatch {
             name: None,
             status: Some(Status::Disabled),
@@ -603,6 +638,7 @@ pub async fn create_audience_tenant_assignment(
 ) -> Result<Audited<AudienceTenantAssignment>, AdminWriteError> {
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
+        check_tenant(transaction, &new.tenant_id, false).await?;
         let new = NewAudienceTenantAssignment {
             id: request.ids.new_id(IdKind::AudienceAssignment)?,
             resource_server_id: new.resource_server_id.clone(),
@@ -667,6 +703,11 @@ pub async fn update_audience_tenant_assignment(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
+        let disable_only = changes.status == Status::Disabled
+            && changes.allowed_profiles == before.allowed_profiles
+            && changes.allowed_scopes == before.allowed_scopes
+            && changes.constraint_versions == before.constraint_versions;
+        check_tenant(transaction, &before.tenant_id, disable_only).await?;
         let target = (id, expected_revision, &before);
         write_assignment(transaction, request, &requester, target, changes, false).await
     })
@@ -685,6 +726,7 @@ pub async fn disable_audience_tenant_assignment(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
+        check_tenant(transaction, &before.tenant_id, true).await?;
         let changes = AudienceTenantAssignmentChanges {
             allowed_profiles: before.allowed_profiles.clone(),
             allowed_scopes: before.allowed_scopes.clone(),
@@ -810,6 +852,7 @@ pub async fn add_resource_server_checker_tenant(
 ) -> Result<Audited<ResourceServerChecker>, AdminWriteError> {
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
+        check_tenant(transaction, tenant_id, false).await?;
         let revision = registry::add_resource_server_checker_tenant(
             &mut **transaction,
             checker_id,
