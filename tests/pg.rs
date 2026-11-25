@@ -9,8 +9,8 @@
 //! registry test ID is `nextest:skyoauth-scenarios/pg/<that name>`
 //! (layout §3). `security::grant_fixture` is a helper module of the A38 and
 //! A53 tests, and `security::selection_fixture` one of the A02, A25 and
-//! A50 tests; neither is a scenario. The A02, A04, A05, A22, A32, A37,
-//! A43, A48, A53 and A54 tests are partial: they are registered on their
+//! A50 tests; neither is a scenario. The A04, A05, A22, A32, A37, A43,
+//! A48, A53 and A54 tests are partial: they are registered on their
 //! scenario's planned M1a stage and count for nothing (see each module's
 //! docs). `harness::pg_teardown`
 //! tests the harness's own database teardown (`src/pg.rs`); its tests are

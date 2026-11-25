@@ -39,7 +39,8 @@ matrix_sha256 = "64b2daf7e8e9936a8f664f8a1c6436c0838c9b3f94ef715c2baba72aaffcfb7
 milestone = "M1a"
 scope = "policy matcher decision over claim maps supplied as evidence (registry and policy API: select_grant, then match_binding), including a binding that pins the reusable-workflow identity (job_workflow_ref); the maps are hand-written, are not verified signed-token output and are an inferred shape"
 legs = ["scenarios-pg/x86_64"]
-status = "planned"
+status = "implemented"
+implemented_sha256 = "4865731fb1a2b2a36a0165924fbcbe31b8387ad7762d1bf9c93cf042bda73e6a"
 tests = [
   "nextest:skyoauth-scenarios/pg/security::a02::a02_pos_push_claims_match_the_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_event_name_case_variant_against_push_binding",
