@@ -11,10 +11,12 @@
 //! the trust keyset and keyset version writes and reads, and the reads of
 //! the source, binding and grant that hang off a keyset) against a real
 //! PostgreSQL, one fresh database per test (per round in the replica
-//! tests), with no SQL of their own; one test also drives the
-//! second-approver flow's public library (`skyoauth_service::operation` and
-//! `skyoauth_service::trust::submit_create_version`, see the gated
-//! positive below), which has no endpoint yet. The fixture is local ([`fixture`]):
+//! tests), with no SQL of their own; six tests also drive the service's
+//! keyset write path and the second-approver flow's public library
+//! (`skyoauth_service::trust`: `validate_upload`, `submit_create_version`,
+//! `submit_enable_version` and `disable_version`; and
+//! `skyoauth_service::operation`), which have no endpoint yet: the gated
+//! positive and the live kid and upload tests below. The fixture is local ([`fixture`]):
 //! tenants `ten_a` and `ten_b`, each with a workload, a keyset `ks_<t>`
 //! with one enabled version `kv_old_<t>` (window `T0` to `T2`), a second
 //! keyset `ks_other_<t>` with a version of its own, an `uploaded_jwks`
@@ -92,6 +94,94 @@
 //!   gated enable and re-enable, and every refusal of the flow, have
 //!   service tests only (`service/tests/keyset_approval.rs`), which are no
 //!   conformance evidence.
+//!
+//! The live kid and upload tests below run as `adm_trust_a` in `ten_a`
+//! (bootstrapped by `adm_first`, with `adm_sec`, [`operators`]), through
+//! Stage A (`trust::validate_upload`) and the gated create and enable
+//! (`trust::submit_create_version`, `trust::submit_enable_version`), each
+//! committed whatever the outcome, so a refusal also shows that the write's
+//! savepoint left nothing behind. A refusal is compared by its typed fields
+//! (the `KeysetWriteError` variant, the `OverlapError` variant with its
+//! `kid`s and version IDs, the `JwkSetError` variant with its index and
+//! `JwkError`), never by message text, and "writes nothing" means: no such
+//! version (`get_trust_keyset_version` is `NotFound`, or the staged version
+//! reads back unchanged), no operation with the request's ID, the same
+//! audit chain head, and both tenants' keysets, versions, sources,
+//! bindings and grants with every column and revision as before.
+//!
+//! - **Negative, live kid conflict.** First with `widening_second_approver`
+//!   off (applied at once), then on (pending, A48's toggle), a new enabled
+//!   version whose window intersects an enabled version of its keyset is
+//!   refused with `Overlap`: a live `kid` with another key is `KidConflict`
+//!   (the windows overlapping, the new one open-ended, the two sharing one
+//!   microsecond before the old expiry, a one-microsecond window inside the
+//!   open-ended `kv_other_a`, and the conflicting key behind a good key in
+//!   the same set); a live key under another `kid` is `KeyConflict`
+//!   (overlapping, and both windows open-ended); and the RFC 7638 RSA key
+//!   under its live `kid` with `PS256`, where an enabled version
+//!   (`kv_rsa_a`, created through the gated create) has it with `RS256`, is
+//!   `AlgorithmConflict` (reachable only with an RSA key: every curve key
+//!   has one algorithm, and a curve key without `alg` resolves to it, so it
+//!   cannot differ). Each refusal writes nothing, and neither its `Debug`
+//!   nor its `Display` holds a `kid`, a key member (`x`, `y`, `n`, `e`) or a
+//!   version ID. As a control, the old key under its own `kid` over the
+//!   overlap goes pending
+//!   (`a04_neg_a_conflicting_live_kid_or_key_is_refused_and_writes_nothing`).
+//! - **Positive, explicit overlap and disjoint windows.** Keeping
+//!   `kv_old_a`'s `kid`, a version with the same key over the overlap (with
+//!   `alg` `ES256`, and without `alg`, whose curve resolves it to `ES256`)
+//!   and a version with another key in a window that starts at the old
+//!   window's expiry (open-ended) or ends at its start (adjacent, so not
+//!   intersecting, the expiry being exclusive) are each written enabled
+//!   exactly as validated (projection, fingerprint, window, provenance) at
+//!   revision 1; all five versions are enabled at once, the old one
+//!   unchanged, and the lineage and the other tenant keep every column and
+//!   revision
+//!   (`a04_pos_a_live_kid_with_its_own_key_or_a_disjoint_window_is_accepted`).
+//! - **Negative, the check at enable.** A version that would conflict in
+//!   each of the three ways over `T1` to `T3`, created disabled, is accepted
+//!   (a disabled create runs no overlap check) and stored disabled; its
+//!   enable (`trust::submit_enable_version`) is then refused with the same
+//!   `Overlap` conflict, applied at once and pending, and writes nothing: the
+//!   version stays disabled at revision 1. Once the old version is disabled
+//!   (`trust::disable_version`), the enable of the `KidConflict` one goes
+//!   pending and `adm_sec`'s approval enables it at revision 2, the rotation
+//!   of `jwk`'s module docs
+//!   (`a04_neg_a_conflicting_version_created_disabled_is_refused_at_enable`).
+//! - **Negative, upload checks.** Stage A (`trust::validate_upload`)
+//!   refuses with `Upload`: a set that is empty, has no `keys`, a `keys`
+//!   that is not an array, is not an object, has another member, a key that
+//!   is not an object, 21 keys, or is over 64 KiB; a `kid` twice in one set
+//!   (two keys, or one key twice) and a key under two `kid`s; per key, after
+//!   a good key (index 1): `alg` `none` or `HS256`
+//!   (`ForbiddenAlgorithm`), `RS512` or `ES256K` (`UnsupportedAlgorithm`),
+//!   an `alg` that does not fit the key (`AlgorithmMismatch`), an RSA key
+//!   without `alg`, and an `alg` that is not a string; alone, against a
+//!   narrower allowed set, `AlgorithmNotAllowed` and `NoAllowedAlgorithm`;
+//!   `kty` `oct` and `AKP`, the curves `secp256k1`, `Ed448` and `X25519`;
+//!   an RSA modulus of 1024 or 2047 bits (`RsaModulusTooSmall`), 8193 bits,
+//!   even or with a leading zero octet, an exponent of 3 or 65535, even
+//!   (65538), with a leading zero octet or of 33 octets; a 31-octet P-256
+//!   `x`, an `x` not below `p`, a point off the curve; and malformed
+//!   members: no `kty`, `kid` or `y`, a `kty`, `kid` or `y` of the wrong
+//!   JSON type, a `kid` of 0 or 129 bytes or with a space or a quote, an
+//!   unknown member and another key type's member, `use` `enc`, `key_ops`
+//!   other than `["verify"]`, a 19-octet `x5t`, and an `x` padded, with `+`
+//!   or empty. The bounds' accepted sides pass: 2048 and 8192 bits, a
+//!   32-octet exponent, a 128-byte `kid`, 20 keys and a P-256 key without
+//!   `alg`. Nothing is written, and no refusal prints a `kid` or key member.
+//!   Private members and `x5u`, `x5c`, `jku` are A05's
+//!   (`tests/security/a05.rs`) and not repeated here
+//!   (`a04_neg_upload_checks_refuse_a_bad_key_set_before_any_write`). The
+//!   bounds (20 keys, 64 KiB, 2048 to 8192 bits, 65537, 32 octets, 128
+//!   bytes) are `jwk`'s inferred picks, written out here, in no spec.
+//! - **Negative, allowed set at create.** A set that Stage A accepted with
+//!   the default algorithms, given to `trust::submit_create_version` with a
+//!   narrower `allowed`, is refused before any statement with `Upload(Key {
+//!   index, AlgorithmNotAllowed(PS256) })` (index in `kid` order) or
+//!   `NoAllowedAlgorithm`, applied at once and pending, and writes nothing;
+//!   the same upload with the default set is written, or goes pending
+//!   (`a04_neg_a_key_outside_the_create_allowed_algorithms_is_refused`).
 //!
 //! # Spec and registry picks
 //!
@@ -172,24 +262,39 @@
 //!   yet started or one already ended stops verification is untested
 //!   either way. The building block exists but is unwired:
 //!   `skyoauth_service::jwk::live_keys` and `KeysetVersion::is_live`, with
-//!   the half-open window `[effective_at, expires_at)`; nothing calls them.
-//! - **Conflicting live kids and key checks.** The registry does not
-//!   compare the kids or keys of overlapping versions, nor algorithms,
-//!   strength or size (`0004_trust_binding_grant.sql`, the `public_jwks`
-//!   comment: "Algorithms, sizes and kid uniqueness are the service's
-//!   checks"; the migrations README leaves the service to "check JWK
-//!   algorithms, key sizes, `kid` conflicts and fingerprints of an upload
-//!   (T11.3)"), so a conflicting live kid has no registry test either way.
-//!   The building blocks exist but are unwired:
-//!   `skyoauth_service::jwk::parse_jwk_set` and `check_version_overlap`,
-//!   to run "wherever a version becomes enabled"; nothing calls them.
+//!   the half-open window `[effective_at, expires_at)`; nothing outside
+//!   `skyoauth_service::jwk` calls them.
+//! - **Conflicting live kids and key checks, at the registry.** The
+//!   registry does not compare the kids or keys of overlapping versions,
+//!   nor algorithms, strength or size (`0004_trust_binding_grant.sql`, the
+//!   `public_jwks` comment: "Algorithms, sizes and kid uniqueness are the
+//!   service's checks"; the migrations README leaves the service to "check
+//!   JWK algorithms, key sizes, `kid` conflicts and fingerprints of an
+//!   upload (T11.3)"), so the registry tests here store conflicting kids
+//!   and unchecked keys alike. The service runs both checks, and they are
+//!   tested through it (see the live kid and upload bullets above):
+//!   `skyoauth_service::jwk::parse_jwk_set`, through `validate_keyset`, at
+//!   upload in `trust::validate_upload` (and the allowed set again in
+//!   `trust::submit_create_version`), and
+//!   `skyoauth_service::jwk::check_version_overlap` wherever a version
+//!   becomes enabled, in `trust::submit_create_version` (an enabled create)
+//!   and `trust::submit_enable_version` (an enable or re-enable), pending
+//!   or applied at once
+//!   (`a04_neg_a_conflicting_live_kid_or_key_is_refused_and_writes_nothing`,
+//!   `a04_pos_a_live_kid_with_its_own_key_or_a_disjoint_window_is_accepted`,
+//!   `a04_neg_a_conflicting_version_created_disabled_is_refused_at_enable`,
+//!   `a04_neg_upload_checks_refuse_a_bad_key_set_before_any_write`,
+//!   `a04_neg_a_key_outside_the_create_allowed_algorithms_is_refused`).
 //!   Private and symmetric key members are refused by
-//!   `trust_keyset_version_public_jwks_check`, which is A05's upload
-//!   rejection and the service tests', not A04's lifecycle.
+//!   `trust_keyset_version_public_jwks_check` and by the service's upload
+//!   check, which is A05's upload rejection and the service tests', not
+//!   A04's lifecycle.
 //!
 //! **Missing, so not a claim.** A04 M1a needs its keyset lifecycle through
-//! the in-process service (UC); these tests reach only the registry. Still
-//! needed, and not claimed here, with the owner of each part:
+//! the in-process service (UC); these tests reach the registry and, for the
+//! gated create and the live kid and upload checks, the service's library,
+//! never an endpoint. Still needed, and not claimed here, with the owner of
+//! each part:
 //!
 //! - **Not claimed:** the verifier's window decision at token time: each
 //!   key valid in its window, the old and the new key both valid in the
@@ -197,12 +302,16 @@
 //!   key refused, against an injected clock (T11.3 "explicit overlap",
 //!   T24.2 "explicit validity windows"). Its place in M1a is inferred and
 //!   provisional: T24.2 is an M2 task. `skyoauth_service::jwk::live_keys`
-//!   is the unwired building block.
-//! - **Not claimed:** the live kid conflict: a unique, nonconflicting kid
-//!   across overlapping versions, and the algorithm, strength and size
-//!   checks of an upload (T11.3; the conflicting kid is also in A05's M2
-//!   negative, T24.3). `skyoauth_service::jwk::parse_jwk_set` and
-//!   `check_version_overlap` are the unwired building blocks.
+//!   and `KeysetVersion::is_live` are the unwired building blocks.
+//! - **Covered, partial, not claimed:** the live kid conflict, a unique,
+//!   nonconflicting kid across overlapping versions where a version becomes
+//!   enabled, and the algorithm, strength and size checks of an upload
+//!   (T11.3; the conflicting kid is also in A05's M2 negative, T24.3), by
+//!   the five live kid and upload tests above, through the service's
+//!   library, not an endpoint. Not covered: the same conflict at
+//!   verification time (`live_keys`, the runtime backstop, unwired), and
+//!   the import and restore paths that must run the check too (T10.5; none
+//!   exists).
 //! - **Not claimed:** the audited trust_admin keyset endpoints for rotation
 //!   and disable (T13.8 provisioning, T13.2 roles), writing the version and
 //!   its audit event atomically, with the expected revision (T11.6;
@@ -251,7 +360,14 @@
 //! This module adds the lifecycle with its parent, source, binding, grant
 //! and sibling keyset, both tenants, the sub-microsecond window, the upload
 //! race on one version ID, the blocked steps' holder-rollback branch, and
-//! eight replicas with separate pools.
+//! eight replicas with separate pools. The JWK rules and the overlap check
+//! have service tests too (`service/tests/jwk.rs`, and
+//! `overlap_is_refused_wherever_a_version_becomes_enabled` in
+//! `service/tests/trust_keyset_version.rs` through the ungated writes),
+//! which are no conformance evidence; the live kid and upload tests here
+//! add the gated create and enable, applied at once and pending, with both
+//! tenants' records and the audit chain head as the check that a refusal
+//! writes nothing.
 
 use std::{
     fmt::Debug,
@@ -267,7 +383,10 @@ use skyoauth_scenarios::{
     pg::TestDb,
     rep::{self, Replicas},
 };
-use skyoauth_service::jwk::{DEFAULT_ALLOWED_ALGORITHMS, parse_jwk_set};
+use skyoauth_service::jwk::{
+    Algorithm, Base64urlError, DEFAULT_ALLOWED_ALGORITHMS, JwkError, JwkSetError, OverlapError,
+    ValidatedKeyset, parse_jwk_set,
+};
 use skyoauth_service::operation::{
     Applied, ApprovalEcho, ApprovalIds, ApprovalScope, Clock, Gated, OperationKind,
     PendingOperation, Submission, approve_operation, prepare_approval, submit_widening_toggle,
@@ -276,14 +395,18 @@ use skyoauth_service::persistence::{
     PgPool,
     registry::{
         self, ActivationState, AdminRole, AssertionProfile, BindingProfile, BootstrapRequest,
-        GrantMode, InvariantKind, JsonObject, MAX_PAGE_SIZE, NewAdminCredential, NewAdminIdentity,
-        NewAdminRoleBinding, NewPrincipal, NewPrincipalBinding, NewServiceGrant, NewTenant,
-        NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, PrincipalBinding,
+        ChainVerdict, GrantMode, InvariantKind, JsonObject, MAX_PAGE_SIZE, NewAdminCredential,
+        NewAdminIdentity, NewAdminRoleBinding, NewPrincipal, NewPrincipalBinding, NewServiceGrant,
+        NewTenant, NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, PrincipalBinding,
         PrincipalKind, RegistryError, ReplayMode, ServiceGrant, Status, TrustKeyset,
         TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceKind, bootstrap_instance,
+        lock_administrative_operation, verify_audit_chain,
     },
 };
-use skyoauth_service::trust::{NewKeysetVersion, submit_create_version, validate_upload};
+use skyoauth_service::trust::{
+    KeysetAudit, KeysetWriteError, NewKeysetVersion, disable_version, submit_create_version,
+    submit_enable_version, validate_upload,
+};
 use sqlx::{Connection, PgConnection};
 
 /// The issuer of every source: an external CI with uploaded keys.
@@ -712,9 +835,9 @@ fn mul_mod(a: &U256, b: &U256) -> U256 {
 /// An enabled version `<base>_<t>` of `keyset` holding one public P-256
 /// key with the kid `<label>-<t>` and its own point from [`point`], from
 /// `effective_micros` to `expires_at`. The set must pass the service's JWK
-/// Set validation (`skyoauth_service::jwk::parse_jwk_set`, unwired; with
-/// #97 it also checks the point), so no test here relies on the registry
-/// accepting a malformed key.
+/// Set validation (`skyoauth_service::jwk::parse_jwk_set`, which
+/// `trust::validate_upload` runs; with #97 it also checks the point), so no
+/// test here relies on the registry accepting a malformed key.
 fn version(
     side: Side,
     base: &str,
@@ -1280,14 +1403,19 @@ async fn operator(pool: &PgPool, admin: &str, key: &str, role: AdminRole, tenant
     .unwrap();
 }
 
-/// Bootstraps the instance (its operator `adm_first`, instance
-/// `security_admin`, [`FIRST_KEY`]), adds `adm_sec` ([`SEC_KEY`]),
-/// instance `security_admin`, and `adm_trust_a` ([`TRUST_KEY`]),
-/// `trust_admin` of `ten_a`, and turns `widening_second_approver` on
-/// through the second-approver flow: `adm_first` requests it and `adm_sec`
-/// approves it (A48's toggle; `single_actor_mode` stays off). Every time is
-/// before `T1`.
+/// [`operators`], then [`turn_gate_on`] at `T0`. Every time is before `T1`.
 async fn gate_on(pool: &PgPool) {
+    operators(pool).await;
+    turn_gate_on(pool, at(T0)).await;
+}
+
+/// Bootstraps the instance (its operator `adm_first`, instance
+/// `security_admin`, [`FIRST_KEY`]; the policy row with both flags off)
+/// and adds `adm_sec` ([`SEC_KEY`]), instance `security_admin`, and
+/// `adm_trust_a` ([`TRUST_KEY`]), `trust_admin` of `ten_a`. A gated write
+/// is then applied at once (`widening_second_approver` off). Every time is
+/// `T0`.
+async fn operators(pool: &PgPool) {
     let mut transaction = pool.begin().await.unwrap();
     bootstrap_instance(
         &mut transaction,
@@ -1315,6 +1443,15 @@ async fn gate_on(pool: &PgPool) {
         Some("ten_a"),
     )
     .await;
+    let policy = registry::get_instance_security_policy(pool).await.unwrap();
+    assert!(!policy.widening_second_approver && !policy.single_actor_mode);
+}
+
+/// Turns `widening_second_approver` on through the second-approver flow:
+/// `adm_first` requests it at `now` and `adm_sec` approves it two
+/// microseconds later (A48's toggle; `single_actor_mode` stays off). A
+/// gated write then goes pending.
+async fn turn_gate_on(pool: &PgPool, now: SystemTime) {
     let mut transaction = pool.begin().await.unwrap();
     let toggle = submit_widening_toggle(
         &mut transaction,
@@ -1326,7 +1463,7 @@ async fn gate_on(pool: &PgPool) {
             acknowledge_widening: true,
             operation_id: "op_gate",
             event_id: "evt_op_gate",
-            now: at(T0),
+            now,
         },
         1,
         true,
@@ -1337,7 +1474,14 @@ async fn gate_on(pool: &PgPool) {
     let Gated::Pending(toggle) = toggle else {
         panic!("the toggle is not pending: {toggle:?}");
     };
-    approve(pool, INSTANCE_PATH, "op_gate", &toggle, at(T0 + 2)).await;
+    approve(
+        pool,
+        INSTANCE_PATH,
+        "op_gate",
+        &toggle,
+        now + Duration::from_micros(2),
+    )
+    .await;
     let policy = registry::get_instance_security_policy(pool).await.unwrap();
     assert!(policy.widening_second_approver && !policy.single_actor_mode);
 }
@@ -1951,4 +2095,1336 @@ async fn a04_neg_blocked_rotation_steps_follow_the_holder_commit_or_rollback() {
             db.drop(pools).await;
         }
     }
+}
+
+// The live kid conflict and the upload checks, through the service's keyset
+// write path (`skyoauth_service::trust`) by `adm_trust_a` in `ten_a`.
+
+/// The RFC 7517 appendix A.1 / RFC 7638 section 3.1 RSA modulus (a real
+/// 2048-bit key, `e` `AQAB`; the same value as `tests/security/a05.rs` and
+/// `service/tests/jwk.rs`).
+const RSA_N: &str = "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw";
+
+/// A P-256 key `kid` with `alg` `ES256` whose point is the one [`point`]
+/// gives the fixture kid `point_of`: `ec_key("old-a", "old-a")` is the old
+/// version's key, `ec_key("old-a", "r0-a")` the same `kid` with another
+/// key, `ec_key("moved-a", "old-a")` the old key under another `kid`. The
+/// replica points (`r<n>-a`) are free here: no test below writes a replica.
+fn ec_key(kid: &str, point_of: &str) -> Value {
+    ec_point_key(kid, point(point_of))
+}
+
+fn ec_point_key(kid: &str, (x, y): (&str, &str)) -> Value {
+    json!({"kty": "EC", "crv": "P-256", "alg": "ES256", "kid": kid, "x": x, "y": y})
+}
+
+/// The RFC 7638 RSA key as `kid`, with `alg`. Its thumbprint does not
+/// depend on `alg`, so `RS256` and `PS256` give the same key.
+fn rsa_key(kid: &str, alg: &str) -> Value {
+    json!({"kty": "RSA", "alg": alg, "kid": kid, "n": RSA_N, "e": "AQAB"})
+}
+
+fn key_set(keys: Vec<Value>) -> Value {
+    json!({ "keys": keys })
+}
+
+/// `key` with `member` set to `value`.
+fn with(mut key: Value, member: &str, value: Value) -> Value {
+    key.as_object_mut()
+        .expect("a key is an object")
+        .insert(member.to_owned(), value);
+    key
+}
+
+/// `key` without `member`.
+fn without(mut key: Value, member: &str) -> Value {
+    key.as_object_mut()
+        .expect("a key is an object")
+        .remove(member);
+    key
+}
+
+/// Unpadded base64url (RFC 4648 section 5), written here so no expected
+/// value comes from the validator.
+fn b64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0_u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let bits = u32::from(buffer[0]) << 16 | u32::from(buffer[1]) << 8 | u32::from(buffer[2]);
+        for i in 0..=chunk.len() {
+            out.push(char::from(ALPHABET[(bits >> (18 - 6 * i) & 63) as usize]));
+        }
+    }
+    out
+}
+
+/// A synthetic RSA modulus of exactly `bits` bits, odd, with no leading
+/// zero octet. The upload checks bound the modulus by its size and parity
+/// only (no factoring), so a synthetic value tests them as well as a real
+/// key; the overlap tests use the real [`RSA_N`].
+fn modulus(bits: usize) -> Vec<u8> {
+    let len = bits.div_ceil(8);
+    let top = (bits - 1) % 8;
+    let mut n = vec![0xa5_u8; len];
+    n[0] = (0xa5 & ((1_u16 << (top + 1)) - 1) as u8) | 1 << top;
+    n[len - 1] |= 1;
+    n
+}
+
+/// An RSA key `kid` with `RS256`, the modulus `n` and the exponent `e`.
+fn rsa_parts(kid: &str, n: &[u8], e: &[u8]) -> Value {
+    json!({"kty": "RSA", "alg": "RS256", "kid": kid, "n": b64url(n), "e": b64url(e)})
+}
+
+/// A validity window: its start and its expiry, if any, in microseconds
+/// from the Unix epoch (as [`at`] takes them).
+type Window = (u64, Option<u64>);
+
+/// One keyset version to create through [`create`]: its keys validated by
+/// Stage A ([`validate_upload`]) against the default allowed algorithms.
+struct Upload {
+    id: String,
+    keyset_id: String,
+    keys: ValidatedKeyset,
+    effective_at: SystemTime,
+    expires_at: Option<SystemTime>,
+    status: Status,
+    provenance: JsonObject,
+}
+
+impl Upload {
+    fn version(&self) -> NewKeysetVersion<'_> {
+        NewKeysetVersion {
+            id: &self.id,
+            tenant_id: A.tenant,
+            keyset_id: &self.keyset_id,
+            keys: &self.keys,
+            effective_at: self.effective_at,
+            expires_at: self.expires_at,
+            status: self.status,
+            provenance: &self.provenance,
+        }
+    }
+
+    /// The row a create of it writes, at revision 1: the validated
+    /// projection and fingerprint, the window as given (whole
+    /// microseconds), the status and the provenance.
+    fn stored(&self) -> TrustKeysetVersion {
+        TrustKeysetVersion {
+            id: self.id.clone(),
+            tenant_id: A.tenant.into(),
+            keyset_id: self.keyset_id.clone(),
+            public_jwks: serde_json::from_str(self.keys.public_json()).unwrap(),
+            fingerprint: self.keys.fingerprint().as_str().into(),
+            effective_at: self.effective_at,
+            expires_at: self.expires_at,
+            status: self.status,
+            provenance: self.provenance.clone(),
+            revision: 1,
+        }
+    }
+}
+
+/// Version `id` of `keyset_id` in `ten_a` with the key set `keys`, over
+/// the window from `effective` to `expires`, at `status`.
+async fn upload(
+    id: &str,
+    keyset_id: &str,
+    keys: &Value,
+    (effective, expires): Window,
+    status: Status,
+) -> Upload {
+    Upload {
+        id: id.into(),
+        keyset_id: keyset_id.into(),
+        keys: validate_upload(keys.clone(), DEFAULT_ALLOWED_ALGORITHMS)
+            .await
+            .unwrap_or_else(|err| panic!("{id}: the upload is refused: {err:?}")),
+        effective_at: at(effective),
+        expires_at: expires.map(at),
+        status,
+        provenance: object(
+            json!({"uploaded_by": "adm_trust_a", "file": format!("{id}.jwks.json")}),
+        ),
+    }
+}
+
+/// `adm_trust_a`'s request as operation `op` at `now`, the widening
+/// acknowledged; its event is `evt_<op>`.
+fn submission<'a>(op: &'a str, event: &'a str, now: SystemTime) -> Submission<'a> {
+    Submission {
+        public_identity: TRUST_KEY,
+        acknowledge_widening: true,
+        operation_id: op,
+        event_id: event,
+        now,
+    }
+}
+
+/// Stage B: the gated create of `upload` against `allowed`, as operation
+/// `op` at `now`, in a transaction committed whatever the outcome, so a
+/// refusal also shows that the write's savepoint left nothing behind.
+async fn create(
+    pool: &PgPool,
+    op: &str,
+    now: SystemTime,
+    upload: &Upload,
+    allowed: &[Algorithm],
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    let event = format!("evt_{op}");
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = submit_create_version(
+        &mut transaction,
+        &submission(op, &event, now),
+        &upload.version(),
+        allowed,
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    outcome
+}
+
+/// The gated enable of version `id` of `ten_a` at `revision`, as operation
+/// `op` at `now`, committed whatever the outcome.
+async fn enable(
+    pool: &PgPool,
+    op: &str,
+    now: SystemTime,
+    id: &str,
+    revision: i64,
+) -> Result<Gated<TrustKeysetVersion>, KeysetWriteError> {
+    let event = format!("evt_{op}");
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = submit_enable_version(
+        &mut transaction,
+        &submission(op, &event, now),
+        A.tenant,
+        id,
+        revision,
+    )
+    .await;
+    transaction.commit().await.unwrap();
+    outcome
+}
+
+#[track_caller]
+fn applied<T: Debug>(result: Result<Gated<T>, KeysetWriteError>) -> T {
+    match result {
+        Ok(Gated::Applied(row)) => row,
+        other => panic!("expected Gated::Applied: {other:?}"),
+    }
+}
+
+#[track_caller]
+fn pending<T: Debug>(result: Result<Gated<T>, KeysetWriteError>) -> PendingOperation {
+    match result {
+        Ok(Gated::Pending(operation)) => operation,
+        other => panic!("expected Gated::Pending: {other:?}"),
+    }
+}
+
+/// What a refused write must leave as it was: both tenants' records with
+/// every revision ([`snapshot`]) and the audit chain's head.
+#[derive(Debug, PartialEq)]
+struct State {
+    records: Vec<String>,
+    audit_head: i64,
+}
+
+async fn state(pool: &PgPool) -> State {
+    let mut connection = pool.acquire().await.unwrap();
+    let audit_head = match verify_audit_chain(&mut connection).await.unwrap() {
+        ChainVerdict::Intact { last_sequence } => last_sequence,
+        broken => panic!("the audit chain is broken: {broken:?}"),
+    };
+    State {
+        records: snapshot(pool).await,
+        audit_head,
+    }
+}
+
+/// Whether no operation `op` exists.
+async fn no_operation(pool: &PgPool, op: &str) -> bool {
+    let mut transaction = pool.begin().await.unwrap();
+    let row = lock_administrative_operation(&mut transaction, op)
+        .await
+        .unwrap();
+    transaction.rollback().await.unwrap();
+    row.is_none()
+}
+
+/// An [`OverlapError`] as its typed fields, the `kid`s and version IDs as
+/// text. The `Display` text is never compared.
+#[derive(Debug, PartialEq, Eq)]
+enum Conflict {
+    Kid {
+        kid: String,
+        first: String,
+        second: String,
+    },
+    Key {
+        first_kid: String,
+        second_kid: String,
+        first: String,
+        second: String,
+    },
+    Algorithm {
+        kid: String,
+        first: String,
+        second: String,
+    },
+}
+
+impl Conflict {
+    fn kid(kid: &str, first: &str, second: &str) -> Self {
+        Self::Kid {
+            kid: kid.into(),
+            first: first.into(),
+            second: second.into(),
+        }
+    }
+
+    fn key(first_kid: &str, second_kid: &str, first: &str, second: &str) -> Self {
+        Self::Key {
+            first_kid: first_kid.into(),
+            second_kid: second_kid.into(),
+            first: first.into(),
+            second: second.into(),
+        }
+    }
+
+    fn algorithm(kid: &str, first: &str, second: &str) -> Self {
+        Self::Algorithm {
+            kid: kid.into(),
+            first: first.into(),
+            second: second.into(),
+        }
+    }
+
+    fn of(err: &OverlapError) -> Self {
+        match err {
+            OverlapError::KidConflict {
+                kid,
+                first_version,
+                second_version,
+            } => Self::kid(kid.as_str(), first_version, second_version),
+            OverlapError::KeyConflict {
+                first_kid,
+                second_kid,
+                first_version,
+                second_version,
+            } => Self::key(
+                first_kid.as_str(),
+                second_kid.as_str(),
+                first_version,
+                second_version,
+            ),
+            OverlapError::AlgorithmConflict {
+                kid,
+                first_version,
+                second_version,
+            } => Self::algorithm(kid.as_str(), first_version, second_version),
+        }
+    }
+
+    /// The `kid`s and version IDs it names.
+    fn names(&self) -> Vec<String> {
+        match self {
+            Self::Kid { kid, first, second } | Self::Algorithm { kid, first, second } => {
+                vec![kid.clone(), first.clone(), second.clone()]
+            }
+            Self::Key {
+                first_kid,
+                second_kid,
+                first,
+                second,
+            } => vec![
+                first_kid.clone(),
+                second_kid.clone(),
+                first.clone(),
+                second.clone(),
+            ],
+        }
+    }
+}
+
+/// The texts of `keys` an error must not print: every string value of a
+/// `kid`, `x`, `y`, `n` or `e` member, at any depth, of 3 or more bytes.
+fn key_texts(keys: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending = vec![keys];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Object(members) => {
+                for (name, value) in members {
+                    match value {
+                        Value::String(text)
+                            if ["kid", "x", "y", "n", "e"].contains(&name.as_str())
+                                && text.len() >= 3 =>
+                        {
+                            out.push(text.clone())
+                        }
+                        _ => pending.push(value),
+                    }
+                }
+            }
+            Value::Array(items) => pending.extend(items),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Asserts that neither the `Debug` nor the `Display` of `err` contains
+/// any of `texts`.
+#[track_caller]
+fn assert_names_none(err: &KeysetWriteError, texts: &[String]) {
+    let shown = [format!("{err:?}"), format!("{err}")];
+    for text in texts {
+        for shown in &shown {
+            assert!(!shown.contains(text.as_str()), "{shown:?} names {text:?}");
+        }
+    }
+}
+
+/// The conflict of a write refused with [`KeysetWriteError::Overlap`] for
+/// the upload `keys`, after checking that the refusal prints none of its
+/// `kid`s, key members or version IDs.
+#[track_caller]
+fn conflict<T: Debug>(result: Result<T, KeysetWriteError>, keys: &Value) -> Conflict {
+    let err = result.expect_err("expected KeysetWriteError::Overlap");
+    let KeysetWriteError::Overlap(overlap) = &err else {
+        panic!("expected KeysetWriteError::Overlap: {err:?}");
+    };
+    let conflict = Conflict::of(overlap);
+    let mut texts = key_texts(keys);
+    texts.extend(conflict.names());
+    assert_names_none(&err, &texts);
+    conflict
+}
+
+/// The rule a write refused with [`KeysetWriteError::Upload`] for the
+/// upload `keys` names, after checking that the refusal prints none of its
+/// `kid`s or key members.
+#[track_caller]
+fn upload_error<T: Debug>(result: Result<T, KeysetWriteError>, keys: &Value) -> JwkSetError {
+    let err = result.expect_err("expected KeysetWriteError::Upload");
+    assert_names_none(&err, &key_texts(keys));
+    match err {
+        KeysetWriteError::Upload(rule) => rule,
+        other => panic!("expected KeysetWriteError::Upload: {other:?}"),
+    }
+}
+
+/// The version `kv_rsa_a` of `ks_a`, enabled over the old version's window
+/// (`T0` to `T2`): the RFC 7638 RSA key as `rsa-a` with `RS256`, the base
+/// of the algorithm conflicts.
+async fn rsa_version() -> Upload {
+    upload(
+        "kv_rsa_a",
+        &A.keyset(),
+        &key_set(vec![rsa_key("rsa-a", "RS256")]),
+        (T0, Some(T2)),
+        Status::Enabled,
+    )
+    .await
+}
+
+/// The two modes of the gated write: applied at once with
+/// `widening_second_approver` off, then pending once it is on.
+const MODES: [&str; 2] = ["applied at once", "pending"];
+
+#[tokio::test]
+async fn a04_neg_a_conflicting_live_kid_or_key_is_refused_and_writes_nothing() {
+    let (db, pool) = fixture().await;
+    operators(&pool).await;
+    let rsa = rsa_version().await;
+    assert_eq!(
+        applied(
+            create(
+                &pool,
+                "op_rsa",
+                at(T0 + 100),
+                &rsa,
+                DEFAULT_ALLOWED_ALGORITHMS
+            )
+            .await
+        ),
+        rsa.stored()
+    );
+    let (ks, other_ks) = (A.keyset(), A.other_keyset());
+    // `ks_a` holds two enabled versions from `T0` to `T2`: `kv_old_a`
+    // (`old-a`, the fixture's EC key) and `kv_rsa_a` (`rsa-a`, RS256);
+    // `ks_other_a` one open-ended from `T0`: `kv_other_a` (`other-a`).
+    // Each case: (label, keyset, key set, window, the expected conflict
+    // with the new version's ID as the second version).
+    type Case = (&'static str, String, Value, Window, fn(&str) -> Conflict);
+    let cases: [Case; 8] = [
+        (
+            "a live kid with another key, windows overlapping",
+            ks.clone(),
+            key_set(vec![ec_key("old-a", "r0-a")]),
+            (T1, Some(T3)),
+            |id| Conflict::kid("old-a", "kv_old_a", id),
+        ),
+        (
+            "a live kid with another key, the new window open-ended",
+            ks.clone(),
+            key_set(vec![ec_key("old-a", "r0-a")]),
+            (T1, None),
+            |id| Conflict::kid("old-a", "kv_old_a", id),
+        ),
+        (
+            "a live kid with another key, the windows sharing one microsecond",
+            ks.clone(),
+            key_set(vec![ec_key("old-a", "r0-a")]),
+            (T2 - 1, Some(T3)),
+            |id| Conflict::kid("old-a", "kv_old_a", id),
+        ),
+        (
+            "a live kid with another key, a one-microsecond window inside an open-ended one",
+            other_ks.clone(),
+            key_set(vec![ec_key("other-a", "r1-a")]),
+            (T3, Some(T3 + 1)),
+            |id| Conflict::kid("other-a", "kv_other_a", id),
+        ),
+        (
+            "a live kid with another key, behind a good key in the same set",
+            ks.clone(),
+            key_set(vec![ec_key("fresh-a", "r2-a"), ec_key("old-a", "r0-a")]),
+            (T1, Some(T3)),
+            |id| Conflict::kid("old-a", "kv_old_a", id),
+        ),
+        (
+            "a live key under another kid, windows overlapping",
+            ks.clone(),
+            key_set(vec![ec_key("moved-a", "old-a")]),
+            (T1, Some(T3)),
+            |id| Conflict::key("old-a", "moved-a", "kv_old_a", id),
+        ),
+        (
+            "a live key under another kid, both windows open-ended",
+            other_ks.clone(),
+            key_set(vec![ec_key("moved-a", "other-a")]),
+            (T1, None),
+            |id| Conflict::key("other-a", "moved-a", "kv_other_a", id),
+        ),
+        (
+            "a live kid and key with another algorithm (PS256 for RS256)",
+            ks.clone(),
+            key_set(vec![rsa_key("rsa-a", "PS256")]),
+            (T1, Some(T3)),
+            |id| Conflict::algorithm("rsa-a", "kv_rsa_a", id),
+        ),
+    ];
+    let mut now = T0 + 200;
+    for (round, mode) in MODES.into_iter().enumerate() {
+        if round == 1 {
+            turn_gate_on(&pool, at(now)).await;
+            now += 10;
+        }
+        for (n, (label, keyset, keys, window, expected)) in cases.iter().enumerate() {
+            let label = format!("{mode}, {label}");
+            let id = format!("kv_c{n}_a");
+            let new = upload(&id, keyset, keys, *window, Status::Enabled).await;
+            let op = format!("op_c{round}_{n}");
+            let before = state(&pool).await;
+            now += 1;
+            let refused = create(&pool, &op, at(now), &new, DEFAULT_ALLOWED_ALGORITHMS).await;
+            assert_eq!(conflict(refused, keys), expected(&id), "{label}");
+            // Nothing written: no version, no operation, no event, and
+            // every record and revision of both tenants as before.
+            assert_not_found(registry::get_trust_keyset_version(&pool, A.tenant, &id).await);
+            assert!(no_operation(&pool, &op).await, "{label}");
+            assert_eq!(state(&pool).await, before, "{label}");
+        }
+    }
+    // The control, gate on: the old version's own key under its kid over
+    // the overlap passes the check and goes pending.
+    let same = upload(
+        "kv_same_a",
+        &ks,
+        &key_set(vec![ec_key("old-a", "old-a")]),
+        (T1, Some(T3)),
+        Status::Enabled,
+    )
+    .await;
+    let operation = pending(
+        create(
+            &pool,
+            "op_same",
+            at(now + 1),
+            &same,
+            DEFAULT_ALLOWED_ALGORITHMS,
+        )
+        .await,
+    );
+    assert_eq!(operation.kind, OperationKind::TrustKeysetVersionCreate);
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a04_pos_a_live_kid_with_its_own_key_or_a_disjoint_window_is_accepted() {
+    let (db, pool) = fixture().await;
+    operators(&pool).await;
+    let before = lineage(&pool, A).await;
+    let other_before = tenant_snapshot(&pool, B).await;
+    let ks = A.keyset();
+    let old = versions(&pool, A, &ks).await;
+    // Every case keeps `old-a`, the kid of `kv_old_a` (`T0` to `T2`).
+    let accepted: [(&str, &str, Value, Window); 4] = [
+        (
+            "the same key with alg ES256, windows overlapping",
+            "kv_same_a",
+            ec_key("old-a", "old-a"),
+            (T1, Some(T2)),
+        ),
+        (
+            "the same key without alg (its curve's ES256), the same window",
+            "kv_same_noalg_a",
+            without(ec_key("old-a", "old-a"), "alg"),
+            (T0, Some(T2)),
+        ),
+        (
+            "another key, open-ended from the old window's expiry",
+            "kv_after_a",
+            ec_key("old-a", "r0-a"),
+            (T2, None),
+        ),
+        (
+            "a third key, up to the old window's start",
+            "kv_before_a",
+            ec_key("old-a", "r1-a"),
+            (T0 - 1_000_000, Some(T0)),
+        ),
+    ];
+    let mut expected = old.clone();
+    for (n, (label, id, key, window)) in accepted.into_iter().enumerate() {
+        let new = upload(id, &ks, &key_set(vec![key]), window, Status::Enabled).await;
+        let op = format!("op_ok{n}");
+        let written = applied(
+            create(
+                &pool,
+                &op,
+                at(T0 + 100 + n as u64),
+                &new,
+                DEFAULT_ALLOWED_ALGORITHMS,
+            )
+            .await,
+        );
+        assert_eq!(written, new.stored(), "{label}");
+        assert_eq!(
+            registry::get_trust_keyset_version(&pool, A.tenant, id)
+                .await
+                .unwrap(),
+            written,
+            "{label}"
+        );
+        expected.push(written);
+    }
+    // All five enabled at once, listed by ID, the old one unchanged; the
+    // lineage and the other tenant keep every column and revision.
+    expected.sort_by(|a, b| a.id.cmp(&b.id));
+    assert_eq!(versions(&pool, A, &ks).await, expected);
+    assert!(expected.iter().all(|v| v.status == Status::Enabled));
+    assert_eq!(lineage(&pool, A).await, before);
+    assert_eq!(tenant_snapshot(&pool, B).await, other_before);
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a04_neg_a_conflicting_version_created_disabled_is_refused_at_enable() {
+    let (db, pool) = fixture().await;
+    operators(&pool).await;
+    let rsa = rsa_version().await;
+    applied(
+        create(
+            &pool,
+            "op_rsa",
+            at(T0 + 100),
+            &rsa,
+            DEFAULT_ALLOWED_ALGORITHMS,
+        )
+        .await,
+    );
+    let ks = A.keyset();
+    // Each staged version would conflict in one way over `T1` to `T3`.
+    let staged: [(&str, Value, Conflict); 3] = [
+        (
+            "kv_d_kid_a",
+            key_set(vec![ec_key("old-a", "r0-a")]),
+            Conflict::kid("old-a", "kv_old_a", "kv_d_kid_a"),
+        ),
+        (
+            "kv_d_key_a",
+            key_set(vec![ec_key("moved-a", "old-a")]),
+            Conflict::key("old-a", "moved-a", "kv_old_a", "kv_d_key_a"),
+        ),
+        (
+            "kv_d_alg_a",
+            key_set(vec![rsa_key("rsa-a", "PS256")]),
+            Conflict::algorithm("rsa-a", "kv_rsa_a", "kv_d_alg_a"),
+        ),
+    ];
+    // Created disabled: accepted, since a disabled create runs no overlap
+    // check, and stored disabled at revision 1.
+    let mut rows = Vec::new();
+    for (n, (id, keys, _)) in staged.iter().enumerate() {
+        let new = upload(id, &ks, keys, (T1, Some(T3)), Status::Disabled).await;
+        let written = applied(
+            create(
+                &pool,
+                &format!("op_d{n}"),
+                at(T0 + 110 + n as u64),
+                &new,
+                DEFAULT_ALLOWED_ALGORITHMS,
+            )
+            .await,
+        );
+        assert_eq!(written, new.stored(), "{id}");
+        rows.push(written);
+    }
+    // Enabling each is refused with the conflict an enabled create would
+    // get, and writes nothing: the version stays disabled at revision 1.
+    let mut now = T0 + 200;
+    for (round, mode) in MODES.into_iter().enumerate() {
+        if round == 1 {
+            turn_gate_on(&pool, at(now)).await;
+            now += 10;
+        }
+        for (n, ((id, keys, expected), row)) in staged.iter().zip(&rows).enumerate() {
+            let label = format!("{mode}, {id}");
+            let op = format!("op_e{round}_{n}");
+            let before = state(&pool).await;
+            now += 1;
+            let refused = enable(&pool, &op, at(now), id, 1).await;
+            assert_eq!(&conflict(refused, keys), expected, "{label}");
+            assert_eq!(
+                &registry::get_trust_keyset_version(&pool, A.tenant, id)
+                    .await
+                    .unwrap(),
+                row,
+                "{label}"
+            );
+            assert!(no_operation(&pool, &op).await, "{label}");
+            assert_eq!(state(&pool).await, before, "{label}");
+        }
+    }
+    // The rotation: once the old version is disabled, the replacement's
+    // enable passes the check, goes pending, and the approval enables it.
+    let mut transaction = pool.begin().await.unwrap();
+    let disabled = disable_version(
+        &mut transaction,
+        TRUST_KEY,
+        A.tenant,
+        "kv_old_a",
+        1,
+        &KeysetAudit {
+            event_id: "evt_disable_old",
+            now: at(now + 1),
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert_eq!((disabled.status, disabled.revision), (Status::Disabled, 2));
+    let operation = pending(enable(&pool, "op_rotate", at(now + 2), "kv_d_kid_a", 1).await);
+    assert_eq!(operation.kind, OperationKind::TrustKeysetVersionEnable);
+    let Applied::KeysetVersion(enabled) = approve(
+        &pool,
+        ApprovalScope::Tenant(A.tenant),
+        "op_rotate",
+        &operation,
+        at(now + 10),
+    )
+    .await
+    else {
+        panic!("the approval did not enable a keyset version");
+    };
+    assert_eq!(
+        enabled,
+        TrustKeysetVersion {
+            status: Status::Enabled,
+            revision: 2,
+            ..rows[0].clone()
+        }
+    );
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a04_neg_upload_checks_refuse_a_bad_key_set_before_any_write() {
+    let (db, pool) = fixture().await;
+    operators(&pool).await;
+    let before = state(&pool).await;
+    assert_eq!(b64url(&[1, 0, 1]), "AQAB");
+    assert_eq!(b64url(&[0xff; 32]).len(), 43);
+    let good = ec_key("good", "r7-a");
+    let ec = ec_key("bad", "r1-a");
+    let rsa = rsa_parts("bad", &modulus(2048), &[1, 0, 1]);
+    let (x, y) = point("r1-a");
+    let key = |index, error| JwkSetError::Key { index, error };
+    let encoding = |reason| JwkError::Encoding {
+        member: "x",
+        reason,
+    };
+    // A bad key after a good one, so the error's index is 1 and the good
+    // key does not save the set.
+    let after_good = |bad: Value| key_set(vec![good.clone(), bad]);
+    let default = DEFAULT_ALLOWED_ALGORITHMS;
+    let rs256_es256: &[Algorithm] = &[Algorithm::Rs256, Algorithm::Es256];
+    let rs256: &[Algorithm] = &[Algorithm::Rs256];
+    let refused: Vec<(&str, Value, &[Algorithm], JwkSetError)> = vec![
+        // The set: shape and bounds (20 keys, 64 KiB, written out here).
+        (
+            "an empty key list",
+            key_set(vec![]),
+            default,
+            JwkSetError::NoKeys,
+        ),
+        (
+            "no keys member",
+            json!({}),
+            default,
+            JwkSetError::MissingKeys,
+        ),
+        (
+            "keys not an array",
+            json!({"keys": good.clone()}),
+            default,
+            JwkSetError::KeysNotArray,
+        ),
+        (
+            "not an object",
+            json!([good.clone()]),
+            default,
+            JwkSetError::NotAnObject,
+        ),
+        (
+            "a member besides keys",
+            json!({"keys": [good.clone()], "issuer": "https://ci.partner.example"}),
+            default,
+            JwkSetError::UnexpectedMember,
+        ),
+        (
+            "a key that is not an object",
+            json!({"keys": [good.clone(), "key"]}),
+            default,
+            JwkSetError::KeyNotObject { index: 1 },
+        ),
+        (
+            "21 keys",
+            key_set(vec![good.clone(); 21]),
+            default,
+            JwkSetError::TooManyKeys { count: 21 },
+        ),
+        (
+            "over 64 KiB",
+            key_set(vec![with(
+                good.clone(),
+                "kid",
+                json!("k".repeat(64 * 1024)),
+            )]),
+            default,
+            JwkSetError::TooLarge,
+        ),
+        // Algorithms: forbidden, unknown, not the key's, missing.
+        (
+            "alg none",
+            after_good(with(ec.clone(), "alg", json!("none"))),
+            default,
+            key(1, JwkError::ForbiddenAlgorithm),
+        ),
+        (
+            "alg HS256",
+            after_good(with(ec.clone(), "alg", json!("HS256"))),
+            default,
+            key(1, JwkError::ForbiddenAlgorithm),
+        ),
+        (
+            "alg RS512",
+            after_good(with(rsa.clone(), "alg", json!("RS512"))),
+            default,
+            key(1, JwkError::UnsupportedAlgorithm),
+        ),
+        (
+            "alg ES256K",
+            after_good(with(ec.clone(), "alg", json!("ES256K"))),
+            default,
+            key(1, JwkError::UnsupportedAlgorithm),
+        ),
+        (
+            "alg ES384 on a P-256 key",
+            after_good(with(ec.clone(), "alg", json!("ES384"))),
+            default,
+            key(1, JwkError::AlgorithmMismatch(Algorithm::Es384)),
+        ),
+        (
+            "alg RS256 on a P-256 key",
+            after_good(with(ec.clone(), "alg", json!("RS256"))),
+            default,
+            key(1, JwkError::AlgorithmMismatch(Algorithm::Rs256)),
+        ),
+        (
+            "alg ES256 on an RSA key",
+            after_good(with(rsa.clone(), "alg", json!("ES256"))),
+            default,
+            key(1, JwkError::AlgorithmMismatch(Algorithm::Es256)),
+        ),
+        (
+            "an RSA key without alg",
+            after_good(without(rsa.clone(), "alg")),
+            default,
+            key(1, JwkError::AlgorithmRequired),
+        ),
+        (
+            "alg not a string",
+            after_good(with(ec.clone(), "alg", json!(256))),
+            default,
+            key(1, JwkError::WrongType("alg")),
+        ),
+        // Algorithms outside a narrower allowed set.
+        (
+            "PS256 with RS256 and ES256 allowed",
+            key_set(vec![with(rsa.clone(), "alg", json!("PS256"))]),
+            rs256_es256,
+            key(0, JwkError::AlgorithmNotAllowed(Algorithm::Ps256)),
+        ),
+        (
+            "ES256 with RS256 allowed",
+            key_set(vec![ec.clone()]),
+            rs256,
+            key(0, JwkError::AlgorithmNotAllowed(Algorithm::Es256)),
+        ),
+        (
+            "a P-256 key without alg with RS256 allowed",
+            key_set(vec![without(ec.clone(), "alg")]),
+            rs256,
+            key(0, JwkError::NoAllowedAlgorithm),
+        ),
+        // Key types and curves.
+        (
+            "kty oct",
+            after_good(json!({"kty": "oct", "kid": "bad", "alg": "HS256"})),
+            default,
+            key(1, JwkError::SymmetricKeyType),
+        ),
+        (
+            "kty AKP",
+            after_good(json!({"kty": "AKP", "kid": "bad"})),
+            default,
+            key(1, JwkError::UnsupportedKeyType),
+        ),
+        (
+            "crv secp256k1",
+            after_good(without(with(ec.clone(), "crv", json!("secp256k1")), "alg")),
+            default,
+            key(1, JwkError::UnsupportedCurve),
+        ),
+        (
+            "crv Ed448",
+            after_good(json!({"kty": "OKP", "crv": "Ed448", "kid": "bad", "x": x})),
+            default,
+            key(1, JwkError::UnsupportedCurve),
+        ),
+        (
+            "crv X25519",
+            after_good(json!({"kty": "OKP", "crv": "X25519", "kid": "bad", "x": x})),
+            default,
+            key(1, JwkError::UnsupportedCurve),
+        ),
+        // RSA strength: modulus 2048 to 8192 bits, odd, minimal; exponent
+        // 65537 or more, odd, at most 32 octets, minimal.
+        (
+            "a 1024-bit modulus",
+            after_good(rsa_parts("bad", &modulus(1024), &[1, 0, 1])),
+            default,
+            key(1, JwkError::RsaModulusTooSmall { bits: 1024 }),
+        ),
+        (
+            "a 2047-bit modulus",
+            after_good(rsa_parts("bad", &modulus(2047), &[1, 0, 1])),
+            default,
+            key(1, JwkError::RsaModulusTooSmall { bits: 2047 }),
+        ),
+        (
+            "an 8193-bit modulus",
+            after_good(rsa_parts("bad", &modulus(8193), &[1, 0, 1])),
+            default,
+            key(1, JwkError::RsaModulusTooLarge { bits: 8193 }),
+        ),
+        (
+            "an even modulus",
+            after_good(rsa_parts(
+                "bad",
+                &{
+                    let mut n = modulus(2048);
+                    n[255] &= 0xfe;
+                    n
+                },
+                &[1, 0, 1],
+            )),
+            default,
+            key(1, JwkError::RsaModulusEven),
+        ),
+        (
+            "a modulus with a leading zero octet",
+            after_good(rsa_parts(
+                "bad",
+                &[&[0][..], &modulus(2048)].concat(),
+                &[1, 0, 1],
+            )),
+            default,
+            key(1, JwkError::RsaModulusLeadingZero),
+        ),
+        (
+            "exponent 3",
+            after_good(rsa_parts("bad", &modulus(2048), &[3])),
+            default,
+            key(1, JwkError::RsaExponentTooSmall),
+        ),
+        (
+            "exponent 65535",
+            after_good(rsa_parts("bad", &modulus(2048), &[0xff, 0xff])),
+            default,
+            key(1, JwkError::RsaExponentTooSmall),
+        ),
+        (
+            "exponent 65538, even",
+            after_good(rsa_parts("bad", &modulus(2048), &[1, 0, 2])),
+            default,
+            key(1, JwkError::RsaExponentEven),
+        ),
+        (
+            "an exponent with a leading zero octet",
+            after_good(rsa_parts("bad", &modulus(2048), &[0, 1, 0, 1])),
+            default,
+            key(1, JwkError::RsaExponentLeadingZero),
+        ),
+        (
+            "a 33-octet exponent",
+            after_good(rsa_parts("bad", &modulus(2048), &[1; 33])),
+            default,
+            key(1, JwkError::RsaExponentTooLong),
+        ),
+        // EC keys: coordinate length, range and the curve equation.
+        (
+            "a 31-octet x",
+            after_good(with(ec.clone(), "x", json!(b64url(&[7; 31])))),
+            default,
+            key(
+                1,
+                JwkError::KeyLength {
+                    member: "x",
+                    expected: 32,
+                    actual: 31,
+                },
+            ),
+        ),
+        (
+            "x not below p",
+            after_good(with(ec.clone(), "x", json!(b64url(&[0xff; 32])))),
+            default,
+            key(1, JwkError::CoordinateOutOfRange { member: "x" }),
+        ),
+        (
+            "a point off the curve",
+            after_good(with(ec.clone(), "y", json!(point("r2-a").1))),
+            default,
+            key(1, JwkError::PointNotOnCurve),
+        ),
+        // Malformed members.
+        (
+            "no kty",
+            after_good(without(ec.clone(), "kty")),
+            default,
+            key(1, JwkError::MissingMember("kty")),
+        ),
+        (
+            "kty not a string",
+            after_good(with(ec.clone(), "kty", json!(2))),
+            default,
+            key(1, JwkError::WrongType("kty")),
+        ),
+        (
+            "no kid",
+            after_good(without(ec.clone(), "kid")),
+            default,
+            key(1, JwkError::MissingMember("kid")),
+        ),
+        (
+            "kid not a string",
+            after_good(with(ec.clone(), "kid", json!(7))),
+            default,
+            key(1, JwkError::WrongType("kid")),
+        ),
+        (
+            "an empty kid",
+            after_good(with(ec.clone(), "kid", json!(""))),
+            default,
+            key(1, JwkError::KidLength { bytes: 0 }),
+        ),
+        (
+            "a 129-byte kid",
+            after_good(with(ec.clone(), "kid", json!("k".repeat(129)))),
+            default,
+            key(1, JwkError::KidLength { bytes: 129 }),
+        ),
+        (
+            "a kid with a space",
+            after_good(with(ec.clone(), "kid", json!("bad kid"))),
+            default,
+            key(1, JwkError::KidCharacter),
+        ),
+        (
+            "a kid with a quote",
+            after_good(with(ec.clone(), "kid", json!("bad\"kid"))),
+            default,
+            key(1, JwkError::KidCharacter),
+        ),
+        (
+            "an unknown member",
+            after_good(with(
+                ec.clone(),
+                "issuer",
+                json!("https://ci.partner.example"),
+            )),
+            default,
+            key(1, JwkError::UnexpectedMember),
+        ),
+        (
+            "an RSA member on an EC key",
+            after_good(with(ec.clone(), "n", json!(RSA_N))),
+            default,
+            key(1, JwkError::UnexpectedMember),
+        ),
+        (
+            "an EC member on an RSA key",
+            after_good(with(rsa.clone(), "crv", json!("P-256"))),
+            default,
+            key(1, JwkError::UnexpectedMember),
+        ),
+        (
+            "use enc",
+            after_good(with(ec.clone(), "use", json!("enc"))),
+            default,
+            key(1, JwkError::Use),
+        ),
+        (
+            "key_ops sign",
+            after_good(with(ec.clone(), "key_ops", json!(["sign"]))),
+            default,
+            key(1, JwkError::KeyOps),
+        ),
+        (
+            "key_ops verify and sign",
+            after_good(with(ec.clone(), "key_ops", json!(["verify", "sign"]))),
+            default,
+            key(1, JwkError::KeyOps),
+        ),
+        (
+            "key_ops a string",
+            after_good(with(ec.clone(), "key_ops", json!("verify"))),
+            default,
+            key(1, JwkError::KeyOps),
+        ),
+        (
+            "a 19-octet x5t",
+            after_good(with(ec.clone(), "x5t", json!(b64url(&[9; 19])))),
+            default,
+            key(
+                1,
+                JwkError::KeyLength {
+                    member: "x5t",
+                    expected: 20,
+                    actual: 19,
+                },
+            ),
+        ),
+        (
+            "no y",
+            after_good(without(ec.clone(), "y")),
+            default,
+            key(1, JwkError::MissingMember("y")),
+        ),
+        (
+            "a padded x",
+            after_good(with(ec.clone(), "x", json!(format!("{x}=")))),
+            default,
+            key(1, encoding(Base64urlError::Padding)),
+        ),
+        (
+            "an x with +",
+            after_good(with(ec.clone(), "x", json!(format!("+{}", &x[1..])))),
+            default,
+            key(1, encoding(Base64urlError::Alphabet)),
+        ),
+        (
+            "an empty x",
+            after_good(with(ec.clone(), "x", json!(""))),
+            default,
+            key(1, encoding(Base64urlError::Empty)),
+        ),
+        (
+            "y not a string",
+            after_good(with(ec.clone(), "y", json!([y]))),
+            default,
+            key(1, JwkError::WrongType("y")),
+        ),
+    ];
+    for (label, keys, allowed, expected) in refused {
+        let outcome = validate_upload(keys.clone(), allowed).await;
+        assert_eq!(upload_error(outcome, &keys), expected, "{label}");
+        assert_eq!(state(&pool).await, before, "{label}");
+    }
+
+    // Within one set: a kid twice (with two keys, or with one key twice),
+    // a key under two kids. The error names the kids, so it is matched.
+    let duplicates = [
+        (
+            "a kid with two keys",
+            key_set(vec![
+                ec_key("dup", "r0-a"),
+                good.clone(),
+                ec_key("dup", "r1-a"),
+            ]),
+        ),
+        (
+            "a kid with one key twice",
+            key_set(vec![
+                ec_key("dup", "r0-a"),
+                good.clone(),
+                ec_key("dup", "r0-a"),
+            ]),
+        ),
+        (
+            "a key under two kids",
+            key_set(vec![
+                ec_key("one", "r0-a"),
+                good.clone(),
+                ec_key("two", "r0-a"),
+            ]),
+        ),
+    ];
+    for (n, (label, keys)) in duplicates.into_iter().enumerate() {
+        let outcome = validate_upload(keys.clone(), default).await;
+        let error = upload_error(outcome, &keys);
+        match (n, &error) {
+            (0 | 1, JwkSetError::DuplicateKid { kid, first, second })
+                if (kid.as_str(), *first, *second) == ("dup", 0, 2) => {}
+            (
+                2,
+                JwkSetError::DuplicateKey {
+                    first_kid,
+                    second_kid,
+                },
+            ) if (first_kid.as_str(), second_kid.as_str()) == ("one", "two") => {}
+            _ => panic!("{label}: {error:?}"),
+        }
+        assert_eq!(state(&pool).await, before, "{label}");
+    }
+
+    // The bounds' accepted sides: 2048 and 8192 bits, a 32-octet exponent,
+    // a 128-byte kid, 20 distinct keys, and a P-256 key without alg.
+    let twenty: Vec<Value> = (0..20)
+        .map(|i| ec_point_key(&format!("k{i:02}"), P256_POINTS[i]))
+        .collect();
+    let accepted = [
+        ("a 2048-bit modulus", key_set(vec![rsa.clone()])),
+        (
+            "an 8192-bit modulus",
+            key_set(vec![rsa_parts("ok", &modulus(8192), &[1, 0, 1])]),
+        ),
+        (
+            "a 32-octet exponent",
+            key_set(vec![rsa_parts("ok", &modulus(2048), &[1; 32])]),
+        ),
+        (
+            "a 128-byte kid",
+            key_set(vec![with(ec.clone(), "kid", json!("k".repeat(128)))]),
+        ),
+        ("20 keys", key_set(twenty)),
+        (
+            "a P-256 key without alg",
+            key_set(vec![without(ec.clone(), "alg")]),
+        ),
+    ];
+    for (label, keys) in accepted {
+        validate_upload(keys, default)
+            .await
+            .unwrap_or_else(|err| panic!("{label}: {err:?}"));
+    }
+    assert_eq!(state(&pool).await, before);
+    db.drop([pool]).await;
+}
+
+#[tokio::test]
+async fn a04_neg_a_key_outside_the_create_allowed_algorithms_is_refused() {
+    let (db, pool) = fixture().await;
+    operators(&pool).await;
+    let ks = A.keyset();
+    // Each set passes Stage A with the default algorithms; the create names
+    // a narrower set. The index is the key's in `kid` order.
+    let rs256_es256: &[Algorithm] = &[Algorithm::Rs256, Algorithm::Es256];
+    let rs256: &[Algorithm] = &[Algorithm::Rs256];
+    let cases: [(&str, Value, &[Algorithm], JwkSetError); 2] = [
+        (
+            "PS256 next to a P-256 key, with RS256 and ES256 allowed",
+            key_set(vec![rsa_key("rsa-a", "PS256"), ec_key("ec-a", "r0-a")]),
+            rs256_es256,
+            JwkSetError::Key {
+                index: 1,
+                error: JwkError::AlgorithmNotAllowed(Algorithm::Ps256),
+            },
+        ),
+        (
+            "a P-256 key without alg, with RS256 allowed",
+            key_set(vec![without(ec_key("ec-a", "r0-a"), "alg")]),
+            rs256,
+            JwkSetError::Key {
+                index: 0,
+                error: JwkError::NoAllowedAlgorithm,
+            },
+        ),
+    ];
+    let mut now = T0 + 100;
+    for (round, mode) in MODES.into_iter().enumerate() {
+        if round == 1 {
+            turn_gate_on(&pool, at(now)).await;
+            now += 10;
+        }
+        for (n, (label, keys, allowed, expected)) in cases.iter().enumerate() {
+            let label = format!("{mode}, {label}");
+            let id = format!("kv_alg{round}{n}_a");
+            let new = upload(&id, &ks, keys, (T2, None), Status::Enabled).await;
+            let op = format!("op_alg{round}_{n}");
+            let before = state(&pool).await;
+            now += 1;
+            let refused = create(&pool, &op, at(now), &new, allowed).await;
+            assert_eq!(&upload_error(refused, keys), expected, "{label}");
+            assert_not_found(registry::get_trust_keyset_version(&pool, A.tenant, &id).await);
+            assert!(no_operation(&pool, &op).await, "{label}");
+            assert_eq!(state(&pool).await, before, "{label}");
+            // The control: the same upload with the set it was validated
+            // against is written, or goes pending.
+            now += 1;
+            let control_op = format!("op_ok{round}_{n}");
+            let control = create(
+                &pool,
+                &control_op,
+                at(now),
+                &new,
+                DEFAULT_ALLOWED_ALGORITHMS,
+            )
+            .await;
+            if round == 0 {
+                assert_eq!(applied(control), new.stored(), "{label}");
+            } else {
+                pending(control);
+            }
+        }
+    }
+    db.drop([pool]).await;
 }
