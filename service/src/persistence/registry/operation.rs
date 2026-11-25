@@ -32,6 +32,11 @@
 //!   `cancel` or `reject` has neither (section 2).
 //! - [`lock_administrative_operation`] reads the row `FOR NO KEY UPDATE`
 //!   (the README's lock for a row a write updates), or `None`.
+//! - [`get_administrative_operation`] reads one row of a tenant (or of the
+//!   instance) without a lock, and [`list_open_administrative_operations`]
+//!   one page of a tenant's (or the instance's) open rows of given kinds:
+//!   the reads under the operation read path of [`crate::operation`]
+//!   (OQ-API-14, D4 of the M1a lead decisions). They authorize no one.
 //! - [`consume_administrative_operation`] sets `consumed_at` and the
 //!   `outcome` and advances the revision; [`revoke_administrative_operation`]
 //!   sets `revoked_at` and `revocation_operation_id` together, as the `0005`
@@ -143,10 +148,10 @@
 
 use std::time::SystemTime;
 
-use sqlx::{FromRow, Postgres, Row, Transaction, postgres::PgRow, types::Json};
+use sqlx::{FromRow, PgExecutor, Postgres, Row, Transaction, postgres::PgRow, types::Json};
 
 use super::{
-    AdminRole, InstanceSecurityPolicy, JsonObject, RegistryError, authorize_operator,
+    AdminRole, InstanceSecurityPolicy, JsonObject, Page, RegistryError, authorize_operator,
     instance::policy_columns,
     micros,
     model::{Origin, json, optional_since_epoch, since_epoch, timestamp},
@@ -299,6 +304,51 @@ const INSERT_OPERATION: &str = concat!(
     operation_columns!()
 );
 
+/// The operation `$1` of the tenant `$2` (`NULL`: the instance), without a
+/// lock.
+const GET_OPERATION: &str = concat!(
+    "SELECT ",
+    operation_columns!(),
+    " FROM administrative_operation WHERE id = $1 AND tenant_id IS NOT DISTINCT FROM $2"
+);
+
+/// The open operations of `$tenant`, one [`Page`] of them: the predicate of
+/// the `0005` index `administrative_operation_open_by_tenant`, then the
+/// caller's clock, the kinds and the actor (the second-approver proposal's
+/// read query, D22). `$tenant` is `tenant_id = $1` or `tenant_id IS NULL`
+/// (a second statement for the instance, since `tenant_id = NULL` matches
+/// nothing); the other parameters are numbered from `$first`: the time
+/// (an interval from the epoch), the kinds (`text[]`), the actor or
+/// `NULL`, the cursor or `NULL`, and the limit.
+macro_rules! open_operations {
+    ($tenant:literal, $time:literal, $kinds:literal, $actor:literal, $after:literal, $limit:literal) => {
+        concat!(
+            "SELECT ",
+            operation_columns!(),
+            " FROM administrative_operation WHERE ",
+            $tenant,
+            " AND consumed_at IS NULL AND revoked_at IS NULL AND expires_at IS NOT NULL \
+             AND expires_at > timestamptz 'epoch' + ",
+            $time,
+            "::interval AND kind = ANY(",
+            $kinds,
+            ") AND (",
+            $actor,
+            "::text IS NULL OR actor_id = ",
+            $actor,
+            ") AND (",
+            $after,
+            "::text IS NULL OR id > ",
+            $after,
+            " COLLATE \"C\") ORDER BY id COLLATE \"C\" LIMIT ",
+            $limit
+        )
+    };
+}
+
+const OPEN_OF_TENANT: &str = open_operations!("tenant_id = $1", "$2", "$3", "$4", "$5", "$6");
+const OPEN_OF_INSTANCE: &str = open_operations!("tenant_id IS NULL", "$1", "$2", "$3", "$4", "$5");
+
 /// The operation row, locked for the update the caller makes later.
 const LOCK_OPERATION: &str = concat!(
     "SELECT ",
@@ -381,6 +431,56 @@ pub async fn lock_administrative_operation(
     Ok(sqlx::query_as(LOCK_OPERATION)
         .bind(id)
         .fetch_optional(&mut **transaction)
+        .await?)
+}
+
+/// The operation `id` of `tenant_id` (`None`: the instance), read without a
+/// lock: an operation of another tenant, of a tenant when `tenant_id` is
+/// `None`, or of the instance when it is `Some`, is
+/// [`RegistryError::NotFound`], as a missing one (see the module docs of
+/// the registry, "Reads and pages"). Every kind, every state.
+pub async fn get_administrative_operation<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: Option<&str>,
+    id: &str,
+) -> Result<AdministrativeOperation, RegistryError> {
+    sqlx::query_as(GET_OPERATION)
+        .bind(id)
+        .bind(tenant_id)
+        .fetch_optional(executor)
+        .await?
+        .ok_or(RegistryError::NotFound)
+}
+
+/// One [`Page`] of the open operations of `tenant_id` (`None`: the
+/// instance), by ID byte-wise, read without a lock: unconsumed, unrevoked,
+/// with an `expires_at` after `now` (so no `approve`, `cancel` or `reject`
+/// row, which has none, and no expired one), of one of `kinds` (byte-wise)
+/// and, when `actor_id` is given, of that actor (the second-approver
+/// proposal's read query, D22; its index is `0005`'s
+/// `administrative_operation_open_by_tenant`). `now` is floored to a whole
+/// microsecond; one outside the `0007` range is [`RegistryError::Other`]
+/// before any statement runs.
+pub async fn list_open_administrative_operations<'e>(
+    executor: impl PgExecutor<'e>,
+    tenant_id: Option<&str>,
+    kinds: &[&str],
+    actor_id: Option<&str>,
+    now: SystemTime,
+    page: Page<'_>,
+) -> Result<Vec<AdministrativeOperation>, RegistryError> {
+    let now = since_epoch(now)?;
+    let query = match tenant_id {
+        Some(tenant_id) => sqlx::query_as(OPEN_OF_TENANT).bind(tenant_id),
+        None => sqlx::query_as(OPEN_OF_INSTANCE),
+    };
+    Ok(query
+        .bind(now)
+        .bind(kinds)
+        .bind(actor_id)
+        .bind(page.after_id())
+        .bind(i64::from(page.limit()))
+        .fetch_all(executor)
         .await?)
 }
 

@@ -508,6 +508,7 @@ pub(crate) use operation::{
     consume_administrative_operation, insert_administrative_operation,
     revoke_administrative_operation, set_widening_second_approver,
 };
+pub use operation::{get_administrative_operation, list_open_administrative_operations};
 pub use operator::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges, AuthorizedOperator,
     DEPLOYMENT_OPERATOR_ACTOR, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
