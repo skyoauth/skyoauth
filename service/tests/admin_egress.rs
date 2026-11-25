@@ -5,7 +5,11 @@
 //! `client_admin`, a revoked credential, a disabled operator, disabled
 //! bindings, an unknown credential), the generated IDs, the audit event and
 //! the chain, the expected revision, a repeated status write, a taken
-//! `(purpose, exact_destination)` pair, the destination rule, the isolation
+//! `(purpose, exact_destination)` pair, the destination rule (a `*` refused
+//! in the host only; the stored destination checked again at an enable,
+//! never at a disable), the widening gate of a create and an enable
+//! (IR-052: the acknowledgement, the policy row `FOR SHARE`, the outcome,
+//! the refusal with the toggle on; a disable never gated), the isolation
 //! level, the locked lookup, a refused or failed write that leaves nothing
 //! behind, errors that never quote the destination, and the trust source
 //! writes that an entry disabled through the writer refuses (at the write,
@@ -107,6 +111,10 @@ const DISCOVERY_OFF: &str = "https://off.example/.well-known/openid-configuratio
 const TOKEN_REVIEW: &str = "https://k8s.internal.example:6443/";
 /// The destination of the entry each create writes.
 const CREATED: &str = "https://created.example/.well-known/openid-configuration";
+
+/// `acknowledge_widening` for a create or an enable: widening writes
+/// (IR-052, IR-152), refused without it.
+const ACK: bool = true;
 
 async fn migrated() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
@@ -294,6 +302,15 @@ impl Write {
             Self::Disable => "egress_allowlist_entry.disable",
         }
     }
+
+    /// Its event's outcome with `widening_second_approver` off: a create
+    /// and an enable are widening (D23), a disable is not.
+    fn outcome(self) -> &'static str {
+        match self {
+            Self::Create | Self::Enable => "success_widening",
+            Self::Disable => "success",
+        }
+    }
 }
 
 fn request<'a>(key: &'a str, ids: &'a dyn IdGenerator) -> AdminRequest<'a> {
@@ -319,7 +336,7 @@ async fn revision(pool: &PgPool, id: &str) -> i64 {
         .revision
 }
 
-/// `write` by `key` at `expected` in `transaction`.
+/// `write` by `key` at `expected` in `transaction`, acknowledged.
 async fn call(
     transaction: &mut Transaction<'_, Postgres>,
     ids: &dyn IdGenerator,
@@ -327,11 +344,27 @@ async fn call(
     key: &str,
     expected: i64,
 ) -> Result<Audited<EgressAllowlistEntry>, AdminWriteError> {
+    call_with(transaction, ids, write, key, expected, ACK).await
+}
+
+/// [`call`] with `acknowledge` as the acknowledgement of a create or an
+/// enable (a disable takes none).
+async fn call_with(
+    transaction: &mut Transaction<'_, Postgres>,
+    ids: &dyn IdGenerator,
+    write: Write,
+    key: &str,
+    expected: i64,
+    acknowledge: bool,
+) -> Result<Audited<EgressAllowlistEntry>, AdminWriteError> {
     let request = request(key, ids);
     match write {
-        Write::Create => admin::create_egress_entry(transaction, &request, &created(CREATED)).await,
+        Write::Create => {
+            admin::create_egress_entry(transaction, &request, &created(CREATED), acknowledge).await
+        }
         Write::Enable => {
-            admin::enable_egress_entry(transaction, &request, write.target(), expected).await
+            let target = write.target();
+            admin::enable_egress_entry(transaction, &request, target, expected, acknowledge).await
         }
         Write::Disable => {
             admin::disable_egress_entry(transaction, &request, write.target(), expected).await
@@ -498,7 +531,7 @@ async fn every_egress_write_refuses_every_other_operator() {
     // `Unauthorized` too: the authorization comes first.
     let refused_create = committed(&pool, async |tx| {
         let request = request(KEY_TRUST_A, &ids);
-        admin::create_egress_entry(tx, &request, &created("http://bad.example/")).await
+        admin::create_egress_entry(tx, &request, &created("http://bad.example/"), ACK).await
     })
     .await;
     refused(refused_create, "Unauthorized");
@@ -578,7 +611,7 @@ async fn every_egress_write_applies_with_its_event() {
                 row.id.clone(),
                 previous,
                 Some(row.revision),
-                "success".into(),
+                write.outcome().into(),
                 micros(5),
             ),
             "{write:?}"
@@ -589,6 +622,7 @@ async fn every_egress_write_applies_with_its_event() {
         assert_eq!(event.action, write.action());
         assert_eq!(event.object_id, row.id);
         assert_eq!(event.tenant_id, None);
+        assert_eq!(event.outcome, write.outcome());
         assert_eq!(event.sequence, count + 1);
     }
     // The other entries are as seeded.
@@ -599,6 +633,234 @@ async fn every_egress_write_applies_with_its_event() {
         assert_eq!((entry.status, entry.revision), (status, 1));
     }
     assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// The widening egress writes: a create, enabled or disabled, and an
+/// enable, each with or without the acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Widening {
+    Create(Status),
+    Enable,
+}
+
+const WIDENING: [Widening; 3] = [
+    Widening::Create(Status::Enabled),
+    Widening::Create(Status::Disabled),
+    Widening::Enable,
+];
+
+/// `write` by [`KEY_SEC`] with `acknowledge`, in a transaction committed
+/// either way: a create for `https://<host>-on.example/` (enabled) or
+/// `https://<host>-off.example/` (disabled), an enable of `egr_off` at its
+/// current revision.
+async fn widening(
+    pool: &PgPool,
+    ids: &dyn IdGenerator,
+    (write, host): (Widening, &str),
+    acknowledge: bool,
+) -> Result<Audited<EgressAllowlistEntry>, AdminWriteError> {
+    let expected = revision(pool, "egr_off").await;
+    let sec = request(KEY_SEC, ids);
+    committed(pool, async |tx| match write {
+        Widening::Create(status) => {
+            let suffix = if status == Status::Enabled {
+                "on"
+            } else {
+                "off"
+            };
+            let destination = format!("https://{host}-{suffix}.example/");
+            let new = EgressEntryCreate {
+                status,
+                ..created(&destination)
+            };
+            admin::create_egress_entry(tx, &sec, &new, acknowledge).await
+        }
+        Widening::Enable => {
+            admin::enable_egress_entry(tx, &sec, "egr_off", expected, acknowledge).await
+        }
+    })
+    .await
+}
+
+/// That `ids` gave no ID: its next IDs are a fresh generator's of `seed`.
+#[track_caller]
+fn no_id_taken(ids: &SequentialIds, seed: u64) {
+    let fresh = SequentialIds::with_seed(seed);
+    for kind in [IdKind::EgressEntry, IdKind::AuditEvent] {
+        assert_eq!(ids.new_id(kind), fresh.new_id(kind), "{kind:?}");
+    }
+}
+
+/// With `widening_second_approver` off, a create (enabled or disabled) and
+/// an enable without `acknowledge_widening` are `WideningNotAcknowledged`,
+/// write nothing and take no ID; acknowledged, each applies with outcome
+/// `success_widening` (D23). A disable takes no acknowledgement and records
+/// `success`.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_widening_egress_write_needs_the_acknowledgement() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::with_seed(21);
+    let before = snapshot(&pool).await;
+    for write in WIDENING {
+        refused(
+            widening(&pool, &ids, (write, "h1"), false).await,
+            "WideningNotAcknowledged",
+        );
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    no_id_taken(&ids, 21);
+    let ids = SequentialIds::with_seed(22);
+    let mut created_status = Vec::new();
+    for write in WIDENING {
+        let done = widening(&pool, &ids, (write, "h2"), true)
+            .await
+            .unwrap_or_else(|err| panic!("{write:?}: {err:?}"));
+        assert_eq!(done.event.outcome, "success_widening", "{write:?}");
+        assert_eq!(last_event(&pool).await.7, "success_widening", "{write:?}");
+        if let Widening::Create(status) = write {
+            created_status.push(done.row.status);
+            assert_eq!(done.row.status, status);
+        }
+    }
+    assert_eq!(created_status, [Status::Enabled, Status::Disabled]);
+    let done = try_set_entry(&pool, &ids, "egr_disc", false).await.unwrap();
+    assert_eq!(done.event.outcome, "success");
+    db.drop([pool]).await;
+}
+
+/// With `widening_second_approver` on and `single_actor_mode` off, a
+/// create (enabled or disabled) and an enable are refused, acknowledged or
+/// not, writing nothing and taking no ID: `SecondApproverRequired` (IR-052:
+/// no effect before an approval), after `WideningNotAcknowledged` and after
+/// the authorization. A disable is never gated: it applies with `success`.
+/// With `single_actor_mode` on too, the requester, an instance
+/// `security_admin`, applies them at once with `success_single_actor`
+/// (Q4).
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn with_the_gate_on_a_widening_egress_write_is_refused() {
+    let (db, pool) = seeded().await;
+    set_policy(&pool, true, false).await;
+    let ids = SequentialIds::with_seed(23);
+    let before = snapshot(&pool).await;
+    for write in WIDENING {
+        refused(
+            widening(&pool, &ids, (write, "h3"), true).await,
+            "SecondApproverRequired",
+        );
+        refused(
+            widening(&pool, &ids, (write, "h4"), false).await,
+            "WideningNotAcknowledged",
+        );
+    }
+    for write in [Write::Create, Write::Enable] {
+        for acknowledge in [true, false] {
+            let expected = match write {
+                Write::Create => 0,
+                _ => revision(&pool, write.target()).await,
+            };
+            let mut tx = pool.begin().await.unwrap();
+            refused(
+                call_with(&mut tx, &ids, write, KEY_TRUST_A, expected, acknowledge).await,
+                "Unauthorized",
+            );
+            tx.commit().await.unwrap();
+        }
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    no_id_taken(&ids, 23);
+    let ids = SequentialIds::with_seed(24);
+    let done = try_set_entry(&pool, &ids, "egr_disc", false).await.unwrap();
+    assert_eq!(
+        (done.row.status, done.event.outcome.as_str()),
+        (Status::Disabled, "success")
+    );
+    set_policy(&pool, true, true).await;
+    for write in WIDENING {
+        let done = widening(&pool, &ids, (write, "h5"), true)
+            .await
+            .unwrap_or_else(|err| panic!("{write:?}: {err:?}"));
+        assert_eq!(done.event.outcome, "success_single_actor", "{write:?}");
+    }
+    refused(
+        widening(&pool, &ids, (Widening::Enable, "h6"), false).await,
+        "WideningNotAcknowledged",
+    );
+    db.drop([pool]).await;
+}
+
+/// Before bootstrap there is no policy row: a create and an enable by an
+/// instance `security_admin` are `PolicyUnavailable` (D18), writing nothing
+/// and taking no ID.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_widening_egress_write_needs_the_policy_row() {
+    let (db, pool) = migrated().await;
+    operator(&pool, "adm_sec", KEY_SEC, &[(SEC, None)], true).await;
+    registry::test_support::create_egress_allowlist_entry(
+        &pool,
+        &NewEgressAllowlistEntry {
+            id: "egr_off".into(),
+            purpose: EgressPurpose::OidcDiscovery,
+            exact_destination: DISCOVERY_OFF.into(),
+            status: Status::Disabled,
+        },
+    )
+    .await
+    .unwrap();
+    let ids = SequentialIds::with_seed(25);
+    let before = snapshot(&pool).await;
+    for write in WIDENING {
+        refused(
+            widening(&pool, &ids, (write, "h7"), true).await,
+            "PolicyUnavailable",
+        );
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    no_id_taken(&ids, 25);
+    db.drop([pool]).await;
+}
+
+/// A create and an enable hold the policy row `FOR SHARE` until their
+/// transaction ends, so a toggle waits for them; a disable takes no policy
+/// row.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_widening_egress_write_holds_the_policy_row() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::with_seed(26);
+    for (write, waits) in [
+        (Write::Create, true),
+        (Write::Enable, true),
+        (Write::Disable, false),
+    ] {
+        let expected = match write {
+            Write::Create => 0,
+            _ => revision(&pool, write.target()).await,
+        };
+        let mut tx = pool.begin().await.unwrap();
+        call(&mut tx, &ids, write, KEY_SEC, expected).await.unwrap();
+        let mut toggle = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout = '200ms'")
+            .execute(&mut *toggle)
+            .await
+            .unwrap();
+        let result = sqlx::query(
+            "UPDATE instance_security_policy SET widening_second_approver = true, \
+             revision = revision + 1",
+        )
+        .execute(&mut *toggle)
+        .await;
+        match (waits, result) {
+            (true, Err(err)) => assert!(format!("{err:?}").contains("55P03"), "{err:?}"),
+            (false, Ok(done)) => assert_eq!(done.rows_affected(), 1),
+            (_, other) => panic!("{write:?}: {other:?}"),
+        }
+        toggle.rollback().await.unwrap();
+        tx.rollback().await.unwrap();
+    }
     db.drop([pool]).await;
 }
 
@@ -625,7 +887,7 @@ async fn a_status_write_checks_the_expected_revision() {
     let sec = request(KEY_SEC, &ids);
     refused(
         committed(&pool, async |tx| {
-            admin::enable_egress_entry(tx, &sec, "egr_missing", 1).await
+            admin::enable_egress_entry(tx, &sec, "egr_missing", 1, ACK).await
         })
         .await,
         "Registry(NotFound)",
@@ -665,7 +927,7 @@ async fn a_repeated_status_write_is_recorded_again() {
     ] {
         let done = committed(&pool, async |tx| {
             if enable {
-                admin::enable_egress_entry(tx, &sec, "egr_disc", expected).await
+                admin::enable_egress_entry(tx, &sec, "egr_disc", expected, ACK).await
             } else {
                 admin::disable_egress_entry(tx, &sec, "egr_disc", expected).await
             }
@@ -700,7 +962,7 @@ async fn a_repeated_status_write_is_recorded_again() {
         ..created(CREATED)
     };
     let done = committed(&pool, async |tx| {
-        admin::create_egress_entry(tx, &sec, &new).await
+        admin::create_egress_entry(tx, &sec, &new, ACK).await
     })
     .await
     .unwrap();
@@ -708,7 +970,7 @@ async fn a_repeated_status_write_is_recorded_again() {
     assert_eq!(done.event.action, "egress_allowlist_entry.create");
     let id = done.row.id;
     let done = committed(&pool, async |tx| {
-        admin::enable_egress_entry(tx, &sec, &id, 1).await
+        admin::enable_egress_entry(tx, &sec, &id, 1, ACK).await
     })
     .await
     .unwrap();
@@ -742,7 +1004,7 @@ async fn a_taken_pair_is_already_exists() {
             status,
         };
         refused(
-            admin::create_egress_entry(&mut tx, &sec, &new).await,
+            admin::create_egress_entry(&mut tx, &sec, &new, ACK).await,
             "Registry(AlreadyExists { constraint: \
              \"egress_allowlist_entry_purpose_exact_destination_key\" })",
         );
@@ -756,7 +1018,7 @@ async fn a_taken_pair_is_already_exists() {
             ..created(DISCOVERY)
         };
         let done = committed(&pool, async |tx| {
-            admin::create_egress_entry(tx, &sec, &new).await
+            admin::create_egress_entry(tx, &sec, &new, ACK).await
         })
         .await
         .unwrap();
@@ -819,8 +1081,8 @@ fn invalid_destinations() -> Vec<(&'static str, String)> {
         ("a single dot segment", "https://idp.example/./b"),
         ("no host", "https:///x"),
         ("a wildcard host", "https://*.idp.example/"),
-        ("a wildcard path", "https://idp.example/keys/*"),
-        ("a wildcard query", "https://idp.example/keys?kid=*"),
+        ("a star in the host", "https://idp.*/"),
+        ("a star host, a path with one", "https://*/keys/*"),
     ]
     .into_iter()
     .map(|(label, destination)| (label, destination.to_owned()))
@@ -852,6 +1114,11 @@ fn valid_destinations() -> Vec<(&'static str, String)> {
         ("an IPv4 host", "https://10.0.0.7/"),
         ("an IPv6 host", "https://[::1]:6443/"),
         ("an A-label host", "https://xn--bcher-kva.example/"),
+        ("a literal star in the path", "https://v7.example/keys/*"),
+        (
+            "a literal star in the query",
+            "https://v8.example/keys?kid=*",
+        ),
     ]
     .into_iter()
     .map(|(label, destination)| (label, destination.to_owned()))
@@ -884,7 +1151,7 @@ async fn a_destination_must_be_an_exact_canonical_https_url() {
                     status,
                 };
                 let result = committed(&pool, async |tx| {
-                    admin::create_egress_entry(tx, &sec, &new).await
+                    admin::create_egress_entry(tx, &sec, &new, ACK).await
                 })
                 .await;
                 assert!(
@@ -912,12 +1179,179 @@ async fn a_destination_must_be_an_exact_canonical_https_url() {
             status: Status::Enabled,
         };
         let done = committed(&pool, async |tx| {
-            admin::create_egress_entry(tx, &sec, &new).await
+            admin::create_egress_entry(tx, &sec, &new, ACK).await
         })
         .await
         .unwrap_or_else(|err| panic!("{label}: {err:?}"));
         assert_eq!(done.row.exact_destination, destination, "{label}");
     }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// A literal `*` in the path or in the query is taken by every writer, as
+/// by a source (byte equality: never a wildcard there): a create, enabled
+/// and disabled, and the enable of the disabled one, which checks its
+/// stored destination again. A `*` in the host is refused, at a create and
+/// at the enable of an entry written in SQL.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn only_a_star_in_the_host_is_refused() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::with_seed(41);
+    let sec = request(KEY_SEC, &ids);
+    for (n, destination) in [
+        "https://s1.example/keys/*",
+        "https://s2.example/keys?kid=*",
+        "https://s3.example/*/jwks?kid=*&x=*",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (purpose, status) in [
+            (EgressPurpose::Jwks, Status::Enabled),
+            (EgressPurpose::OidcDiscovery, Status::Disabled),
+        ] {
+            let new = EgressEntryCreate {
+                purpose,
+                exact_destination: destination.into(),
+                status,
+            };
+            let done = committed(&pool, async |tx| {
+                admin::create_egress_entry(tx, &sec, &new, ACK).await
+            })
+            .await
+            .unwrap_or_else(|err| panic!("{n} {status:?}: {err:?}"));
+            assert_eq!(done.row.exact_destination, destination);
+            assert_eq!(done.row.status, status);
+            if status == Status::Disabled {
+                let enabled = try_set_entry(&pool, &ids, &done.row.id, true)
+                    .await
+                    .unwrap_or_else(|err| panic!("{n} enable: {err:?}"));
+                assert_eq!(enabled.row.status, Status::Enabled);
+                assert_eq!(enabled.row.exact_destination, destination);
+            }
+        }
+    }
+    let host = "https://*.s4.example/";
+    let before = snapshot(&pool).await;
+    for status in [Status::Enabled, Status::Disabled] {
+        let new = EgressEntryCreate {
+            status,
+            ..created(host)
+        };
+        refused(
+            committed(&pool, async |tx| {
+                admin::create_egress_entry(tx, &sec, &new, ACK).await
+            })
+            .await,
+            "InvalidDestination",
+        );
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    seed_entry(&pool, "egr_star_host", host, Status::Disabled).await;
+    let before = snapshot(&pool).await;
+    refused(
+        try_set_entry(&pool, &ids, "egr_star_host", true).await,
+        "InvalidDestination",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// The entry `id` for `destination`, of `token_review`, written in SQL
+/// through the bare registry writer, as a fixture does: no destination
+/// check and no event.
+async fn seed_entry(pool: &PgPool, id: &str, destination: &str, status: Status) {
+    registry::test_support::create_egress_allowlist_entry(
+        pool,
+        &NewEgressAllowlistEntry {
+            id: id.into(),
+            purpose: EgressPurpose::TokenReview,
+            exact_destination: destination.into(),
+            status,
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// An entry written in SQL whose destination fails the create rule (the
+/// pathless `token_review` URL of the A29 fixture, `tests/security/a29.rs`)
+/// cannot be enabled through the writer, disabled or already enabled: the
+/// enable checks the stored destination of the row its revision-checked
+/// update returns, and is `InvalidDestination` with nothing written, no
+/// event and no ID taken. The authorization and the gate come first: a
+/// `trust_admin` gets `Unauthorized`, no acknowledgement
+/// `WideningNotAcknowledged`, the gate on `SecondApproverRequired`.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn an_enable_checks_the_stored_destination() {
+    let (db, pool) = seeded().await;
+    let pathless = "https://k8s-a.example:6443";
+    assert!(!is_valid_destination(pathless));
+    seed_entry(&pool, "egr_bad_off", pathless, Status::Disabled).await;
+    seed_entry(
+        &pool,
+        "egr_bad_on",
+        "https://k8s-b.example:6443",
+        Status::Enabled,
+    )
+    .await;
+    let ids = SequentialIds::with_seed(42);
+    let before = snapshot(&pool).await;
+    let count = event_count(&pool).await;
+    for id in ["egr_bad_off", "egr_bad_on"] {
+        let enable = async |key: &str, acknowledge: bool| {
+            let request = request(key, &ids);
+            committed(&pool, async |tx| {
+                admin::enable_egress_entry(tx, &request, id, 1, acknowledge).await
+            })
+            .await
+        };
+        refused(enable(KEY_SEC, ACK).await, "InvalidDestination");
+        refused(enable(KEY_TRUST_A, ACK).await, "Unauthorized");
+        refused(enable(KEY_SEC, false).await, "WideningNotAcknowledged");
+        set_policy(&pool, true, false).await;
+        refused(enable(KEY_SEC, ACK).await, "SecondApproverRequired");
+        set_policy(&pool, false, false).await;
+    }
+    // The snapshot leaves out the policy row, whose flags the test set.
+    assert_eq!(snapshot(&pool).await, before);
+    assert_eq!(event_count(&pool).await, count);
+    no_id_taken(&ids, 42);
+    db.drop([pool]).await;
+}
+
+/// The same SQL-written entry is still disabled through the writer: a
+/// disable checks no destination and passes no gate, also with the gate
+/// on; it applies with outcome `success`, and the entry then still cannot
+/// be enabled.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_disable_checks_no_destination() {
+    let (db, pool) = seeded().await;
+    let pathless = "https://k8s-a.example:6443";
+    seed_entry(&pool, "egr_bad_on", pathless, Status::Enabled).await;
+    set_policy(&pool, true, false).await;
+    let ids = SequentialIds::with_seed(43);
+    for repeat in [false, true] {
+        let done = try_set_entry(&pool, &ids, "egr_bad_on", false)
+            .await
+            .unwrap_or_else(|err| panic!("repeat {repeat}: {err:?}"));
+        assert_eq!(done.row.status, Status::Disabled);
+        assert_eq!(done.row.exact_destination, pathless);
+        assert_eq!(done.event.outcome, "success");
+        assert_eq!(last_event(&pool).await.4, "egr_bad_on");
+    }
+    set_policy(&pool, false, false).await;
+    let before = snapshot(&pool).await;
+    refused(
+        try_set_entry(&pool, &ids, "egr_bad_on", true).await,
+        "InvalidDestination",
+    );
+    assert_eq!(snapshot(&pool).await, before);
     assert_chain_intact(&pool).await;
     db.drop([pool]).await;
 }
@@ -963,7 +1397,7 @@ async fn a_failing_generator_leaves_nothing() {
         let new = created("https://exhausted.example/");
         let request = request(KEY_SEC, &ids);
         let result = match write {
-            Write::Create => admin::create_egress_entry(&mut tx, &request, &new).await,
+            Write::Create => admin::create_egress_entry(&mut tx, &request, &new, ACK).await,
             _ => admin::disable_egress_entry(&mut tx, &request, "egr_tr", 1).await,
         };
         refused(result, "Id(Exhausted)");
@@ -996,8 +1430,10 @@ async fn a_failed_audit_append_rolls_the_write_back() {
         .unwrap();
     for write in WRITES {
         let result = match write {
-            Write::Create => admin::create_egress_entry(&mut tx, &sec, &created(CREATED)).await,
-            Write::Enable => admin::enable_egress_entry(&mut tx, &sec, "egr_off", 1).await,
+            Write::Create => {
+                admin::create_egress_entry(&mut tx, &sec, &created(CREATED), ACK).await
+            }
+            Write::Enable => admin::enable_egress_entry(&mut tx, &sec, "egr_off", 1, ACK).await,
             Write::Disable => admin::disable_egress_entry(&mut tx, &sec, "egr_disc", 1).await,
         };
         let err = result.unwrap_err();
@@ -1116,13 +1552,13 @@ async fn errors_omit_the_destination() {
         format!("https://{marker}.example/{}", "a".repeat(2048)),
     ] {
         errors.push(
-            admin::create_egress_entry(&mut tx, &sec, &created(&destination))
+            admin::create_egress_entry(&mut tx, &sec, &created(&destination), ACK)
                 .await
                 .unwrap_err(),
         );
     }
     errors.push(
-        admin::create_egress_entry(&mut tx, &sec, &created(DISCOVERY))
+        admin::create_egress_entry(&mut tx, &sec, &created(DISCOVERY), ACK)
             .await
             .unwrap_err(),
     );
@@ -1132,13 +1568,13 @@ async fn errors_omit_the_destination() {
             .unwrap_err(),
     );
     errors.push(
-        admin::enable_egress_entry(&mut tx, &sec, "egr_missing", 1)
+        admin::enable_egress_entry(&mut tx, &sec, "egr_missing", 1, ACK)
             .await
             .unwrap_err(),
     );
     let trust = request(KEY_TRUST_A, &ids);
     errors.push(
-        admin::create_egress_entry(&mut tx, &trust, &created(CREATED))
+        admin::create_egress_entry(&mut tx, &trust, &created(CREATED), ACK)
             .await
             .unwrap_err(),
     );
@@ -1313,18 +1749,41 @@ fn applied(result: Submitted) -> TrustSource {
     }
 }
 
-/// The entry `id` disabled or enabled through the writer by [`KEY_SEC`],
-/// at its current revision, committed.
+/// The entry `id` disabled or enabled (acknowledged) through the writer
+/// by [`KEY_SEC`], at its current revision, committed.
 async fn set_entry(pool: &PgPool, ids: &SequentialIds, id: &str, enabled: bool) {
+    try_set_entry(pool, ids, id, enabled).await.unwrap();
+}
+
+/// [`set_entry`], returning the writer's result.
+async fn try_set_entry(
+    pool: &PgPool,
+    ids: &SequentialIds,
+    id: &str,
+    enabled: bool,
+) -> Result<Audited<EgressAllowlistEntry>, AdminWriteError> {
     let expected = revision(pool, id).await;
     let sec = request(KEY_SEC, ids);
     committed(pool, async |tx| {
         if enabled {
-            admin::enable_egress_entry(tx, &sec, id, expected).await
+            admin::enable_egress_entry(tx, &sec, id, expected, ACK).await
         } else {
             admin::disable_egress_entry(tx, &sec, id, expected).await
         }
     })
+    .await
+}
+
+/// Sets the policy row's flags in SQL, as the tests of the gated trust
+/// writes do (`service/tests/source_approval.rs`).
+async fn set_policy(pool: &PgPool, widening_second_approver: bool, single_actor_mode: bool) {
+    sqlx::query(
+        "UPDATE instance_security_policy SET widening_second_approver = $1, \
+         single_actor_mode = $2, revision = revision + 1",
+    )
+    .bind(widening_second_approver)
+    .bind(single_actor_mode)
+    .execute(pool)
     .await
     .unwrap();
 }
@@ -1353,7 +1812,7 @@ async fn a_source_write_through_a_disabled_entry_is_refused() {
             status: Status::Enabled,
         };
         let done = committed(&pool, async |tx| {
-            admin::create_egress_entry(tx, &sec, &new).await
+            admin::create_egress_entry(tx, &sec, &new, ACK).await
         })
         .await
         .unwrap();
@@ -1448,10 +1907,12 @@ impl Clock for FixedClock {
 }
 
 /// With the gate on, a source create on an enabled entry goes pending; the
-/// entry is then disabled through the writer, and the approval by a
-/// distinct `security_admin` is refused with the source path's
-/// `EgressNotAllowed`: no source is written and the operation stays
-/// pending. Re-enabled through the writer, the same approval applies.
+/// entry is then disabled through the writer (a disable is never gated),
+/// and the approval by a distinct `security_admin` is refused with the
+/// source path's `EgressNotAllowed`: no source is written and the operation
+/// stays pending. The entry's re-enable is widening, so with the gate on it
+/// is refused too, writing nothing; with the gate off for the re-enable and
+/// on again, the same approval applies.
 #[tokio::test]
 #[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
 async fn an_approval_after_the_writer_disables_its_entry_is_refused() {
@@ -1459,18 +1920,12 @@ async fn an_approval_after_the_writer_disables_its_entry_is_refused() {
     let ids = SequentialIds::with_seed(12);
     let sec = request(KEY_SEC, &ids);
     let entry = committed(&pool, async |tx| {
-        admin::create_egress_entry(tx, &sec, &created(CREATED)).await
+        admin::create_egress_entry(tx, &sec, &created(CREATED), ACK).await
     })
     .await
     .unwrap()
     .row;
-    sqlx::query(
-        "UPDATE instance_security_policy SET widening_second_approver = true, \
-         revision = revision + 1",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
+    set_policy(&pool, true, false).await;
     let new = oidc("src_pending", CREATED);
     let pending = match submit_create(&pool, "op_pending", &new).await {
         Ok(Gated::Pending(pending)) => pending,
@@ -1523,7 +1978,14 @@ async fn an_approval_after_the_writer_disables_its_entry_is_refused() {
         other => panic!("expected ApprovalError::Source: {other:?}"),
     }
     assert_eq!(snapshot(&pool).await, before);
+    refused(
+        try_set_entry(&pool, &ids, &entry.id, true).await,
+        "SecondApproverRequired",
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    set_policy(&pool, false, false).await;
     set_entry(&pool, &ids, &entry.id, true).await;
+    set_policy(&pool, true, false).await;
     approve("applied").await.unwrap();
     let written = registry::get_trust_source(&pool, "ten_a", "src_pending")
         .await
@@ -1533,26 +1995,62 @@ async fn an_approval_after_the_writer_disables_its_entry_is_refused() {
     db.drop([pool]).await;
 }
 
+/// The text of the one statement of this test's database that waits for
+/// a lock, once there is one.
+async fn waiting_statement(pool: &PgPool) -> String {
+    for _ in 0..1000 {
+        let waiting: Vec<String> = sqlx::query_scalar(
+            "SELECT query FROM pg_stat_activity \
+             WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        match waiting.as_slice() {
+            [] => tokio::time::sleep(Duration::from_millis(10)).await,
+            [one] => return one.clone(),
+            many => panic!("more than one statement waits: {many:?}"),
+        }
+    }
+    panic!("no statement waits for a lock");
+}
+
+/// A gated source create of `src_held` on [`DISCOVERY`] (`egr_disc`) by
+/// [`KEY_TRUST_A`], gate off.
+fn held_submission() -> Submission<'static> {
+    Submission {
+        public_identity: KEY_TRUST_A,
+        acknowledge_widening: true,
+        operation_id: "op_held",
+        event_id: "evt_op_held",
+        now: at(10),
+    }
+}
+
 /// The disable and a source write that checks the entry wait for each
-/// other: a disable waits for an uncommitted source write that holds the
-/// entry `FOR SHARE`, and a source write waits for an uncommitted disable;
-/// once the disable commits, the source write is refused.
+/// other, on the entry row itself:
+///
+/// 1. a source inserted by the bare registry writer, uncommitted, holds
+///    the entry through the `0011` guard's `FOR SHARE` alone (it takes no
+///    audit head and no operator row), and the disable times out;
+/// 2. a gated source create, uncommitted, holds the entry, and the disable
+///    waits on its entry `UPDATE`, not on the audit head the create also
+///    holds; once the create rolls back the disable applies;
+/// 3. an uncommitted disable holds the entry, and a gated source create
+///    waits on the service's entry check (`FOR SHARE`), not on the `0011`
+///    guard; once the disable commits, that check refuses it with
+///    `EgressNotAllowed`, not the guard's `Invariant`.
 #[tokio::test]
 #[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
 async fn a_disable_and_a_source_write_wait_for_each_other() {
     let (db, pool) = seeded().await;
     let ids = SequentialIds::with_seed(13);
     let sec = request(KEY_SEC, &ids);
-    let submission = Submission {
-        public_identity: KEY_TRUST_A,
-        acknowledge_widening: true,
-        operation_id: "op_held",
-        event_id: "evt_op_held",
-        now: at(10),
-    };
-    // A source write holds the entry: the disable times out.
-    let mut source_tx = pool.begin().await.unwrap();
-    applied(submit_create_source(&mut source_tx, &submission, &oidc("src_held", DISCOVERY)).await);
+    // 1. The 0011 guard's lock.
+    let mut holder = pool.begin().await.unwrap();
+    registry::test_support::create_trust_source(&mut *holder, &oidc("src_raw", DISCOVERY))
+        .await
+        .unwrap();
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET LOCAL lock_timeout = '200ms'")
         .execute(&mut *tx)
@@ -1563,27 +2061,55 @@ async fn a_disable_and_a_source_write_wait_for_each_other() {
         .unwrap_err();
     assert!(format!("{err:?}").contains("55P03"), "{err:?}");
     tx.rollback().await.unwrap();
-    source_tx.rollback().await.unwrap();
-    // A disable holds the entry: the source write times out.
+    holder.rollback().await.unwrap();
+    // 2. A gated source create holds the entry.
+    let mut holder = pool.begin().await.unwrap();
+    applied(
+        submit_create_source(
+            &mut holder,
+            &held_submission(),
+            &oidc("src_held", DISCOVERY),
+        )
+        .await,
+    );
+    let mut tx = pool.begin().await.unwrap();
+    let (done, waiting) = tokio::join!(
+        admin::disable_egress_entry(&mut tx, &sec, "egr_disc", 1),
+        async {
+            let waiting = waiting_statement(&pool).await;
+            holder.rollback().await.unwrap();
+            waiting
+        }
+    );
+    // The compare-and-set's `UPDATE`, in its `WITH`.
+    assert!(
+        waiting.contains("(UPDATE egress_allowlist_entry SET status = "),
+        "{waiting}"
+    );
+    assert_eq!(done.unwrap().row.status, Status::Disabled);
+    tx.rollback().await.unwrap();
+    // 3. A disable holds the entry.
     let mut disable_tx = pool.begin().await.unwrap();
     admin::disable_egress_entry(&mut disable_tx, &sec, "egr_disc", 1)
         .await
         .unwrap();
     let mut source_tx = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL lock_timeout = '200ms'")
-        .execute(&mut *source_tx)
-        .await
-        .unwrap();
-    let err = submit_create_source(&mut source_tx, &submission, &oidc("src_held", DISCOVERY))
-        .await
-        .unwrap_err();
-    assert!(format!("{err:?}").contains("55P03"), "{err:?}");
-    source_tx.rollback().await.unwrap();
-    disable_tx.commit().await.unwrap();
-    // Committed: the source write is refused.
-    refused(
-        submit_create(&pool, "op_after", &oidc("src_held", DISCOVERY)).await,
-        "EgressNotAllowed { member: \"discovery_url\" }",
+    let submission = held_submission();
+    let held = oidc("src_held", DISCOVERY);
+    let (result, waiting) = tokio::join!(
+        submit_create_source(&mut source_tx, &submission, &held),
+        async {
+            let waiting = waiting_statement(&pool).await;
+            disable_tx.commit().await.unwrap();
+            waiting
+        }
     );
+    assert!(
+        waiting.starts_with("SELECT id, status FROM egress_allowlist_entry")
+            && waiting.ends_with("FOR SHARE"),
+        "{waiting}"
+    );
+    refused(result, "EgressNotAllowed { member: \"discovery_url\" }");
+    source_tx.rollback().await.unwrap();
     db.drop([pool]).await;
 }

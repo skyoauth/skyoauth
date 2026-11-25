@@ -97,7 +97,8 @@ pub async fn list_egress_allowlist_entries<'e>(
 /// comment leaves the URL rule to the service) and no second-approver rule
 /// (IR-052, IR-152: adding an entry is widening-class). Within the crate
 /// only [`crate::admin::egress::create_egress_entry`] calls it, after its
-/// own checks and with the audit event.
+/// authorization, its widening gate and its destination check, and with
+/// the audit event.
 pub(crate) async fn create_egress_allowlist_entry<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewEgressAllowlistEntry,
@@ -129,9 +130,10 @@ pub(crate) async fn create_egress_allowlist_entry<'e>(
 ///
 /// **The unchecked floor, crate-private**, like
 /// [`create_egress_allowlist_entry`]: re-enabling is widening-class
-/// (IR-152), and only [`crate::admin::egress::enable_egress_entry`] and
-/// [`crate::admin::egress::disable_egress_entry`] call it, after the
-/// authorization and with the audit event.
+/// (IR-152), and only [`crate::admin::egress::enable_egress_entry`], after
+/// the authorization and the widening gate, and
+/// [`crate::admin::egress::disable_egress_entry`], after the
+/// authorization, call it, each with the audit event.
 pub(crate) async fn update_egress_allowlist_entry<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,

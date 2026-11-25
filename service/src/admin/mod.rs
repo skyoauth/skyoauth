@@ -15,7 +15,9 @@
 //!    writes do ([`crate::trust`]);
 //! 2. authorizes the presented credential for the one role and scope the
 //!    write needs (see "Who"), locked until the transaction ends once the
-//!    write succeeds (see "Errors and rollback" for an `Err`);
+//!    write succeeds (see "Errors and rollback" for an `Err`); an egress
+//!    entry create or enable, which is widening, then passes the gate's
+//!    acknowledgement and policy steps (see "Egress allowlist");
 //! 3. for an update, reads the stored row and checks the caller's expected
 //!    revision (IR-022), and the compare-and-set of the write checks it
 //!    again; [`workload::disable_tenant`] and the checker tenant set
@@ -23,7 +25,9 @@
 //!    [`workload::remove_resource_server_checker_tenant`]) read no stored
 //!    row and rely on that compare-and-set alone, and so do
 //!    [`egress::enable_egress_entry`] and [`egress::disable_egress_entry`],
-//!    which change only `status` and need no stored column;
+//!    which change only `status` and need no stored column before it (an
+//!    enable checks the destination of the row it returns, see "Egress
+//!    allowlist");
 //! 4. for a create, takes the new object's ID from the [`IdGenerator`]
 //!    the request carries (IR-020, IR-022; T10.2), never from the caller,
 //!    after every check of the request's input (a checker's key is derived
@@ -141,7 +145,8 @@
 //!
 //! # Audit events
 //!
-//! One event per write, last, with outcome `success`, the authorized
+//! One event per write, last, with outcome `success` (a widening egress
+//! write's is the gate's, see "Egress allowlist"), the authorized
 //! operator as actor (`{"type": "operator", "id": <admin_id>}`) and the
 //! written object's ID as `object_id`, with no previous revision and the
 //! new row's revision for a create, and the expected and the new revision
@@ -238,19 +243,33 @@
 //!   column bound, checked here so that a longer one is this error, not a
 //!   database check (inferred: the bound is the lead's, the place of the
 //!   check this module's);
-//! - has no `*` anywhere (inferred: matching is byte equality, so a `*` is
-//!   never a wildcard, but the URL parser takes `https://*.example/` as a
-//!   host, and an entry that reads like a pattern while it matches one
-//!   exact text is refused rather than misread).
+//! - has no `*` in its host (lead decision, 2026-11-25, replacing the
+//!   earlier inferred "no `*` anywhere"): the URL parser takes
+//!   `https://*.example/` as a host, and an entry whose host reads like a
+//!   pattern while it matches one exact text is refused rather than
+//!   misread. A literal `*` in the path or the query is allowed, as the
+//!   source rule allows it: matching is byte equality, so it is never a
+//!   wildcard there, and refusing it would leave a source that has one with
+//!   no entry to match.
 //!
 //! The rule is about spelling, not about where an address points, as for a
 //! source: a canonical loopback, private or link-local address passes. A
-//! policy on such addresses belongs to the fetcher (T11.2, T11.8). A refused
-//! destination is [`AdminWriteError::InvalidDestination`], fixed text that
-//! never quotes it, after the authorization and before any ID is generated,
-//! so a refusal uses up no ID. An enable checks no destination again: it is
-//! immutable and was checked at its create (an entry written another way,
-//! raw SQL or the tests' bare registry writer, is not rechecked; inferred).
+//! policy on such addresses belongs to the fetcher (T11.2, T11.8), not to
+//! this writer or the source writes. A refused destination is
+//! [`AdminWriteError::InvalidDestination`], fixed text that never quotes it,
+//! after the authorization and the gate and before any ID is generated, so a
+//! refusal uses up no ID.
+//!
+//! **An enable checks the stored destination again** (lead decision,
+//! 2026-11-25). An entry written another way (raw SQL, a fixture, the tests'
+//! bare registry writer) may fail the rule, a pathless URL say, which no
+//! source destination can match. After the authorization and the gate,
+//! [`egress::enable_egress_entry`] checks the immutable destination of the
+//! row its revision-checked update returns, before the event: one that
+//! fails is [`AdminWriteError::InvalidDestination`], and the savepoint
+//! takes the update back, so nothing is written, no event appended and no
+//! ID taken, and a refused operator learns nothing of the destination. A
+//! disable checks no destination, so such an entry can always be disabled.
 //!
 //! **Disabling fails closed.** A trust source write that sets
 //! `discovery_url` or `token_review_endpoint` to a disabled entry's
@@ -263,6 +282,37 @@
 //! write that leaves both members unchanged is still accepted (IR-152), and
 //! sources that already use the entry are not changed: IR-152 makes them
 //! degraded, a derived signal of the fetcher, which does not exist yet.
+//!
+//! **Widening writes fail closed.** A create, enabled or disabled, and an
+//! enable or re-enable are widening-class: IR-052 lists "adding or
+//! re-enabling an `EgressAllowlistEntry`" with the gated trust writes, and
+//! IR-152 and OQ-IR-12 repeat it; a disabled create is widening as a
+//! disabled keyset or source create is (the user's ruling Q3 of the
+//! second-approver proposal; ADR-008; [`crate::trust::source`] and
+//! [`crate::trust::keyset`] gate theirs). IR-052 decides this, so D3 does
+//! not (lead decision, 2026-11-25). The two writes take the gate's request
+//! steps 3 and 4 after the authorization, as a gated trust write does
+//! ([`crate::trust`]):
+//!
+//! - without `acknowledge_widening`,
+//!   [`AdminWriteError::WideningNotAcknowledged`];
+//! - the `instance_security_policy` row `FOR SHARE`, after the operator
+//!   rows (the source path's order); none is
+//!   [`AdminWriteError::PolicyUnavailable`];
+//! - the mode table: `widening_second_approver` off applies the write with
+//!   outcome `success_widening` (D23); on, under `single_actor_mode`,
+//!   with `success_single_actor`, since the requester always holds instance
+//!   `security_admin` (Q4; IR-052: "or one actor when `single_actor_mode`
+//!   is on"); otherwise the write would be a pending operation, and an
+//!   egress write has no operation kind yet, so it is
+//!   [`AdminWriteError::SecondApproverRequired`]: nothing written, no ID
+//!   taken, until an `egress_allowlist_entry_*` kind adds the pending path.
+//!
+//! The expected revision IR-052 asks for is the entry's, which an enable
+//! carries; a create has none, and neither carries the policy row's
+//! revision, as no gated trust write does (inferred). A disable is not
+//! widening (IR-152) and passes no gate step: no acknowledgement, no policy
+//! row, outcome `success`.
 //!
 //! # Order and locks
 //!
@@ -282,8 +332,10 @@
 //! compare-and-set then succeeds only on the row at the revision read, and
 //! every change advances the revision, so the event's classification holds
 //! for the row it replaced. An egress entry write takes, after the operator
-//! rows, only its own: the insert's unique index entry, or the entry row
-//! `FOR NO KEY UPDATE` by its compare-and-set, then the audit head.
+//! rows, the policy row `FOR SHARE` (a create or an enable, "Egress
+//! allowlist"), then only its own: the insert's unique index entry, or the
+//! entry row `FOR NO KEY UPDATE` by its compare-and-set, then the audit
+//! head.
 //!
 //! # Errors and rollback
 //!
@@ -306,13 +358,15 @@
 //!
 //! # Not gated: the D3 seams
 //!
-//! Every write here applies at once on one operator's authority. None goes
-//! through the second-approver gate ([`crate::operation`]), none takes
-//! `acknowledge_widening`, and none reads `widening_second_approver`:
-//! which of these writes are widening (D3 of the M1a plan) awaits a ruling
-//! of the user (slice S3b), so this module decides nothing about it. The
-//! writes a ruling may move behind the gate are the ones that can widen
-//! what a credential, a checker or an operator can reach:
+//! Every workload write here ([`workload`]) applies at once on one
+//! operator's authority. None goes through the second-approver gate
+//! ([`crate::operation`]), none takes `acknowledge_widening`, and none
+//! reads `widening_second_approver`: which of these writes are widening
+//! (D3 of the M1a plan) awaits a ruling of the user (slice S3b), so this
+//! module decides nothing about it. The egress entry writes are not among
+//! them: IR-052 already gates them (see "Egress allowlist"). The writes a
+//! ruling may move behind the gate are the ones that can widen what a
+//! credential, a checker or an operator can reach:
 //!
 //! - an audience tenant assignment create (enabled), its enable or
 //!   re-enable, and an update that adds a profile, a scope or a constraint
@@ -336,22 +390,14 @@
 //!   accepted profile or turns `live_check_required` off
 //!   ([`workload::create_resource_action`],
 //!   [`workload::update_resource_action`]);
-//! - a tenant create ([`workload::create_tenant`]);
-//! - an egress allowlist entry create (enabled) and its enable or re-enable
-//!   ([`egress::create_egress_entry`], [`egress::enable_egress_entry`]),
-//!   which IR-152 itself names widening-class (an IR-054 approval when
-//!   `widening_second_approver` is on, IR-052): they are gated-in-future,
-//!   and only the ruling on D3 decides when, so here they apply at once.
+//! - a tenant create ([`workload::create_tenant`]).
 //!
 //! The `disable_*` writes and a checker tenant set removal only narrow; the
 //! design's rule that a soft disable is fail-safe and not widening
 //! (ADR-008 item 3, for bindings and grants) suggests they stay ungated,
-//! but that too is for the ruling. For an egress entry IR-152 says so
-//! itself: disabling is not widening, so [`egress::disable_egress_entry`]
-//! stays ungated, and so does a create of a disabled entry (inferred: it
-//! lets no fetch through until an enable, which is the gated step). A
-//! gated write would keep this module's authorization and audit and add
-//! the gate's steps between them, as [`crate::trust`] does.
+//! but that too is for the ruling. A gated write would keep this module's
+//! authorization and audit and add the gate's steps between them, as
+//! [`crate::trust`] does, and as the egress create and enable do.
 //!
 //! Such a write creates an `administrative_operation`, so it must take its
 //! locks as steps 1 to 3 of "What 0005 adds" in the migrations README
@@ -366,11 +412,11 @@
 //! order and in the mode that order asks for, not `FOR SHARE` first and
 //! stronger later, since two writes that each hold it `FOR SHARE` and then
 //! ask for more deadlock, `40P01`), and the migrations README's lock order
-//! with it. A gated egress entry write must also lock no `trust_source` row
-//! (the `0011` README notes and [`crate::trust::source`], "Order and
-//! locks": a source update holds its row and then takes the entry
-//! `FOR SHARE`); it may list the affected sources without a lock after its
-//! entry `UPDATE`.
+//! with it. An egress entry write that creates an operation must also lock
+//! no `trust_source` row (the `0011` README notes and
+//! [`crate::trust::source`], "Order and locks": a source update holds its
+//! row and then takes the entry `FOR SHARE`); it may list the affected
+//! sources without a lock after its entry `UPDATE`.
 //!
 //! # Not done here
 //!
@@ -407,12 +453,15 @@
 //!   assignment or an action, and the T14.4 range rules of an action
 //!   (IR-101); leaving a disabled assignment's tenant out of a checker's
 //!   effective set (OQ-ADR018-1).
-//! - The affected source IDs in an egress entry write's event: IR-152 says
-//!   "the audit event of the entry write lists the affected source IDs",
-//!   but an event has no detail member (no `audit_event` column for it), so
-//!   the event records only the entry; recording them needs an envelope
-//!   member first (OQ-IR-15). The degraded health signal of dependent
-//!   sources and the fail-closed fetch are the fetcher's (T11.2, T11.8).
+//! - The affected source IDs in an egress entry write's event: decided, not
+//!   implemented. IR-152 and OQ-IR-12 (decided, 2026-11-20) say "the audit
+//!   event of the entry write lists the affected source IDs", but an event
+//!   has no detail member (no `audit_event` column for it), and an envelope
+//!   member is an ADR-level change to the IR-056 hash input (as ruled for
+//!   the fingerprint, Q6 of the second-approver proposal), so the event
+//!   records only the entry until that change lands. The degraded health
+//!   signal of dependent sources and the fail-closed fetch are the
+//!   fetcher's (T11.2, T11.8).
 //! - The deployment-policy mirror of the egress allowlist, which is slice
 //!   S8, not these writers; nothing here bumps a revision for it.
 //!
@@ -430,7 +479,7 @@ use std::{fmt, time::SystemTime};
 use crate::identity::IdentityError;
 use crate::ids::{IdError, IdGenerator};
 use crate::persistence::registry::{AuditEvent, RegistryError};
-use crate::trust::write::WriteError;
+use crate::trust::write::{GatedWriteError, WriteError};
 
 pub use egress::{
     EgressEntryCreate, MAX_DESTINATION_BYTES, create_egress_entry, disable_egress_entry,
@@ -515,12 +564,28 @@ pub enum AdminWriteError {
     /// identity ([`crate::identity::canonical_public_identity`]); checked
     /// after the authorization and before any ID is generated.
     PublicKey(IdentityError),
-    /// An egress entry create gave an `exact_destination` that is not an
-    /// exact `https` URL in canonical form within the writer's bounds
-    /// ([`egress::is_valid_destination`]; see the module docs, "Egress
-    /// allowlist"); checked after the authorization and before any ID is
-    /// generated. The text never quotes the destination.
+    /// An egress entry create gave an `exact_destination`, or an enable
+    /// found a stored one, that is not an exact `https` URL in canonical
+    /// form within the writer's bounds ([`egress::is_valid_destination`];
+    /// see the module docs, "Egress allowlist"); checked after the
+    /// authorization and the gate and before any ID is generated. The text
+    /// never quotes the destination.
     InvalidDestination,
+    /// A widening egress write (a create, enabled or disabled, or an enable;
+    /// IR-052, IR-152) was submitted without `acknowledge_widening`, as a
+    /// gated trust write's `WideningNotAcknowledged` (see the module docs,
+    /// "Egress allowlist"). Checked after the authorization.
+    WideningNotAcknowledged,
+    /// A widening egress write found no `instance_security_policy` row
+    /// (before bootstrap; D18), as a gated trust write's
+    /// `PolicyUnavailable`.
+    PolicyUnavailable,
+    /// A widening egress write while `widening_second_approver` is on and
+    /// the write is not single-actor: IR-052 says it must not take effect
+    /// until an approval applies it, and an egress write has no pending
+    /// operation yet, so it is refused, writing nothing (fails closed; see
+    /// the module docs, "Egress allowlist").
+    SecondApproverRequired,
     /// The generator gave no ID, for the new object or for the audit
     /// event: a server error, not retried with another source (see
     /// "Generators" in [`crate::ids`]; lead decision, 2026-11-24).
@@ -549,6 +614,14 @@ impl fmt::Display for AdminWriteError {
             Self::InvalidDestination => {
                 f.write_str("the egress destination is not an exact https URL in canonical form")
             }
+            Self::WideningNotAcknowledged => {
+                f.write_str("the egress allowlist write is widening and was not acknowledged")
+            }
+            Self::PolicyUnavailable => f.write_str("the instance security policy is unavailable"),
+            Self::SecondApproverRequired => f.write_str(
+                "the egress allowlist write is widening and needs a second approver, \
+                 which egress writes cannot request yet",
+            ),
             Self::Id(_) => f.write_str("operator write could not generate an ID"),
             Self::Registry(err) => write!(f, "operator write failed: {err}"),
         }
@@ -595,6 +668,11 @@ impl WriteError for AdminWriteError {
     const UNAUTHORIZED: Self = Self::Unauthorized;
 }
 
+impl GatedWriteError for AdminWriteError {
+    const WIDENING_NOT_ACKNOWLEDGED: Self = Self::WideningNotAcknowledged;
+    const POLICY_UNAVAILABLE: Self = Self::PolicyUnavailable;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +705,22 @@ mod tests {
                 AdminWriteError::InvalidDestination,
                 "InvalidDestination",
                 "the egress destination is not an exact https URL in canonical form",
+            ),
+            (
+                AdminWriteError::WideningNotAcknowledged,
+                "WideningNotAcknowledged",
+                "the egress allowlist write is widening and was not acknowledged",
+            ),
+            (
+                AdminWriteError::PolicyUnavailable,
+                "PolicyUnavailable",
+                "the instance security policy is unavailable",
+            ),
+            (
+                AdminWriteError::SecondApproverRequired,
+                "SecondApproverRequired",
+                "the egress allowlist write is widening and needs a second approver, which \
+                 egress writes cannot request yet",
             ),
         ];
         for (err, debug, display) in cases {

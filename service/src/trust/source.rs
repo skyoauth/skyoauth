@@ -93,8 +93,8 @@
 //!   (`https://127.0.0.1/`, `https://169.254.169.254/`) or an IPv4-mapped
 //!   IPv6 address passes it when an entry lists it. A policy on such
 //!   addresses, and on what a host name resolves to, belongs to the
-//!   fetcher (T11.2, T11.8) or the egress entry writer, not here
-//!   (inferred).
+//!   fetcher (T11.2, T11.8), not here and not to the egress entry writer,
+//!   which checks this same spelling rule (inferred).
 //!
 //!   A refused member is [`SourceWriteError::InvalidDestination`] naming
 //!   the member. A create checks the syntax before any statement. An update
@@ -279,9 +279,10 @@
 //! entry row would deadlock with an update here; PostgreSQL fails one of
 //! them with `40P01` ([`RegistryError::Retry`]), a refusal for this write.
 //! The egress entry writer of [`crate::admin::egress`] locks no
-//! `trust_source` row and creates no operation; one that creates an
-//! operation (a gated create or re-enable, D3) must lock no `trust_source`
-//! row at all either. It may list the affected source IDs
+//! `trust_source` row and creates no operation (with the toggle on and no
+//! `single_actor_mode`, its widening create or enable is refused, IR-052);
+//! one that creates an operation, once an egress operation kind exists,
+//! must lock no `trust_source` row at all either. It may list the affected source IDs
 //! without a lock only after its entry `UPDATE`, under `READ COMMITTED`:
 //! a source write that checked the entry has committed by then, since the
 //! `UPDATE` waited for its `FOR SHARE`, and a later one sees the new status.

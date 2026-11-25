@@ -127,7 +127,10 @@
 //! and of the other purposes and the disabled entries (created as
 //! `disabled`), and [`disable_entry`] disables an entry, at its current
 //! revision, after a source was written on it or a request went pending on
-//! it. No entry is SQL-seeded, so A05 no longer uses the shared fixture
+//! it. A create, enabled or disabled, is widening (IR-052, IR-152), so
+//! [`seed_entry`] acknowledges it and runs while `widening_second_approver`
+//! is still off (outcome `success_widening`), before a gated fixture turns
+//! it on; a disable is not widening and needs neither. No entry is SQL-seeded, so A05 no longer uses the shared fixture
 //! `skyoauth_scenarios::egress` (conformance layout §1.3). The writer has no
 //! endpoint yet; its library call is what one will make.
 //!
@@ -1179,8 +1182,9 @@ fn writer_ids() -> SequentialIds {
 }
 
 /// Creates the egress allowlist entry of `purpose` for `destination` with
-/// `status` through the writer (see "Egress allowlist entries" in the
-/// module docs); it fails on a duplicate.
+/// `status` through the writer, acknowledged as widening, with the toggle
+/// off (see "Egress allowlist entries" in the module docs); it fails on a
+/// duplicate or with the toggle on.
 async fn seed_entry(pool: &PgPool, purpose: &str, destination: &str, status: Status) {
     let ids = writer_ids();
     let new = EgressEntryCreate {
@@ -1189,7 +1193,7 @@ async fn seed_entry(pool: &PgPool, purpose: &str, destination: &str, status: Sta
         status,
     };
     let mut transaction = pool.begin().await.unwrap();
-    admin::create_egress_entry(&mut transaction, &writer_request(&ids), &new)
+    admin::create_egress_entry(&mut transaction, &writer_request(&ids), &new, true)
         .await
         .unwrap_or_else(|err| panic!("{status:?} {purpose} entry: {err:?}"));
     transaction.commit().await.unwrap();
