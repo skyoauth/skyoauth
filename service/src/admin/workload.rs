@@ -6,13 +6,18 @@
 //!
 //! A create takes an input without an ID ([`TenantCreate`] and the other
 //! `*Create` types): the ID comes from the request's generator. An update
-//! takes the registry's patch or changes type and the expected revision; a
-//! `disable_*` write sets only `status` to `disabled` at the expected
-//! revision and keeps every other column.
+//! takes the registry's patch or changes type and the expected revision,
+//! but a checker's, which takes [`CheckerChanges`]: a checker's identity is
+//! derived from the DER key a create or a rotation gives, never taken from
+//! the caller. A `disable_*` write sets only `status` to `disabled` at the
+//! expected revision and keeps every other column.
 
-use sqlx::{Postgres, Transaction};
+use std::fmt;
+
+use sqlx::{Postgres, Transaction, types::Json};
 
 use super::{AdminRequest, AdminWriteError, Audited};
+use crate::identity::canonical_public_identity;
 use crate::ids::IdKind;
 use crate::operation::{OUTCOME_SUCCESS, Requester};
 use crate::persistence::registry::{
@@ -132,12 +137,51 @@ pub struct AssignmentCreate {
 }
 
 /// The input of [`create_resource_server_checker`]: a checker without its
-/// ID. It starts with no tenants; see [`add_resource_server_checker_tenant`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ID and identity. It starts with no tenants; see
+/// [`add_resource_server_checker_tenant`].
+///
+/// `Debug` leaves out the key bytes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CheckerCreate {
     pub resource_server_id: String,
-    pub public_mtls_identity: String,
+    /// The DER `SubjectPublicKeyInfo` of the checker's mTLS key. The write
+    /// derives `public_mtls_identity` from it with
+    /// [`canonical_public_identity`]; bytes that are not one well-formed
+    /// DER `SubjectPublicKeyInfo` are [`AdminWriteError::PublicKey`].
+    pub public_key_der: Vec<u8>,
     pub status: Status,
+}
+
+impl fmt::Debug for CheckerCreate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckerCreate")
+            .field("resource_server_id", &self.resource_server_id)
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The input of [`update_resource_server_checker`]: a checker's new key, or
+/// none, and its status.
+///
+/// `Debug` leaves out the key bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CheckerChanges {
+    /// The DER `SubjectPublicKeyInfo` of the checker's new mTLS key (a
+    /// rotation), from which the write derives the new
+    /// `public_mtls_identity` as [`CheckerCreate`] does; `None` keeps the
+    /// stored identity (a status-only write).
+    pub public_key_der: Option<Vec<u8>>,
+    pub status: Status,
+}
+
+impl fmt::Debug for CheckerChanges {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CheckerChanges")
+            .field("rotates", &self.public_key_der.is_some())
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The input of [`create_resource_action`]: an action rule without its ID.
@@ -222,13 +266,15 @@ fn check_revision(stored: i64, expected: i64) -> Result<(), AdminWriteError> {
     }
 }
 
-/// Step 3 of a write in a tenant: refuses it with
-/// [`AdminWriteError::TenantDisabled`] when `tenant_id` is disabled and the
-/// write is not `narrowing` (see the module docs, "Disabled tenants"). The
-/// tenant row is locked `FOR SHARE` until the transaction ends, whatever
-/// the outcome, so a tenant enable or disable waits for this write, and
-/// this write for it. A tenant that does not exist passes: the registry
-/// write then gives its own refusal, as before this check.
+/// Step 3 of a write in a tenant: the write needs an eligible tenant, one
+/// that exists and is enabled, or any tenant when the write is `narrowing`
+/// (see the module docs, "Disabled tenants"). A tenant that does not exist
+/// is [`RegistryError::NotFound`], and a disabled one for a write that is
+/// not `narrowing` is [`AdminWriteError::TenantDisabled`]. The tenant row
+/// is locked `FOR SHARE` in the write's savepoint: when the write succeeds
+/// the lock is held until the caller's transaction ends, so a tenant enable
+/// or disable waits for this write, and this write for it; when the write
+/// returns `Err` the savepoint's rollback releases it.
 async fn check_tenant(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
@@ -239,10 +285,69 @@ async fn check_tenant(
             .bind(tenant_id)
             .fetch_optional(&mut **transaction)
             .await?;
-    if disabled == Some(true) && !narrowing {
-        return Err(AdminWriteError::TenantDisabled);
+    match disabled {
+        None => Err(RegistryError::NotFound.into()),
+        Some(true) if !narrowing => Err(AdminWriteError::TenantDisabled),
+        Some(_) => Ok(()),
     }
-    Ok(())
+}
+
+/// Step 5 of [`disable_resource_server`] and
+/// [`disable_audience_tenant_assignment`]: one statement that sets only
+/// `status` to `disabled` and advances `revision`, as a compare-and-set at
+/// `expected_revision`, so the row's other columns are not read back
+/// through Rust and written again (a `jsonb` number that an `f64` cannot
+/// hold stays as stored). The caller read the row at `expected_revision`
+/// first, so a miss is [`RegistryError::StaleRevision`].
+async fn disable_status(
+    transaction: &mut Transaction<'_, Postgres>,
+    statement: &'static str,
+    id: &str,
+    expected_revision: i64,
+) -> Result<(), AdminWriteError> {
+    let updated = sqlx::query(statement)
+        .bind(id)
+        .bind(expected_revision)
+        .bind(Status::Disabled.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    if updated.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(RegistryError::StaleRevision.into())
+    }
+}
+
+const DISABLE_RESOURCE_SERVER: &str = "UPDATE resource_server \
+     SET status = $3, revision = revision + 1 WHERE id = $1 AND revision = $2";
+
+const DISABLE_ASSIGNMENT: &str = "UPDATE audience_tenant_assignment \
+     SET status = $3, revision = revision + 1 WHERE id = $1 AND revision = $2";
+
+/// Whether `changes` keeps every mutable column of the assignment `id` at
+/// `expected_revision` but `status`, compared in PostgreSQL with `jsonb`
+/// equality, as the columns are stored: `1` and `1.0` are one number there,
+/// though not as a `serde_json::Value`. The row is read without a lock
+/// (the compare-and-set after it holds the revision); a row no longer at
+/// `expected_revision` is [`RegistryError::StaleRevision`].
+async fn same_assignment_ceiling(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: &str,
+    expected_revision: i64,
+    changes: &AudienceTenantAssignmentChanges,
+) -> Result<bool, AdminWriteError> {
+    let same: Option<bool> = sqlx::query_scalar(
+        "SELECT allowed_profiles = $3 AND allowed_scopes = $4 AND constraint_versions = $5 \
+         FROM audience_tenant_assignment WHERE id = $1 AND revision = $2",
+    )
+    .bind(id)
+    .bind(expected_revision)
+    .bind(Json(&changes.allowed_profiles))
+    .bind(Json(&changes.allowed_scopes))
+    .bind(Json(&changes.constraint_versions))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    same.ok_or(RegistryError::StaleRevision.into())
 }
 
 /// Step 6: the write's event, last, with a generated ID.
@@ -561,20 +666,15 @@ async fn write_resource_server(
     requester: &Requester,
     (id, expected_revision, before): (&str, i64, &ResourceServer),
     changes: &ResourceServerChanges,
-    disable: bool,
 ) -> Result<Audited<ResourceServer>, AdminWriteError> {
     let row = registry::update_resource_server(&mut **transaction, id, expected_revision, changes)
         .await?;
-    let action = if disable {
-        RESOURCE_SERVER.disable
-    } else {
-        let unchanged = ResourceServer {
-            status: row.status,
-            revision: row.revision,
-            ..before.clone()
-        };
-        RESOURCE_SERVER.of_update(unchanged == row, before.status, row.status)
+    let unchanged = ResourceServer {
+        status: row.status,
+        revision: row.revision,
+        ..before.clone()
     };
+    let action = RESOURCE_SERVER.of_update(unchanged == row, before.status, row.status);
     let change = changed(action, None, &row.id, expected_revision, row.revision);
     let event = append_event(transaction, request, requester, change).await?;
     Ok(Audited { row, event })
@@ -595,13 +695,13 @@ pub async fn update_resource_server(
         let before = registry::get_resource_server(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
         let target = (id, expected_revision, &before);
-        write_resource_server(transaction, request, &requester, target, changes, false).await
+        write_resource_server(transaction, request, &requester, target, changes).await
     })
     .await
 }
 
-/// Disables the resource server `id` at `expected_revision`, keeping its
-/// other columns, and appends `resource_server.disable`.
+/// Disables the resource server `id` at `expected_revision`, writing only
+/// its `status` and `revision`, and appends `resource_server.disable`.
 pub async fn disable_resource_server(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -612,15 +712,17 @@ pub async fn disable_resource_server(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_resource_server(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
-        let changes = ResourceServerChanges {
-            name: before.name.clone(),
-            allowed_profiles: before.allowed_profiles.clone(),
-            scopes: before.scopes.clone(),
-            constraint_versions: before.constraint_versions.clone(),
-            status: Status::Disabled,
-        };
-        let target = (id, expected_revision, &before);
-        write_resource_server(transaction, request, &requester, target, &changes, true).await
+        disable_status(transaction, DISABLE_RESOURCE_SERVER, id, expected_revision).await?;
+        let row = registry::get_resource_server(&mut **transaction, id).await?;
+        let change = changed(
+            RESOURCE_SERVER.disable,
+            None,
+            &row.id,
+            expected_revision,
+            row.revision,
+        );
+        let event = append_event(transaction, request, &requester, change).await?;
+        Ok(Audited { row, event })
     })
     .await
 }
@@ -630,7 +732,10 @@ pub async fn disable_resource_server(
 
 /// Creates an audience assignment of a tenant with a generated ID
 /// ([`IdKind::AudienceAssignment`]) and appends
-/// `audience_tenant_assignment.create`.
+/// `audience_tenant_assignment.create`. The tenant must exist
+/// ([`RegistryError::NotFound`] otherwise) and be enabled
+/// ([`AdminWriteError::TenantDisabled`] otherwise), checked under its lock
+/// before any ID is generated.
 pub async fn create_audience_tenant_assignment(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -656,14 +761,15 @@ pub async fn create_audience_tenant_assignment(
     .await
 }
 
-/// The update of the assignment `id` from `before` to `changes`.
+/// The update of the assignment `id` from `before` to `changes`;
+/// `status_only` is [`same_assignment_ceiling`]'s answer for them.
 async fn write_assignment(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
     requester: &Requester,
     (id, expected_revision, before): (&str, i64, &AudienceTenantAssignment),
     changes: &AudienceTenantAssignmentChanges,
-    disable: bool,
+    status_only: bool,
 ) -> Result<Audited<AudienceTenantAssignment>, AdminWriteError> {
     let row = registry::update_audience_tenant_assignment(
         &mut **transaction,
@@ -672,16 +778,7 @@ async fn write_assignment(
         changes,
     )
     .await?;
-    let action = if disable {
-        ASSIGNMENT.disable
-    } else {
-        let unchanged = AudienceTenantAssignment {
-            status: row.status,
-            revision: row.revision,
-            ..before.clone()
-        };
-        ASSIGNMENT.of_update(unchanged == row, before.status, row.status)
-    };
+    let action = ASSIGNMENT.of_update(status_only, before.status, row.status);
     let change = changed(action, None, &row.id, expected_revision, row.revision);
     let event = append_event(transaction, request, requester, change).await?;
     Ok(Audited { row, event })
@@ -690,8 +787,10 @@ async fn write_assignment(
 /// Replaces the mutable columns of the assignment `id` at
 /// `expected_revision` with `changes`, and appends
 /// `audience_tenant_assignment.update`, or `.enable` or `.disable` for a
-/// status-only change. Enabling revalidates nothing and disabling strands
-/// the rows that reference it (the registry writer's rules).
+/// status-only change. Whether the other columns change is decided in
+/// PostgreSQL with `jsonb` equality, the stored columns' own (`1` and `1.0`
+/// are one number), for the tenant check and the event's action alike. Enabling revalidates nothing and disabling
+/// strands the rows that reference it (the registry writer's rules).
 pub async fn update_audience_tenant_assignment(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -703,19 +802,26 @@ pub async fn update_audience_tenant_assignment(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
-        let disable_only = changes.status == Status::Disabled
-            && changes.allowed_profiles == before.allowed_profiles
-            && changes.allowed_scopes == before.allowed_scopes
-            && changes.constraint_versions == before.constraint_versions;
+        let status_only =
+            same_assignment_ceiling(transaction, id, expected_revision, changes).await?;
+        let disable_only = status_only && changes.status == Status::Disabled;
         check_tenant(transaction, &before.tenant_id, disable_only).await?;
         let target = (id, expected_revision, &before);
-        write_assignment(transaction, request, &requester, target, changes, false).await
+        write_assignment(
+            transaction,
+            request,
+            &requester,
+            target,
+            changes,
+            status_only,
+        )
+        .await
     })
     .await
 }
 
-/// Disables the assignment `id` at `expected_revision`, keeping its other
-/// columns, and appends `audience_tenant_assignment.disable`.
+/// Disables the assignment `id` at `expected_revision`, writing only its
+/// `status` and `revision`, and appends `audience_tenant_assignment.disable`.
 pub async fn disable_audience_tenant_assignment(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -727,14 +833,17 @@ pub async fn disable_audience_tenant_assignment(
         let before = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
         check_tenant(transaction, &before.tenant_id, true).await?;
-        let changes = AudienceTenantAssignmentChanges {
-            allowed_profiles: before.allowed_profiles.clone(),
-            allowed_scopes: before.allowed_scopes.clone(),
-            constraint_versions: before.constraint_versions.clone(),
-            status: Status::Disabled,
-        };
-        let target = (id, expected_revision, &before);
-        write_assignment(transaction, request, &requester, target, &changes, true).await
+        disable_status(transaction, DISABLE_ASSIGNMENT, id, expected_revision).await?;
+        let row = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
+        let change = changed(
+            ASSIGNMENT.disable,
+            None,
+            &row.id,
+            expected_revision,
+            row.revision,
+        );
+        let event = append_event(transaction, request, &requester, change).await?;
+        Ok(Audited { row, event })
     })
     .await
 }
@@ -743,7 +852,17 @@ pub async fn disable_audience_tenant_assignment(
 // Checkers and their tenant sets: instance `security_admin`.
 
 /// Creates a checker, with no tenants, with a generated ID
-/// ([`IdKind::Checker`]) and appends `resource_server_checker.create`.
+/// ([`IdKind::Checker`]) and the canonical public identity of
+/// `new.public_key_der` ([`canonical_public_identity`]), and appends
+/// `resource_server_checker.create`. Key bytes that are not one well-formed
+/// DER `SubjectPublicKeyInfo` are [`AdminWriteError::PublicKey`], after the
+/// authorization and before any ID is generated; an identity another
+/// checker has is [`RegistryError::AlreadyExists`].
+///
+/// Interim: the per-algorithm form rule of [`crate::identity`] ("A hard
+/// requirement on the callers") is not enforced yet, so this write must not
+/// be exposed on any HTTP surface until it is (see the module docs, "Not
+/// done here").
 pub async fn create_resource_server_checker(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -751,10 +870,11 @@ pub async fn create_resource_server_checker(
 ) -> Result<Audited<ResourceServerChecker>, AdminWriteError> {
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
+        let public_mtls_identity = canonical_public_identity(&new.public_key_der)?;
         let new = NewResourceServerChecker {
             id: request.ids.new_id(IdKind::Checker)?,
             resource_server_id: new.resource_server_id.clone(),
-            public_mtls_identity: new.public_mtls_identity.clone(),
+            public_mtls_identity,
             status: new.status,
         };
         let row = registry::create_resource_server_checker(&mut **transaction, &new).await?;
@@ -796,23 +916,37 @@ async fn write_checker(
     Ok(Audited { row, event })
 }
 
-/// Replaces the mutable columns of the checker `id` at `expected_revision`
-/// with `changes`, and appends `resource_server_checker.update`, or
-/// `.enable` or `.disable` for a status-only change. Its tenant set is
-/// unchanged.
+/// Sets the status of the checker `id` at `expected_revision` and, for a
+/// rotation, its identity to the canonical public identity of
+/// `changes.public_key_der`, and appends `resource_server_checker.update`,
+/// or `.enable` or `.disable` for a status-only change (no key, or a key of
+/// the stored identity). Without a key the stored identity is kept. Key
+/// bytes that are not one well-formed DER `SubjectPublicKeyInfo` are
+/// [`AdminWriteError::PublicKey`], after the authorization and before the
+/// stored row is read. Its tenant set is unchanged.
+///
+/// Interim, as [`create_resource_server_checker`]: not to be exposed on any
+/// HTTP surface until the per-algorithm form rule lands.
 pub async fn update_resource_server_checker(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
     id: &str,
     expected_revision: i64,
-    changes: &ResourceServerCheckerChanges,
+    changes: &CheckerChanges,
 ) -> Result<Audited<ResourceServerChecker>, AdminWriteError> {
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
+        let rotated = (changes.public_key_der.as_deref())
+            .map(canonical_public_identity)
+            .transpose()?;
         let before = registry::get_resource_server_checker(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
+        let changes = ResourceServerCheckerChanges {
+            public_mtls_identity: rotated.unwrap_or_else(|| before.public_mtls_identity.clone()),
+            status: changes.status,
+        };
         let target = (id, expected_revision, &before);
-        write_checker(transaction, request, &requester, target, changes, false).await
+        write_checker(transaction, request, &requester, target, &changes, false).await
     })
     .await
 }
@@ -841,8 +975,10 @@ pub async fn disable_resource_server_checker(
 
 /// Adds `tenant_id` to the tenant set of the checker `checker_id` at
 /// `expected_revision` and appends `resource_server_checker.update`. The
-/// tenant needs an assignment of the checker's resource server, whatever
-/// its status (the registry writer's rules).
+/// tenant must exist ([`RegistryError::NotFound`] otherwise) and be enabled
+/// ([`AdminWriteError::TenantDisabled`] otherwise), and needs an assignment
+/// of the checker's resource server, whatever its status (the registry
+/// writer's rules).
 pub async fn add_resource_server_checker_tenant(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -870,7 +1006,10 @@ pub async fn add_resource_server_checker_tenant(
 
 /// Removes `tenant_id` from the tenant set of the checker `checker_id` at
 /// `expected_revision` and appends `resource_server_checker.update`. A
-/// tenant not in the set is `NotFound`.
+/// tenant not in the set, or not at all, is `NotFound`. The removal only
+/// narrows, so it applies whatever the tenant's status; it still locks the
+/// tenant row `FOR SHARE`, as the addition does, so a tenant status write
+/// and the change of its checkers wait for each other.
 pub async fn remove_resource_server_checker_tenant(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -880,6 +1019,7 @@ pub async fn remove_resource_server_checker_tenant(
 ) -> Result<Audited<ResourceServerChecker>, AdminWriteError> {
     in_savepoint(transaction, async |transaction| {
         let requester = security_admin(transaction, request).await?;
+        check_tenant(transaction, tenant_id, true).await?;
         let revision = registry::remove_resource_server_checker_tenant(
             &mut **transaction,
             checker_id,

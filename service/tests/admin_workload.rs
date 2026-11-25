@@ -33,8 +33,9 @@ use serde_json::json;
 use skyoauth_service::{
     admin::{
         self, ActionCreate, AdminRequest, AdminWriteError, AssignmentCreate, Audited,
-        CheckerCreate, PrincipalCreate, ResourceServerCreate, TenantCreate,
+        CheckerChanges, CheckerCreate, PrincipalCreate, ResourceServerCreate, TenantCreate,
     },
+    identity::{IdentityError, canonical_public_identity},
     ids::{IdError, IdGenerator, IdKind, test_support::SequentialIds},
     persistence::{
         self, PgPool,
@@ -44,9 +45,8 @@ use skyoauth_service::{
             NewAdminRoleBinding, NewAudienceTenantAssignment, NewPrincipal, NewResourceAction,
             NewResourceServer, NewResourceServerChecker, NewTenant, Principal, PrincipalKind,
             PrincipalPatch, Profile, RegistryError, ResourceAction, ResourceActionChanges,
-            ResourceServer, ResourceServerChanges, ResourceServerChecker,
-            ResourceServerCheckerChanges, Status, Tenant, TenantPatch, bootstrap_instance,
-            verify_audit_chain,
+            ResourceServer, ResourceServerChanges, ResourceServerChecker, Status, Tenant,
+            TenantPatch, bootstrap_instance, verify_audit_chain,
         },
     },
 };
@@ -76,6 +76,41 @@ const KEY_TRUST_A: &str = "key_trust_a";
 const KEY_TRUST_B: &str = "key_trust_b";
 /// No credential has it.
 const KEY_UNKNOWN: &str = "key_unknown";
+
+/// The DER `SubjectPublicKeyInfo` of a P-256 key (`id-ecPublicKey`, named
+/// curve, uncompressed point), generated with `openssl genpkey -algorithm
+/// EC -pkeyopt ec_paramgen_curve:P-256` and exported with `openssl pkey
+/// -pubout -outform DER`; its PEM body is
+/// `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0MiOvSGD6ffnGhciKbOKaTPw49aB`
+/// `RlDZtg60VkOvhIdf1Yf3T5ng5nNMEml/czhJj6N0+o/BDc74uqaizbqp5Q==`. The key
+/// a checker create gives.
+const P256_SPKI: [u8; 91] = [
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a,
+    0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0xd0, 0xc8, 0x8e, 0xbd, 0x21,
+    0x83, 0xe9, 0xf7, 0xe7, 0x1a, 0x17, 0x22, 0x29, 0xb3, 0x8a, 0x69, 0x33, 0xf0, 0xe3, 0xd6, 0x81,
+    0x46, 0x50, 0xd9, 0xb6, 0x0e, 0xb4, 0x56, 0x43, 0xaf, 0x84, 0x87, 0x5f, 0xd5, 0x87, 0xf7, 0x4f,
+    0x99, 0xe0, 0xe6, 0x73, 0x4c, 0x12, 0x69, 0x7f, 0x73, 0x38, 0x49, 0x8f, 0xa3, 0x74, 0xfa, 0x8f,
+    0xc1, 0x0d, 0xce, 0xf8, 0xba, 0xa6, 0xa2, 0xcd, 0xba, 0xa9, 0xe5,
+];
+
+/// The SHA-256 of [`P256_SPKI`], computed outside this code with
+/// `sha256sum`, `openssl dgst -sha256` and Python's `hashlib`, which agree.
+const P256_IDENTITY: &str =
+    "spki-sha256:ab852f30034f1945fb547e5228559defe8c777b064c2194bc7a1c10b518aa0db";
+
+/// The DER `SubjectPublicKeyInfo` of an Ed25519 key (parameters absent),
+/// generated with `openssl genpkey -algorithm ED25519`; as PEM,
+/// `MCowBQYDK2VwAyEAUfRYmkzHj6GwuLYsI+tTkGiXTCnuDGoilEBRjZFj8OQ=`. The key
+/// a checker rotation gives.
+const ED25519_SPKI: [u8; 44] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 0x51, 0xf4, 0x58, 0x9a,
+    0x4c, 0xc7, 0x8f, 0xa1, 0xb0, 0xb8, 0xb6, 0x2c, 0x23, 0xeb, 0x53, 0x90, 0x68, 0x97, 0x4c, 0x29,
+    0xee, 0x0c, 0x6a, 0x22, 0x94, 0x40, 0x51, 0x8d, 0x91, 0x63, 0xf0, 0xe4,
+];
+
+/// The SHA-256 of [`ED25519_SPKI`], computed as [`P256_IDENTITY`].
+const ED25519_IDENTITY: &str =
+    "spki-sha256:280292eab9838fde657039d990410c3525af3bcf2882b2cbee438d905d6e877f";
 
 /// Every enrolled key but the two that authorize something here, and the
 /// unknown one: an instance `auditor`; `ten_a`'s `auditor`, `client_admin`
@@ -771,7 +806,7 @@ async fn call(
                 request,
                 &CheckerCreate {
                     resource_server_id: "rs_1".into(),
-                    public_mtls_identity: "spki-sha256:created".into(),
+                    public_key_der: P256_SPKI.to_vec(),
                     status: Status::Enabled,
                 },
             )
@@ -783,8 +818,8 @@ async fn call(
                 request,
                 id(),
                 expected,
-                &ResourceServerCheckerChanges {
-                    public_mtls_identity: "spki-sha256:chk1-rotated".into(),
+                &CheckerChanges {
+                    public_key_der: Some(ED25519_SPKI.to_vec()),
                     status: Status::Enabled,
                 },
             )
@@ -1053,7 +1088,14 @@ async fn every_write_applies_for_its_role_with_its_event() {
         .await
         .unwrap();
     assert_eq!(checker.allowed_tenant_ids, ["ten_b"]);
-    assert_eq!(checker.public_mtls_identity, "spki-sha256:chk1-rotated");
+    assert_eq!(checker.public_mtls_identity, ED25519_IDENTITY);
+    let checker = registry::get_resource_server_checker(&pool, &created[4])
+        .await
+        .unwrap();
+    assert_eq!(
+        (checker.public_mtls_identity.as_str(), checker.status),
+        (P256_IDENTITY, Status::Enabled)
+    );
     let tenant = registry::get_tenant(&pool, "ten_c").await.unwrap();
     assert_eq!(tenant.status, Status::Disabled);
     let tenant = registry::get_tenant(&pool, &created[0]).await.unwrap();
@@ -1348,8 +1390,8 @@ async fn an_update_names_its_action_from_what_it_changes() {
             .unwrap();
         actions.push(done.event.action);
     }
-    // An assignment, a checker and an action: status only, then another
-    // column.
+    // An assignment: status only, then another column, then another
+    // column with an enable (`.update`, not `.enable`).
     let a = registry::get_audience_tenant_assignment(&mut **tx, "asgn_a3")
         .await
         .unwrap();
@@ -1372,6 +1414,15 @@ async fn an_update_names_its_action_from_what_it_changes() {
                 status: Status::Disabled,
             },
         ),
+        (
+            3,
+            AudienceTenantAssignmentChanges {
+                allowed_profiles: a.allowed_profiles.clone(),
+                allowed_scopes: a.allowed_scopes.clone(),
+                constraint_versions: vec![json!(3)],
+                status: Status::Enabled,
+            },
+        ),
     ] {
         let done =
             admin::update_audience_tenant_assignment(tx, &sec, "asgn_a3", revision, &changes)
@@ -1379,34 +1430,34 @@ async fn an_update_names_its_action_from_what_it_changes() {
                 .unwrap();
         actions.push(done.event.action);
     }
-    for (revision, changes) in [
+    // A checker: status only without a key, which keeps the stored
+    // identity; a rotation; status only with the key of the stored
+    // identity; a rotation with a disable.
+    for (revision, key, status, identity) in [
+        (1, None, Status::Disabled, "spki-sha256:chk2"),
+        (2, None, Status::Enabled, "spki-sha256:chk2"),
+        (3, Some(&P256_SPKI[..]), Status::Enabled, P256_IDENTITY),
+        (4, Some(&P256_SPKI[..]), Status::Disabled, P256_IDENTITY),
+        (5, Some(&P256_SPKI[..]), Status::Enabled, P256_IDENTITY),
         (
-            1,
-            ResourceServerCheckerChanges {
-                public_mtls_identity: "spki-sha256:chk2".into(),
-                status: Status::Disabled,
-            },
-        ),
-        (
-            2,
-            ResourceServerCheckerChanges {
-                public_mtls_identity: "spki-sha256:chk2".into(),
-                status: Status::Enabled,
-            },
-        ),
-        (
-            3,
-            ResourceServerCheckerChanges {
-                public_mtls_identity: "spki-sha256:chk2b".into(),
-                status: Status::Enabled,
-            },
+            6,
+            Some(&ED25519_SPKI[..]),
+            Status::Disabled,
+            ED25519_IDENTITY,
         ),
     ] {
+        let changes = CheckerChanges {
+            public_key_der: key.map(<[u8]>::to_vec),
+            status,
+        };
         let done = admin::update_resource_server_checker(tx, &sec, "chk_2", revision, &changes)
             .await
             .unwrap();
+        assert_eq!(done.row.public_mtls_identity, identity, "{revision}");
+        assert_eq!(done.row.status, status, "{revision}");
         actions.push(done.event.action);
     }
+    // An action: status only, then another column with an enable.
     let act = registry::get_resource_action(&mut **tx, "act_2")
         .await
         .unwrap();
@@ -1446,6 +1497,10 @@ async fn an_update_names_its_action_from_what_it_changes() {
             "resource_server.update",
             "audience_tenant_assignment.disable",
             "audience_tenant_assignment.update",
+            "audience_tenant_assignment.update",
+            "resource_server_checker.disable",
+            "resource_server_checker.enable",
+            "resource_server_checker.update",
             "resource_server_checker.disable",
             "resource_server_checker.enable",
             "resource_server_checker.update",
@@ -1453,6 +1508,483 @@ async fn an_update_names_its_action_from_what_it_changes() {
             "resource_action.update",
         ]
     );
+    db.drop([pool]).await;
+}
+
+/// Every `disable_*` write is `<resource>.disable`, the first time and
+/// again on a row already disabled, for each of the six tables, and writes
+/// only `status` and `revision`.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn every_disable_is_disable_also_when_repeated() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::new();
+    let sec = request(KEY_SEC, &ids);
+    let trust = request(KEY_TRUST_A, &ids);
+    let rs = registry::get_resource_server(&pool, "rs_3").await.unwrap();
+    let asgn = registry::get_audience_tenant_assignment(&pool, "asgn_b")
+        .await
+        .unwrap();
+    let chk = registry::get_resource_server_checker(&pool, "chk_2")
+        .await
+        .unwrap();
+    let act = registry::get_resource_action(&pool, "act_2").await.unwrap();
+    for revision in [1, 2] {
+        let mut actions = Vec::new();
+        let done = committed(&pool, async |tx| {
+            admin::disable_tenant(tx, &sec, "ten_c", revision).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (done.row.status, done.row.revision),
+            (Status::Disabled, revision + 1)
+        );
+        actions.push(done.event.action);
+        let done = committed(&pool, async |tx| {
+            admin::disable_principal(tx, &trust, "ten_a", "wld_a2", revision).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            (done.row.status, done.row.revision),
+            (Status::Disabled, revision + 1)
+        );
+        actions.push(done.event.action);
+        let done = committed(&pool, async |tx| {
+            admin::disable_resource_server(tx, &sec, "rs_3", revision).await
+        })
+        .await
+        .unwrap();
+        let expected = ResourceServer {
+            status: Status::Disabled,
+            revision: revision + 1,
+            ..rs.clone()
+        };
+        assert_eq!(done.row, expected);
+        actions.push(done.event.action);
+        let done = committed(&pool, async |tx| {
+            admin::disable_audience_tenant_assignment(tx, &sec, "asgn_b", revision).await
+        })
+        .await
+        .unwrap();
+        let expected = AudienceTenantAssignment {
+            status: Status::Disabled,
+            revision: revision + 1,
+            ..asgn.clone()
+        };
+        assert_eq!(done.row, expected);
+        actions.push(done.event.action);
+        let done = committed(&pool, async |tx| {
+            admin::disable_resource_server_checker(tx, &sec, "chk_2", revision).await
+        })
+        .await
+        .unwrap();
+        let expected = ResourceServerChecker {
+            status: Status::Disabled,
+            revision: revision + 1,
+            ..chk.clone()
+        };
+        assert_eq!(done.row, expected);
+        actions.push(done.event.action);
+        let done = committed(&pool, async |tx| {
+            admin::disable_resource_action(tx, &sec, "act_2", revision).await
+        })
+        .await
+        .unwrap();
+        let expected = ResourceAction {
+            status: Status::Disabled,
+            revision: revision + 1,
+            ..act.clone()
+        };
+        assert_eq!(done.row, expected);
+        actions.push(done.event.action);
+        assert_eq!(
+            actions,
+            [
+                "tenant.disable",
+                "principal.disable",
+                "resource_server.disable",
+                "audience_tenant_assignment.disable",
+                "resource_server_checker.disable",
+                "resource_action.disable",
+            ],
+            "disable at revision {revision}"
+        );
+        assert!(actions.iter().all(|action| action.ends_with(".disable")));
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// A status-only enable of an assignment and of an action is `.enable`,
+/// and so is an assignment's whose constraint versions are stored as `1.0`
+/// and submitted as `1`: the columns are compared as `jsonb`.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_status_only_enable_is_enable() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::new();
+    let sec = request(KEY_SEC, &ids);
+    set_jsonb(&pool, "audience_tenant_assignment", "asgn_a", "[1.0]").await;
+    let mut actions = Vec::new();
+    for (id, versions) in [("asgn_a3", json!(1)), ("asgn_a", json!(1))] {
+        let disabled = committed(&pool, async |tx| {
+            let revision = registry::get_audience_tenant_assignment(&mut **tx, id)
+                .await
+                .unwrap()
+                .revision;
+            admin::disable_audience_tenant_assignment(tx, &sec, id, revision).await
+        })
+        .await
+        .unwrap();
+        let changes = AudienceTenantAssignmentChanges {
+            allowed_profiles: disabled.row.allowed_profiles.clone(),
+            allowed_scopes: disabled.row.allowed_scopes.clone(),
+            constraint_versions: vec![versions],
+            status: Status::Enabled,
+        };
+        let done = committed(&pool, async |tx| {
+            let revision = disabled.row.revision;
+            admin::update_audience_tenant_assignment(tx, &sec, id, revision, &changes).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(done.row.status, Status::Enabled);
+        actions.push(done.event.action);
+    }
+    let disabled = committed(&pool, async |tx| {
+        admin::disable_resource_action(tx, &sec, "act_2", 1).await
+    })
+    .await
+    .unwrap();
+    let row = disabled.row;
+    let changes = ResourceActionChanges {
+        required_scopes: row.required_scopes.clone(),
+        accepted_profiles: row.accepted_profiles.clone(),
+        required_resource_dimensions: row.required_resource_dimensions.clone(),
+        live_check_required: row.live_check_required,
+        status: Status::Enabled,
+    };
+    let done = committed(&pool, async |tx| {
+        admin::update_resource_action(tx, &sec, "act_2", 2, &changes).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.row.status, Status::Enabled);
+    actions.push(done.event.action);
+    assert_eq!(
+        actions,
+        [
+            "audience_tenant_assignment.enable",
+            "audience_tenant_assignment.enable",
+            "resource_action.enable",
+        ]
+    );
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// Sets the `constraint_versions` of the row `id` of `table` to the `jsonb`
+/// text `versions`, advancing its revision: a fixture step for values that
+/// a `serde_json::Value` cannot carry, not a write under test.
+async fn set_jsonb(pool: &PgPool, table: &str, id: &str, versions: &str) {
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {table} SET constraint_versions = $2::jsonb, revision = revision + 1 \
+         WHERE id = $1"
+    )))
+    .bind(id)
+    .bind(versions)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// The stored `constraint_versions` of the row `id` of `table`, as text.
+async fn stored_jsonb(pool: &PgPool, table: &str, id: &str) -> String {
+    sqlx::query_scalar(AssertSqlSafe(format!(
+        "SELECT constraint_versions::text FROM {table} WHERE id = $1"
+    )))
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// In a disabled tenant, an assignment update whose constraint versions
+/// are `jsonb`-equal to the stored ones (`1` for a stored `1.0`) is
+/// disable-only and applies as `.disable`; one that changes them is still
+/// `TenantDisabled`. A resource server or assignment disable keeps a
+/// number that an `f64` cannot hold, and a trailing zero, as stored.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn disables_compare_and_keep_jsonb_as_stored() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::new();
+    let sec = request(KEY_SEC, &ids);
+    set_jsonb(&pool, "audience_tenant_assignment", "asgn_a", "[1.0]").await;
+    disable_tenant_row(&pool, "ten_a").await;
+    let stored = registry::get_audience_tenant_assignment(&pool, "asgn_a")
+        .await
+        .unwrap();
+    assert_eq!(stored.revision, 2);
+    assert_ne!(stored.constraint_versions, [json!(1)]);
+    let mut changes = assignment_changes(&stored, Status::Disabled, false);
+    changes.constraint_versions = vec![json!(2)];
+    let before = snapshot(&pool).await;
+    let result = committed(&pool, async |tx| {
+        admin::update_audience_tenant_assignment(tx, &sec, "asgn_a", 2, &changes).await
+    })
+    .await;
+    refused(result, "TenantDisabled");
+    assert_eq!(snapshot(&pool).await, before);
+    changes.constraint_versions = vec![json!(1)];
+    let done = committed(&pool, async |tx| {
+        admin::update_audience_tenant_assignment(tx, &sec, "asgn_a", 2, &changes).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.event.action, "audience_tenant_assignment.disable");
+    assert_eq!((done.row.status, done.row.revision), (Status::Disabled, 3));
+    let precise = "[123456789012345678901234567890.123456789, 1.10, {\"v\": 0.30}]";
+    for (table, id) in [
+        ("audience_tenant_assignment", "asgn_a3"),
+        ("resource_server", "rs_3"),
+    ] {
+        set_jsonb(&pool, table, id, precise).await;
+        let text = stored_jsonb(&pool, table, id).await;
+        assert_eq!(text, precise);
+        let done = committed(&pool, async |tx| match table {
+            "resource_server" => admin::disable_resource_server(tx, &sec, id, 2)
+                .await
+                .map(|done| (done.row.status, done.row.revision, done.event.action)),
+            _ => admin::disable_audience_tenant_assignment(tx, &sec, id, 2)
+                .await
+                .map(|done| (done.row.status, done.row.revision, done.event.action)),
+        })
+        .await
+        .unwrap();
+        assert_eq!(done.0, Status::Disabled, "{table}");
+        assert_eq!(done.1, 3, "{table}");
+        assert!(done.2.ends_with(".disable"), "{table}");
+        assert_eq!(stored_jsonb(&pool, table, id).await, text, "{table}");
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// A resource server or assignment disable whose row another transaction
+/// moves to a new revision after the disable read it, and commits while
+/// the disable's statement waits on the row, is `StaleRevision` and writes
+/// nothing: the statement compares the revision again on the committed
+/// row, not only the read before it.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_disable_overtaken_by_a_committed_write_is_stale() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::new();
+    let sec = request(KEY_SEC, &ids);
+    for (table, id) in [
+        ("resource_server", "rs_3"),
+        ("audience_tenant_assignment", "asgn_a3"),
+    ] {
+        let events = event_count(&pool).await;
+        let mut other = pool.begin().await.unwrap();
+        sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {table} SET revision = revision + 1 WHERE id = $1"
+        )))
+        .bind(id)
+        .execute(&mut *other)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let disable = async {
+            let result = match table {
+                "resource_server" => admin::disable_resource_server(&mut tx, &sec, id, 1)
+                    .await
+                    .map(|done| done.event.action),
+                _ => admin::disable_audience_tenant_assignment(&mut tx, &sec, id, 1)
+                    .await
+                    .map(|done| done.event.action),
+            };
+            tx.commit().await.unwrap();
+            result
+        };
+        // Commits the other write once the disable waits on it, or fails
+        // the test after ten seconds.
+        let commit = async {
+            for _ in 0..1000 {
+                let waits: bool =
+                    sqlx::query_scalar("SELECT cardinality(pg_blocking_pids($1)) > 0")
+                        .bind(pid)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                if waits {
+                    other.commit().await.unwrap();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("{table}: the disable never waited on the row");
+        };
+        let (result, ()) = tokio::join!(disable, commit);
+        refused(result, "Registry(StaleRevision)");
+        assert_eq!(event_count(&pool).await, events, "{table}");
+        let (status, revision) = match table {
+            "resource_server" => {
+                let row = registry::get_resource_server(&pool, id).await.unwrap();
+                (row.status, row.revision)
+            }
+            _ => {
+                let row = registry::get_audience_tenant_assignment(&pool, id)
+                    .await
+                    .unwrap();
+                (row.status, row.revision)
+            }
+        };
+        assert_eq!((status, revision), (Status::Enabled, 2), "{table}");
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
+/// A checker's identity is derived from the key's DER: the known answers
+/// of the two fixture keys, computed outside this code.
+#[test]
+fn the_checker_keys_have_their_known_identities() {
+    assert_eq!(
+        canonical_public_identity(&P256_SPKI).unwrap(),
+        P256_IDENTITY
+    );
+    assert_eq!(
+        canonical_public_identity(&ED25519_SPKI).unwrap(),
+        ED25519_IDENTITY
+    );
+    let debug = format!(
+        "{:?} {:?}",
+        CheckerCreate {
+            resource_server_id: "rs_1".into(),
+            public_key_der: P256_SPKI.to_vec(),
+            status: Status::Enabled,
+        },
+        CheckerChanges {
+            public_key_der: Some(ED25519_SPKI.to_vec()),
+            status: Status::Enabled,
+        }
+    );
+    for marker in ["208, 200", "81, 244", "d0c88e", "51f458"] {
+        assert!(!debug.contains(marker), "{debug}");
+    }
+}
+
+/// A checker create or rotation whose key is not one well-formed DER
+/// `SubjectPublicKeyInfo` is `PublicKey`, after the authorization: no row,
+/// no event, no ID taken, the stored identity kept. A status-only update
+/// keeps the stored identity, and a valid key then applies with the next
+/// checker ID.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_malformed_checker_key_writes_nothing() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::with_seed(31);
+    let sec = request(KEY_SEC, &ids);
+    let pem = b"-----BEGIN PUBLIC KEY-----\n\
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0MiOvSGD6ffnGhciKbOKaTPw49aB\n\
+        RlDZtg60VkOvhIdf1Yf3T5ng5nNMEml/czhJj6N0+o/BDc74uqaizbqp5Q==\n\
+        -----END PUBLIC KEY-----\n";
+    let mut trailing = P256_SPKI.to_vec();
+    trailing.push(0);
+    let cases: [(Vec<u8>, IdentityError); 5] = [
+        (Vec::new(), IdentityError::Empty),
+        (pem.to_vec(), IdentityError::NotDer),
+        (
+            P256_SPKI[..P256_SPKI.len() - 1].to_vec(),
+            IdentityError::Truncated,
+        ),
+        (trailing, IdentityError::TrailingBytes),
+        // The AlgorithmIdentifier alone: DER, but not an SPKI.
+        (P256_SPKI[2..23].to_vec(), IdentityError::NotSpki),
+    ];
+    let before = snapshot(&pool).await;
+    for (der, error) in &cases {
+        // The authorization comes first: a refused operator learns nothing
+        // of the key.
+        let other = request(KEY_TRUST_A, &ids);
+        let new = CheckerCreate {
+            resource_server_id: "rs_1".into(),
+            public_key_der: der.clone(),
+            status: Status::Enabled,
+        };
+        let result = committed(&pool, async |tx| {
+            admin::create_resource_server_checker(tx, &other, &new).await
+        })
+        .await;
+        refused(result, "Unauthorized");
+        let result = committed(&pool, async |tx| {
+            admin::create_resource_server_checker(tx, &sec, &new).await
+        })
+        .await;
+        refused(result, &format!("PublicKey({error:?})"));
+        let changes = CheckerChanges {
+            public_key_der: Some(der.clone()),
+            status: Status::Enabled,
+        };
+        let result = committed(&pool, async |tx| {
+            admin::update_resource_server_checker(tx, &sec, "chk_1", 2, &changes).await
+        })
+        .await;
+        refused(result, &format!("PublicKey({error:?})"));
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    let fresh = SequentialIds::with_seed(31);
+    for kind in IdKind::ALL {
+        assert_eq!(ids.new_id(kind), fresh.new_id(kind), "{kind:?}");
+    }
+    let changes = CheckerChanges {
+        public_key_der: None,
+        status: Status::Disabled,
+    };
+    let done = committed(&pool, async |tx| {
+        admin::update_resource_server_checker(tx, &sec, "chk_1", 2, &changes).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.row.public_mtls_identity, "spki-sha256:chk1");
+    assert_eq!(done.event.action, "resource_server_checker.disable");
+    let next = fresh.new_id(IdKind::Checker).unwrap();
+    let new = CheckerCreate {
+        resource_server_id: "rs_1".into(),
+        public_key_der: P256_SPKI.to_vec(),
+        status: Status::Enabled,
+    };
+    let done = committed(&pool, async |tx| {
+        admin::create_resource_server_checker(tx, &sec, &new).await
+    })
+    .await
+    .unwrap();
+    assert_eq!(done.row.id, next);
+    assert_eq!(done.row.public_mtls_identity, P256_IDENTITY);
+    assert_eq!(done.event.action, "resource_server_checker.create");
+    // A second checker of the same key is the identity's unique key.
+    let result = committed(&pool, async |tx| {
+        admin::create_resource_server_checker(tx, &sec, &new).await
+    })
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(AdminWriteError::Registry(
+                RegistryError::AlreadyExists { .. }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert_chain_intact(&pool).await;
     db.drop([pool]).await;
 }
 
@@ -1503,16 +2035,16 @@ async fn a_refused_registry_write_leaves_nothing() {
         ),
         "{result:?}"
     );
-    // No tenant `ten_missing`, so no assignment of it; `chk_1` holds no
-    // `ten_b` and holds `ten_a`.
-    let result =
-        admin::add_resource_server_checker_tenant(&mut tx, &sec, "chk_2", 1, "ten_missing").await;
-    assert!(
-        matches!(
-            result,
-            Err(AdminWriteError::Registry(RegistryError::Invariant { .. }))
-        ),
-        "{result:?}"
+    // No tenant `ten_missing`: the tenant check finds none, before the
+    // registry write; `chk_1` holds no `ten_b` and holds `ten_a`.
+    refused(
+        admin::add_resource_server_checker_tenant(&mut tx, &sec, "chk_2", 1, "ten_missing").await,
+        "Registry(NotFound)",
+    );
+    refused(
+        admin::remove_resource_server_checker_tenant(&mut tx, &sec, "chk_1", 2, "ten_missing")
+            .await,
+        "Registry(NotFound)",
     );
     refused(
         admin::remove_resource_server_checker_tenant(&mut tx, &sec, "chk_1", 2, "ten_b").await,
@@ -1874,9 +2406,10 @@ fn assignment_changes(
 
 /// An assignment's writes follow its tenant: in a disabled tenant a create
 /// (even of a disabled assignment), a widening, a widening with a disable
-/// and a re-enable are `TenantDisabled` and write nothing; a disable-only
-/// update and a disable apply; another tenant's assignments are
-/// unaffected. Every other operator is `Unauthorized` first.
+/// and a re-enable are `TenantDisabled`, write nothing and take no ID, as
+/// is a create in a tenant that does not exist (`NotFound`); a
+/// disable-only update and a disable apply; another tenant's assignments
+/// are unaffected. Every other operator is `Unauthorized` first.
 #[tokio::test]
 #[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
 async fn a_disabled_tenant_takes_only_disable_only_assignment_writes() {
@@ -1910,6 +2443,14 @@ async fn a_disabled_tenant_takes_only_disable_only_assignment_writes() {
         .await;
         refused(result, "TenantDisabled");
     }
+    // A tenant that does not exist is no eligible tenant either: the
+    // locking read finds no row.
+    let new = create("ten_missing", Status::Enabled);
+    let result = committed(&pool, async |tx| {
+        admin::create_audience_tenant_assignment(tx, &sec, &new).await
+    })
+    .await;
+    refused(result, "Registry(NotFound)");
     let asgn_a = registry::get_audience_tenant_assignment(&pool, "asgn_a")
         .await
         .unwrap();
@@ -1922,6 +2463,12 @@ async fn a_disabled_tenant_takes_only_disable_only_assignment_writes() {
         refused(result, "TenantDisabled");
     }
     assert_eq!(snapshot(&pool).await, before);
+    // No refused create took an ID: the tenant is checked before the
+    // assignment's ID is generated.
+    let fresh = SequentialIds::with_seed(23);
+    for kind in IdKind::ALL {
+        assert_eq!(ids.new_id(kind), fresh.new_id(kind), "{kind:?}");
+    }
     let changes = assignment_changes(&asgn_a, Status::Disabled, false);
     let done = committed(&pool, async |tx| {
         admin::update_audience_tenant_assignment(tx, &sec, "asgn_a", 1, &changes).await
@@ -2017,15 +2564,32 @@ async fn a_disabled_tenant_is_never_added_to_a_checker_and_instance_writes_go_on
 
 /// A write in a tenant holds the tenant row `FOR SHARE` until its
 /// transaction ends: a tenant disable waits for it (here, until its lock
-/// timeout).
+/// timeout). This holds for every write of the "Disabled tenants" table
+/// but the tenant's own, a checker tenant removal included, which takes
+/// the lock although it is allowed in either status.
 #[tokio::test]
 #[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
 async fn the_tenant_check_is_locked_until_the_transaction_ends() {
     let (db, pool) = seeded().await;
     let ids = SequentialIds::new();
-    for write in [Write::CreatePrincipal, Write::CreateAssignment] {
+    for (write, tenant_id) in [
+        (Write::CreatePrincipal, "ten_a"),
+        (Write::UpdatePrincipal, "ten_a"),
+        (Write::DisablePrincipal, "ten_a"),
+        (Write::CreateAssignment, "ten_a"),
+        (Write::UpdateAssignment, "ten_a"),
+        (Write::DisableAssignment, "ten_b"),
+        (Write::AddCheckerTenant, "ten_b"),
+        (Write::RemoveCheckerTenant, "ten_a"),
+    ] {
+        let expected = match write.created_kind() {
+            Some(_) => 0,
+            None => current_revision(&pool, write).await,
+        };
         let mut tx = pool.begin().await.unwrap();
-        call(&mut tx, &ids, write, write.key(), 0).await.unwrap();
+        call(&mut tx, &ids, write, write.key(), expected)
+            .await
+            .unwrap_or_else(|err| panic!("{write:?}: {err:?}"));
         let mut other = pool.acquire().await.unwrap();
         let mut disable = Connection::begin(&mut *other).await.unwrap();
         sqlx::query("SET LOCAL lock_timeout = '200ms'")
@@ -2033,7 +2597,7 @@ async fn the_tenant_check_is_locked_until_the_transaction_ends() {
             .await
             .unwrap();
         let patch = tenant_patch(None, Some(Status::Disabled));
-        let err = registry::test_support::update_tenant(&mut *disable, "ten_a", 1, &patch)
+        let err = registry::test_support::update_tenant(&mut *disable, tenant_id, 1, &patch)
             .await
             .unwrap_err();
         assert!(format!("{err:?}").contains("55P03"), "{write:?}: {err:?}");
@@ -2043,8 +2607,6 @@ async fn the_tenant_check_is_locked_until_the_transaction_ends() {
     db.drop([pool]).await;
 }
 
-/// No refusal's `Display` or `Debug` holds a value of the request: a key,
-/// an ID, a name, a namespace or an audience.
 /// A generator that gives no ID, at any of the calls a write makes (a
 /// create's object ID, before the registry write, and every write's event
 /// ID, after it), fails the write with `Id` and leaves nothing written,
@@ -2106,6 +2668,8 @@ async fn an_exhausted_generator_writes_nothing() {
     db.drop([pool]).await;
 }
 
+/// No refusal's `Display` or `Debug` holds a value of the request: a key,
+/// a key's bytes, an ID, a name, a namespace or an audience.
 #[tokio::test]
 #[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
 async fn errors_omit_the_requests_values() {
@@ -2127,6 +2691,9 @@ async fn errors_omit_the_requests_values() {
         "principal-wld_a",
         "adm_",
         "crd_",
+        // The key's bytes, as hexadecimal and as a `Debug` of a `Vec<u8>`.
+        "d0c88e",
+        "208, 200",
     ];
     let generated = SequentialIds::with_seed(0x5ec7);
     let mut errors = Vec::new();
@@ -2200,6 +2767,17 @@ async fn errors_omit_the_requests_values() {
             .await
             .unwrap_err(),
     );
+    let truncated = CheckerCreate {
+        resource_server_id: "rs_1".into(),
+        public_key_der: P256_SPKI[..P256_SPKI.len() - 1].to_vec(),
+        status: Status::Enabled,
+    };
+    assert!(!format!("{truncated:?}").contains("208, 200"));
+    errors.push(
+        admin::create_resource_server_checker(&mut tx, &sec, &truncated)
+            .await
+            .unwrap_err(),
+    );
     tx.commit().await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
@@ -2238,6 +2816,7 @@ async fn errors_omit_the_requests_values() {
             "PrincipalKindNotAllowed",
             "Registry(NotFound)",
             "Registry(AlreadyExists { constraint: \"resource_server_checker_tenant_pkey\" })",
+            "PublicKey(Truncated)",
             "UnsupportedIsolation",
         ]
     );

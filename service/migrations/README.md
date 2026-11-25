@@ -235,7 +235,23 @@ The database does not enforce these rules; the service must:
   grant's audience row also locks its audience tenant assignment
   `FOR SHARE` (an `AFTER INSERT` guard trigger, at the end of the insert
   statement); that lock is one of the domain rows' and comes before the
-  tenant and head locks too ("What 0010 adds", "Lock order"). A write
+  tenant and head locks too ("What 0010 adds", "Lock order"). The
+  audited operator writes of `crate::admin` (T13.3) take one more lock
+  before their domain rows: after the operator rows (`FOR SHARE`, in the
+  order of "What 0005 adds"), a write in a tenant other than the tenant
+  itself (a principal create, update or disable; an assignment create,
+  update or disable; a checker tenant set addition or removal) locks that
+  tenant row `FOR SHARE` (`SELECT … FOR SHARE`, which also refuses a
+  missing tenant), then writes its domain rows and appends its event, so
+  the tenant-then-head order holds and the append's `FOR KEY SHARE` on the
+  same row (a principal's event) adds no wait. The lock is held until the transaction ends once
+  the write succeeds, and released with the write's savepoint when it
+  fails; a tenant status write (`FOR NO KEY UPDATE` with its `UPDATE`)
+  waits for it, and it for the status write, and neither holds the head
+  while it waits. A gated version of such a write would follow steps 1 to
+  3 of "What 0005 adds" instead, which put `tenant` after the domain
+  tables; `crate::admin` ("Not gated: the D3 seams") notes the
+  reconciliation it then needs. A write
   that creates an `administrative_operation` is the exception to "domain rows first": it
   follows steps 1 to 3 of "What 0005 adds", and its event precedes the
   operation, since `audit_id` is an immediate (not deferrable) foreign key.

@@ -347,9 +347,10 @@
 //! - `append_audit_event` and the operation-row writers
 //!   `insert_administrative_operation`, `consume_administrative_operation`
 //!   and `revoke_administrative_operation` (`pub(crate)`, PR 10): the
-//!   audited writes of this registry, of [`crate::trust`] and of
-//!   [`crate::operation`] call the append, and [`crate::operation`] the
-//!   operation-row writers, so they cannot be narrower;
+//!   audited writes of this registry, of [`crate::trust`], of
+//!   [`crate::operation`] and of [`crate::admin`] call the append, and
+//!   [`crate::operation`] the operation-row writers, so they cannot be
+//!   narrower;
 //! - the checker writers `create_resource_server_checker`,
 //!   `update_resource_server_checker`,
 //!   `add_resource_server_checker_tenant` and

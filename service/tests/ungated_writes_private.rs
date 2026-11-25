@@ -561,11 +561,11 @@ admin/workload.rs | pub async fn create_resource_server_checker( | append_event 
 admin/workload.rs | pub async fn create_resource_server_checker( | create_resource_server_checker | 2
 admin/workload.rs | pub async fn create_tenant( | append_event | 1
 admin/workload.rs | pub async fn create_workload_principal( | append_event | 1
-admin/workload.rs | pub async fn disable_audience_tenant_assignment( | write_assignment | 1
+admin/workload.rs | pub async fn disable_audience_tenant_assignment( | append_event | 1
 admin/workload.rs | pub async fn disable_principal( | append_event | 1
 admin/workload.rs | pub async fn disable_principal( | update_principal | 1
 admin/workload.rs | pub async fn disable_resource_action( | write_action | 1
-admin/workload.rs | pub async fn disable_resource_server( | write_resource_server | 1
+admin/workload.rs | pub async fn disable_resource_server( | append_event | 1
 admin/workload.rs | pub async fn disable_resource_server_checker( | write_checker | 1
 admin/workload.rs | pub async fn disable_tenant( | append_event | 1
 admin/workload.rs | pub async fn disable_tenant( | update_tenant | 1
