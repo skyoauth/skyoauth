@@ -10,7 +10,7 @@
 //!
 //! These tests need `SKYOAUTH_IT_DATABASE_URL` (see `common/mod.rs`); each
 //! creates and drops its own database. They are registry tests in the shape
-//! of A26 (M1a "policy"), not that conformance scenario, which belongs to
+//! of A26 (M1a, registry API), not that conformance scenario, which belongs to
 //! the test session in `tests/security`.
 //!
 //! No test name here may match the scenario pattern

@@ -274,11 +274,21 @@ speak of disabling and re-enabling, and of an "active" assignment, read as
   `public_mtls_identity` are non-empty and at most 2048 bytes, so an
   over-long value fails with `23514` instead of the btree error `54000`;
   `audience` and `action_name` also reject whitespace and control characters
-  (`[[:space:][:cntrl:]]`, as for egress destinations). `public_mtls_identity`
-  may contain spaces, since its form is not specified and may be a subject
-  DN. The audience syntax stays open (OQ-IR-9), and Unicode normalization
+  (`[[:space:][:cntrl:]]`, as for egress destinations). The
+  database does not reject whitespace in `public_mtls_identity`: when `0003`
+  was written its form was not specified and could have been a subject DN.
+  The form the service stores (next bullet) has neither. The audience syntax stays open (OQ-IR-9), and Unicode normalization
   (NFC or NFD) of these values is a service rule: the database compares
   bytes, so two spellings of one name are two keys.
+- **`public_mtls_identity` form.** The service stores `spki-sha256:` and 64
+  lowercase hexadecimal digits, which it computes from the checker key's DER
+  SubjectPublicKeyInfo with `crate::identity::canonical_public_identity`
+  (lead ruling, 2026-11-24; the contract wording is pending); the column
+  checks above are unchanged. The existing checker writers
+  (`create_resource_server_checker` and `update_resource_server_checker`,
+  test-support only) still take the identity string from their caller
+  today, until S3 wires `canonical_public_identity` in, as the `0005`
+  bullet says for operator credentials.
 - **ID column bounds.** Every ID column of `0003`, own IDs and reference
   columns alike, is at most 255 bytes. `resource_server.id` and `tenant.id`
   are bounded by lead decision (2026-11-20), `tenant.id` with
@@ -815,7 +825,16 @@ below. A database created from an earlier `0005` is recreated.
   `public_identity` is not checked for them: it is the canonical public-key
   identity of the credential, for example the SHA-256 digest of its
   SubjectPublicKeyInfo, in an encoding the service fixes; subject DNs are
-  not stored. The digests
+  not stored. The service computes that identity with
+  `crate::identity::canonical_public_identity` from the key's DER
+  SubjectPublicKeyInfo, as `spki-sha256:` and 64 lowercase hexadecimal
+  digits, and never accepts a precomputed string (lead decision,
+  2026-11-24): the operator tooling only supplies the DER key, at bootstrap
+  as at enrollment (the contract update is pending: identity-registry
+  still leaves canonicalizing to the operator tooling). `bootstrap_instance`
+  and `create_admin_credential` still take the identity string from their
+  caller today; the slices that wire enrollment and authentication (S5, S7)
+  call the function. The digests
   `request_digest`, `challenge_hash` and `replay_key_digest` are `bytea` of
   32 to 64 bytes, and the recovery public key is 1 to 8192 bytes. Every ID,
   key, reference and enumeration is `COLLATE "C"`; only `outcome` keeps the
@@ -3030,8 +3049,11 @@ and the `now` of a revocation are arguments, never the database's `now()`
 (`Guard`), `admin_credential_revoked_disabled_check` refuses an enabled
 revoked credential (`Invariant`), `admin_credential_immutable` keeps the
 key on its row, and the `0006` delete and truncate guards keep the row, so
-`admin_credential_public_identity_key` refuses the revoked key again
-(`AlreadyExists`, naming only the constraint). Only credential
+`admin_credential_public_identity_key` refuses the revoked identity again
+(`AlreadyExists`, naming only the constraint); the unique key is per
+identity, which is per DER encoding of a key, so it refuses the revoked key
+only once the callers enforce the one-form requirement of
+`crate::identity` (S3, S5, S7). Only credential
 revocation is one-way in the database. The registry has no setter that
 enables or otherwise updates an identity or a credential, and no way to
 disable a credential without revoking it (public-api §7.1 names enrollment
@@ -3163,8 +3185,10 @@ over-2048-byte `public_identity` or `trust_anchor_ref`, and a `now` outside
 the `0007` range or outside the years `0000` to `9999` that the audit writer
 accepts, with the writer's bound and message (encode errors, `Other`; no
 statement runs and nothing is written). It trusts its caller otherwise:
-canonicalizing the operator's mTLS key stays with the operator tooling
-(T13.1, T13.10). Then, in order: it locks the policy row
+it takes `public_identity` as given today, and the service, not the
+operator tooling, is to derive it from the DER SubjectPublicKeyInfo that
+the operator tooling supplies (T13.1, T13.10), as the `0005` bullet above
+says. Then, in order: it locks the policy row
 (`SELECT instance_id FROM instance_security_policy FOR UPDATE`) and, in a
 statement after the lock, refuses with `AlreadyClosed` when a
 `recovery_state` row exists; it adopts a policy row found without one,
