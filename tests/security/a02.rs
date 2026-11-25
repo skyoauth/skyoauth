@@ -4,13 +4,11 @@
 //! satisfied by pull request, dispatch, comment or `workflow_run` context
 //! (tasks §8; T12.2, T12.7, T22.5, T52.2).
 //!
-//! **A02 M1a: these tests are registered on A02's M1a stage ("policy
-//! matcher decision over claim maps supplied as evidence ..."), which stays
-//! `planned` until its own promotion PR, so for now they are no evidence:
-//! the reporter lists their results as not counted.** They test exactly
-//! that scope, with no signed token: `registry::select_grant`, then
-//! `policy::match_binding` (ADR-015 item 4
-//! steps 1, 3 and 4; design section 5.3 and section 5.7; ADR-016 item 1)
+//! **A02 M1a: these tests are the evidence of A02's implemented M1a stage
+//! ("policy matcher decision over claim maps supplied as evidence ..."), on
+//! the `scenarios-pg/x86_64` leg.** They test exactly that scope, with no
+//! signed token: `registry::select_grant`, then `policy::match_binding`
+//! (ADR-015 item 4 steps 1, 3 and 4; design section 5.3 and section 5.7; ADR-016 item 1)
 //! against a real PostgreSQL, one fresh database per test, seeded through
 //! the typed registry API by the shared fixture
 //! (`tests/security/selection_fixture.rs`). Every test runs in both
