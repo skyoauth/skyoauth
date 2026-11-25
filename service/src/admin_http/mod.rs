@@ -115,6 +115,10 @@
 //! | | `ReservedActorId`, `RequiredPredicate` | 400 | `invalid_request` |
 //! | [`AdminWriteError`](crate::admin::AdminWriteError) | `Unauthorized`, `PrincipalKindNotAllowed` | 403 | `forbidden` |
 //! | | `TenantDisabled` | 409 | `tenant_disabled` |
+//! | | `InvalidDestination` | 400 | `invalid_request` |
+//! | | `WideningNotAcknowledged` | 422 | `widening_not_acknowledged` |
+//! | | `SecondApproverRequired` (gate on, no egress operation kind yet) | 409 | `conflict` |
+//! | | `PolicyUnavailable` | 503 + `Retry-After: 1` | `auth_unavailable` |
 //! | | `UnsupportedIsolation` | 500 | `server_error` |
 //! | | `PublicKey(_)`, `Id(_)`, `Registry(_)` | as [`IdentityError`](crate::identity::IdentityError), [`IdError`](crate::ids::IdError), [`RegistryError`](crate::persistence::registry::RegistryError) | |
 //! | [`ApprovalError`](crate::operation::ApprovalError) | `Unauthorized`, `SelfApproval` | 403 | `forbidden` |

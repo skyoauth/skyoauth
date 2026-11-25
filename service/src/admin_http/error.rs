@@ -233,6 +233,12 @@ pub const fn from_admin_write(err: &AdminWriteError) -> AdminHttpError {
         }
         AdminWriteError::UnsupportedIsolation => code(ErrorCode::ServerError),
         AdminWriteError::TenantDisabled => code(ErrorCode::TenantDisabled),
+        AdminWriteError::InvalidDestination => code(ErrorCode::InvalidRequest),
+        AdminWriteError::WideningNotAcknowledged => code(ErrorCode::WideningNotAcknowledged),
+        // The gate is on and no egress operation kind exists, so the write
+        // cannot proceed in this state (a conflict with the instance policy).
+        AdminWriteError::SecondApproverRequired => code(ErrorCode::Conflict),
+        AdminWriteError::PolicyUnavailable => AdminHttpError::retry(ErrorCode::AuthUnavailable),
         AdminWriteError::PublicKey(err) => from_identity(err),
         AdminWriteError::Id(err) => from_id(err),
         AdminWriteError::Registry(err) => from_registry(err),
@@ -490,6 +496,10 @@ mod tests {
             (AdminWriteError::UnsupportedIsolation, SERVER),
             (AdminWriteError::PrincipalKindNotAllowed, FORBIDDEN),
             (AdminWriteError::TenantDisabled, TENANT_DISABLED),
+            (AdminWriteError::InvalidDestination, INVALID),
+            (AdminWriteError::WideningNotAcknowledged, WIDENING),
+            (AdminWriteError::SecondApproverRequired, CONFLICT),
+            (AdminWriteError::PolicyUnavailable, RETRY),
             (AdminWriteError::PublicKey(IdentityError::NotDer), INVALID),
             (AdminWriteError::Id(IdError::SourceFailed), SERVER),
             (AdminWriteError::Id(IdError::Exhausted), SERVER),
@@ -499,7 +509,7 @@ mod tests {
                 .into_iter()
                 .map(|(err, expected)| (AdminWriteError::Registry(err), expected)),
         );
-        check(from_admin_write, rows, 7);
+        check(from_admin_write, rows, 11);
     }
 
     /// An [`OverlapError`] from two versions that give one `kid` two keys.
