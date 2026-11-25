@@ -61,9 +61,12 @@
 //!   `#[doc(hidden)]` `test_support` module, compiled only with the
 //!   `test-support` feature, and they must stay unreachable from any
 //!   endpoint. This module must be the only path that writes a keyset
-//!   version outside tests. The A04 scenario tests (`tests/security`) stay
-//!   on the raw writers until A04 M1a is claimed, then switch to this
-//!   module (follow-up).
+//!   version outside tests. The A04 scenario tests (`tests/security`) write
+//!   through `registry::test_support` and use the wired jwk checks
+//!   (`parse_jwk_set`, and `check_version_overlap` through
+//!   `validate_upload`, `submit_create_version` and
+//!   `submit_enable_version`); only `live_keys` and
+//!   `KeysetVersion::is_live` are unwired.
 //!
 //! # The gate
 //!
@@ -374,8 +377,8 @@
 //! - What the design section 5.7 export carries of a version (OQ-IR-6).
 //! - A fingerprint in the audit event (an ADR question: the envelope has
 //!   no member for it).
-//! - Moving the A04 scenario tests from the raw writers to this module,
-//!   once A04 M1a is claimed.
+//! - Wiring `live_keys` and `KeysetVersion::is_live` (the A04 scenario
+//!   tests already use the other jwk checks).
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
 //! [`OperatorScope::Tenant`]: crate::persistence::registry::OperatorScope::Tenant
