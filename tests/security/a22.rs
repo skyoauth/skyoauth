@@ -45,6 +45,10 @@
 //!   in for another (`a22_neg_scope_and_role_never_inherit`). The IDs and
 //!   names of other registries' rows, used as the key, never authorize
 //!   (`a22_neg_other_registries_identities_never_authorize`; see its docs).
+//!   Strings shaped like an ID token, a `Bearer` header, a role claim, a
+//!   claims object or an issuer and subject, also when a human principal is
+//!   named exactly like one, give the same `None` as an unknown key
+//!   (`a22_neg_token_and_claim_shaped_keys_never_authorize`).
 //!   A closed pool gives an `Err` (`PoolClosed`), never a hit or a miss
 //!   (`a22_neg_store_unavailable_is_an_error_not_a_grant`); the pool is
 //!   closed on the client side, and no server outage is simulated.
@@ -66,16 +70,19 @@
 //!   `public_identity` as given and checks no handshake, chain or trust
 //!   anchor. Its client side is `skyoauth-operator`, which presents the key.
 //!   Neither the operator endpoint nor `skyoauth-operator` exists.
-//! - The negative at that endpoint: an upstream admin-role claim or a human
-//!   session from the OIDC harness component (the mock human IdP) confers
-//!   no operator authority.
+//! - The negative at that endpoint: an upstream admin-role claim, a token or
+//!   a human session confers no operator authority. A22's M1a stage, and
+//!   needing no mock IdP: a token-shaped input must not authenticate. The
+//!   registry-level form is pinned here
+//!   (`a22_neg_token_and_claim_shaped_keys_never_authorize`).
 //!
 //! Bootstrap and recovery (one bootstrap and signed recovery; concurrent or
 //! reopened bootstrap, replayed recovery) are A32's row (T13.4, T13.5,
 //! T13.6), not A22's.
 //!
 //! A22's M3 stage, "linking" (an explicit verified link positive and the
-//! email-only link negative; T30.4, T52.3), is not owned here. A22 has no
+//! email-only link negative, which need the OIDC harness's login and the
+//! linking flow; T30.4, T52.3), is not owned here. A22 has no
 //! M4 stage.
 //!
 //! Not covered here, because `service/tests/registry_operator.rs` covers
@@ -198,7 +205,7 @@ async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
     for (tenant, namespace) in TENANTS.into_iter().zip(["ns_a", "ns_b"]) {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: tenant.into(),
@@ -634,7 +641,7 @@ async fn a22_neg_other_registries_identities_never_authorize() {
     }
     for tenant in TENANTS {
         others.push(tenant.into());
-        let workload = registry::create_principal(
+        let workload = registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: format!("wld_{tenant}"),
@@ -647,7 +654,7 @@ async fn a22_neg_other_registries_identities_never_authorize() {
         .await
         .unwrap();
         others.push(workload.id);
-        let human = registry::create_principal(
+        let human = registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: format!("hum_{tenant}"),
@@ -710,6 +717,77 @@ async fn a22_neg_other_registries_identities_never_authorize() {
         }
     }
     // Each operator's own key still reaches it.
+    for operator in &operators {
+        assert_eq!(
+            authorize(&pool, &operator.request()).await.unwrap(),
+            Some(operator.hit())
+        );
+    }
+    db.drop([pool]).await;
+}
+
+/// Strings shaped like what an upstream login or a request header carries:
+/// an ID token whose payload names an admin role, the same behind a
+/// `Bearer` prefix, a role claim, a claims object naming a role and an
+/// email, an issuer and subject, and each operator's own key inside a
+/// claims object or behind a `Bearer` prefix. Used as `public_identity` for
+/// every role and every scope, none authorizes: the same `Ok(None)` as a
+/// never-registered key's, also when a human principal of the tenant is
+/// named exactly like it. Nothing but the exact registered key reaches an
+/// operator, so no claim, token or email is an operator credential
+/// (T13.1, API-002). Registry level and structural: no wire claim is made,
+/// and no human-link writer exists yet to exercise (T30.4 is A22's M3 stage;
+/// see the module docs). The email-only match through a login is not
+/// tested here.
+#[tokio::test]
+async fn a22_neg_token_and_claim_shaped_keys_never_authorize() {
+    const ID_TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJyb2xlIjoic2VjdXJpdHlfYWRtaW4ifQ.c2lnbmF0dXJl";
+    let (db, pool) = fixture().await;
+    let operators = enroll_every_shape(&pool).await;
+    let mut keys: Vec<String> = vec![
+        ID_TOKEN.into(),
+        format!("Bearer {ID_TOKEN}"),
+        "role=security_admin".into(),
+        "security_admin".into(),
+        r#"{"role":"security_admin","email":"operator@ten_a.example"}"#.into(),
+        "https://idp.example/ten_a#operator@ten_a.example".into(),
+    ];
+    for operator in &operators {
+        let key = &operator.credential.public_identity;
+        keys.push(format!(r#"{{"sub":"{key}","role":"security_admin"}}"#));
+        keys.push(format!("Bearer {key}"));
+    }
+    // A human principal named exactly like each of them, in each tenant.
+    for tenant in TENANTS {
+        for (index, key) in keys.iter().enumerate() {
+            registry::test_support::create_principal(
+                &pool,
+                &NewPrincipal {
+                    id: format!("hum_{tenant}_{index}"),
+                    tenant_id: tenant.into(),
+                    kind: PrincipalKind::Human,
+                    name: key.clone(),
+                    status: Status::Enabled,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    for key in &operators {
+        assert!(!keys.contains(&key.credential.public_identity));
+    }
+
+    for key in &keys {
+        for role in ROLES {
+            for scope in SCOPES {
+                let found = authorize(&pool, &request(key, role, scope)).await;
+                let unknown = authorize(&pool, &request(NEVER_REGISTERED, role, scope)).await;
+                assert_same_none(&found, &unknown, &format!("{key} {role} {scope:?}"));
+            }
+        }
+    }
+    // Each operator's own key still reaches exactly it.
     for operator in &operators {
         assert_eq!(
             authorize(&pool, &operator.request()).await.unwrap(),

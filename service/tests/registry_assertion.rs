@@ -81,7 +81,7 @@ fn oidc_source(tenant_id: &str, id: &str) -> NewTrustSource {
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for tenant in ["ten_a", "ten_b"] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: tenant.into(),

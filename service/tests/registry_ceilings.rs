@@ -271,7 +271,7 @@ async fn every_miss_is_the_same_none() {
     let service = registry::get_service_identity(&pool, "ten_a", "svc_1")
         .await
         .unwrap();
-    registry::remove_service_identity_resource_server(
+    registry::test_support::remove_service_identity_resource_server(
         &pool,
         "ten_a",
         "svc_1",

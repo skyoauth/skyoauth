@@ -346,7 +346,7 @@ fn placements(bad: &Value) -> [(&'static str, Value, usize); 3] {
 async fn base_fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         &pool,
         &NewTenant {
             id: TENANT.into(),
@@ -357,7 +357,7 @@ async fn base_fixture() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
-    registry::create_trust_keyset(
+    registry::test_support::create_trust_keyset(
         &pool,
         &NewTrustKeyset {
             id: KEYSET.into(),

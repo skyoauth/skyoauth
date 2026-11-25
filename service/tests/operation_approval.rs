@@ -203,7 +203,7 @@ async fn seeded() -> (TestDb, PgPool) {
     .unwrap();
     transaction.commit().await.unwrap();
     for (id, ns) in [("ten_a", "ns_a"), ("ten_b", "ns_b")] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: id.into(),

@@ -262,7 +262,7 @@ async fn seeded() -> (TestDb, PgPool) {
     .unwrap();
     transaction.commit().await.unwrap();
     for (id, ns) in [("ten_a", "ns_a"), ("ten_b", "ns_b"), ("ten_c", "ns_c")] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: id.into(),
@@ -281,7 +281,7 @@ async fn seeded() -> (TestDb, PgPool) {
         ("usr_a", "ten_a", PrincipalKind::Human),
         ("wld_b", "ten_b", PrincipalKind::Workload),
     ] {
-        registry::create_principal(
+        registry::test_support::create_principal(
             &pool,
             &NewPrincipal {
                 id: id.into(),
@@ -299,7 +299,7 @@ async fn seeded() -> (TestDb, PgPool) {
         ("rs_2", "https://api2.example"),
         ("rs_3", "https://api3.example"),
     ] {
-        registry::create_resource_server(&pool, &server(id, audience))
+        registry::test_support::create_resource_server(&pool, &server(id, audience))
             .await
             .unwrap();
     }
@@ -308,9 +308,12 @@ async fn seeded() -> (TestDb, PgPool) {
         ("asgn_b", "rs_1", "ten_b"),
         ("asgn_a3", "rs_3", "ten_a"),
     ] {
-        registry::create_audience_tenant_assignment(&pool, &assignment(id, rs, tenant))
-            .await
-            .unwrap();
+        registry::test_support::create_audience_tenant_assignment(
+            &pool,
+            &assignment(id, rs, tenant),
+        )
+        .await
+        .unwrap();
     }
     for (id, identity) in [("chk_1", "spki-sha256:chk1"), ("chk_2", "spki-sha256:chk2")] {
         registry::test_support::create_resource_server_checker(

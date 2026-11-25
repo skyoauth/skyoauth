@@ -226,7 +226,7 @@ fn strings(values: &[&str]) -> Vec<String> {
 async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         &pool,
         &NewTenant {
             id: TENANT.into(),
@@ -237,7 +237,7 @@ async fn fixture() -> (TestDb, PgPool) {
     )
     .await
     .unwrap();
-    registry::create_principal(
+    registry::test_support::create_principal(
         &pool,
         &NewPrincipal {
             id: ACTOR.into(),
@@ -334,7 +334,9 @@ async fn listed(pool: &PgPool) -> Vec<PrincipalBinding> {
 /// the record `new` describes.
 async fn assert_stored(pool: &PgPool, new: &NewPrincipalBinding) -> PrincipalBinding {
     let want = record(new, 1);
-    let created = registry::create_principal_binding(pool, new).await.unwrap();
+    let created = registry::test_support::create_principal_binding(pool, new)
+        .await
+        .unwrap();
     assert_eq!(created, want);
     assert_eq!(
         registry::get_principal_binding(pool, TENANT, &new.id)
@@ -450,7 +452,7 @@ async fn a37_pos_optional_predicate_omitted_is_unconstrained() {
         assert!(!new.claim_match_policy.contains_key(optional));
     }
     assert_stored(&pool, &new).await;
-    registry::create_service_grant(
+    registry::test_support::create_service_grant(
         &pool,
         &NewServiceGrant {
             id: "grt_release".into(),
@@ -547,7 +549,7 @@ async fn a37_neg_required_predicate_missing_refused() {
             for status in [Status::Enabled, Status::Disabled] {
                 let new = binding(&id, template, template.without(claim), status);
                 assert_refused(
-                    registry::create_principal_binding(&pool, &new).await,
+                    registry::test_support::create_principal_binding(&pool, &new).await,
                     &[claim],
                     template.name,
                     "missing",
@@ -569,7 +571,7 @@ async fn a37_neg_required_predicate_empty_refused() {
             for status in [Status::Enabled, Status::Disabled] {
                 let new = binding(&id, template, template.emptied(claim), status);
                 assert_refused(
-                    registry::create_principal_binding(&pool, &new).await,
+                    registry::test_support::create_principal_binding(&pool, &new).await,
                     &[claim],
                     template.name,
                     "empty",
@@ -609,7 +611,7 @@ async fn a37_neg_required_predicate_removed_by_update_refused() {
                             status,
                         };
                         assert_refused(
-                            registry::update_principal_binding(
+                            registry::test_support::update_principal_binding(
                                 &pool,
                                 TENANT,
                                 &stored.id,
@@ -656,7 +658,7 @@ async fn a37_neg_profile_change_needs_new_required_set() {
                     status,
                 };
                 assert_refused(
-                    registry::update_principal_binding(
+                    registry::test_support::update_principal_binding(
                         &pool,
                         TENANT,
                         &stored.id,

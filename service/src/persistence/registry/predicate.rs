@@ -13,14 +13,14 @@
 //! values of `claim_match_policy` are strings in the registry's types, and
 //! `0004` rejects a stored value that is not one.
 //!
-//! [`create_principal_binding`](super::create_principal_binding) and
-//! [`update_principal_binding`](super::update_principal_binding) call
+//! [`create_principal_binding`](super::grant::create_principal_binding) and
+//! [`update_principal_binding`](super::grant::update_principal_binding) call
 //! [`validate_claim_match_policy`] before their statement; an unmet required
 //! predicate is [`RegistryError::RequiredPredicate`], naming the claim and
 //! whether it is [`PredicateProblem::Missing`] or [`PredicateProblem::Empty`],
-//! never a value. Removing an optional predicate widens the binding and
-//! needs review (ADR-016 item 2; ADR-008 items 12 and 13), which stays with
-//! the service: the registry cannot tell a reviewed update from another.
+//! never a value. Removing an optional predicate widens the binding and needs
+//! review (ADR-016 item 2; ADR-008 items 12 and 13), which stays with the
+//! service: the registry cannot tell a reviewed update from another.
 //!
 //! A profile change that drops a predicate is such a removal too: moving a
 //! binding from `github_production` to `generic_production` with a policy

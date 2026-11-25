@@ -3,9 +3,11 @@
 //! the bare registry trust writers, operator writers, audit append or
 //! operation-row writers (second-approver proposal,
 //! `docs/proposals/second-approver-gated-writes.md`, PRs 7, 9 and 10), nor
-//! the checker, action, tenant and principal writers that only the audited
-//! writes of `crate::admin` call (the proposal's survey under "Still open
-//! after PRs 7, 9 and 10").
+//! the other registry writers of resource servers, audience tenant
+//! assignments, checkers, actions, tenants, principals, principal bindings,
+//! service identities, service grants and trust keysets, whether only the
+//! audited writes of `crate::admin` call them or nothing in the crate does
+//! (the proposal's survey under "Still open after PRs 7, 9 and 10").
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
 //! apply a write without the second-approver gate, so they are visible only
@@ -26,10 +28,13 @@
 //! and the operation-row writers `insert_administrative_operation`,
 //! `consume_administrative_operation` and `revoke_administrative_operation`
 //! are `pub(crate)`, called by `crate::operation` and `crate::trust` as
-//! well. The checker writers, the action writers, `update_tenant` and
-//! `update_principal` of the registry are `pub(crate)` too: the audited,
-//! authorized writes of `crate::admin` call them, and nothing else in the
-//! crate does.
+//! well. The registry's resource server, assignment, checker and action
+//! writers and its tenant and principal writers are `pub(crate)` too: the
+//! audited, authorized writes of `crate::admin` call them, and nothing else
+//! in the crate does. Its other writers of those tables (the principal
+//! binding, service identity and grant writers with their list-set changes,
+//! and the trust keyset writers) have no caller in the crate, so they take
+//! `update_admin_role_binding`'s form ([`REGISTRY_DEAD`]).
 //! Only the `#[doc(hidden)]` modules `trust::test_support` and
 //! `persistence::registry::test_support`, compiled with the feature, expose
 //! them to tests. The same feature gates `ids::test_support`, whose
@@ -47,7 +52,7 @@
 //!
 //! - asserts that `skyoauth-service`'s library was built with no feature;
 //! - asserts that the library emitted no warning. Without the feature each
-//!   `trust` writer and the registry writer of [`REGISTRY_DEAD`] carry
+//!   `trust` writer and each registry writer of [`REGISTRY_DEAD`] carry
 //!   `expect(dead_code)`, so a caller in their visibility, a public
 //!   forwarder included, makes the expectation unfulfilled, which is a
 //!   warning (a caller outside it is a privacy error in every build);
@@ -62,7 +67,7 @@
 //!   reason (a toolchain mismatch, a missing crate) or a narrowing of what
 //!   must stay public fails this test instead of passing it.
 //!
-//! The registry writers but the one of [`REGISTRY_DEAD`] are called in every
+//! The registry writers but those of [`REGISTRY_DEAD`] are called in every
 //! build, and so are the six crate-private steps of `trust` that apply a
 //! write without authorizing, gating or auditing it themselves
 //! (`insert_create_version`, `apply_create_version`,
@@ -141,17 +146,19 @@ const REGISTRY_UNGATED: [&str; 4] = [
     "update_trust_source",
 ];
 
-/// The registry writers that PR 10 and the checker, action, tenant and
-/// principal hardening after it made crate-private, by the private module
-/// of `persistence::registry` that defines them: the operator writers
-/// (`pub(super)`: the three creates are called only by the registry's
-/// `bootstrap` and `recovery`, the update by nothing in the crate), the
-/// audit append and the operation-row writers (`pub(crate)`:
-/// `crate::operation`, `crate::trust` and `crate::admin` call the append,
-/// the first the operation-row writers), and the checker, action, tenant
-/// and principal writers (`pub(crate)`: the audited, authorized writes of
-/// `crate::admin` call them).
-const REGISTRY_PRIVATE: [(&str, &str); 16] = [
+/// The registry writers that PR 10 and the hardening after it made
+/// crate-private, by the private module of `persistence::registry` that
+/// defines them: the operator writers (`pub(super)`: the three creates are
+/// called only by the registry's `bootstrap` and `recovery`, the update by
+/// nothing in the crate), the audit append and the operation-row writers
+/// (`pub(crate)`: `crate::operation`, `crate::trust` and `crate::admin` call
+/// the append, the first the operation-row writers), the resource server,
+/// assignment, checker, action, tenant and principal writers (`pub(crate)`:
+/// the audited, authorized writes of `crate::admin` call them), and the
+/// principal binding, service identity, grant and trust keyset writers that
+/// nothing in the crate calls (`pub(super)`, each with the update's
+/// `expect(dead_code)`).
+const REGISTRY_PRIVATE: [(&str, &str); 36] = [
     ("operator", "create_admin_identity"),
     ("operator", "create_admin_credential"),
     ("operator", "create_admin_role_binding"),
@@ -168,16 +175,67 @@ const REGISTRY_PRIVATE: [(&str, &str); 16] = [
     ("audience", "update_resource_action"),
     ("tenant", "update_tenant"),
     ("tenant", "update_principal"),
+    ("audience", "create_resource_server"),
+    ("audience", "update_resource_server"),
+    ("audience", "create_audience_tenant_assignment"),
+    ("audience", "update_audience_tenant_assignment"),
+    ("grant", "create_principal_binding"),
+    ("grant", "update_principal_binding"),
+    ("grant", "create_service_identity"),
+    ("grant", "update_service_identity"),
+    ("grant", "add_service_identity_resource_server"),
+    ("grant", "remove_service_identity_resource_server"),
+    ("grant", "create_service_grant"),
+    ("grant", "update_service_grant"),
+    ("grant", "add_service_grant_binding"),
+    ("grant", "remove_service_grant_binding"),
+    ("grant", "add_service_grant_resource_server"),
+    ("grant", "remove_service_grant_resource_server"),
+    ("tenant", "create_tenant"),
+    ("tenant", "create_principal"),
+    ("trust", "create_trust_keyset"),
+    ("trust", "update_trust_keyset"),
 ];
 
-/// The registry writer of [`REGISTRY_PRIVATE`] that nothing in the crate
-/// calls, so that it carries the `expect(dead_code)` guard, by its file
-/// under `src`. The checker, action, tenant and principal writers left this
-/// table when `crate::admin` became their caller.
-const REGISTRY_DEAD: [(&str, &str); 1] = [(
-    "persistence/registry/operator.rs",
-    "update_admin_role_binding",
-)];
+/// The registry writers of [`REGISTRY_PRIVATE`] that nothing in the crate
+/// calls, so that each carries the `expect(dead_code)` guard, by their
+/// file under `src`. The resource server, assignment, checker, action,
+/// tenant and principal writers are not here: `crate::admin` calls them.
+const REGISTRY_DEAD: [(&str, &str); 15] = [
+    (
+        "persistence/registry/operator.rs",
+        "update_admin_role_binding",
+    ),
+    ("persistence/registry/grant.rs", "create_principal_binding"),
+    ("persistence/registry/grant.rs", "update_principal_binding"),
+    ("persistence/registry/grant.rs", "create_service_identity"),
+    ("persistence/registry/grant.rs", "update_service_identity"),
+    (
+        "persistence/registry/grant.rs",
+        "add_service_identity_resource_server",
+    ),
+    (
+        "persistence/registry/grant.rs",
+        "remove_service_identity_resource_server",
+    ),
+    ("persistence/registry/grant.rs", "create_service_grant"),
+    ("persistence/registry/grant.rs", "update_service_grant"),
+    ("persistence/registry/grant.rs", "add_service_grant_binding"),
+    (
+        "persistence/registry/grant.rs",
+        "remove_service_grant_binding",
+    ),
+    (
+        "persistence/registry/grant.rs",
+        "add_service_grant_resource_server",
+    ),
+    (
+        "persistence/registry/grant.rs",
+        "remove_service_grant_resource_server",
+    ),
+    ("persistence/registry/trust.rs", "create_trust_keyset"),
+    ("persistence/registry/trust.rs", "update_trust_keyset"),
+];
 
 /// The crate-private steps of the trust write path that apply a write
 /// without authorizing, gating or auditing it themselves: the four that
@@ -271,7 +329,7 @@ const SCOPED: [(&str, &str); 6] = [
 
 /// The registry items of the same tables that stay public: the readers,
 /// and the row and input types the test-support wrappers take and return.
-const REGISTRY_PUBLIC: [&str; 43] = [
+const REGISTRY_PUBLIC: [&str; 75] = [
     "get_trust_keyset_version",
     "list_trust_keyset_versions",
     "get_trust_source",
@@ -315,17 +373,52 @@ const REGISTRY_PUBLIC: [&str; 43] = [
     "list_principals",
     "PrincipalPatch",
     "Principal",
+    "get_resource_server",
+    "list_resource_servers",
+    "NewResourceServer",
+    "ResourceServerChanges",
+    "ResourceServer",
+    "get_audience_tenant_assignment",
+    "list_audience_tenant_assignments",
+    "NewAudienceTenantAssignment",
+    "AudienceTenantAssignmentChanges",
+    "AudienceTenantAssignment",
+    "get_principal_binding",
+    "list_principal_bindings",
+    "NewPrincipalBinding",
+    "PrincipalBindingChanges",
+    "PrincipalBinding",
+    "get_service_identity",
+    "list_service_identities",
+    "NewServiceIdentity",
+    "ServiceIdentityChanges",
+    "ServiceIdentity",
+    "get_service_grant",
+    "list_service_grants",
+    "NewServiceGrant",
+    "ServiceGrantChanges",
+    "ServiceGrant",
+    "NewTenant",
+    "NewPrincipal",
+    "get_trust_keyset",
+    "list_trust_keysets",
+    "NewTrustKeyset",
+    "TrustKeysetChanges",
+    "TrustKeyset",
 ];
 
 /// The registry writers that deliberately stay public (the proposal's
-/// "Still open after PRs 7, 9 and 10"): bootstrap, a separate decision, and
-/// the two operator writers that only narrow. A change that made one of
-/// them crate-private would be a decision this test does not take; the
+/// "Still open after PRs 7, 9 and 10"): bootstrap, a separate decision, the
+/// two operator writers that only narrow, and the two replay-record writers,
+/// which can refuse a replay and never widen access. A change that made one
+/// of them crate-private would be a decision this test does not take; the
 /// control probe fails on it.
-const REGISTRY_KEPT_PUBLIC: [&str; 3] = [
+const REGISTRY_KEPT_PUBLIC: [&str; 5] = [
     "bootstrap_instance",
     "disable_admin_identity",
     "revoke_admin_credential",
+    "consume_assertion",
+    "consume_assertion_set",
 ];
 
 /// The public surface of break-glass restoration
@@ -385,13 +478,18 @@ const IDS_TEST_ONLY: [&str; 2] = ["test_support::SequentialIds", "test_support"]
 /// `append_stamped`) and of `crate::operation` (the approval's
 /// `approve_steps` and `revoke_steps`, the toggle's `toggle_steps`, and
 /// `insert_pending`, which the gated `submit_*` writes call). The
-/// checker, action, tenant and principal writers are defined and
-/// re-exported `pub(crate)`, named by their wrapper, and called only by
-/// `crate::admin`: by its private `write_checker` and `write_action` and
-/// by its public writes, which authorize first and then append their event
-/// through its private `append_event` (a caller of the audit append, like
-/// `append_stamped`); those public writes share the writers' names, so
-/// `crate::admin`'s own re-export of them is listed too. The last rows list
+/// resource server, assignment, checker, action, tenant and principal
+/// writers are defined and re-exported `pub(crate)`, named by their wrapper,
+/// and called only by `crate::admin`: by its private `write_checker` and
+/// `write_action` and by its public writes, which authorize first and then
+/// append their event through its private `append_event` (a caller of the
+/// audit append, like `append_stamped`); those public writes share the
+/// writers' names, so `crate::admin`'s own re-export of them is listed too
+/// (`create_tenant` is also named by the same `seed`, through
+/// `test_support`). The other writers of [`REGISTRY_DEAD`] are, like
+/// `update_admin_role_binding`, named only by their definition and their
+/// wrapper, but `create_trust_keyset`, which the same `seed` also names
+/// through `test_support`. The last rows list
 /// where each caller of [`CALLERS`] is named: its definition, the `use`s
 /// and the crate-private re-export of `insert_pending`, the other callers,
 /// and the public entry points that call it (`bootstrap_instance`,
@@ -524,19 +622,30 @@ persistence/registry/test_support.rs | pub async fn update_resource_action<'e>( 
 persistence/registry/test_support.rs | pub async fn update_tenant<'e>( | update_tenant | 2
 persistence/registry/test_support.rs | pub async fn update_principal<'e>( | update_principal | 2
 persistence/registry/mod.rs | pub(crate) use audience::{ | add_resource_server_checker_tenant | 1
+persistence/registry/mod.rs | pub(crate) use audience::{ | create_audience_tenant_assignment | 1
 persistence/registry/mod.rs | pub(crate) use audience::{ | create_resource_action | 1
+persistence/registry/mod.rs | pub(crate) use audience::{ | create_resource_server | 1
 persistence/registry/mod.rs | pub(crate) use audience::{ | create_resource_server_checker | 1
 persistence/registry/mod.rs | pub(crate) use audience::{ | remove_resource_server_checker_tenant | 1
+persistence/registry/mod.rs | pub(crate) use audience::{ | update_audience_tenant_assignment | 1
 persistence/registry/mod.rs | pub(crate) use audience::{ | update_resource_action | 1
+persistence/registry/mod.rs | pub(crate) use audience::{ | update_resource_server | 1
 persistence/registry/mod.rs | pub(crate) use audience::{ | update_resource_server_checker | 1
-persistence/registry/mod.rs | pub(crate) use tenant::{update_principal, update_tenant}; | update_principal | 1
-persistence/registry/mod.rs | pub(crate) use tenant::{update_principal, update_tenant}; | update_tenant | 1
+persistence/registry/mod.rs | pub(crate) use tenant::{create_principal, create_tenant, update_principal, update_tenant}; | create_principal | 1
+persistence/registry/mod.rs | pub(crate) use tenant::{create_principal, create_tenant, update_principal, update_tenant}; | create_tenant | 1
+persistence/registry/mod.rs | pub(crate) use tenant::{create_principal, create_tenant, update_principal, update_tenant}; | update_principal | 1
+persistence/registry/mod.rs | pub(crate) use tenant::{create_principal, create_tenant, update_principal, update_tenant}; | update_tenant | 1
 admin/mod.rs | pub use workload::{ | add_resource_server_checker_tenant | 1
+admin/mod.rs | pub use workload::{ | create_audience_tenant_assignment | 1
 admin/mod.rs | pub use workload::{ | create_resource_action | 1
+admin/mod.rs | pub use workload::{ | create_resource_server | 1
 admin/mod.rs | pub use workload::{ | create_resource_server_checker | 1
+admin/mod.rs | pub use workload::{ | create_tenant | 1
 admin/mod.rs | pub use workload::{ | remove_resource_server_checker_tenant | 1
+admin/mod.rs | pub use workload::{ | update_audience_tenant_assignment | 1
 admin/mod.rs | pub use workload::{ | update_principal | 1
 admin/mod.rs | pub use workload::{ | update_resource_action | 1
+admin/mod.rs | pub use workload::{ | update_resource_server | 1
 admin/mod.rs | pub use workload::{ | update_resource_server_checker | 1
 admin/mod.rs | pub use workload::{ | update_tenant | 1
 admin/workload.rs | async fn append_event( | append_audit_event | 1
@@ -545,22 +654,28 @@ admin/workload.rs | async fn write_action( | append_event | 1
 admin/workload.rs | async fn write_action( | update_resource_action | 1
 admin/workload.rs | async fn write_action( | write_action | 1
 admin/workload.rs | async fn write_assignment( | append_event | 1
+admin/workload.rs | async fn write_assignment( | update_audience_tenant_assignment | 1
 admin/workload.rs | async fn write_assignment( | write_assignment | 1
 admin/workload.rs | async fn write_checker( | append_event | 1
 admin/workload.rs | async fn write_checker( | update_resource_server_checker | 1
 admin/workload.rs | async fn write_checker( | write_checker | 1
 admin/workload.rs | async fn write_resource_server( | append_event | 1
+admin/workload.rs | async fn write_resource_server( | update_resource_server | 1
 admin/workload.rs | async fn write_resource_server( | write_resource_server | 1
 admin/workload.rs | pub async fn add_resource_server_checker_tenant( | add_resource_server_checker_tenant | 2
 admin/workload.rs | pub async fn add_resource_server_checker_tenant( | append_event | 1
 admin/workload.rs | pub async fn create_audience_tenant_assignment( | append_event | 1
+admin/workload.rs | pub async fn create_audience_tenant_assignment( | create_audience_tenant_assignment | 2
 admin/workload.rs | pub async fn create_resource_action( | append_event | 1
 admin/workload.rs | pub async fn create_resource_action( | create_resource_action | 2
 admin/workload.rs | pub async fn create_resource_server( | append_event | 1
+admin/workload.rs | pub async fn create_resource_server( | create_resource_server | 2
 admin/workload.rs | pub async fn create_resource_server_checker( | append_event | 1
 admin/workload.rs | pub async fn create_resource_server_checker( | create_resource_server_checker | 2
 admin/workload.rs | pub async fn create_tenant( | append_event | 1
+admin/workload.rs | pub async fn create_tenant( | create_tenant | 2
 admin/workload.rs | pub async fn create_workload_principal( | append_event | 1
+admin/workload.rs | pub async fn create_workload_principal( | create_principal | 1
 admin/workload.rs | pub async fn disable_audience_tenant_assignment( | append_event | 1
 admin/workload.rs | pub async fn disable_principal( | append_event | 1
 admin/workload.rs | pub async fn disable_principal( | update_principal | 1
@@ -571,17 +686,61 @@ admin/workload.rs | pub async fn disable_tenant( | append_event | 1
 admin/workload.rs | pub async fn disable_tenant( | update_tenant | 1
 admin/workload.rs | pub async fn remove_resource_server_checker_tenant( | append_event | 1
 admin/workload.rs | pub async fn remove_resource_server_checker_tenant( | remove_resource_server_checker_tenant | 2
+admin/workload.rs | pub async fn update_audience_tenant_assignment( | update_audience_tenant_assignment | 1
 admin/workload.rs | pub async fn update_audience_tenant_assignment( | write_assignment | 1
 admin/workload.rs | pub async fn update_principal( | append_event | 1
 admin/workload.rs | pub async fn update_principal( | update_principal | 2
 admin/workload.rs | pub async fn update_resource_action( | update_resource_action | 1
 admin/workload.rs | pub async fn update_resource_action( | write_action | 1
+admin/workload.rs | pub async fn update_resource_server( | update_resource_server | 1
 admin/workload.rs | pub async fn update_resource_server( | write_resource_server | 1
 admin/workload.rs | pub async fn update_resource_server_checker( | update_resource_server_checker | 1
 admin/workload.rs | pub async fn update_resource_server_checker( | write_checker | 1
 admin/workload.rs | pub async fn update_tenant( | append_event | 1
 admin/workload.rs | pub async fn update_tenant( | update_tenant | 2
 admin/workload.rs | use crate::persistence::registry::{ | append_audit_event | 1
+persistence/registry/audience.rs | pub(crate) async fn create_resource_server<'e>( | create_resource_server | 1
+persistence/registry/audience.rs | pub(crate) async fn update_resource_server<'e>( | update_resource_server | 1
+persistence/registry/audience.rs | pub(crate) async fn create_audience_tenant_assignment<'e>( | create_audience_tenant_assignment | 1
+persistence/registry/audience.rs | pub(crate) async fn update_audience_tenant_assignment<'e>( | update_audience_tenant_assignment | 1
+persistence/registry/grant.rs | pub(super) async fn create_principal_binding<'e>( | create_principal_binding | 1
+persistence/registry/grant.rs | pub(super) async fn update_principal_binding<'e>( | update_principal_binding | 1
+persistence/registry/grant.rs | pub(super) async fn create_service_identity<'e>( | create_service_identity | 1
+persistence/registry/grant.rs | pub(super) async fn update_service_identity<'e>( | update_service_identity | 1
+persistence/registry/grant.rs | pub(super) async fn add_service_identity_resource_server<'e>( | add_service_identity_resource_server | 1
+persistence/registry/grant.rs | pub(super) async fn remove_service_identity_resource_server<'e>( | remove_service_identity_resource_server | 1
+persistence/registry/grant.rs | pub(super) async fn create_service_grant<'e>( | create_service_grant | 1
+persistence/registry/grant.rs | pub(super) async fn update_service_grant<'e>( | update_service_grant | 1
+persistence/registry/grant.rs | pub(super) async fn add_service_grant_binding<'e>( | add_service_grant_binding | 1
+persistence/registry/grant.rs | pub(super) async fn remove_service_grant_binding<'e>( | remove_service_grant_binding | 1
+persistence/registry/grant.rs | pub(super) async fn add_service_grant_resource_server<'e>( | add_service_grant_resource_server | 1
+persistence/registry/grant.rs | pub(super) async fn remove_service_grant_resource_server<'e>( | remove_service_grant_resource_server | 1
+persistence/registry/tenant.rs | pub(crate) async fn create_tenant<'e>( | create_tenant | 1
+persistence/registry/tenant.rs | pub(crate) async fn create_principal<'e>( | create_principal | 1
+persistence/registry/trust.rs | pub(super) async fn create_trust_keyset<'e>( | create_trust_keyset | 1
+persistence/registry/trust.rs | pub(super) async fn update_trust_keyset<'e>( | update_trust_keyset | 1
+persistence/registry/test_support.rs | pub async fn create_resource_server<'e>( | create_resource_server | 2
+persistence/registry/test_support.rs | pub async fn update_resource_server<'e>( | update_resource_server | 2
+persistence/registry/test_support.rs | pub async fn create_audience_tenant_assignment<'e>( | create_audience_tenant_assignment | 2
+persistence/registry/test_support.rs | pub async fn update_audience_tenant_assignment<'e>( | update_audience_tenant_assignment | 2
+persistence/registry/test_support.rs | pub async fn create_principal_binding<'e>( | create_principal_binding | 2
+persistence/registry/test_support.rs | pub async fn update_principal_binding<'e>( | update_principal_binding | 2
+persistence/registry/test_support.rs | pub async fn create_service_identity<'e>( | create_service_identity | 2
+persistence/registry/test_support.rs | pub async fn update_service_identity<'e>( | update_service_identity | 2
+persistence/registry/test_support.rs | pub async fn add_service_identity_resource_server<'e>( | add_service_identity_resource_server | 2
+persistence/registry/test_support.rs | pub async fn remove_service_identity_resource_server<'e>( | remove_service_identity_resource_server | 2
+persistence/registry/test_support.rs | pub async fn create_service_grant<'e>( | create_service_grant | 2
+persistence/registry/test_support.rs | pub async fn update_service_grant<'e>( | update_service_grant | 2
+persistence/registry/test_support.rs | pub async fn add_service_grant_binding<'e>( | add_service_grant_binding | 2
+persistence/registry/test_support.rs | pub async fn remove_service_grant_binding<'e>( | remove_service_grant_binding | 2
+persistence/registry/test_support.rs | pub async fn add_service_grant_resource_server<'e>( | add_service_grant_resource_server | 2
+persistence/registry/test_support.rs | pub async fn remove_service_grant_resource_server<'e>( | remove_service_grant_resource_server | 2
+persistence/registry/test_support.rs | pub async fn create_tenant<'e>( | create_tenant | 2
+persistence/registry/test_support.rs | pub async fn create_principal<'e>( | create_principal | 2
+persistence/registry/test_support.rs | pub async fn create_trust_keyset<'e>( | create_trust_keyset | 2
+persistence/registry/test_support.rs | pub async fn update_trust_keyset<'e>( | update_trust_keyset | 2
+trust/keyset.rs |         impl Drop for Db { | create_tenant | 1
+trust/keyset.rs |         impl Drop for Db { | create_trust_keyset | 1
 operation/approval.rs | async fn apply_create( | apply_create | 1
 operation/approval.rs | async fn apply_enable( | apply_enable | 1
 operation/approval.rs | async fn apply_source_create( | apply_source_create | 1

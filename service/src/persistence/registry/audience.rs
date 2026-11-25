@@ -44,7 +44,7 @@ macro_rules! action_columns {
 }
 
 /// Creates a resource server at revision 1.
-pub async fn create_resource_server<'e>(
+pub(crate) async fn create_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewResourceServer,
 ) -> Result<ResourceServer, RegistryError> {
@@ -97,7 +97,7 @@ pub async fn list_resource_servers<'e>(
 
 /// Replaces the mutable columns of a resource server at
 /// `expected_revision` and advances its revision by one.
-pub async fn update_resource_server<'e>(
+pub(crate) async fn update_resource_server<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,
@@ -121,7 +121,7 @@ pub async fn update_resource_server<'e>(
 }
 
 /// Creates an audience assignment of a tenant at revision 1.
-pub async fn create_audience_tenant_assignment<'e>(
+pub(crate) async fn create_audience_tenant_assignment<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewAudienceTenantAssignment,
 ) -> Result<AudienceTenantAssignment, RegistryError> {
@@ -186,7 +186,7 @@ pub async fn list_audience_tenant_assignments<'e>(
 /// that audits the update appends its event after this call, so it locks
 /// the assignment before the audit head (migrations README, "What 0010
 /// adds").
-pub async fn update_audience_tenant_assignment<'e>(
+pub(crate) async fn update_audience_tenant_assignment<'e>(
     executor: impl PgExecutor<'e>,
     id: &str,
     expected_revision: i64,

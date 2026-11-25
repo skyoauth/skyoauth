@@ -278,7 +278,7 @@ async fn seeded() -> (TestDb, PgPool) {
     let pool = db.pool().await;
     persistence::migrate(&pool).await.unwrap();
     for tenant in ["ten_a", "ten_b"] {
-        registry::create_tenant(
+        registry::test_support::create_tenant(
             &pool,
             &NewTenant {
                 id: tenant.into(),
@@ -290,7 +290,7 @@ async fn seeded() -> (TestDb, PgPool) {
         .await
         .unwrap();
     }
-    registry::create_trust_keyset(
+    registry::test_support::create_trust_keyset(
         &pool,
         &NewTrustKeyset {
             id: "ks_1".into(),
@@ -1886,7 +1886,7 @@ async fn a_refusal_releases_its_locks() {
 /// The workload principal `wld_1` of `ten_a`, which bindings to `src_1`
 /// name.
 async fn workload(pool: &PgPool) {
-    registry::create_principal(
+    registry::test_support::create_principal(
         pool,
         &NewPrincipal {
             id: "wld_1".into(),
@@ -1942,7 +1942,7 @@ async fn reference_source(pool: &PgPool, n: u8) -> [Result<(), Option<String>>; 
     let set_timeout = "SET LOCAL lock_timeout = '100ms'";
     let mut tx = pool.begin().await.unwrap();
     sqlx::query(set_timeout).execute(&mut *tx).await.unwrap();
-    let binding = registry::create_principal_binding(
+    let binding = registry::test_support::create_principal_binding(
         &mut *tx,
         &NewPrincipalBinding {
             id: format!("bnd_{n}"),

@@ -41,18 +41,34 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # `update_admin_role_binding`), `append_audit_event` and the operation-row
 # writers (`insert_administrative_operation`,
 # `consume_administrative_operation`, `revoke_administrative_operation`),
-# and the checker, action, tenant and principal writers that only
-# `crate::admin`'s audited writes call (`create_resource_server_checker`,
+# the registry writers that only `crate::admin`'s audited writes call, of
+# checkers (`create_resource_server_checker`,
 # `update_resource_server_checker`, `add_resource_server_checker_tenant`,
-# `remove_resource_server_checker_tenant`, `create_resource_action`,
-# `update_resource_action`, `update_tenant`, `update_principal`)
+# `remove_resource_server_checker_tenant`), actions
+# (`create_resource_action`, `update_resource_action`), resource servers
+# (`create_resource_server`, `update_resource_server`), audience
+# assignments (`create_audience_tenant_assignment`,
+# `update_audience_tenant_assignment`), tenants and principals
+# (`create_tenant`, `update_tenant`, `create_principal`,
+# `update_principal`), and the other registry writers no code in the crate
+# calls: of principal bindings (`create_principal_binding`,
+# `update_principal_binding`), service identities
+# (`create_service_identity`, `update_service_identity`,
+# `add_service_identity_resource_server`,
+# `remove_service_identity_resource_server`), service grants
+# (`create_service_grant`, `update_service_grant`,
+# `add_service_grant_binding`, `remove_service_grant_binding`,
+# `add_service_grant_resource_server`,
+# `remove_service_grant_resource_server`) and trust keysets
+# (`create_trust_keyset`, `update_trust_keyset`),
 # to those tests and to the scenario tests of `skyoauth-scenarios`, and
 # `ids::test_support`, the deterministic ID generator `SequentialIds`. Off in
 # a normal build, where those writes are crate-private; the dev-dependency
 # on this package below, and the one in `tests/Cargo.toml`, turn it on for
 # test targets only (inferred: the mechanism; second-approver proposal,
-# "PR 7 as implemented", "PR 9 as implemented" and "PR 10 as
-# implemented"). Only a `[dev-dependencies]` entry may name it.
+# "PR 7 as implemented", "PR 9 as implemented", "PR 10 as implemented",
+# "Registry hardening PR as implemented" and "Registry writers follow-up
+# as implemented"). Only a `[dev-dependencies]` entry may name it.
 test-support = []
 
 [dev-dependencies]

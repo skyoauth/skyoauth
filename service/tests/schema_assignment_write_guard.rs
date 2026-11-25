@@ -258,7 +258,7 @@ async fn add<'e>(
     resource_server_id: &str,
 ) -> Result<i64, RegistryError> {
     if table == "service_identity_resource_server" {
-        registry::add_service_identity_resource_server(
+        registry::test_support::add_service_identity_resource_server(
             executor,
             "ten_a",
             "svc_1",
@@ -267,7 +267,7 @@ async fn add<'e>(
         )
         .await
     } else {
-        registry::add_service_grant_resource_server(
+        registry::test_support::add_service_grant_resource_server(
             executor,
             "ten_a",
             "grt_1",
@@ -619,16 +619,20 @@ async fn registry_writes_and_creating_statements_refuse_a_disabled_assignment() 
 
     // The creates: the disabled audience among enabled ones.
     assert_active_refusal(
-        registry::create_service_identity(&pool, &identity("svc_2", &["rs_1", "rs_2", "rs_3"]))
-            .await,
+        registry::test_support::create_service_identity(
+            &pool,
+            &identity("svc_2", &["rs_1", "rs_2", "rs_3"]),
+        )
+        .await,
         identities,
     );
     assert_active_refusal(
-        registry::create_service_grant(&pool, &grant("grt_2", &["rs_1", "rs_2"])).await,
+        registry::test_support::create_service_grant(&pool, &grant("grt_2", &["rs_1", "rs_2"]))
+            .await,
         grants,
     );
     assert_missing_refusal(
-        registry::create_service_grant(&pool, &grant("grt_2", &["rs_4"])).await,
+        registry::test_support::create_service_grant(&pool, &grant("grt_2", &["rs_4"])).await,
         grants,
     );
     let owners: Vec<String> = sqlx::query_scalar(
@@ -639,13 +643,17 @@ async fn registry_writes_and_creating_statements_refuse_a_disabled_assignment() 
     .await
     .unwrap();
     assert_eq!(owners, ["grt_1", "svc_1"]);
-    let created = registry::create_service_identity(&pool, &identity("svc_2", &["rs_3", "rs_1"]))
-        .await
-        .unwrap();
+    let created = registry::test_support::create_service_identity(
+        &pool,
+        &identity("svc_2", &["rs_3", "rs_1"]),
+    )
+    .await
+    .unwrap();
     assert_eq!(created.resource_server_ids, ["rs_1", "rs_3"]);
-    let created = registry::create_service_grant(&pool, &grant("grt_2", &["rs_1", "rs_3"]))
-        .await
-        .unwrap();
+    let created =
+        registry::test_support::create_service_grant(&pool, &grant("grt_2", &["rs_1", "rs_3"]))
+            .await
+            .unwrap();
     assert_eq!(created.resource_server_ids, ["rs_1", "rs_3"]);
 
     // The adds: the owner's revision does not move on a refusal.
@@ -781,7 +789,7 @@ async fn an_insert_holds_the_assignment_so_a_disable_waits_for_its_commit() {
         let mut tx = inserter.begin().await.unwrap();
         add(&mut *tx, table, 1, "rs_3").await.unwrap();
         let waiting = tokio::spawn(async move {
-            registry::update_audience_tenant_assignment(
+            registry::test_support::update_audience_tenant_assignment(
                 &mut disabler,
                 "ata_3",
                 revision,
@@ -928,7 +936,7 @@ async fn an_assignment_created_disabled_while_the_statement_runs_is_refused() {
                         resource_server_ids: audiences_of_statement.to_vec(),
                         status: Status::Enabled,
                     };
-                    registry::create_service_identity(&mut inserter, &new)
+                    registry::test_support::create_service_identity(&mut inserter, &new)
                         .await
                         .map(|_| ())
                 } else {

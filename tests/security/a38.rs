@@ -131,7 +131,9 @@ async fn a38_neg_reenable_does_not_restore_prior_revision() {
     let update = |revision, status| {
         let pool = &pool;
         let changes = changes(&first, status, ActivationState::NotRequired);
-        async move { registry::update_service_grant(pool, TENANT, id, revision, &changes).await }
+        async move {
+            registry::test_support::update_service_grant(pool, TENANT, id, revision, &changes).await
+        }
     };
     let disabled = update(1, Status::Disabled).await.unwrap();
     assert_eq!((disabled.status, disabled.revision), (Status::Disabled, 2));

@@ -150,7 +150,7 @@ async fn registry_refuses_a_missing_or_empty_required_predicate() {
     let (db, pool) = seeded().await;
     // One valid binding per profile, to update.
     for profile in PROFILES {
-        registry::create_principal_binding(
+        registry::test_support::create_principal_binding(
             &pool,
             &new_binding(&format!("bnd_{profile}"), profile, complete(profile)),
         )
@@ -170,7 +170,7 @@ async fn registry_refuses_a_missing_or_empty_required_predicate() {
                     policy.insert((*claim).to_string(), value);
                 }
                 assert_refused(
-                    registry::create_principal_binding(
+                    registry::test_support::create_principal_binding(
                         &pool,
                         &new_binding("bnd_new", profile, policy.clone()),
                     )
@@ -183,7 +183,7 @@ async fn registry_refuses_a_missing_or_empty_required_predicate() {
                 // own included, whatever profile it had.
                 for existing in PROFILES {
                     assert_refused(
-                        registry::update_principal_binding(
+                        registry::test_support::update_principal_binding(
                             &pool,
                             "ten_a",
                             &format!("bnd_{existing}"),
@@ -204,7 +204,7 @@ async fn registry_refuses_a_missing_or_empty_required_predicate() {
                 // Checked before the statement: also for a binding that
                 // does not exist.
                 assert_refused(
-                    registry::update_principal_binding(
+                    registry::test_support::update_principal_binding(
                         &pool,
                         "ten_a",
                         "bnd_x",
@@ -238,7 +238,7 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
     let (db, pool) = seeded().await;
     for profile in PROFILES {
         let id = format!("bnd_{profile}");
-        let created = registry::create_principal_binding(
+        let created = registry::test_support::create_principal_binding(
             &pool,
             &new_binding(&id, profile, complete(profile)),
         )
@@ -257,7 +257,7 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
             claim_match_policy: policy,
             status: Status::Enabled,
         };
-        let updated = registry::update_principal_binding(
+        let updated = registry::test_support::update_principal_binding(
             &pool,
             "ten_a",
             &id,
@@ -267,10 +267,15 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
         .await
         .unwrap();
         assert_eq!(updated.claim_match_policy, with_optional);
-        let narrowed_again =
-            registry::update_principal_binding(&pool, "ten_a", &id, 2, &changes(complete(profile)))
-                .await
-                .unwrap();
+        let narrowed_again = registry::test_support::update_principal_binding(
+            &pool,
+            "ten_a",
+            &id,
+            2,
+            &changes(complete(profile)),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             (narrowed_again.revision, narrowed_again.claim_match_policy),
             (3, complete(profile))
@@ -280,7 +285,7 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
     // with the GitHub set (and sub kept as an optional predicate) it is.
     let mut github = complete(BindingProfile::GithubProduction);
     assert_refused(
-        registry::update_principal_binding(
+        registry::test_support::update_principal_binding(
             &pool,
             "ten_a",
             "bnd_generic_production",
@@ -301,7 +306,7 @@ async fn optional_predicates_are_free_and_a_profile_change_needs_the_new_set() {
         "sub".into(),
         "repo:acme/platform:environment:production".into(),
     );
-    let moved = registry::update_principal_binding(
+    let moved = registry::test_support::update_principal_binding(
         &pool,
         "ten_a",
         "bnd_generic_production",
@@ -339,10 +344,12 @@ async fn a_whitespace_only_value_is_accepted_by_the_registry_and_the_database() 
                 assert!(validate_claim_match_policy(profile, &policy).is_ok());
                 n += 1;
                 let id = format!("bnd_r{n}");
-                let created =
-                    registry::create_principal_binding(&pool, &new_binding(&id, profile, policy))
-                        .await
-                        .unwrap();
+                let created = registry::test_support::create_principal_binding(
+                    &pool,
+                    &new_binding(&id, profile, policy),
+                )
+                .await
+                .unwrap();
                 assert_eq!(created.claim_match_policy[*claim], value);
                 // The same policy by raw SQL, past the registry.
                 let json = serde_json::to_string(value).unwrap();
@@ -383,10 +390,13 @@ async fn a_profile_change_that_drops_predicates_passes_both_checks() {
     let (db, pool) = seeded().await;
     let github = BindingProfile::GithubProduction;
     let generic = BindingProfile::GenericProduction;
-    registry::create_principal_binding(&pool, &new_binding("bnd_r", github, complete(github)))
-        .await
-        .unwrap();
-    let downgraded = registry::update_principal_binding(
+    registry::test_support::create_principal_binding(
+        &pool,
+        &new_binding("bnd_r", github, complete(github)),
+    )
+    .await
+    .unwrap();
+    let downgraded = registry::test_support::update_principal_binding(
         &pool,
         "ten_a",
         "bnd_r",
@@ -712,7 +722,7 @@ async fn upgrade_precondition_lists_the_bindings_that_would_fail_the_upgrade() {
         "0b1c2d3e".into(),
     );
     for binding in [gh, k8s] {
-        registry::update_principal_binding(
+        registry::test_support::update_principal_binding(
             &pool,
             "ten_a",
             &binding.id,

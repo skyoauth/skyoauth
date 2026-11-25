@@ -28,7 +28,8 @@ tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 # The service with `test-support`, for the scenario tests only: they set up
-# keyset versions, trust sources, operators, audit events and operation rows
+# tenants, audiences, bindings, service identities, grants, keysets and
+# their versions, trust sources, operators, audit events and operation rows
 # with the bare registry writers, which a normal build keeps crate-private
 # (`persistence::registry::test_support`; second-approver proposal, "PR 9
 # as implemented" and "PR 10 as implemented"). This turns on a

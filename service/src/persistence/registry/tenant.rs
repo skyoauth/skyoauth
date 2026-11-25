@@ -35,7 +35,7 @@ fn empty_patch() -> RegistryError {
 }
 
 /// Creates a tenant with the caller's ID and secret namespace.
-pub async fn create_tenant<'e>(
+pub(crate) async fn create_tenant<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewTenant,
 ) -> Result<Tenant, RegistryError> {
@@ -127,7 +127,7 @@ pub(crate) async fn update_tenant<'e>(
 /// check: PostgreSQL refuses it while decoding the text argument, so it is
 /// [`RegistryError::Other`] with SQLSTATE `22021`; the request layer must
 /// reject it first (T14.1).
-pub async fn create_principal<'e>(
+pub(crate) async fn create_principal<'e>(
     executor: impl PgExecutor<'e>,
     new: &NewPrincipal,
 ) -> Result<Principal, RegistryError> {

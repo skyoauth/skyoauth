@@ -136,19 +136,22 @@ fn new_action(id: &str, resource_server_id: &str, action_name: &str) -> NewResou
 async fn seeded() -> (TestDb, PgPool) {
     let (db, pool) = migrated().await;
     for (id, ns) in [("ten_a", "ns_a"), ("ten_b", "ns_b")] {
-        registry::create_tenant(&pool, &new_tenant(id, ns))
+        registry::test_support::create_tenant(&pool, &new_tenant(id, ns))
             .await
             .unwrap();
     }
     for (id, audience) in [("rs_1", "control-plane-api"), ("rs_2", "billing-api")] {
-        registry::create_resource_server(&pool, &new_server(id, audience))
+        registry::test_support::create_resource_server(&pool, &new_server(id, audience))
             .await
             .unwrap();
     }
     for (id, rs, tenant) in [("ata_1", "rs_1", "ten_a"), ("ata_2", "rs_2", "ten_b")] {
-        registry::create_audience_tenant_assignment(&pool, &new_assignment(id, rs, tenant))
-            .await
-            .unwrap();
+        registry::test_support::create_audience_tenant_assignment(
+            &pool,
+            &new_assignment(id, rs, tenant),
+        )
+        .await
+        .unwrap();
     }
     (db, pool)
 }
@@ -262,7 +265,7 @@ async fn registry_constraint_names_match_the_catalog() {
 async fn tenants_are_created_read_listed_and_keyed() {
     let (db, pool) = migrated().await;
     let before = SystemTime::now() - Duration::from_secs(60);
-    let created = registry::create_tenant(&pool, &new_tenant("ten_a", "ns_a"))
+    let created = registry::test_support::create_tenant(&pool, &new_tenant("ten_a", "ns_a"))
         .await
         .unwrap();
     assert_eq!(
@@ -282,7 +285,9 @@ async fn tenants_are_created_read_listed_and_keyed() {
     assert_not_found(registry::get_tenant(&pool, "ten_x").await);
     let mut disabled = new_tenant("ten_b", "ns_b");
     disabled.status = Status::Disabled;
-    registry::create_tenant(&pool, &disabled).await.unwrap();
+    registry::test_support::create_tenant(&pool, &disabled)
+        .await
+        .unwrap();
     let listed = registry::list_tenants(&pool, Page::first(10))
         .await
         .unwrap();
@@ -293,32 +298,32 @@ async fn tenants_are_created_read_listed_and_keyed() {
     );
 
     assert_exists(
-        registry::create_tenant(&pool, &new_tenant("ten_a", "ns_other")).await,
+        registry::test_support::create_tenant(&pool, &new_tenant("ten_a", "ns_other")).await,
         "tenant_pkey",
     );
     assert_exists(
-        registry::create_tenant(&pool, &new_tenant("ten_c", "ns_a")).await,
+        registry::test_support::create_tenant(&pool, &new_tenant("ten_c", "ns_a")).await,
         "tenant_secret_namespace_key",
     );
     let mut nameless = new_tenant("ten_c", "ns_c");
     nameless.name.clear();
     assert_invariant(
-        registry::create_tenant(&pool, &nameless).await,
+        registry::test_support::create_tenant(&pool, &nameless).await,
         InvariantKind::Check,
         "tenant_name_check",
     );
     assert_invariant(
-        registry::create_tenant(&pool, &new_tenant(&"t".repeat(256), "ns_c")).await,
+        registry::test_support::create_tenant(&pool, &new_tenant(&"t".repeat(256), "ns_c")).await,
         InvariantKind::Check,
         "tenant_id_octet_length_check",
     );
     assert_invariant(
-        registry::create_tenant(&pool, &new_tenant("ten_c", &"n".repeat(256))).await,
+        registry::test_support::create_tenant(&pool, &new_tenant("ten_c", &"n".repeat(256))).await,
         InvariantKind::Check,
         "tenant_secret_namespace_octet_length_check",
     );
     assert_invariant(
-        registry::create_tenant(&pool, &new_tenant("", "ns_c")).await,
+        registry::test_support::create_tenant(&pool, &new_tenant("", "ns_c")).await,
         InvariantKind::Check,
         "tenant_id_check",
     );
@@ -332,10 +337,10 @@ async fn tenants_are_created_read_listed_and_keyed() {
 async fn registry_errors_do_not_repeat_request_values() {
     let (db, pool) = migrated().await;
     let secret = "ns-value-that-must-not-leak";
-    registry::create_tenant(&pool, &new_tenant("ten_a", secret))
+    registry::test_support::create_tenant(&pool, &new_tenant("ten_a", secret))
         .await
         .unwrap();
-    let err = registry::create_tenant(&pool, &new_tenant("ten_b", secret))
+    let err = registry::test_support::create_tenant(&pool, &new_tenant("ten_b", secret))
         .await
         .unwrap_err();
     for text in [err.to_string(), format!("{err:?}")] {
@@ -344,7 +349,7 @@ async fn registry_errors_do_not_repeat_request_values() {
     }
     let mut spaced = new_server("rs_1", "has a space-value");
     spaced.name = "name-value".into();
-    let err = registry::create_resource_server(&pool, &spaced)
+    let err = registry::test_support::create_resource_server(&pool, &spaced)
         .await
         .unwrap_err();
     for text in [err.to_string(), format!("{err:?}")] {
@@ -360,14 +365,16 @@ async fn registry_errors_do_not_repeat_request_values() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn principal_reads_are_scoped_to_their_tenant() {
     let (db, pool) = seeded().await;
-    let created = registry::create_principal(&pool, &new_principal("ten_a", "prn_1"))
+    let created = registry::test_support::create_principal(&pool, &new_principal("ten_a", "prn_1"))
         .await
         .unwrap();
     assert_eq!(created.kind, PrincipalKind::Workload);
     assert_eq!(created.tenant_id, "ten_a");
     let mut human = new_principal("ten_b", "prn_2");
     human.kind = PrincipalKind::Human;
-    registry::create_principal(&pool, &human).await.unwrap();
+    registry::test_support::create_principal(&pool, &human)
+        .await
+        .unwrap();
 
     assert_eq!(
         registry::get_principal(&pool, "ten_a", "prn_1")
@@ -398,16 +405,17 @@ async fn principal_reads_are_scoped_to_their_tenant() {
     );
 
     assert_invariant(
-        registry::create_principal(&pool, &new_principal("ten_x", "prn_3")).await,
+        registry::test_support::create_principal(&pool, &new_principal("ten_x", "prn_3")).await,
         InvariantKind::ForeignKey,
         "principal_tenant_id_fkey",
     );
     assert_exists(
-        registry::create_principal(&pool, &new_principal("ten_b", "prn_1")).await,
+        registry::test_support::create_principal(&pool, &new_principal("ten_b", "prn_1")).await,
         "principal_pkey",
     );
     assert_invariant(
-        registry::create_principal(&pool, &new_principal("ten_a", &"p".repeat(256))).await,
+        registry::test_support::create_principal(&pool, &new_principal("ten_a", &"p".repeat(256)))
+            .await,
         InvariantKind::Check,
         "principal_id_octet_length_check",
     );
@@ -422,7 +430,7 @@ async fn list_pages_follow_byte_order_and_are_bounded() {
     let (db, pool) = migrated().await;
     // Byte order: 'B' (0x42) < '_' (0x5F) < 'a' (0x61) < 'b' < 'ä' (0xC3 0xA4).
     for id in ["ä", "b", "a", "_", "B"] {
-        registry::create_tenant(&pool, &new_tenant(id, &format!("ns_{id}")))
+        registry::test_support::create_tenant(&pool, &new_tenant(id, &format!("ns_{id}")))
             .await
             .unwrap();
     }
@@ -481,9 +489,12 @@ async fn list_pages_follow_byte_order_and_are_bounded() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn resource_servers_update_by_revision_compare_and_set() {
     let (db, pool) = migrated().await;
-    let created = registry::create_resource_server(&pool, &new_server("rs_1", "control-plane-api"))
-        .await
-        .unwrap();
+    let created = registry::test_support::create_resource_server(
+        &pool,
+        &new_server("rs_1", "control-plane-api"),
+    )
+    .await
+    .unwrap();
     assert_eq!(created.revision, 1);
     assert_eq!(created.allowed_profiles, [Profile::Wif, Profile::HumanCli]);
     assert_eq!(created.constraint_versions, [json!(1)]);
@@ -493,9 +504,14 @@ async fn resource_servers_update_by_revision_compare_and_set() {
     );
     assert_not_found(registry::get_resource_server(&pool, "rs_x").await);
 
-    let updated = registry::update_resource_server(&pool, "rs_1", 1, &server_changes("Renamed"))
-        .await
-        .unwrap();
+    let updated = registry::test_support::update_resource_server(
+        &pool,
+        "rs_1",
+        1,
+        &server_changes("Renamed"),
+    )
+    .await
+    .unwrap();
     assert_eq!(updated.revision, 2);
     assert_eq!(updated.name, "Renamed");
     assert_eq!(updated.audience, "control-plane-api");
@@ -514,8 +530,13 @@ async fn resource_servers_update_by_revision_compare_and_set() {
     // A stale or future revision changes nothing.
     for expected in [1, 3, 0, -1] {
         assert_stale(
-            registry::update_resource_server(&pool, "rs_1", expected, &server_changes("Stale"))
-                .await,
+            registry::test_support::update_resource_server(
+                &pool,
+                "rs_1",
+                expected,
+                &server_changes("Stale"),
+            )
+            .await,
         );
     }
     assert_eq!(
@@ -523,14 +544,16 @@ async fn resource_servers_update_by_revision_compare_and_set() {
         updated
     );
     assert_not_found(
-        registry::update_resource_server(&pool, "rs_x", 1, &server_changes("x")).await,
+        registry::test_support::update_resource_server(&pool, "rs_x", 1, &server_changes("x"))
+            .await,
     );
-    let again = registry::update_resource_server(&pool, "rs_1", 2, &server_changes("Again"))
-        .await
-        .unwrap();
+    let again =
+        registry::test_support::update_resource_server(&pool, "rs_1", 2, &server_changes("Again"))
+            .await
+            .unwrap();
     assert_eq!((again.revision, &again.name[..]), (3, "Again"));
 
-    registry::create_resource_server(&pool, &new_server("rs_2", "billing-api"))
+    registry::test_support::create_resource_server(&pool, &new_server("rs_2", "billing-api"))
         .await
         .unwrap();
     let ids: Vec<_> = registry::list_resource_servers(&pool, Page::first(10))
@@ -554,12 +577,12 @@ async fn resource_servers_update_by_revision_compare_and_set() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn resource_server_errors_name_their_constraint() {
     let (db, pool) = migrated().await;
-    registry::create_resource_server(&pool, &new_server("rs_1", "control-plane-api"))
+    registry::test_support::create_resource_server(&pool, &new_server("rs_1", "control-plane-api"))
         .await
         .unwrap();
     let create = |server: NewResourceServer| {
         let pool = pool.clone();
-        async move { registry::create_resource_server(&pool, &server).await }
+        async move { registry::test_support::create_resource_server(&pool, &server).await }
     };
     assert_exists(
         create(new_server("rs_1", "other-api")).await,
@@ -610,13 +633,13 @@ async fn resource_server_errors_name_their_constraint() {
     let mut changes = server_changes("Renamed");
     changes.scopes = vec!["quote\"d".into()];
     assert_invariant(
-        registry::update_resource_server(&pool, "rs_1", 1, &changes).await,
+        registry::test_support::update_resource_server(&pool, "rs_1", 1, &changes).await,
         InvariantKind::Check,
         "skyoauth_scope_list_check",
     );
     changes = server_changes("");
     assert_invariant(
-        registry::update_resource_server(&pool, "rs_1", 1, &changes).await,
+        registry::test_support::update_resource_server(&pool, "rs_1", 1, &changes).await,
         InvariantKind::Check,
         "resource_server_name_check",
     );
@@ -638,12 +661,15 @@ async fn resource_server_errors_name_their_constraint() {
 async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
     const MAX: i64 = i64::MAX;
     let (db, pool) = seeded().await;
-    registry::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
+    registry::test_support::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
         .await
         .unwrap();
-    registry::create_audience_tenant_assignment(&pool, &new_assignment("ata_3", "rs_1", "ten_c"))
-        .await
-        .unwrap();
+    registry::test_support::create_audience_tenant_assignment(
+        &pool,
+        &new_assignment("ata_3", "rs_1", "ten_c"),
+    )
+    .await
+    .unwrap();
     registry::test_support::create_resource_server_checker(
         &pool,
         &new_checker("chk_1", "rs_1", "sha256:aa"),
@@ -677,15 +703,31 @@ async fn an_expected_revision_of_i64_max_is_stale_or_not_found() {
         status: Status::Disabled,
     };
 
-    assert_stale(registry::update_resource_server(&pool, "rs_1", MAX, &server_changes("x")).await);
+    assert_stale(
+        registry::test_support::update_resource_server(&pool, "rs_1", MAX, &server_changes("x"))
+            .await,
+    );
     assert_not_found(
-        registry::update_resource_server(&pool, "rs_x", MAX, &server_changes("x")).await,
+        registry::test_support::update_resource_server(&pool, "rs_x", MAX, &server_changes("x"))
+            .await,
     );
     assert_stale(
-        registry::update_audience_tenant_assignment(&pool, "ata_1", MAX, &assignment_changes).await,
+        registry::test_support::update_audience_tenant_assignment(
+            &pool,
+            "ata_1",
+            MAX,
+            &assignment_changes,
+        )
+        .await,
     );
     assert_not_found(
-        registry::update_audience_tenant_assignment(&pool, "ata_x", MAX, &assignment_changes).await,
+        registry::test_support::update_audience_tenant_assignment(
+            &pool,
+            "ata_x",
+            MAX,
+            &assignment_changes,
+        )
+        .await,
     );
     assert_stale(
         registry::test_support::update_resource_server_checker(
@@ -794,11 +836,17 @@ async fn a_second_updater_from_the_same_revision_is_stale_after_the_first_commit
         backend_pid(&mut second).await,
     );
     let mut tx = first.begin().await.unwrap();
-    registry::update_resource_server(&mut *tx, "rs_1", 1, &server_changes("First"))
+    registry::test_support::update_resource_server(&mut *tx, "rs_1", 1, &server_changes("First"))
         .await
         .unwrap();
     let waiting = tokio::spawn(async move {
-        registry::update_resource_server(&mut second, "rs_1", 1, &server_changes("Second")).await
+        registry::test_support::update_resource_server(
+            &mut second,
+            "rs_1",
+            1,
+            &server_changes("Second"),
+        )
+        .await
     });
     wait_until_blocked(&pool, second_pid, first_pid).await;
     assert!(!waiting.is_finished());
@@ -845,11 +893,16 @@ async fn a_second_updater_from_the_same_revision_must_retry_under_repeatable_rea
             backend_pid(&mut first).await,
             backend_pid(&mut second).await,
         );
-        registry::update_resource_server(&mut *first, "rs_1", 1, &server_changes("First"))
-            .await
-            .unwrap();
+        registry::test_support::update_resource_server(
+            &mut *first,
+            "rs_1",
+            1,
+            &server_changes("First"),
+        )
+        .await
+        .unwrap();
         let waiting = tokio::spawn(async move {
-            let result = registry::update_resource_server(
+            let result = registry::test_support::update_resource_server(
                 &mut *second,
                 "rs_1",
                 1,
@@ -900,23 +953,41 @@ async fn a_deadlock_between_two_updaters_must_retry() {
         backend_pid(&mut first).await,
         backend_pid(&mut second).await,
     );
-    registry::update_resource_server(&mut *first, "rs_1", 1, &server_changes("First"))
-        .await
-        .unwrap();
-    registry::update_resource_server(&mut *second, "rs_2", 1, &server_changes("Second"))
-        .await
-        .unwrap();
+    registry::test_support::update_resource_server(
+        &mut *first,
+        "rs_1",
+        1,
+        &server_changes("First"),
+    )
+    .await
+    .unwrap();
+    registry::test_support::update_resource_server(
+        &mut *second,
+        "rs_2",
+        1,
+        &server_changes("Second"),
+    )
+    .await
+    .unwrap();
     let first_waits = tokio::spawn(async move {
-        let result =
-            registry::update_resource_server(&mut *first, "rs_2", 1, &server_changes("First"))
-                .await;
+        let result = registry::test_support::update_resource_server(
+            &mut *first,
+            "rs_2",
+            1,
+            &server_changes("First"),
+        )
+        .await;
         (first, result)
     });
     wait_until_blocked(&pool, first_pid, second_pid).await;
     let second_waits = tokio::spawn(async move {
-        let result =
-            registry::update_resource_server(&mut *second, "rs_1", 1, &server_changes("Second"))
-                .await;
+        let result = registry::test_support::update_resource_server(
+            &mut *second,
+            "rs_1",
+            1,
+            &server_changes("Second"),
+        )
+        .await;
         (second, result)
     });
     let ((first, first_result), (second, second_result)) =
@@ -965,12 +1036,15 @@ async fn a_deadlock_between_two_updaters_must_retry() {
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_second_checker_tenant_change_from_the_same_revision_is_stale_after_the_first_commits() {
     let (db, pool) = seeded().await;
-    registry::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
+    registry::test_support::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
         .await
         .unwrap();
-    registry::create_audience_tenant_assignment(&pool, &new_assignment("ata_3", "rs_1", "ten_c"))
-        .await
-        .unwrap();
+    registry::test_support::create_audience_tenant_assignment(
+        &pool,
+        &new_assignment("ata_3", "rs_1", "ten_c"),
+    )
+    .await
+    .unwrap();
     registry::test_support::create_resource_server_checker(
         &pool,
         &new_checker("chk_1", "rs_1", "sha256:aa"),
@@ -1064,10 +1138,10 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
     // different tenants.
     for n in 0..4 {
         let tenant = format!("ten_c{n}");
-        registry::create_tenant(&pool, &new_tenant(&tenant, &format!("ns_c{n}")))
+        registry::test_support::create_tenant(&pool, &new_tenant(&tenant, &format!("ns_c{n}")))
             .await
             .unwrap();
-        registry::create_audience_tenant_assignment(
+        registry::test_support::create_audience_tenant_assignment(
             &pool,
             &new_assignment(&format!("ata_c{n}"), "rs_1", &tenant),
         )
@@ -1097,8 +1171,13 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
     let outcome = race(move |n| {
         let pool = p.clone();
         async move {
-            registry::update_resource_server(&pool, "rs_1", 1, &server_changes(&format!("n{n}")))
-                .await
+            registry::test_support::update_resource_server(
+                &pool,
+                "rs_1",
+                1,
+                &server_changes(&format!("n{n}")),
+            )
+            .await
         }
     })
     .await;
@@ -1114,7 +1193,8 @@ async fn concurrent_updates_from_one_revision_have_exactly_one_winner() {
                 constraint_versions: vec![],
                 status: Status::Disabled,
             };
-            registry::update_audience_tenant_assignment(&pool, "ata_1", 1, &changes).await
+            registry::test_support::update_audience_tenant_assignment(&pool, "ata_1", 1, &changes)
+                .await
         }
     })
     .await;
@@ -1221,9 +1301,10 @@ async fn assignments_update_by_revision_and_name_their_constraints() {
         constraint_versions: vec![json!(1), json!(2)],
         status: Status::Disabled,
     };
-    let updated = registry::update_audience_tenant_assignment(&pool, "ata_1", 1, &changes)
-        .await
-        .unwrap();
+    let updated =
+        registry::test_support::update_audience_tenant_assignment(&pool, "ata_1", 1, &changes)
+            .await
+            .unwrap();
     assert_eq!(updated.revision, 2);
     assert_eq!(updated.allowed_profiles, changes.allowed_profiles);
     assert!(updated.allowed_scopes.is_empty());
@@ -1233,9 +1314,13 @@ async fn assignments_update_by_revision_and_name_their_constraints() {
         (&updated.tenant_id[..], &updated.resource_server_id[..]),
         ("ten_a", "rs_1")
     );
-    assert_stale(registry::update_audience_tenant_assignment(&pool, "ata_1", 1, &changes).await);
+    assert_stale(
+        registry::test_support::update_audience_tenant_assignment(&pool, "ata_1", 1, &changes)
+            .await,
+    );
     assert_not_found(
-        registry::update_audience_tenant_assignment(&pool, "ata_x", 1, &changes).await,
+        registry::test_support::update_audience_tenant_assignment(&pool, "ata_x", 1, &changes)
+            .await,
     );
 
     let listed: Vec<_> = registry::list_audience_tenant_assignments(&pool, Page::first(10))
@@ -1248,7 +1333,7 @@ async fn assignments_update_by_revision_and_name_their_constraints() {
 
     let create = |new: NewAudienceTenantAssignment| {
         let pool = pool.clone();
-        async move { registry::create_audience_tenant_assignment(&pool, &new).await }
+        async move { registry::test_support::create_audience_tenant_assignment(&pool, &new).await }
     };
     assert_exists(
         create(new_assignment("ata_1", "rs_2", "ten_a")).await,
@@ -1432,12 +1517,12 @@ async fn checker_tenant_rows_need_an_assignment_and_advance_the_revision() {
     assert_eq!(revision(pool.clone()).await, 2);
 
     // A disabled assignment still allows the row (the service filters it).
-    registry::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
+    registry::test_support::create_tenant(&pool, &new_tenant("ten_c", "ns_c"))
         .await
         .unwrap();
     let mut disabled = new_assignment("ata_3", "rs_1", "ten_c");
     disabled.status = Status::Disabled;
-    registry::create_audience_tenant_assignment(&pool, &disabled)
+    registry::test_support::create_audience_tenant_assignment(&pool, &disabled)
         .await
         .unwrap();
     assert_eq!(
@@ -1503,10 +1588,10 @@ async fn checker_tenant_sets_are_returned_in_byte_order() {
     let (db, pool) = seeded().await;
     // seeded() assigns rs_1 to ten_a.
     for (tenant, ns, assignment) in [("ten_c", "ns_c", "ata_c"), ("ten_B", "ns_B", "ata_B")] {
-        registry::create_tenant(&pool, &new_tenant(tenant, ns))
+        registry::test_support::create_tenant(&pool, &new_tenant(tenant, ns))
             .await
             .unwrap();
-        registry::create_audience_tenant_assignment(
+        registry::test_support::create_audience_tenant_assignment(
             &pool,
             &new_assignment(assignment, "rs_1", tenant),
         )
@@ -1716,10 +1801,10 @@ async fn guard_not_null_and_unknown_errors_map_from_raw_statements() {
 async fn registry_functions_compose_in_a_caller_transaction() {
     let (db, pool) = seeded().await;
     let mut tx = pool.begin().await.unwrap();
-    registry::create_tenant(&mut *tx, &new_tenant("ten_c", "ns_c"))
+    registry::test_support::create_tenant(&mut *tx, &new_tenant("ten_c", "ns_c"))
         .await
         .unwrap();
-    registry::create_audience_tenant_assignment(
+    registry::test_support::create_audience_tenant_assignment(
         &mut *tx,
         &new_assignment("ata_3", "rs_1", "ten_c"),
     )
@@ -1752,7 +1837,7 @@ async fn registry_functions_compose_in_a_caller_transaction() {
     assert_not_found(registry::get_resource_server_checker(&pool, "chk_1").await);
 
     let mut tx = pool.begin().await.unwrap();
-    registry::update_resource_server(&mut *tx, "rs_1", 1, &server_changes("In tx"))
+    registry::test_support::update_resource_server(&mut *tx, "rs_1", 1, &server_changes("In tx"))
         .await
         .unwrap();
     tx.commit().await.unwrap();

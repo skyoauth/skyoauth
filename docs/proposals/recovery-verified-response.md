@@ -363,7 +363,7 @@ The implementation PR adds or adapts (a list, not code):
   A32's M1a row (conformance-layout :145) still lacks the socket and the
   workstation, A48 and A64 are unchanged, and no stage moves;
 - fixture churn from the weak-key checks: fixtures that enroll arbitrary 32
-  bytes (`tests/security/a04.rs:1289`, `a48.rs:393`, and at least six files
+  bytes (`tests/security/a04.rs:1429`, `a48.rs:393`, and at least six files
   under `service/`) need real public keys.
 
 ## Alternative: a `VerifiedRecoveryResponse` value

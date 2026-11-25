@@ -377,7 +377,7 @@ fn grant(side: Side, grant: Grant) -> NewServiceGrant {
 
 /// Creates the records of `side` described in the module docs.
 async fn seed(pool: &PgPool, side: Side) {
-    registry::create_tenant(
+    registry::test_support::create_tenant(
         pool,
         &NewTenant {
             id: side.tenant.into(),
@@ -394,7 +394,7 @@ async fn seed(pool: &PgPool, side: Side) {
         ("svc_1", PrincipalKind::Service, "deploy-api"),
         ("svc_2", PrincipalKind::Service, "audit-api"),
     ] {
-        registry::create_principal(
+        registry::test_support::create_principal(
             pool,
             &NewPrincipal {
                 id: side.id(base),
@@ -407,7 +407,7 @@ async fn seed(pool: &PgPool, side: Side) {
         .await
         .unwrap();
     }
-    registry::create_resource_server(
+    registry::test_support::create_resource_server(
         pool,
         &NewResourceServer {
             id: side.audience(),
@@ -421,7 +421,7 @@ async fn seed(pool: &PgPool, side: Side) {
     )
     .await
     .unwrap();
-    registry::create_audience_tenant_assignment(
+    registry::test_support::create_audience_tenant_assignment(
         pool,
         &NewAudienceTenantAssignment {
             id: side.id("ata"),
@@ -436,7 +436,7 @@ async fn seed(pool: &PgPool, side: Side) {
     .await
     .unwrap();
     for (base, name) in [("svc_1", "deploy-api"), ("svc_2", "audit-api")] {
-        registry::create_service_identity(
+        registry::test_support::create_service_identity(
             pool,
             &NewServiceIdentity {
                 id: side.id(base),
@@ -458,12 +458,15 @@ async fn seed(pool: &PgPool, side: Side) {
             .unwrap();
     }
     for (base, actor, on, status) in BINDINGS {
-        registry::create_principal_binding(pool, &binding(side, base, actor, on, status))
-            .await
-            .unwrap();
+        registry::test_support::create_principal_binding(
+            pool,
+            &binding(side, base, actor, on, status),
+        )
+        .await
+        .unwrap();
     }
     for g in GRANTS {
-        registry::create_service_grant(pool, &grant(side, g))
+        registry::test_support::create_service_grant(pool, &grant(side, g))
             .await
             .unwrap();
     }
@@ -668,7 +671,7 @@ async fn seed_matching(pool: &PgPool, side: Side) {
     .unwrap();
     for (base, actor, on, status, policy) in MATCHING_BINDINGS {
         let claim_match_policy = policy.claims();
-        registry::create_principal_binding(
+        registry::test_support::create_principal_binding(
             pool,
             &NewPrincipalBinding {
                 trust_source_id: side.id(on),
@@ -680,7 +683,7 @@ async fn seed_matching(pool: &PgPool, side: Side) {
         .unwrap();
     }
     for g in MATCHING_GRANTS {
-        registry::create_service_grant(
+        registry::test_support::create_service_grant(
             pool,
             &NewServiceGrant {
                 id: side.id(g.id),
