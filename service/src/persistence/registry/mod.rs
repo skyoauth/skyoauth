@@ -5,8 +5,9 @@
 //! keysets and their versions, trust sources, principal bindings, service
 //! identities with their audience rows, and service grants with their
 //! binding and audience rows; the consumed single-use proofs
-//! (`consumed_assertion`, insert only); and, read-only, the instance
-//! security policy and the egress allowlist. [`select_grant`] and
+//! (`consumed_assertion`, insert only); the egress allowlist (whose
+//! writers are crate-private; see "Writers kept crate-private"); and,
+//! read-only, the instance security policy. [`select_grant`] and
 //! [`policy::match_binding`](crate::policy::match_binding) select a grant
 //! and its matching binding for the workload exchange (ADR-015 item 4
 //! steps 1, 3 and 4; see their modules). [`load_scope_ceilings`] loads the
@@ -364,6 +365,10 @@
 //!   of [`crate::admin`] call them, and nothing else in the crate does
 //!   (inferred: the narrowest visibility that caller allows; the scenario
 //!   tests under `tests/security` name them through `test_support`);
+//! - the egress allowlist writers `create_egress_allowlist_entry` and
+//!   `update_egress_allowlist_entry` (the latter sets only `status`), also
+//!   `pub(crate)`: only the audited, authorized writes of
+//!   [`crate::admin::egress`] call them (inferred, as above);
 //! - the other writers of the principal binding, service identity, grant
 //!   and trust keyset tables: `create_principal_binding`,
 //!   `update_principal_binding`, `create_service_identity`,
@@ -485,19 +490,22 @@ pub use grant::{
 pub use instance::{
     get_egress_allowlist_entry, get_instance_security_policy, list_egress_allowlist_entries,
 };
+// Crate-private: `crate::admin::egress` calls them from its audited,
+// authorized writes; tests reach them through `test_support`.
+pub(crate) use instance::{create_egress_allowlist_entry, update_egress_allowlist_entry};
 pub(crate) use model::floor_to_microsecond;
 pub use model::{
     ActivationState, AdminRole, AssertionProfile, AudienceTenantAssignment,
     AudienceTenantAssignmentChanges, BindingProfile, EgressAllowlistEntry, EgressPurpose,
-    GrantMode, InstanceSecurityPolicy, JsonObject, NewAudienceTenantAssignment, NewPrincipal,
-    NewPrincipalBinding, NewResourceAction, NewResourceServer, NewResourceServerChecker,
-    NewServiceGrant, NewServiceIdentity, NewTenant, NewTrustKeyset, NewTrustKeysetVersion,
-    NewTrustSource, Principal, PrincipalBinding, PrincipalBindingChanges, PrincipalKind,
-    PrincipalPatch, Profile, ReplayMode, ResourceAction, ResourceActionChanges, ResourceServer,
-    ResourceServerChanges, ResourceServerChecker, ResourceServerCheckerChanges, ServiceGrant,
-    ServiceGrantChanges, ServiceIdentity, ServiceIdentityChanges, Status, Tenant, TenantPatch,
-    TrustKeyset, TrustKeysetChanges, TrustKeysetVersion, TrustSource, TrustSourceChanges,
-    TrustSourceKind, UnknownValue,
+    GrantMode, InstanceSecurityPolicy, JsonObject, NewAudienceTenantAssignment,
+    NewEgressAllowlistEntry, NewPrincipal, NewPrincipalBinding, NewResourceAction,
+    NewResourceServer, NewResourceServerChecker, NewServiceGrant, NewServiceIdentity, NewTenant,
+    NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Principal, PrincipalBinding,
+    PrincipalBindingChanges, PrincipalKind, PrincipalPatch, Profile, ReplayMode, ResourceAction,
+    ResourceActionChanges, ResourceServer, ResourceServerChanges, ResourceServerChecker,
+    ResourceServerCheckerChanges, ServiceGrant, ServiceGrantChanges, ServiceIdentity,
+    ServiceIdentityChanges, Status, Tenant, TenantPatch, TrustKeyset, TrustKeysetChanges,
+    TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind, UnknownValue,
 };
 pub use operation::{
     AdministrativeOperation, ApprovalAuthority, NewAdministrativeOperation, RolesHeld,

@@ -182,10 +182,21 @@ pub(crate) fn widening_mode<E: GatedWriteError>(
     requester: &GatedRequester,
     policy: Option<&InstanceSecurityPolicy>,
 ) -> Result<Mode, E> {
+    policy_mode::<E>(requester.security_admin, policy)
+}
+
+/// [`widening_mode`] for a requester who holds instance `security_admin`
+/// (`security_admin`) or not: the mode table on its own, shared with the
+/// egress allowlist writes of [`crate::admin::egress`], whose requester is
+/// always an instance `security_admin`.
+pub(crate) fn policy_mode<E: GatedWriteError>(
+    security_admin: bool,
+    policy: Option<&InstanceSecurityPolicy>,
+) -> Result<Mode, E> {
     let policy = policy.ok_or(E::POLICY_UNAVAILABLE)?;
     Ok(if !policy.widening_second_approver {
         Mode::Apply(OUTCOME_SUCCESS_WIDENING)
-    } else if policy.single_actor_mode && requester.security_admin {
+    } else if policy.single_actor_mode && security_admin {
         Mode::Apply(OUTCOME_SUCCESS_SINGLE_ACTOR)
     } else {
         Mode::Pending

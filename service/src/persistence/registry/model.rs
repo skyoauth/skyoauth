@@ -739,6 +739,17 @@ impl FromRow<'_, PgRow> for InstanceSecurityPolicy {
     }
 }
 
+/// The input of the crate-private `create_egress_allowlist_entry` (called
+/// by `crate::admin`; tests reach it through the `test-support` feature's
+/// `registry::test_support`): an entry with the caller's ID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEgressAllowlistEntry {
+    pub id: String,
+    pub purpose: EgressPurpose,
+    pub exact_destination: String,
+    pub status: Status,
+}
+
 /// An exact egress destination (IR-152).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EgressAllowlistEntry {

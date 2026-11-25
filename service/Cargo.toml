@@ -50,7 +50,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # assignments (`create_audience_tenant_assignment`,
 # `update_audience_tenant_assignment`), tenants and principals
 # (`create_tenant`, `update_tenant`, `create_principal`,
-# `update_principal`), and the other registry writers no code in the crate
+# `update_principal`) and egress allowlist entries
+# (`create_egress_allowlist_entry`, `update_egress_allowlist_entry`), and
+# the other registry writers no code in the crate
 # calls: of principal bindings (`create_principal_binding`,
 # `update_principal_binding`), service identities
 # (`create_service_identity`, `update_service_identity`,

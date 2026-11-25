@@ -6,30 +6,39 @@
 //! event. This module is the write path above them for the workload
 //! provisioning objects of M1a ([`workload`]): tenants, workload and service
 //! principals, resource servers, audience tenant assignments, checkers with
-//! their tenant sets, and resource actions. Each write, in the caller's
-//! transaction:
+//! their tenant sets, and resource actions; and for the instance-global
+//! egress allowlist ([`egress`]; see "Egress allowlist"). Each write, in the
+//! caller's transaction:
 //!
 //! 1. runs only under `READ COMMITTED`
 //!    ([`AdminWriteError::UnsupportedIsolation`] otherwise), as the trust
 //!    writes do ([`crate::trust`]);
 //! 2. authorizes the presented credential for the one role and scope the
 //!    write needs (see "Who"), locked until the transaction ends once the
-//!    write succeeds (see "Errors and rollback" for an `Err`);
+//!    write succeeds (see "Errors and rollback" for an `Err`); an egress
+//!    entry create or enable, which is widening, then passes the gate's
+//!    acknowledgement and policy steps (see "Egress allowlist");
 //! 3. for an update, reads the stored row and checks the caller's expected
 //!    revision (IR-022), and the compare-and-set of the write checks it
 //!    again; [`workload::disable_tenant`] and the checker tenant set
 //!    changes ([`workload::add_resource_server_checker_tenant`],
 //!    [`workload::remove_resource_server_checker_tenant`]) read no stored
-//!    row and rely on that compare-and-set alone;
+//!    row and rely on that compare-and-set alone, and so do
+//!    [`egress::enable_egress_entry`] and [`egress::disable_egress_entry`],
+//!    which change only `status` and need no stored column before it (an
+//!    enable checks the destination of the row it returns, see "Egress
+//!    allowlist");
 //! 4. for a create, takes the new object's ID from the [`IdGenerator`]
 //!    the request carries (IR-020, IR-022; T10.2), never from the caller,
 //!    after every check of the request's input (a checker's key is derived
-//!    into its identity first, see "Not done here");
+//!    into its identity first, see "Not done here"; an egress entry's
+//!    destination is checked first, see "Egress allowlist");
 //! 5. calls the registry writer, or, for [`workload::disable_resource_server`]
 //!    and [`workload::disable_audience_tenant_assignment`], one statement
 //!    of its own that sets only `status` and `revision`, so the other
 //!    columns are not read into Rust and written back (a `jsonb` number an
-//!    `f64` cannot hold is kept as stored);
+//!    `f64` cannot hold is kept as stored); the egress entry writers'
+//!    registry status update sets only those two columns too;
 //! 6. appends the write's audit event, whose ID the generator gives too,
 //!    and returns the row with the stored event ([`Audited`]).
 //!
@@ -52,7 +61,10 @@
 //!   self-assignment); a checker create, update or disable and a change of
 //!   its tenant set (`/checker-identities`; IR-090; identity-registry
 //!   section 10, `ResourceServerChecker.allowed_tenant_ids`); a resource
-//!   action create, update or disable (`/actions`; IR-100).
+//!   action create, update or disable (`/actions`; IR-100); an egress
+//!   allowlist entry create, enable or disable (`/admin/v1/egress-allowlist`;
+//!   IR-152: owned by instance `security_admin`, tenant operators only choose
+//!   from it, so a tenant `trust_admin` is refused like any other role).
 //! - **`trust_admin` of the principal's tenant**: a workload principal
 //!   create, and a workload or service principal update or disable
 //!   (public-api section 7.1, `/admin/v1/tenants/{tenant}/principals`;
@@ -109,11 +121,11 @@
 //! | [`workload::add_resource_server_checker_tenant`] | the tenant added | refused: adding it widens the checker |
 //! | [`workload::remove_resource_server_checker_tenant`] | the tenant removed | allowed: removing it narrows |
 //!
-//! The resource server, checker (create, update, disable) and action
-//! writes are in no tenant and do not check one. The tenant itself is
-//! enabled again only by a status-only update, which stays allowed. The
-//! check comes after the authorization, so it tells nothing to an
-//! operator the write refuses: a principal write's `trust_admin` holds
+//! The resource server, checker (create, update, disable), action and
+//! egress entry writes are in no tenant and do not check one. The tenant
+//! itself is enabled again only by a status-only update, which stays
+//! allowed. The check comes after the authorization, so it tells nothing
+//! to an operator the write refuses: a principal write's `trust_admin` holds
 //! that very tenant, and an instance `security_admin` reads every tenant
 //! anyway. For a write in a tenant other than the tenant itself (every
 //! write of the table but the first two, the removal from a checker
@@ -133,7 +145,8 @@
 //!
 //! # Audit events
 //!
-//! One event per write, last, with outcome `success`, the authorized
+//! One event per write, last, with outcome `success` (a widening egress
+//! write's is the gate's, see "Egress allowlist"), the authorized
 //! operator as actor (`{"type": "operator", "id": <admin_id>}`) and the
 //! written object's ID as `object_id`, with no previous revision and the
 //! new row's revision for a create, and the expected and the new revision
@@ -151,10 +164,10 @@
 //! classification, the verb of a no-op write and of a repeated disable).
 //! Principal events carry the principal's tenant as `tenant_id`; the events
 //! of the instance-owned objects (tenants, resource servers, assignments,
-//! checkers, actions) are instance events, with no tenant (lead decision,
-//! 2026-11-24: they are writes of instance `security_admin`, whose events
-//! a tenant `auditor` does not read, tasks section 2,
-//! `/admin/v1/tenants/{tenant}/audit`). The event has no member for the
+//! checkers, actions, egress entries) are instance events, with no tenant
+//! (lead decision, 2026-11-24: they are writes of instance
+//! `security_admin`, whose events a tenant `auditor` does not read, tasks
+//! section 2, `/admin/v1/tenants/{tenant}/audit`). The event has no member for the
 //! changed values (no `audit_event` detail column), so it records none.
 //!
 //! The actions these writes append, all of [`AUDIT_ACTIONS`], for the
@@ -183,6 +196,123 @@
 //! | [`workload::create_resource_action`] | `resource_action.create` | none |
 //! | [`workload::update_resource_action`] | `resource_action.enable` or `resource_action.disable` when status-only, else `resource_action.update` | none |
 //! | [`workload::disable_resource_action`] | `resource_action.disable`, also when already disabled | none |
+//! | [`egress::create_egress_entry`] | `egress_allowlist_entry.create`, enabled or disabled | none |
+//! | [`egress::enable_egress_entry`] | `egress_allowlist_entry.enable`, also when already enabled | none |
+//! | [`egress::disable_egress_entry`] | `egress_allowlist_entry.disable`, also when already disabled | none |
+//!
+//! # Egress allowlist
+//!
+//! An `EgressAllowlistEntry` (IR-152) is an instance-global exact
+//! destination of one purpose (`oidc_discovery`, `jwks`, `token_review`):
+//! `(purpose, exact_destination)` is unique and both are immutable, a
+//! PATCH changes only `status`, and entries are not deleted. So
+//! [`egress::create_egress_entry`] inserts one, and
+//! [`egress::enable_egress_entry`] and [`egress::disable_egress_entry`] set
+//! its `status`, nothing else; there is no update and no delete. A taken
+//! pair, whatever the other entry's status, is
+//! [`RegistryError::AlreadyExists`] naming
+//! `egress_allowlist_entry_purpose_exact_destination_key`, a typed error
+//! whose text names the constraint only.
+//!
+//! **The destination rule.** IR-152 calls `exact_destination` "an exact
+//! URL (scheme, host, port and path)" and states no syntax; the `0002`
+//! comment leaves the URL rule to the service (inferred there), and the
+//! user ruled canonical-form destinations the convention: "an egress entry
+//! writer must enforce this same rule on `exact_destination`" (2026-11-22,
+//! relayed by the lead; [`crate::trust::source`], "Syntax"). So
+//! [`egress::is_valid_destination`] is that rule, the one function a trust
+//! source's destination passes too, plus two bounds of the writer's own. In
+//! full, a destination:
+//!
+//! - has no ASCII whitespace, no control character (NUL included) and no
+//!   backslash;
+//! - is the text the URL parser serializes it to, byte for byte, with no
+//!   incomplete or non-hex escape and no escape of an unreserved
+//!   character (so the host is lowercase, an IPv4 address is dotted
+//!   decimal, a default port is left out and the path is at least `/`);
+//! - has the scheme `https`, a non-empty host, no userinfo and no fragment,
+//!   not even an empty `@` or `#`, for every purpose, `token_review`
+//!   included: the design asks for a "fixed HTTPS API endpoint" for a
+//!   TokenReview source (design section 5.4) and T11.2 for "approved HTTPS
+//!   egress", and no source allows `http`;
+//! - may have a query, as a source's destination may (the shared rule
+//!   allows it; inferred: no source names a query, and refusing it here
+//!   would leave a source with one, which the source rule takes, with no
+//!   entry to match);
+//! - is at most [`egress::MAX_DESTINATION_BYTES`] (2048) bytes, the `0002`
+//!   column bound, checked here so that a longer one is this error, not a
+//!   database check (inferred: the bound is the lead's, the place of the
+//!   check this module's);
+//! - has no `*` in its host (lead decision, 2026-11-25, replacing the
+//!   earlier inferred "no `*` anywhere"): the URL parser takes
+//!   `https://*.example/` as a host, and an entry whose host reads like a
+//!   pattern while it matches one exact text is refused rather than
+//!   misread. A literal `*` in the path or the query is allowed, as the
+//!   source rule allows it: matching is byte equality, so it is never a
+//!   wildcard there, and refusing it would leave a source that has one with
+//!   no entry to match.
+//!
+//! The rule is about spelling, not about where an address points, as for a
+//! source: a canonical loopback, private or link-local address passes. A
+//! policy on such addresses belongs to the fetcher (T11.2, T11.8), not to
+//! this writer or the source writes. A refused destination is
+//! [`AdminWriteError::InvalidDestination`], fixed text that never quotes it,
+//! after the authorization and the gate and before any ID is generated, so a
+//! refusal uses up no ID.
+//!
+//! **An enable checks the stored destination again** (lead decision,
+//! 2026-11-25). An entry written another way (raw SQL, a fixture, the tests'
+//! bare registry writer) may fail the rule, a pathless URL say, which no
+//! source destination can match. After the authorization and the gate,
+//! [`egress::enable_egress_entry`] checks the immutable destination of the
+//! row its revision-checked update returns, before the event: one that
+//! fails is [`AdminWriteError::InvalidDestination`], and the savepoint
+//! takes the update back, so nothing is written, no event appended and no
+//! ID taken, and a refused operator learns nothing of the destination. A
+//! disable checks no destination, so such an entry can always be disabled.
+//!
+//! **Disabling fails closed.** A trust source write that sets
+//! `discovery_url` or `token_review_endpoint` to a disabled entry's
+//! destination is refused, at the write and at the approval of a pending
+//! one, by the source path's entry check under `FOR SHARE` and by the
+//! `0011` guard; the disable's `UPDATE` takes the entry `FOR NO KEY
+//! UPDATE`, which waits for those `FOR SHARE` locks and they for it (see
+//! [`crate::trust::source`], "Order and locks"). These writers lock no
+//! `trust_source` row, so they add no deadlock with a source update. A
+//! write that leaves both members unchanged is still accepted (IR-152), and
+//! sources that already use the entry are not changed: IR-152 makes them
+//! degraded, a derived signal of the fetcher, which does not exist yet.
+//!
+//! **Widening writes fail closed.** A create, enabled or disabled, and an
+//! enable or re-enable are widening-class: IR-052 lists "adding or
+//! re-enabling an `EgressAllowlistEntry`" with the gated trust writes, and
+//! IR-152 and OQ-IR-12 repeat it; a disabled create is widening as a
+//! disabled keyset or source create is (the user's ruling Q3 of the
+//! second-approver proposal; ADR-008; [`crate::trust::source`] and
+//! [`crate::trust::keyset`] gate theirs). IR-052 decides this, so D3 does
+//! not (lead decision, 2026-11-25). The two writes take the gate's request
+//! steps 3 and 4 after the authorization, as a gated trust write does
+//! ([`crate::trust`]):
+//!
+//! - without `acknowledge_widening`,
+//!   [`AdminWriteError::WideningNotAcknowledged`];
+//! - the `instance_security_policy` row `FOR SHARE`, after the operator
+//!   rows (the source path's order); none is
+//!   [`AdminWriteError::PolicyUnavailable`];
+//! - the mode table: `widening_second_approver` off applies the write with
+//!   outcome `success_widening` (D23); on, under `single_actor_mode`,
+//!   with `success_single_actor`, since the requester always holds instance
+//!   `security_admin` (Q4; IR-052: "or one actor when `single_actor_mode`
+//!   is on"); otherwise the write would be a pending operation, and an
+//!   egress write has no operation kind yet, so it is
+//!   [`AdminWriteError::SecondApproverRequired`]: nothing written, no ID
+//!   taken, until an `egress_allowlist_entry_*` kind adds the pending path.
+//!
+//! The expected revision IR-052 asks for is the entry's, which an enable
+//! carries; a create has none, and neither carries the policy row's
+//! revision, as no gated trust write does (inferred). A disable is not
+//! widening (IR-152) and passes no gate step: no acknowledgement, no policy
+//! row, outcome `success`.
 //!
 //! # Order and locks
 //!
@@ -201,7 +331,11 @@
 //! stored row an update reads first is read without a lock: the
 //! compare-and-set then succeeds only on the row at the revision read, and
 //! every change advances the revision, so the event's classification holds
-//! for the row it replaced.
+//! for the row it replaced. An egress entry write takes, after the operator
+//! rows, the policy row `FOR SHARE` (a create or an enable, "Egress
+//! allowlist"), then only its own: the insert's unique index entry, or the
+//! entry row `FOR NO KEY UPDATE` by its compare-and-set, then the audit
+//! head.
 //!
 //! # Errors and rollback
 //!
@@ -224,13 +358,15 @@
 //!
 //! # Not gated: the D3 seams
 //!
-//! Every write here applies at once on one operator's authority. None goes
-//! through the second-approver gate ([`crate::operation`]), none takes
-//! `acknowledge_widening`, and none reads `widening_second_approver`:
-//! which of these writes are widening (D3 of the M1a plan) awaits a ruling
-//! of the user (slice S3b), so this module decides nothing about it. The
-//! writes a ruling may move behind the gate are the ones that can widen
-//! what a credential, a checker or an operator can reach:
+//! Every workload write here ([`workload`]) applies at once on one
+//! operator's authority. None goes through the second-approver gate
+//! ([`crate::operation`]), none takes `acknowledge_widening`, and none
+//! reads `widening_second_approver`: which of these writes are widening
+//! (D3 of the M1a plan) awaits a ruling of the user (slice S3b), so this
+//! module decides nothing about it. The egress entry writes are not among
+//! them: IR-052 already gates them (see "Egress allowlist"). The writes a
+//! ruling may move behind the gate are the ones that can widen what a
+//! credential, a checker or an operator can reach:
 //!
 //! - an audience tenant assignment create (enabled), its enable or
 //!   re-enable, and an update that adds a profile, a scope or a constraint
@@ -261,7 +397,7 @@
 //! (ADR-008 item 3, for bindings and grants) suggests they stay ungated,
 //! but that too is for the ruling. A gated write would keep this module's
 //! authorization and audit and add the gate's steps between them, as
-//! [`crate::trust`] does.
+//! [`crate::trust`] does, and as the egress create and enable do.
 //!
 //! Such a write creates an `administrative_operation`, so it must take its
 //! locks as steps 1 to 3 of "What 0005 adds" in the migrations README
@@ -276,7 +412,11 @@
 //! order and in the mode that order asks for, not `FOR SHARE` first and
 //! stronger later, since two writes that each hold it `FOR SHARE` and then
 //! ask for more deadlock, `40P01`), and the migrations README's lock order
-//! with it.
+//! with it. An egress entry write that creates an operation must also lock
+//! no `trust_source` row (the `0011` README notes and
+//! [`crate::trust::source`], "Order and locks": a source update holds its
+//! row and then takes the entry `FOR SHARE`); it may list the affected
+//! sources without a lock after its entry `UPDATE`.
 //!
 //! # Not done here
 //!
@@ -313,12 +453,25 @@
 //!   assignment or an action, and the T14.4 range rules of an action
 //!   (IR-101); leaving a disabled assignment's tenant out of a checker's
 //!   effective set (OQ-ADR018-1).
+//! - The affected source IDs in an egress entry write's event: decided, not
+//!   implemented. IR-152 and OQ-IR-12 (decided, 2026-11-20) say "the audit
+//!   event of the entry write lists the affected source IDs", but an event
+//!   has no detail member (no `audit_event` column for it), and an envelope
+//!   member is an ADR-level change to the IR-056 hash input (as ruled for
+//!   the fingerprint, Q6 of the second-approver proposal), so the event
+//!   records only the entry until that change lands. The degraded health
+//!   signal of dependent sources and the fail-closed fetch are the
+//!   fetcher's (T11.2, T11.8).
+//! - The deployment-policy mirror of the egress allowlist, which is slice
+//!   S8, not these writers; nothing here bumps a revision for it.
 //!
 //! [`authorize_operator_locked`]: crate::persistence::registry::authorize_operator_locked
 //! [`AUDIT_ACTIONS`]: crate::persistence::registry::AUDIT_ACTIONS
+//! [`RegistryError::AlreadyExists`]: crate::persistence::registry::RegistryError::AlreadyExists
 //! [`RegistryError::NotFound`]: crate::persistence::registry::RegistryError::NotFound
 //! [`RegistryError::Retry`]: crate::persistence::registry::RegistryError::Retry
 
+pub mod egress;
 pub mod workload;
 
 use std::{fmt, time::SystemTime};
@@ -326,8 +479,12 @@ use std::{fmt, time::SystemTime};
 use crate::identity::IdentityError;
 use crate::ids::{IdError, IdGenerator};
 use crate::persistence::registry::{AuditEvent, RegistryError};
-use crate::trust::write::WriteError;
+use crate::trust::write::{GatedWriteError, WriteError};
 
+pub use egress::{
+    EgressEntryCreate, MAX_DESTINATION_BYTES, create_egress_entry, disable_egress_entry,
+    enable_egress_entry, is_valid_destination,
+};
 pub use workload::{
     ActionCreate, AssignmentCreate, CheckerChanges, CheckerCreate, PrincipalCreate,
     ResourceServerCreate, TenantCreate, add_resource_server_checker_tenant,
@@ -407,6 +564,28 @@ pub enum AdminWriteError {
     /// identity ([`crate::identity::canonical_public_identity`]); checked
     /// after the authorization and before any ID is generated.
     PublicKey(IdentityError),
+    /// An egress entry create gave an `exact_destination`, or an enable
+    /// found a stored one, that is not an exact `https` URL in canonical
+    /// form within the writer's bounds ([`egress::is_valid_destination`];
+    /// see the module docs, "Egress allowlist"); checked after the
+    /// authorization and the gate and before any ID is generated. The text
+    /// never quotes the destination.
+    InvalidDestination,
+    /// A widening egress write (a create, enabled or disabled, or an enable;
+    /// IR-052, IR-152) was submitted without `acknowledge_widening`, as a
+    /// gated trust write's `WideningNotAcknowledged` (see the module docs,
+    /// "Egress allowlist"). Checked after the authorization.
+    WideningNotAcknowledged,
+    /// A widening egress write found no `instance_security_policy` row
+    /// (before bootstrap; D18), as a gated trust write's
+    /// `PolicyUnavailable`.
+    PolicyUnavailable,
+    /// A widening egress write while `widening_second_approver` is on and
+    /// the write is not single-actor: IR-052 says it must not take effect
+    /// until an approval applies it, and an egress write has no pending
+    /// operation yet, so it is refused, writing nothing (fails closed; see
+    /// the module docs, "Egress allowlist").
+    SecondApproverRequired,
     /// The generator gave no ID, for the new object or for the audit
     /// event: a server error, not retried with another source (see
     /// "Generators" in [`crate::ids`]; lead decision, 2026-11-24).
@@ -432,6 +611,17 @@ impl fmt::Display for AdminWriteError {
             Self::PublicKey(_) => {
                 f.write_str("the checker's public key is not a DER SubjectPublicKeyInfo")
             }
+            Self::InvalidDestination => {
+                f.write_str("the egress destination is not an exact https URL in canonical form")
+            }
+            Self::WideningNotAcknowledged => {
+                f.write_str("the egress allowlist write is widening and was not acknowledged")
+            }
+            Self::PolicyUnavailable => f.write_str("the instance security policy is unavailable"),
+            Self::SecondApproverRequired => f.write_str(
+                "the egress allowlist write is widening and needs a second approver, \
+                 which egress writes cannot request yet",
+            ),
             Self::Id(_) => f.write_str("operator write could not generate an ID"),
             Self::Registry(err) => write!(f, "operator write failed: {err}"),
         }
@@ -478,6 +668,11 @@ impl WriteError for AdminWriteError {
     const UNAUTHORIZED: Self = Self::Unauthorized;
 }
 
+impl GatedWriteError for AdminWriteError {
+    const WIDENING_NOT_ACKNOWLEDGED: Self = Self::WideningNotAcknowledged;
+    const POLICY_UNAVAILABLE: Self = Self::PolicyUnavailable;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +700,27 @@ mod tests {
                 AdminWriteError::TenantDisabled,
                 "TenantDisabled",
                 "this write is refused while its tenant is disabled",
+            ),
+            (
+                AdminWriteError::InvalidDestination,
+                "InvalidDestination",
+                "the egress destination is not an exact https URL in canonical form",
+            ),
+            (
+                AdminWriteError::WideningNotAcknowledged,
+                "WideningNotAcknowledged",
+                "the egress allowlist write is widening and was not acknowledged",
+            ),
+            (
+                AdminWriteError::PolicyUnavailable,
+                "PolicyUnavailable",
+                "the instance security policy is unavailable",
+            ),
+            (
+                AdminWriteError::SecondApproverRequired,
+                "SecondApproverRequired",
+                "the egress allowlist write is widening and needs a second approver, which \
+                 egress writes cannot request yet",
             ),
         ];
         for (err, debug, display) in cases {

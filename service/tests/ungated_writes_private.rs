@@ -5,9 +5,10 @@
 //! `docs/proposals/second-approver-gated-writes.md`, PRs 7, 9 and 10), nor
 //! the other registry writers of resource servers, audience tenant
 //! assignments, checkers, actions, tenants, principals, principal bindings,
-//! service identities, service grants and trust keysets, whether only the
-//! audited writes of `crate::admin` call them or nothing in the crate does
-//! (the proposal's survey under "Still open after PRs 7, 9 and 10").
+//! service identities, service grants and trust keysets, and of the egress
+//! allowlist, whether only the audited writes of `crate::admin` call them or
+//! nothing in the crate does (the proposal's survey under "Still open after
+//! PRs 7, 9 and 10").
 //!
 //! `create_version`, `enable_version`, `create_source` and `update_source`
 //! apply a write without the second-approver gate, so they are visible only
@@ -31,7 +32,10 @@
 //! well. The registry's resource server, assignment, checker and action
 //! writers and its tenant and principal writers are `pub(crate)` too: the
 //! audited, authorized writes of `crate::admin` call them, and nothing else
-//! in the crate does. Its other writers of those tables (the principal
+//! in the crate does, and so are its egress allowlist writers
+//! `create_egress_allowlist_entry` and `update_egress_allowlist_entry`,
+//! which only `crate::admin::egress` calls. Its other writers of those
+//! tables (the principal
 //! binding, service identity and grant writers with their list-set changes,
 //! and the trust keyset writers) have no caller in the crate, so they take
 //! `update_admin_role_binding`'s form ([`REGISTRY_DEAD`]).
@@ -83,10 +87,10 @@
 //! ([`CALLERS`]: `bootstrap_steps`, `insert_pending`, each `append_stamped`,
 //! `crate::admin`'s `append_event` and `write_*` helpers and the rest, and
 //! `trust::keyset`'s `set_status`, the one caller of a caller that is not
-//! public or itself guarded; `set_status` and the `crate::admin` helpers
-//! are counted in their own module only ([`SCOPED`]: they are private
-//! there)), each keyed by the item that holds it
-//! (a top-level item, or an `impl` block at any depth) with that item's
+//! public or itself guarded; `set_status` and the `crate::admin` and
+//! `crate::admin::egress` helpers are counted in their own module only
+//! ([`SCOPED`]: they are private there)), each keyed by the item that holds
+//! it (a top-level item, or an `impl` block at any depth) with that item's
 //! visibility and counted. So a forwarder of another name, a new caller, a
 //! widened definition or caller and a public method of an `impl` nested in
 //! a function body each change a key or a count. The check also refuses
@@ -154,11 +158,12 @@ const REGISTRY_UNGATED: [&str; 4] = [
 /// (`pub(crate)`: `crate::operation`, `crate::trust` and `crate::admin` call
 /// the append, the first the operation-row writers), the resource server,
 /// assignment, checker, action, tenant and principal writers (`pub(crate)`:
-/// the audited, authorized writes of `crate::admin` call them), and the
-/// principal binding, service identity, grant and trust keyset writers that
+/// the audited, authorized writes of `crate::admin` call them), the egress
+/// allowlist writers (`pub(crate)`: `crate::admin::egress` calls them), and
+/// the principal binding, service identity, grant and trust keyset writers that
 /// nothing in the crate calls (`pub(super)`, each with the update's
 /// `expect(dead_code)`).
-const REGISTRY_PRIVATE: [(&str, &str); 36] = [
+const REGISTRY_PRIVATE: [(&str, &str); 38] = [
     ("operator", "create_admin_identity"),
     ("operator", "create_admin_credential"),
     ("operator", "create_admin_role_binding"),
@@ -195,6 +200,8 @@ const REGISTRY_PRIVATE: [(&str, &str); 36] = [
     ("tenant", "create_principal"),
     ("trust", "create_trust_keyset"),
     ("trust", "update_trust_keyset"),
+    ("instance", "create_egress_allowlist_entry"),
+    ("instance", "update_egress_allowlist_entry"),
 ];
 
 /// The registry writers of [`REGISTRY_PRIVATE`] that nothing in the crate
@@ -264,7 +271,9 @@ const STEPS: [(&str, &str); 6] = [
 /// `append_stamped` and `*_steps`; `crate::operation`'s approval steps,
 /// `toggle_steps` and `insert_pending`, the pending branch of every gated
 /// `submit_*`; `crate::admin`'s `append_event` and the `write_*` helpers of
-/// its updates, whose public writes authorize first), and `crate::admin`'s
+/// its updates, whose public writes authorize first, and
+/// `crate::admin::egress`'s `append_egress_event` and `write_egress_status`,
+/// likewise), and `crate::admin`'s
 /// `disable_status`, which names no writer but runs one of two fixed status
 /// updates itself, with no authorization or event of its own, for the
 /// public disables that authorize first and append their event, so a
@@ -272,7 +281,9 @@ const STEPS: [(&str, &str); 6] = [
 /// ungated write as surely as a forwarder of the writer: the source check
 /// counts where each is named too, and the probes require each to be
 /// unreachable from outside the crate.
-const CALLERS: [(&str, &str, &str); 28] = [
+const CALLERS: [(&str, &str, &str); 30] = [
+    ("admin::egress", "admin", "append_egress_event"),
+    ("admin::egress", "admin", "write_egress_status"),
     ("admin::workload", "admin", "append_event"),
     ("admin::workload", "admin", "disable_status"),
     ("admin::workload", "admin", "write_resource_server"),
@@ -315,17 +326,18 @@ const CALLERS: [(&str, &str, &str); 28] = [
     ("trust::source", "trust", "submit_update_steps"),
 ];
 
-/// Names the source check counts only in the files of the module that
-/// defines them (its file, and the files of its submodules), as a path
-/// under `src/` without `.rs`. `trust::keyset`'s `set_status` and
-/// `crate::admin::workload`'s helpers (`disable_status` included) are
-/// private, so only that module and its descendants can name them: the
-/// same name elsewhere is another item (a method of another type, say), not
-/// a forwarder. Widening one changes
-/// the key of its definition, which the count still catches, and a new
-/// caller can only be in these files.
-const SCOPED: [(&str, &str); 7] = [
+/// Names the source check counts only in the files of the module that defines
+/// them (its file, and the files of its submodules), as a path under `src/`
+/// without `.rs`. `trust::keyset`'s `set_status`, `crate::admin::workload`'s
+/// helpers (`disable_status` included) and `crate::admin::egress`'s are
+/// private, so only that module and its descendants can name them: the same
+/// name elsewhere is another item (a method of another type, say), not a
+/// forwarder. Widening one changes the key of its definition, which the count
+/// still catches, and a new caller can only be in these files.
+const SCOPED: [(&str, &str); 9] = [
     ("set_status", "trust/keyset"),
+    ("append_egress_event", "admin/egress"),
+    ("write_egress_status", "admin/egress"),
     ("append_event", "admin/workload"),
     ("disable_status", "admin/workload"),
     ("write_resource_server", "admin/workload"),
@@ -336,7 +348,7 @@ const SCOPED: [(&str, &str); 7] = [
 
 /// The registry items of the same tables that stay public: the readers,
 /// and the row and input types the test-support wrappers take and return.
-const REGISTRY_PUBLIC: [&str; 75] = [
+const REGISTRY_PUBLIC: [&str; 79] = [
     "get_trust_keyset_version",
     "list_trust_keyset_versions",
     "get_trust_source",
@@ -412,6 +424,10 @@ const REGISTRY_PUBLIC: [&str; 75] = [
     "NewTrustKeyset",
     "TrustKeysetChanges",
     "TrustKeyset",
+    "get_egress_allowlist_entry",
+    "list_egress_allowlist_entries",
+    "NewEgressAllowlistEntry",
+    "EgressAllowlistEntry",
 ];
 
 /// The registry writers that deliberately stay public (the proposal's
@@ -465,47 +481,51 @@ const IDS_PUBLIC: [&str; 4] = ["IdGenerator", "IdError", "IdKind", "encode_id"];
 const IDS_TEST_ONLY: [&str; 2] = ["test_support::SequentialIds", "test_support"];
 
 /// Where the library's source, comments and literals aside, names a bare
-/// registry writer, a writer of [`REGISTRY_PRIVATE`], a step of [`STEPS`]
-/// or a caller of [`CALLERS`], one entry per line: the file under `src`,
-/// the first line of the item that holds the mention (the top-level item,
-/// or an `impl` block at any depth that follows it: the `seed` of
-/// `trust::keyset`'s tests comes after their `impl Drop for Db`), the name,
-/// and how many times, separated by ` | `. The trust writers are defined
-/// and re-exported `pub(crate)`, each wrapper is compiled only with
-/// `test-support`, and the callers are the trust write path's own steps and
-/// `crate::operation`'s approval, none of them public. Of PR 10's writers,
-/// the operator writers are defined `pub(super)` and the three creates
-/// re-exported privately, to `bootstrap_steps` and `restore_steps` (and the
-/// `seed` of a database unit test in `trust::keyset`, through
-/// `test_support`); `update_admin_role_binding` is named only by its
-/// definition and its wrapper; the audit append and the operation-row
-/// writers are defined and re-exported `pub(crate)`, and called by the
-/// audited steps of the registry (`bootstrap_steps`, `issue_steps`,
-/// `restore_steps`), of `crate::trust` (each module's private
-/// `append_stamped`) and of `crate::operation` (the approval's
+/// registry writer, a writer of [`REGISTRY_PRIVATE`], a step of [`STEPS`] or a
+/// caller of [`CALLERS`], one entry per line: the file under `src`, the first
+/// line of the item that holds the mention (the top-level item, or an `impl`
+/// block at any depth that follows it: the `seed` of `trust::keyset`'s tests
+/// comes after their `impl Drop for Db`), the name, and how many times,
+/// separated by ` | `. The trust writers are defined and re-exported
+/// `pub(crate)`, each wrapper is compiled only with `test-support`, and the
+/// callers are the trust write path's own steps and `crate::operation`'s
+/// approval, none of them public. Of PR 10's writers, the operator writers are
+/// defined `pub(super)` and the three creates re-exported privately, to
+/// `bootstrap_steps` and `restore_steps` (and the `seed` of a database unit
+/// test in `trust::keyset`, through `test_support`);
+/// `update_admin_role_binding` is named only by its definition and its wrapper;
+/// the audit append and the operation-row writers are defined and re-exported
+/// `pub(crate)`, and called by the audited steps of the registry
+/// (`bootstrap_steps`, `issue_steps`, `restore_steps`), of `crate::trust` (each
+/// module's private `append_stamped`) and of `crate::operation` (the approval's
 /// `approve_steps` and `revoke_steps`, the toggle's `toggle_steps`, and
-/// `insert_pending`, which the gated `submit_*` writes call). The
-/// resource server, assignment, checker, action, tenant and principal
+/// `insert_pending`, which the gated `submit_*` writes call). The resource
+/// server, assignment, checker, action, tenant and principal writers are
+/// defined and re-exported `pub(crate)`, named by their wrapper, and called
+/// only by `crate::admin`: by its private `write_checker` and `write_action`
+/// and by its public writes, which authorize first and then append their event
+/// through its private `append_event` (a caller of the audit append, like
+/// `append_stamped`); those public writes share the writers' names, so
+/// `crate::admin`'s own re-export of them is listed too (`create_tenant` is
+/// also named by the same `seed`, through `test_support`). The egress allowlist
 /// writers are defined and re-exported `pub(crate)`, named by their wrapper,
-/// and called only by `crate::admin`: by its private `write_checker` and
-/// `write_action` and by its public writes, which authorize first and then
-/// append their event through its private `append_event` (a caller of the
-/// audit append, like `append_stamped`); those public writes share the
-/// writers' names, so `crate::admin`'s own re-export of them is listed too
-/// (`create_tenant` is also named by the same `seed`, through
-/// `test_support`). The other writers of [`REGISTRY_DEAD`] are, like
+/// and called only by `crate::admin::egress`: the create by the public
+/// `create_egress_entry`, the status update by the private
+/// `write_egress_status`, which the public `enable_egress_entry` and
+/// `disable_egress_entry` call, each appending its event through the private
+/// `append_egress_event`. The other writers of [`REGISTRY_DEAD`] are, like
 /// `update_admin_role_binding`, named only by their definition and their
-/// wrapper, but `create_trust_keyset`, which the same `seed` also names
-/// through `test_support`. The last rows list
-/// where each caller of [`CALLERS`] is named: its definition, the `use`s
-/// and the crate-private re-export of `insert_pending`, the other callers,
-/// and the public entry points that call it (`bootstrap_instance`,
-/// `issue_recovery_challenge`, `restore_operator`, `approve_operation`,
-/// `cancel_operation`, `reject_operation`, `submit_widening_toggle`, the
-/// gated `submit_*` of `crate::trust`, the narrowing `disable_version` and
-/// the public writes of `crate::admin`, `disable_resource_server` and
-/// `disable_audience_tenant_assignment` for `disable_status`), and the ungated `pub(super)` writers of `crate::trust`, which their
-/// `expect(dead_code)` guards.
+/// wrapper, but `create_trust_keyset`, which the same `seed` also names through
+/// `test_support`. The last rows list where each caller of [`CALLERS`] is
+/// named: its definition, the `use`s and the crate-private re-export of
+/// `insert_pending`, the other callers, and the public entry points that call
+/// it (`bootstrap_instance`, `issue_recovery_challenge`, `restore_operator`,
+/// `approve_operation`, `cancel_operation`, `reject_operation`,
+/// `submit_widening_toggle`, the gated `submit_*` of `crate::trust`, the
+/// narrowing `disable_version` and the public writes of `crate::admin`,
+/// `disable_resource_server` and `disable_audience_tenant_assignment` for
+/// `disable_status`), and the ungated `pub(super)` writers of `crate::trust`,
+/// which their `expect(dead_code)` guards.
 const MENTIONS: &str = "
 persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_keyset_version | 1
 persistence/registry/mod.rs | pub(crate) use trust::{ | update_trust_keyset_version | 1
@@ -710,6 +730,22 @@ admin/workload.rs | pub async fn update_resource_server_checker( | write_checker
 admin/workload.rs | pub async fn update_tenant( | append_event | 1
 admin/workload.rs | pub async fn update_tenant( | update_tenant | 2
 admin/workload.rs | use crate::persistence::registry::{ | append_audit_event | 1
+admin/egress.rs | async fn append_egress_event( | append_audit_event | 1
+admin/egress.rs | async fn append_egress_event( | append_egress_event | 1
+admin/egress.rs | async fn write_egress_status( | append_egress_event | 1
+admin/egress.rs | async fn write_egress_status( | update_egress_allowlist_entry | 1
+admin/egress.rs | async fn write_egress_status( | write_egress_status | 1
+admin/egress.rs | pub async fn create_egress_entry( | append_egress_event | 1
+admin/egress.rs | pub async fn create_egress_entry( | create_egress_allowlist_entry | 1
+admin/egress.rs | pub async fn disable_egress_entry( | write_egress_status | 1
+admin/egress.rs | pub async fn enable_egress_entry( | write_egress_status | 1
+admin/egress.rs | use crate::persistence::registry::{ | append_audit_event | 1
+persistence/registry/instance.rs | pub(crate) async fn create_egress_allowlist_entry<'e>( | create_egress_allowlist_entry | 1
+persistence/registry/instance.rs | pub(crate) async fn update_egress_allowlist_entry<'e>( | update_egress_allowlist_entry | 1
+persistence/registry/mod.rs | pub(crate) use instance::{create_egress_allowlist_entry, update_egress_allowlist_entry}; | create_egress_allowlist_entry | 1
+persistence/registry/mod.rs | pub(crate) use instance::{create_egress_allowlist_entry, update_egress_allowlist_entry}; | update_egress_allowlist_entry | 1
+persistence/registry/test_support.rs | pub async fn create_egress_allowlist_entry<'e>( | create_egress_allowlist_entry | 2
+persistence/registry/test_support.rs | pub async fn update_egress_allowlist_entry<'e>( | update_egress_allowlist_entry | 2
 persistence/registry/audience.rs | pub(crate) async fn create_resource_server<'e>( | create_resource_server | 1
 persistence/registry/audience.rs | pub(crate) async fn update_resource_server<'e>( | update_resource_server | 1
 persistence/registry/audience.rs | pub(crate) async fn create_audience_tenant_assignment<'e>( | create_audience_tenant_assignment | 1

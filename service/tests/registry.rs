@@ -214,7 +214,7 @@ async fn registry_constraint_names_match_the_catalog() {
                    'service_grant', 'service_grant_binding',
                    'service_grant_resource_server', 'consumed_assertion',
                    'admin_identity', 'admin_credential', 'admin_role_binding',
-                   'instance_security_policy', 'recovery_state',
+                   'egress_allowlist_entry', 'instance_security_policy', 'recovery_state',
                    'administrative_operation']::regclass[]))
             OR contypid = ANY(ARRAY[
                    'skyoauth_scope_list', 'skyoauth_profile_list',
@@ -1783,10 +1783,11 @@ async fn guard_not_null_and_unknown_errors_map_from_raw_statements() {
         ),
         "{err:?}"
     );
-    // A constraint of a table the registry does not write is not mapped.
+    // A constraint of a table the registry does not write is not mapped
+    // (`schema_info`, the only one since the egress allowlist writers).
     let err = raw_error(
         &pool,
-        "INSERT INTO egress_allowlist_entry VALUES ('egr_1', 'jwks', 'has space', 'enabled')",
+        "INSERT INTO schema_info (singleton, product) VALUES (false, 'other')",
     )
     .await;
     assert!(matches!(err, RegistryError::Other(_)), "{err:?}");

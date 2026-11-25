@@ -109,27 +109,30 @@
 //!   create to a listed destination is applied
 //!   (`a05_neg_gated_source_write_without_an_enabled_matching_egress_entry_is_refused`).
 //! - **Negative, approval.** With the gate on, a create on a listed
-//!   destination goes pending; its entry is then disabled (a stand-in, see
-//!   below), and the approval is refused with `ApprovalError::Source`
+//!   destination goes pending; its entry is then disabled through the
+//!   egress allowlist writer, and the approval is refused with
+//!   `ApprovalError::Source`
 //!   (`EgressNotAllowed` naming the member): no source is written, the
 //!   operation stays pending and the audit chain has no new event. As a
 //!   control, a create on a destination whose entry stays enabled is
 //!   approved and written as requested
 //!   (`a05_neg_approval_after_its_egress_entry_is_disabled_is_refused`).
 //!
-//! # Stand-ins (§1.3)
+//! # Egress allowlist entries
 //!
-//! No public path writes an egress allowlist entry: the registry only
-//! reads entries, and the writer and its endpoint (IR-052, IR-152) do not
-//! exist. So every entry here is SQL-seeded, in the manner of the shared
-//! fixture `skyoauth_scenarios::egress`: the enabled entries of the
-//! member's own purpose through that fixture, and in this module
-//! ([`seed_entry`], [`disable_entry`]) the enabled entries of another
-//! purpose, the disabled entries (inserted as `disabled`), and entries
-//! disabled by an `UPDATE` after a source was written on them or a request
-//! went pending on them. These are IR-152 rows the API will create, not
-//! deployment configuration: the seeds are listed in §1.3's stand-ins, and
-//! the PR that adds the egress allowlist writer replaces them with it.
+//! Every entry here is written through the audited egress allowlist writer
+//! (`skyoauth_service::admin::egress`; IR-152) by the instance
+//! `security_admin` `adm_first`, which [`egress_fixture`] bootstraps first:
+//! [`seed_entry`] creates the enabled entries of the member's own purpose
+//! and of the other purposes and the disabled entries (created as
+//! `disabled`), and [`disable_entry`] disables an entry, at its current
+//! revision, after a source was written on it or a request went pending on
+//! it. A create, enabled or disabled, is widening (IR-052, IR-152), so
+//! [`seed_entry`] acknowledges it and runs while `widening_second_approver`
+//! is still off (outcome `success_widening`), before a gated fixture turns
+//! it on; a disable is not widening and needs neither. No entry is SQL-seeded, so A05 no longer uses the shared fixture
+//! `skyoauth_scenarios::egress` (conformance layout §1.3). The writer has no
+//! endpoint yet; its library call is what one will make.
 //!
 //! # Spec and registry picks
 //!
@@ -201,11 +204,14 @@
 
 use std::{
     fmt::Debug,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
+use skyoauth_service::admin::{self, AdminRequest, EgressEntryCreate};
+use skyoauth_service::ids::test_support::SequentialIds;
 use skyoauth_service::jwk::{DEFAULT_ALLOWED_ALGORITHMS, JwkError, JwkSetError, ValidatedKeyset};
 use skyoauth_service::operation::{
     ApprovalEcho, ApprovalError, ApprovalIds, ApprovalScope, Clock, Gated, OperationKind,
@@ -214,11 +220,12 @@ use skyoauth_service::operation::{
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
-        self, AdminRole, AssertionProfile, BootstrapRequest, ChainVerdict, InvariantKind,
-        JsonObject, MAX_PAGE_SIZE, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
-        NewTenant, NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource, Page, RegistryError,
-        ReplayMode, Status, TrustKeysetVersion, TrustSource, TrustSourceChanges, TrustSourceKind,
-        bootstrap_instance, lock_administrative_operation, verify_audit_chain,
+        self, AdminRole, AssertionProfile, BootstrapRequest, ChainVerdict, EgressPurpose,
+        InvariantKind, JsonObject, MAX_PAGE_SIZE, NewAdminCredential, NewAdminIdentity,
+        NewAdminRoleBinding, NewTenant, NewTrustKeyset, NewTrustKeysetVersion, NewTrustSource,
+        Page, RegistryError, ReplayMode, Status, TrustKeysetVersion, TrustSource,
+        TrustSourceChanges, TrustSourceKind, bootstrap_instance, lock_administrative_operation,
+        verify_audit_chain,
     },
 };
 use skyoauth_service::trust::{
@@ -411,12 +418,15 @@ async fn operator(pool: &PgPool, admin: &str, key: &str, role: AdminRole, tenant
 }
 
 /// The instance bootstrapped by `adm_first` (the policy row with both
-/// flags off), `adm_sec` (a second instance `security_admin`, the approver)
-/// and `adm_trust` (the `trust_admin` of [`TENANT`], the requester). With
-/// `gate`, `widening_second_approver` is then turned on through the flow:
-/// `adm_first` requests it and `adm_sec` approves it. Without it, a gated
-/// write is applied at once.
+/// flags off), then [`enrolled`].
 async fn operators(pool: &PgPool, gate: bool) {
+    bootstrap(pool).await;
+    enrolled(pool, gate).await;
+}
+
+/// The instance bootstrapped by `adm_first`, an instance `security_admin`
+/// (the policy row with both flags off).
+async fn bootstrap(pool: &PgPool) {
     let mut transaction = pool.begin().await.unwrap();
     bootstrap_instance(
         &mut transaction,
@@ -435,6 +445,14 @@ async fn operators(pool: &PgPool, gate: bool) {
     .await
     .unwrap();
     transaction.commit().await.unwrap();
+}
+
+/// On a bootstrapped instance: `adm_sec` (a second instance
+/// `security_admin`, the approver) and `adm_trust` (the `trust_admin` of
+/// [`TENANT`], the requester). With `gate`, `widening_second_approver` is
+/// then turned on through the flow: `adm_first` requests it and `adm_sec`
+/// approves it. Without it, a gated write is applied at once.
+async fn enrolled(pool: &PgPool, gate: bool) {
     operator(pool, "adm_sec", SEC_KEY, AdminRole::SecurityAdmin, None).await;
     operator(
         pool,
@@ -1146,58 +1164,87 @@ impl Member {
     }
 }
 
-/// Inserts an egress allowlist entry of `purpose` for `destination` with
-/// `status`, the stand-in for the egress allowlist writer that does not
-/// exist (see "Stand-ins" in the module docs). The ID is derived as the
-/// shared fixture's; the insert fails on a duplicate.
-async fn seed_entry(pool: &PgPool, purpose: &str, destination: &str, status: &str) {
-    sqlx::query(
-        "INSERT INTO egress_allowlist_entry (id, purpose, exact_destination, status) \
-         VALUES ('egr_' || md5($1 || ' ' || $2), $1, $2, $3)",
-    )
-    .bind(purpose)
-    .bind(destination)
-    .bind(status)
-    .execute(pool)
-    .await
-    .unwrap_or_else(|err| panic!("{status} {purpose} entry: {err}"));
+/// The seed of the next egress writer call's [`SequentialIds`], so that no
+/// two calls give the same entry or event ID.
+static NEXT_SEED: AtomicU64 = AtomicU64::new(0x0a05_0000);
+
+/// An egress writer call's request by `adm_first`, with IDs of their own.
+fn writer_request(ids: &SequentialIds) -> AdminRequest<'_> {
+    AdminRequest {
+        public_identity: FIRST_KEY,
+        ids,
+        now: at(3),
+    }
 }
 
-/// Disables the entry of `purpose` for `destination`, advancing its
-/// revision, the stand-in for the writer's disable (see "Stand-ins").
+fn writer_ids() -> SequentialIds {
+    SequentialIds::with_seed(NEXT_SEED.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Creates the egress allowlist entry of `purpose` for `destination` with
+/// `status` through the writer, acknowledged as widening, with the toggle
+/// off (see "Egress allowlist entries" in the module docs); it fails on a
+/// duplicate or with the toggle on.
+async fn seed_entry(pool: &PgPool, purpose: &str, destination: &str, status: Status) {
+    let ids = writer_ids();
+    let new = EgressEntryCreate {
+        purpose: purpose.parse::<EgressPurpose>().unwrap(),
+        exact_destination: destination.into(),
+        status,
+    };
+    let mut transaction = pool.begin().await.unwrap();
+    admin::create_egress_entry(&mut transaction, &writer_request(&ids), &new, true)
+        .await
+        .unwrap_or_else(|err| panic!("{status:?} {purpose} entry: {err:?}"));
+    transaction.commit().await.unwrap();
+}
+
+/// Disables the enabled entry of `purpose` for `destination` through the
+/// writer, at its current revision (see "Egress allowlist entries").
 async fn disable_entry(pool: &PgPool, purpose: &str, destination: &str) {
-    let done = sqlx::query(
-        "UPDATE egress_allowlist_entry SET status = 'disabled', revision = revision + 1 \
-         WHERE purpose = $1 AND exact_destination = $2 AND status = 'enabled'",
+    let entries = registry::list_egress_allowlist_entries(pool, Page::first(MAX_PAGE_SIZE))
+        .await
+        .unwrap();
+    assert!(entries.len() < usize::try_from(MAX_PAGE_SIZE).unwrap());
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.purpose.as_str() == purpose && entry.exact_destination == destination)
+        .unwrap_or_else(|| panic!("no {purpose} entry"));
+    assert_eq!(entry.status, Status::Enabled, "the {purpose} entry");
+    let ids = writer_ids();
+    let mut transaction = pool.begin().await.unwrap();
+    admin::disable_egress_entry(
+        &mut transaction,
+        &writer_request(&ids),
+        &entry.id,
+        entry.revision,
     )
-    .bind(purpose)
-    .bind(destination)
-    .execute(pool)
     .await
-    .unwrap_or_else(|err| panic!("disable the {purpose} entry: {err}"));
-    assert_eq!(done.rows_affected(), 1, "disable the {purpose} entry");
+    .unwrap_or_else(|err| panic!("disable the {purpose} entry: {err:?}"));
+    transaction.commit().await.unwrap();
 }
 
-/// [`base_fixture`], then the egress entries: enabled entries of each
-/// member's purpose for both its allowed destinations (the shared
-/// fixture), and for each missing-entry case its seed.
+/// [`base_fixture`], the instance [`bootstrap`]ped, then the egress
+/// entries through the writer: enabled entries of each member's purpose for
+/// both its allowed destinations, and for each missing-entry case its seed.
 async fn egress_fixture() -> (TestDb, PgPool) {
     let (db, pool) = base_fixture().await;
+    bootstrap(&pool).await;
     for member in MEMBERS {
         let (allowed, next) = member.allowed();
         for destination in [allowed, next] {
-            egress::allow_destinations(&pool, &member.source("seed", destination)).await;
+            seed_entry(&pool, member.purpose(), destination, Status::Enabled).await;
         }
         for &(_, destination, seed) in member.missing() {
             match seed {
                 Seed::Nothing => {}
                 Seed::OtherPurposes => {
                     for purpose in PURPOSES.into_iter().filter(|&p| p != member.purpose()) {
-                        seed_entry(&pool, purpose, destination, "enabled").await;
+                        seed_entry(&pool, purpose, destination, Status::Enabled).await;
                     }
                 }
                 Seed::Disabled => {
-                    seed_entry(&pool, member.purpose(), destination, "disabled").await;
+                    seed_entry(&pool, member.purpose(), destination, Status::Disabled).await;
                 }
             }
         }
@@ -1205,12 +1252,12 @@ async fn egress_fixture() -> (TestDb, PgPool) {
     (db, pool)
 }
 
-/// [`egress_fixture`] and [`operators`]: the gated source writes of
+/// [`egress_fixture`] and [`enrolled`]: the gated source writes of
 /// `adm_trust`, applied at once (`gate` off) or pending until `adm_sec`
 /// approves them (`gate` on).
 async fn gated_egress_fixture(gate: bool) -> (TestDb, PgPool) {
     let (db, pool) = egress_fixture().await;
-    operators(&pool, gate).await;
+    enrolled(&pool, gate).await;
     (db, pool)
 }
 

@@ -2517,9 +2517,10 @@ validates no existing row. Choices marked "(inferred)" are its own.
   - Under `REPEATABLE READ` and `SERIALIZABLE`, a write whose snapshot
     predates a change of its entry fails with `40001`, which the registry
     maps to `Retry`. A deadlock (`40P01`) is `Retry` too: an egress entry
-    writer that locks a `trust_source` row after an entry row can deadlock
-    with a source update ("Trust source writes" has the rule for that
-    writer; none exists yet).
+    writer that locked a `trust_source` row after an entry row could
+    deadlock with a source update ("Trust source writes" has the rule for
+    that writer). The writer, `crate::admin::egress`, locks no
+    `trust_source` row.
 - **Locks on existing tables.** Checked with `pg_locks` in a transaction
   that applies `0011` to a `0010` database (PostgreSQL 16.15 here; 17.12
   in the lead's review, same result): `CREATE TRIGGER` and
@@ -2537,7 +2538,9 @@ validates no existing row. Choices marked "(inferred)" are its own.
   `service/tests/trust_source_egress.rs` covers both layers. Tests and
   scenarios that write trust sources with raw SQL or the bare registry
   writers first insert an enabled entry for each destination
-  (`tests/src/egress.rs`, `allow_destinations`).
+  (`tests/src/egress.rs`, `allow_destinations`), except A05, which writes
+  its entries through the audited egress allowlist writer
+  (`crate::admin::egress`).
 - **Frozen comments.** The `0004` comment on the destination columns ("a
   write that leaves them unchanged must not be rejected for a missing or
   disabled entry") still holds: the guard checks only a changed member.
@@ -2802,8 +2805,9 @@ Not done in `0005`:
 the registry tables of `0002` and `0003`: create, get, list and
 revision-checked update for `tenant`, `principal`, `resource_server`,
 `audience_tenant_assignment`, `resource_server_checker` (with its tenant
-rows) and `resource_action`; and reads of `instance_security_policy` and
-`egress_allowlist_entry`. The revisions of `tenant` and `principal` are the
+rows) and `resource_action`; create, get, list and a revision-checked
+status update for `egress_allowlist_entry`, whose other columns are
+immutable; and reads of `instance_security_policy`. The revisions of `tenant` and `principal` are the
 ones `0007` adds. Their updates, `update_tenant` and `update_principal`,
 take a patch (`TenantPatch`, `PrincipalPatch`) and change only the columns
 set in it, `name` and `status` (lead ruling, 2026-11-21); the other updates
@@ -2830,7 +2834,7 @@ gives `Other` with `22003` from `revision + 1`, which is unreachable in
 practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
-cursor. Fourteen writers are crate-private (`pub(crate)`): the tenant
+cursor. Sixteen writers are crate-private (`pub(crate)`): the tenant
 and principal writers (`create_tenant`, `update_tenant`,
 `create_principal`, `update_principal`), the resource server writers
 (`create_resource_server`, `update_resource_server`), the assignment
@@ -2839,8 +2843,10 @@ writers (`create_audience_tenant_assignment`,
 (`create_resource_server_checker`, `update_resource_server_checker`,
 `add_resource_server_checker_tenant`,
 `remove_resource_server_checker_tenant`) and the action writers
-(`create_resource_action`, `update_resource_action`). The audited,
-authorized writes of `crate::admin` call them, and tests reach them through
+(`create_resource_action`, `update_resource_action`) and the egress
+allowlist writers (`create_egress_allowlist_entry`,
+`update_egress_allowlist_entry`; the latter sets only `status`). The
+audited, authorized writes of `crate::admin` call them, and tests reach them through
 `persistence::registry::test_support`.
 
 Of two concurrent updates from one revision exactly one succeeds. Under
@@ -2892,10 +2898,11 @@ enforce these rules" above, generate IDs or run migrations.
 
 Since the second-approver proposal's registry hardening PR and its
 follow-up, no writer of tenants, principals, resource servers, audience
-tenant assignments, checkers, actions, principal bindings, service
-identities, grants or trust keysets (each create, update and list-set
-change) is public. The fourteen writers of tenants, principals, resource
-servers, assignments, checkers and actions listed above are crate-private
+tenant assignments, checkers, actions, egress allowlist entries,
+principal bindings, service identities, grants or trust keysets (each
+create, update and list-set change) is public. The sixteen writers of
+tenants, principals, resource servers, assignments, checkers, actions and
+egress allowlist entries listed above are crate-private
 (`pub(crate)`), called by the audited, authorized writes of
 `crate::admin`. The rest, the writers of principal bindings, service
 identities, grants and trust keysets, stay private to the registry
@@ -3711,7 +3718,8 @@ the caller's transaction. The picks are the lead's (provisional lead pick,
   not about where an address points: a canonical loopback, link-local,
   private or metadata address, or an IPv4-mapped IPv6 address, passes it
   when an entry lists it. A policy on such addresses, and on what a name
-  resolves to, belongs to the fetcher or the egress entry writer (inferred).
+  resolves to, belongs to the fetcher (T11.2, T11.8; inferred); the egress
+  entry writer checks the same spelling rule and no address policy either.
 - Only `READ COMMITTED` runs: any other level is `UnsupportedIsolation`
   before any lock. A `40001` or `40P01` is `RegistryError::Retry`.
 - The gate (`docs/proposals/second-approver-gated-writes.md`, its PR 5):
@@ -3798,19 +3806,35 @@ that consumer's own audit append.
 
 Follow-ups and open questions:
 
-- An egress entry writer (IR-152 `create`, `enable` and `disable`; none
-  exists yet):
-  - It must enforce the same canonical-form rule on `exact_destination`
-    (the convention ruled below). Entries are matched byte for byte, and nothing validates them today
-    beyond the `0002` checks; a non-canonical entry matches no source.
-  - It must lock no `trust_source` row at all when it creates an operation,
-    and in any case never after the entry row, or it can deadlock with an
-    update here (`40P01`, `Retry`, fail-closed).
-  - Listing the affected source IDs for its audit event needs no lock only
-    after its entry `UPDATE`, under `READ COMMITTED`. By then every source
-    write that checked the entry has committed or rolled back, since the
-    `UPDATE` waited for its `FOR SHARE`, and any later one waits for the
-    entry and then reads it `disabled`.
+- The egress entry writer (IR-152 `create`, `enable` and `disable`) is
+  `crate::admin::egress`, an audited write of instance `security_admin`
+  with no endpoint yet:
+  - It enforces the same canonical-form rule on `exact_destination` (the
+    convention ruled below), plus a 2048-byte bound and no `*` in the host
+    (a literal `*` in the path or the query is allowed, as for a source), at
+    a create and again at an enable, on the stored destination. Entries are
+    matched byte for byte; one written another way (SQL, the tests' bare
+    registry writer) is not validated beyond the `0002` checks, a
+    non-canonical entry matches no source, and the writer refuses to enable
+    it, though it can still disable it.
+  - A create, enabled or disabled, and an enable are widening (IR-052,
+    IR-152): it needs `acknowledge_widening` and reads the policy row
+    `FOR SHARE`; with `widening_second_approver` off it applies with
+    outcome `success_widening`, single-actor with `success_single_actor`,
+    and otherwise it is refused, writing nothing, since an egress write has
+    no pending operation yet. A disable is not widening.
+  - It locks no `trust_source` row. One that creates an operation must
+    lock none at all either, and in any case never after the entry row, or
+    it can deadlock with an update here (`40P01`, `Retry`, fail-closed).
+  - Decided, not implemented: the audit event of the entry write lists the
+    affected source IDs (IR-152; OQ-IR-12). The event envelope has no
+    member for them, and adding one is an ADR-level change to the IR-056
+    hash input (as for the fingerprint, Q6 of the second-approver
+    proposal), so the event records only the entry for now. Listing them
+    needs no lock only after the entry `UPDATE`, under `READ COMMITTED`.
+    By then every source write that checked the entry has committed or
+    rolled back, since the `UPDATE` waited for its `FOR SHARE`, and any
+    later one waits for the entry and then reads it `disabled`.
 - Canonical-form egress destinations are the convention (ruled by the
   user, 2026-11-22, relayed by the lead): the entry writer enforces the
   same rule as the source writes (above), and an importer rewrites a
