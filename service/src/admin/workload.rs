@@ -207,8 +207,8 @@ struct Change<'a> {
 }
 
 /// Steps 1 and 2 of an instance write: `READ COMMITTED`, then an instance
-/// `security_admin`, locked.
-async fn security_admin(
+/// `security_admin`, locked. Shared with [`super::egress`].
+pub(super) async fn security_admin(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
 ) -> Result<Requester, AdminWriteError> {

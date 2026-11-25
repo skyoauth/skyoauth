@@ -54,13 +54,13 @@
 //! [`IdGenerator`] is the interface a write path takes. **It has no
 //! production caller yet**: the registry writers still take caller-supplied
 //! IDs (migrations README, "Rust registry surface"), and the audited
-//! workload writes of [`crate::admin`], which take a `&dyn IdGenerator` for
-//! every ID they create, have no endpoint yet. The production generator,
-//! which fills the 16 bytes from the operating system's CSPRNG and calls
-//! [`encode_id`], is not here yet either: it needs a dependency that awaits
-//! approval. Tests use the deterministic generator
-//! `test_support::SequentialIds`, compiled only with the `test-support`
-//! feature.
+//! workload and egress allowlist writes of [`crate::admin`], which take a
+//! `&dyn IdGenerator` for every ID they create, have no endpoint yet. The
+//! production generator, which fills the 16 bytes from the operating
+//! system's CSPRNG and calls [`encode_id`], is not here yet either: it
+//! needs a dependency that awaits approval. Tests use the deterministic
+//! generator `test_support::SequentialIds`, compiled only with the
+//! `test-support` feature.
 //!
 //! Generating an ID is fallible: [`IdGenerator::new_id`] returns an
 //! [`IdError`] when it has no new ID to give. The production generator will

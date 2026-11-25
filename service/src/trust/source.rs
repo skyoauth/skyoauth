@@ -93,8 +93,8 @@
 //!   (`https://127.0.0.1/`, `https://169.254.169.254/`) or an IPv4-mapped
 //!   IPv6 address passes it when an entry lists it. A policy on such
 //!   addresses, and on what a host name resolves to, belongs to the
-//!   fetcher (T11.2, T11.8) or the egress entry writer, not here
-//!   (inferred).
+//!   fetcher (T11.2, T11.8), not here and not to the egress entry writer,
+//!   which checks this same spelling rule (inferred).
 //!
 //!   A refused member is [`SourceWriteError::InvalidDestination`] naming
 //!   the member. A create checks the syntax before any statement. An update
@@ -108,9 +108,12 @@
 //!   enforce this same rule on `exact_destination`, and an importer (C05)
 //!   must rewrite a path-less, kubeconfig-style server URL
 //!   (`https://host:6443`, the export's `api_server`, OQ-IR-6), which this
-//!   check refuses, to canonical form. Neither exists yet: nothing checks
-//!   today that an entry's `exact_destination` is canonical, and entries
-//!   are matched byte for byte, so a non-canonical entry matches no source.
+//!   check refuses, to canonical form. The entry writer is
+//!   [`crate::admin::egress`], which applies this check (one function for
+//!   both, `is_canonical_destination`) and two bounds of its own; the
+//!   importer does not exist yet. An entry written another way (SQL, the
+//!   bare registry writer of the tests) is not checked, and entries are
+//!   matched byte for byte, so a non-canonical entry matches no source.
 //!
 //! No error's `Display` or `Debug` contains a destination: errors name the
 //! member, never its value.
@@ -275,8 +278,11 @@
 //! request reads first, comes before both (inferred). An egress entry writer that locked a trust source row after an
 //! entry row would deadlock with an update here; PostgreSQL fails one of
 //! them with `40P01` ([`RegistryError::Retry`]), a refusal for this write.
-//! No egress entry writer exists yet. One that creates an operation must
-//! lock no `trust_source` row at all. It may list the affected source IDs
+//! The egress entry writer of [`crate::admin::egress`] locks no
+//! `trust_source` row and creates no operation (with the toggle on and no
+//! `single_actor_mode`, its widening create or enable is refused, IR-052);
+//! one that creates an operation, once an egress operation kind exists,
+//! must lock no `trust_source` row at all either. It may list the affected source IDs
 //! without a lock only after its entry `UPDATE`, under `READ COMMITTED`:
 //! a source write that checked the entry has committed by then, since the
 //! `UPDATE` waited for its `FOR SHARE`, and a later one sees the new status.
@@ -612,31 +618,41 @@ fn destinations<'a>(
 
 /// Checks the syntax of `destination` (see the module docs, "Rules").
 fn check_syntax(destination: Destination<'_>) -> Result<(), SourceWriteError> {
-    let invalid = || SourceWriteError::InvalidDestination {
-        member: destination.member,
-    };
-    let raw = destination.value;
+    if is_canonical_destination(destination.value) {
+        Ok(())
+    } else {
+        Err(SourceWriteError::InvalidDestination {
+            member: destination.member,
+        })
+    }
+}
+
+/// Whether `raw` is an egress destination in canonical form: the rule of
+/// the module docs ("Rules", "Syntax"), which the user ruled the
+/// convention for egress destinations (2026-11-22, relayed by the lead), so
+/// the egress entry writer ([`crate::admin::egress`]) applies it to
+/// `exact_destination` as well.
+pub(crate) fn is_canonical_destination(raw: &str) -> bool {
     // Characters the parser strips, drops or reads as `/`.
     if raw
         .chars()
         .any(|c| c.is_ascii_whitespace() || c.is_control() || c == '\\')
     {
-        return Err(invalid());
+        return false;
     }
-    let url = Url::parse(raw).map_err(|_| invalid())?;
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
     // Canonical form: the text is what the parser serializes, so it names
     // the host, port and path that are fetched.
     if url.as_str() != raw || bad_escape(raw) {
-        return Err(invalid());
+        return false;
     }
     if url.scheme() != "https" || url.host_str().is_none_or(str::is_empty) {
-        return Err(invalid());
+        return false;
     }
     // No userinfo and no fragment, not even an empty one.
-    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
-        return Err(invalid());
-    }
-    Ok(())
+    url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
 }
 
 /// Whether `raw` has a `%` that is not a valid escape of a character that
