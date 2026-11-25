@@ -554,7 +554,7 @@ envs = ["pg"]
 harness = ["UC", "OIDC", "OP"]
 owners = ["T13.1", "T13.3", "T13.6", "T13.10", "T30.4", "T52.3"]
 positive = "registered mTLS adm credential with active role (M1a); explicit verified link (M3)"
-negative = "email-only match, upstream admin-role claim"
+negative = "email-only match → no link or elevation (M3, linking; needs the OIDC harness login and the linking flow); upstream admin-role claim, token or session → no operator authority, only a registered mTLS credential key authorizes (M1a, at the operator endpoint; a token-shaped input needs no mock IdP)"
 matrix_sha256 = "153d162687572075c2155403b0554e662174fccad7a60a2685adf791ec02b128"
 
 [[scenario.stage]]
@@ -569,6 +569,7 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_other_registries_identities_never_authorize",
   "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_scope_and_role_never_inherit",
   "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_store_unavailable_is_an_error_not_a_grant",
+  "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_token_and_claim_shaped_keys_never_authorize",
 ]
 
 [[scenario.stage]]
