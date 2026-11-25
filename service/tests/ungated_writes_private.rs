@@ -264,12 +264,17 @@ const STEPS: [(&str, &str); 6] = [
 /// `append_stamped` and `*_steps`; `crate::operation`'s approval steps,
 /// `toggle_steps` and `insert_pending`, the pending branch of every gated
 /// `submit_*`; `crate::admin`'s `append_event` and the `write_*` helpers of
-/// its updates, whose public writes authorize first), so a public forwarder of one of them, under another name,
-/// would reach an ungated write as surely as a forwarder of the writer: the
-/// source check counts where each is named too, and the probes require each
-/// to be unreachable from outside the crate.
-const CALLERS: [(&str, &str, &str); 27] = [
+/// its updates, whose public writes authorize first), and `crate::admin`'s
+/// `disable_status`, which names no writer but runs one of two fixed status
+/// updates itself, with no authorization or event of its own, for the
+/// public disables that authorize first and append their event, so a
+/// public forwarder of one of them, under another name, would reach an
+/// ungated write as surely as a forwarder of the writer: the source check
+/// counts where each is named too, and the probes require each to be
+/// unreachable from outside the crate.
+const CALLERS: [(&str, &str, &str); 28] = [
     ("admin::workload", "admin", "append_event"),
+    ("admin::workload", "admin", "disable_status"),
     ("admin::workload", "admin", "write_resource_server"),
     ("admin::workload", "admin", "write_assignment"),
     ("admin::workload", "admin", "write_checker"),
@@ -313,14 +318,16 @@ const CALLERS: [(&str, &str, &str); 27] = [
 /// Names the source check counts only in the files of the module that
 /// defines them (its file, and the files of its submodules), as a path
 /// under `src/` without `.rs`. `trust::keyset`'s `set_status` and
-/// `crate::admin::workload`'s helpers are private, so only that module and
-/// its descendants can name them: the same name elsewhere is another item
-/// (a method of another type, say), not a forwarder. Widening one changes
+/// `crate::admin::workload`'s helpers (`disable_status` included) are
+/// private, so only that module and its descendants can name them: the
+/// same name elsewhere is another item (a method of another type, say), not
+/// a forwarder. Widening one changes
 /// the key of its definition, which the count still catches, and a new
 /// caller can only be in these files.
-const SCOPED: [(&str, &str); 6] = [
+const SCOPED: [(&str, &str); 7] = [
     ("set_status", "trust/keyset"),
     ("append_event", "admin/workload"),
+    ("disable_status", "admin/workload"),
     ("write_resource_server", "admin/workload"),
     ("write_assignment", "admin/workload"),
     ("write_checker", "admin/workload"),
@@ -496,7 +503,8 @@ const IDS_TEST_ONLY: [&str; 2] = ["test_support::SequentialIds", "test_support"]
 /// `issue_recovery_challenge`, `restore_operator`, `approve_operation`,
 /// `cancel_operation`, `reject_operation`, `submit_widening_toggle`, the
 /// gated `submit_*` of `crate::trust`, the narrowing `disable_version` and
-/// the public writes of `crate::admin`), and the ungated `pub(super)` writers of `crate::trust`, which their
+/// the public writes of `crate::admin`, `disable_resource_server` and
+/// `disable_audience_tenant_assignment` for `disable_status`), and the ungated `pub(super)` writers of `crate::trust`, which their
 /// `expect(dead_code)` guards.
 const MENTIONS: &str = "
 persistence/registry/mod.rs | pub(crate) use trust::{ | create_trust_keyset_version | 1
@@ -650,6 +658,7 @@ admin/mod.rs | pub use workload::{ | update_resource_server_checker | 1
 admin/mod.rs | pub use workload::{ | update_tenant | 1
 admin/workload.rs | async fn append_event( | append_audit_event | 1
 admin/workload.rs | async fn append_event( | append_event | 1
+admin/workload.rs | async fn disable_status( | disable_status | 1
 admin/workload.rs | async fn write_action( | append_event | 1
 admin/workload.rs | async fn write_action( | update_resource_action | 1
 admin/workload.rs | async fn write_action( | write_action | 1
@@ -677,10 +686,12 @@ admin/workload.rs | pub async fn create_tenant( | create_tenant | 2
 admin/workload.rs | pub async fn create_workload_principal( | append_event | 1
 admin/workload.rs | pub async fn create_workload_principal( | create_principal | 1
 admin/workload.rs | pub async fn disable_audience_tenant_assignment( | append_event | 1
+admin/workload.rs | pub async fn disable_audience_tenant_assignment( | disable_status | 1
 admin/workload.rs | pub async fn disable_principal( | append_event | 1
 admin/workload.rs | pub async fn disable_principal( | update_principal | 1
 admin/workload.rs | pub async fn disable_resource_action( | write_action | 1
 admin/workload.rs | pub async fn disable_resource_server( | append_event | 1
+admin/workload.rs | pub async fn disable_resource_server( | disable_status | 1
 admin/workload.rs | pub async fn disable_resource_server_checker( | write_checker | 1
 admin/workload.rs | pub async fn disable_tenant( | append_event | 1
 admin/workload.rs | pub async fn disable_tenant( | update_tenant | 1

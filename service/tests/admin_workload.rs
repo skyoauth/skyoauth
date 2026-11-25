@@ -1776,6 +1776,114 @@ async fn disables_compare_and_keep_jsonb_as_stored() {
     db.drop([pool]).await;
 }
 
+/// A resource server update classifies its write as an assignment update
+/// does, comparing the columns as `jsonb` in PostgreSQL: constraint
+/// versions stored as `[1.0, {"b": 2.0, "a": 1}]` and submitted as
+/// `[1, {"a": 1, "b": 2}]` (a trailing zero, another key order), which
+/// differ as `serde_json::Value`s, are unchanged for both, so a status
+/// change is `.disable` and then `.enable` for both alike, and other
+/// versions with a status change are `.update` for both. A resource
+/// server's other name or another profile with a status change is
+/// `.update` too. Before each write the versions are stored again as
+/// `1.0`, so each compares against them.
+#[tokio::test]
+#[ignore = "needs SKYOAUTH_IT_DATABASE_URL"]
+async fn a_resource_server_update_compares_jsonb_as_an_assignment_does() {
+    let (db, pool) = seeded().await;
+    let ids = SequentialIds::new();
+    let sec = request(KEY_SEC, &ids);
+    let stored = "[1.0, {\"b\": 2.0, \"a\": 1}]";
+    let same = vec![json!(1), json!({"a": 1, "b": 2})];
+    let rs = registry::get_resource_server(&pool, "rs_3").await.unwrap();
+    let asgn = registry::get_audience_tenant_assignment(&pool, "asgn_a3")
+        .await
+        .unwrap();
+    let mut actions = Vec::new();
+    for (versions, status) in [
+        (same.clone(), Status::Disabled),
+        (same.clone(), Status::Enabled),
+        (vec![json!(2)], Status::Disabled),
+    ] {
+        set_jsonb(&pool, "resource_server", "rs_3", stored).await;
+        set_jsonb(&pool, "audience_tenant_assignment", "asgn_a3", stored).await;
+        let before = registry::get_resource_server(&pool, "rs_3").await.unwrap();
+        assert_ne!(before.constraint_versions, same);
+        let changes = ResourceServerChanges {
+            name: rs.name.clone(),
+            allowed_profiles: rs.allowed_profiles.clone(),
+            scopes: rs.scopes.clone(),
+            constraint_versions: versions.clone(),
+            status,
+        };
+        let server = committed(&pool, async |tx| {
+            admin::update_resource_server(tx, &sec, "rs_3", before.revision, &changes).await
+        })
+        .await
+        .unwrap();
+        let before = registry::get_audience_tenant_assignment(&pool, "asgn_a3")
+            .await
+            .unwrap();
+        assert_ne!(before.constraint_versions, same);
+        let changes = AudienceTenantAssignmentChanges {
+            allowed_profiles: asgn.allowed_profiles.clone(),
+            allowed_scopes: asgn.allowed_scopes.clone(),
+            constraint_versions: versions,
+            status,
+        };
+        let assignment = committed(&pool, async |tx| {
+            let revision = before.revision;
+            admin::update_audience_tenant_assignment(tx, &sec, "asgn_a3", revision, &changes).await
+        })
+        .await
+        .unwrap();
+        actions.push((server.event.action, assignment.event.action));
+    }
+    let verb = |action: &str| action.rsplit('.').next().unwrap().to_owned();
+    let verbs: Vec<(String, String)> = actions
+        .iter()
+        .map(|(server, assignment)| (verb(server), verb(assignment)))
+        .collect();
+    assert_eq!(
+        verbs,
+        [
+            ("disable".to_owned(), "disable".to_owned()),
+            ("enable".to_owned(), "enable".to_owned()),
+            ("update".to_owned(), "update".to_owned()),
+        ],
+        "{actions:?}"
+    );
+    for (rename, profiles) in [
+        (true, rs.allowed_profiles.clone()),
+        (false, vec![Profile::Wif, Profile::HumanCli]),
+    ] {
+        set_jsonb(&pool, "resource_server", "rs_3", stored).await;
+        let before = registry::get_resource_server(&pool, "rs_3").await.unwrap();
+        let name = if rename {
+            format!("{} renamed", before.name)
+        } else {
+            before.name.clone()
+        };
+        let changes = ResourceServerChanges {
+            name,
+            allowed_profiles: profiles,
+            scopes: rs.scopes.clone(),
+            constraint_versions: same.clone(),
+            status: match before.status {
+                Status::Enabled => Status::Disabled,
+                Status::Disabled => Status::Enabled,
+            },
+        };
+        let done = committed(&pool, async |tx| {
+            admin::update_resource_server(tx, &sec, "rs_3", before.revision, &changes).await
+        })
+        .await
+        .unwrap();
+        assert_eq!(done.event.action, "resource_server.update", "{rename}");
+    }
+    assert_chain_intact(&pool).await;
+    db.drop([pool]).await;
+}
+
 /// A resource server or assignment disable whose row another transaction
 /// moves to a new revision after the disable read it, and commits while
 /// the disable's statement waits on the row, is `StaleRevision` and writes

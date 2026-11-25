@@ -2830,11 +2830,16 @@ gives `Other` with `22003` from `revision + 1`, which is unreachable in
 practice since revisions start at 1 and advance by 1. Adding or removing a checker tenant row
 advances the checker's revision in the same statement. A principal is read
 by tenant and ID; lists are ordered by ID byte-wise and paged after an ID
-cursor. The checker writers (`create_resource_server_checker`,
-`update_resource_server_checker`, `add_resource_server_checker_tenant`,
-`remove_resource_server_checker_tenant`), the action writers
-(`create_resource_action`, `update_resource_action`), `update_tenant` and
-`update_principal` are crate-private (`pub(crate)`): the audited,
+cursor. Fourteen writers are crate-private (`pub(crate)`): the tenant
+and principal writers (`create_tenant`, `update_tenant`,
+`create_principal`, `update_principal`), the resource server writers
+(`create_resource_server`, `update_resource_server`), the assignment
+writers (`create_audience_tenant_assignment`,
+`update_audience_tenant_assignment`), the checker writers
+(`create_resource_server_checker`, `update_resource_server_checker`,
+`add_resource_server_checker_tenant`,
+`remove_resource_server_checker_tenant`) and the action writers
+(`create_resource_action`, `update_resource_action`). The audited,
 authorized writes of `crate::admin` call them, and tests reach them through
 `persistence::registry::test_support`.
 
@@ -2886,15 +2891,21 @@ listed under "The database does not
 enforce these rules" above, generate IDs or run migrations.
 
 Since the second-approver proposal's registry hardening PR and its
-follow-up, the writers of tenants, principals, resource servers, audience
+follow-up, no writer of tenants, principals, resource servers, audience
 tenant assignments, checkers, actions, principal bindings, service
-identities, grants and trust keysets (each create, update and list-set
-change) are private to the registry (`pub(super)`): nothing in the crate
-calls them outside tests, and the integration and scenario tests reach
+identities, grants or trust keysets (each create, update and list-set
+change) is public. The fourteen writers of tenants, principals, resource
+servers, assignments, checkers and actions listed above are crate-private
+(`pub(crate)`), called by the audited, authorized writes of
+`crate::admin`. The rest, the writers of principal bindings, service
+identities, grants and trust keysets, stay private to the registry
+(`pub(super)`): nothing in the crate calls them outside tests, so each
+carries an `expect(dead_code)` guard in a build without the
+`test-support` feature. The integration and scenario tests reach all of
 them through the `#[doc(hidden)]` `persistence::registry::test_support`,
-compiled only with the `test-support` feature. The readers stay public, and
-so do `consume_assertion` and `consume_assertion_set` below, which only
-insert replay records.
+compiled only with that feature. The readers stay public, and so do
+`consume_assertion` and `consume_assertion_set` below, which only insert
+replay records.
 
 Consumed assertions (T10.9; ADR-016 items 6 and 7): `consume_assertion`
 inserts one row with `ON CONFLICT DO NOTHING` and returns `Consumed`, or

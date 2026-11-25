@@ -292,19 +292,42 @@ async fn check_tenant(
     }
 }
 
+/// The tables [`disable_status`] writes: a closed set, so that it runs one
+/// of two fixed statements and never one its caller passes.
+#[derive(Clone, Copy)]
+enum DisableTable {
+    ResourceServer,
+    Assignment,
+}
+
 /// Step 5 of [`disable_resource_server`] and
 /// [`disable_audience_tenant_assignment`]: one statement that sets only
-/// `status` to `disabled` and advances `revision`, as a compare-and-set at
-/// `expected_revision`, so the row's other columns are not read back
-/// through Rust and written again (a `jsonb` number that an `f64` cannot
-/// hold stays as stored). The caller read the row at `expected_revision`
-/// first, so a miss is [`RegistryError::StaleRevision`].
+/// `status` to `disabled` and advances `revision` of the row `id` of
+/// `table`, as a compare-and-set at `expected_revision`, so the row's other
+/// columns are not read back through Rust and written again (a `jsonb`
+/// number that an `f64` cannot hold stays as stored). The caller read the
+/// row at `expected_revision` first, so a miss is
+/// [`RegistryError::StaleRevision`].
+///
+/// It authorizes nothing and appends no event, so it stays private to this
+/// module; the proof test `service/tests/ungated_writes_private.rs` lists
+/// it with the module's other helpers and refuses a wider visibility.
 async fn disable_status(
     transaction: &mut Transaction<'_, Postgres>,
-    statement: &'static str,
+    table: DisableTable,
     id: &str,
     expected_revision: i64,
 ) -> Result<(), AdminWriteError> {
+    let statement = match table {
+        DisableTable::ResourceServer => {
+            "UPDATE resource_server SET status = $3, revision = revision + 1 \
+             WHERE id = $1 AND revision = $2"
+        }
+        DisableTable::Assignment => {
+            "UPDATE audience_tenant_assignment SET status = $3, revision = revision + 1 \
+             WHERE id = $1 AND revision = $2"
+        }
+    };
     let updated = sqlx::query(statement)
         .bind(id)
         .bind(expected_revision)
@@ -318,11 +341,35 @@ async fn disable_status(
     }
 }
 
-const DISABLE_RESOURCE_SERVER: &str = "UPDATE resource_server \
-     SET status = $3, revision = revision + 1 WHERE id = $1 AND revision = $2";
-
-const DISABLE_ASSIGNMENT: &str = "UPDATE audience_tenant_assignment \
-     SET status = $3, revision = revision + 1 WHERE id = $1 AND revision = $2";
+/// Whether `changes` keeps every mutable column of the resource server `id`
+/// at `expected_revision` but `status`, compared in PostgreSQL as
+/// [`same_assignment_ceiling`] compares an assignment's: the `jsonb`
+/// columns with `jsonb` equality (`1` and `1.0` are one number, and an
+/// object's key order is not kept), so the two writers classify the same
+/// `constraint_versions` alike. The row is read without a lock (the
+/// compare-and-set after it holds the revision); a row no longer at
+/// `expected_revision` is [`RegistryError::StaleRevision`].
+async fn same_resource_server(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: &str,
+    expected_revision: i64,
+    changes: &ResourceServerChanges,
+) -> Result<bool, AdminWriteError> {
+    let same: Option<bool> = sqlx::query_scalar(
+        "SELECT name = $3 AND allowed_profiles = $4 AND scopes = $5 \
+         AND constraint_versions = $6 \
+         FROM resource_server WHERE id = $1 AND revision = $2",
+    )
+    .bind(id)
+    .bind(expected_revision)
+    .bind(&changes.name)
+    .bind(Json(&changes.allowed_profiles))
+    .bind(Json(&changes.scopes))
+    .bind(Json(&changes.constraint_versions))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    same.ok_or(RegistryError::StaleRevision.into())
+}
 
 /// Whether `changes` keeps every mutable column of the assignment `id` at
 /// `expected_revision` but `status`, compared in PostgreSQL with `jsonb`
@@ -659,22 +706,19 @@ pub async fn create_resource_server(
     .await
 }
 
-/// The update of the resource server `id` from `before` to `changes`.
+/// The update of the resource server `id` from `before` to `changes`;
+/// `status_only` is [`same_resource_server`]'s answer for them.
 async fn write_resource_server(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
     requester: &Requester,
     (id, expected_revision, before): (&str, i64, &ResourceServer),
     changes: &ResourceServerChanges,
+    status_only: bool,
 ) -> Result<Audited<ResourceServer>, AdminWriteError> {
     let row = registry::update_resource_server(&mut **transaction, id, expected_revision, changes)
         .await?;
-    let unchanged = ResourceServer {
-        status: row.status,
-        revision: row.revision,
-        ..before.clone()
-    };
-    let action = RESOURCE_SERVER.of_update(unchanged == row, before.status, row.status);
+    let action = RESOURCE_SERVER.of_update(status_only, before.status, row.status);
     let change = changed(action, None, &row.id, expected_revision, row.revision);
     let event = append_event(transaction, request, requester, change).await?;
     Ok(Audited { row, event })
@@ -682,7 +726,9 @@ async fn write_resource_server(
 
 /// Replaces the mutable columns of the resource server `id` at
 /// `expected_revision` with `changes`, and appends `resource_server.update`,
-/// or `.enable` or `.disable` for a status-only change.
+/// or `.enable` or `.disable` for a status-only change. Whether the other
+/// columns change is decided in PostgreSQL with `jsonb` equality, as for an
+/// assignment ([`update_audience_tenant_assignment`]).
 pub async fn update_resource_server(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -694,8 +740,17 @@ pub async fn update_resource_server(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_resource_server(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
+        let status_only = same_resource_server(transaction, id, expected_revision, changes).await?;
         let target = (id, expected_revision, &before);
-        write_resource_server(transaction, request, &requester, target, changes).await
+        write_resource_server(
+            transaction,
+            request,
+            &requester,
+            target,
+            changes,
+            status_only,
+        )
+        .await
     })
     .await
 }
@@ -712,7 +767,13 @@ pub async fn disable_resource_server(
         let requester = security_admin(transaction, request).await?;
         let before = registry::get_resource_server(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
-        disable_status(transaction, DISABLE_RESOURCE_SERVER, id, expected_revision).await?;
+        disable_status(
+            transaction,
+            DisableTable::ResourceServer,
+            id,
+            expected_revision,
+        )
+        .await?;
         let row = registry::get_resource_server(&mut **transaction, id).await?;
         let change = changed(
             RESOURCE_SERVER.disable,
@@ -833,7 +894,7 @@ pub async fn disable_audience_tenant_assignment(
         let before = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
         check_revision(before.revision, expected_revision)?;
         check_tenant(transaction, &before.tenant_id, true).await?;
-        disable_status(transaction, DISABLE_ASSIGNMENT, id, expected_revision).await?;
+        disable_status(transaction, DisableTable::Assignment, id, expected_revision).await?;
         let row = registry::get_audience_tenant_assignment(&mut **transaction, id).await?;
         let change = changed(
             ASSIGNMENT.disable,
@@ -904,6 +965,9 @@ async fn write_checker(
     let action = if disable {
         CHECKER.disable
     } else {
+        // Compared in Rust, and needs no `jsonb` comparison in PostgreSQL as
+        // a resource server's and an assignment's do: a checker has no
+        // `jsonb` column (text columns, and a tenant set of text rows).
         let unchanged = ResourceServerChecker {
             status: row.status,
             revision: row.revision,
@@ -1079,6 +1143,10 @@ async fn write_action(
     let action = if disable {
         ACTION.disable
     } else {
+        // Compared in Rust, and needs no `jsonb` comparison in PostgreSQL as
+        // a resource server's and an assignment's do: an action's `jsonb`
+        // columns hold only strings (their domains refuse any other element),
+        // no number or object, so `jsonb` equality and `Vec` equality agree.
         let unchanged = ResourceAction {
             status: row.status,
             revision: row.revision,

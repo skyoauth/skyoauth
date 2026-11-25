@@ -141,7 +141,9 @@
 //! [`AUDIT_ACTIONS`] (identity-registry IR-059): `<resource>.create` for a
 //! create; for an update, `<resource>.enable` or `<resource>.disable` when
 //! the write changes the stored row's `status` and nothing else (an
-//! assignment's columns compared as under "Disabled tenants"), and
+//! assignment's columns compared as under "Disabled tenants", and a
+//! resource server's name, profiles, scopes and constraint versions the
+//! same way, so the two classify the same constraint versions alike), and
 //! `<resource>.update` otherwise, a write that changes nothing included;
 //! `<resource>.disable` for every `disable_*` write, also of a row already
 //! disabled; `resource_server_checker.update` for a change of a checker's
