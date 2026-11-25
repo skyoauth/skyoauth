@@ -199,6 +199,13 @@ describe('the guard on a workspace', () => {
     ]);
   });
 
+  test('fails closed on a short option that the table of its subcommand does not name', () => {
+    const files = { 'scripts/release.sh': 'cargo build -qxr --all-features\ncargo build -mservice/Cargo.toml\n' };
+    assertErrors(guard(workspace({ files })), [
+      'error: scripts/release.sh:1: command: unknown short option -x in -qxr: `cargo build` has no such letter in SHORT_OPTIONS in scripts/ci/check-release-features.mjs, so the guard cannot tell whether the rest of the word holds -r (--release); add it there, as a flag or as a letter that takes a value, as `cargo build --help` lists it: cargo build -qxr --all-features',
+    ]);
+  });
+
   test('fails on a feature that turns it on, directly or through other features', () => {
     const svc = SVC('full = ["test-support"]\n');
     const scen = SCEN('', 'leak = ["svc/test-support"]\nall = ["more"]\nmore = ["svc/full"]\nplain = []\n');
@@ -411,6 +418,14 @@ describe('the parts', () => {
     assert.equal(badReleaseCommands('CARGO_HOME=/opt/cargo make build -r --all-features\n').length, 0);
   });
 
+  test('badReleaseCommands reads the words after every word that runs cargo, not only the first', () => {
+    // A `cargo-X` word before the real `cargo` (an image, a wrapper script) does not hide it.
+    for (const line of ['docker run --rm ghcr.io/acme/cargo-builder cargo test --release', 'time ./scripts/cargo-wrapper cargo bench']) {
+      assert.deepEqual(badReleaseCommands(`${line}\n`), [{ line: 1, text: line }], line);
+    }
+    assert.deepEqual(badReleaseCommands('docker run --rm ghcr.io/acme/cargo-builder cargo test --all-features\n'), []);
+  });
+
   test('badReleaseCommands reads nextest profiles under llvm-cov too', () => {
     assert.equal(badReleaseCommands('cargo llvm-cov nextest --profile ci\n').length, 0);
     assert.equal(badReleaseCommands('cargo llvm-cov nextest --profile ci --cargo-profile release\n').length, 1);
@@ -445,6 +460,75 @@ describe('the parts', () => {
     ]) {
       assert.equal(badReleaseCommands(`${line}\n`, { leaking }).length, 0, line);
     }
+  });
+
+  test('badReleaseCommands reads a cluster with the short options of its subcommand', () => {
+    // A letter that takes a value takes the rest of the word, by the table of the subcommand it is
+    // given to: `-e` is `cargo tree`'s --edges, `-m` cargo's --manifest-path, `-E` nextest's
+    // --filterset (`-E'binary(pg)'` is one shell word), `-P` nextest's --profile, `-T` its
+    // --message-format. `cargo tree` builds nothing, so no cluster of it is a release flag.
+    for (const line of [
+      'cargo tree -efeatures --all-features',
+      'cargo tree -e features -p service',
+      'cargo test -mservice/Cargo.toml',
+      'cargo build -mservice/Cargo.toml --all-features',
+      "cargo nextest run -E'binary(pg)'",
+      'cargo nextest run -Erdeps(foo)',
+      'cargo nextest run -Pstrict',
+      'cargo nextest run -Pcoverage',
+      'cargo nextest run -Rlatest',
+      'cargo tree -ifoo -fformat --all-features',
+      'cargo nextest list -Tjson -Pstrict',
+      'cargo llvm-cov nextest -Pstrict',
+      'cargo -Zunstable-options build -mservice/Cargo.toml --all-features',
+    ]) {
+      assert.deepEqual(badReleaseCommands(`${line}\n`), [], line);
+    }
+    for (const line of [
+      'cargo build -mservice/Cargo.toml -r --all-features',
+      "cargo nextest run -rE 'binary(pg)'",
+      'cargo nextest run -Pci -r',
+      'cargo nextest r -vr',
+      'cargo-nextest run -vr',
+      'cargo clippy -qr --all-features',
+      'cargo install -fF test-support --path svc',
+      'cargo -vq build -r --all-features',
+      'cargo llvm-cov -qr nextest',
+      'cargo llvm-cov nextest -vr',
+    ]) {
+      assert.deepEqual(badReleaseCommands(`${line}\n`), [{ line: 1, text: line }], line);
+    }
+  });
+
+  test('badReleaseCommands fails closed on a letter of a cluster that no table names', () => {
+    // An unknown letter could take a value or be a flag, so the guard cannot tell whether the rest
+    // of the word holds `-r`; it names the letter and the fix instead of reading on silently.
+    for (const [line, sub, letter, word] of [
+      ['cargo build -xr', 'build', 'x', '-xr'],
+      ['cargo build -qx', 'build', 'x', '-qx'],
+      ['cargo b -vxr', 'build', 'x', '-vxr'],
+      ['cargo nextest run -Tr', 'nextest run', 'T', '-Tr'],
+      ['cargo bench -qr', 'bench', 'r', '-qr'],
+      ['cargo tree -xr', 'tree', 'x', '-xr'],
+      ['cargo -xv build', '', 'x', '-xv'],
+      ['cargo ship -qr', 'ship', 'q', '-qr'],
+    ]) {
+      const found = badReleaseCommands(`${line}\n`);
+      assert.equal(found.length, 1, line);
+      const { problem } = found[0];
+      const help = sub ? `cargo ${sub} --help` : 'cargo --help';
+      assert.ok(problem?.startsWith(`unknown short option -${letter} in ${word}: `), `${line}: ${problem}`);
+      assert.ok(problem.includes('SHORT_OPTIONS in scripts/ci/check-release-features.mjs') && problem.includes(`\`${help}\``), `${line}: ${problem}`);
+    }
+    // A single letter (no cluster) hides nothing, and the words after `--` are the program's.
+    for (const line of ['cargo build -x', 'cargo nextest run -T json', 'cargo rustc -- -Dwarnings -Cfoo']) {
+      assert.deepEqual(badReleaseCommands(`${line}\n`), [], line);
+    }
+    // An alias's arguments are read with the table of the subcommand it runs.
+    const aliases = new Map([['ship', [['build']]]]);
+    assert.deepEqual(badReleaseCommands('cargo ship -qv\n', { aliases }), []);
+    assert.deepEqual(badReleaseCommands('cargo ship -qr --all-features\n', { aliases }), [{ line: 1, text: 'cargo ship -qr --all-features' }]);
+    assert.equal(badReleaseCommands('cargo ship -xr\n', { aliases })[0]?.problem?.startsWith('unknown short option -x in -xr: '), true);
   });
 
   test('badReleaseCommands reads cargo-SUB run directly as cargo SUB', () => {

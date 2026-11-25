@@ -2299,9 +2299,25 @@ its guard kept fails all three (the plain build's unfulfilled
 registry fails the source check and the plain-build test. The
 `release-features` command check now
 also reads a short-option cluster letter by letter, as cargo does (`-qr`,
-`-vr`, `-rF x`, `-rFfull`; `F`, `p`, `j`, `Z` and `C` take the rest of the
-word or the next word, so `-pr` is the package `r`; the words after `--`
-are not read), reads `cargo-SUB` run directly (`cargo-nextest`,
+`-vr`, `-rF x`, `-rFfull`; the words after `--` are not read), with a
+per-subcommand table of short options taken from each one's `--help`
+(cargo 1.100.0, cargo-nextest 0.9.151, cargo-llvm-cov 0.9.1): cargo before
+its subcommand (`C`, `Z` take a value), its build commands (`F`, `Z`, `j`,
+`m`, `p`; `r` a flag), `install`, `clippy`, `tree` (`e`, `f`, `i` too),
+`metadata`, `fmt`, cargo-nextest's `run`, `list`, `archive` and `bench`
+(`E`, `P`, `R`, `T` among them) and cargo-llvm-cov's. A value letter takes
+the rest of the word or the next word, so `-pr` is the package `r` and
+`-mservice/Cargo.toml`, `cargo tree -efeatures`, `cargo nextest run
+-Pstrict` and `-E'binary(pg)'` are no release flag, as the first version,
+which took every letter but `F`, `p`, `j`, `Z` and `C` as a flag, read them.
+A letter of a cluster that the table does not name (any letter, for a
+subcommand with no table) fails the check with an error that names it and
+the fix, since the guard cannot tell whether the rest of the word holds
+`-r`; `cargo tree` has a table like the others and so is read the same way
+(it has no `-r`). The check also reads the words after each word that runs
+cargo, not only the first, so an image or wrapper named `cargo-X` before
+the real `cargo` (`docker run ... ghcr.io/acme/cargo-builder cargo test
+--release`) hides nothing. It reads `cargo-SUB` run directly (`cargo-nextest`,
 `cargo-llvm-cov`) as `cargo SUB`, takes `cargo llvm-cov nextest-archive`'s
 `--profile` as nextest's, as for `nextest` (both pass their options on to
 cargo-nextest; cargo's profile is `--cargo-profile`), and reads neither the

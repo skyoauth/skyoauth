@@ -66,18 +66,32 @@
 //            commands at `&&`, `||`, `;`, `|` and `&` (not a redirection's)
 //            outside quotes, a command into shell words (a quoted string is
 //            one; `(`, `)`, `<`, `>`, `[`, `]` and `,` separate words too),
-//            and the words after the first one that runs cargo (`cargo` or
-//            a path to it, not an assignment `NAME=value` nor the value of
-//            a `-C`, as in `make -C /opt/cargo`; `cargo-SUB` run directly,
-//            such as `cargo-nextest` or `cargo-llvm-cov`, is `cargo SUB`)
-//            are checked as its arguments; so are the words read with
-//            quotes as separators, and the contents of each quoted string
-//            are read as a line of their own (`sh -c "..."`, `"$(...)"`).
-//            A short-option cluster before `--` is read letter by letter,
-//            as cargo reads it (`-qr` is `-q -r`, `-rFfull` is
-//            `-r -F full`): `F`, `p`, `j`, `Z` and `C` take the rest of the
-//            word or the next word, so `-pr` names the package `r` and is
-//            no release flag. The word `cargo` starts a command wherever it
+//            and the words after each word that runs cargo (`cargo` or a
+//            path to it, not an assignment `NAME=value` nor the value of a
+//            `-C`, as in `make -C /opt/cargo`; `cargo-SUB` run directly,
+//            such as `cargo-nextest` or `cargo-llvm-cov`, is `cargo SUB`, so
+//            an image or wrapper named `cargo-X` before the real `cargo`
+//            hides nothing) are checked as its arguments; so are the words
+//            read with quotes as separators, and the contents of each quoted
+//            string are read as a line of their own (`sh -c "..."`,
+//            `"$(...)"`). A short-option cluster before `--` is read letter
+//            by letter, as cargo reads it (`-qr` is `-q -r`, `-rFfull` is
+//            `-r -F full`), with the short options of the subcommand it is
+//            given to (`SHORT_OPTIONS`, from each one's `--help`: cargo
+//            before its subcommand, its build commands, `install`, `clippy`,
+//            `tree`, `metadata` and `fmt`, cargo-nextest's `run`, `list`,
+//            `archive` and `bench`, cargo-llvm-cov's): a letter that takes a
+//            value takes the rest of the word or the next word, so `-pr`
+//            names the package `r`, `-mservice/Cargo.toml` is a manifest
+//            path, `cargo tree -efeatures` an edge kind, `cargo nextest run
+//            -Pstrict` a nextest profile and `-E'binary(pg)'` a filterset,
+//            none of them a release flag. Fail-closed: a letter of a
+//            cluster that the subcommand's table does not name (any letter,
+//            for a subcommand with no table) is an error that names the
+//            letter, as the guard cannot tell whether the rest of the word
+//            holds `-r`; the fix is to add it to the table. An alias's
+//            arguments are read with the table of the subcommand it runs.
+//            The word `cargo` starts a command wherever it
 //            is (`echo cargo ...` included): the guard does not know which
 //            programs run their arguments. This file and its self-test are
 //            not scanned: they name the flags as patterns. What the guard
@@ -217,15 +231,60 @@ export function logicalLines(text, { yaml = false } = {}) {
 
 // cargo's built-in aliases of the subcommands this check reads.
 const BUILTIN_ALIASES = { b: 'build', c: 'check', d: 'doc', r: 'run', t: 'test' };
-// Global options that take a value before the subcommand.
-const GLOBAL_WITH_VALUE = new Set(['-C', '-Z', '--config', '--color', '--manifest-path']);
+// Long options that take a value as the next word, before a subcommand or
+// after it (`--color always nextest`: `always` is no subcommand).
+const LONG_WITH_VALUE = new Set(['--config', '--color', '--manifest-path']);
 // Subcommands that build test or bench targets.
 const TEST_COMMANDS = new Set(['test', 'bench', 'nextest', 'llvm-cov']);
 const TEST_TARGETS = /^--(?:tests|benches|examples|test|bench|example|all-targets)(?:=|$)/;
-// The letters of a short option that take a value, the rest of the word or
-// the next word (`-Ffull`, `-F full`; `-p`, `-j`, `-Z`, `-C`); every other
-// letter is a flag (`-r` is `--release`, `-q` and `-v` change nothing here).
-const SHORT_WITH_VALUE = new Set(['F', 'p', 'j', 'Z', 'C']);
+
+// The short options of each subcommand the check reads, as its `--help`
+// lists them (cargo 1.100.0, cargo-nextest 0.9.151, cargo-llvm-cov 0.9.1):
+// `flags` are letters that take no value (`-r` is `--release`), `values`
+// letters that take one, the rest of the word (an `=` after the letter
+// dropped) or, when nothing follows the letter, the next word. A letter
+// with an optional value (`-p [<SPEC>]`, `-i [<SPEC>]`) takes the rest of
+// the word as cargo does, so it is a value letter here. `''` is cargo
+// before its subcommand; `nextest` and `llvm-cov` are those tools before
+// their own subcommand, which is read after a space (`nextest run`).
+const shortOptions = (flags, values) => ({ flags: new Set(flags), values: new Set(values) });
+// `cargo build --help`, and the same letters in `check`, `doc`, `fix`,
+// `run`, `rustc`, `rustdoc` and `test`; clippy adds `-V` to `check`'s.
+const CARGO_BUILD = shortOptions('hqrv', 'FZjmp');
+// `cargo llvm-cov --help`; `test`, `run` and `report` have the same letters but `-V`.
+const LLVM_COV = shortOptions('hqrv', 'FZjp');
+const SHORT_OPTIONS = new Map([
+  ['', shortOptions('Vhqv', 'CZ')],
+  ...['build', 'check', 'doc', 'fix', 'run', 'rustc', 'rustdoc', 'test'].map((sub) => [sub, CARGO_BUILD]),
+  ['bench', shortOptions('hqv', 'FZjmp')],
+  ['clippy', shortOptions('Vhqrv', 'FZjmp')],
+  ['install', shortOptions('fhnqv', 'FZj')],
+  ['tree', shortOptions('dhqv', 'FZefimp')],
+  ['metadata', shortOptions('hqv', 'FZm')],
+  ['fmt', shortOptions('hqv', 'p')],
+  ['nextest', shortOptions('Vhv', 'P')],
+  ['nextest run', shortOptions('hrv', 'EFPRZjp')],
+  ['nextest list', shortOptions('hrv', 'EFPTZp')],
+  ['nextest archive', shortOptions('hrv', 'EFPZp')],
+  ['nextest bench', shortOptions('hrv', 'EFPZp')],
+  ['llvm-cov', shortOptions('Vhqrv', 'FZjp')],
+  ['llvm-cov test', LLVM_COV],
+  ['llvm-cov run', LLVM_COV],
+  ['llvm-cov report', LLVM_COV],
+  // `cargo llvm-cov nextest` takes llvm-cov's options and `cargo nextest
+  // run`'s, `nextest-archive` llvm-cov's and `cargo nextest archive`'s; the
+  // letters both name take a value in both.
+  ['llvm-cov nextest', shortOptions('Vhqrv', 'EFPRZjp')],
+  ['llvm-cov nextest-archive', shortOptions('Vhqrv', 'EFPZjp')],
+]);
+// The subcommands of the tools with their own (`cargo nextest --help`:
+// `r` is `run`, `b` is `bench`; `cargo llvm-cov --help`), which take the
+// first word after the tool's options. Another word there leaves the
+// tool's own table in use (`cargo llvm-cov` alone runs `test`).
+const NESTED_COMMANDS = new Map([
+  ['nextest', { run: 'run', r: 'run', list: 'list', archive: 'archive', bench: 'bench', b: 'bench' }],
+  ['llvm-cov', { test: 'test', run: 'run', report: 'report', nextest: 'nextest', 'nextest-archive': 'nextest-archive' }],
+]);
 // The llvm-cov subcommands that run nextest, whose `--profile` is
 // nextest's own (cargo's is `--cargo-profile`): both pass their options on
 // to cargo-nextest (cargo-llvm-cov's `docs/cargo-llvm-cov-nextest*.txt`).
@@ -297,33 +356,89 @@ export function cargoWord(word) {
   return match ? (match[1] ?? '') : null;
 }
 
-// `tokens` with each short-option cluster (`-qr`, `-rF x`, `-rFfull`)
-// expanded letter by letter: a letter of `SHORT_WITH_VALUE` takes the rest
-// of the word (an `=` after it dropped) or, when nothing follows it, the
-// next word, as cargo reads it, so `-pr` is the package `r`, not
-// `--release`. The words after `--` are the program's, not cargo's, and stay
-// as they are (`-- -Dwarnings`).
-export function expandShortOptions(tokens) {
-  const end = tokens.indexOf('--');
-  const head = end < 0 ? tokens : tokens.slice(0, end);
-  const expanded = head.flatMap((token) => {
-    if (!/^-[A-Za-z]{2,}/.test(token)) return [token];
-    const out = [];
-    for (let i = 1; i < token.length; i++) {
-      if (!/[A-Za-z]/.test(token[i])) {
-        out.push(token.slice(i));
-        break;
-      }
-      out.push(`-${token[i]}`);
-      if (SHORT_WITH_VALUE.has(token[i])) {
-        const value = token.slice(i + 1).replace(/^=/, '');
-        if (value) out.push(value);
-        break;
-      }
+// The short-option word `token` (`-r`, `-qr`, `-rFfull`) of the subcommand
+// `key` read letter by letter with its `SHORT_OPTIONS` table, as cargo
+// reads it: a value letter takes the rest of the word (an `=` after it
+// dropped), so `-pr` is the package `r` and `-mservice/Cargo.toml` a
+// manifest path, not `--release`. `words` are the letters as options and
+// the value; `next` is whether the last letter takes the next word. A
+// letter of a cluster that the table does not name (or a subcommand with
+// no table) adds a problem to `problems` and is read as a flag, so the
+// letters after it are still read: the guard cannot tell whether it takes
+// a value, and so whether the rest of the word holds `-r`.
+function readShortOptions(token, key, problems) {
+  const table = SHORT_OPTIONS.get(key);
+  const words = [];
+  for (let i = 1; i < token.length; i++) {
+    const letter = token[i];
+    if (!/[A-Za-z]/.test(letter)) {
+      words.push(token.slice(i));
+      break;
     }
-    return out;
-  });
-  return end < 0 ? expanded : [...expanded, ...tokens.slice(end)];
+    words.push(`-${letter}`);
+    if (table?.values.has(letter)) {
+      const value = token.slice(i + 1).replace(/^=/, '');
+      if (value) words.push(value);
+      return { words, next: !value };
+    }
+    if (!table?.flags.has(letter) && token.length > 2) {
+      const command = key ? `cargo ${key}` : 'cargo';
+      problems.push(
+        `unknown short option -${letter} in ${token}: \`${command}\` has no such letter in SHORT_OPTIONS in scripts/ci/check-release-features.mjs, so the guard cannot tell whether the rest of the word holds -r (--release); add it there, as a flag or as a letter that takes a value, as \`${command} --help\` lists it`,
+      );
+    }
+  }
+  return { words, next: false };
+}
+
+// The cargo command `tokens` (the words after `cargo`) up to its
+// subcommand: `name`, the subcommand's word (an alias's name included),
+// `rest`, the words after it as written, and `problems` (unknown letters,
+// `readShortOptions`) of cargo's own options before it.
+function readCommand(tokens) {
+  const problems = [];
+  let at = 0;
+  while (at < tokens.length && /^[+-]/.test(tokens[at])) {
+    const token = tokens[at++];
+    if (LONG_WITH_VALUE.has(token) || (/^-[A-Za-z]/.test(token) && readShortOptions(token, '', problems).next)) at++;
+  }
+  return { name: tokens[at] ?? '', rest: tokens.slice(at + 1), problems };
+}
+
+// The arguments `rest` of the subcommand `sub`, each short-option word
+// before `--` read with the table of `sub` (`readShortOptions`), and of the
+// tool's own subcommand once it is read (`NESTED_COMMANDS`): `args`, the
+// words read, `nested`, the tool's subcommand or undefined, and `problems`.
+// The words after `--` are the program's, not cargo's, and stay as they
+// are (`-- -Dwarnings`).
+function readArguments(sub, rest) {
+  const problems = [];
+  const args = [];
+  const nestedNames = NESTED_COMMANDS.get(sub);
+  let key = sub;
+  let nested;
+  let looking = Boolean(nestedNames);
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i];
+    if (token === '--') {
+      args.push(...rest.slice(i));
+      break;
+    }
+    args.push(token);
+    if (/^-[A-Za-z]/.test(token)) {
+      const { words, next } = readShortOptions(token, key, problems);
+      args.splice(args.length - 1, 1, ...words);
+      // The next word is the option's value, never a subcommand.
+      if (next && i + 1 < rest.length && !rest[i + 1].startsWith('-')) args.push(rest[++i]);
+    } else if (LONG_WITH_VALUE.has(token)) {
+      if (i + 1 < rest.length) args.push(rest[++i]);
+    } else if (looking && !token.startsWith('-')) {
+      looking = false;
+      nested = nestedNames[token];
+      if (nested) key = `${sub} ${nested}`;
+    }
+  }
+  return { args, nested, problems };
 }
 
 // Whether the profile `name` is a release profile: `release` and `bench`
@@ -339,31 +454,39 @@ export function isReleaseProfile(name, profiles, seen = new Set()) {
   return parents.some((parent) => isReleaseProfile(parent, profiles, seen));
 }
 
-// Whether the cargo command `tokens` (the words after `cargo`, or an alias
-// value) is a release command that uses a forbidden flag, names the feature
-// or builds test targets. `context` holds `profiles`, `aliases` (name to
-// the values declared for it, each a token list) and `leaking`, the
-// features that turn the feature on (`F` and `PKG/F`, `leakingFeatures`):
-// a release command's argument that is one of them is refused as well.
-export function isBadCommand(command, context, depth = 0) {
-  const tokens = expandShortOptions(command);
-  let at = 0;
-  while (at < tokens.length && (tokens[at].startsWith('+') || tokens[at].startsWith('-'))) {
-    at += GLOBAL_WITH_VALUE.has(tokens[at]) ? 2 : 1;
-  }
-  const name = tokens[at] ?? '';
+// The message of a release command that uses a forbidden flag, names the
+// feature or builds test targets.
+const RELEASE_MESSAGE = `a release build must not use --all-features or --all-targets, name ${FEATURE} or a feature that turns it on, or build test, bench or example targets`;
+
+// What is wrong with the cargo command `tokens` (the words after `cargo`,
+// or an alias value), or null: `RELEASE_MESSAGE` for a release command that
+// uses a forbidden flag, names the feature or builds test targets, or an
+// unknown letter of a short-option cluster (`readShortOptions`), which is
+// refused whether the command is a release one or not. `context` holds
+// `profiles`, `aliases` (name to the values declared for it, each a token
+// list) and `leaking`, the features that turn the feature on (`F` and
+// `PKG/F`, `leakingFeatures`): a release command's argument that is one of
+// them is refused as well. An alias is read with the table of the
+// subcommand it runs; its name is read as a subcommand of its own only when
+// cargo has one of that name.
+function commandProblem(command, context, depth = 0) {
+  const { name, rest, problems } = readCommand(command);
+  if (problems.length) return problems[0];
+  const sub = BUILTIN_ALIASES[name] ?? name;
   const expansions = context.aliases.get(name);
   if (expansions && depth < MAX_ALIAS_DEPTH) {
-    const rest = tokens.slice(at + 1);
-    if (expansions.some((expansion) => isBadCommand([...expansion, ...rest], context, depth + 1))) return true;
+    for (const expansion of expansions) {
+      const problem = commandProblem([...expansion, ...rest], context, depth + 1);
+      if (problem) return problem;
+    }
+    if (!SHORT_OPTIONS.has(sub)) return null;
   }
-  const sub = BUILTIN_ALIASES[name] ?? name;
-  const args = tokens.slice(at + 1);
+  const read = readArguments(sub, rest);
+  if (read.problems.length) return read.problems[0];
+  const { args } = read;
   // `cargo llvm-cov nextest` (and `nextest-archive`) runs nextest too, with
-  // nextest's `--profile`. Its subcommand is the first word that is no
-  // option and no value of a global option (`--color always nextest`).
-  const llvmCovSub = args.find((arg, index) => !arg.startsWith('-') && !GLOBAL_WITH_VALUE.has(args[index - 1]));
-  const nextest = sub === 'nextest' || (sub === 'llvm-cov' && LLVM_COV_NEXTEST.has(llvmCovSub));
+  // nextest's `--profile`.
+  const nextest = sub === 'nextest' || (sub === 'llvm-cov' && LLVM_COV_NEXTEST.has(read.nested));
   const profileFlag = nextest ? '--cargo-profile' : '--profile';
   let profile;
   args.forEach((arg, index) => {
@@ -375,15 +498,18 @@ export function isBadCommand(command, context, depth = 0) {
     args.includes('--release') ||
     args.includes('-r') ||
     (profile !== undefined ? isReleaseProfile(profile, context.profiles) : sub === 'bench');
-  if (!release) return false;
+  if (!release) return null;
   const leaking = context.leaking ?? new Set();
   // A feature list is split at commas and white space (`-F a,b`, `--features "a b"`).
   const names = (arg) => arg.replace(/^(?:--features=|-F=?)/, '').split(/[\s,]+/);
-  return (
+  const bad =
     TEST_COMMANDS.has(sub) ||
-    args.some((arg) => arg === '--all-features' || arg.includes(FEATURE) || TEST_TARGETS.test(arg) || names(arg).some((n) => leaking.has(n)))
-  );
+    args.some((arg) => arg === '--all-features' || arg.includes(FEATURE) || TEST_TARGETS.test(arg) || names(arg).some((n) => leaking.has(n)));
+  return bad ? RELEASE_MESSAGE : null;
 }
+
+// Whether `commandProblem` finds something wrong with the cargo command `command`.
+export const isBadCommand = (command, context, depth = 0) => commandProblem(command, context, depth) !== null;
 
 // The commands of a logical line: it split at `&&`, `||`, `;`, `|` and `&`
 // (not a redirection's: `&>`, `2>&1`) outside quotes (a backslash escapes
@@ -412,38 +538,50 @@ export function splitCommands(line) {
   return commands;
 }
 
-// Whether a command of the line `line` (`splitCommands`) is a bad release
-// command: the shell words (`shellWords`) after its first word that runs
-// cargo (`cargoWord`), with the feature's name looked for in the whole
-// command, an environment prefix included. The words are read as the shell
-// reads them and, as well, with quotes read as separators: a quote nested
-// in another without an escape (`sh -c "cargo build -F "a b" -r"`) pairs
-// with the wrong one. The contents of each quoted string are read as a
-// line of their own.
-function lineIsBad(line, context, depth = 0) {
-  return splitCommands(line).some((segment) => {
+// What is wrong with a command of the line `line` (`splitCommands`), or
+// null: the problem (`commandProblem`) of the shell words (`shellWords`)
+// after a word that runs cargo (`cargoWord`), each such word in turn (a
+// `cargo-X` image or wrapper before the real `cargo` hides nothing), with
+// the feature's name looked for in the whole command, an environment prefix
+// included. The words are read as the shell reads them and, as well, with
+// quotes read as separators: a quote nested in another without an escape
+// (`sh -c "cargo build -F "a b" -r"`) pairs with the wrong one. The
+// contents of each quoted string are read as a line of their own.
+function lineProblem(line, context, depth = 0) {
+  for (const segment of splitCommands(line)) {
     const { words, quoted } = shellWords(segment);
-    const bad = [words, shellWords(segment, { quoting: false }).words].some((view) => {
-      // A value of `-C` (`make -C /opt/cargo`) is a directory, not cargo.
-      const at = view.findIndex((word, index) => cargoWord(word) !== null && view[index - 1] !== '-C');
-      if (at < 0) return false;
-      const tokens = view.slice(at + 1);
-      // `cargo-SUB` run directly is `cargo SUB`; cargo passes it `SUB` first.
-      const sub = cargoWord(view[at]);
-      if (sub && tokens[0] !== sub) tokens.unshift(sub);
-      if (segment.includes(FEATURE)) tokens.push(FEATURE);
-      return isBadCommand(tokens, context);
-    });
-    return bad || (depth < MAX_QUOTE_DEPTH && quoted.some((content) => lineIsBad(content, context, depth + 1)));
-  });
+    for (const view of [words, shellWords(segment, { quoting: false }).words]) {
+      for (let at = 0; at < view.length; at++) {
+        // A value of `-C` (`make -C /opt/cargo`) is a directory, not cargo.
+        const sub = cargoWord(view[at]);
+        if (sub === null || view[at - 1] === '-C') continue;
+        const tokens = view.slice(at + 1);
+        // `cargo-SUB` run directly is `cargo SUB`; cargo passes it `SUB` first.
+        if (sub && tokens[0] !== sub) tokens.unshift(sub);
+        if (segment.includes(FEATURE)) tokens.push(FEATURE);
+        const problem = commandProblem(tokens, context);
+        if (problem) return problem;
+      }
+    }
+    if (depth < MAX_QUOTE_DEPTH) {
+      for (const content of quoted) {
+        const problem = lineProblem(content, context, depth + 1);
+        if (problem) return problem;
+      }
+    }
+  }
+  return null;
 }
 
-// The release commands of one file that use a forbidden flag, name the
-// feature or build test targets (`lineIsBad`): `[{ line, text }]`.
+// The commands of one file that `lineProblem` refuses: `[{ line, text }]`
+// for a release command that uses a forbidden flag, names the feature or
+// builds test targets, with `problem` when it is something else (an
+// unknown short option).
 export function badReleaseCommands(text, { yaml = false, profiles = new Map(), aliases = new Map(), leaking = new Set() } = {}) {
   const bad = [];
   for (const { line, text: logical } of logicalLines(text, { yaml })) {
-    if (lineIsBad(logical, { profiles, aliases, leaking })) bad.push({ line, text: logical.trim().replace(/\s+/g, ' ') });
+    const problem = lineProblem(logical, { profiles, aliases, leaking });
+    if (problem) bad.push({ line, text: logical.trim().replace(/\s+/g, ' '), ...(problem === RELEASE_MESSAGE ? {} : { problem }) });
   }
   return bad;
 }
@@ -570,7 +708,6 @@ export function checkReleaseFeatures({ root }) {
   }
 
   const commandErrors = [];
-  const message = `a release build must not use --all-features or --all-targets, name ${FEATURE} or a feature that turns it on, or build test, bench or example targets`;
   for (const path of configs) {
     stats.scanned++;
     const text = readFileSync(join(root, path), 'utf8');
@@ -584,10 +721,11 @@ export function checkReleaseFeatures({ root }) {
     const toml = readToml(root, path);
     for (const [name, value] of Object.entries(isTable(toml.alias) ? toml.alias : {})) {
       const tokens = Array.isArray(value) ? value.map(String) : tokenize(String(value));
-      if (isBadCommand(tokens, { profiles, aliases, leaking })) {
+      const problem = commandProblem(tokens, { profiles, aliases, leaking });
+      if (problem) {
         const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const line = lineOf(new RegExp(`^\\s*(?:alias\\.)?["']?${escaped}["']?\\s*=`));
-        commandErrors.push({ path, line, text: `${message}: alias ${name} = ${tokens.join(' ')}` });
+        commandErrors.push({ path, line, text: `${problem}: alias ${name} = ${tokens.join(' ')}` });
       }
     }
   }
@@ -595,8 +733,8 @@ export function checkReleaseFeatures({ root }) {
     if (kind !== 'file' && kind !== 'yaml') continue;
     stats.scanned++;
     const text = readFileSync(join(root, path), 'utf8');
-    for (const { line, text: command } of badReleaseCommands(text, { yaml: kind === 'yaml', profiles, aliases, leaking })) {
-      commandErrors.push({ path, line, text: `${message}: ${command}` });
+    for (const { line, text: command, problem = RELEASE_MESSAGE } of badReleaseCommands(text, { yaml: kind === 'yaml', profiles, aliases, leaking })) {
+      commandErrors.push({ path, line, text: `${problem}: ${command}` });
     }
   }
   commandErrors.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line));

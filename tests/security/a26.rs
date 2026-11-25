@@ -7,17 +7,22 @@
 //! **A26 M1a: the registry and policy API, `implemented`.** These tests
 //! are A26's M1a stage, whose scope is the scope policy through the
 //! registry API (re-scoped from "policy" on 2026-11-24); the token endpoint
-//! and the wire `invalid_scope` are A26's M2 stage. They run through the
-//! public API of `skyoauth_service` against a real PostgreSQL, one fresh
-//! database per test, with no SQL of their own: the registry writes and
-//! reads (`skyoauth_service::persistence::registry`; the trust source
-//! setup goes through its `#[doc(hidden)]` `test_support` module, which
-//! only the `test-support` feature compiles and this package's test
-//! targets turn on), the ceiling loader
-//! [`load_scope_ceilings`] and the pure scope decision
+//! and the wire `invalid_scope` are A26's M2 stage. They run against a
+//! real PostgreSQL, one fresh database per test, with no SQL of their own.
+//! Every registry write goes through the registry's `#[doc(hidden)]`
+//! `test_support` module (`skyoauth_service::persistence::registry`),
+//! which only the `test-support` feature compiles and this package's test
+//! targets turn on: the trust source setup, the other records and their
+//! changes, and also the grant-create and grant-update refusal assertions
+//! (`registry::test_support::create_service_grant` and
+//! `update_service_grant`), which therefore cover the underlying storage
+//! behaviour (the `0004` checks under those writers), not a public write
+//! path. The reads (the registry's getters and `list_service_grants`), the
+//! ceiling loader [`load_scope_ceilings`] and the pure scope decision
 //! [`resolve_scopes`] (`skyoauth_service::policy`), which the loader feeds
 //! through [`LoadedCeilings::default_scopes`] and
-//! [`LoadedCeilings::scope_ceilings`]. A [`ScopeError::Invalid`] is what
+//! [`LoadedCeilings::scope_ceilings`], still use the public API of
+//! `skyoauth_service`. A [`ScopeError::Invalid`] is what
 //! the token endpoint is to map to `invalid_scope`; no test here sees that
 //! wire code.
 //!
