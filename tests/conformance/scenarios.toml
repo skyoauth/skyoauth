@@ -30,16 +30,17 @@ kind = "scenario"
 layers = ["security"]
 envs = ["pg", "live"]
 harness = ["GH", "PG claim-mutation table", "GH-live"]
-owners = ["T12.2", "T12.7", "T22.5", "T52.2"]
-positive = "push"
-negative = "one case each for pull_request, pull_request_target, workflow_dispatch, issue_comment, workflow_run, missing event, and wrong owner/repo/ref/env/workflow; live: the real token of a `schedule` or `workflow_dispatch` run is denied by the push-only binding"
+owners = ["T12.2", "T12.7", "T22.2", "T22.5", "T52.2"]
+positive = "push (M1a: the policy matcher over hand-written claim maps; M2: the claims of a verified GitHub token)"
+negative = "one case each for pull_request, pull_request_target, workflow_dispatch, issue_comment, workflow_run, missing event, and wrong owner/repo/ref/env/workflow, and a wrong, absent, empty or only-extended reusable-workflow identity against a binding that pins it (M1a: the policy matcher over hand-written claim maps; M2: the same on verified-token claims through the exchange); live: the real token of a `schedule` or `workflow_dispatch` run is denied by the push-only binding (M2)"
 matrix_sha256 = "64b2daf7e8e9936a8f664f8a1c6436c0838c9b3f94ef715c2baba72aaffcfb78"
 
 [[scenario.stage]]
 milestone = "M1a"
-scope = "policy on verified-claim fixtures"
+scope = "policy matcher decision over claim maps supplied as evidence (registry and policy API: select_grant, then match_binding), including a binding that pins the reusable-workflow identity (job_workflow_ref); the maps are hand-written, are not verified signed-token output and are an inferred shape"
 legs = ["scenarios-pg/x86_64"]
-status = "planned"
+status = "implemented"
+implemented_sha256 = "4865731fb1a2b2a36a0165924fbcbe31b8387ad7762d1bf9c93cf042bda73e6a"
 tests = [
   "nextest:skyoauth-scenarios/pg/security::a02::a02_pos_push_claims_match_the_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_event_name_case_variant_against_push_binding",
@@ -47,6 +48,7 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_missing_event_name_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_pull_request_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_pull_request_target_against_push_binding",
+  "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_reusable_workflow_identity_pinned_by_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_workflow_dispatch_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_workflow_run_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_wrong_environment_against_push_binding",
@@ -58,7 +60,7 @@ tests = [
 
 [[scenario.stage]]
 milestone = "M2"
-scope = "exchange and live negatives"
+scope = "signed-token verification (T22.2) and the claims it produces, from whose output the M1a claim maps are rebuilt; mock GitHub token issuance; the whole-token shape of a real pull_request token (claims that differ together); the fork and pull-request context of T22.5; the exchange and its wire denial; and the live negatives"
 legs = ["scenarios-pg/x86_64", "live-wif-negative"]
 status = "planned"
 tests = []
