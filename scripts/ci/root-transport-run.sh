@@ -6,10 +6,16 @@
 #   sh root-transport-run.sh run LOG COMMAND [ARG...]
 #       Runs COMMAND with its stdout and stderr copied to LOG and to
 #       stdout, with workflow commands stopped meanwhile
-#       (`::stop-commands::` with a random token, resumed afterwards on a
-#       line of its own, also when COMMAND or the copy fails), so no line
-#       a test prints is read as a workflow command. Exits with COMMAND's
-#       status, or 2 when the log cannot be written.
+#       (`::stop-commands::` with a random token), so no line a test prints
+#       is read as a workflow command. The EXIT trap, and nothing else,
+#       resumes them, once, on a line of its own: after COMMAND, also when
+#       COMMAND or the copy fails, and when the script itself gets TERM,
+#       INT or HUP (a signal to its process group, e.g. from a terminal or
+#       `timeout`); on a cancel the Actions runner signals only the step's
+#       shell, so the script usually gets none, and a stop it leaves ends
+#       with the step. Exits with COMMAND's status, 2 when the log cannot
+#       be written (its `::error::` annotation follows the resume line), or
+#       143, 130 or 129 after TERM, INT or HUP.
 #
 #   sh root-transport-run.sh summarize LOG USERNS_STATUS RUN_STATUS
 #       Reads the log of that run (RUN_STATUS: its exit status) and appends
@@ -61,19 +67,49 @@ run() {
         *) annotate error "could not read a random token from /dev/urandom"; exit 2 ;;
     esac
     status_file=$(mktemp)
-    # From here on, commands resume whatever happens. The leading newline
-    # ends a last output line that has none, which would otherwise swallow
-    # the resume token.
-    trap 'printf "\n::%s::\n" "$token"; rm -f "$status_file"' EXIT
-    echo "::stop-commands::$token"
     copied=0
+    copy_error=
+    resumed=0
+    # From here on, commands resume whatever happens: `resume`, the EXIT
+    # trap, is the only place that prints the resume token, and the trap
+    # is never cleared, so every way out (COMMAND's status, a failed copy,
+    # a signal) prints it exactly once. The leading newline ends a last
+    # output line that has none, which would otherwise swallow the resume
+    # token. The error for a failed copy is printed after the token, where
+    # it is a live annotation. Signals are ignored while it runs, and
+    # `resumed` keeps a second run from printing the token again; each
+    # command is `|| :` so that, under `set -e`, a failure there cannot
+    # replace the exit status.
+    # shellcheck disable=SC2317 # called by the EXIT trap
+    resume() {
+        trap '' TERM INT HUP
+        [ "$resumed" -eq 0 ] || return 0
+        resumed=1
+        printf '\n::%s::\n' "$token" || :
+        rm -f "$status_file" || :
+        if [ -n "$copy_error" ]; then
+            annotate error "$copy_error" || :
+        fi
+    }
+    # A shell killed by a signal it does not trap runs no EXIT trap, so
+    # TERM, INT and HUP are trapped and exit through it, with the status a
+    # shell reports for that signal (128 + its number). That applies
+    # when the script itself gets TERM, INT or HUP (a signal to its process
+    # group, e.g. from a terminal or `timeout`); on a cancel the Actions
+    # runner signals only the step's shell, so the script usually gets
+    # none, and a stop it leaves ends with the step. A signal sent to the
+    # script alone, not to its process group, takes effect once COMMAND
+    # and the copy have ended (POSIX defers traps while a foreground
+    # command runs).
+    trap resume EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
+    echo "::stop-commands::$token"
     { "$@" 2>&1 || echo "$?" > "$status_file"; } | tee "$log" || copied=$?
     status=$(cat "$status_file")
-    trap - EXIT
-    printf '\n::%s::\n' "$token"
-    rm -f "$status_file"
     if [ "$copied" -ne 0 ]; then
-        annotate error "could not write the log $log (tee exited $copied)"
+        copy_error="could not write the log $log (tee exited $copied)"
         exit 2
     fi
     exit "${status:-0}"

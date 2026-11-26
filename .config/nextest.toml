@@ -20,7 +20,7 @@ path = "junit.xml"
 # settings as `ci`; its own JUnit path, so it does not overwrite the first
 # run's report. Written to target/nextest/ci-root/junit.xml, uploaded as
 # its own artifact, service-nextest-root-junit-<attempt>, which exists only
-# when that step ran.
+# when that step got far enough to write the JUnit.
 [profile.ci-root]
 retries = 0
 fail-fast = false

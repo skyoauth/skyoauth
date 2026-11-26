@@ -176,7 +176,8 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   summary lists its other notices and whether the runner user (not root)
   may create a user namespace. Its JUnit report
   (`target/nextest/ci-root/junit.xml`) is a separate artifact,
-  `service-nextest-root-junit-N`, which exists only when that step ran.
+  `service-nextest-root-junit-N`, which exists only when that step got
+  far enough to write the JUnit.
   DB-backed tests reach a PostgreSQL 17 service container, with the same
   pinned image as `scenarios-pg` and `rust-coverage`, through
   `SKYOAUTH_IT_DATABASE_URL`. They are `#[ignore]`d, so jobs without a

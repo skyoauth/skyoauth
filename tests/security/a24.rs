@@ -950,8 +950,9 @@ async fn a24_neg_consume_names_other_tenants_source() {
 /// nothing: no row, and each member then consumes exactly once and replays
 /// after. Before any statement: on a closed pool, where any statement fails
 /// with `PoolClosed`, every one of these sets is still the same encode
-/// error. Control: the same members with distinct keys are one set that
-/// consumes once and replays the second time.
+/// error. Control: a set of two other, distinct keys (3 and 4, under
+/// different digest-key versions) consumes once as one set and replays the
+/// second time.
 #[tokio::test]
 async fn a24_neg_duplicate_key_in_set_is_refused_not_a_replay() {
     let (db, pool) = two_tenants().await;
