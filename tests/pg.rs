@@ -18,8 +18,11 @@
 //! A48, A49, A53 and A54 tests are partial: they are registered on their
 //! scenario's planned M1a stage and count for nothing (see each module's
 //! docs). `harness::pg_teardown`
-//! tests the harness's own database teardown (`src/pg.rs`); its tests are
-//! not scenario tests, no name in it matches `a\d\d_`, and the registry
+//! tests the harness's own database teardown (`src/pg.rs`), and
+//! `harness::wire_errors` the wire error catalogue
+//! `tests/conformance/fixtures/_wire/errors.v1.json` against the service's
+//! `admin_http::ErrorCode` (no server needed); their tests are
+//! not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
 
 mod security {
@@ -68,4 +71,6 @@ mod security {
 mod harness {
     #[path = "pg_teardown.rs"]
     mod pg_teardown;
+    #[path = "wire_errors.rs"]
+    mod wire_errors;
 }

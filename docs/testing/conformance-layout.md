@@ -57,7 +57,7 @@ Required changes, applied by the first M1a scenario PR (A29):
 
 ### 1.3 Shared fixtures
 
-Put one directory per scenario at `tests/conformance/fixtures/a61/`, with one JSON file per case. Cross-scenario catalogues sit in `_`-prefixed directories beside them: `fixtures/_wire/errors.v1.json` and `fixtures/_profiles/<profile>.v1.json`. The scenario-directory check skips `_`-prefixed directories. Each case file looks like this:
+Put one directory per scenario at `tests/conformance/fixtures/a61/`, with one JSON file per case. Cross-scenario catalogues sit in `_`-prefixed directories beside them: `fixtures/_wire/errors.v1.json` and `fixtures/_profiles/<profile>.v1.json`. The scenario-directory check skips `_`-prefixed directories. `_wire/errors.v1.json` exists since the S4 admin surface: the admin wire codes with their one HTTP status and when each applies, pinned to the service's `ErrorCode` by `harness::wire_errors` in the `pg` target; the token endpoint's codes are not in it yet. Each case file looks like this:
 
 ```json
 {
