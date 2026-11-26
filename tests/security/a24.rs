@@ -991,7 +991,10 @@ async fn a24_neg_duplicate_key_in_set_is_refused_not_a_replay() {
                 let case = format!("{t} {name} ({} members), {pool_name}", set.len());
                 match registry::consume_assertion_set(executor, set).await {
                     Err(RegistryError::Other(sqlx::Error::Encode(err))) => {
-                        assert!(err.to_string().contains("duplicate key"), "{case}: {err}");
+                        assert!(
+                            err.to_string().contains("duplicate key in assertion set"),
+                            "{case}: {err}"
+                        );
                     }
                     other => panic!("{case}: expected an encode error, not a replay: {other:?}"),
                 }
