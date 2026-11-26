@@ -253,7 +253,6 @@ use std::{
 
 use serde_json::{Value, json};
 use skyoauth_scenarios::{
-    egress,
     pg::TestDb,
     rep::{self, Replicas},
 };
@@ -269,6 +268,8 @@ use skyoauth_service::persistence::{
     },
 };
 use sqlx::{Connection, Postgres, pool::PoolConnection};
+
+use super::egress_fixture::Egress;
 
 const GITHUB_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
@@ -539,9 +540,11 @@ async fn tenants() -> (TestDb, PgPool) {
 
 /// Both tenants with their records (module docs), the four resource
 /// servers and the four assignments. Each tenant's service identity and
-/// grant name its own audience only.
+/// grant name its own audience only. The GitHub sources' destination is
+/// allowed by the egress fixture, on the instance it bootstraps.
 async fn fixture() -> (TestDb, PgPool) {
     let (db, pool) = tenants().await;
+    let egress = Egress::bootstrap(&pool).await;
     for new in servers() {
         registry::test_support::create_resource_server(&pool, &new)
             .await
@@ -562,7 +565,7 @@ async fn fixture() -> (TestDb, PgPool) {
                 .await
                 .unwrap();
         }
-        egress::allow_destinations(&pool, &github_source(side)).await;
+        egress.allow_destinations(&pool, &github_source(side)).await;
         registry::test_support::create_trust_source(&pool, &github_source(side))
             .await
             .unwrap();

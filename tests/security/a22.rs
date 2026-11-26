@@ -98,7 +98,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -110,6 +110,8 @@ use skyoauth_service::persistence::{
     },
 };
 use sqlx::{PgConnection, PgExecutor};
+
+use super::egress_fixture::Egress;
 
 const TENANTS: [&str; 2] = ["ten_a", "ten_b"];
 
@@ -626,10 +628,15 @@ async fn a22_neg_scope_and_role_never_inherit() {
 /// principal of each tenant. This is the registry-level form of "no
 /// promotion" (T13.1, API-002): nothing but a registered credential key
 /// reaches an operator. It makes no wire claim: no handshake, no endpoint,
-/// no upstream token or session is involved (see the module docs).
+/// no upstream token or session is involved (see the module docs). The
+/// sources' destinations are allowed by the egress fixture first, on the
+/// instance it bootstraps with an operator of its own (`adm_egress`, an
+/// instance `security_admin`), whose rows are the fixture's and not among
+/// the identifiers checked here.
 #[tokio::test]
 async fn a22_neg_other_registries_identities_never_authorize() {
     let (db, pool) = fixture().await;
+    let egress = Egress::bootstrap(&pool).await;
     let operators = enroll_every_shape(&pool).await;
     let mut others: Vec<String> = Vec::new();
     for operator in &operators {
@@ -691,7 +698,7 @@ async fn a22_neg_other_registries_identities_never_authorize() {
             replay_mode: ReplayMode::Reusable,
             status: Status::Enabled,
         };
-        egress::allow_destinations(&pool, &new).await;
+        egress.allow_destinations(&pool, &new).await;
         let source = registry::test_support::create_trust_source(&pool, &new)
             .await
             .unwrap();

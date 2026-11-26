@@ -162,7 +162,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -176,6 +176,8 @@ use skyoauth_service::persistence::{
     },
 };
 use sqlx::{Postgres, Transaction};
+
+use super::egress_fixture::Egress;
 
 const GITHUB_ISSUER: &str = "https://token.actions.githubusercontent.com";
 const PARTNER_ISSUER: &str = "https://ci.partner.example";
@@ -330,14 +332,16 @@ fn uploaded_source(side: Side, id: String, name: &str, keyset_id: String) -> New
 }
 
 /// A `kubernetes_token_review` source of the tenant's own cluster on the
-/// in-cluster issuer, which every cluster shares.
+/// in-cluster issuer, which every cluster shares. Its endpoint is in
+/// canonical form (the path at least `/`), which the egress allowlist
+/// writer requires of the entry that allows it.
 fn kubernetes_source(side: Side, id: String, name: &str) -> NewTrustSource {
     NewTrustSource {
         kind: TrustSourceKind::KubernetesTokenReview,
         exact_issuer: KUBERNETES_ISSUER.into(),
         discovery_url: None,
         cluster_id: Some(side.id("cluster")),
-        token_review_endpoint: Some(format!("https://k8s-{}.example:6443", side.suffix)),
+        token_review_endpoint: Some(format!("https://k8s-{}.example:6443/", side.suffix)),
         ca_bundle_ref: Some("cluster-ca".into()),
         ca_fingerprint: Some("sha256:cluster-ca".into()),
         reviewer_credential_ref: Some("token-reviewer".into()),
@@ -416,10 +420,12 @@ fn direct_grant(
 /// referring only to its own records: principals, an audience assigned to
 /// it alone, a keyset with a version, three sources (one per kind, each on
 /// an issuer the other tenant also uses), a binding, a service identity and
-/// a grant.
+/// a grant. The sources' destinations are allowed by the egress fixture,
+/// on the instance it bootstraps.
 async fn two_tenants() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
+    let egress = Egress::bootstrap(&pool).await;
     for side in [A, B] {
         registry::test_support::create_tenant(
             &pool,
@@ -483,7 +489,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
             uploaded_source(side, side.uploaded(), "partner", side.keyset()),
             kubernetes_source(side, side.kubernetes(), "cluster"),
         ] {
-            egress::allow_destinations(&pool, &source).await;
+            egress.allow_destinations(&pool, &source).await;
             registry::test_support::create_trust_source(&pool, &source)
                 .await
                 .unwrap();

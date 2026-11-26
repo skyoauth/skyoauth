@@ -94,7 +94,7 @@
 
 use std::{collections::BTreeMap, fmt::Debug};
 
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -107,6 +107,8 @@ use skyoauth_service::{
     },
     policy::{Evidence, match_binding},
 };
+
+use super::egress_fixture::Egress;
 
 const TENANT: &str = "ten_a";
 /// The workload principal every binding maps to.
@@ -222,10 +224,12 @@ fn strings(values: &[&str]) -> Vec<String> {
 }
 
 /// A fresh database with the tenant, its workload principal and the two
-/// sources.
+/// sources, whose destinations the egress fixture allows on the instance
+/// it bootstraps.
 async fn fixture() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
+    let egress = Egress::bootstrap(&pool).await;
     registry::test_support::create_tenant(
         &pool,
         &NewTenant {
@@ -279,7 +283,7 @@ async fn fixture() -> (TestDb, PgPool) {
             replay_mode: ReplayMode::Reusable,
             status: Status::Enabled,
         };
-        egress::allow_destinations(&pool, &new).await;
+        egress.allow_destinations(&pool, &new).await;
         registry::test_support::create_trust_source(&pool, &new)
             .await
             .unwrap();

@@ -82,7 +82,6 @@ use std::{
 };
 
 use skyoauth_scenarios::{
-    egress,
     pg::TestDb,
     rep::{self, Replicas},
 };
@@ -94,6 +93,8 @@ use skyoauth_service::persistence::{
     },
 };
 use sqlx::{Connection, Postgres, pool::PoolConnection};
+
+use super::egress_fixture::Egress;
 
 const ISSUER: &str = "https://token.actions.githubusercontent.com";
 
@@ -165,10 +166,12 @@ fn single_use_source(tenant: &str, id: &str, name: &str) -> NewTrustSource {
     }
 }
 
-/// Tenants `ten_a` and `ten_b`, each with its `single_use` source.
+/// Tenants `ten_a` and `ten_b`, each with its `single_use` source, whose
+/// destination the egress fixture allows on the instance it bootstraps.
 async fn two_tenants() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
+    let egress = Egress::bootstrap(&pool).await;
     for side in [A, B] {
         registry::test_support::create_tenant(
             &pool,
@@ -182,7 +185,7 @@ async fn two_tenants() -> (TestDb, PgPool) {
         .await
         .unwrap();
         let source = single_use_source(side.tenant, side.source, "github");
-        egress::allow_destinations(&pool, &source).await;
+        egress.allow_destinations(&pool, &source).await;
         registry::test_support::create_trust_source(&pool, &source)
             .await
             .unwrap();
