@@ -813,7 +813,7 @@ jobs:
       - name: Check that the registered tests exist
         if: success() || failure()
         run: |
-          cargo nextest list --locked -p skyoauth-scenarios --profile ci --message-format json > "$RUNNER_TEMP/nextest-list.json"
+          cargo nextest list --locked -p skyoauth-operator -p skyoauth-scenarios --profile ci --message-format json > "$RUNNER_TEMP/nextest-list.json"
           node scripts/ci/check-conformance-registry.mjs --nextest-list "$RUNNER_TEMP/nextest-list.json"
 
   # Informational conformance report: runs scripts/ci/report-conformance.mjs
