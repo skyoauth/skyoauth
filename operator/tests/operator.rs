@@ -1,19 +1,23 @@
 //! Target `operator`: the workstation library against the shared fixture
-//! files `tests/conformance/fixtures/_recovery/key.v1.json` and
-//! `public_identity.v1.json`, whose cases the `pg` target of
-//! `skyoauth-scenarios` also feeds to the service (`tests/harness/`). Every
-//! case of every file is run, and a test fails when a file or a case is not
+//! files `tests/conformance/fixtures/_recovery/key.v1.json`,
+//! `public_identity.v1.json` and `challenge.v1.json` (in `challenge`, with
+//! the strictness of the challenge reader and the challenge checks), whose
+//! cases the `pg` target of `skyoauth-scenarios` also checks against the
+//! service (`tests/harness/`). Every case of every file is run, and a test
+//! fails when a file, a member or a case is not
 //! (`every_fixture_file_and_case_is_covered`).
 //!
-//! Portable: no network, database, socket or clock; it runs on Linux,
-//! macOS and Windows. These are not scenario tests: no name here may match
-//! the scenario pattern `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, and the
+//! Portable: no network, database, socket or clock (a time is always
+//! injected); it runs on Linux, macOS and Windows. These are not scenario
+//! tests: no name here may match the scenario pattern `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, and the
 //! registry (`tests/conformance/scenarios.toml`) does not list them.
 
+mod challenge;
 mod support;
 
 use std::collections::BTreeSet;
 
+use challenge::{CHALLENGE_FIXTURE, VECTOR_MEMBERS, run_challenge_vectors};
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
 use skyoauth_operator::{
@@ -351,7 +355,38 @@ fn every_fixture_file_and_case_is_covered() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     files.sort();
-    assert_eq!(files, [KEY_FIXTURE, IDENTITY_FIXTURE]);
+    assert_eq!(files, [CHALLENGE_FIXTURE, KEY_FIXTURE, IDENTITY_FIXTURE]);
+
+    let challenge = recovery_fixture(CHALLENGE_FIXTURE);
+    assert_eq!(
+        members(&challenge),
+        BTreeSet::from([
+            "fixture_version",
+            "kind",
+            "description",
+            "prefix",
+            "request_digest_prefix",
+            "actor_id",
+            "challenge_kind",
+            "ttl_seconds",
+            "plan_members",
+            "vectors",
+        ])
+    );
+    let vectors = list(&challenge, "vectors");
+    assert_eq!(
+        run_challenge_vectors(&challenge)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        case_names(vectors)
+    );
+    for vector in vectors {
+        assert_eq!(members(vector), BTreeSet::from(VECTOR_MEMBERS), "{vector}");
+    }
+    // The service's pinned vector, and the escapes and integer extremes.
+    for case in ["op_1", "escapes", "integer_extremes"] {
+        assert!(case_names(vectors).contains(case), "no vector {case}");
+    }
 
     let key = recovery_fixture(KEY_FIXTURE);
     assert_eq!(
@@ -418,6 +453,19 @@ fn every_fixture_file_and_case_is_covered() {
             .iter()
             .any(|&(len, trimmed)| len > 64 && trimmed == 64),
         "{trimmed_lengths:?}"
+    );
+    // Independently: leading whitespace before a valid 64-digit key, so a
+    // reader that trims the start before its length check accepts it.
+    assert!(
+        text_cases.iter().any(|c| {
+            let padded = text(c, "text");
+            let rest = padded.trim_start();
+            rest.len() < padded.len()
+                && rest.len() == 2 * RECOVERY_PUBLIC_KEY_LENGTH
+                && RecoveryPublicKey::from_hex(rest).is_ok()
+                && text(c, "expected") == "not_hex"
+        }),
+        "no text case of leading whitespace and a valid 64-digit key"
     );
 
     let identity = recovery_fixture(IDENTITY_FIXTURE);

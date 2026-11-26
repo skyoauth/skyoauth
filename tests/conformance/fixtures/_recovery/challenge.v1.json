@@ -1,0 +1,89 @@
+{
+  "fixture_version": 1,
+  "kind": "recovery_challenge",
+  "description": "Known answers for the recovery challenge (service/src/persistence/registry/recovery.rs, module docs \"What is signed\"; docs/proposals/recovery-verified-response.md section 4): C is the canonical JSON of the seven members actor_id (always actor_id below), expected_revision, expires_at (whole microseconds since the Unix epoch), id, kind (always challenge_kind below), plan and tenant_id (always null), with the members sorted byte-wise at both levels, no whitespace, integers (i64 only) in decimal and strings escaped as the service's canonical writer escapes them (quotation mark and reverse solidus with a reverse solidus, U+0008, U+0009, U+000A, U+000C and U+000D as \\b \\t \\n \\f \\r, any other character below U+0020 as \\u followed by four lowercase hexadecimal digits, everything else as is, in UTF-8). The plan is closed: exactly the eight plan_members, recovery_key_epoch an integer and the others strings. M = prefix || C is what the recovery key signs; challenge_hash = SHA-256(M); request_digest = SHA-256(request_digest_prefix || C). ttl_seconds are the shortest, default and longest challenge TTL. Each vector gives the inputs (id, expected_revision, expires_at, plan) and the expected canonical (C as text), message_hex (M), challenge_hash and request_digest; op_1 is the vector the service's own unit test pins. Readers: operator/tests/operator.rs (the workstation's writer of C and M, and parse_challenge, which accepts exactly these bytes) and tests/harness/recovery_challenge_fixture.rs (the constants, the service's DigestEnvelope for C and request_digest, and issue_recovery_challenge on a database for op_1's M, challenge_hash and request_digest). The values were computed independently of both crates.",
+  "prefix": "skyoauth.recovery_challenge.v1\n",
+  "request_digest_prefix": "skyoauth.administrative_operation.v1\n",
+  "actor_id": "deployment_operator",
+  "challenge_kind": "operator_restoration",
+  "ttl_seconds": {
+    "min": 1,
+    "default": 300,
+    "max": 900
+  },
+  "plan_members": [
+    "admin_id",
+    "binding_id",
+    "credential_id",
+    "instance_id",
+    "new_recovery_public_key",
+    "public_identity",
+    "recovery_key_epoch",
+    "trust_anchor_ref"
+  ],
+  "vectors": [
+    {
+      "case": "op_1",
+      "note": "the service's pinned challenge (the_signed_message_is_pinned); issued through issue_recovery_challenge by the harness",
+      "id": "op_1",
+      "expected_revision": 1,
+      "expires_at": 1790000300000000,
+      "plan": {
+        "instance_id": "01936f4e-8a2b-7c3d-9e4f-0123456789ab",
+        "recovery_key_epoch": 1,
+        "admin_id": "adm_new",
+        "credential_id": "crd_new",
+        "binding_id": "rb_new",
+        "public_identity": "spki-sha256:new",
+        "trust_anchor_ref": "deployment/operator-ca",
+        "new_recovery_public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+      },
+      "canonical": "{\"actor_id\":\"deployment_operator\",\"expected_revision\":1,\"expires_at\":1790000300000000,\"id\":\"op_1\",\"kind\":\"operator_restoration\",\"plan\":{\"admin_id\":\"adm_new\",\"binding_id\":\"rb_new\",\"credential_id\":\"crd_new\",\"instance_id\":\"01936f4e-8a2b-7c3d-9e4f-0123456789ab\",\"new_recovery_public_key\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"public_identity\":\"spki-sha256:new\",\"recovery_key_epoch\":1,\"trust_anchor_ref\":\"deployment/operator-ca\"},\"tenant_id\":null}",
+      "message_hex": "736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f705f31222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f6e6577222c2262696e64696e675f6964223a2272625f6e6577222c2263726564656e7469616c5f6964223a226372645f6e6577222c22696e7374616e63655f6964223a2230313933366634652d386132622d376333642d396534662d303132333435363738396162222c226e65775f7265636f766572795f7075626c69635f6b6579223a2264373561393830313832623130616237643534626665643363393634303733613065653137326633646161363233323561663032316136386637303735313161222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a6e6577222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d",
+      "challenge_hash": "38bfce122a7807a760f2e556496415859ce931a2589e0b9f4098f3eaf23bbcf4",
+      "request_digest": "34694852ec1514d9054822e6a5c7b650637176d5b16ab18bf4442d9531170808"
+    },
+    {
+      "case": "escapes",
+      "note": "quotation mark and reverse solidus escaped; the five short control escapes; other characters below U+0020 as \\u00XX in lowercase; U+007F, the solidus, two-, three- and four-byte UTF-8, U+2028 and U+2029 as is",
+      "id": "op_\"\\\u00e9",
+      "expected_revision": 7,
+      "expires_at": 1790000300000001,
+      "plan": {
+        "instance_id": "01936f4e-8a2b-7c3d-9e4f-0123456789ab",
+        "recovery_key_epoch": 2,
+        "admin_id": "adm_\"quoted\"\\back\\",
+        "credential_id": "crd_\u00e9\u20ac\ud800\udf48",
+        "binding_id": "rb_\b\t\n\f\r\u0000\u0001\u001f\u007f/",
+        "public_identity": "spki-sha256:new",
+        "trust_anchor_ref": "anchor/\u2028\u2029",
+        "new_recovery_public_key": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "canonical": "{\"actor_id\":\"deployment_operator\",\"expected_revision\":7,\"expires_at\":1790000300000001,\"id\":\"op_\\\"\\\\\u00e9\",\"kind\":\"operator_restoration\",\"plan\":{\"admin_id\":\"adm_\\\"quoted\\\"\\\\back\\\\\",\"binding_id\":\"rb_\\b\\t\\n\\f\\r\\u0000\\u0001\\u001f\u007f/\",\"credential_id\":\"crd_\u00e9\u20ac\ud800\udf48\",\"instance_id\":\"01936f4e-8a2b-7c3d-9e4f-0123456789ab\",\"new_recovery_public_key\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"public_identity\":\"spki-sha256:new\",\"recovery_key_epoch\":2,\"trust_anchor_ref\":\"anchor/\u2028\u2029\"},\"tenant_id\":null}",
+      "message_hex": "736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a372c22657870697265735f6174223a313739303030303330303030303030312c226964223a226f705f5c225c5cc3a9222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f5c2271756f7465645c225c5c6261636b5c5c222c2262696e64696e675f6964223a2272625f5c625c745c6e5c665c725c75303030305c75303030315c75303031667f2f222c2263726564656e7469616c5f6964223a226372645fc3a9e282acf0908d88222c22696e7374616e63655f6964223a2230313933366634652d386132622d376333642d396534662d303132333435363738396162222c226e65775f7265636f766572795f7075626c69635f6b6579223a2231313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a6e6577222c227265636f766572795f6b65795f65706f6368223a322c2274727573745f616e63686f725f726566223a22616e63686f722fe280a8e280a9227d2c2274656e616e745f6964223a6e756c6c7d",
+      "challenge_hash": "e73b708089910ffde04eccd3d370bd0075fc0663aa753dfd30000c12c54185b9",
+      "request_digest": "43fa5508de84d4b230f3b76b1241c7d39273fc776e2925cced5521b1225a7655"
+    },
+    {
+      "case": "integer_extremes",
+      "note": "i64::MAX, i64::MIN and a negative integer in decimal",
+      "id": "op_3",
+      "expected_revision": 9223372036854775807,
+      "expires_at": -1,
+      "plan": {
+        "instance_id": "01936f4e-8a2b-7c3d-9e4f-0123456789ab",
+        "recovery_key_epoch": -9223372036854775808,
+        "admin_id": "adm_new",
+        "credential_id": "crd_new",
+        "binding_id": "rb_new",
+        "public_identity": "spki-sha256:new",
+        "trust_anchor_ref": "deployment/operator-ca",
+        "new_recovery_public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+      },
+      "canonical": "{\"actor_id\":\"deployment_operator\",\"expected_revision\":9223372036854775807,\"expires_at\":-1,\"id\":\"op_3\",\"kind\":\"operator_restoration\",\"plan\":{\"admin_id\":\"adm_new\",\"binding_id\":\"rb_new\",\"credential_id\":\"crd_new\",\"instance_id\":\"01936f4e-8a2b-7c3d-9e4f-0123456789ab\",\"new_recovery_public_key\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\",\"public_identity\":\"spki-sha256:new\",\"recovery_key_epoch\":-9223372036854775808,\"trust_anchor_ref\":\"deployment/operator-ca\"},\"tenant_id\":null}",
+      "message_hex": "736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a393232333337323033363835343737353830372c22657870697265735f6174223a2d312c226964223a226f705f33222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f6e6577222c2262696e64696e675f6964223a2272625f6e6577222c2263726564656e7469616c5f6964223a226372645f6e6577222c22696e7374616e63655f6964223a2230313933366634652d386132622d376333642d396534662d303132333435363738396162222c226e65775f7265636f766572795f7075626c69635f6b6579223a2264373561393830313832623130616237643534626665643363393634303733613065653137326633646161363233323561663032316136386637303735313161222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a6e6577222c227265636f766572795f6b65795f65706f6368223a2d393232333337323033363835343737353830382c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d",
+      "challenge_hash": "b3d5056d3b704379c0761173b10f97812e9a52441d3d922b0c320ff4bac5bdf0",
+      "request_digest": "7e85e26a0b3a4aa20a54306ea25d0c01cac3144e226b75fe1cb3dd1ea33f4e1f"
+    }
+  ]
+}
