@@ -6,15 +6,15 @@
 //! the refusals of `sign_challenge`, with signers that misbehave; and the
 //! replacement confirmation `check_challenge` records.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use skyoauth_operator::recovery::{
-    CHALLENGE_PREFIX, Challenge, Expectations, RecoveryPublicKey, RecoverySigner, SIGNATURE_LENGTH,
-    SignError, SignerError, SoftwareSigner, VerifyError, check_challenge, parse_challenge,
-    sign_challenge, verify_response,
+    CHALLENGE_PREFIX, Challenge, Expectations, RecoveryPublicKey, RecoverySigner, Refusal,
+    SIGNATURE_LENGTH, SignError, SignerError, SigningRequest, SoftwareSigner, VerifyError,
+    check_challenge, parse_challenge, sign_challenge, verify_response,
 };
 
 use crate::support::{list, recovery_fixture, text, unhex};
@@ -25,9 +25,10 @@ pub const SIGNATURE_FIXTURE: &str = "signature.v1.json";
 /// The members of a key of the test-key fixture.
 pub const KEY_MEMBERS: [&str; 3] = ["name", "seed", "public_key"];
 
-/// The members a case of the signature fixture may have; `lax_verify` only
-/// for 64 bytes, `signed_by` and `signed_over` together.
-pub const CASE_MEMBERS: [&str; 7] = [
+/// The members a case of the signature fixture may have; `lax_verify` and
+/// `cofactored_verify` exactly for 64 bytes, `signed_by` and `signed_over`
+/// together.
+pub const CASE_MEMBERS: [&str; 8] = [
     "case",
     "note",
     "signed_by",
@@ -35,6 +36,7 @@ pub const CASE_MEMBERS: [&str; 7] = [
     "signature",
     "expected",
     "lax_verify",
+    "cofactored_verify",
 ];
 
 /// The class of a `verify_response` result in the signature fixture.
@@ -62,6 +64,13 @@ pub fn seed(name: &str) -> [u8; 32] {
 /// The signer of the key `name` of the test-key fixture.
 pub fn signer(name: &str) -> SoftwareSigner {
     SoftwareSigner::from_seed(seed(name)).expect("a test key is valid")
+}
+
+/// The signature of the key `name` of the test-key fixture over any bytes,
+/// made with `ed25519-dalek` directly: a `SoftwareSigner` signs only what
+/// `sign_challenge` asks of it.
+pub fn raw_sign(name: &str, message: &[u8]) -> [u8; SIGNATURE_LENGTH] {
+    SigningKey::from_bytes(&seed(name)).sign(message).to_bytes()
 }
 
 /// The vector `case` of the challenge fixture.
@@ -105,13 +114,14 @@ fn signed_over(case: &str, name: &str) -> Vec<u8> {
 }
 
 /// Expectations that op_1 meets at `now`, with the replacement confirmed:
-/// its instance, epoch, replacement identity and new key.
+/// its instance, epoch, replacement identity, trust anchor and new key.
 fn confirmed(new_key: &RecoveryPublicKey) -> Expectations<'_> {
     Expectations {
         instance_id: "01936f4e-8a2b-7c3d-9e4f-0123456789ab",
         now_micros: EXPIRES_AT - 1,
         recovery_key_epoch: Some(1),
         replacement_public_identity: Some("spki-sha256:new"),
+        trust_anchor_ref: Some("deployment/operator-ca"),
         new_recovery_public_key: Some(new_key),
     }
 }
@@ -150,7 +160,7 @@ pub fn run_test_keys(fixture: &Value) -> Vec<String> {
 
 /// Runs every case of the signature fixture through [`verify_response`]
 /// with the signer's key over the challenge's `M`, and re-makes each real
-/// signature with [`SoftwareSigner`]. Returns the names.
+/// signature with `ed25519-dalek` ([`raw_sign`]). Returns the names.
 pub fn run_signature_cases(fixture: &Value) -> Vec<String> {
     let challenge_case = text(fixture, "challenge_case");
     let challenge = challenge(challenge_case);
@@ -180,8 +190,16 @@ pub fn run_signature_cases(fixture: &Value) -> Vec<String> {
                     lax_verify,
                     "{name}"
                 );
+                // Recorded from the fixture's independent computation; no
+                // verifier here is cofactored.
+                case["cofactored_verify"]
+                    .as_bool()
+                    .expect("cofactored_verify");
             }
-            Err(_) => assert!(case.get("lax_verify").is_none(), "{name}"),
+            Err(_) => {
+                assert!(case.get("lax_verify").is_none(), "{name}");
+                assert!(case.get("cofactored_verify").is_none(), "{name}");
+            }
         }
         // A real signature: its key signs its bytes to exactly it.
         match (case.get("signed_by"), case.get("signed_over")) {
@@ -189,11 +207,7 @@ pub fn run_signature_cases(fixture: &Value) -> Vec<String> {
             (Some(by), Some(over)) => {
                 let by = by.as_str().expect("signed_by");
                 let over = signed_over(challenge_case, over.as_str().expect("signed_over"));
-                assert_eq!(
-                    signer(by).sign(&over).unwrap().to_vec(),
-                    signature,
-                    "{name}"
-                );
+                assert_eq!(raw_sign(by, &over).to_vec(), signature, "{name}");
             }
             _ => panic!("{name}: signed_by and signed_over go together"),
         }
@@ -243,15 +257,24 @@ fn signature_cases_match_verify_response() {
     assert!(!run_signature_cases(&fixture).is_empty());
 }
 
-/// RFC 8032 section 7.1, test 1, through [`SoftwareSigner`].
+/// RFC 8032 section 7.1, test 1: the key's seed gives the RFC's public key
+/// through [`SoftwareSigner`], and its signature of the empty message
+/// (`ed25519-dalek`, since a `SoftwareSigner` signs only a challenge) is
+/// the RFC's.
 #[test]
 fn rfc8032_test1_through_software_signer() {
     let fixture = recovery_fixture(SIGNATURE_FIXTURE);
     let vector = &fixture["rfc8032_test1"];
-    let signer = signer(text(vector, "key"));
-    let signature = signer.sign(&unhex(text(vector, "message_hex"))).unwrap();
+    let name = text(vector, "key");
+    assert_eq!(
+        signer(name).public_key().as_bytes(),
+        SigningKey::from_bytes(&seed(name))
+            .verifying_key()
+            .as_bytes()
+    );
+    let signature = raw_sign(name, &unhex(text(vector, "message_hex")));
     assert_eq!(signature.to_vec(), unhex(text(vector, "signature")));
-    assert_ne!(signer.sign(b"x").unwrap(), signature);
+    assert_ne!(raw_sign(name, b"x"), signature);
 }
 
 /// The signature `sign_challenge` returns for op_1 is the fixture's
@@ -284,12 +307,14 @@ fn sign_challenge_returns_the_fixture_signature() {
     );
 }
 
-/// A signer that answers with what it was given, and counts its calls.
+/// A signer that answers with what it was given, counts its calls and
+/// keeps the bytes it was asked to sign.
 struct StubSigner {
     public_key: RecoveryPublicKey,
     answer: Result<[u8; SIGNATURE_LENGTH], SignerError>,
     public_key_calls: Cell<usize>,
     signed: Cell<usize>,
+    asked: RefCell<Vec<Vec<u8>>>,
 }
 
 impl StubSigner {
@@ -299,6 +324,7 @@ impl StubSigner {
             answer,
             public_key_calls: Cell::new(0),
             signed: Cell::new(0),
+            asked: RefCell::new(Vec::new()),
         }
     }
 }
@@ -309,10 +335,54 @@ impl RecoverySigner for StubSigner {
         self.public_key
     }
 
-    fn sign(&self, _message: &[u8]) -> Result<[u8; SIGNATURE_LENGTH], SignerError> {
+    fn sign(&self, request: &SigningRequest<'_>) -> Result<[u8; SIGNATURE_LENGTH], SignerError> {
         self.signed.set(self.signed.get() + 1);
+        self.asked.borrow_mut().push(request.message().to_vec());
         self.answer
     }
+}
+
+/// A signer that passes the request it is given on to the signer it wraps:
+/// a signer of another crate can do so, and signs only what
+/// `sign_challenge` asked.
+struct Wrapping<'s> {
+    inner: &'s SoftwareSigner,
+    asked: RefCell<Vec<Vec<u8>>>,
+}
+
+impl RecoverySigner for Wrapping<'_> {
+    fn public_key(&self) -> RecoveryPublicKey {
+        self.inner.public_key()
+    }
+
+    fn sign(&self, request: &SigningRequest<'_>) -> Result<[u8; SIGNATURE_LENGTH], SignerError> {
+        assert_eq!(format!("{request:?}"), "SigningRequest(..)");
+        self.asked.borrow_mut().push(request.message().to_vec());
+        self.inner.sign(request)
+    }
+}
+
+/// The signer is asked for exactly `M`, once, and a wrapping signer of
+/// another crate can pass the request on.
+#[test]
+fn the_signer_is_asked_for_exactly_m() {
+    let challenge = challenge("op_1");
+    let new_key = op_1_new_key();
+    let verified = check_challenge(&challenge, &confirmed(&new_key)).unwrap();
+    let stub = StubSigner::new(
+        signer("recovery").public_key(),
+        Ok(raw_sign("recovery", challenge.message())),
+    );
+    sign_challenge(&verified, &stub).unwrap();
+    assert_eq!(*stub.asked.borrow(), [challenge.message().to_vec()]);
+    let inner = signer("recovery");
+    let wrapping = Wrapping {
+        inner: &inner,
+        asked: RefCell::new(Vec::new()),
+    };
+    let response = sign_challenge(&verified, &wrapping).unwrap();
+    assert_eq!(*wrapping.asked.borrow(), [challenge.message().to_vec()]);
+    assert_eq!(response, sign_challenge(&verified, &inner).unwrap());
 }
 
 /// A signer whose signature does not verify with its own public key over
@@ -361,9 +431,7 @@ fn sign_challenge_refuses_a_signature_that_does_not_verify() {
         );
     }
     // The right signature, presented under another key.
-    let right = signer(text(&fixture, "signer"))
-        .sign(challenge.message())
-        .unwrap();
+    let right = raw_sign(text(&fixture, "signer"), challenge.message());
     let stub = StubSigner::new(signer("other").public_key(), Ok(right));
     assert_eq!(
         sign_challenge(&verified, &stub),
@@ -400,7 +468,7 @@ fn sign_challenge_refuses_the_plans_new_key_as_signer() {
         sign_challenge(&verified, &signer("rfc8032_test1")),
         Err(SignError::RecoveryKeyUnchanged)
     );
-    let right = signer("rfc8032_test1").sign(challenge.message()).unwrap();
+    let right = raw_sign("rfc8032_test1", challenge.message());
     let stub = StubSigner::new(new_key, Ok(right));
     assert_eq!(
         sign_challenge(&verified, &stub),
@@ -409,8 +477,10 @@ fn sign_challenge_refuses_the_plans_new_key_as_signer() {
     assert_eq!((stub.public_key_calls.get(), stub.signed.get()), (1, 0));
 }
 
-/// Only a challenge checked with both the replacement's identity and the
-/// new key is signed; without either, nothing is asked of the signer.
+/// Only a challenge checked with the replacement's identity, its trust
+/// anchor and the new key is signed; without any of them, nothing is asked
+/// of the signer. A challenge whose trust anchor is another one is refused
+/// by the check, so it never reaches the signer.
 #[test]
 fn sign_challenge_requires_a_confirmed_replacement() {
     let challenge = challenge("op_1");
@@ -418,7 +488,7 @@ fn sign_challenge_requires_a_confirmed_replacement() {
     let all = confirmed(&new_key);
     let stub = StubSigner::new(
         signer("recovery").public_key(),
-        signer("recovery").sign(challenge.message()),
+        Ok(raw_sign("recovery", challenge.message())),
     );
     for (expected, confirmed) in [
         (all, true),
@@ -438,6 +508,13 @@ fn sign_challenge_requires_a_confirmed_replacement() {
         ),
         (
             Expectations {
+                trust_anchor_ref: None,
+                ..all
+            },
+            false,
+        ),
+        (
+            Expectations {
                 new_recovery_public_key: None,
                 ..all
             },
@@ -446,6 +523,15 @@ fn sign_challenge_requires_a_confirmed_replacement() {
         (
             Expectations {
                 replacement_public_identity: None,
+                new_recovery_public_key: None,
+                ..all
+            },
+            false,
+        ),
+        (
+            Expectations {
+                replacement_public_identity: None,
+                trust_anchor_ref: None,
                 new_recovery_public_key: None,
                 ..all
             },
@@ -465,6 +551,21 @@ fn sign_challenge_requires_a_confirmed_replacement() {
             assert_eq!(after, before);
         }
     }
+    // The two confirmed ones only were signed.
+    assert_eq!((stub.public_key_calls.get(), stub.signed.get()), (2, 2));
+    // Another trust anchor: refused by the check, before any signer.
+    for anchor in ["deployment/other-ca", "deployment/operator-c", ""] {
+        let other = Expectations {
+            trust_anchor_ref: Some(anchor),
+            ..all
+        };
+        assert_eq!(
+            check_challenge(&challenge, &other).map(|_| ()),
+            Err(Refusal::OtherTrustAnchor),
+            "{anchor:?}"
+        );
+    }
+    assert_eq!((stub.public_key_calls.get(), stub.signed.get()), (2, 2));
 }
 
 /// A signer can present only a key that passed the service's checks: every
@@ -500,7 +601,7 @@ fn a_signer_cannot_present_a_weak_key() {
 fn verify_response_refuses_other_lengths() {
     let challenge = challenge("op_1");
     let key = signer("recovery").public_key();
-    let signature = signer("recovery").sign(challenge.message()).unwrap();
+    let signature = raw_sign("recovery", challenge.message());
     assert_eq!(verify_response(&key, &challenge, &signature), Ok(()));
     let extended = [&signature[..], &[0]].concat();
     let doubled = [signature, signature].concat();
@@ -531,10 +632,11 @@ fn a_signature_verifies_for_its_challenge_and_key_alone() {
         .iter()
         .map(|vector| parse_challenge(&unhex(text(vector, "message_hex"))).unwrap())
         .collect();
-    let keys = [signer("recovery"), signer("other")];
+    let names = ["recovery", "other"];
+    let keys = names.map(signer);
     for (i, signed) in challenges.iter().enumerate() {
-        for (k, by) in keys.iter().enumerate() {
-            let signature = by.sign(signed.message()).unwrap();
+        for (k, by) in names.iter().enumerate() {
+            let signature = raw_sign(by, signed.message());
             for (j, checked) in challenges.iter().enumerate() {
                 for (l, key) in keys.iter().enumerate() {
                     let expected = if i == j && k == l {

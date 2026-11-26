@@ -6,6 +6,12 @@
 //! only the signer's public key and the 64 bytes it returns, so a signer
 //! backed by a device or an OS key store can take the place of
 //! [`SoftwareSigner`] without a change here.
+//!
+//! A signer signs only a [`SigningRequest`], which [`sign_challenge`] alone
+//! makes, after its checks. So no caller can have a signer of this crate
+//! sign other bytes, and the gates of [`sign_challenge`] (a confirmed
+//! replacement, a new key that is not the signer's) hold for every
+//! signature a [`SoftwareSigner`] makes.
 
 use std::fmt;
 
@@ -13,25 +19,67 @@ use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 
 use super::{Challenge, KeyError, RecoveryPublicKey, SIGNATURE_LENGTH, VerifiedChallenge};
 
+/// What [`sign_challenge`] asks a [`RecoverySigner`] to sign: `M` of a
+/// challenge that passed every check of [`sign_challenge`].
+///
+/// Only [`sign_challenge`] makes one: it has no public constructor and no
+/// `Clone`, `Copy` or `Default`, so a signer is never asked to sign bytes
+/// that did not pass those checks. A signer may pass the request it was
+/// given on, to a signer it wraps.
+///
+/// `Debug` prints `SigningRequest(..)`.
+pub struct SigningRequest<'a> {
+    message: &'a [u8],
+}
+
+impl fmt::Debug for SigningRequest<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SigningRequest(..)")
+    }
+}
+
+impl<'a> SigningRequest<'a> {
+    /// The bytes to sign: `M`, the challenge exactly as the service issued
+    /// it.
+    pub const fn message(&self) -> &'a [u8] {
+        self.message
+    }
+}
+
 /// Signs the bytes of a recovery challenge with the recovery private key,
 /// wherever that key is kept.
 ///
 /// [`sign_challenge`] calls [`RecoverySigner::public_key`] once, then
-/// [`RecoverySigner::sign`] once with `M`, and checks the signature it gets
-/// with that public key before it returns it: a signer whose key or output
-/// is wrong is refused, never passed on.
+/// [`RecoverySigner::sign`] once with a [`SigningRequest`] for `M`, and
+/// checks the signature it gets with that public key before it returns it:
+/// a signer whose key or output is wrong is refused, never passed on.
+///
+/// A signer of another crate can implement this trait; it is asked to sign
+/// only through [`sign_challenge`], since nothing else can make a
+/// [`SigningRequest`].
+///
+/// # Which key
+///
+/// The offline self-check of [`sign_challenge`] establishes only that the
+/// signature is consistent with the key the signer reports: it cannot tell
+/// the enrolled recovery key from another one. Choosing the signer that
+/// holds the enrolled key is the caller's job. A signer holding a retired
+/// key still passes the self-check against its own reported public key;
+/// the service then refuses the signature against the enrolled key
+/// (`NotRestorable(BadSignature)`).
 pub trait RecoverySigner {
     /// The signer's recovery public key. A [`RecoveryPublicKey`] passed the
     /// service's key checks when it was made, so a signer cannot present a
     /// small-order, non-canonically encoded or undecodable key.
     fn public_key(&self) -> RecoveryPublicKey;
 
-    /// The pure Ed25519 signature (RFC 8032) of `message`, 64 bytes.
+    /// The pure Ed25519 signature (RFC 8032) of
+    /// [`SigningRequest::message`], 64 bytes.
     ///
     /// # Errors
     ///
     /// [`SignerError`] when the signer does not sign.
-    fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_LENGTH], SignerError>;
+    fn sign(&self, request: &SigningRequest<'_>) -> Result<[u8; SIGNATURE_LENGTH], SignerError>;
 }
 
 /// Why a [`RecoverySigner`] did not sign. Carries nothing from the signer:
@@ -62,7 +110,8 @@ impl std::error::Error for SignerError {}
 /// Nothing in this crate writes the seed anywhere or shows it: the signer
 /// has no `Clone`, `Copy`, `Display`, `Default`, `Deref` or `AsRef`, no
 /// serialization and no method that returns the seed or the signing key,
-/// and its `Debug` prints `SoftwareSigner(..)`.
+/// and its `Debug` prints `SoftwareSigner(..)`. It signs only a
+/// [`SigningRequest`], so only through [`sign_challenge`] and its checks.
 ///
 /// It is **not** wiped from memory when the signer is dropped: the crate's
 /// `ed25519-dalek` is built without its `zeroize` feature (the workspace
@@ -109,9 +158,9 @@ impl RecoverySigner for SoftwareSigner {
         self.public_key
     }
 
-    fn sign(&self, message: &[u8]) -> Result<[u8; SIGNATURE_LENGTH], SignerError> {
+    fn sign(&self, request: &SigningRequest<'_>) -> Result<[u8; SIGNATURE_LENGTH], SignerError> {
         self.signing_key
-            .try_sign(message)
+            .try_sign(request.message())
             .map(|signature| signature.to_bytes())
             .map_err(|_| SignerError::Failed)
     }
@@ -122,9 +171,9 @@ impl RecoverySigner for SoftwareSigner {
 /// fixed text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignError {
-    /// [`check_challenge`](super::check_challenge) was not given both the
-    /// replacement's public identity and the new recovery public key to
-    /// compare with the plan (see
+    /// [`check_challenge`](super::check_challenge) was not given all of
+    /// the replacement's public identity, its trust anchor and the new
+    /// recovery public key to compare with the plan (see
     /// [`VerifiedChallenge::replacement_confirmed`]).
     ReplacementNotConfirmed,
     /// The plan's new recovery public key is the signer's own key. The
@@ -143,8 +192,8 @@ impl fmt::Display for SignError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::ReplacementNotConfirmed => {
-                "the replacement's public identity and new recovery public key were not both \
-                 confirmed"
+                "the replacement's public identity, trust anchor and new recovery public key were \
+                 not all confirmed"
             }
             Self::RecoveryKeyUnchanged => {
                 "the challenge's new recovery public key is the signer's own key"
@@ -225,18 +274,27 @@ impl SignedResponse {
 /// Signs a checked challenge, in this order:
 ///
 /// 1. the challenge's replacement was confirmed:
-///    [`check_challenge`](super::check_challenge) compared both the
-///    replacement's public identity and the new recovery public key with
-///    what the operator approves ([`VerifiedChallenge::replacement_confirmed`]);
+///    [`check_challenge`](super::check_challenge) compared the
+///    replacement's public identity, its trust anchor and the new recovery
+///    public key with what the operator approves
+///    ([`VerifiedChallenge::replacement_confirmed`]);
 /// 2. the plan's new recovery public key is not the signer's
 ///    ([`RecoverySigner::public_key`], called once): the service would
 ///    refuse it;
 /// 3. the signer signs `M`, the challenge's bytes exactly as received, not
-///    its hash and not `C`;
+///    its hash and not `C`, as a [`SigningRequest`]: the one way any
+///    signer is asked to sign, so steps 1 and 2 hold for every signature;
 /// 4. the signature verifies with the signer's public key over `M` as the
 ///    service verifies it ([`verify_response`]: `verify_strict`), so a
 ///    signer that returns another key's signature, a signature over other
 ///    bytes or a malformed one is refused here and nothing is returned.
+///
+/// The self-check of step 4 establishes consistency with the key the
+/// signer reports, not that this key is the enrolled recovery key: the
+/// caller selects the signer of the enrolled key. A retired key's
+/// signature still verifies against that key's own reported public key
+/// here, and the service refuses it against the enrolled one
+/// (`NotRestorable(BadSignature)`).
 ///
 /// # Errors
 ///
@@ -253,7 +311,10 @@ pub fn sign_challenge(
     if public_key == checked.plan().new_recovery_public_key {
         return Err(SignError::RecoveryKeyUnchanged);
     }
-    let signature = signer.sign(checked.message()).map_err(SignError::Signer)?;
+    let request = SigningRequest {
+        message: checked.message(),
+    };
+    let signature = signer.sign(&request).map_err(SignError::Signer)?;
     verify_message(&public_key, checked.message(), &signature)
         .map_err(|_| SignError::NotVerified)?;
     Ok(SignedResponse {

@@ -22,8 +22,9 @@
 //!   independent signer's signature over it is the `valid` case; every case
 //!   through [`preview_recovery_response`] and [`restore_operator`] is the
 //!   fixture's `service_expected` for its class (`valid` previews and
-//!   restores, every other case is `NotRestorable(BadSignature)` and leaves
-//!   the challenge unconsumed); and a replay of the restore is `Consumed`.
+//!   restores, every other case, the cofactor case `mixed_order_r`
+//!   included, is `NotRestorable(BadSignature)` and leaves the challenge
+//!   unconsumed); and a replay of the restore is `Consumed`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -312,7 +313,7 @@ async fn signature_fixture_cases_through_preview_and_restore() {
 
     // Every case, previewed and restored: only `valid` passes, and a
     // refused restore leaves the challenge for the next one.
-    let mut refused = 0;
+    let mut refused = Vec::new();
     for (n, case) in cases.iter().enumerate() {
         let name = text(case, "case");
         if text(case, "expected") == "valid" {
@@ -344,9 +345,25 @@ async fn signature_fixture_cases_through_preview_and_restore() {
         )
         .await;
         assert_eq!(outcome(&restored, name), expected, "{name}: restore");
-        refused += 1;
+        refused.push(name);
     }
-    assert!(refused >= 16, "{refused}");
+    assert!(refused.len() >= 18, "{refused:?}");
+    // The lengths, the malleability and the cofactor cases, each refused:
+    // `mixed_order_r` (R = rB + T, T of small order) is one a cofactored
+    // verifier would accept and ed25519-dalek's `verify` and
+    // `verify_strict` both refuse.
+    for name in [
+        "length_0",
+        "length_63",
+        "length_65",
+        "length_128",
+        "s_plus_l",
+        "small_order_r",
+        "non_canonical_r",
+        "mixed_order_r",
+    ] {
+        assert!(refused.contains(&name), "{name} is not refused");
+    }
 
     let bytes = unhex(text(valid, "signature"));
     let mut transaction = pool.begin().await.unwrap();

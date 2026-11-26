@@ -45,10 +45,15 @@
 //!
 //! [`sign_challenge`] signs a [`VerifiedChallenge`] with a
 //! [`RecoverySigner`] ([`SoftwareSigner`] for a seed held in memory): only
-//! a challenge whose replacement the operator confirmed (both the public
-//! identity and the new recovery public key were expected and matched),
+//! a challenge whose replacement the operator confirmed (the public
+//! identity, its trust anchor and the new recovery public key were all
+//! expected and matched; the server-generated `admin_id`, `credential_id`
+//! and `binding_id` are deliberately not),
 //! never with the plan's new key, over `M` itself, and only once the
-//! signature verifies as the service verifies it. [`verify_response`]
+//! signature verifies as the service verifies it. A signer is asked to
+//! sign only a [`SigningRequest`], which [`sign_challenge`] alone makes,
+//! so those checks hold for every signature this crate asks of a signer,
+//! and a [`SoftwareSigner`] signs nothing else. [`verify_response`]
 //! checks a signature over a challenge's `M` as the service's restore
 //! does: 64 bytes, then `ed25519-dalek`'s `verify_strict`. The result,
 //! [`SignedResponse`], is the challenge's operation ID and the 64 bytes.
@@ -77,8 +82,8 @@ pub use challenge::{
 };
 pub use key::{KeyError, RecoveryPublicKey};
 pub use sign::{
-    RecoverySigner, SignError, SignedResponse, SignerError, SoftwareSigner, VerifyError,
-    sign_challenge, verify_response,
+    RecoverySigner, SignError, SignedResponse, SignerError, SigningRequest, SoftwareSigner,
+    VerifyError, sign_challenge, verify_response,
 };
 
 /// The length of a recovery public key, in bytes (the service's

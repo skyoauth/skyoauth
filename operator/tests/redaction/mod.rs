@@ -1,10 +1,14 @@
 //! No key material, signature or challenge value in what the crate shows:
 //! a sentinel test over the `Debug` and `Display` of every type that holds
-//! one and of every error; the traits `SoftwareSigner` must not have; and
-//! source checks that nothing under `operator/src` writes a file, and that
-//! the deployment-local client, once it exists, never names the signer.
+//! one and of every error; the traits `SoftwareSigner` and `SigningRequest`
+//! must not have; and source checks that every top-level module is
+//! classified, that nothing under `operator/src` but the deployment-local
+//! client writes a file or prints, that the signer's key and request have
+//! no way out, and that the deployment-local client, once it exists,
+//! never names the signer.
 
 use std::{
+    collections::BTreeSet,
     fmt::Debug,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -14,8 +18,8 @@ use skyoauth_operator::{
     identity::IdentityError,
     recovery::{
         ChallengeError, Expectations, KeyError, RecoveryPublicKey, RecoverySigner, Refusal,
-        RestorationPlan, SignError, SignerError, SoftwareSigner, VerifyError, challenge_message,
-        check_challenge, parse_challenge, sign_challenge,
+        RestorationPlan, SignError, SignerError, SigningRequest, SoftwareSigner, VerifyError,
+        challenge_message, check_challenge, parse_challenge, sign_challenge,
     },
 };
 
@@ -94,6 +98,7 @@ fn no_sentinel_value_is_shown() {
         now_micros: EXPIRES_AT - 1,
         recovery_key_epoch: Some(7_310_411),
         replacement_public_identity: Some(IDENTITY),
+        trust_anchor_ref: Some(ANCHOR),
         new_recovery_public_key: Some(&new_key),
     };
     let verified = check_challenge(&challenge, &expectations).unwrap();
@@ -186,6 +191,7 @@ fn no_sentinel_value_is_shown() {
         Refusal::ExpiresTooLate,
         Refusal::OtherEpoch,
         Refusal::OtherReplacementIdentity,
+        Refusal::OtherTrustAnchor,
         Refusal::OtherNewRecoveryKey,
     ] {
         add("Refusal", shown_error(&refusal));
@@ -339,6 +345,13 @@ fn sources(dir: &Path) -> Vec<(PathBuf, String)> {
     found
 }
 
+/// Whether `path` is the deployment-local client: `src/local.rs` or a file
+/// under `src/local/`.
+fn is_local(path: &Path) -> bool {
+    let src = source_dir();
+    path == src.join("local.rs") || path.starts_with(src.join("local"))
+}
+
 /// The code of `text`: every line but comment lines.
 fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
     text.lines()
@@ -347,25 +360,125 @@ fn code_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
         .map(|(index, line)| (index + 1, line))
 }
 
-/// Nothing under `operator/src` touches a file or a writer: no `std::fs`,
-/// `File`, `OpenOptions` or `std::io`, and every `write` is a formatter's
-/// `f.write_str(`. So no function of the crate writes a private key
-/// anywhere.
+/// The code of `text` with no comment line and no whitespace, so that a
+/// pattern cannot hide behind a line break.
+fn joined_code(text: &str) -> String {
+    code_lines(text)
+        .flat_map(|(_, line)| line.chars())
+        .filter(|c| !c.is_whitespace())
+        .collect()
+}
+
+/// The top-level modules of the crate other than the deployment-local
+/// client, all held to [`no_source_writes_a_file`].
+const FORMAT_MODULES: [&str; 3] = ["identity", "recovery", "text"];
+
+/// The deployment-local client's module (a later part of the crate), held
+/// to [`the_local_client_never_names_the_signer`] instead.
+const LOCAL_MODULE: &str = "local";
+
+/// The modules `lib.rs` declares (`mod x;`, with or without a visibility
+/// or an attribute on the line).
+fn declared_modules() -> BTreeSet<String> {
+    let lib = std::fs::read_to_string(source_dir().join("lib.rs")).unwrap();
+    code_lines(&lib)
+        .filter_map(|(_, line)| {
+            let line = line.trim();
+            let at = line.find("mod ")?;
+            let rest = line[at + 4..].trim();
+            let name = rest.strip_suffix(';')?;
+            let before = line[..at].trim();
+            let prefix_ok = before.is_empty()
+                || before.starts_with("pub")
+                || (before.starts_with("#[") && before.contains(']'));
+            (prefix_ok && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Every top-level module is classified: each is a format module or the
+/// local client, every format module is declared, and every file or
+/// directory in `src/` is `lib.rs` or names a declared module (a
+/// `local.rs` or `local/` is checked as the local client whether declared
+/// or not). So a new module, or the local client in either layout, cannot
+/// escape both source checks below.
+#[test]
+fn every_top_level_module_is_classified() {
+    let declared = declared_modules();
+    for module in FORMAT_MODULES {
+        assert!(
+            declared.contains(module),
+            "lib.rs does not declare {module}"
+        );
+    }
+    for module in &declared {
+        assert!(
+            FORMAT_MODULES.contains(&module.as_str()) || module == LOCAL_MODULE,
+            "module {module} is not classified"
+        );
+    }
+    for entry in std::fs::read_dir(source_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name == "lib.rs" {
+            continue;
+        }
+        let module = name.strip_suffix(".rs").unwrap_or(&name);
+        assert!(
+            declared.contains(module),
+            "src/{name} is not a module lib.rs declares"
+        );
+    }
+}
+
+/// Nothing under `operator/src` but the deployment-local client
+/// (`src/local.rs` or `src/local/`, which talks to a socket and is held to
+/// its own check below) touches a file, a writer, the console, the process
+/// or its environment, or the secret scalar: no `std::fs`, `File`,
+/// `OpenOptions`, `std::io`, `print!`, `println!`, `eprint`, `dbg!`,
+/// `std::process`, `std::env` or `to_scalar`, and every `write` is a
+/// formatter's `f.write_str(`. So no function of the formats or the signer
+/// writes or prints a private key anywhere.
 #[test]
 fn no_source_writes_a_file() {
-    // Only `recovery/`: the deployment-local client (`local/`) legitimately
-    // uses `std::io` to talk to a socket, and is held to its own check below.
-    let sources = sources(&source_dir().join("recovery"));
-    assert!(
-        sources
-            .iter()
-            .any(|(path, _)| path.ends_with("recovery/sign.rs")),
-        "sign.rs is read"
-    );
+    let src = source_dir();
+    let sources: Vec<(PathBuf, String)> = sources(&src)
+        .into_iter()
+        .filter(|(path, _)| !is_local(path))
+        .collect();
+    for read in [
+        "lib.rs",
+        "identity.rs",
+        "text.rs",
+        "recovery/mod.rs",
+        "recovery/sign.rs",
+    ] {
+        assert!(
+            sources.iter().any(|(path, _)| *path == src.join(read)),
+            "{read} is read"
+        );
+    }
     for (path, text) in &sources {
         for (number, line) in code_lines(text) {
             let place = format!("{}:{number}: {line}", path.display());
-            for token in ["std::fs", "fs::", "File", "OpenOptions", "std::io", "io::"] {
+            for token in [
+                "std::fs",
+                "fs::",
+                "File",
+                "OpenOptions",
+                "std::io",
+                "io::",
+                "print!",
+                "println!",
+                "eprint",
+                "dbg!",
+                "std::process",
+                "process::",
+                "std::env",
+                "env::",
+                "to_scalar",
+            ] {
                 assert!(!line.contains(token), "{token} at {place}");
             }
             let writes = line.matches("write").count();
@@ -375,74 +488,148 @@ fn no_source_writes_a_file() {
     }
 }
 
-/// The deployment-local client (`operator/src/local/`, a later part of the
-/// crate) carries a signed response only: no source there may name the
-/// signer, its key or its seed. The directory does not exist yet, so the
-/// check passes vacuously until it does; it then checks every file there.
+/// The deployment-local client (`src/local.rs` or `src/local/`, a later
+/// part of the crate) carries a signed response only: no source there may
+/// name the signer, its request, its key or its seed. Without a local
+/// client the check has nothing to read and passes; with one, in either
+/// layout, it checks every file.
 #[test]
 fn the_local_client_never_names_the_signer() {
-    let local = source_dir().join("local");
-    if !local.exists() {
-        // Vacuous: no local client yet.
-        return;
-    }
-    for (path, text) in sources(&local) {
+    for (path, text) in sources(&source_dir())
+        .into_iter()
+        .filter(|(path, _)| is_local(path))
+    {
         for name in [
             "SigningKey",
             "SoftwareSigner",
             "RecoverySigner",
+            "SigningRequest",
+            "signing_key",
             "seed",
             "sign_challenge",
+            "to_scalar",
         ] {
             assert!(!text.contains(name), "{name} in {}", path.display());
         }
     }
 }
 
-/// `SoftwareSigner` derives nothing and implements only `Debug` (by hand)
-/// and `RecoverySigner`; no function in `sign.rs` returns a seed or a
-/// signing key, and nothing there names a secret key type.
-#[test]
-fn software_signer_source_has_no_way_out_for_the_seed() {
-    let path = source_dir().join("recovery").join("sign.rs");
-    let text = std::fs::read_to_string(&path).unwrap();
-    let lines: Vec<&str> = text.lines().collect();
+/// The attributes right above the line of `item` in `lines`.
+fn attributes_above<'a>(lines: &[&'a str], item: &str) -> Vec<&'a str> {
     let at = lines
         .iter()
-        .position(|line| line.starts_with("pub struct SoftwareSigner"))
-        .expect("the struct");
-    let attributes: Vec<&str> = lines[..at]
+        .position(|line| line.starts_with(item))
+        .unwrap_or_else(|| panic!("no {item}"));
+    lines[..at]
         .iter()
         .rev()
         .take_while(|line| line.starts_with("///") || line.starts_with("#["))
         .copied()
         .filter(|line| line.starts_with("#["))
-        .collect();
-    assert!(attributes.is_empty(), "{attributes:?}");
+        .collect()
+}
+
+/// The `impl` lines of `sign.rs` that name `name`, sorted.
+fn impls_of<'a>(lines: &[&'a str], name: &str) -> Vec<&'a str> {
     let mut impls: Vec<&str> = lines
         .iter()
-        .filter(|line| line.starts_with("impl") && line.contains("SoftwareSigner"))
+        .filter(|line| line.starts_with("impl") && line.contains(name))
         .map(|line| line.trim_end_matches(" {"))
         .collect();
     impls.sort_unstable();
+    impls
+}
+
+/// `SoftwareSigner` derives nothing, implements only `Debug` (by hand) and
+/// `RecoverySigner`, and its fields have no visibility; its signing key is
+/// named only where it is declared, made, stored, signs and gives its
+/// public key; no function in `sign.rs` returns a seed or a signing key.
+/// A `SigningRequest` is made in one place, `sign_challenge`, has a
+/// private field, derives nothing and has only `Debug` and its `message`
+/// accessor.
+#[test]
+fn software_signer_source_has_no_way_out_for_the_seed() {
+    let path = source_dir().join("recovery").join("sign.rs");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    let code = joined_code(&text);
+
     assert_eq!(
-        impls,
+        attributes_above(&lines, "pub struct SoftwareSigner"),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        impls_of(&lines, "SoftwareSigner"),
         [
             "impl RecoverySigner for SoftwareSigner",
             "impl SoftwareSigner",
             "impl fmt::Debug for SoftwareSigner",
         ]
     );
+    // The fields, with no visibility at all.
+    assert!(
+        code.contains(
+            "pubstructSoftwareSigner{signing_key:SigningKey,public_key:RecoveryPublicKey,}"
+        ),
+        "SoftwareSigner's fields changed or gained a visibility"
+    );
+    // Every use of the signing key, each exactly once.
+    let uses = [
+        "pubstructSoftwareSigner{signing_key:SigningKey,",
+        "letsigning_key=SigningKey::from_bytes(&seed);",
+        "RecoveryPublicKey::from_bytes(signing_key.verifying_key().as_bytes())?;",
+        "Ok(Self{signing_key,public_key,})",
+        "self.signing_key.try_sign(request.message())",
+    ];
+    for allowed in uses {
+        assert_eq!(code.matches(allowed).count(), 1, "{allowed}");
+    }
+    assert_eq!(
+        code.matches("signing_key").count(),
+        uses.len(),
+        "the signing key is used other than to be made, stored, sign and give its public key"
+    );
+
+    assert_eq!(
+        attributes_above(&lines, "pub struct SigningRequest"),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        impls_of(&lines, "SigningRequest"),
+        [
+            "impl fmt::Debug for SigningRequest<'_>",
+            "impl<'a> SigningRequest<'a>",
+        ]
+    );
+    assert!(
+        code.contains("pubstructSigningRequest<'a>{message:&'a[u8],}"),
+        "SigningRequest's field changed or gained a visibility"
+    );
+    assert!(
+        code.contains(
+            "impl<'a>SigningRequest<'a>{pubconstfnmessage(&self)->&'a[u8]{self.message}}"
+        )
+    );
+    assert_eq!(
+        code.matches("SigningRequest{").count(),
+        1,
+        "a SigningRequest is made elsewhere than in sign_challenge"
+    );
+    assert!(code.contains(
+        "letrequest=SigningRequest{message:checked.message(),};letsignature=signer.sign(&request)"
+    ));
+    assert!(!code.contains("->SigningRequest"));
+
     for (number, line) in code_lines(&text) {
         for token in [
             "-> [u8; 32]",
             "-> &[u8; 32]",
-            "SigningKey {",
             "-> SigningKey",
             "-> &SigningKey",
             "SecretKey",
             "to_bytes()",
             "as_bytes()",
+            "to_scalar",
             "to_keypair",
             "unsafe",
         ] {
@@ -450,20 +637,28 @@ fn software_signer_source_has_no_way_out_for_the_seed() {
             if token == "to_bytes()" && line.contains("signature.to_bytes()") {
                 continue;
             }
-            // The verifying key's bytes are public.
+            // Public key bytes: the verifying key's, and a recovery public
+            // key's when it is decoded.
             if token == "as_bytes()"
-                && (line.contains("verifying_key().as_bytes()") || line.contains("key.as_bytes()"))
+                && (line.contains("verifying_key().as_bytes()")
+                    || line.contains("VerifyingKey::from_bytes(key.as_bytes())"))
             {
                 continue;
             }
             assert!(!line.contains(token), "{token} at sign.rs:{number}: {line}");
         }
     }
-    // The fields stay private.
-    assert!(!text.contains("pub signing_key"));
-    assert!(!text.contains("pub(crate) signing_key"));
     // A signer is usable as a trait object.
     let signer = SoftwareSigner::from_seed(SEED).unwrap();
     let object: &dyn RecoverySigner = &signer;
     assert_eq!(object.public_key(), signer.public_key());
+}
+
+/// `SigningRequest` has none of the traits that would let a caller copy,
+/// make or show one.
+#[test]
+fn signing_request_has_no_trait_to_copy_or_make_it() {
+    for (name, has) in traits_of!(SigningRequest<'static>) {
+        assert!(!has, "SigningRequest implements {name}");
+    }
 }
