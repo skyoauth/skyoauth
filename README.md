@@ -167,6 +167,16 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
+  The job then runs `skyoauth-service`'s `local_transport` integration
+  tests again as root, with a second local user in `SKYOAUTH_IT_PEER_USER`
+  (`--profile ci-root`, through `scripts/ci/root-transport-run.sh`), also
+  when the first run failed: their cross-UID checks only print a notice and
+  pass without root and that user. The step fails unless every test ran
+  and passed and on a notice that the peer user is missing; the job
+  summary lists its other notices and whether the runner user (not root)
+  may create a user namespace. Its JUnit report
+  (`target/nextest/ci-root/junit.xml`) is a separate artifact,
+  `service-nextest-root-junit-N`, which exists only when that step ran.
   DB-backed tests reach a PostgreSQL 17 service container, with the same
   pinned image as `scenarios-pg` and `rust-coverage`, through
   `SKYOAUTH_IT_DATABASE_URL`. They are `#[ignore]`d, so jobs without a
@@ -194,7 +204,9 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   `node scripts/ci/gen-conformance-registry.mjs --check`, both
   self-tests, the self-tests of the badge scripts (`node --test
   scripts/ci/publish-badges.test.mjs
-  scripts/ci/verify-badges-render.test.mjs`, without network access), and the
+  scripts/ci/verify-badges-render.test.mjs`, without network access), the
+  self-test of `scripts/ci/root-transport-run.sh` (`node --test
+  scripts/ci/root-transport-run.test.mjs`), and the
   self-test of the result reporter
   `scripts/ci/report-conformance.mjs`, which joins the registry with the
   JUnit artifacts of one commit into per-stage and per-milestone passed,
