@@ -13,13 +13,15 @@
 //! trust sources through the bare registry writers (A02, A22, A24, A25,
 //! A26, A29, A37, A38, A43, A50, A53 and A54): it bootstraps the instance,
 //! or adopts one the test bootstrapped, and writes the sources' egress
-//! allowlist entries through the audited egress allowlist writer. None of
-//! them is a scenario. A scenario's tests may be in more than one module:
-//! a `security::aNN_wire` module drives the admin read router of
-//! `skyoauth_service::admin_http` with an already-verified peer, next to
-//! `security::aNN`. Some modules hold partial tests, registered on a
-//! planned stage and counting for nothing; this comment does not list
-//! which: the stages' `tests` in the registry
+//! allowlist entries through the audited egress allowlist writer; and
+//! `security::wire_fixture` one of the A22 and A49 wire tests: the wire
+//! error catalogue reader, requests through the admin router, the keys and
+//! the operation seeding. None of them is a scenario. A scenario's tests
+//! may be in more than one module: a `security::aNN_wire` module drives the
+//! admin read router of `skyoauth_service::admin_http` with an
+//! already-verified peer, next to `security::aNN`. Some modules hold
+//! partial tests, registered on a planned stage and counting for nothing;
+//! this comment does not list which: the stages' `tests` in the registry
 //! (`tests/conformance/scenarios.toml`) are the source, layout §2
 //! "Partial tests" is generated from them, and each module's docs say what
 //! its tests cover.
@@ -76,6 +78,8 @@ mod security {
     mod grant_fixture;
     #[path = "selection_fixture.rs"]
     mod selection_fixture;
+    #[path = "wire_fixture.rs"]
+    mod wire_fixture;
 }
 
 mod harness {
