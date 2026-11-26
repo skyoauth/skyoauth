@@ -698,6 +698,10 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_omitted_scope_without_defaults_gives_the_one_scope_error",
   "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_other_tenants_ceilings_never_apply",
   "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_uncommitted_ceiling_changes_never_apply",
+  "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_empty_target_service_ceiling_denies_every_scope",
+  "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_target_service_off_the_audience_loads_nothing",
+  "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_target_service_off_one_of_the_grants_audiences_loads_only_the_other",
+  "nextest:skyoauth-scenarios/pg/security::a26::a26_neg_audience_outside_the_grant_loads_nothing",
 ]
 
 [[scenario.stage]]
