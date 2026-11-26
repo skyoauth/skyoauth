@@ -1320,14 +1320,15 @@ async fn a_hidden_row_is_never_decoded() {
     db.drop([pool]).await;
 }
 
-/// Polls until a backend waits for a lock on `administrative_operation`.
-async fn until_a_read_waits(pool: &PgPool) {
+/// Polls until a backend waits for a lock on `table`.
+async fn until_a_read_waits(pool: &PgPool, table: &str) {
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_locks \
-                 WHERE relation = 'administrative_operation'::regclass AND NOT granted",
+                 WHERE relation = $1::text::regclass AND NOT granted",
             )
+            .bind(table)
             .fetch_one(pool)
             .await
             .unwrap();
@@ -1338,20 +1339,17 @@ async fn until_a_read_waits(pool: &PgPool) {
         }
     })
     .await
-    .expect("the read never waited for the operation table");
+    .unwrap_or_else(|_| panic!("the read never waited for {table}"));
 }
 
-/// A read authorizes and fetches in one snapshot. The test holds the
-/// operation table `ACCESS EXCLUSIVE`, so an auditor's read authorizes and
-/// then waits at its fetch; meanwhile the holder disables the auditor's
-/// binding and creates `op_a6`, and commits. The read still answers as of
-/// its authorization: the single read of `op_a6` is the one 404 and the
-/// list does not hold it. Read in separate statements (or at
-/// `READ COMMITTED`), the fetch would see `op_a6`, created after the
-/// auditor lost its role.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
-async fn a_read_authorizes_and_fetches_in_one_snapshot() {
+/// The rounds of the one-snapshot tests, a single read then a list, each
+/// with `table` held `ACCESS EXCLUSIVE` by a holder transaction: an
+/// auditor's read starts and waits for `table`; meanwhile the holder
+/// disables the auditor's binding and creates `op_a6_<round>`, and commits.
+/// The read answers as of its first lookup: the single read of the new
+/// operation is the one 404 and the list does not hold it. Read afresh, the
+/// auditor is refused; with its role back, it reads the new operation.
+async fn read_in_one_snapshot(table: &str) {
     let (db, pool) = seeded().await;
     let router = router(&pool);
     let read = "/admin/v1/tenants/ten_a/operations/op_a6";
@@ -1361,13 +1359,15 @@ async fn a_read_authorizes_and_fetches_in_one_snapshot() {
         let id = format!("op_a6_{round}");
         let uri = uri.replace("op_a6", &id);
         let mut holder = pool.begin().await.unwrap();
-        sqlx::query("LOCK TABLE administrative_operation IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *holder)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"
+        )))
+        .execute(&mut *holder)
+        .await
+        .unwrap();
         let request = with_admin_peer(Request::get(&uri).body(Body::empty()).unwrap(), KEY_AUD_A);
         let reader = tokio::spawn(router.clone().oneshot(request));
-        until_a_read_waits(&pool).await;
+        until_a_read_waits(&pool, table).await;
         update_admin_role_binding(
             &mut *holder,
             "rb_adm_aud_a_0",
@@ -1396,10 +1396,10 @@ async fn a_read_authorizes_and_fetches_in_one_snapshot() {
         let status = response.status();
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
         if uri.ends_with(&id) {
-            assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+            assert_eq!(status, StatusCode::NOT_FOUND, "{table}: {body:?}");
             assert_eq!(body, "{\"error\":\"not_found\"}");
         } else {
-            assert_eq!(status, StatusCode::OK, "{body:?}");
+            assert_eq!(status, StatusCode::OK, "{table}: {body:?}");
             let json: Value = serde_json::from_slice(&body).unwrap();
             let ids: Vec<&str> = json["operations"]
                 .as_array()
@@ -1436,4 +1436,29 @@ async fn a_read_authorizes_and_fetches_in_one_snapshot() {
         assert_eq!(answer.status, StatusCode::OK, "{:?}", answer.body);
     }
     db.drop([pool]).await;
+}
+
+/// A read authorizes and fetches in one snapshot ([`read_in_one_snapshot`]
+/// with the operation table held): the read authorizes and then waits at
+/// its fetch, while the holder disables the auditor's binding and creates
+/// the operation. Read in separate statements (or at `READ COMMITTED`), the
+/// fetch would see the operation, created after the auditor lost its role.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_read_authorizes_and_fetches_in_one_snapshot() {
+    read_in_one_snapshot("administrative_operation").await;
+}
+
+/// The authorization itself reads the snapshot ([`read_in_one_snapshot`]
+/// with the binding table held): the read waits at its first role lookup,
+/// whose snapshot is taken before it waits, while the holder disables the
+/// auditor's binding and creates the operation. The lookups still see the
+/// binding enabled and the fetch, in the same snapshot, does not see the
+/// operation: the one 404. Were the lookups read outside the read's
+/// transaction (on the pool, at `READ COMMITTED`), they would see the
+/// committed change and answer 403.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_read_authorizes_in_its_snapshot() {
+    read_in_one_snapshot("admin_role_binding").await;
 }

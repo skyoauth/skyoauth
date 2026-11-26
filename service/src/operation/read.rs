@@ -3,14 +3,15 @@
 //! [`read_operation`] reads one operation of the flow by its ID and
 //! [`list_operations`] one page of the open ones, each on the path of its
 //! scope, the instance or one tenant ([`ApprovalScope`], the same scope the
-//! approve, cancel and reject take). Both take no lock and write nothing.
+//! approve, cancel and reject take). Both take no row lock and write
+//! nothing.
 //!
 //! # Who
 //!
 //! Readable by an instance `security_admin`, by the requester and, for a
 //! tenant operation, by that tenant's `auditor` (tasks:149; Q1, ruled by the
 //! user, 2026-11-23). In this order, each a point-in-time
-//! [`authorize_operator`] lookup (a read needs no lock):
+//! [`authorize_operator`] lookup (a read needs no row lock):
 //!
 //! 1. instance `security_admin`: every operation of the path;
 //! 2. on a tenant path, that tenant's `auditor`: every operation of the
@@ -47,8 +48,9 @@
 //! the first lookup: a revocation, a disable or a binding change that
 //! commits between the two cannot let the fetch see rows written after it,
 //! and the answer is the state at one instant in which the caller was
-//! authorized. The transaction takes no lock and writes nothing; a
-//! `READ ONLY` transaction at this level cannot fail with `40001`.
+//! authorized. The transaction takes no row lock and writes nothing; on
+//! the primary, a `READ ONLY` transaction at this level cannot fail with
+//! `40001`.
 //!
 //! # What is found
 //!
@@ -342,7 +344,7 @@ async fn begin_read(pool: &PgPool) -> Result<Transaction<'static, Postgres>, Reg
 /// [`OperationReadError::Unauthorized`]), then the row
 /// ([`OperationReadError::NotFound`] for every row the caller may not read
 /// here), then its envelope ([`OperationReadError::PlanIntegrity`]). Takes
-/// no lock and writes nothing.
+/// no row lock and writes nothing.
 pub async fn read_operation(
     pool: &PgPool,
     public_identity: &str,
@@ -374,7 +376,8 @@ pub async fn read_operation(
 /// [`OperationReadError::Unauthorized`]), then the page, by
 /// ID byte-wise; a `trust_admin` lists only its own. A row of the page
 /// without an envelope fails the whole page with
-/// [`OperationReadError::PlanIntegrity`]. Takes no lock and writes nothing.
+/// [`OperationReadError::PlanIntegrity`]. Takes no row lock and writes
+/// nothing.
 pub async fn list_operations(
     pool: &PgPool,
     public_identity: &str,
