@@ -266,7 +266,8 @@
 //! source destination can match. After the authorization and the gate,
 //! [`egress::enable_egress_entry`] checks the immutable destination of the
 //! row its revision-checked update returns, before the event: one that
-//! fails is [`AdminWriteError::InvalidDestination`], and the savepoint
+//! fails is [`AdminWriteError::InvalidStoredDestination`] (a refusal by
+//! the stored state, not by a value of the request), and the savepoint
 //! takes the update back, so nothing is written, no event appended and no
 //! ID taken, and a refused operator learns nothing of the destination. A
 //! disable checks no destination, so such an entry can always be disabled.
@@ -564,13 +565,17 @@ pub enum AdminWriteError {
     /// identity ([`crate::identity::canonical_public_identity`]); checked
     /// after the authorization and before any ID is generated.
     PublicKey(IdentityError),
-    /// An egress entry create gave an `exact_destination`, or an enable
-    /// found a stored one, that is not an exact `https` URL in canonical
-    /// form within the writer's bounds ([`egress::is_valid_destination`];
-    /// see the module docs, "Egress allowlist"); checked after the
-    /// authorization and the gate and before any ID is generated. The text
-    /// never quotes the destination.
+    /// An egress entry create gave an `exact_destination` that is not an
+    /// exact `https` URL in canonical form within the writer's bounds
+    /// ([`egress::is_valid_destination`]; see the module docs, "Egress
+    /// allowlist"); checked after the authorization and the gate and before
+    /// any ID is generated. The text never quotes the destination.
     InvalidDestination,
+    /// An enable found a stored `exact_destination` that fails the same
+    /// rule, which only an entry written another way can have (see the
+    /// module docs, "Egress allowlist"): a refusal by the stored state,
+    /// with nothing written. The text never quotes the destination.
+    InvalidStoredDestination,
     /// A widening egress write (a create, enabled or disabled, or an enable;
     /// IR-052, IR-152) was submitted without `acknowledge_widening`, as a
     /// gated trust write's `WideningNotAcknowledged` (see the module docs,
@@ -614,6 +619,9 @@ impl fmt::Display for AdminWriteError {
             Self::InvalidDestination => {
                 f.write_str("the egress destination is not an exact https URL in canonical form")
             }
+            Self::InvalidStoredDestination => f.write_str(
+                "the stored egress destination is not an exact https URL in canonical form",
+            ),
             Self::WideningNotAcknowledged => {
                 f.write_str("the egress allowlist write is widening and was not acknowledged")
             }
@@ -705,6 +713,11 @@ mod tests {
                 AdminWriteError::InvalidDestination,
                 "InvalidDestination",
                 "the egress destination is not an exact https URL in canonical form",
+            ),
+            (
+                AdminWriteError::InvalidStoredDestination,
+                "InvalidStoredDestination",
+                "the stored egress destination is not an exact https URL in canonical form",
             ),
             (
                 AdminWriteError::WideningNotAcknowledged,

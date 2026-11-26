@@ -29,8 +29,9 @@
 //! | `GET` | `/admin/v1/tenants/{tenant}/operations/{operation}` | instance `security_admin`, the tenant's `auditor`, the requesting `trust_admin` |
 //! | `GET` | `/admin/v1/tenants/{tenant}/operations` | the same; a `trust_admin` lists its own only |
 //!
-//! No write is exposed: none of the twenty audited writes of
-//! [`crate::admin`] (S3a), not the checker writes, which need the
+//! No write is exposed: none of the twenty-three audited writes of
+//! [`crate::admin`] (the twenty workload writes of S3a and the three egress
+//! allowlist writes of S2a), not the checker writes, which need the
 //! per-algorithm `SubjectPublicKeyInfo` form rule first ([`crate::admin`],
 //! "Not done here"), not the tenant create, which needs the IR-034
 //! generator, and not the approve, cancel, reject or gated trust writes of
@@ -71,7 +72,10 @@
 //! (inferred: an operation's digest and plan are not for caches, as ERR-051
 //! to ERR-053 ask of the other credential-bearing responses). An unknown
 //! path or method under the router is 401 without a peer and 404
-//! `not_found` with one (inferred).
+//! `not_found` with one (inferred). `GET` is the only method of a route:
+//! `HEAD`, which `axum` would otherwise answer with the `GET` handler, goes
+//! to that same fallback (inferred: a `HEAD` would run the whole read for
+//! no body).
 //!
 //! # Errors
 //!
@@ -80,18 +84,29 @@
 //! ID, name, constraint, member or claim name), no key byte, and no
 //! version member (ERR-072). Each code has one status. The order of the
 //! checks makes the status itself say nothing more than the caller may
-//! know: the peer first (401), then the operator's authorization (403),
+//! know: the peer first (401), then a malformed path or query (400) and an
+//! unknown path or method (404), which the router answers from the request
+//! alone, then the operator's credential (401) and authorization (403),
 //! before any target is read, then the target (404, the same bytes for a
-//! missing object and for one outside the caller's scope).
+//! missing object and for one outside the caller's scope). A 400 or the
+//! router's 404 before the authorization tells a caller nothing of the
+//! store: both depend on the request's bytes only.
 //!
-//! **401 versus 403.** 401 `unauthenticated` is only a request without a
-//! verified peer identity ([`AdminPeer`] absent: no client certificate the
-//! acceptor verified). A request whose verified identity names no usable
-//! credential (unknown, revoked, disabled, of a disabled operator) or no
-//! binding of the needed role and scope is 403 `forbidden`, one value for
-//! every cause, as the service layer makes it one `Unauthorized` (ERR-010,
-//! ERR-011; inferred: the TLS handshake authenticated the key, and the
-//! registry lookup is the authorization).
+//! **401 versus 403** (ERR-001, ERR-010, ERR-011). 401 `unauthenticated` is
+//! a request without a verified peer identity ([`AdminPeer`] absent: no
+//! client certificate the acceptor verified), and a verified identity that
+//! names no usable credential: none that is enabled and unrevoked, of an
+//! enabled operator
+//! ([`authenticate_operator`](crate::persistence::registry::authenticate_operator)).
+//! A usable credential without a binding of the needed role and scope is
+//! 403 `forbidden`, one value for every cause. The two 401s are the same
+//! bytes. Telling a 401 from a 403 is no oracle: the peer proved possession
+//! of the key in the TLS handshake, so it learns the state of its own
+//! credential only. The operation reads split the two
+//! ([`OperationReadError`](crate::operation::OperationReadError)); the
+//! service-layer writes of [`crate::admin`] still return one
+//! `Unauthorized` for both, and the slice that exposes a write must split
+//! it the same way before it maps it.
 //!
 //! The mapping, by family (one pure function each in `error`, an
 //! exhaustive `match`, so a new variant fails the build; the unit tests
@@ -101,6 +116,7 @@
 //! | ------ | ------- | ------ | ---- |
 //! | (request) | no [`AdminPeer`] | 401 | `unauthenticated` |
 //! | (request) | malformed path, query or cursor | 400 | `invalid_request` |
+//! | (request) | unknown path or method, `HEAD` included | 404 | `not_found` |
 //! | [`IdError`](crate::ids::IdError) | `SourceFailed`, `Exhausted` | 500 | `server_error` (D1: writes nothing) |
 //! | [`IdentityError`](crate::identity::IdentityError) | every variant | 400 | `invalid_request` |
 //! | [`RegistryError`](crate::persistence::registry::RegistryError) | `NotFound` | 404 | `not_found` |
@@ -111,14 +127,17 @@
 //! | | `Invariant` `SameTenantOperation`, `DistinctApprover` (tripwires) | 500 | `server_error` |
 //! | | `UnreadableTimestamp` | 500 | `server_error` |
 //! | | `Retry` (`40001`, `40P01`) | 503 + `Retry-After: 1` | `auth_unavailable` |
-//! | | `Other` (store failure) | 503 | `auth_unavailable` |
+//! | | `Other`: `Io`, `Tls`, `PoolTimedOut`, `PoolClosed`; SQLSTATE class `08`, `53`, `57P01` to `57P05` | 503 | `auth_unavailable` |
+//! | | `Other`: `55P03`, `57014` (lock or statement timeout) | 503 + `Retry-After: 1` | `auth_unavailable` |
+//! | | `Other`: anything else (a decode failure, an unknown SQLSTATE, a constraint not in [`KNOWN_CONSTRAINTS`](crate::persistence::registry::KNOWN_CONSTRAINTS)) | 500 | `server_error` |
 //! | | `ReservedActorId`, `RequiredPredicate` | 400 | `invalid_request` |
 //! | [`AdminWriteError`](crate::admin::AdminWriteError) | `Unauthorized`, `PrincipalKindNotAllowed` | 403 | `forbidden` |
 //! | | `TenantDisabled` | 409 | `tenant_disabled` |
-//! | | `InvalidDestination` | 400 | `invalid_request` |
+//! | | `InvalidDestination` (a create's submitted destination) | 400 | `invalid_request` |
+//! | | `InvalidStoredDestination` (an enable's stored destination) | 409 | `conflict` |
 //! | | `WideningNotAcknowledged` | 422 | `widening_not_acknowledged` |
 //! | | `SecondApproverRequired` (gate on, no egress operation kind yet) | 409 | `conflict` |
-//! | | `PolicyUnavailable` | 503 + `Retry-After: 1` | `auth_unavailable` |
+//! | | `PolicyUnavailable` (effectively unreachable: see below) | 503 + `Retry-After: 1` | `auth_unavailable` |
 //! | | `UnsupportedIsolation` | 500 | `server_error` |
 //! | | `PublicKey(_)`, `Id(_)`, `Registry(_)` | as [`IdentityError`](crate::identity::IdentityError), [`IdError`](crate::ids::IdError), [`RegistryError`](crate::persistence::registry::RegistryError) | |
 //! | [`ApprovalError`](crate::operation::ApprovalError) | `Unauthorized`, `SelfApproval` | 403 | `forbidden` |
@@ -129,7 +148,9 @@
 //! | | `WideningNotAcknowledged` | 422 | `widening_not_acknowledged` |
 //! | | `PlanIntegrity`, `UnsupportedIsolation` | 500 | `server_error` |
 //! | | `PolicyUnavailable` | 503 + `Retry-After: 1` | `auth_unavailable` |
-//! | | `Keyset(_)`, `Source(_)`, `Registry(_)` | as their family | |
+//! | | `Keyset(Upload(_))`, `Keyset(PrivateMemberInProvenance)`, `Source(InvalidDestination)` (the stored plan's values) | 409 | `not_approvable` |
+//! | | `Registry(Invariant Check, NotNull)`, also inside `Keyset(_)` and `Source(_)` (D7: the constraints run at approve only) | 409 | `not_approvable` |
+//! | | any other `Keyset(_)`, `Source(_)`, `Registry(_)` | as their family | |
 //! | [`KeysetWriteError`](crate::trust::KeysetWriteError) | `Unauthorized` | 403 | `forbidden` |
 //! | | `Upload(_)`, `PrivateMemberInProvenance` | 400 | `invalid_request` |
 //! | | `Overlap(_)`, `TooManyEnabledVersions` | 409 | `conflict` |
@@ -145,27 +166,38 @@
 //! | | `UnsupportedIsolation` | 500 | `server_error` |
 //! | | `PolicyUnavailable` | 503 + `Retry-After: 1` | `auth_unavailable` |
 //! | | `Registry(_)` | as [`RegistryError`](crate::persistence::registry::RegistryError) | |
-//! | [`OperationReadError`](crate::operation::OperationReadError) | `Unauthorized` | 403 | `forbidden` |
+//! | [`OperationReadError`](crate::operation::OperationReadError) | `Unauthenticated` (no usable credential) | 401 | `unauthenticated` |
+//! | | `Unauthorized` | 403 | `forbidden` |
 //! | | `NotFound` | 404 | `not_found` |
 //! | | `PlanIntegrity` | 500 | `server_error` |
 //! | | `Registry(_)` | as [`RegistryError`](crate::persistence::registry::RegistryError) | |
 //!
 //! The classes, which a variant of a later family follows: 400 for a
 //! request or a submitted value that breaks a syntax or value rule,
-//! whatever the stored state; 422 only for a well-formed write that lacks
-//! the widening acknowledgement the server's rule asks for (the
-//! second-approver proposal's mapping, section 10); 409 for a refusal by
-//! the stored state (a moved revision, a duplicate, a missing or disabled
-//! referenced row, a disabled tenant, an operation that is no longer
-//! approvable); 403 for a refusal of the caller's authority, an
-//! `PrincipalKindNotAllowed` included (inferred: IR-043 limits what this
-//! path's authority reaches, ERR-011); 500 for a server or data-integrity
-//! error, where nothing was written; 503 for an unavailable store or
-//! worker, with `Retry-After` when a retry of the whole request may
-//! succeed (the proposal's mapping). This is the proposed mapping of the
-//! S4 PR (lead decision, 2026-11-24, "the admin error-to-HTTP mapping is
-//! proposed in the S4 PR"); every row not quoted from the proposal is
-//! inferred.
+//! whatever the stored state (a value the request did not submit, a stored
+//! plan's or a stored row's, is the stored state's: 409); 422 only for a
+//! well-formed write that lacks the widening acknowledgement the server's
+//! rule asks for (the second-approver proposal's mapping, section 10); 409
+//! for a refusal by the stored state (a moved revision, a duplicate, a
+//! missing or disabled referenced row, a disabled tenant, an operation that
+//! is no longer approvable, a stored plan or destination a check refuses);
+//! 401 for a peer or credential that authenticates no one; 403 for a
+//! refusal of the
+//! caller's authority, an `PrincipalKindNotAllowed` included (inferred:
+//! IR-043 limits what this path's authority reaches, ERR-011); 500 for a
+//! server or data-integrity error, where nothing was written; 503 for an
+//! unavailable store or worker, with `Retry-After` when a retry of the
+//! whole request may succeed (the proposal's mapping).
+//!
+//! `PolicyUnavailable` (no instance security policy row, D18) is effectively
+//! unreachable after the authorization: bootstrap writes the policy row in
+//! the transaction that enrolls the first operator, so before it no
+//! credential authorizes anything. It keeps its retryable 503 (a store
+//! state that never widens) rather than a 500.
+//!
+//! This is the proposed mapping of the S4 PR (lead decision, 2026-11-24,
+//! "the admin error-to-HTTP mapping is proposed in the S4 PR"); every row
+//! not quoted from the proposal is inferred.
 //!
 //! # Wire codes
 //!
@@ -238,13 +270,23 @@ impl AdminState {
 
 /// The admin router (see the module docs): the operation reads of D4, and
 /// nothing else yet. Never merged into [`crate::app`]; served nowhere until
-/// the rustls acceptor lands (D5).
+/// the rustls acceptor lands (D5). A route's `HEAD` is the fallback's, not
+/// its `GET` handler's.
 pub fn admin_router(state: AdminState) -> Router {
     Router::new()
-        .route(INSTANCE_OPERATIONS, get(operations::list_instance))
-        .route(INSTANCE_OPERATION, get(operations::read_instance))
-        .route(TENANT_OPERATIONS, get(operations::list_tenant))
-        .route(TENANT_OPERATION, get(operations::read_tenant))
+        .route(
+            INSTANCE_OPERATIONS,
+            get(operations::list_instance).head(unknown),
+        )
+        .route(
+            INSTANCE_OPERATION,
+            get(operations::read_instance).head(unknown),
+        )
+        .route(
+            TENANT_OPERATIONS,
+            get(operations::list_tenant).head(unknown),
+        )
+        .route(TENANT_OPERATION, get(operations::read_tenant).head(unknown))
         // Later slices add their routes here, each listed in ADMIN_ROUTES
         // and the module docs, its handler extracting `AdminPeer` first.
         .fallback(unknown)
@@ -253,7 +295,8 @@ pub fn admin_router(state: AdminState) -> Router {
         .layer(map_response(no_store))
 }
 
-/// An unknown path or method: 401 without a peer, else 404.
+/// An unknown path or method, and a route's `HEAD`: 401 without a peer,
+/// else 404.
 async fn unknown(_: AdminPeer) -> AdminHttpError {
     AdminHttpError::NOT_FOUND
 }
@@ -313,8 +356,9 @@ mod tests {
         paths
     }
 
-    const METHODS: [Method; 5] = [
+    const METHODS: [Method; 6] = [
         Method::GET,
+        Method::HEAD,
         Method::POST,
         Method::PATCH,
         Method::PUT,
@@ -375,13 +419,18 @@ mod tests {
                 );
                 assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
                 let body = to_bytes(response.into_body(), 1024).await.unwrap();
-                assert_eq!(body, "{\"error\":\"unauthenticated\"}");
+                // A `HEAD` response has no body.
+                if method == Method::HEAD {
+                    assert_eq!(body, "", "{path}");
+                } else {
+                    assert_eq!(body, "{\"error\":\"unauthenticated\"}");
+                }
             }
         }
     }
 
-    /// With a peer, an unknown path or method is 404 `not_found`, before
-    /// the store is reached; a malformed query is 400.
+    /// With a peer, an unknown path or method, and a route's `HEAD`, is 404
+    /// `not_found`, before the store is reached; a malformed query is 400.
     #[tokio::test]
     async fn unknown_paths_and_bad_queries_need_no_store() {
         let unknown = [
@@ -392,6 +441,25 @@ mod tests {
             (Method::DELETE, "/admin/v1/tenants/ten_a/operations/op_1"),
             (Method::PATCH, "/admin/v1/tenants/ten_a/operations"),
         ];
+        let heads = ADMIN_ROUTES.map(|route| {
+            (
+                Method::HEAD,
+                route
+                    .replace("{tenant}", "ten_a")
+                    .replace("{operation}", "op_1"),
+            )
+        });
+        for (method, path) in heads {
+            // The `GET` handler would reach the store, which this pool never
+            // connects to (a 503); the fallback answers 404 before it.
+            let response = admin_router(state())
+                .oneshot(request(&method, &path, true))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        }
         for (method, path) in unknown {
             let response = admin_router(state())
                 .oneshot(request(&method, path, true))

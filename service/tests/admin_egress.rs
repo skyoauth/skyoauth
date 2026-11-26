@@ -1289,7 +1289,7 @@ async fn only_a_star_in_the_host_is_refused() {
     let before = snapshot(&pool).await;
     refused(
         try_set_entry(&pool, &ids, "egr_star_host", true).await,
-        "InvalidDestination",
+        "InvalidStoredDestination",
     );
     assert_eq!(snapshot(&pool).await, before);
     assert_chain_intact(&pool).await;
@@ -1317,8 +1317,9 @@ async fn seed_entry(pool: &PgPool, id: &str, destination: &str, status: Status) 
 /// pathless `token_review` URL of the A29 fixture, `tests/security/a29.rs`)
 /// cannot be enabled through the writer, disabled or already enabled: the
 /// enable checks the stored destination of the row its revision-checked
-/// update returns, and is `InvalidDestination` with nothing written, no
-/// event and no ID taken. The authorization and the gate come first: a
+/// update returns, and is `InvalidStoredDestination` (not the create's
+/// `InvalidDestination`: a refusal by the stored state) with nothing
+/// written, no event and no ID taken. The authorization and the gate come first: a
 /// `trust_admin` gets `Unauthorized`, no acknowledgement
 /// `WideningNotAcknowledged`, the gate on `SecondApproverRequired`.
 #[tokio::test]
@@ -1346,7 +1347,7 @@ async fn an_enable_checks_the_stored_destination() {
             })
             .await
         };
-        refused(enable(KEY_SEC, ACK).await, "InvalidDestination");
+        refused(enable(KEY_SEC, ACK).await, "InvalidStoredDestination");
         refused(enable(KEY_TRUST_A, ACK).await, "Unauthorized");
         refused(enable(KEY_SEC, false).await, "WideningNotAcknowledged");
         set_policy(&pool, true, false).await;
@@ -1385,7 +1386,7 @@ async fn a_disable_checks_no_destination() {
     let before = snapshot(&pool).await;
     refused(
         try_set_entry(&pool, &ids, "egr_bad_on", true).await,
-        "InvalidDestination",
+        "InvalidStoredDestination",
     );
     assert_eq!(snapshot(&pool).await, before);
     assert_chain_intact(&pool).await;

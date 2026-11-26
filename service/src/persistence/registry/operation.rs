@@ -33,7 +33,8 @@
 //! - [`lock_administrative_operation`] reads the row `FOR NO KEY UPDATE`
 //!   (the README's lock for a row a write updates), or `None`.
 //! - [`get_administrative_operation`] reads one row of a tenant (or of the
-//!   instance) without a lock, and [`list_open_administrative_operations`]
+//!   instance) of given kinds, and of a given actor if any, without a
+//!   lock, and [`list_open_administrative_operations`]
 //!   one page of a tenant's (or the instance's) open rows of given kinds:
 //!   the reads under the operation read path of [`crate::operation`]
 //!   (OQ-API-14, D4 of the M1a lead decisions). They authorize no one.
@@ -304,12 +305,14 @@ const INSERT_OPERATION: &str = concat!(
     operation_columns!()
 );
 
-/// The operation `$1` of the tenant `$2` (`NULL`: the instance), without a
-/// lock.
+/// The operation `$1` of the tenant `$2` (`NULL`: the instance), of one of
+/// the kinds `$3` (`text[]`) and, unless `$4` is `NULL`, of the actor `$4`,
+/// without a lock: the kind and actor predicates of [`open_operations!`].
 const GET_OPERATION: &str = concat!(
     "SELECT ",
     operation_columns!(),
-    " FROM administrative_operation WHERE id = $1 AND tenant_id IS NOT DISTINCT FROM $2"
+    " FROM administrative_operation WHERE id = $1 AND tenant_id IS NOT DISTINCT FROM $2 \
+     AND kind = ANY($3) AND ($4::text IS NULL OR actor_id = $4)"
 );
 
 /// The open operations of `$tenant`, one [`Page`] of them: the predicate of
@@ -434,19 +437,26 @@ pub async fn lock_administrative_operation(
         .await?)
 }
 
-/// The operation `id` of `tenant_id` (`None`: the instance), read without a
-/// lock: an operation of another tenant, of a tenant when `tenant_id` is
-/// `None`, or of the instance when it is `Some`, is
-/// [`RegistryError::NotFound`], as a missing one (see the module docs of
-/// the registry, "Reads and pages"). Every kind, every state.
+/// The operation `id` of `tenant_id` (`None`: the instance), of one of
+/// `kinds` (byte-wise) and, when `actor_id` is given, of that actor, read
+/// without a lock: an operation of another tenant, of a tenant when
+/// `tenant_id` is `None`, of the instance when it is `Some`, of another
+/// kind or of another actor is [`RegistryError::NotFound`], as a missing
+/// one (see the module docs of the registry, "Reads and pages"), and is
+/// never decoded, so a broken row outside the predicate is that
+/// `NotFound` too. Every state.
 pub async fn get_administrative_operation<'e>(
     executor: impl PgExecutor<'e>,
     tenant_id: Option<&str>,
     id: &str,
+    kinds: &[&str],
+    actor_id: Option<&str>,
 ) -> Result<AdministrativeOperation, RegistryError> {
     sqlx::query_as(GET_OPERATION)
         .bind(id)
         .bind(tenant_id)
+        .bind(kinds)
+        .bind(actor_id)
         .fetch_optional(executor)
         .await?
         .ok_or(RegistryError::NotFound)

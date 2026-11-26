@@ -22,11 +22,33 @@
 //!    kind of the flow is its tenant's `trust_admin`, and the requester of
 //!    the instance kind is an instance `security_admin`, already step 1).
 //!
-//! Any other caller is [`OperationReadError::Unauthorized`], before any
-//! operation is read, so it learns nothing about one: an unknown, revoked
-//! or disabled credential, a disabled operator, another role (a
-//! `client_admin`, a `provider_admin`), an instance `auditor` (inferred: not
-//! named by the ruling), or a tenant role of another tenant.
+//! Any other caller is refused before any operation is read, so it learns
+//! nothing about one, in one of two ways (errors-retry ERR-001, ERR-010,
+//! ERR-011):
+//!
+//! - [`OperationReadError::Unauthenticated`] when the presented identity
+//!   names no usable credential ([`authenticate_operator`]): an unknown,
+//!   revoked or disabled credential, or one of a disabled operator. This
+//!   is no oracle: the peer proved possession of the key in the handshake,
+//!   so it learns only the state of its own credential;
+//! - [`OperationReadError::Unauthorized`] when the credential is usable but
+//!   holds no binding that reads the path: a disabled binding, another
+//!   role (a `client_admin`, a `provider_admin`), an instance `auditor`
+//!   (inferred: not named by the ruling), or a tenant role of another
+//!   tenant.
+//!
+//! The credential lookup runs only after the role lookups have all missed,
+//! so a reader pays for none.
+//!
+//! # One snapshot
+//!
+//! Each read runs its authorization and its fetch in one transaction,
+//! `REPEATABLE READ` and `READ ONLY`, so both read one snapshot, taken at
+//! the first lookup: a revocation, a disable or a binding change that
+//! commits between the two cannot let the fetch see rows written after it,
+//! and the answer is the state at one instant in which the caller was
+//! authorized. The transaction takes no lock and writes nothing; a
+//! `READ ONLY` transaction at this level cannot fail with `40001`.
 //!
 //! # What is found
 //!
@@ -39,7 +61,11 @@
 //! (no existence oracle: the same error as the approve and cancel give for
 //! an operation outside the path, [`ApprovalError::NotFound`]). An ID with a
 //! NUL character, which no row can hold, is that `NotFound` too, after the
-//! authorization (inferred).
+//! authorization (inferred). The single read asks the store only for a row
+//! of the path's tenant, of the path's kinds and, for a requester, of its
+//! actor, as the list does, so a row outside the caller's view is never
+//! decoded: a broken one (an unreadable timestamp, say) is that `NotFound`
+//! too, not a server error.
 //!
 //! [`read_operation`] returns an operation in any state: pending (also once
 //! expired, D22: the outcome stays `pending`), applied, cancelled or
@@ -69,7 +95,7 @@
 
 use std::{fmt, time::SystemTime};
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 use super::{
     ApprovalScope, OperationKind, RequestDigest, digest::canonical_plan,
@@ -77,7 +103,8 @@ use super::{
 };
 use crate::persistence::registry::{
     AdminRole, AdministrativeOperation, OperatorRequest, OperatorScope, Page, RegistryError,
-    authorize_operator, get_administrative_operation, list_open_administrative_operations,
+    authenticate_operator, authorize_operator, get_administrative_operation,
+    list_open_administrative_operations,
 };
 
 /// One operation as the read path returns it: the digest envelope (D29),
@@ -111,8 +138,11 @@ pub struct OperationRecord {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum OperationReadError {
-    /// The presented credential may read no operation of the path (see the
-    /// module docs, "Who").
+    /// The presented identity names no usable credential: none enabled and
+    /// unrevoked, of an enabled operator (see the module docs, "Who").
+    Unauthenticated,
+    /// The presented credential is usable but may read no operation of the
+    /// path (see the module docs, "Who").
     Unauthorized,
     /// No such operation the caller may read on this path (see the module
     /// docs, "What is found").
@@ -128,6 +158,9 @@ pub enum OperationReadError {
 impl fmt::Display for OperationReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Unauthenticated => {
+                f.write_str("the presented key names no usable operator credential")
+            }
             Self::Unauthorized => f.write_str("the operator may not read operations of this scope"),
             Self::NotFound => f.write_str("no such operation in this scope"),
             Self::PlanIntegrity => {
@@ -204,12 +237,17 @@ fn kinds_of(scope: ApprovalScope<'_>) -> Vec<&'static str> {
 
 /// The caller's reading rights on the path (see the module docs, "Who").
 async fn authorize_reader(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     public_identity: &str,
     scope: ApprovalScope<'_>,
 ) -> Result<Reader, OperationReadError> {
+    // No credential can hold a NUL character. A real peer's identity is
+    // `spki-sha256:<hex>` and never has one, so for a real peer removing
+    // this check changes nothing (an equivalent mutant there); it keeps a
+    // NUL off the store (`22021`) for any other caller, which only the
+    // tests' fake acceptor can be.
     if !storable(public_identity) {
-        return Err(OperationReadError::Unauthorized);
+        return Err(OperationReadError::Unauthenticated);
     }
     let lookup = |scope, role| OperatorRequest {
         public_identity,
@@ -217,20 +255,31 @@ async fn authorize_reader(
         role,
     };
     let instance = lookup(OperatorScope::Instance, AdminRole::SecurityAdmin);
-    if authorize_operator(pool, &instance).await?.is_some() {
+    if authorize_operator(&mut *connection, &instance)
+        .await?
+        .is_some()
+    {
         return Ok(Reader::Any);
     }
-    let Some(tenant_id) = tenant_of(scope).filter(|tenant_id| storable(tenant_id)) else {
-        return Err(OperationReadError::Unauthorized);
-    };
-    let auditor = lookup(OperatorScope::Tenant(tenant_id), AdminRole::Auditor);
-    if authorize_operator(pool, &auditor).await?.is_some() {
-        return Ok(Reader::Any);
+    if let Some(tenant_id) = tenant_of(scope).filter(|tenant_id| storable(tenant_id)) {
+        let auditor = lookup(OperatorScope::Tenant(tenant_id), AdminRole::Auditor);
+        if authorize_operator(&mut *connection, &auditor)
+            .await?
+            .is_some()
+        {
+            return Ok(Reader::Any);
+        }
+        let trust_admin = lookup(OperatorScope::Tenant(tenant_id), AdminRole::TrustAdmin);
+        if let Some(operator) = authorize_operator(&mut *connection, &trust_admin).await? {
+            return Ok(Reader::Requester(operator.admin_id));
+        }
     }
-    let trust_admin = lookup(OperatorScope::Tenant(tenant_id), AdminRole::TrustAdmin);
-    match authorize_operator(pool, &trust_admin).await? {
-        Some(operator) => Ok(Reader::Requester(operator.admin_id)),
-        None => Err(OperationReadError::Unauthorized),
+    // Every role lookup missed: a credential that authenticates no one is
+    // 401, a usable one without the role 403.
+    if authenticate_operator(&mut *connection, public_identity).await? {
+        Err(OperationReadError::Unauthorized)
+    } else {
+        Err(OperationReadError::Unauthenticated)
     }
 }
 
@@ -273,9 +322,24 @@ fn record(
     })
 }
 
+/// The one transaction of a read: `REPEATABLE READ` and `READ ONLY`, so
+/// the authorization and the fetch read one snapshot (see the module docs,
+/// "One snapshot").
+const READ_TRANSACTION: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
+
+/// Begins the read's transaction ([`READ_TRANSACTION`]).
+async fn begin_read(pool: &PgPool) -> Result<Transaction<'static, Postgres>, RegistryError> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(READ_TRANSACTION)
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
 /// Reads the operation `operation_id` on the path `scope` for the operator
 /// of `public_identity` (see the module docs): the authorization
-/// ([`OperationReadError::Unauthorized`]), then the row
+/// ([`OperationReadError::Unauthenticated`] or
+/// [`OperationReadError::Unauthorized`]), then the row
 /// ([`OperationReadError::NotFound`] for every row the caller may not read
 /// here), then its envelope ([`OperationReadError::PlanIntegrity`]). Takes
 /// no lock and writes nothing.
@@ -285,18 +349,29 @@ pub async fn read_operation(
     scope: ApprovalScope<'_>,
     operation_id: &str,
 ) -> Result<OperationRecord, OperationReadError> {
-    let reader = authorize_reader(pool, public_identity, scope).await?;
+    let mut transaction = begin_read(pool).await?;
+    let reader = authorize_reader(&mut transaction, public_identity, scope).await?;
     let tenant_id = tenant_of(scope);
     if !storable(operation_id) || !tenant_id.is_none_or(storable) {
         return Err(OperationReadError::NotFound);
     }
-    let row = get_administrative_operation(pool, tenant_id, operation_id).await?;
+    let kinds = kinds_of(scope);
+    let row = get_administrative_operation(
+        &mut *transaction,
+        tenant_id,
+        operation_id,
+        &kinds,
+        reader.actor(),
+    )
+    .await?;
+    transaction.commit().await.map_err(RegistryError::from)?;
     record(row, scope, &reader)
 }
 
 /// One page of the open operations on the path `scope` that the operator
 /// of `public_identity` may read, at `now` (see the module docs): the
-/// authorization ([`OperationReadError::Unauthorized`]), then the page, by
+/// authorization ([`OperationReadError::Unauthenticated`] or
+/// [`OperationReadError::Unauthorized`]), then the page, by
 /// ID byte-wise; a `trust_admin` lists only its own. A row of the page
 /// without an envelope fails the whole page with
 /// [`OperationReadError::PlanIntegrity`]. Takes no lock and writes nothing.
@@ -307,16 +382,24 @@ pub async fn list_operations(
     now: SystemTime,
     page: Page<'_>,
 ) -> Result<Vec<OperationRecord>, OperationReadError> {
-    let reader = authorize_reader(pool, public_identity, scope).await?;
+    let mut transaction = begin_read(pool).await?;
+    let reader = authorize_reader(&mut transaction, public_identity, scope).await?;
     let tenant_id = tenant_of(scope);
     if !tenant_id.is_none_or(storable) {
         return Ok(Vec::new());
     }
     let kinds = kinds_of(scope);
-    let rows =
-        list_open_administrative_operations(pool, tenant_id, &kinds, reader.actor(), now, page)
-            .await
-            .map_err(OperationReadError::Registry)?;
+    let rows = list_open_administrative_operations(
+        &mut *transaction,
+        tenant_id,
+        &kinds,
+        reader.actor(),
+        now,
+        page,
+    )
+    .await
+    .map_err(OperationReadError::Registry)?;
+    transaction.commit().await.map_err(RegistryError::from)?;
     rows.into_iter()
         .map(|row| record(row, scope, &reader))
         .collect()
@@ -473,6 +556,11 @@ mod tests {
     #[test]
     fn errors_print_fixed_text() {
         for (err, debug, display) in [
+            (
+                OperationReadError::Unauthenticated,
+                "Unauthenticated",
+                "the presented key names no usable operator credential",
+            ),
             (
                 OperationReadError::Unauthorized,
                 "Unauthorized",

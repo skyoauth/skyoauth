@@ -37,16 +37,17 @@ use skyoauth_service::{
     persistence::{
         self, PgPool,
         registry::{
-            self, AdminRole, AuditActor, BootstrapRequest, JsonObject, NewAdminCredential,
-            NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent,
-            NewTenant, RegistryError, Status, bootstrap_instance,
+            self, AdminRole, AdminRoleBindingChanges, AuditActor, BootstrapRequest, JsonObject,
+            NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation,
+            NewAuditEvent, NewTenant, RegistryError, Status, bootstrap_instance,
             test_support::{
                 append_audit_event, consume_administrative_operation,
-                insert_administrative_operation,
+                insert_administrative_operation, update_admin_role_binding,
             },
         },
     },
 };
+use sqlx::{Postgres, Transaction};
 use tower::ServiceExt;
 
 const INSTANCE_ID: &str = "019a9f3c-5b2e-7c41-9d8e-0123456789ab";
@@ -75,6 +76,21 @@ const KEY_CLIENT_A: &str = "spki-sha256:client_a";
 const KEY_BIND_OFF: &str = "spki-sha256:bind_off";
 /// No credential has it.
 const KEY_UNKNOWN: &str = "spki-sha256:unknown";
+/// A revoked credential of an operator bound as instance `security_admin`
+/// and `ten_a`'s `auditor`.
+const KEY_REVOKED: &str = "spki-sha256:revoked";
+/// A credential created disabled, unrevoked, of an operator with the same
+/// bindings.
+const KEY_CRED_OFF: &str = "spki-sha256:cred_off";
+/// An enabled credential of a disabled operator with the same bindings.
+const KEY_ID_OFF: &str = "spki-sha256:id_off";
+/// An identity with a NUL character, which no credential can hold. The
+/// acceptor never makes one (`spki-sha256:<hex>`); only the fake acceptor
+/// can.
+const KEY_NUL: &str = "spki-sha256:\u{0}sec";
+/// The keys that authenticate no one: 401, whatever the bindings.
+const UNAUTHENTICATED_KEYS: [&str; 5] =
+    [KEY_UNKNOWN, KEY_REVOKED, KEY_CRED_OFF, KEY_ID_OFF, KEY_NUL];
 
 /// The plan of `op_a1`: an integer above 2^53, a negative one, nested
 /// members out of order, an escape and a non-ASCII character.
@@ -124,12 +140,23 @@ async fn migrated() -> (TestDb, PgPool) {
     (db, pool)
 }
 
-/// One operator `admin` with the credential `crd_<admin>` of `key` and the
-/// bindings `(role, tenant, enabled)`.
+/// One operator `admin` with the enabled credential `crd_<admin>` of `key`
+/// and the bindings `(role, tenant, enabled)`.
 async fn operator(
     pool: &PgPool,
     admin: &str,
     key: &str,
+    bindings: &[(AdminRole, Option<&str>, bool)],
+) {
+    operator_with(pool, admin, key, Status::Enabled, bindings).await;
+}
+
+/// [`operator`] with the credential's status.
+async fn operator_with(
+    pool: &PgPool,
+    admin: &str,
+    key: &str,
+    credential_status: Status,
     bindings: &[(AdminRole, Option<&str>, bool)],
 ) {
     registry::test_support::create_admin_identity(
@@ -149,7 +176,7 @@ async fn operator(
             admin_id: admin.into(),
             public_identity: key.into(),
             trust_anchor_ref: "deployment/operator-ca".into(),
-            status: Status::Enabled,
+            status: credential_status,
         },
     )
     .await
@@ -225,8 +252,14 @@ fn plan_of(credential: &str) -> JsonObject {
 /// inserts it, committed.
 async fn insert(pool: &PgPool, new: &NewAdministrativeOperation) {
     let mut transaction = pool.begin().await.unwrap();
+    insert_in(&mut transaction, new).await;
+    transaction.commit().await.unwrap();
+}
+
+/// [`insert`] in the caller's transaction, uncommitted.
+async fn insert_in(transaction: &mut Transaction<'_, Postgres>, new: &NewAdministrativeOperation) {
     append_audit_event(
-        &mut transaction,
+        transaction,
         &NewAuditEvent {
             id: new.audit_id.clone(),
             tenant_id: new.tenant_id.clone(),
@@ -241,10 +274,9 @@ async fn insert(pool: &PgPool, new: &NewAdministrativeOperation) {
     )
     .await
     .unwrap();
-    insert_administrative_operation(&mut transaction, new)
+    insert_administrative_operation(transaction, new)
         .await
         .unwrap();
-    transaction.commit().await.unwrap();
 }
 
 /// A bootstrapped instance, the tenants `ten_a` and `ten_b`, the operators
@@ -320,6 +352,26 @@ async fn seeded() -> (TestDb, PgPool) {
     ] {
         operator(&pool, admin, key, &bindings).await;
     }
+    // Three operators with every reading role whose credential
+    // authenticates no one: revoked, created disabled, of a disabled
+    // identity.
+    let readers = [(SEC, None, true), (AUDITOR, a, true), (TRUST, a, true)];
+    operator(&pool, "adm_revoked", KEY_REVOKED, &readers).await;
+    registry::revoke_admin_credential(&pool, "crd_adm_revoked", at(1))
+        .await
+        .unwrap();
+    operator_with(
+        &pool,
+        "adm_cred_off",
+        KEY_CRED_OFF,
+        Status::Disabled,
+        &readers,
+    )
+    .await;
+    operator(&pool, "adm_id_off", KEY_ID_OFF, &readers).await;
+    registry::disable_admin_identity(&pool, "adm_id_off")
+        .await
+        .unwrap();
     let ops = [
         operation(
             "op_a1",
@@ -530,21 +582,32 @@ const ROUTES_A: [&str; 4] = [
     "/admin/v1/tenants/ten_a/operations/op_a1",
 ];
 
-/// No peer is 401 on every route; a peer that authorizes nothing there is
-/// the one 403 (an unknown credential, a disabled binding, another role,
-/// an instance `auditor`, another tenant's `trust_admin`, a tenant role on
-/// the instance path); the readers read.
+/// No peer is 401 on every route, and so is a peer whose credential
+/// authenticates no one (unknown, revoked, disabled, of a disabled
+/// operator), with the same bytes, whatever its bindings; a usable
+/// credential that authorizes nothing there is the one 403, with the same
+/// bytes for every cause (a disabled binding, another role, an instance
+/// `auditor`, another tenant's `trust_admin`, a tenant role on the
+/// instance path); the readers read.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_readers_of_each_path() {
     let (db, pool) = seeded().await;
     let router = router(&pool);
+    let no_peer = get_with(&router, None, ROUTES_A[0], &[]).await;
+    assert_error(&no_peer, StatusCode::UNAUTHORIZED, "unauthenticated");
     for uri in ROUTES_A {
         let answer = get_with(&router, None, uri, &[]).await;
-        assert_error(&answer, StatusCode::UNAUTHORIZED, "unauthenticated");
+        assert_eq!(answer.seen(), no_peer.seen(), "{uri}");
+        for key in UNAUTHENTICATED_KEYS {
+            let answer = get(&router, key, uri).await;
+            assert_eq!(answer.seen(), no_peer.seen(), "{key} {uri}");
+            assert_eq!(answer.headers, no_peer.headers, "{key} {uri}");
+        }
     }
+    let forbidden = get(&router, KEY_AUD_I, ROUTES_A[0]).await;
+    assert_error(&forbidden, StatusCode::FORBIDDEN, "forbidden");
     let instance_refused = [
-        KEY_UNKNOWN,
         KEY_BIND_OFF,
         KEY_AUD_I,
         KEY_AUD_A,
@@ -553,27 +616,17 @@ async fn the_readers_of_each_path() {
     ];
     for key in instance_refused {
         for uri in &ROUTES_A[..2] {
-            assert_error(
-                &get(&router, key, uri).await,
-                StatusCode::FORBIDDEN,
-                "forbidden",
-            );
+            let answer = get(&router, key, uri).await;
+            assert_eq!(answer.seen(), forbidden.seen(), "{key} {uri}");
+            assert_eq!(answer.headers, forbidden.headers, "{key} {uri}");
         }
     }
-    let tenant_refused = [
-        KEY_UNKNOWN,
-        KEY_BIND_OFF,
-        KEY_AUD_I,
-        KEY_TRUST_B,
-        KEY_CLIENT_A,
-    ];
+    let tenant_refused = [KEY_BIND_OFF, KEY_AUD_I, KEY_TRUST_B, KEY_CLIENT_A];
     for key in tenant_refused {
         for uri in &ROUTES_A[2..] {
-            assert_error(
-                &get(&router, key, uri).await,
-                StatusCode::FORBIDDEN,
-                "forbidden",
-            );
+            let answer = get(&router, key, uri).await;
+            assert_eq!(answer.seen(), forbidden.seen(), "{key} {uri}");
+            assert_eq!(answer.headers, forbidden.headers, "{key} {uri}");
         }
     }
 
@@ -682,15 +735,39 @@ async fn no_existence_oracle() {
         let answer = get(&router, KEY_SEC, &format!("/admin/v1/operations/{id}")).await;
         assert_eq!(answer.seen(), missing.seen(), "{id}");
     }
+    // A tenant with a NUL character, which no row can hold, for the
+    // instance `security_admin`, who passes the authorization without a
+    // tenant lookup: the read is the one `NotFound` and the list is empty,
+    // and neither reaches the store with the NUL (which would be a 500).
+    let nul = get(
+        &router,
+        KEY_SEC,
+        "/admin/v1/tenants/ten%00/operations/op_a1",
+    )
+    .await;
+    assert_eq!(nul.seen(), missing.seen());
+    assert_eq!(nul.headers, missing.headers);
+    assert_eq!(
+        page(&get(&router, KEY_SEC, "/admin/v1/tenants/ten%00/operations").await),
+        (Vec::new(), None)
+    );
     // An instance row of a tenant kind is listed nowhere.
     let (ids, _) = page(&get(&router, KEY_SEC, "/admin/v1/operations").await);
     assert!(!ids.contains(&"op_ix".to_owned()));
 
-    // Refused callers: the same 403 for an existing, a missing and a
-    // foreign operation, and for an unknown tenant.
-    for key in [KEY_TRUST_B, KEY_UNKNOWN, KEY_AUD_I] {
+    // Refused callers: the same 403 (a usable credential without the role)
+    // or 401 (a credential that authenticates no one) for an existing, a
+    // missing and a foreign operation, and for an unknown tenant.
+    let refusals = [
+        (KEY_TRUST_B, StatusCode::FORBIDDEN, "forbidden"),
+        (KEY_AUD_I, StatusCode::FORBIDDEN, "forbidden"),
+        (KEY_UNKNOWN, StatusCode::UNAUTHORIZED, "unauthenticated"),
+        (KEY_REVOKED, StatusCode::UNAUTHORIZED, "unauthenticated"),
+        (KEY_ID_OFF, StatusCode::UNAUTHORIZED, "unauthenticated"),
+    ];
+    for (key, status, code) in refusals {
         let refused = get(&router, key, "/admin/v1/tenants/ten_a/operations/op_none").await;
-        assert_error(&refused, StatusCode::FORBIDDEN, "forbidden");
+        assert_error(&refused, status, code);
         for uri in [
             "/admin/v1/tenants/ten_a/operations/op_a1",
             "/admin/v1/tenants/ten_a/operations/op_b1",
@@ -1074,6 +1151,8 @@ async fn spoofed_headers_are_ignored() {
         let answer = get_with(&router, None, uri, &spoofed).await;
         assert_error(&answer, StatusCode::UNAUTHORIZED, "unauthenticated");
         let answer = get_with(&router, Some(KEY_UNKNOWN), uri, &spoofed).await;
+        assert_error(&answer, StatusCode::UNAUTHORIZED, "unauthenticated");
+        let answer = get_with(&router, Some(KEY_AUD_I), uri, &spoofed).await;
         assert_error(&answer, StatusCode::FORBIDDEN, "forbidden");
         let answer = get_with(
             &router,
@@ -1099,12 +1178,19 @@ async fn spoofed_headers_are_ignored() {
 /// The registry read keys a row by its tenant itself, not only through the
 /// read path's scope check behind it: an operation asked for under another
 /// tenant, under the instance or under a tenant when it is an instance one
-/// is `NotFound`, called directly, with no `record()` in between.
+/// is `NotFound`, called directly, with no `record()` in between; so is
+/// one of a kind not asked for, or of another actor than the one asked for.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn the_registry_read_is_keyed_by_the_tenant() {
     let (db, pool) = seeded().await;
-    let get = |tenant_id, id| registry::get_administrative_operation(&pool, tenant_id, id);
+    let kinds = [
+        "trust_source_create",
+        "trust_source_update",
+        "instance_security_policy_update",
+    ];
+    let get =
+        |tenant_id, id| registry::get_administrative_operation(&pool, tenant_id, id, &kinds, None);
     for (tenant_id, id) in [
         (Some("ten_a"), "op_a1"),
         (Some("ten_b"), "op_b1"),
@@ -1125,6 +1211,229 @@ async fn the_registry_read_is_keyed_by_the_tenant() {
             matches!(get(tenant_id, id).await, Err(RegistryError::NotFound)),
             "{tenant_id:?} {id}"
         );
+    }
+    // The kinds and the actor.
+    let a = Some("ten_a");
+    let read = |id, kinds: &'static [&'static str], actor| {
+        registry::get_administrative_operation(&pool, a, id, kinds, actor)
+    };
+    assert!(
+        read("op_a1", &["trust_source_create"], Some("adm_trust_a"))
+            .await
+            .is_ok()
+    );
+    assert!(read("op_a1", &["trust_source_create"], None).await.is_ok());
+    for (id, kinds, actor) in [
+        ("op_a1", &["trust_source_update"][..], None),
+        ("op_a1", &[][..], None),
+        ("op_a1", &["Trust_source_create"][..], None),
+        ("op_a1", &["trust_source_create"][..], Some("adm_trust_a2")),
+        ("op_a1", &["trust_source_create"][..], Some("ADM_TRUST_A")),
+        ("op_a5", &["trust_source_create"][..], None),
+    ] {
+        assert!(
+            matches!(read(id, kinds, actor).await, Err(RegistryError::NotFound)),
+            "{id} {kinds:?} {actor:?}"
+        );
+    }
+    db.drop([pool]).await;
+}
+
+/// Stores an `expires_at` the registry cannot read (`infinity`) on the
+/// operation `id`, past its `0007` range check and the immutability guard,
+/// as a row written before those checks could hold one.
+async fn break_expiry(pool: &PgPool, id: &str) {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "BEGIN; \
+         ALTER TABLE administrative_operation \
+         DROP CONSTRAINT IF EXISTS administrative_operation_expires_at_range_check; \
+         ALTER TABLE administrative_operation \
+         DISABLE TRIGGER administrative_operation_immutable; \
+         UPDATE administrative_operation SET expires_at = 'infinity', \
+         revision = revision + 1 WHERE id = '{id}'; \
+         ALTER TABLE administrative_operation \
+         ENABLE ALWAYS TRIGGER administrative_operation_immutable; \
+         COMMIT"
+    )))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// The single read asks the store for the caller's view only, as the list
+/// does: a row of another requester, or of a kind of another scope, that
+/// holds a timestamp the registry cannot read is the one 404 of a missing
+/// row, byte for byte, never decoded into a 500. In the caller's view the
+/// same row is the 500 of an unreadable row.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_hidden_row_is_never_decoded() {
+    let (db, pool) = seeded().await;
+    let a = Some("ten_a");
+    insert(
+        &pool,
+        &operation(
+            "op_a8",
+            a,
+            "adm_trust_a2",
+            "trust_source_create",
+            DAY,
+            plan_of("crd_adm_trust_a2"),
+            None,
+        ),
+    )
+    .await;
+    // A tenant row of the instance kind: a kind of another scope.
+    insert(
+        &pool,
+        &operation(
+            "op_a7",
+            a,
+            "adm_aud_a",
+            "instance_security_policy_update",
+            DAY,
+            plan_of("crd_adm_aud_a"),
+            None,
+        ),
+    )
+    .await;
+    break_expiry(&pool, "op_a8").await;
+    break_expiry(&pool, "op_a7").await;
+    let router = router(&pool);
+    let uri = |id| format!("/admin/v1/tenants/ten_a/operations/{id}");
+    for (key, hidden) in [
+        (KEY_TRUST_A, "op_a8"),
+        (KEY_TRUST_A, "op_a7"),
+        (KEY_AUD_A, "op_a7"),
+        (KEY_SEC, "op_a7"),
+    ] {
+        let missing = get(&router, key, &uri("op_none")).await;
+        assert_error(&missing, StatusCode::NOT_FOUND, "not_found");
+        let answer = get(&router, key, &uri(hidden)).await;
+        assert_eq!(answer.seen(), missing.seen(), "{key} {hidden}");
+        assert_eq!(answer.headers, missing.headers, "{key} {hidden}");
+    }
+    for key in [KEY_TRUST_A2, KEY_AUD_A, KEY_SEC] {
+        let answer = get(&router, key, &uri("op_a8")).await;
+        assert_error(&answer, StatusCode::INTERNAL_SERVER_ERROR, "server_error");
+    }
+    db.drop([pool]).await;
+}
+
+/// Polls until a backend waits for a lock on `administrative_operation`.
+async fn until_a_read_waits(pool: &PgPool) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_locks \
+                 WHERE relation = 'administrative_operation'::regclass AND NOT granted",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the read never waited for the operation table");
+}
+
+/// A read authorizes and fetches in one snapshot. The test holds the
+/// operation table `ACCESS EXCLUSIVE`, so an auditor's read authorizes and
+/// then waits at its fetch; meanwhile the holder disables the auditor's
+/// binding and creates `op_a6`, and commits. The read still answers as of
+/// its authorization: the single read of `op_a6` is the one 404 and the
+/// list does not hold it. Read in separate statements (or at
+/// `READ COMMITTED`), the fetch would see `op_a6`, created after the
+/// auditor lost its role.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_read_authorizes_and_fetches_in_one_snapshot() {
+    let (db, pool) = seeded().await;
+    let router = router(&pool);
+    let read = "/admin/v1/tenants/ten_a/operations/op_a6";
+    let list = "/admin/v1/tenants/ten_a/operations";
+    for (round, uri) in [read, list].into_iter().enumerate() {
+        let revision = i64::try_from(2 * round + 1).unwrap();
+        let id = format!("op_a6_{round}");
+        let uri = uri.replace("op_a6", &id);
+        let mut holder = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE administrative_operation IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let request = with_admin_peer(Request::get(&uri).body(Body::empty()).unwrap(), KEY_AUD_A);
+        let reader = tokio::spawn(router.clone().oneshot(request));
+        until_a_read_waits(&pool).await;
+        update_admin_role_binding(
+            &mut *holder,
+            "rb_adm_aud_a_0",
+            revision,
+            &AdminRoleBindingChanges {
+                status: Status::Disabled,
+            },
+        )
+        .await
+        .unwrap();
+        insert_in(
+            &mut holder,
+            &operation(
+                &id,
+                Some("ten_a"),
+                "adm_trust_a",
+                "trust_source_create",
+                DAY,
+                plan_of("crd_adm_trust_a"),
+                None,
+            ),
+        )
+        .await;
+        holder.commit().await.unwrap();
+        let response = reader.await.unwrap().unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        if uri.ends_with(&id) {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+            assert_eq!(body, "{\"error\":\"not_found\"}");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body:?}");
+            let json: Value = serde_json::from_slice(&body).unwrap();
+            let ids: Vec<&str> = json["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| op["id"].as_str().unwrap())
+                .collect();
+            // `op_a6_0` of the first round, not this round's.
+            assert_eq!(ids, ["op_a1", "op_a2", "op_a6_0"]);
+        }
+        // Read afresh, the auditor is refused.
+        assert_error(
+            &get(&router, KEY_AUD_A, &uri).await,
+            StatusCode::FORBIDDEN,
+            "forbidden",
+        );
+        update_admin_role_binding(
+            &pool,
+            "rb_adm_aud_a_0",
+            revision + 1,
+            &AdminRoleBindingChanges {
+                status: Status::Enabled,
+            },
+        )
+        .await
+        .unwrap();
+        // With its role back, it reads the new operation.
+        let answer = get(
+            &router,
+            KEY_AUD_A,
+            &format!("/admin/v1/tenants/ten_a/operations/{id}"),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "{:?}", answer.body);
     }
     db.drop([pool]).await;
 }

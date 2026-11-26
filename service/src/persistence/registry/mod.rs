@@ -21,7 +21,8 @@
 //! kept crate-private"), and [`authorize_operator`] looks up whether a
 //! presented operator credential holds a role in a scope (design section
 //! 7.2; API-002, API-120; see its module for the one-way rules, the
-//! reserved actor IDs and what the lookup does not do).
+//! reserved actor IDs and what the lookup does not do), and
+//! [`authenticate_operator`] whether it is usable at all.
 //! [`bootstrap_instance`] bootstraps the instance once: the policy row, the
 //! closed recovery state, the first `security_admin` and its audit event,
 //! in the caller's transaction (design section 7.2; T13.4, T13.6; see its
@@ -520,9 +521,10 @@ pub use operation::{get_administrative_operation, list_open_administrative_opera
 pub use operator::{
     AdminCredential, AdminIdentity, AdminRoleBinding, AdminRoleBindingChanges, AuthorizedOperator,
     DEPLOYMENT_OPERATOR_ACTOR, NewAdminCredential, NewAdminIdentity, NewAdminRoleBinding,
-    OperatorRequest, OperatorScope, RECOVERY_KEY_ACTOR_PREFIX, authorize_operator,
-    authorize_operator_locked, disable_admin_identity, get_admin_credential, get_admin_identity,
-    get_admin_role_binding, is_reserved_actor_id, recovery_key_actor, revoke_admin_credential,
+    OperatorRequest, OperatorScope, RECOVERY_KEY_ACTOR_PREFIX, authenticate_operator,
+    authorize_operator, authorize_operator_locked, disable_admin_identity, get_admin_credential,
+    get_admin_identity, get_admin_role_binding, is_reserved_actor_id, recovery_key_actor,
+    revoke_admin_credential,
 };
 // Private to the registry: `bootstrap` and `recovery` enroll an operator
 // with them; tests reach them through `test_support` (second-approver

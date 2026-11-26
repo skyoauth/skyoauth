@@ -182,7 +182,7 @@ pub async fn create_egress_entry(
 /// `StaleRevision`), and appends `action` with its outcome. An enable
 /// (`status` enabled) then checks the stored destination of the row it
 /// wrote: one that fails [`is_valid_destination`] is
-/// [`AdminWriteError::InvalidDestination`] before the event's ID, and the
+/// [`AdminWriteError::InvalidStoredDestination`] before the event's ID, and the
 /// caller's savepoint takes the update back. A disable checks nothing.
 async fn write_egress_status(
     transaction: &mut Transaction<'_, Postgres>,
@@ -196,7 +196,7 @@ async fn write_egress_status(
         registry::update_egress_allowlist_entry(&mut **transaction, id, expected_revision, status)
             .await?;
     if status == Status::Enabled && !is_valid_destination(&row.exact_destination) {
-        return Err(AdminWriteError::InvalidDestination);
+        return Err(AdminWriteError::InvalidStoredDestination);
     }
     let previous = Some(expected_revision);
     let event =
@@ -214,7 +214,7 @@ async fn write_egress_status(
 /// ([`is_valid_destination`]), on the row the revision-checked update
 /// returns (its destination is immutable): one that fails the rule, which
 /// only an entry written another way can have (SQL, a fixture), is
-/// [`AdminWriteError::InvalidDestination`], with nothing written, no event
+/// [`AdminWriteError::InvalidStoredDestination`], with nothing written, no event
 /// and no ID taken; such an entry can still be disabled.
 pub async fn enable_egress_entry(
     transaction: &mut Transaction<'_, Postgres>,

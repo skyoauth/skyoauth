@@ -19,6 +19,20 @@ use crate::trust::{KeysetWriteError, SourceWriteError};
 /// second, well inside the 300 s bound of ERR-047).
 pub const RETRY_AFTER_SECONDS: u32 = 1;
 
+/// SQLSTATE class 08, `connection_exception`.
+const CONNECTION_EXCEPTION_CLASS: &str = "08";
+/// SQLSTATE class 53, `insufficient_resources`.
+const INSUFFICIENT_RESOURCES_CLASS: &str = "53";
+/// The SQLSTATEs `57P01` to `57P05` of class 57, `operator_intervention`:
+/// `admin_shutdown`, `crash_shutdown`, `cannot_connect_now`,
+/// `database_dropped` and `idle_session_timeout`. Not `57014`
+/// ([`QUERY_CANCELED`]).
+const SHUTDOWN_PREFIX: &str = "57P0";
+/// `lock_not_available`: a `NOWAIT` lock or a `lock_timeout`.
+const LOCK_NOT_AVAILABLE: &str = "55P03";
+/// `query_canceled`: a `statement_timeout`, or a cancel request.
+const QUERY_CANCELED: &str = "57014";
+
 /// The value of the body's one member, `error`. Each code has one status
 /// ([`Self::status`]). `unauthenticated`, `forbidden` and `auth_unavailable`
 /// are the frozen reasons of errors-retry ERR-070, `invalid_request` and
@@ -209,8 +223,51 @@ const fn from_invariant(kind: InvariantKind) -> AdminHttpError {
     }
 }
 
+/// The [`sqlx::Error`] of a [`RegistryError::Other`], which the registry
+/// leaves unclassified: an unavailable store is 503, a lock or statement
+/// timeout 503 with `Retry-After` (as a [`RegistryError::Retry`]: the
+/// whole request may succeed again), and everything else 500.
+///
+/// - 503: a connection or TLS failure ([`sqlx::Error::Io`],
+///   [`sqlx::Error::Tls`]), no pooled connection in time or a closed pool
+///   ([`sqlx::Error::PoolTimedOut`], [`sqlx::Error::PoolClosed`]), and the
+///   SQLSTATE classes 08 (`connection_exception`) and 53
+///   (`insufficient_resources`) and the codes `57P01` to `57P05` (a server
+///   shutting down, starting up or dropping the database, an idle session
+///   timed out).
+/// - 503 with `Retry-After`: `55P03` (`lock_not_available`) and `57014`
+///   (`query_canceled`). The registry keeps them in `Other` (only `40001`
+///   and `40P01` are its `Retry`); the HTTP layer retries them as it
+///   retries those.
+/// - 500: a decode or encode failure, a protocol error, an unknown
+///   SQLSTATE, and a constraint violation whose name is not in
+///   [`KNOWN_CONSTRAINTS`](crate::persistence::registry::KNOWN_CONSTRAINTS):
+///   a server or data-integrity error (inferred).
+fn from_store_failure(err: &sqlx::Error) -> AdminHttpError {
+    match err {
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed => code(ErrorCode::AuthUnavailable),
+        sqlx::Error::Database(db) => match db.code().as_deref() {
+            Some(LOCK_NOT_AVAILABLE | QUERY_CANCELED) => {
+                AdminHttpError::retry(ErrorCode::AuthUnavailable)
+            }
+            Some(sqlstate)
+                if sqlstate.starts_with(CONNECTION_EXCEPTION_CLASS)
+                    || sqlstate.starts_with(INSUFFICIENT_RESOURCES_CLASS)
+                    || sqlstate.starts_with(SHUTDOWN_PREFIX) =>
+            {
+                code(ErrorCode::AuthUnavailable)
+            }
+            _ => code(ErrorCode::ServerError),
+        },
+        _ => code(ErrorCode::ServerError),
+    }
+}
+
 /// [`RegistryError`].
-pub const fn from_registry(err: &RegistryError) -> AdminHttpError {
+pub fn from_registry(err: &RegistryError) -> AdminHttpError {
     match err {
         RegistryError::NotFound => AdminHttpError::NOT_FOUND,
         RegistryError::StaleRevision => code(ErrorCode::StaleRevision),
@@ -218,7 +275,7 @@ pub const fn from_registry(err: &RegistryError) -> AdminHttpError {
         RegistryError::Invariant { kind, .. } => from_invariant(*kind),
         RegistryError::UnreadableTimestamp { .. } => code(ErrorCode::ServerError),
         RegistryError::Retry(_) => AdminHttpError::retry(ErrorCode::AuthUnavailable),
-        RegistryError::Other(_) => code(ErrorCode::AuthUnavailable),
+        RegistryError::Other(err) => from_store_failure(err),
         RegistryError::ReservedActorId | RegistryError::RequiredPredicate { .. } => {
             code(ErrorCode::InvalidRequest)
         }
@@ -226,7 +283,7 @@ pub const fn from_registry(err: &RegistryError) -> AdminHttpError {
 }
 
 /// [`AdminWriteError`].
-pub const fn from_admin_write(err: &AdminWriteError) -> AdminHttpError {
+pub fn from_admin_write(err: &AdminWriteError) -> AdminHttpError {
     match err {
         AdminWriteError::Unauthorized | AdminWriteError::PrincipalKindNotAllowed => {
             code(ErrorCode::Forbidden)
@@ -234,10 +291,16 @@ pub const fn from_admin_write(err: &AdminWriteError) -> AdminHttpError {
         AdminWriteError::UnsupportedIsolation => code(ErrorCode::ServerError),
         AdminWriteError::TenantDisabled => code(ErrorCode::TenantDisabled),
         AdminWriteError::InvalidDestination => code(ErrorCode::InvalidRequest),
+        // An enable's stored destination: a refusal by the stored state.
+        AdminWriteError::InvalidStoredDestination => code(ErrorCode::Conflict),
         AdminWriteError::WideningNotAcknowledged => code(ErrorCode::WideningNotAcknowledged),
         // The gate is on and no egress operation kind exists, so the write
         // cannot proceed in this state (a conflict with the instance policy).
         AdminWriteError::SecondApproverRequired => code(ErrorCode::Conflict),
+        // Effectively unreachable after the authorization: bootstrap writes
+        // the policy row in the transaction that enrolls the first
+        // operator, so no request before it is authorized. Mapped as a
+        // store failure that a retry may clear (D18: it never widens).
         AdminWriteError::PolicyUnavailable => AdminHttpError::retry(ErrorCode::AuthUnavailable),
         AdminWriteError::PublicKey(err) => from_identity(err),
         AdminWriteError::Id(err) => from_id(err),
@@ -246,7 +309,7 @@ pub const fn from_admin_write(err: &AdminWriteError) -> AdminHttpError {
 }
 
 /// [`KeysetWriteError`], also inside [`ApprovalError::Keyset`].
-pub const fn from_keyset_write(err: &KeysetWriteError) -> AdminHttpError {
+pub fn from_keyset_write(err: &KeysetWriteError) -> AdminHttpError {
     match err {
         KeysetWriteError::Unauthorized => code(ErrorCode::Forbidden),
         KeysetWriteError::Upload(_) | KeysetWriteError::PrivateMemberInProvenance => {
@@ -259,6 +322,8 @@ pub const fn from_keyset_write(err: &KeysetWriteError) -> AdminHttpError {
         | KeysetWriteError::StoredFingerprintMismatch
         | KeysetWriteError::UnsupportedIsolation => code(ErrorCode::ServerError),
         KeysetWriteError::WorkerUnavailable => code(ErrorCode::AuthUnavailable),
+        // `PolicyUnavailable` is effectively unreachable after the
+        // authorization (see [`from_admin_write`]).
         KeysetWriteError::ValidationBusy | KeysetWriteError::PolicyUnavailable => {
             AdminHttpError::retry(ErrorCode::AuthUnavailable)
         }
@@ -268,20 +333,44 @@ pub const fn from_keyset_write(err: &KeysetWriteError) -> AdminHttpError {
 }
 
 /// [`SourceWriteError`], also inside [`ApprovalError::Source`].
-pub const fn from_source_write(err: &SourceWriteError) -> AdminHttpError {
+pub fn from_source_write(err: &SourceWriteError) -> AdminHttpError {
     match err {
         SourceWriteError::Unauthorized => code(ErrorCode::Forbidden),
         SourceWriteError::InvalidDestination { .. } => code(ErrorCode::InvalidRequest),
         SourceWriteError::EgressNotAllowed { .. } => code(ErrorCode::Conflict),
         SourceWriteError::UnsupportedIsolation => code(ErrorCode::ServerError),
         SourceWriteError::WideningNotAcknowledged => code(ErrorCode::WideningNotAcknowledged),
+        // Effectively unreachable after the authorization (see
+        // [`from_admin_write`]).
         SourceWriteError::PolicyUnavailable => AdminHttpError::retry(ErrorCode::AuthUnavailable),
         SourceWriteError::Registry(err) => from_registry(err),
     }
 }
 
-/// [`ApprovalError`]: the approve, cancel, reject and toggle.
-pub const fn from_approval(err: &ApprovalError) -> AdminHttpError {
+/// A [`RegistryError`] of the approval family, also inside
+/// [`ApprovalError::Keyset`] and [`ApprovalError::Source`]: the values an
+/// approve writes are the stored plan's (D7: the database constraints run
+/// at approve only), and a cancel, reject or toggle submits no value a
+/// constraint checks, so a check or not-null refusal is one by the stored
+/// state, 409 `not_approvable`; every other error maps as
+/// [`from_registry`].
+fn from_applied_registry(err: &RegistryError) -> AdminHttpError {
+    match err {
+        RegistryError::Invariant {
+            kind: InvariantKind::Check | InvariantKind::NotNull,
+            ..
+        } => code(ErrorCode::NotApprovable),
+        err => from_registry(err),
+    }
+}
+
+/// [`ApprovalError`]: the approve, cancel, reject and toggle. A refusal
+/// of the stored plan's values, which a direct write gives as 400 (an
+/// upload the plan's algorithms refuse, a private member in the plan's
+/// provenance, a destination that is not canonical, a check or not-null
+/// constraint), is 409 `not_approvable` here: the approver submitted none
+/// of them, and no retry of the approve can succeed.
+pub fn from_approval(err: &ApprovalError) -> AdminHttpError {
     match err {
         ApprovalError::Unauthorized | ApprovalError::SelfApproval => code(ErrorCode::Forbidden),
         ApprovalError::NotFound => AdminHttpError::NOT_FOUND,
@@ -298,17 +387,29 @@ pub const fn from_approval(err: &ApprovalError) -> AdminHttpError {
         ApprovalError::PlanIntegrity | ApprovalError::UnsupportedIsolation => {
             code(ErrorCode::ServerError)
         }
+        // Effectively unreachable after the authorization (see
+        // [`from_admin_write`]).
         ApprovalError::PolicyUnavailable => AdminHttpError::retry(ErrorCode::AuthUnavailable),
         ApprovalError::WideningNotAcknowledged => code(ErrorCode::WideningNotAcknowledged),
+        ApprovalError::Keyset(
+            KeysetWriteError::Upload(_) | KeysetWriteError::PrivateMemberInProvenance,
+        )
+        | ApprovalError::Source(SourceWriteError::InvalidDestination { .. }) => {
+            code(ErrorCode::NotApprovable)
+        }
+        ApprovalError::Keyset(KeysetWriteError::Registry(err))
+        | ApprovalError::Source(SourceWriteError::Registry(err))
+        | ApprovalError::Registry(err) => from_applied_registry(err),
         ApprovalError::Keyset(err) => from_keyset_write(err),
         ApprovalError::Source(err) => from_source_write(err),
-        ApprovalError::Registry(err) => from_registry(err),
     }
 }
 
 /// [`OperationReadError`]: the operation reads.
-pub const fn from_operation_read(err: &OperationReadError) -> AdminHttpError {
+pub fn from_operation_read(err: &OperationReadError) -> AdminHttpError {
     match err {
+        // The presented key names no usable credential (ERR-010).
+        OperationReadError::Unauthenticated => AdminHttpError::UNAUTHENTICATED,
         OperationReadError::Unauthorized => code(ErrorCode::Forbidden),
         OperationReadError::NotFound => AdminHttpError::NOT_FOUND,
         OperationReadError::PlanIntegrity => code(ErrorCode::ServerError),
@@ -391,6 +492,55 @@ mod tests {
         sqlx::Error::PoolTimedOut
     }
 
+    /// A database error with a chosen SQLSTATE and constraint, whose text
+    /// stands for a value of the row.
+    #[derive(Debug)]
+    struct FakeDbError {
+        code: Option<&'static str>,
+        constraint: Option<&'static str>,
+    }
+
+    impl std::fmt::Display for FakeDbError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Key (id)=(ten_secret_marker) failed")
+        }
+    }
+
+    impl std::error::Error for FakeDbError {}
+
+    impl sqlx::error::DatabaseError for FakeDbError {
+        fn message(&self) -> &str {
+            "ten_secret_marker"
+        }
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            self.code.map(std::borrow::Cow::Borrowed)
+        }
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
+        }
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    /// The registry's error for a database error of `code` naming
+    /// `constraint`, as the registry classifies it.
+    fn database(code: &'static str, constraint: Option<&'static str>) -> RegistryError {
+        RegistryError::from(sqlx::Error::database(FakeDbError {
+            code: Some(code),
+            constraint,
+        }))
+    }
+
     /// Every registry variant and every invariant kind.
     fn registry_rows() -> Vec<(RegistryError, (u16, &'static str, bool))> {
         let invariant = |kind| RegistryError::Invariant {
@@ -465,6 +615,127 @@ mod tests {
         check(from_registry, registry_rows(), 10);
     }
 
+    /// What the registry leaves in `Other`: an unavailable store is 503, a
+    /// lock or statement timeout 503 with `Retry-After`, everything else
+    /// (a decode failure, an unknown SQLSTATE, a constraint the registry
+    /// does not know) 500. `40001` and `40P01` are the registry's `Retry`.
+    #[test]
+    fn the_store_failure_table() {
+        let io = || std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        let unavailable = [
+            sqlx::Error::Io(io()),
+            sqlx::Error::Tls(io().into()),
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::PoolClosed,
+        ];
+        for err in unavailable {
+            let err = RegistryError::Other(err);
+            assert_eq!(seen(from_registry(&err)), UNAVAILABLE, "{err:?}");
+        }
+        let rows = [
+            // Class 08, connection_exception.
+            ("08000", UNAVAILABLE),
+            ("08003", UNAVAILABLE),
+            ("08006", UNAVAILABLE),
+            ("08P01", UNAVAILABLE),
+            // Class 53, insufficient_resources.
+            ("53000", UNAVAILABLE),
+            ("53100", UNAVAILABLE),
+            ("53200", UNAVAILABLE),
+            ("53300", UNAVAILABLE),
+            // 57P01 to 57P05: shutdown, startup, a dropped database, an
+            // idle session timeout.
+            ("57P01", UNAVAILABLE),
+            ("57P02", UNAVAILABLE),
+            ("57P03", UNAVAILABLE),
+            ("57P04", UNAVAILABLE),
+            ("57P05", UNAVAILABLE),
+            // A lock or statement timeout: retried as a `Retry` is.
+            ("55P03", RETRY),
+            ("57014", RETRY),
+            // The registry's own `Retry`.
+            ("40001", RETRY),
+            ("40P01", RETRY),
+            // Everything else: a server error.
+            ("57000", SERVER),
+            ("55000", SERVER),
+            ("55006", SERVER),
+            ("40002", SERVER),
+            ("22021", SERVER),
+            ("22003", SERVER),
+            ("54000", SERVER),
+            ("42P01", SERVER),
+            ("XX000", SERVER),
+            ("5", SERVER),
+            ("", SERVER),
+        ];
+        for (code, expected) in rows {
+            let err = database(code, None);
+            assert!(
+                matches!(err, RegistryError::Other(_) | RegistryError::Retry(_)),
+                "{code}: {err:?}"
+            );
+            assert_eq!(seen(from_registry(&err)), expected, "{code}");
+        }
+        // A database error without a SQLSTATE.
+        let err = RegistryError::Other(sqlx::Error::database(FakeDbError {
+            code: None,
+            constraint: None,
+        }));
+        assert_eq!(seen(from_registry(&err)), SERVER);
+        // A constraint violation the registry does not know is `Other`, a
+        // server error, not the 400 or 409 of a known one.
+        for code in ["23505", "23503", "23514"] {
+            let err = database(code, Some("not_a_known_constraint"));
+            assert!(matches!(err, RegistryError::Other(_)), "{code}: {err:?}");
+            assert_eq!(seen(from_registry(&err)), SERVER, "{code}");
+            let known = database(code, Some("tenant_pkey"));
+            assert!(!matches!(known, RegistryError::Other(_)), "{code}");
+        }
+        // A decode, encode or protocol failure, and the other non-database
+        // errors.
+        for err in [
+            sqlx::Error::Decode("bad".into()),
+            sqlx::Error::Encode("bad".into()),
+            sqlx::Error::ColumnDecode {
+                index: "status".into(),
+                source: "bad".into(),
+            },
+            sqlx::Error::Protocol("bad".into()),
+            sqlx::Error::RowNotFound,
+            sqlx::Error::ColumnNotFound("status".into()),
+            sqlx::Error::WorkerCrashed,
+        ] {
+            let err = RegistryError::from(err);
+            assert!(matches!(err, RegistryError::Other(_)), "{err:?}");
+            assert_eq!(seen(from_registry(&err)), SERVER, "{err:?}");
+        }
+        // Every family passes a store failure through.
+        let timeout = || database("57014", None);
+        assert_eq!(seen(from_admin_write(&timeout().into())), RETRY);
+        assert_eq!(
+            seen(from_operation_read(
+                &OperationReadError::Registry(timeout())
+            )),
+            RETRY
+        );
+        let decode = || RegistryError::Other(sqlx::Error::Decode("bad".into()));
+        assert_eq!(
+            seen(from_approval(&ApprovalError::Registry(decode()))),
+            SERVER
+        );
+        assert_eq!(
+            seen(from_keyset_write(&KeysetWriteError::Registry(decode()))),
+            SERVER
+        );
+        assert_eq!(
+            seen(from_source_write(&SourceWriteError::Registry(database(
+                "08006", None
+            )))),
+            UNAVAILABLE
+        );
+    }
+
     #[test]
     fn the_id_and_identity_tables() {
         check(
@@ -497,6 +768,7 @@ mod tests {
             (AdminWriteError::PrincipalKindNotAllowed, FORBIDDEN),
             (AdminWriteError::TenantDisabled, TENANT_DISABLED),
             (AdminWriteError::InvalidDestination, INVALID),
+            (AdminWriteError::InvalidStoredDestination, CONFLICT),
             (AdminWriteError::WideningNotAcknowledged, WIDENING),
             (AdminWriteError::SecondApproverRequired, CONFLICT),
             (AdminWriteError::PolicyUnavailable, RETRY),
@@ -509,7 +781,7 @@ mod tests {
                 .into_iter()
                 .map(|(err, expected)| (AdminWriteError::Registry(err), expected)),
         );
-        check(from_admin_write, rows, 11);
+        check(from_admin_write, rows, 12);
     }
 
     /// An [`OverlapError`] from two versions that give one `kid` two keys.
@@ -620,27 +892,89 @@ mod tests {
             (ApprovalError::UnsupportedIsolation, SERVER),
             (ApprovalError::WideningNotAcknowledged, WIDENING),
         ];
-        rows.extend(
-            keyset_rows()
-                .into_iter()
-                .map(|(err, expected)| (ApprovalError::Keyset(err), expected)),
-        );
-        rows.extend(
-            source_rows()
-                .into_iter()
-                .map(|(err, expected)| (ApprovalError::Source(err), expected)),
-        );
-        rows.extend(
-            registry_rows()
-                .into_iter()
-                .map(|(err, expected)| (ApprovalError::Registry(err), expected)),
-        );
+        // Inside an approval, a refusal of the stored plan's values is
+        // 409 `not_approvable`, not the direct write's 400; every other
+        // row maps as in its family.
+        let stored = |err: &RegistryError, expected| match err {
+            RegistryError::Invariant {
+                kind: InvariantKind::Check | InvariantKind::NotNull,
+                ..
+            } => NOT_APPROVABLE,
+            _ => expected,
+        };
+        rows.extend(keyset_rows().into_iter().map(|(err, expected)| {
+            let expected = match &err {
+                KeysetWriteError::Upload(_) | KeysetWriteError::PrivateMemberInProvenance => {
+                    NOT_APPROVABLE
+                }
+                _ => expected,
+            };
+            (ApprovalError::Keyset(err), expected)
+        }));
+        rows.extend(source_rows().into_iter().map(|(err, expected)| {
+            let expected = match &err {
+                SourceWriteError::InvalidDestination { .. } => NOT_APPROVABLE,
+                _ => expected,
+            };
+            (ApprovalError::Source(err), expected)
+        }));
+        for (err, expected) in registry_rows() {
+            let expected = stored(&err, expected);
+            rows.push((ApprovalError::Registry(err), expected));
+        }
+        for (err, expected) in registry_rows() {
+            let expected = stored(&err, expected);
+            rows.push((
+                ApprovalError::Keyset(KeysetWriteError::Registry(err)),
+                expected,
+            ));
+        }
+        for (err, expected) in registry_rows() {
+            let expected = stored(&err, expected);
+            rows.push((
+                ApprovalError::Source(SourceWriteError::Registry(err)),
+                expected,
+            ));
+        }
         check(from_approval, rows, 14);
+        // The direct writes keep their 400 for the same errors.
+        let check_kind = |kind| RegistryError::Invariant {
+            kind,
+            constraint: None,
+        };
+        for kind in [InvariantKind::Check, InvariantKind::NotNull] {
+            assert_eq!(seen(from_registry(&check_kind(kind))), INVALID);
+            assert_eq!(
+                seen(from_keyset_write(&KeysetWriteError::Registry(check_kind(
+                    kind
+                )))),
+                INVALID
+            );
+            assert_eq!(
+                seen(from_source_write(&SourceWriteError::Registry(check_kind(
+                    kind
+                )))),
+                INVALID
+            );
+        }
+        assert_eq!(
+            seen(from_keyset_write(&KeysetWriteError::Upload(
+                JwkSetError::NoKeys
+            ))),
+            INVALID
+        );
+        assert_eq!(
+            seen(from_source_write(&SourceWriteError::InvalidDestination {
+                member: "discovery_url"
+            })),
+            INVALID
+        );
     }
 
     #[test]
     fn the_operation_read_table() {
         let mut rows = vec![
+            (OperationReadError::Unauthenticated, UNAUTHENTICATED),
             (OperationReadError::Unauthorized, FORBIDDEN),
             (OperationReadError::NotFound, NOT_FOUND),
             (OperationReadError::PlanIntegrity, SERVER),
@@ -650,7 +984,12 @@ mod tests {
                 .into_iter()
                 .map(|(err, expected)| (OperationReadError::Registry(err), expected)),
         );
-        check(from_operation_read, rows, 4);
+        check(from_operation_read, rows, 5);
+        // The credential's 401 is the missing peer's, byte for byte.
+        assert_eq!(
+            from_operation_read(&OperationReadError::Unauthenticated),
+            AdminHttpError::UNAUTHENTICATED
+        );
     }
 
     /// Every code has its one status, and the codes are distinct.
@@ -724,6 +1063,21 @@ mod tests {
                 from_registry(&RegistryError::Retry(other())),
                 "{\"error\":\"auth_unavailable\"}",
                 Some("1"),
+            ),
+            (
+                from_registry(&database("57014", None)),
+                "{\"error\":\"auth_unavailable\"}",
+                Some("1"),
+            ),
+            (
+                from_registry(&database("23505", Some("ten_secret_marker_key"))),
+                "{\"error\":\"server_error\"}",
+                None,
+            ),
+            (
+                from_registry(&RegistryError::Other(other())),
+                "{\"error\":\"auth_unavailable\"}",
+                None,
             ),
             (
                 AdminHttpError::UNAUTHENTICATED,
