@@ -84,6 +84,25 @@
 //!   pinned one or a case variant. It is written through the registry API and
 //!   matched directly, without `select_grant`, in both tenants
 //!   (`a02_neg_reusable_workflow_identity_pinned_by_binding`).
+//! - **Whitespace.** A `ref` or `event_name` padded with a space, a tab, a
+//!   newline or a carriage return, before or after the bound value, gives
+//!   no binding: no trimming
+//!   (`a02_neg_whitespace_padded_claims_against_push_binding`).
+//! - **Empty policy.** A binding with an empty `claim_match_policy`
+//!   matches nothing, not the push claims, not an empty claim map, and it
+//!   never displaces the grant's own binding when its ID sorts first. The
+//!   registry refuses an empty policy on create and on update
+//!   (`RequiredPredicate` for the profile's first required predicate,
+//!   before any statement; the `0004` check stands behind it), so the
+//!   empty binding is built by hand from the selected one
+//!   (`a02_neg_empty_policy_binding_matches_nothing`).
+//!
+//! **T12.7's cross-actor clause.** T12.7 is one of A02's owners, and its
+//! clause that an allowed-binding reference to another actor's binding is
+//! rejected is tested by A50's M1a stage, which keeps those tests:
+//! `a50_neg_grant_listing_another_actors_binding_is_refused` and
+//! `a50_neg_adding_another_actors_binding_to_a_grant_is_refused`
+//! (`tests/security/a50.rs`).
 //!
 //! Byte-wise exact comparison (the case-variant `event_name` and
 //! environment, the short `main`, and the values that only extend the
@@ -95,7 +114,8 @@
 //! bindings name it, as well as `repository_id`, so here an absent
 //! `repository` denies like any configured claim absent from the evidence
 //! (T12.2, ADR-016 item 1). The generic near-miss matrices (case, trailing
-//! space, near-miss claim names) are A50's and the service tests'
+//! space, near-miss claim names; whitespace on `ref` and `event_name` is
+//! pinned above too) are A50's and the service tests'
 //! (`service/tests/registry_selection.rs`); that a `github_production`
 //! binding cannot omit its required predicates is A37's.
 //!
@@ -125,7 +145,10 @@ use std::collections::BTreeMap;
 use skyoauth_service::{
     persistence::{
         PgPool,
-        registry::{self, BindingProfile, NewPrincipalBinding, Selection, Status, select_grant},
+        registry::{
+            self, BindingProfile, NewPrincipalBinding, PredicateProblem, PrincipalBindingChanges,
+            RegistryError, Selection, Status, select_grant,
+        },
     },
     policy::{EligibleBinding, Evidence, match_binding},
 };
@@ -633,4 +656,186 @@ async fn a02_neg_reusable_workflow_identity_pinned_by_binding() {
         }
     }
     db.drop([pool]).await;
+}
+
+/// Whitespace in a claim value is significant: a `ref` or `event_name`
+/// padded with a space, a tab, a newline or a carriage return, before or
+/// after the bound value, gives no binding (byte-wise comparison with no
+/// trimming, ADR-016 item 1). The exact values match (the in-test control),
+/// for every grant of both tenants on both GitHub-issuer sources.
+#[tokio::test]
+async fn a02_neg_whitespace_padded_claims_against_push_binding() {
+    assert_every_case_matches_nothing(&[
+        (
+            "ref with a trailing space",
+            &[Change::Set("ref", "refs/heads/main ")],
+        ),
+        (
+            "ref with a leading tab",
+            &[Change::Set("ref", "\trefs/heads/main")],
+        ),
+        (
+            "ref with a trailing newline",
+            &[Change::Set("ref", "refs/heads/main\n")],
+        ),
+        (
+            "event_name with a leading space",
+            &[Change::Set("event_name", " push")],
+        ),
+        (
+            "event_name with a trailing tab",
+            &[Change::Set("event_name", "push\t")],
+        ),
+        (
+            "event_name with a trailing CRLF",
+            &[Change::Set("event_name", "push\r\n")],
+        ),
+        (
+            "ref and event_name both padded",
+            &[
+                Change::Set("ref", " refs/heads/main"),
+                Change::Set("event_name", "push "),
+            ],
+        ),
+    ])
+    .await;
+}
+
+/// A binding whose `claim_match_policy` is empty matches no evidence: not
+/// the push claim set, not the same with unnamed claims, not an empty claim
+/// map, and, listed next to the grant's own binding with an ID that sorts
+/// before it, it never displaces it. The registry never stores such a
+/// binding: an empty policy is refused on create and on update with
+/// `RequiredPredicate` for the first predicate the profile requires
+/// (`github_production` and `generic_production`), before any statement
+/// runs, and writes nothing; the `0004` check that refuses `'{}'` stands
+/// behind it. So the empty binding is built by hand, from the grant's own
+/// selected binding with its policy removed. Control: the same binding with
+/// its stored policy matches. Every grant of both tenants on both
+/// GitHub-issuer sources.
+#[tokio::test]
+async fn a02_neg_empty_policy_binding_matches_nothing() {
+    let (db, pool) = two_tenants().await;
+    // The registry refuses an empty policy, on create and on update.
+    for side in [A, B] {
+        for (profile, source) in [
+            (BindingProfile::GithubProduction, Source::Github),
+            (BindingProfile::GenericProduction, Source::Generic),
+        ] {
+            let case = format!("{} {profile:?}", side.tenant);
+            let id = side.id("bnd_a02_empty");
+            let result = registry::test_support::create_principal_binding(
+                &pool,
+                &NewPrincipalBinding {
+                    id: id.clone(),
+                    tenant_id: side.tenant.into(),
+                    name: "a02-empty".into(),
+                    trust_source_id: source.id(side),
+                    profile,
+                    claim_match_policy: BTreeMap::new(),
+                    workload_principal_id: side.id("wld_a"),
+                    status: Status::Enabled,
+                },
+            )
+            .await;
+            assert_empty_policy_refused(result, profile, &case);
+            assert!(
+                matches!(
+                    registry::get_principal_binding(&pool, side.tenant, &id).await,
+                    Err(RegistryError::NotFound)
+                ),
+                "{case}"
+            );
+        }
+        let own = side.id(GRANTS[0].eligible_on(Source::Github));
+        let stored = registry::get_principal_binding(&pool, side.tenant, &own)
+            .await
+            .unwrap();
+        let result = registry::test_support::update_principal_binding(
+            &pool,
+            side.tenant,
+            &own,
+            stored.revision,
+            &PrincipalBindingChanges {
+                name: stored.name.clone(),
+                profile: stored.profile,
+                claim_match_policy: BTreeMap::new(),
+                status: stored.status,
+            },
+        )
+        .await;
+        assert_empty_policy_refused(result, stored.profile, &format!("{} update", side.tenant));
+        assert_eq!(
+            registry::get_principal_binding(&pool, side.tenant, &own)
+                .await
+                .unwrap(),
+            stored,
+            "{}",
+            side.tenant
+        );
+    }
+
+    let targets = targets(&pool).await;
+    assert_eq!(targets.len(), 16);
+    for target in &targets {
+        let empty = EligibleBinding {
+            claim_match_policy: BTreeMap::new(),
+            ..target.binding.clone()
+        };
+        // Sorts before the grant's own binding, so a matcher that let it
+        // match would pick it.
+        let empty_first = EligibleBinding {
+            id: "bnd_0_0_empty".into(),
+            ..empty.clone()
+        };
+        assert!(empty_first.id.as_bytes() < target.binding.id.as_bytes());
+        let mut evidences: Vec<(&str, BTreeMap<String, String>)> = bases().into_iter().collect();
+        evidences.push(("no claims", BTreeMap::new()));
+        for (name, claims) in evidences {
+            let label = format!("{} {name}", target.label);
+            let evidence = Evidence::new(claims.clone());
+            assert_eq!(
+                match_binding(std::slice::from_ref(&empty), &evidence),
+                None,
+                "{label}"
+            );
+            assert!(!empty.matches(&evidence), "{label}");
+            // Control: the same binding with its stored policy matches every
+            // base, and nothing matches no claims.
+            let expected = (!claims.is_empty()).then_some(&target.binding);
+            assert_eq!(
+                match_binding(std::slice::from_ref(&target.binding), &evidence),
+                expected,
+                "{label}: control"
+            );
+            let both = [empty_first.clone(), target.binding.clone()];
+            assert_eq!(
+                match_binding(&both, &evidence),
+                expected.map(|_| &both[1]),
+                "{label}: beside the grant's own"
+            );
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// The registry's refusal of an empty policy for `profile`: the first
+/// predicate it requires, missing.
+#[track_caller]
+fn assert_empty_policy_refused<T: std::fmt::Debug>(
+    result: Result<T, RegistryError>,
+    profile: BindingProfile,
+    case: &str,
+) {
+    match result {
+        Err(RegistryError::RequiredPredicate { claim, problem }) => assert_eq!(
+            (claim, problem),
+            (
+                registry::required_claims(profile)[0],
+                PredicateProblem::Missing
+            ),
+            "{case}"
+        ),
+        other => panic!("{case}: expected RequiredPredicate: {other:?}"),
+    }
 }
