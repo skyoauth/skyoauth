@@ -11,9 +11,12 @@
 //!   `restore`) are unknown outcomes carrying the code, every other
 //!   refusal, and these two after a `preview`, are refused;
 //! - an issued reply whose members are not its challenge's is unknown;
-//! - after a failed write (a broken pipe) or a reset, the reply is still
-//!   read and the bytes read are kept, but only a refusal is believed: a
-//!   success the server sent without reading the request is unknown;
+//! - after a failed write (a broken pipe), a failed end of the write half
+//!   or a reset, the reply is still read and the bytes read are kept, but
+//!   only a refusal is believed: a success the server sent without reading
+//!   the request is unknown;
+//! - a wait whose setting is refused as invalid (macOS, once the server has
+//!   closed) is passed over, and the reply read as usual;
 //! - everything else once the request may have been written is unknown,
 //!   never refused and never a success: no reply, a partial reply, bytes
 //!   after the newline, a reply over the cap, a server too slow for the
@@ -27,7 +30,11 @@
 //!
 //! Unix only, like the module. Each wait of a test is bounded
 //! ([`TEST_WAIT`]); no test polls: a fake server that must outlast the
-//! call blocks until the call has returned.
+//! call blocks until the call has returned. What only Linux does is
+//! checked on Linux alone: the kind of a lost connection, a reset when a
+//! server closes with bytes unread (macOS reads the end of the stream
+//! instead), and a queued connection still readable after its client has
+//! gone.
 
 use std::{
     io::{self, Read as _, Write as _},
@@ -442,7 +449,10 @@ fn lost_by(outcome: &Result<Reply, CallError>, kind: io::ErrorKind) -> bool {
 /// `invalid_request` (which the server sends before reading the request in
 /// full) are refusals, a store failure after a write is still an uncertain
 /// commit, and nothing at all, a partial refusal or a success, a
-/// well-formed one even, is an unknown outcome.
+/// well-formed one even, is an unknown outcome. That last part is Linux's
+/// alone: macOS has no reset there, the client reads the end of the stream
+/// and cannot tell this server from one that read the whole request, so
+/// elsewhere these are only never refused and never not sent.
 #[test]
 fn a_reset_keeps_the_bytes_read_and_only_a_refusal_is_believed() {
     let forbidden = golden("error_forbidden");
@@ -486,8 +496,12 @@ fn a_reset_keeps_the_bytes_read_and_only_a_refusal_is_believed() {
             let case = format!("{op:?}, {} bytes, first {reply_first}", reply.len());
             match &expected {
                 Some(expected) => assert_eq!(outcome, Err(*expected), "{case}"),
-                None => assert!(
+                None if cfg!(target_os = "linux") => assert!(
                     lost_by(&outcome, io::ErrorKind::ConnectionReset),
+                    "{case}: {outcome:?}"
+                ),
+                None => assert!(
+                    !matches!(outcome, Err(CallError::Refused(_) | CallError::NotSent(_))),
                     "{case}: {outcome:?}"
                 ),
             }
@@ -694,13 +708,18 @@ fn a_listener_that_never_accepts_is_unknown() {
     assert_eq!(outcome, Err(CallError::Unknown(UnknownOutcome::TimedOut)));
     assert!(took >= timeouts.total && took < TEST_WAIT / 2, "{took:?}");
     assert_eq!(connects.load(Ordering::SeqCst), 1);
-    // The queued connection holds the whole request line, then its end.
-    let (mut queued, _) = listener.accept().unwrap();
-    queued.set_read_timeout(Some(TEST_WAIT)).unwrap();
-    read_request(
-        &mut queued,
-        request(Op::Bootstrap).encode().unwrap().as_bytes(),
-    );
+    // The queued connection holds the whole request line, then its end. On
+    // Linux only: by now the call's thread may have dropped its end, and
+    // macOS then refuses the options of the queued socket (`EINVAL`), and
+    // may refuse its accept.
+    if cfg!(target_os = "linux") {
+        let (mut queued, _) = listener.accept().unwrap();
+        queued.set_read_timeout(Some(TEST_WAIT)).unwrap();
+        read_request(
+            &mut queued,
+            request(Op::Bootstrap).encode().unwrap().as_bytes(),
+        );
+    }
 }
 
 /// Paths no connection can be made to: missing, a regular file, a
@@ -840,6 +859,187 @@ fn a_write_that_times_out_is_unknown() {
             "{op:?}"
         );
     }
+}
+
+/// A stream, not a socket, that takes the whole line written to it and
+/// answers `reply`, a few bytes per read, then the end of the stream; the
+/// end of its write half fails with `close`, and the setting of each wait
+/// with `waits`, when given.
+struct Scripted {
+    reply: Vec<u8>,
+    close: Option<io::ErrorKind>,
+    waits: Option<io::ErrorKind>,
+    written: Arc<Mutex<Vec<u8>>>,
+}
+
+impl io::Read for Scripted {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.reply.len().min(buf.len()).min(7);
+        buf[..read].copy_from_slice(&self.reply[..read]);
+        self.reply.drain(..read);
+        Ok(read)
+    }
+}
+
+impl io::Write for Scripted {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.written.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Scripted {
+    fn fail(kind: Option<io::ErrorKind>) -> io::Result<()> {
+        kind.map_or(Ok(()), |kind| Err(io::Error::from(kind)))
+    }
+}
+
+impl HalfClose for Scripted {
+    fn close_write(&mut self) -> io::Result<()> {
+        Self::fail(self.close)
+    }
+
+    fn set_read_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
+        Self::fail(self.waits)
+    }
+
+    fn set_write_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
+        Self::fail(self.waits)
+    }
+}
+
+/// The connector of [`Scripted`] streams, keeping what was written.
+struct Script {
+    reply: Vec<u8>,
+    close: Option<io::ErrorKind>,
+    waits: Option<io::ErrorKind>,
+    written: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Connector for Script {
+    type Stream = Scripted;
+
+    fn connect(&self) -> io::Result<Scripted> {
+        Ok(Scripted {
+            reply: self.reply.clone(),
+            close: self.close,
+            waits: self.waits,
+            written: Arc::clone(&self.written),
+        })
+    }
+}
+
+/// Calls `op` over a [`Scripted`] stream: the outcome, and the bytes
+/// written.
+fn scripted(
+    op: Op,
+    reply: &[u8],
+    close: Option<io::ErrorKind>,
+    waits: Option<io::ErrorKind>,
+) -> (Result<Reply, CallError>, Vec<u8>) {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let script = Script {
+        reply: reply.to_vec(),
+        close,
+        waits,
+        written: Arc::clone(&written),
+    };
+    let outcome = call(&LocalClient::with_connector(script, PATIENT), &request(op));
+    let written = written.lock().unwrap().clone();
+    (outcome, written)
+}
+
+/// An end of the write half that fails after the whole line was written
+/// (`EINVAL` or, as macOS does once the server has closed, `ENOTCONN`):
+/// the reply is still read, and as after a failed write only a refusal is
+/// believed. A server dispatches a request only once it has read the end of
+/// the stream, which this end never sent: a well-formed success, then, is
+/// not one the server sent for this request, and is unknown.
+#[test]
+fn a_half_close_that_fails_after_the_whole_line_still_reads_the_reply() {
+    for kind in [io::ErrorKind::InvalidInput, io::ErrorKind::NotConnected] {
+        let mut cases = vec![
+            (
+                Op::Restore,
+                golden("error_forbidden"),
+                Err(CallError::Refused(ErrorCode::Forbidden)),
+            ),
+            (
+                Op::Preview,
+                golden("error_server_error"),
+                Err(CallError::Refused(ErrorCode::ServerError)),
+            ),
+            (
+                Op::Bootstrap,
+                golden("error_auth_unavailable"),
+                Err(CallError::Unknown(UnknownOutcome::UncertainCommit(
+                    ErrorCode::AuthUnavailable,
+                ))),
+            ),
+            (
+                Op::IssueChallenge,
+                Vec::new(),
+                Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
+            ),
+        ];
+        for op in Op::ALL {
+            cases.push((
+                op,
+                golden_success(op),
+                Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
+            ));
+        }
+        for (op, reply, expected) in cases {
+            let (outcome, written) = scripted(op, &reply, Some(kind), None);
+            let case = format!("{kind:?}, {op:?}, {} bytes", reply.len());
+            assert_eq!(outcome, expected, "{case}");
+            assert_eq!(
+                written,
+                request(op).encode().unwrap().as_bytes(),
+                "{case}: the whole line"
+            );
+        }
+    }
+}
+
+/// A wait whose setting is refused as invalid (`EINVAL`, as macOS refuses
+/// every option of a socket once the server has closed) is passed over:
+/// each golden success is its operation's success, and a refusal a
+/// refusal. A setting that fails otherwise is an unknown outcome, before
+/// anything is written.
+#[test]
+fn a_wait_refused_as_invalid_is_passed_over() {
+    for op in Op::ALL {
+        let reply = golden_success(op);
+        let expected = parse_reply(op, &reply).unwrap();
+        let (outcome, written) = scripted(op, &reply, None, Some(io::ErrorKind::InvalidInput));
+        assert_eq!(outcome, Ok(expected), "{op:?}");
+        assert_eq!(written, request(op).encode().unwrap().as_bytes(), "{op:?}");
+    }
+    let (outcome, _) = scripted(
+        Op::Restore,
+        &golden("error_forbidden"),
+        None,
+        Some(io::ErrorKind::InvalidInput),
+    );
+    assert_eq!(outcome, Err(CallError::Refused(ErrorCode::Forbidden)));
+    let (outcome, written) = scripted(
+        Op::Restore,
+        &golden_success(Op::Restore),
+        None,
+        Some(io::ErrorKind::Other),
+    );
+    assert_eq!(
+        outcome,
+        Err(CallError::Unknown(UnknownOutcome::ConnectionLost(
+            io::ErrorKind::Other
+        )))
+    );
+    assert!(written.is_empty());
 }
 
 /// A connector whose connect blocks until the test hands it a stream.

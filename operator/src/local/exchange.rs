@@ -85,7 +85,9 @@ pub trait HalfClose: Read + Write {
     ///
     /// # Errors
     ///
-    /// The stream's error.
+    /// The stream's error (on macOS, `ENOTCONN` once the peer has closed).
+    /// The call reads on, and believes only a refusal, as after a failed
+    /// write (see [`LocalClient`], "Exchange").
     fn close_write(&mut self) -> io::Result<()>;
 
     /// Bounds each later read: `None` blocks without a bound. A read past
@@ -94,7 +96,14 @@ pub trait HalfClose: Read + Write {
     ///
     /// # Errors
     ///
-    /// The stream's error.
+    /// The stream's error. [`io::ErrorKind::InvalidInput`] is passed over,
+    /// here and for [`HalfClose::set_write_wait`]: the stream keeps the
+    /// wait it had, if any. A wait asked for is never zero, the one wait
+    /// `std` refuses; macOS refuses every option of a socket whose peer has
+    /// closed (`EINVAL`), and such a socket no longer blocks: a read
+    /// returns what is buffered, then the end of the stream, and a write
+    /// fails at once. Whatever the stream, the caller waits no longer than
+    /// [`Timeouts::total`].
     fn set_read_wait(&mut self, wait: Option<Duration>) -> io::Result<()>;
 
     /// Bounds each later write, as [`HalfClose::set_read_wait`] does reads.
@@ -210,6 +219,18 @@ impl Op {
 /// included, is [`UnknownOutcome::ConnectionLost`]. (A write to a closed
 /// socket raises `SIGPIPE`; Rust programs ignore it by default, and a
 /// process that does not is killed by it.)
+///
+/// An end of the write half that fails after the line was written in full
+/// counts as a failed write too: only a refusal is believed. On a socket it
+/// fails only once the server has closed (macOS: `ENOTCONN`; Linux does not
+/// fail it), and the server dispatches a request only once it has read the
+/// end of the stream, which the failed end never sent: a server that
+/// closed before it can have answered with a refusal, never a success.
+///
+/// On macOS a socket refuses every option (`EINVAL`) once it can neither
+/// send nor receive, which is the case once the server has closed: a wait
+/// whose setting fails as [`io::ErrorKind::InvalidInput`] is passed over
+/// (see [`HalfClose::set_read_wait`]), and the reply is read as usual.
 ///
 /// # Time limits
 ///
@@ -485,7 +506,8 @@ fn run<C: Connector>(
 /// A write or an end of the write half that fails other than by a timeout
 /// does not stop the read (the server may have answered before reading the
 /// whole request, and closed), and a reset ends the stream with what was
-/// read: both are noted in [`Received::lost`]. Any other failure, a
+/// read: both are noted in [`Received::lost`]. A wait whose setting is
+/// refused as invalid is passed over ([`settle`]). Any other failure, a
 /// timeout included, is an unknown outcome: the line may have been
 /// written.
 fn exchange<S: HalfClose>(
@@ -494,9 +516,7 @@ fn exchange<S: HalfClose>(
     deadline: Option<Instant>,
     idle: Duration,
 ) -> Result<Received, UnknownOutcome> {
-    stream
-        .set_write_wait(wait(deadline, Some(idle))?)
-        .map_err(failed)?;
+    settle(stream.set_write_wait(wait(deadline, Some(idle))?))?;
     let lost = note(stream.write_all(line).and_then(|()| stream.flush()), None)?;
     let lost = note(stream.close_write(), lost)?;
     let mut reply = Vec::new();
@@ -505,9 +525,7 @@ fn exchange<S: HalfClose>(
         // Until the reply begins, the server may be silent for as long as
         // its deadline and transaction last: only the total bounds it.
         let bound = if reply.is_empty() { None } else { Some(idle) };
-        stream
-            .set_read_wait(wait(deadline, bound)?)
-            .map_err(failed)?;
+        settle(stream.set_read_wait(wait(deadline, bound)?))?;
         match stream.read(&mut chunk) {
             Ok(0) => return Ok(Received { reply, lost }),
             Ok(read) => {
@@ -545,6 +563,17 @@ fn wait(
         return Err(UnknownOutcome::TimedOut);
     }
     Ok(Some(bound.map_or(left, |bound| bound.min(left))))
+}
+
+/// The outcome of the setting of a wait: a failure is an unknown outcome
+/// ([`failed`]), but for [`io::ErrorKind::InvalidInput`], which is passed
+/// over and the previous wait kept (macOS refuses every option of a socket
+/// whose peer has closed; see [`HalfClose::set_read_wait`]).
+fn settle(result: io::Result<()>) -> Result<(), UnknownOutcome> {
+    match result {
+        Err(err) if err.kind() != io::ErrorKind::InvalidInput => Err(failed(err)),
+        _ => Ok(()),
+    }
 }
 
 /// Notes the failure of a write or of the end of the write half, after
