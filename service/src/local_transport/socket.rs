@@ -1526,10 +1526,15 @@ mod tests {
     /// [`PrivateDir::create`] refuses it, whichever term of its check of
     /// the open directory it fails. Deterministic: the test hook swaps the
     /// directory at that step. Each swap passes every other term, so that
-    /// removing one term (or the whole check) is caught here. Not covered:
-    /// the device term (it differs from the path's only across file
-    /// systems, where the inode term of a link already refuses) and, when
-    /// the tests do not run as root, the owner term.
+    /// removing one term (or the whole check) is caught here. The same
+    /// swaps after the open (the open directory is then the verified one
+    /// and the path is not) are refused by the comparison of the open
+    /// directory with the path. Not covered: the device term, which alone
+    /// refuses a link to another file system whose inode number equals the
+    /// link's (fresh tmpfs instances, btrfs subvolumes); a unit test cannot
+    /// set that up without mounts. The owner case needs root (others cannot
+    /// give a directory away) and is skipped otherwise: CI's root step runs
+    /// only `--test local_transport`, so it runs in a manual root run.
     #[test]
     fn a_directory_swapped_in_before_its_check_is_not_verified() {
         // Swaps: the directory at the path is renamed away and `put`
@@ -1563,27 +1568,29 @@ mod tests {
             }),
         ];
         for (n, (what, put)) in cases.into_iter().enumerate() {
-            let dir = Scratch::new(&format!("swapped-{n}"));
-            let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
-            if what == "another owner" && uid != 0 {
-                continue;
-            }
-            let parent = opened(&dir.0);
-            let name = OsStr::new("local.sock");
-            CREATE_HOOK.set(Some(Box::new(move |at, path: &Path| {
-                if at == CreateStep::Made {
-                    let away = path.with_extension("away");
-                    fs::rename(path, &away).unwrap();
-                    put(path, &away);
+            for step in [CreateStep::Made, CreateStep::Opened] {
+                let dir = Scratch::new(&format!("swapped-{n}-{step:?}"));
+                let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
+                if what == "another owner" && uid != 0 {
+                    continue;
                 }
-            })));
-            let created = PrivateDir::create(&parent, name, uid, uid);
-            CREATE_HOOK.set(None);
-            assert!(
-                matches!(created, Err(BindError::NotVerified)),
-                "{what}: {:?}",
-                created.map(|dir| dir.map(|dir| dir.path.clone()))
-            );
+                let parent = opened(&dir.0);
+                let name = OsStr::new("local.sock");
+                CREATE_HOOK.set(Some(Box::new(move |at, path: &Path| {
+                    if at == step {
+                        let away = path.with_extension("away");
+                        fs::rename(path, &away).unwrap();
+                        put(path, &away);
+                    }
+                })));
+                let created = PrivateDir::create(&parent, name, uid, uid);
+                CREATE_HOOK.set(None);
+                assert!(
+                    matches!(created, Err(BindError::NotVerified)),
+                    "{what} at {step:?}: {:?}",
+                    created.map(|dir| dir.map(|dir| dir.path.clone()))
+                );
+            }
         }
     }
 
