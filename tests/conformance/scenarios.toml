@@ -1314,6 +1314,11 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a49::a49_neg_a_name_in_another_tenant_neither_collides_nor_shows",
   "nextest:skyoauth-scenarios/pg/security::a49::a49_neg_a_refused_create_consumes_no_id",
   "nextest:skyoauth-scenarios/pg/security::a49::a49_neg_other_tenants_principal_id_is_not_found_as_a_missing_one",
+  "nextest:skyoauth-scenarios/pg/security::a49_wire::a49_pos_each_reader_reads_its_own_tenants_operations",
+  "nextest:skyoauth-scenarios/pg/security::a49_wire::a49_neg_other_tenants_path_is_the_403_of_a_tenant_that_does_not_exist",
+  "nextest:skyoauth-scenarios/pg/security::a49_wire::a49_neg_other_tenants_operation_on_own_path_is_the_404_of_a_missing_one",
+  "nextest:skyoauth-scenarios/pg/security::a49_wire::a49_neg_another_trust_admins_operation_is_the_404_of_a_missing_one",
+  "nextest:skyoauth-scenarios/pg/security::a49_wire::a49_neg_own_list_shows_nothing_of_the_other_tenant",
 ]
 
 [[scenario.stage]]
