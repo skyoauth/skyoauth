@@ -10,8 +10,8 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use skyoauth_operator::recovery::{
     CHALLENGE_PREFIX, ChallengeError, DEFAULT_CHALLENGE_TTL, DEPLOYMENT_OPERATOR_ACTOR,
-    Expectations, KeyError, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL, OPERATOR_RESTORATION,
-    PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID,
+    Expectations, KeyError, MAX_CHALLENGE_BYTES, MAX_CHALLENGE_TTL, MIN_CHALLENGE_TTL,
+    OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID,
     PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
     PLAN_TRUST_ANCHOR_REF, RecoveryPublicKey, Refusal, RestorationPlan, canonical_json,
     challenge_message, check_challenge, parse_challenge,
@@ -386,6 +386,12 @@ fn parse_challenge_refuses_each_malformed_challenge_by_reason() {
             Syntax,
         ),
         ("raw_tab", prefixed(&with(&c, "op_1", "op\t1")), Syntax),
+        // The last control character, raw: not read, so not NotCanonical.
+        (
+            "raw_unit_separator",
+            prefixed(&with(&c, "op_1", "op\u{1f}1")),
+            Syntax,
+        ),
         ("bad_escape", prefixed(&with(&c, "op_1", "op\\x1")), Syntax),
         (
             "short_unicode_escape",
@@ -588,13 +594,14 @@ fn parse_challenge_refuses_each_malformed_challenge_by_reason() {
             prefixed(&with(&c, "\"adm_new\"", "{}")),
             WrongType,
         ),
-        // Refused at the third level, without reading deeper.
+        // Refused at the third level, without reading deeper (10,000
+        // levels: deep, and under the size cap).
         (
             "deeply_nested_object",
             prefixed(&with(
                 &c,
                 "\"adm_new\"",
-                &format!("{}{}", "{\"a\":".repeat(100_000), "}".repeat(100_000)),
+                &format!("{}{}", "{\"a\":".repeat(10_000), "}".repeat(10_000)),
             )),
             WrongType,
         ),
@@ -682,6 +689,17 @@ fn parse_challenge_refuses_each_malformed_challenge_by_reason() {
                 &c,
                 "null}",
                 "null,\"\u{10348}\":null,\"\\ud800\\udf48\":null}",
+            )),
+            DuplicateMember,
+        ),
+        // U+1F600 as is, then as an escaped surrogate pair whose high half
+        // is not D800, so the high half's shift matters.
+        (
+            "duplicate_member_by_surrogate_pair_high_above_d800",
+            prefixed(&with(
+                &c,
+                "null}",
+                "null,\"\u{1f600}\":null,\"\\ud83d\\ude00\":null}",
             )),
             DuplicateMember,
         ),
@@ -934,8 +952,10 @@ fn parse_challenge_refuses_each_malformed_challenge_by_reason() {
             reasons.push(*expected);
         }
     }
-    // Every reason has a case, with the four key refusals.
+    // Every reason but the size cap (its own test) has a case, with the
+    // four key refusals.
     assert_eq!(reasons.len(), 16);
+    assert!(!reasons.contains(&TooLarge));
     // The bounds themselves are accepted.
     for (from, to) in [
         (
@@ -956,12 +976,41 @@ fn parse_challenge_refuses_each_malformed_challenge_by_reason() {
     }
 }
 
+/// `M` of exactly [`MAX_CHALLENGE_BYTES`] bytes is read; one byte more is
+/// refused before any reading, even with a good prefix and `C`.
+#[test]
+fn parse_challenge_reads_at_most_the_size_cap() {
+    let base = challenge_message("op_1", 1, EXPIRES_AT, &good_plan());
+    let sized = |length: usize| {
+        let mut plan = good_plan();
+        plan.admin_id.push_str(&"x".repeat(length - base.len()));
+        challenge_message("op_1", 1, EXPIRES_AT, &plan)
+    };
+    let at_cap = sized(MAX_CHALLENGE_BYTES);
+    assert_eq!(at_cap.len(), MAX_CHALLENGE_BYTES);
+    let parsed = parse_challenge(&at_cap).unwrap();
+    assert_eq!(parsed.message(), at_cap);
+    let over_cap = sized(MAX_CHALLENGE_BYTES + 1);
+    assert_eq!(over_cap.len(), MAX_CHALLENGE_BYTES + 1);
+    assert_eq!(
+        parse_challenge(&over_cap).map(|_| ()),
+        Err(ChallengeError::TooLarge)
+    );
+    // Before the prefix.
+    assert_eq!(
+        parse_challenge(&vec![b'x'; MAX_CHALLENGE_BYTES + 1]).map(|_| ()),
+        Err(ChallengeError::TooLarge)
+    );
+    assert_eq!(MAX_CHALLENGE_BYTES, 64 * 1024);
+}
+
 /// Every refusal of parsing and checking has its own fixed text, which
 /// holds no value of the challenge.
 #[test]
 fn challenge_errors_and_refusals_show_no_value() {
     use ChallengeError::*;
     let errors = [
+        TooLarge,
         Prefix,
         NotUtf8,
         Syntax,

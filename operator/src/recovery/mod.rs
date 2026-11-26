@@ -35,6 +35,8 @@
 //! [`parse_challenge`] reads `M` strictly, then re-encodes what it read
 //! with [`canonical_json`] and requires the same bytes, so a non-canonical
 //! or extended `C` is never accepted (provisional lead pick, 2026-11-24).
+//! It refuses an `M` over [`MAX_CHALLENGE_BYTES`] before reading it, and
+//! reads the rest in time linear in its length.
 //! [`check_challenge`] then checks the challenge against what the operator
 //! expects ([`Expectations`]) and the operator's clock; only its result, a
 //! [`VerifiedChallenge`], is meant to be signed.
@@ -84,6 +86,13 @@ pub const DEFAULT_CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
 /// furthest ahead of the operator's clock that [`check_challenge`] accepts
 /// an expiry.
 pub const MAX_CHALLENGE_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// The largest `M` [`parse_challenge`] reads, in bytes: 64 KiB, the
+/// deployment-local transport's largest request line (the service's
+/// `MAX_REQUEST_BYTES`). An `M` the service issues is far smaller: the
+/// plan's `public_identity` and `trust_anchor_ref` are at most 2048 bytes
+/// each, and its other strings are identifiers (inferred bound).
+pub const MAX_CHALLENGE_BYTES: usize = 64 * 1024;
 
 /// The plan member that names the instance.
 pub const PLAN_INSTANCE_ID: &str = "instance_id";

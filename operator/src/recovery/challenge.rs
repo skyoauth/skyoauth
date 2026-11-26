@@ -8,11 +8,11 @@
 //! refuses them; the closed shape (members, types, fixed values, order and
 //! duplicates) is checked while reading, each with a reason of its own.
 
-use std::{fmt, time::Duration};
+use std::{cmp::Ordering, fmt, time::Duration};
 
 use super::{
-    CHALLENGE_PREFIX, DEPLOYMENT_OPERATOR_ACTOR, KeyError, MAX_CHALLENGE_TTL, OPERATOR_RESTORATION,
-    PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID,
+    CHALLENGE_PREFIX, DEPLOYMENT_OPERATOR_ACTOR, KeyError, MAX_CHALLENGE_BYTES, MAX_CHALLENGE_TTL,
+    OPERATOR_RESTORATION, PLAN_ADMIN_ID, PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID,
     PLAN_NEW_RECOVERY_PUBLIC_KEY, PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH,
     PLAN_TRUST_ANCHOR_REF, RecoveryPublicKey, canonical_json,
 };
@@ -62,20 +62,26 @@ const EXPIRY_HORIZON: Duration = MAX_CHALLENGE_TTL;
 /// input byte: `Debug` names the reason only, `Display` is fixed text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChallengeError {
+    /// More than [`MAX_CHALLENGE_BYTES`] bytes; nothing of them is read.
+    TooLarge,
     /// The bytes do not begin with [`CHALLENGE_PREFIX`], its newline
     /// included.
     Prefix,
     /// `C` is not UTF-8.
     NotUtf8,
-    /// `C` is not one JSON value (a bad token, string or escape, a raw
-    /// control character in a string, or bytes after the value).
+    /// `C` is not one JSON value as the reader reads it: a bad token,
+    /// string or escape, a raw control character in a string, or bytes
+    /// after the value. A `t`, `f` or `[` where a value starts is
+    /// [`ChallengeError::WrongType`] instead, whatever follows it.
     Syntax,
     /// A number that is not an `i64` integer in JSON's form: a fraction, an
     /// exponent, a leading zero, `-0`, or a value outside the `i64` range.
     Number,
     /// `C` or one of its members is not of its type: `C` or the plan not an
     /// object, a string member not a string, an integer member not an
-    /// integer, a boolean, an array, or an object below the plan.
+    /// integer, or an object below the plan. A `t`, `f` or `[` where a
+    /// value starts (a boolean or an array in JSON) is refused here at once,
+    /// without reading further, so even when the rest is not JSON.
     WrongType,
     /// An object names one member twice.
     DuplicateMember,
@@ -102,6 +108,7 @@ pub enum ChallengeError {
 impl fmt::Display for ChallengeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::TooLarge => "the challenge is larger than 64 KiB",
             Self::Prefix => "the challenge does not begin with the recovery challenge prefix",
             Self::NotUtf8 => "the challenge is not UTF-8",
             Self::Syntax => "the challenge is not one JSON value",
@@ -288,14 +295,22 @@ impl<'a> Reader<'a> {
             self.expect(b':')?;
             self.skip_whitespace();
             let value = self.value(depth)?;
-            if members.iter().any(|(seen, _)| *seen == name) {
-                return Err(ChallengeError::DuplicateMember);
-            }
-            if members
-                .last()
-                .is_some_and(|(last, _)| last.as_bytes() > name.as_bytes())
-            {
-                return Err(ChallengeError::UnsortedMembers);
+            // The names so far are strictly increasing, so a name above the
+            // last one is new and in order: one comparison per member. Only
+            // a name that is not above the last one is compared with the
+            // earlier names, once, and the object is refused.
+            if let Some((last, _)) = members.last() {
+                match last.as_bytes().cmp(name.as_bytes()) {
+                    Ordering::Less => {}
+                    Ordering::Equal => return Err(ChallengeError::DuplicateMember),
+                    Ordering::Greater => {
+                        return Err(if members.iter().any(|(seen, _)| *seen == name) {
+                            ChallengeError::DuplicateMember
+                        } else {
+                            ChallengeError::UnsortedMembers
+                        });
+                    }
+                }
             }
             members.push((name, value));
             self.skip_whitespace();
@@ -494,15 +509,33 @@ fn plan(members: Vec<(String, Value)>) -> Result<RestorationPlan, ChallengeError
 /// It checks nothing against the operator's expectations or clock: see
 /// [`check_challenge`].
 ///
+/// `M` is read only when it is at most [`MAX_CHALLENGE_BYTES`] long, and
+/// then in time linear in its length.
+///
 /// # Errors
 ///
-/// The first [`ChallengeError`] met, in this order: the prefix, UTF-8, the
-/// JSON reading (syntax, numbers, value types, duplicate and unsorted
-/// members, as they come), then the members of `C` in byte-wise order (an
-/// unknown or missing member, a type, a fixed value, the plan's members
-/// likewise, the plan's text bounds and new key), and last the canonical
-/// comparison.
+/// The first [`ChallengeError`] met, in this order:
+///
+/// 1. [`ChallengeError::TooLarge`], then [`ChallengeError::Prefix`], then
+///    [`ChallengeError::NotUtf8`];
+/// 2. one pass of the reader over `C`, which stops at the first error in
+///    the text: syntax, a number, a value of a type `C` never holds (a
+///    `t`, `f` or `[` where a value starts is
+///    [`ChallengeError::WrongType`] at once, even if the rest is not JSON),
+///    a repeated or out-of-order member name, each where it occurs;
+/// 3. `C` not an object, or a member of `C` other than its seven;
+/// 4. the members of `C` taken one by one in byte-wise order, each checked
+///    in full when taken: missing, of the wrong type, not its fixed value.
+///    The plan, when taken, is checked the same way: a member other than
+///    its eight, then its members one by one in byte-wise order, each with
+///    its own type, text bound or key check, so a refused new key is
+///    reported before a missing `trust_anchor_ref`. `tenant_id` comes
+///    after the plan;
+/// 5. the canonical comparison, [`ChallengeError::NotCanonical`].
 pub fn parse_challenge(message: &[u8]) -> Result<Challenge, ChallengeError> {
+    if message.len() > MAX_CHALLENGE_BYTES {
+        return Err(ChallengeError::TooLarge);
+    }
     let canonical = message
         .strip_prefix(CHALLENGE_PREFIX)
         .ok_or(ChallengeError::Prefix)?;
@@ -687,4 +720,67 @@ pub fn check_challenge<'c>(
         return Err(Refusal::OtherNewRecoveryKey);
     }
     Ok(VerifiedChallenge { challenge })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::mpsc, thread, time::Duration};
+
+    use super::*;
+
+    /// The text of an object of `count` members `"m0000000":null`, ...,
+    /// all different and in byte-wise order, then `tail` before its `}`.
+    fn many_members(count: usize, tail: &str) -> String {
+        let members: Vec<String> = (0..count).map(|i| format!("\"m{i:07}\":null")).collect();
+        format!("{{{}{tail}}}", members.join(","))
+    }
+
+    fn read_object(text: &str) -> (Result<usize, ChallengeError>, bool) {
+        let mut reader = Reader { text, at: 0 };
+        let members = reader.object(1).map(|members| members.len());
+        (members, reader.at == text.len())
+    }
+
+    /// The reader compares each member name with the last one only, so a
+    /// large object is read in linear time. Not a timing measurement: the
+    /// 300,000 members take some 300,000 name comparisons, where comparing
+    /// each name with every earlier one takes some 4.5e10, so the bound of
+    /// 5 seconds separates the two by orders of magnitude on any runner.
+    /// (`parse_challenge` refuses such an input as too large before reading
+    /// it, so the reader is called directly.)
+    #[test]
+    fn many_members_are_read_in_linear_time() {
+        const MEMBERS: usize = 300_000;
+        let text = many_members(MEMBERS, "");
+        assert!(text.len() > 4_000_000);
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(read_object(&text));
+        });
+        let read = finished
+            .recv_timeout(Duration::from_secs(5))
+            .expect("300,000 members are read within 5 seconds");
+        assert_eq!(read, (Ok(MEMBERS), true));
+    }
+
+    /// After many members, a repeated name is still found among the earlier
+    /// ones, and a new name out of order is unsorted.
+    #[test]
+    fn a_late_repeated_or_unsorted_name_is_found() {
+        for (tail, expected) in [
+            (",\"m0000000\":null", ChallengeError::DuplicateMember),
+            (",\"m0000500\":null", ChallengeError::DuplicateMember),
+            (",\"m0000999\":null", ChallengeError::DuplicateMember),
+            (",\"\\u006d0000500\":null", ChallengeError::DuplicateMember),
+            (",\"m0000500a\":null", ChallengeError::UnsortedMembers),
+            (",\"a\":null", ChallengeError::UnsortedMembers),
+        ] {
+            assert_eq!(
+                read_object(&many_members(1000, tail)).0,
+                Err(expected),
+                "{tail}"
+            );
+        }
+        assert_eq!(read_object(&many_members(1000, ",\"n\":null")).0, Ok(1001));
+    }
 }
