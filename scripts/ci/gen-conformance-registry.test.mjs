@@ -23,8 +23,12 @@ import {
   LocalDate,
   MILESTONES,
   parseConditional,
+  PARTIAL_BEGIN,
+  PARTIAL_END,
   parseToml,
+  partialStages,
   renderLayoutRow,
+  renderPartialTests,
   renderTable,
   rowConditionals,
   stageStamp,
@@ -60,9 +64,19 @@ function fixture(edit = (_rel, text) => text) {
 }
 
 const read = (root, rel) => readFileSync(join(root, rel), 'utf8');
+// The §2 partial-tests passage of a registry whose stages list no tests.
+const NO_PARTIAL = 'Partial tests by stage: none. No `planned` stage lists tests.';
+// The layout with the line between the partial-tests markers replaced by `line`.
+const withPartial = (layout, line) => layout.replace(new RegExp(`^(${reLiteral(PARTIAL_BEGIN)}\n)[^\n]*(\n${reLiteral(PARTIAL_END)})$`, 'm'), (_m, b, e) => `${b}${line}${e}`);
 // A repository file as fixtures start from it: the registry files with every
-// stage planned and no gate passed (registry-fixtures.mjs), the specs as they are.
-const registry = (rel) => (rel === SCENARIOS || rel === SUBCASES ? normaliseRegistry(read(REPO, rel)) : read(REPO, rel));
+// stage planned and no gate passed (registry-fixtures.mjs), the layout with the
+// partial-tests passage of such a registry, the other specs as they are.
+const registry = (rel) => {
+  const text = read(REPO, rel);
+  if (rel === SCENARIOS || rel === SUBCASES) return normaliseRegistry(text);
+  if (rel === LAYOUT) return withPartial(text, NO_PARTIAL);
+  return text;
+};
 
 // Runs the CLI and returns { status, stderr, stdout }.
 function cli(...args) {
@@ -208,7 +222,7 @@ describe('drift is detected', () => {
     assert.equal(r.status, 1);
     assert.match(r.stderr, new RegExp(`conformance-layout\\.md:${line}: §2 row A26 differs from the table rendered from the registry`));
     assert.equal(cli('--root', root).status, 0);
-    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
+    assert.equal(read(root, LAYOUT), registry(LAYOUT));
   });
 
   test('an edited registry column is rendered into the §2 table', () => {
@@ -224,7 +238,7 @@ describe('drift is detected', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, 'Counts by first stage: M1a 19 ', 'Counts by first stage: M1a 21 ') : t));
     assert.match(cli('--root', root, '--check').stderr, /conformance-layout\.md:\d+: the §2 counts sentences differ/);
     assert.equal(cli('--root', root).status, 0);
-    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
+    assert.equal(read(root, LAYOUT), registry(LAYOUT));
   });
 
   test('a new env in the registry needs legs before it passes', () => {
@@ -292,7 +306,7 @@ describe('spec errors stop generation', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? t.replace(`${specLine(t, 'A12')}\n`, '') : t));
     assert.match(cli('--root', root, '--check').stderr, /§2 row A12 differs/);
     assert.equal(cli('--root', root).status, 0);
-    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
+    assert.equal(read(root, LAYOUT), registry(LAYOUT));
   });
 
   test('a missing §2 table header', () => {
@@ -892,7 +906,7 @@ describe('conditional sub-ID sentences are rendered from subcases.toml', () => {
     const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '(back-channel logout, T30.6): verified sid targeting', '(back-channel logout, T30.6): verified sid targeting only') : t));
     assert.match(cli('--root', root, '--check').stderr, /§2 row A33 differs/);
     assert.equal(cli('--root', root).status, 0);
-    assert.equal(read(root, LAYOUT), read(REPO, LAYOUT));
+    assert.equal(read(root, LAYOUT), registry(LAYOUT));
   });
 });
 
@@ -1178,5 +1192,257 @@ describe('a value with an own toString key is a diagnostic, not a crash', () => 
       assert.match(r.stderr, re);
       assert.doesNotMatch(r.stderr, /internal error/);
     }
+  });
+});
+
+describe('the §2 partial-tests passage', () => {
+  // `tests = [...]` with `n` test IDs of scenario `id`, short enough for the
+  // generator to keep the list on one line (the generator does not resolve
+  // them; the registry check does).
+  const testsOf = (id, n) => `tests = [${Array.from({ length: n }, (_, i) => `"t:${id}.${i}"`).join(', ')}]`;
+  // Planned stages given tests in a fixture, as [id, milestone, count], on
+  // purpose neither in registry order nor in count order. A12's M4 stage and
+  // A26's M1a stage keep `tests = []`.
+  const PARTIAL = [
+    ['A26', 'M2', 1],
+    ['A12', 'M3', 2],
+    ['A04', 'M1a', 3],
+    ['A12', 'M2', 4],
+  ];
+  const WANT = 'Partial tests by stage: A04 M1a 3 · A12 M2 4 · A12 M3 2 · A26 M2 1. 4 `planned` stages list 10 partial tests.';
+  const withTests = (t, list = PARTIAL) => list.reduce((x, [id, m, n]) => editStageAt(x, id, m, 'tests = []', testsOf(id, n)), t);
+  // The line between the markers of a layout text, and its 1-based line number.
+  const passageOf = (layout) => {
+    const lines = layout.split('\n');
+    const b = lines.indexOf(PARTIAL_BEGIN);
+    assert.ok(b >= 0, 'no BEGIN marker');
+    assert.equal(lines[b + 2], PARTIAL_END);
+    return { text: lines[b + 1], n: b + 2 };
+  };
+  const layoutUnchanged = (root, re) => {
+    const before = read(root, LAYOUT);
+    failsBothModes(root, re);
+    assert.equal(read(root, LAYOUT), before);
+  };
+
+  test('the fixtures start from the passage of a registry with no tests', () => {
+    assert.equal(passageOf(registry(LAYOUT)).text, NO_PARTIAL);
+    assert.equal(cli('--root', fixture(), '--check').status, 0);
+  });
+
+  // Checks the passage of a root's layout against its scenarios.toml, derived
+  // here without the generator: entries in file order (tasks §8 order),
+  // stages in file order. With no planned stage listing tests (the last one
+  // implemented), the passage is the empty one.
+  const assertPassageOfRoot = (root) => {
+    const want = [];
+    const implemented = [];
+    for (const e of parseToml(read(root, SCENARIOS)).scenario.filter((x) => x.kind === 'scenario')) {
+      for (const s of e.stage) {
+        if (s.status === 'implemented') implemented.push(`${e.id} ${s.milestone}`);
+        else if ((s.tests ?? []).length) want.push(`${e.id} ${s.milestone} ${s.tests.length}`);
+      }
+    }
+    const { text } = passageOf(read(root, LAYOUT));
+    if (!want.length) {
+      assert.equal(text, NO_PARTIAL);
+      return;
+    }
+    const m = /^Partial tests by stage: (.*)\. (\d+) `planned` stages? lists? (\d+) partial tests?\.$/.exec(text);
+    assert.ok(m, text);
+    assert.deepEqual(m[1].split(' · '), want);
+    assert.equal(Number(m[2]), want.length);
+    assert.equal(Number(m[3]), want.reduce((n, w) => n + Number(w.split(' ')[2]), 0));
+    for (const s of implemented) assert.ok(!m[1].split(' · ').some((w) => w.startsWith(`${s} `)), `implemented ${s} is listed`);
+  };
+
+  test('the committed passage lists every planned stage with tests, with its count, in registry order', () => {
+    assertPassageOfRoot(REPO);
+  });
+
+  test('with no planned stage listing tests, the committed-passage check expects the empty passage', () => {
+    // The fixture registry lists no tests; one stage implemented with tests
+    // (as when the last partial stage is promoted) leaves it empty too.
+    for (const root of [fixture(), fixture((rel, t) => (rel === SCENARIOS ? implementedA24(t) : t))]) {
+      assert.equal(cli('--root', root).status, 0);
+      assert.equal(cli('--root', root, '--check').status, 0);
+      assertPassageOfRoot(root);
+    }
+    // And it still rejects a stale empty passage.
+    const stale = fixture((rel, t) => (rel === SCENARIOS ? withTests(t) : t));
+    assert.throws(() => assertPassageOfRoot(stale));
+  });
+
+  test('counts and order: entries in tasks §8 order, stages in milestone order', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? withTests(t) : t));
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(passageOf(read(root, LAYOUT)).text, WANT);
+    assert.equal(read(root, LAYOUT), withPartial(registry(LAYOUT), WANT));
+    assert.equal(cli('--root', root, '--check').status, 0);
+    // The generator's own view agrees.
+    const { entries } = generate(root);
+    assert.deepEqual(
+      partialStages(entries.scenarios).map((s) => [s.id, s.milestone, s.count]),
+      [...PARTIAL].sort((x, y) => (x[0] + x[1] < y[0] + y[1] ? -1 : 1)),
+    );
+  });
+
+  test('a planned stage with tests = [] is left out, also when another stage of its entry is listed', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? withTests(t) : t));
+    assert.equal(cli('--root', root).status, 0);
+    const { text } = passageOf(read(root, LAYOUT));
+    for (const s of ['A12 M4', 'A26 M1a', 'A04 M2']) assert.doesNotMatch(text, new RegExp(`\\b${s} `));
+    // Registry shape: a missing status is planned and missing tests are [].
+    assert.deepEqual(partialStages([{ id: 'A01', stage: [{ milestone: 'M1a' }, { milestone: 'M2', tests: [] }, { milestone: 'M3', tests: ['x'] }] }]), [{ id: 'A01', milestone: 'M3', count: 1 }]);
+  });
+
+  test('an implemented stage is left out', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? implementedA24(withTests(t)) : t));
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(passageOf(read(root, LAYOUT)).text, WANT);
+    assert.doesNotMatch(read(root, LAYOUT), /A24 M1a \d/);
+    assert.deepEqual(partialStages([{ id: 'A01', stages: [{ milestone: 'M1a', status: 'implemented', tests: ['x', 'y'] }, { milestone: 'M2', status: 'planned', tests: ['z'] }] }]), [{ id: 'A01', milestone: 'M2', count: 1 }]);
+  });
+
+  test('singular, plural and empty forms', () => {
+    const one = [{ id: 'A01', stages: [{ milestone: 'M1a', status: 'planned', tests: ['x'] }] }];
+    assert.deepEqual(renderPartialTests(one), ['Partial tests by stage: A01 M1a 1. 1 `planned` stage lists 1 partial test.']);
+    const two = [{ id: 'A01', stages: [{ milestone: 'M1a', status: 'planned', tests: ['x', 'y'] }] }];
+    assert.deepEqual(renderPartialTests(two), ['Partial tests by stage: A01 M1a 2. 1 `planned` stage lists 2 partial tests.']);
+    assert.deepEqual(renderPartialTests([]), [NO_PARTIAL]);
+    assert.deepEqual(renderPartialTests([{ id: 'A01', stages: [{ milestone: 'M1a', status: 'planned', tests: [] }] }]), [NO_PARTIAL]);
+  });
+
+  test('tests added to a planned stage without regenerating fail --check, naming the passage line', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? withTests(t) : t));
+    const { n } = passageOf(read(root, LAYOUT));
+    const r = cli('--root', root, '--check');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, new RegExp(`conformance-layout\\.md:${n}: the §2 partial-tests passage differs from the one rendered from the registry`));
+    // Only the passage is stale.
+    assert.equal(r.stderr.trim().split('\n').length, 1, r.stderr);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(passageOf(read(root, LAYOUT)).text, WANT);
+    assert.equal(cli('--root', root, '--check').status, 0);
+  });
+
+  test('a test removed from a listed stage without regenerating fails --check', () => {
+    const root = fixture((rel, t) => (rel === SCENARIOS ? withTests(t) : rel === LAYOUT ? withPartial(t, WANT) : t));
+    assert.equal(cli('--root', root, '--check').status, 0);
+    writeFileSync(join(root, SCENARIOS), editStageAt(read(root, SCENARIOS), 'A12', 'M3', testsOf('A12', 2), testsOf('A12', 1)));
+    assert.match(cli('--root', root, '--check').stderr, /the §2 partial-tests passage differs/);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(passageOf(read(root, LAYOUT)).text, WANT.replace('A12 M3 2', 'A12 M3 1').replace('10 partial tests', '9 partial tests'));
+  });
+
+  test('a hand-edited passage fails --check and is rendered back, extra generated lines included', () => {
+    const EXTRA = 'Partial tests by stage: A04 M1a 3. 1 `planned` stage lists 3 partial tests.';
+    for (const line of [NO_PARTIAL.replace('none', 'A04 M1a 3'), `${NO_PARTIAL}\n${EXTRA}`, `${EXTRA}\n${EXTRA}\n${EXTRA}`]) {
+      const root = fixture((rel, t) => (rel === LAYOUT ? withPartial(t, line) : t));
+      const r = cli('--root', root, '--check');
+      assert.equal(r.status, 1, JSON.stringify(line));
+      assert.match(r.stderr, /the §2 partial-tests passage differs/);
+      assert.equal(cli('--root', root).status, 0);
+      assert.equal(read(root, LAYOUT), registry(LAYOUT));
+    }
+    // One extra line before the closing marker: one diagnostic, for the
+    // passage, and none for the lines after it, which it shifts.
+    {
+      const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, `${NO_PARTIAL}\n${PARTIAL_END}`, `${NO_PARTIAL}\n${EXTRA}\n${PARTIAL_END}`) : t));
+      const r = cli('--root', root, '--check');
+      assert.equal(r.status, 1);
+      assert.deepEqual(r.stderr.trim().split('\n'), [
+        `error: ${LAYOUT}:${passageOf(registry(LAYOUT)).n}: the §2 partial-tests passage differs from the one rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`,
+      ]);
+    }
+    // A stale passage and a stale table row after an extra passage line: each
+    // is named once, the row at its own committed line.
+    {
+      const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${NO_PARTIAL}\n${PARTIAL_END}`, `${NO_PARTIAL}\n${EXTRA}\n${PARTIAL_END}`), '| A26 | C | PG | PG, UC |', '| A26 | C | PG | PG, UC, FX |') : t));
+      const r = cli('--root', root, '--check');
+      const lines = r.stderr.trim().split('\n');
+      assert.equal(lines.length, 2, r.stderr);
+      assert.match(lines[0], /the §2 partial-tests passage differs/);
+      assert.match(lines[1], /§2 row A26 differs/);
+      assert.match(lines[1], new RegExp(`conformance-layout\\.md:${lineOf(read(root, LAYOUT), '| A26 |')}: `));
+    }
+    // No line at all between the markers.
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, `${PARTIAL_BEGIN}\n${NO_PARTIAL}\n`, `${PARTIAL_BEGIN}\n`) : t));
+    assert.equal(cli('--root', root, '--check').status, 1);
+    assert.equal(cli('--root', root).status, 0);
+    assert.equal(read(root, LAYOUT), registry(LAYOUT));
+  });
+
+  test('a missing, repeated or misplaced marker stops generation', () => {
+    const missing = /the generated partial-tests passage needs exactly a line "<!-- BEGIN GENERATED partial-tests: .*" in §2; found/;
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, `${PARTIAL_BEGIN}\n`, '') : t)), missing);
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, `\n${PARTIAL_END}`, '') : t)), missing);
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, PARTIAL_BEGIN, `${PARTIAL_BEGIN}\n${PARTIAL_BEGIN}`) : t)), /found 2 and 1/);
+    // The END marker first.
+    layoutUnchanged(
+      fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, `${PARTIAL_BEGIN}\n${NO_PARTIAL}\n${PARTIAL_END}`, `${PARTIAL_END}\n${NO_PARTIAL}\n${PARTIAL_BEGIN}`) : t)),
+      /the partial-tests END marker comes before its BEGIN marker/,
+    );
+    // Moved into the table, between rows A05 and A06: write mode used to
+    // render the whole table above it and keep rows A06-A64 below it, which a
+    // second --check accepted.
+    const moved = (t, to) => {
+      const block = `${PARTIAL_BEGIN}\n${NO_PARTIAL}\n${PARTIAL_END}\n`;
+      const without = replaceOnce(t, block, '');
+      const at = without.indexOf(to);
+      assert.ok(at >= 0, to);
+      return without.slice(0, at) + block + without.slice(at);
+    };
+    const placement = /conformance-layout\.md:\d+: the partial-tests passage must start after the §2 table and its counts sentences \(line \d+\)/;
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? moved(t, '| A06 |') : t)), placement);
+    // Right after the table, above the counts sentences.
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? moved(t, '\nCounts by first stage:') : t)), placement);
+    // Only the opening marker above the counts sentences: write mode used to
+    // replace the counts and the hand-written paragraph after them.
+    layoutUnchanged(
+      fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${PARTIAL_BEGIN}\n`, ''), 'Counts by first stage:', `${PARTIAL_BEGIN}\nCounts by first stage:`) : t)),
+      placement,
+    );
+    // Markers around the whole table and its counts.
+    layoutUnchanged(
+      fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${PARTIAL_BEGIN}\n`, ''), '| ID | Layer | Env |', `${PARTIAL_BEGIN}\n| ID | Layer | Env |`) : t)),
+      placement,
+    );
+    // Write mode replaces everything between the markers, so they may enclose
+    // only generated lines. The opening marker above the hand-written
+    // "Partial tests." lead-in, after the counts:
+    const region = /conformance-layout\.md:\d+: the partial-tests markers \(lines \d+ and \d+\) enclose a line that is not a generated "Partial tests by stage: \.\.\." line/;
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${PARTIAL_BEGIN}\n`, ''), '**Partial tests.**', `${PARTIAL_BEGIN}\n**Partial tests.**`) : t)), region);
+    // The closing marker below the "Stages are separate evidence" paragraph:
+    layoutUnchanged(
+      fixture((rel, t) => {
+        if (rel !== LAYOUT) return t;
+        const without = replaceOnce(t, `\n${PARTIAL_END}`, '');
+        const at = without.indexOf('\n', without.indexOf('**Stages are separate evidence.**'));
+        return `${without.slice(0, at)}\n${PARTIAL_END}${without.slice(at)}`;
+      }),
+      region,
+    );
+    // A blank or hand-written line between the markers.
+    for (const line of ['', 'extra', `${NO_PARTIAL}\nA04 M1a 3`]) layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? withPartial(t, line) : t)), region);
+    // Moved out of §2, into §3.
+    layoutUnchanged(
+      fixture((rel, t) => {
+        if (rel !== LAYOUT) return t;
+        const block = `${PARTIAL_BEGIN}\n${NO_PARTIAL}\n${PARTIAL_END}\n`;
+        return replaceOnce(replaceOnce(t, block, ''), '## 3. Naming and traceability\n', `## 3. Naming and traceability\n\n${block}`);
+      }),
+      /found 0 and 0/,
+    );
+  });
+
+  test('a planned subcase stage that lists tests stops generation', () => {
+    const root = fixture((rel, t) => (rel === SUBCASES ? editStage(t, 'subcase', 'A33.90', 'status = "planned"\ntests = []', 'status = "planned"\ntests = ["t:A33.90.0"]') : t));
+    const before = read(root, LAYOUT);
+    failsBothModes(root, new RegExp(`subcases\\.toml:\\d+: A33\\.90 M3: a planned subcase stage lists tests; partial tests of a sub-ID are not supported`));
+    assert.equal(read(root, LAYOUT), before);
+    // An implemented subcase stage still lists its tests (its stamp is checked).
+    const impl = fixture((rel, t) => (rel === SUBCASES ? editStage(t, 'subcase', 'A33.90', 'status = "planned"\ntests = []', 'status = "implemented"\ntests = ["t:A33.90.0"]') : t));
+    assert.doesNotMatch(cli('--root', impl, '--check').stderr, /a planned subcase stage lists tests/);
   });
 });

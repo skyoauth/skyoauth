@@ -16,15 +16,15 @@
 //! allowlist entries through the audited egress allowlist writer; and
 //! `security::wire_fixture` one of the A22 and A49 wire tests: the wire
 //! error catalogue reader, requests through the admin router, the keys and
-//! the operation seeding. None of them is a scenario. The A04, A05, A22,
-//! A32, A37, A43, A48, A49, A53 and A54 tests are partial: they are
-//! registered on their scenario's planned M1a stage and count for nothing
-//! (see each module's docs). A22's are in two modules: `security::a22`, the operator registry
-//! lookup, and `security::a22_wire`, the admin read router of
-//! `skyoauth_service::admin_http` driven with an already-verified peer;
-//! A49's are in two as well: `security::a49`, the generated IDs through the
-//! audited workload writes, and `security::a49_wire`, the cross-tenant
-//! probe of the same router.
+//! the operation seeding. None of them is a scenario. A scenario's tests
+//! may be in more than one module: a `security::aNN_wire` module drives the
+//! admin read router of `skyoauth_service::admin_http` with an
+//! already-verified peer, next to `security::aNN`. Some modules hold
+//! partial tests, registered on a planned stage and counting for nothing;
+//! this comment does not list which: the stages' `tests` in the registry
+//! (`tests/conformance/scenarios.toml`) are the source, layout §2
+//! "Partial tests" is generated from them, and each module's docs say what
+//! its tests cover.
 //! `harness::pg_teardown`
 //! tests the harness's own database teardown (`src/pg.rs`), and
 //! `harness::wire_errors` the wire error catalogue
