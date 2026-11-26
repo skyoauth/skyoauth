@@ -65,22 +65,57 @@ const PRIVATE_DIR_ATTEMPTS: u64 = 16;
 /// ([`check_ancestors`]), as Linux's own lookup does.
 const MAX_SYMLINKS: u32 = 40;
 
-/// `O_NOFOLLOW | O_NONBLOCK` for opening the lock file, by architecture:
-/// the crate does not depend on `libc` (which this crate may not name
-/// without a new dependency), so the values are Linux's own, from its
-/// `asm-generic/fcntl.h` (`O_NOFOLLOW` 0o400000 on x86_64 and riscv64) and
-/// `arch/arm64/include/uapi/asm/fcntl.h` (0o100000 on aarch64), and
-/// `O_NONBLOCK` 0o4000 on all three. Elsewhere there is none, and
-/// [`bind`] refuses to start ([`BindError::Io`] of kind
+/// Linux's `open` flags that differ by architecture: the crate does not
+/// depend on `libc` (which this crate may not name without a new
+/// dependency), so the values are Linux's own.
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        )
+    )),
+    allow(dead_code, reason = "constructed only where the flags are known")
+)]
+struct OpenFlags {
+    /// `O_NOFOLLOW`.
+    no_follow: i32,
+    /// `O_DIRECTORY`.
+    directory: i32,
+}
+
+/// `O_PATH`, 0o10000000 on x86_64, aarch64 and riscv64: a descriptor that
+/// names a file (a directory the process may search but not list included)
+/// without opening it for reading.
+const O_PATH: i32 = 0o10_000_000;
+
+/// `O_NONBLOCK`, 0o4000 on x86_64, aarch64 and riscv64.
+const O_NONBLOCK: i32 = 0o4000;
+
+/// The flags of [`OpenFlags`], by architecture, from Linux's
+/// `asm-generic/fcntl.h` (`O_NOFOLLOW` 0o400000 and `O_DIRECTORY` 0o200000
+/// on x86_64 and riscv64) and `arch/arm64/include/uapi/asm/fcntl.h`
+/// (0o100000 and 0o40000 on aarch64). Elsewhere there are none: the
+/// socket's directory is checked by its path, and [`bind`] refuses to start
+/// when it opens the lock file ([`BindError::Io`] of kind
 /// [`io::ErrorKind::Unsupported`]).
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "riscv64")
 ))]
-const LOCK_OPEN_FLAGS: Option<i32> = Some(0o400_000 | 0o4000);
+const OPEN_FLAGS: Option<OpenFlags> = Some(OpenFlags {
+    no_follow: 0o400_000,
+    directory: 0o200_000,
+});
 /// See the other architectures' definition.
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const LOCK_OPEN_FLAGS: Option<i32> = Some(0o100_000 | 0o4000);
+const OPEN_FLAGS: Option<OpenFlags> = Some(OpenFlags {
+    no_follow: 0o100_000,
+    directory: 0o40_000,
+});
 /// See the Linux definitions: no flags known here.
 #[cfg(not(all(
     target_os = "linux",
@@ -90,7 +125,7 @@ const LOCK_OPEN_FLAGS: Option<i32> = Some(0o100_000 | 0o4000);
         target_arch = "aarch64"
     )
 )))]
-const LOCK_OPEN_FLAGS: Option<i32> = None;
+const OPEN_FLAGS: Option<OpenFlags> = None;
 
 /// Why [`bind`](super::LocalTransport::bind) did not start the transport.
 /// Nothing is left at the socket path on any variant (a stale socket it
@@ -113,19 +148,30 @@ pub enum BindError {
     /// service UID or root when the service UID is the process's effective
     /// UID, else (root binding for another service UID) the effective UID
     /// itself, so the service UID cannot rename what the bind creates in
-    /// it. Another UID could otherwise replace the socket.
+    /// it. Another UID could otherwise replace the socket. Also a directory
+    /// that is not the one the check of its path reached (it was moved
+    /// while the bind checked it).
     UnsafeDirectory,
     /// A directory the lookup of the socket's directory passes through (an
-    /// ancestor, or one holding a symbolic link on the way) is not owned by
-    /// root, the service UID or the process's effective UID, or is writable
-    /// by its group or others without the sticky bit: another UID could rename the socket's
-    /// directory, or the path to it. `depth` names the directory by its
-    /// depth below the root directory (0 is the root directory itself), not
-    /// by its path.
+    /// ancestor, or one holding a symbolic link on the way) is writable by
+    /// its group or others without the sticky bit, or has an owner the bind
+    /// does not trust: root or the service UID when the service UID is the
+    /// process's effective UID, else (a bind for another UID) root alone;
+    /// or a symbolic link on the way, in such a directory that others may
+    /// write (sticky), has an owner the bind does not trust. Another UID
+    /// could rename the socket's directory, or the path to it. `depth`
+    /// names the directory by its depth below the root directory (0 is the
+    /// root directory itself), not by its path.
     UnsafeAncestor {
         /// The unsafe directory's depth below the root directory.
         depth: usize,
     },
+    /// The service UID is not the process's effective UID, and the system
+    /// has no `/proc/self/fd`: a bind for another UID reaches every entry it
+    /// creates, opens or removes in the socket's directory through the open
+    /// directory, never by a path looked up again, and refuses to start
+    /// without it.
+    NoDescriptorPaths,
     /// Something is at the socket path that is not a socket owned by the
     /// service UID (a file, a directory, a symbolic link, another UID's
     /// socket), or at the lock path that is not a regular file owned by the
@@ -140,7 +186,9 @@ pub enum BindError {
     /// service UID (the socket), with mode 0700 or 0600.
     NotVerified,
     /// A file-system or socket call failed, a refused change of owner (the
-    /// process may not give the socket to the service UID) included; also
+    /// process may not give the lock file or the socket to the service UID,
+    /// or link them once given away: it needs `CAP_CHOWN`, and `CAP_FOWNER`
+    /// where `fs.protected_hardlinks` is set) included; also
     /// a lookup of the socket's directory through more than 40 symbolic
     /// links, and a target where the lock file cannot be opened without
     /// following a symbolic link (kind [`io::ErrorKind::Unsupported`]: not
@@ -168,8 +216,13 @@ impl fmt::Display for BindError {
             Self::UnsafeAncestor { depth } => write!(
                 f,
                 "the local socket's directory is reached through a directory {depth} levels \
-                 below the root directory that is not owned by root, the service UID or the \
-                 process's UID, or is writable by group or others without the sticky bit",
+                 below the root directory that is not owned by root (or by the service UID \
+                 when it is the process's UID), is writable by group or others without the \
+                 sticky bit, or holds a symbolic link on the way of another owner",
+            ),
+            Self::NoDescriptorPaths => f.write_str(
+                "the local socket can be bound for another service UID only through \
+                 /proc/self/fd, which is not available",
             ),
             Self::PathOccupied => f.write_str(
                 "the local socket path holds something other than a socket owned by the \
@@ -193,6 +246,7 @@ impl std::error::Error for BindError {
             | Self::StagingPathTooLong
             | Self::UnsafeDirectory
             | Self::UnsafeAncestor { .. }
+            | Self::NoDescriptorPaths
             | Self::PathOccupied
             | Self::InUse
             | Self::NotVerified => None,
@@ -212,7 +266,12 @@ impl From<io::Error> for BindError {
 /// lock.
 #[derive(Debug)]
 pub(super) struct SocketFile {
+    /// The socket path as given.
     path: PathBuf,
+    /// The socket's directory, open: the socket is removed through it.
+    parent: ParentDir,
+    /// The socket's name in `parent`.
+    name: OsString,
     dev: u64,
     ino: u64,
     /// Locked (exclusive, `flock`) until dropped, after the path is
@@ -235,17 +294,119 @@ impl Drop for SocketFile {
     fn drop(&mut self) {
         // Under the lock: no other transport can have published a socket at
         // the path, and the inode check leaves anything else in place.
-        if fs::symlink_metadata(&self.path)
+        let entry = self.parent.entry(&self.name);
+        if fs::symlink_metadata(&entry)
             .is_ok_and(|metadata| is_socket(&metadata, self.dev, self.ino))
         {
-            let _ = fs::remove_file(&self.path);
+            let _ = fs::remove_file(&entry);
         }
+    }
+}
+
+/// The open file `file` as a path, `/proc/self/fd/<fd>`, where the system
+/// has `/proc/self/fd` and the path leads to `file` itself.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn descriptor_path(file: &File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd as _;
+    let path = Path::new("/proc/self/fd").join(file.as_raw_fd().to_string());
+    let (Ok(at_path), Ok(opened)) = (fs::metadata(&path), file.metadata()) else {
+        return None;
+    };
+    (at_path.dev() == opened.dev() && at_path.ino() == opened.ino()).then_some(path)
+}
+
+/// The open file as a path: none where the system has no `/proc/self/fd`.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn descriptor_path(_file: &File) -> Option<PathBuf> {
+    None
+}
+
+/// The socket's directory, opened once and checked: every entry the bind
+/// creates, opens, links or removes in it (the lock file, the private
+/// directories, the socket) is reached through the open directory,
+/// `/proc/self/fd/<fd>/<entry>`, never through its path looked up again,
+/// so a rename of the directory, or of one above it, after the check
+/// redirects none of them. Where the system has no `/proc/self/fd`, the
+/// entries are reached through the absolute path, and only a bind for the
+/// process's own UID starts ([`BindError::NoDescriptorPaths`]).
+#[derive(Debug)]
+struct ParentDir {
+    /// The directory's absolute path, as given (the working directory
+    /// joined to a relative one).
+    path: PathBuf,
+    /// `/proc/self/fd/<fd>` of the open directory, where the system has it.
+    fd_dir: Option<PathBuf>,
+    /// The open directory (`O_PATH`: no read permission needed), kept open
+    /// while `fd_dir` names it; `None` where [`OPEN_FLAGS`] are not known.
+    _handle: Option<File>,
+}
+
+impl ParentDir {
+    /// Opens the directory at `path`, an absolute path, never through a
+    /// symbolic link at `path` itself (`O_NOFOLLOW`), and checks the open
+    /// directory ([`check_directory`]), then the lookup of `path`
+    /// ([`check_ancestors`]), which must end at the open directory, else
+    /// [`BindError::UnsafeDirectory`] (it was moved in between). A symbolic
+    /// link or another file at `path` is [`BindError::UnsafeDirectory`]; a
+    /// failed open is reported as the walk reports it, when that refuses
+    /// the path (an unsafe ancestor that the open could not pass, say).
+    fn open(path: PathBuf, effective_uid: u32, service_uid: u32) -> Result<Self, BindError> {
+        let handle = match OPEN_FLAGS {
+            Some(flags) => {
+                let opened = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(O_PATH | flags.directory | flags.no_follow)
+                    .open(&path);
+                match opened {
+                    Ok(handle) => Some(handle),
+                    Err(err) => {
+                        if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_dir()) {
+                            return Err(BindError::UnsafeDirectory);
+                        }
+                        check_ancestors(&path, effective_uid, service_uid)?;
+                        return Err(err.into());
+                    }
+                }
+            }
+            None => None,
+        };
+        let metadata = match &handle {
+            Some(handle) => handle.metadata()?,
+            None => fs::symlink_metadata(&path)?,
+        };
+        check_directory(&metadata, effective_uid, service_uid)?;
+        let walked = check_ancestors(&path, effective_uid, service_uid)?;
+        if walked.dev() != metadata.dev() || walked.ino() != metadata.ino() {
+            return Err(BindError::UnsafeDirectory);
+        }
+        let fd_dir = handle.as_ref().and_then(descriptor_path);
+        if fd_dir.is_none() && service_uid != effective_uid {
+            return Err(BindError::NoDescriptorPaths);
+        }
+        Ok(Self {
+            path,
+            fd_dir,
+            _handle: handle,
+        })
+    }
+
+    /// The directory the entries are reached through: the open directory,
+    /// else the path.
+    fn dir(&self) -> &Path {
+        self.fd_dir.as_deref().unwrap_or(&self.path)
+    }
+
+    /// The entry `name` of the directory, reached through [`Self::dir`].
+    fn entry(&self, name: &OsStr) -> PathBuf {
+        self.dir().join(name)
     }
 }
 
 /// The private directory a bind creates next to the socket path, open, and
 /// cleared when dropped ([`clear_private_dir`]).
 struct PrivateDir {
+    /// The directory, reached through the socket's open directory
+    /// ([`ParentDir::entry`]).
     path: PathBuf,
     handle: File,
     /// The UIDs whose staged entries clearing it unlinks: the process's
@@ -258,14 +419,18 @@ impl PrivateDir {
     /// `.<name>.<pid>.<n>.bind`, opens it and checks that the open
     /// directory is the one at the path, owned by `effective_uid`, and that
     /// no one but its owner may enter it. `mkdir` never reuses an existing
-    /// entry (a symbolic link included): a taken name is skipped.
+    /// entry (a symbolic link included): a taken name is skipped. `None`
+    /// when the new directory is gone before it is opened and checked:
+    /// another bind, under the lock, cleared it as a leftover (an empty
+    /// private directory of the process's UID), and the caller retries.
     fn create(
-        parent: &Path,
+        parent: &ParentDir,
         name: &OsStr,
         effective_uid: u32,
         service_uid: u32,
-    ) -> Result<Self, BindError> {
+    ) -> Result<Option<Self>, BindError> {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let gone = |err: &io::Error| err.kind() == io::ErrorKind::NotFound;
         let mut last = None;
         for _ in 0..PRIVATE_DIR_ATTEMPTS {
             let mut entry = private_dir_prefix(name);
@@ -274,20 +439,28 @@ impl PrivateDir {
                 std::process::id(),
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
-            let path = parent.join(entry);
+            let path = parent.entry(&entry);
             match fs::DirBuilder::new().mode(PRIVATE_DIR_MODE).create(&path) {
                 Ok(()) => {
-                    let handle = File::open(&path).map_err(|err| {
-                        let _ = fs::remove_dir(&path);
-                        BindError::Io(err)
-                    })?;
+                    let handle = match File::open(&path) {
+                        Ok(handle) => handle,
+                        Err(err) if gone(&err) => return Ok(None),
+                        Err(err) => {
+                            let _ = fs::remove_dir(&path);
+                            return Err(err.into());
+                        }
+                    };
                     let dir = Self {
                         path,
                         handle,
                         owners: [effective_uid, service_uid],
                     };
                     let opened = dir.handle.metadata()?;
-                    let at_path = fs::symlink_metadata(&dir.path)?;
+                    let at_path = match fs::symlink_metadata(&dir.path) {
+                        Ok(at_path) => at_path,
+                        Err(err) if gone(&err) => return Ok(None),
+                        Err(err) => return Err(err.into()),
+                    };
                     // The umask can only clear bits of 0700.
                     if !opened.is_dir()
                         || opened.dev() != at_path.dev()
@@ -297,7 +470,7 @@ impl PrivateDir {
                     {
                         return Err(BindError::NotVerified);
                     }
-                    return Ok(dir);
+                    return Ok(Some(dir));
                 }
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = Some(err),
                 Err(err) => return Err(err.into()),
@@ -309,15 +482,7 @@ impl PrivateDir {
     /// The open directory as a path, `/proc/self/fd/<fd>`, where the system
     /// has `/proc/self/fd`.
     fn fd_dir(&self) -> Option<PathBuf> {
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            use std::os::fd::AsRawFd as _;
-            let fd_dir = Path::new("/proc/self/fd");
-            if fd_dir.is_dir() {
-                return Some(fd_dir.join(self.handle.as_raw_fd().to_string()));
-            }
-        }
-        None
+        descriptor_path(&self.handle)
     }
 
     /// The directory every staged entry is reached through: the open
@@ -363,18 +528,27 @@ fn staging_address(private: &Path, fd_dir: Option<PathBuf>) -> Result<PathBuf, B
 /// Clears the private directory at `path`, one this process or a killed
 /// bind created, reaching its entries through `entries` (the open
 /// directory, or `path` itself): it unlinks only the entries a bind puts
-/// there, the staged socket `s` (a socket) and the staged lock `l` (a
-/// regular file), each owned by one of `owners`, and then removes the
-/// directory at `path` only if it is empty (`rmdir`, never recursively).
-/// Anything else in it is left, and so is the directory.
+/// there, each owned by one of `owners`: the staged socket `s` (a socket)
+/// and the staged lock `l` as a bind leaves it, an empty regular file with
+/// no permission bits beyond 0600, in a directory with no group or other
+/// bits. Then it removes the directory at `path` only if it is empty
+/// (`rmdir`, never recursively). Anything else in it is left (an `l` with
+/// data, say, which no bind writes), and so is the directory.
 fn clear_private_dir(path: &Path, entries: &Path, owners: [u32; 2]) -> io::Result<()> {
+    // `fs::metadata`: the open directory's path is a link to it.
+    let private = fs::metadata(entries).is_ok_and(|metadata| metadata.mode() & 0o077 == 0);
     for name in [STAGED_NAME, STAGED_LOCK_NAME] {
-        // The staged socket is a socket, the staged lock a regular file.
+        // The staged socket is a socket, the staged lock an empty regular
+        // file of mode 0600 at most (the umask may clear bits), in a
+        // private directory.
         let expected = |metadata: &fs::Metadata| {
             if name == STAGED_NAME {
                 metadata.file_type().is_socket()
             } else {
                 metadata.is_file()
+                    && metadata.len() == 0
+                    && metadata.mode() & PERMISSION_BITS & !SOCKET_MODE == 0
+                    && private
             }
         };
         let entry = entries.join(name);
@@ -430,16 +604,16 @@ fn listing(read: io::Result<fs::ReadDir>) -> io::Result<Option<fs::ReadDir>> {
 /// directory to this, and then opens the lock file again). Only
 /// directories (never a symbolic link) owned by `effective_uid` whose name
 /// is `.<name>.<digits>.<digits>.bind` are cleared, and only when `parent`
-/// can be listed ([`listing`]).
+/// can be listed ([`listing`]); each is reached through the open `parent`.
 fn remove_stale_private_dirs(
-    parent: &Path,
+    parent: &ParentDir,
     name: &OsStr,
     effective_uid: u32,
     service_uid: u32,
 ) -> io::Result<()> {
     let prefix = private_dir_prefix(name);
     let prefix = prefix.as_encoded_bytes();
-    let Some(entries) = listing(fs::read_dir(parent))? else {
+    let Some(entries) = listing(fs::read_dir(parent.dir()))? else {
         return Ok(());
     };
     for entry in entries {
@@ -459,7 +633,7 @@ fn remove_stale_private_dirs(
         if !(numeric(parts.next()) && numeric(parts.next()) && parts.next().is_none()) {
             continue;
         }
-        let path = entry.path();
+        let path = parent.entry(&file_name);
         let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
@@ -484,11 +658,15 @@ fn write_safe(mode: u32) -> bool {
     mode & GROUP_OTHER_WRITE == 0 || mode & STICKY != 0
 }
 
-/// Refuses a socket directory another UID could write to, or one whose
-/// owner could rename what a bind for another service UID creates in it
-/// (see [`BindError::UnsafeDirectory`]).
-fn check_directory(parent: &Path, effective_uid: u32, service_uid: u32) -> Result<(), BindError> {
-    let metadata = fs::symlink_metadata(parent)?;
+/// Refuses a socket directory, `metadata` of the open directory (or of its
+/// path, not followed), another UID could write to, or one whose owner
+/// could rename what a bind for another service UID creates in it (see
+/// [`BindError::UnsafeDirectory`]).
+fn check_directory(
+    metadata: &fs::Metadata,
+    effective_uid: u32,
+    service_uid: u32,
+) -> Result<(), BindError> {
     let owner_ok = if effective_uid == service_uid {
         metadata.uid() == service_uid || metadata.uid() == 0
     } else {
@@ -531,20 +709,25 @@ fn push_steps(steps: &mut Vec<Step>, path: &Path) {
 
 /// Refuses a socket directory reached through a directory another UID
 /// could change ([`BindError::UnsafeAncestor`]): it walks the lookup of
-/// `parent` from the root directory (from the working directory when
-/// `parent` is relative), entry by entry, following each symbolic link as
-/// the kernel would, and checks every directory it looks an entry up in,
-/// the root directory included: owned by root, `service_uid` or
-/// `effective_uid` (the process binding, which a bind for another UID
-/// trusts already: it is root, or it cannot give the files away), and not
-/// writable by group or others unless sticky. The socket's directory
-/// itself, where the walk ends, is [`check_directory`]'s.
-fn check_ancestors(parent: &Path, effective_uid: u32, service_uid: u32) -> Result<(), BindError> {
+/// `parent`, an absolute path, from the root directory, entry by entry,
+/// following each symbolic link as the kernel would, and checks every
+/// directory it looks an entry up in, the root directory included: not
+/// writable by group or others unless sticky, and owned by a trusted UID:
+/// root or `service_uid` when that is `effective_uid`; root alone when the
+/// bind is for another UID, which must trust no one but root with the path
+/// (neither the service UID, which would gain what the bind gives away,
+/// nor the process's own UID). A symbolic link on the way in a directory
+/// others may write (sticky) must be a trusted UID's too: its owner could
+/// replace it. The socket's directory itself, where the walk ends, is
+/// [`check_directory`]'s; the walk returns its metadata, to be compared
+/// with the open directory.
+fn check_ancestors(
+    parent: &Path,
+    effective_uid: u32,
+    service_uid: u32,
+) -> Result<fs::Metadata, BindError> {
+    let trusted = |uid: u32| uid == 0 || (service_uid == effective_uid && uid == service_uid);
     let mut steps = Vec::new();
-    if parent.is_relative() {
-        // The working directory as the kernel resolved it: no link in it.
-        push_steps(&mut steps, &std::env::current_dir()?);
-    }
     push_steps(&mut steps, parent);
     let mut at = PathBuf::from("/");
     let mut links = 0;
@@ -562,17 +745,19 @@ fn check_ancestors(parent: &Path, effective_uid: u32, service_uid: u32) -> Resul
             Step::Name(name) => name,
         };
         let metadata = fs::symlink_metadata(&at)?;
-        if !metadata.is_dir()
-            || ![0, service_uid, effective_uid].contains(&metadata.uid())
-            || !write_safe(metadata.mode())
-        {
-            // `at` is `/` and normal entries only.
-            let depth = at.components().count() - 1;
+        // `at` is `/` and normal entries only.
+        let depth = at.components().count() - 1;
+        if !metadata.is_dir() || !trusted(metadata.uid()) || !write_safe(metadata.mode()) {
             return Err(BindError::UnsafeAncestor { depth });
         }
         let next = at.join(&name);
         let found = fs::symlink_metadata(&next)?;
         if found.file_type().is_symlink() {
+            // Sticky and writable by others (`write_safe` held): another
+            // UID's link here could be replaced by its owner.
+            if metadata.mode() & GROUP_OTHER_WRITE != 0 && !trusted(found.uid()) {
+                return Err(BindError::UnsafeAncestor { depth });
+            }
             links += 1;
             if links > MAX_SYMLINKS {
                 return Err(io::Error::other(
@@ -587,7 +772,7 @@ fn check_ancestors(parent: &Path, effective_uid: u32, service_uid: u32) -> Resul
             return Err(io::Error::from(io::ErrorKind::NotADirectory).into());
         }
     }
-    Ok(())
+    Ok(fs::symlink_metadata(&at)?)
 }
 
 /// Opens, or creates, the lock file of `name` in `parent`, `<name>.lock`
@@ -597,21 +782,22 @@ fn check_ancestors(parent: &Path, effective_uid: u32, service_uid: u32) -> Resul
 /// removing a lock file while another process holds it open would let two
 /// processes lock two files of the same name.
 fn lock(
-    parent: &Path,
+    parent: &ParentDir,
     name: &OsStr,
     effective_uid: u32,
     service_uid: u32,
 ) -> Result<File, BindError> {
     let mut lock_name = name.to_os_string();
     lock_name.push(LOCK_SUFFIX);
-    let lock_path = parent.join(lock_name);
+    let lock_path = parent.entry(&lock_name);
     for _ in 0..LOCK_ATTEMPTS {
         let opened = match open_lock(&lock_path)? {
             Some(file) => Some(file),
             None => create_lock(parent, name, &lock_path, effective_uid, service_uid)?,
         };
         // `None`: another bind published a lock file meanwhile, or cleared
-        // this one's private directory; open what is there now.
+        // this one's private directory (before it was opened, or after);
+        // open what is there now.
         let Some(file) = opened else {
             continue;
         };
@@ -640,9 +826,9 @@ fn lock(
 /// through a symbolic link at the path (`O_NOFOLLOW`: one fails with
 /// `ELOOP`), and without blocking on a FIFO or a device (`O_NONBLOCK`).
 /// [`io::ErrorKind::Unsupported`] where the flags are not known
-/// ([`LOCK_OPEN_FLAGS`]).
+/// ([`OPEN_FLAGS`]).
 fn lock_options() -> io::Result<OpenOptions> {
-    let Some(flags) = LOCK_OPEN_FLAGS else {
+    let Some(flags) = OPEN_FLAGS else {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "the local socket's lock file can be opened without following a symbolic link \
@@ -650,7 +836,10 @@ fn lock_options() -> io::Result<OpenOptions> {
         ));
     };
     let mut options = OpenOptions::new();
-    options.read(true).write(true).custom_flags(flags);
+    options
+        .read(true)
+        .write(true)
+        .custom_flags(flags.no_follow | O_NONBLOCK);
     Ok(options)
 }
 
@@ -676,18 +865,21 @@ fn open_lock(lock_path: &Path) -> Result<Option<File>, BindError> {
 /// then hard-linked to `lock_path`, which never replaces an entry; the
 /// private directory is cleared after. `None` when another bind
 /// published a lock file first, or cleared the private directory, under
-/// its lock, before the link: the caller opens the lock file again. Killed
+/// its lock, before the link (or before it was opened, [`PrivateDir::create`]):
+/// the caller opens the lock file again. Killed
 /// at any point, it leaves either no lock file or one owned by
 /// `service_uid` with mode 0600, and at most a private directory, which
 /// the next bind clears.
 fn create_lock(
-    parent: &Path,
+    parent: &ParentDir,
     name: &OsStr,
     lock_path: &Path,
     effective_uid: u32,
     service_uid: u32,
 ) -> Result<Option<File>, BindError> {
-    let private = PrivateDir::create(parent, name, effective_uid, service_uid)?;
+    let Some(private) = PrivateDir::create(parent, name, effective_uid, service_uid)? else {
+        return Ok(None);
+    };
     let staged = private.entries().join(STAGED_LOCK_NAME);
     let file = match OpenOptions::new()
         .read(true)
@@ -700,11 +892,14 @@ fn create_lock(
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(err) => return Err(err.into()),
     };
+    // The umask may have cleared bits of 0600. The mode is set while the
+    // process still owns the file: a change of mode after giving it away
+    // would need `CAP_FOWNER` as well as `CAP_CHOWN` (the link below needs
+    // it anyway where `fs.protected_hardlinks` is set).
+    file.set_permissions(fs::Permissions::from_mode(SOCKET_MODE))?;
     if service_uid != effective_uid {
         std::os::unix::fs::fchown(&file, Some(service_uid), None)?;
     }
-    // The umask may have cleared bits of 0600.
-    file.set_permissions(fs::Permissions::from_mode(SOCKET_MODE))?;
     match fs::hard_link(&staged, lock_path) {
         Ok(()) => Ok(Some(file)),
         Err(err)
@@ -727,22 +922,52 @@ enum Existing {
     Stale(fs::Metadata),
 }
 
-/// Refuses anything at `path` but nothing or a stale socket of
-/// `service_uid` (see [`BindError::PathOccupied`] and
-/// [`BindError::InUse`]).
-async fn existing(path: &Path, service_uid: u32) -> Result<Existing, BindError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Existing::Nothing),
-        Err(err) => return Err(err.into()),
+/// Refuses anything at the socket path, `name` in `parent`, but nothing or
+/// a stale socket of `service_uid` (see [`BindError::PathOccupied`] and
+/// [`BindError::InUse`]). Through the open directory, the entry is opened
+/// itself (`O_PATH`, never through a symbolic link), checked with `fstat`
+/// and connected to through its own descriptor, `/proc/self/fd/<fd>`: the
+/// inode checked, and an address that fits whatever the name's length.
+/// Elsewhere the entry is checked with `lstat` and connected to by its
+/// path.
+async fn existing(
+    parent: &ParentDir,
+    name: &OsStr,
+    service_uid: u32,
+) -> Result<Existing, BindError> {
+    let entry = parent.entry(name);
+    let opened = match OPEN_FLAGS {
+        Some(flags) if parent.fd_dir.is_some() => {
+            let opened = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_PATH | flags.no_follow)
+                .open(&entry);
+            match opened {
+                Ok(file) => Some(file),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    return Ok(Existing::Nothing);
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        _ => None,
+    };
+    let metadata = match &opened {
+        Some(file) => file.metadata()?,
+        None => match fs::symlink_metadata(&entry) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Existing::Nothing),
+            Err(err) => return Err(err.into()),
+        },
     };
     if !metadata.file_type().is_socket() || metadata.uid() != service_uid {
         return Err(BindError::PathOccupied);
     }
+    let address = opened.as_ref().and_then(descriptor_path).unwrap_or(entry);
     // A non-blocking connect: accepted (or a full backlog, `WouldBlock`)
     // means a listener; only a refusal means none. Under the lock, a live
     // listener here is a process that does not take the lock file.
-    match UnixStream::connect(path).await {
+    match UnixStream::connect(&address).await {
         Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => Ok(Existing::Stale(metadata)),
         Ok(_) => Err(BindError::InUse),
         Err(err) if err.kind() == io::ErrorKind::WouldBlock => Err(BindError::InUse),
@@ -750,23 +975,24 @@ async fn existing(path: &Path, service_uid: u32) -> Result<Existing, BindError> 
     }
 }
 
-/// Removes the stale socket `stale` at `path`, only while the path is still
-/// that socket; anything else there is [`BindError::PathOccupied`] and left
-/// in place.
-fn remove_stale(path: &Path, stale: &fs::Metadata) -> Result<(), BindError> {
-    let now = fs::symlink_metadata(path)?;
+/// Removes the stale socket `stale` at the socket path, `name` in the open
+/// `parent`, only while the path is still that socket; anything else there
+/// is [`BindError::PathOccupied`] and left in place.
+fn remove_stale(parent: &ParentDir, name: &OsStr, stale: &fs::Metadata) -> Result<(), BindError> {
+    let entry = parent.entry(name);
+    let now = fs::symlink_metadata(&entry)?;
     if !is_socket(&now, stale.dev(), stale.ino()) {
         return Err(BindError::PathOccupied);
     }
-    fs::remove_file(path)?;
+    fs::remove_file(&entry)?;
     Ok(())
 }
 
-/// Publishes the bound socket `staged` at `path` with `link`, which never
-/// replaces an entry: one that is there is left in place
-/// ([`BindError::PathOccupied`]).
-fn publish(staged: &Path, path: &Path) -> Result<(), BindError> {
-    fs::hard_link(staged, path).map_err(|err| match err.kind() {
+/// Publishes the bound socket `staged` at the socket path, `name` in the
+/// open `parent`, with `link`, which never replaces an entry: one that is
+/// there is left in place ([`BindError::PathOccupied`]).
+fn publish(staged: &Path, parent: &ParentDir, name: &OsStr) -> Result<(), BindError> {
+    fs::hard_link(staged, parent.entry(name)).map_err(|err| match err.kind() {
         io::ErrorKind::AlreadyExists => BindError::PathOccupied,
         _ => BindError::Io(err),
     })
@@ -785,24 +1011,29 @@ pub(super) async fn bind(
     if path.as_os_str().len() >= SUN_PATH_BYTES {
         return Err(BindError::PathTooLong);
     }
-    let parent = if parent.as_os_str().is_empty() {
-        Path::new(".")
-    } else {
-        parent
-    };
     let effective_uid = effective_uid()?;
     let service_uid = service_uid.unwrap_or(effective_uid);
-    check_directory(parent, effective_uid, service_uid)?;
-    check_ancestors(parent, effective_uid, service_uid)?;
+    // One absolute path, the working directory joined to a relative one
+    // (an empty one is the working directory), for the open and the walk
+    // of its lookup: the working directory is read once.
+    let parent = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(parent)
+    };
+    let parent = ParentDir::open(parent, effective_uid, service_uid)?;
 
     // Everything below runs under the lock, held until the socket file is
     // dropped: two transports never replace or remove each other's socket.
-    let lock = lock(parent, name, effective_uid, service_uid)?;
-    remove_stale_private_dirs(parent, name, effective_uid, service_uid)?;
-    let private = PrivateDir::create(parent, name, effective_uid, service_uid)?;
+    // Every entry is reached through the open directory.
+    let lock = lock(&parent, name, effective_uid, service_uid)?;
+    remove_stale_private_dirs(&parent, name, effective_uid, service_uid)?;
+    // `None` (cleared before it was checked) cannot happen under the lock.
+    let private = PrivateDir::create(&parent, name, effective_uid, service_uid)?
+        .ok_or(BindError::NotVerified)?;
 
-    if let Existing::Stale(stale) = existing(path, service_uid).await? {
-        remove_stale(path, &stale)?;
+    if let Existing::Stale(stale) = existing(&parent, name, service_uid).await? {
+        remove_stale(&parent, name, &stale)?;
     }
 
     // Bound where no other UID can reach it: the mode the umask leaves does
@@ -812,25 +1043,29 @@ pub(super) async fn bind(
     // between the calls (a `chmod` through a planted symbolic link).
     let staged = private.bind_address()?;
     let listener = UnixListener::bind(&staged)?;
+    // The mode first, while the process owns the socket (see
+    // `create_lock`).
+    fs::set_permissions(&staged, fs::Permissions::from_mode(SOCKET_MODE))?;
     if service_uid != effective_uid {
         // `lchown`: never through a symbolic link.
         std::os::unix::fs::lchown(&staged, Some(service_uid), None)?;
     }
-    fs::set_permissions(&staged, fs::Permissions::from_mode(SOCKET_MODE))?;
     let bound = fs::symlink_metadata(&staged)?;
     if !bound.file_type().is_socket() {
         return Err(BindError::NotVerified);
     }
-    publish(&staged, path)?;
+    publish(&staged, &parent, name)?;
     let socket = SocketFile {
         path: path.to_path_buf(),
+        parent,
+        name: name.to_os_string(),
         dev: bound.dev(),
         ino: bound.ino(),
         _lock: lock,
     };
     drop(private);
 
-    let metadata = fs::symlink_metadata(path)?;
+    let metadata = fs::symlink_metadata(socket.parent.entry(&socket.name))?;
     if !is_socket(&metadata, socket.dev, socket.ino)
         || metadata.uid() != service_uid
         || metadata.mode() & PERMISSION_BITS != SOCKET_MODE
@@ -852,6 +1087,7 @@ mod tests {
             BindError::StagingPathTooLong,
             BindError::UnsafeDirectory,
             BindError::UnsafeAncestor { depth: 3 },
+            BindError::NoDescriptorPaths,
             BindError::PathOccupied,
             BindError::InUse,
             BindError::NotVerified,
@@ -915,23 +1151,44 @@ mod tests {
         }
     }
 
+    /// `dir` opened as the socket's directory of a bind for the process's
+    /// own UID (its owner).
+    fn opened(dir: &Path) -> ParentDir {
+        let uid = fs::symlink_metadata(dir).unwrap().uid();
+        ParentDir::open(dir.to_path_buf(), uid, uid).unwrap()
+    }
+
+    /// A private directory as a bind creates it, mode 0700.
+    fn private_dir_at(path: &Path) {
+        fs::create_dir(path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    /// A staged lock as a bind leaves it: empty, mode 0600.
+    fn staged_lock_at(path: &Path) {
+        fs::write(path, b"").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     /// `link`, not `rename`: an entry that appeared at the path since the
     /// check is never replaced.
     #[test]
     fn publishing_never_replaces_an_entry() {
         let dir = Scratch::new("publish");
+        let parent = opened(&dir.0);
         let staged = dir.0.join("staged");
         let path = dir.0.join("public");
+        let name = OsStr::new("public");
         fs::write(&staged, b"staged").unwrap();
         fs::write(&path, b"there first").unwrap();
         assert!(matches!(
-            publish(&staged, &path),
+            publish(&staged, &parent, name),
             Err(BindError::PathOccupied)
         ));
         assert_eq!(fs::read(&path).unwrap(), b"there first");
         assert_eq!(fs::read(&staged).unwrap(), b"staged");
         fs::remove_file(&path).unwrap();
-        publish(&staged, &path).unwrap();
+        publish(&staged, &parent, name).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"staged");
     }
 
@@ -940,6 +1197,8 @@ mod tests {
     #[test]
     fn a_stale_socket_is_removed_only_while_it_is_there() {
         let dir = Scratch::new("stale");
+        let parent = opened(&dir.0);
+        let name = OsStr::new("sock");
         let path = dir.0.join("sock");
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
         let stale = fs::symlink_metadata(&path).unwrap();
@@ -949,7 +1208,7 @@ mod tests {
         fs::rename(&path, &moved).unwrap();
         let other = std::os::unix::net::UnixListener::bind(&path).unwrap();
         assert!(matches!(
-            remove_stale(&path, &stale),
+            remove_stale(&parent, name, &stale),
             Err(BindError::PathOccupied)
         ));
         assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
@@ -957,14 +1216,14 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::write(&path, b"file").unwrap();
         assert!(matches!(
-            remove_stale(&path, &stale),
+            remove_stale(&parent, name, &stale),
             Err(BindError::PathOccupied)
         ));
         assert_eq!(fs::read(&path).unwrap(), b"file");
         // Still the stale socket: removed.
         fs::remove_file(&path).unwrap();
         fs::rename(&moved, &path).unwrap();
-        remove_stale(&path, &stale).unwrap();
+        remove_stale(&parent, name, &stale).unwrap();
         assert!(fs::symlink_metadata(&path).is_err());
     }
 
@@ -996,9 +1255,10 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         // A directory of another owner is left.
         let other = uid.wrapping_add(1);
-        remove_stale_private_dirs(&dir.0, name, other, other).unwrap();
+        let parent = opened(&dir.0);
+        remove_stale_private_dirs(&parent, name, other, other).unwrap();
         assert!(stale.exists());
-        remove_stale_private_dirs(&dir.0, name, uid, uid).unwrap();
+        remove_stale_private_dirs(&parent, name, uid, uid).unwrap();
         assert!(!stale.exists());
         for name in kept {
             assert!(dir.0.join(name).is_dir(), "{name}");
@@ -1013,41 +1273,54 @@ mod tests {
     }
 
     /// What a leftover private directory holds is unlinked only when a bind
-    /// put it there (the staged socket `s`, the staged lock `l`, of the
-    /// expected owners); anything else is kept, and so is the directory,
-    /// which is removed only once empty (never recursively).
+    /// put it there (the staged socket `s`, the staged lock `l` as a bind
+    /// leaves it, of the expected owners); anything else is kept, and so is
+    /// the directory, which is removed only once empty (never recursively).
     #[test]
     fn a_leftover_directory_keeps_what_a_bind_did_not_put_there() {
         let dir = Scratch::new("leftover");
         let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
+        let parent = opened(&dir.0);
         let name = OsStr::new("local.sock");
         let leftover = |n: u32| dir.0.join(format!(".local.sock.4194305.{n}.bind"));
         let socket_at = |path: PathBuf| drop(std::os::unix::net::UnixListener::bind(path).unwrap());
 
         // Empty: removed.
-        fs::create_dir(leftover(0)).unwrap();
+        private_dir_at(&leftover(0));
         // Only a stale staged socket: cleared.
-        fs::create_dir(leftover(1)).unwrap();
+        private_dir_at(&leftover(1));
         socket_at(leftover(1).join("s"));
         // Only a staged lock (a killed lock creation): cleared.
-        fs::create_dir(leftover(2)).unwrap();
-        fs::write(leftover(2).join("l"), b"").unwrap();
+        private_dir_at(&leftover(2));
+        staged_lock_at(&leftover(2).join("l"));
         // A staged socket and an unexpected file: the socket goes, the file
         // and the directory stay.
-        fs::create_dir(leftover(3)).unwrap();
+        private_dir_at(&leftover(3));
         socket_at(leftover(3).join("s"));
         fs::write(leftover(3).join("keep"), b"keep").unwrap();
         // An `s` that is not a socket and an `l` that is not a file: kept.
-        fs::create_dir(leftover(4)).unwrap();
+        private_dir_at(&leftover(4));
         fs::write(leftover(4).join("s"), b"not a socket").unwrap();
         fs::create_dir(leftover(4).join("l")).unwrap();
         fs::write(leftover(4).join("l").join("inner"), b"").unwrap();
         // A directory inside: kept with what it holds.
-        fs::create_dir(leftover(5)).unwrap();
+        private_dir_at(&leftover(5));
         fs::create_dir(leftover(5).join("sub")).unwrap();
         fs::write(leftover(5).join("sub").join("inner"), b"").unwrap();
+        // An `l` no bind leaves: with data, with a wider mode, or in a
+        // directory with group or other bits. Kept, and so is the
+        // directory.
+        private_dir_at(&leftover(7));
+        staged_lock_at(&leftover(7).join("l"));
+        fs::write(leftover(7).join("l"), b"data").unwrap();
+        private_dir_at(&leftover(8));
+        staged_lock_at(&leftover(8).join("l"));
+        fs::set_permissions(leftover(8).join("l"), fs::Permissions::from_mode(0o644)).unwrap();
+        private_dir_at(&leftover(9));
+        staged_lock_at(&leftover(9).join("l"));
+        fs::set_permissions(leftover(9), fs::Permissions::from_mode(0o750)).unwrap();
 
-        remove_stale_private_dirs(&dir.0, name, uid, uid).unwrap();
+        remove_stale_private_dirs(&parent, name, uid, uid).unwrap();
         for n in [0, 1, 2] {
             assert!(fs::symlink_metadata(leftover(n)).is_err(), "{n}");
         }
@@ -1056,21 +1329,25 @@ mod tests {
         assert_eq!(fs::read(leftover(4).join("s")).unwrap(), b"not a socket");
         assert!(leftover(4).join("l").join("inner").exists());
         assert!(leftover(5).join("sub").join("inner").exists());
+        assert_eq!(fs::read(leftover(7).join("l")).unwrap(), b"data");
+        for n in [8, 9] {
+            assert!(leftover(n).join("l").is_file(), "{n}");
+        }
 
         // Staged entries of another owner are kept (root only: others
         // cannot give a file away).
         if uid == 0 {
             let foreign = leftover(6);
-            fs::create_dir(&foreign).unwrap();
+            private_dir_at(&foreign);
             socket_at(foreign.join("s"));
-            fs::write(foreign.join("l"), b"").unwrap();
+            staged_lock_at(&foreign.join("l"));
             for entry in ["s", "l"] {
                 std::os::unix::fs::lchown(foreign.join(entry), Some(4_194_305), None).unwrap();
             }
-            remove_stale_private_dirs(&dir.0, name, uid, uid).unwrap();
+            remove_stale_private_dirs(&parent, name, uid, uid).unwrap();
             assert!(foreign.join("s").exists() && foreign.join("l").exists());
             // Of the service UID: cleared.
-            remove_stale_private_dirs(&dir.0, name, uid, 4_194_305).unwrap();
+            remove_stale_private_dirs(&parent, name, uid, 4_194_305).unwrap();
             assert!(fs::symlink_metadata(&foreign).is_err());
         }
     }
@@ -1160,7 +1437,10 @@ mod tests {
     fn the_staged_entries_are_reached_through_the_open_directory() {
         let dir = Scratch::new("staged");
         let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
-        let private = PrivateDir::create(&dir.0, OsStr::new("x.sock"), uid, uid).unwrap();
+        let parent = opened(&dir.0);
+        let private = PrivateDir::create(&parent, OsStr::new("x.sock"), uid, uid)
+            .unwrap()
+            .unwrap();
         if private.fd_dir().is_none() {
             eprintln!("NOTICE: /proc/self/fd is missing: the staged entries were NOT tested");
             return;
@@ -1193,7 +1473,7 @@ mod tests {
             fs::symlink_metadata(&target).unwrap().mode() & PERMISSION_BITS,
             0o644
         );
-        fs::write(&lock, b"").unwrap();
+        staged_lock_at(&lock);
         assert!(moved.join(STAGED_LOCK_NAME).is_file());
         assert!(!private.path.join(STAGED_LOCK_NAME).exists());
         drop(listener);
@@ -1212,8 +1492,16 @@ mod tests {
 
     /// The lock file is opened without following a symbolic link: a link at
     /// the lock path, to a file or to nothing, is occupied, and the file it
-    /// points to is not opened.
-    #[cfg(target_os = "linux")]
+    /// points to is not opened. Where [`OPEN_FLAGS`] are known only: `ELOOP`
+    /// is 40 there.
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        )
+    ))]
     #[test]
     fn the_lock_file_is_never_opened_through_a_link() {
         let dir = Scratch::new("lock-link");
@@ -1234,6 +1522,55 @@ mod tests {
         assert!(matches!(open_lock(&lock), Ok(None)));
         fs::write(&lock, b"").unwrap();
         assert!(matches!(open_lock(&lock), Ok(Some(_))));
+    }
+
+    /// The socket's directory: owned by the service UID or root when the
+    /// process binds for itself; by the process's UID alone when it binds
+    /// for another UID, so a directory of the service UID is refused then
+    /// (it could rename what the bind gives away); never writable by group
+    /// or others unless sticky; a directory.
+    #[test]
+    fn the_socket_directory_has_a_trusted_owner() {
+        let dir = Scratch::new("parent-owner");
+        let metadata = fs::symlink_metadata(&dir.0).unwrap();
+        let uid = metadata.uid();
+        let other = uid.wrapping_add(1);
+        check_directory(&metadata, uid, uid).unwrap();
+        // Root's: trusted when the process binds for itself.
+        check_directory(&fs::symlink_metadata("/").unwrap(), other, other).unwrap();
+        // A bind for the owner from another UID: refused, root's included.
+        assert!(matches!(
+            check_directory(&metadata, other, uid),
+            Err(BindError::UnsafeDirectory)
+        ));
+        // Another UID binding for itself: only root's directory is trusted.
+        let result = check_directory(&metadata, other, other);
+        if uid == 0 {
+            result.unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(BindError::UnsafeDirectory)),
+                "{result:?}"
+            );
+        }
+        // A bind for another UID: the process's own directory only.
+        check_directory(&metadata, uid, other).unwrap();
+        for mode in [0o775, 0o757] {
+            fs::set_permissions(&dir.0, fs::Permissions::from_mode(mode)).unwrap();
+            let metadata = fs::symlink_metadata(&dir.0).unwrap();
+            assert!(matches!(
+                check_directory(&metadata, uid, uid),
+                Err(BindError::UnsafeDirectory)
+            ));
+        }
+        fs::set_permissions(&dir.0, fs::Permissions::from_mode(0o1777)).unwrap();
+        check_directory(&fs::symlink_metadata(&dir.0).unwrap(), uid, uid).unwrap();
+        let file = dir.0.join("file");
+        fs::write(&file, b"").unwrap();
+        assert!(matches!(
+            check_directory(&fs::symlink_metadata(&file).unwrap(), uid, uid),
+            Err(BindError::UnsafeDirectory)
+        ));
     }
 
     /// Every directory the lookup of the socket's directory passes through
@@ -1292,20 +1629,193 @@ mod tests {
             check_ancestors(&safe.join("loop").join("s"), uid, uid),
             Err(BindError::Io(_))
         ));
-        // The process's own directories, when it binds for another UID.
-        check_ancestors(&socket_dir, uid, uid.wrapping_add(1)).unwrap();
+        // A bind for another UID trusts root alone: the process's own
+        // directories are refused unless it is root.
+        let result = check_ancestors(&socket_dir, uid, uid.wrapping_add(1));
+        if uid == 0 {
+            result.unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(BindError::UnsafeAncestor { .. })),
+                "{result:?}"
+            );
+        }
         // Another owner (root only): refused unless it is the service UID
-        // or the effective UID.
+        // binding for itself; never for a bind for another UID, the owner
+        // being the service UID or the binding process.
         if uid == 0 {
             std::os::unix::fs::lchown(&grandparent, Some(4_194_305), None).unwrap();
-            assert!(matches!(
-                check_ancestors(&socket_dir, uid, uid),
-                Err(BindError::UnsafeAncestor { depth: d }) if d == depth + 1
-            ));
-            check_ancestors(&socket_dir, uid, 4_194_305).unwrap();
-            // Or the effective UID (another process binding for root).
-            check_ancestors(&socket_dir, 4_194_305, uid).unwrap();
+            for (effective, service) in [(uid, uid), (uid, 4_194_305), (4_194_305, uid)] {
+                assert!(
+                    matches!(
+                        check_ancestors(&socket_dir, effective, service),
+                        Err(BindError::UnsafeAncestor { depth: d }) if d == depth + 1
+                    ),
+                    "{effective} for {service}"
+                );
+            }
+            check_ancestors(&socket_dir, 4_194_305, 4_194_305).unwrap();
         }
+    }
+
+    /// A symbolic link on the way in a sticky directory others may write
+    /// (`/tmp`) is followed only when its owner is trusted: root, or the
+    /// service UID when the process binds for itself; else the bind is
+    /// refused at the link's directory. It needs a root-owned sticky
+    /// `/tmp`; otherwise it prints a notice and passes.
+    #[test]
+    fn a_link_in_a_sticky_directory_needs_a_trusted_owner() {
+        let shared = Path::new("/tmp");
+        if !fs::symlink_metadata(shared)
+            .is_ok_and(|metadata| metadata.uid() == 0 && metadata.mode() & 0o1002 == 0o1002)
+        {
+            eprintln!("NOTICE: no root-owned sticky /tmp: links in it were NOT tested");
+            return;
+        }
+        let dir = Scratch::new("sticky-link");
+        let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
+        fs::create_dir(dir.0.join("sub")).unwrap();
+        struct Unlink(PathBuf);
+        impl Drop for Unlink {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let link = Unlink(shared.join(format!("skyoauth-socket-unit-link-{}", std::process::id())));
+        let _ = fs::remove_file(&link.0);
+        std::os::unix::fs::symlink(&dir.0, &link.0).unwrap();
+        let through = link.0.join("sub");
+        // The process's own link, for its own bind: followed.
+        assert_eq!(
+            check_ancestors(&through, uid, uid).unwrap().ino(),
+            fs::metadata(dir.0.join("sub")).unwrap().ino()
+        );
+        // For another UID (root alone is trusted): refused at `/tmp`,
+        // unless the process is root.
+        let result = check_ancestors(&through, uid, uid.wrapping_add(1));
+        if uid == 0 {
+            result.unwrap();
+        } else {
+            assert!(
+                matches!(result, Err(BindError::UnsafeAncestor { depth: 1 })),
+                "{result:?}"
+            );
+        }
+        if uid == 0 {
+            // Another UID's link: refused, unless that UID binds for
+            // itself.
+            std::os::unix::fs::lchown(&link.0, Some(4_194_305), None).unwrap();
+            for (effective, service) in [(0, 0), (0, 4_194_305)] {
+                let result = check_ancestors(&through, effective, service);
+                assert!(
+                    matches!(result, Err(BindError::UnsafeAncestor { depth: 1 })),
+                    "{effective} for {service}: {result:?}"
+                );
+            }
+            check_ancestors(&through, 4_194_305, 4_194_305).unwrap();
+            // In a directory others may not write, the owner of a link does
+            // not matter: only the directory's owner can replace it.
+            let safe = dir.0.join("safe");
+            fs::create_dir(&safe).unwrap();
+            let inner = safe.join("link");
+            std::os::unix::fs::symlink(dir.0.join("sub"), &inner).unwrap();
+            std::os::unix::fs::lchown(&inner, Some(4_194_305), None).unwrap();
+            check_ancestors(&inner, 0, 0).unwrap();
+        }
+    }
+
+    /// Every entry of the socket's directory is reached through the open
+    /// directory: with the directory renamed after it was opened, and
+    /// another one put at its path holding the same names (a leftover
+    /// private directory, a live socket), the lock file, the scan for
+    /// leftovers, the private directory, the stale socket's check and
+    /// removal, the publication and the socket's removal all act on the
+    /// moved directory, and the one at the path is left as it was. Without
+    /// `/proc/self/fd` it prints a notice and passes.
+    #[tokio::test]
+    async fn the_socket_directory_is_reached_through_its_descriptor() {
+        let dir = Scratch::new("parent-fd");
+        let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
+        let socket_dir = dir.0.join("s");
+        fs::create_dir(&socket_dir).unwrap();
+        let parent = opened(&socket_dir);
+        if parent.fd_dir.is_none() {
+            eprintln!("NOTICE: /proc/self/fd is missing: the open directory was NOT tested");
+            return;
+        }
+        let moved = dir.0.join("moved");
+        fs::rename(&socket_dir, &moved).unwrap();
+        fs::create_dir(&socket_dir).unwrap();
+        let name = OsStr::new("local.sock");
+        let leftover = ".local.sock.4194305.1.bind";
+        for at in [&moved, &socket_dir] {
+            private_dir_at(&at.join(leftover));
+            staged_lock_at(&at.join(leftover).join("l"));
+        }
+        // A stale socket in the moved directory, a live one at the path: a
+        // check by the path would find it in use.
+        drop(std::os::unix::net::UnixListener::bind(moved.join("local.sock")).unwrap());
+        let live = std::os::unix::net::UnixListener::bind(socket_dir.join("local.sock")).unwrap();
+        let decoy_socket = fs::symlink_metadata(socket_dir.join("local.sock"))
+            .unwrap()
+            .ino();
+        let names = |at: &Path| {
+            let mut names: Vec<String> = fs::read_dir(at)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let decoy = names(&socket_dir);
+        assert_eq!(decoy, [leftover, "local.sock"]);
+        let decoy_unchanged = || {
+            assert_eq!(names(&socket_dir), decoy);
+            assert!(socket_dir.join(leftover).join("l").is_file());
+            assert_eq!(
+                fs::symlink_metadata(socket_dir.join("local.sock"))
+                    .unwrap()
+                    .ino(),
+                decoy_socket
+            );
+        };
+
+        let lock = lock(&parent, name, uid, uid).unwrap();
+        remove_stale_private_dirs(&parent, name, uid, uid).unwrap();
+        let private = PrivateDir::create(&parent, name, uid, uid)
+            .unwrap()
+            .unwrap();
+        decoy_unchanged();
+        let Existing::Stale(stale) = existing(&parent, name, uid).await.unwrap() else {
+            panic!("the moved directory's stale socket was not found");
+        };
+        remove_stale(&parent, name, &stale).unwrap();
+        let staged = private.bind_address().unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&staged).unwrap();
+        publish(&staged, &parent, name).unwrap();
+        let bound = fs::symlink_metadata(&staged).unwrap();
+        decoy_unchanged();
+        drop(private);
+        assert_eq!(names(&moved), ["local.sock", "local.sock.lock"]);
+        assert_eq!(
+            fs::symlink_metadata(moved.join("local.sock"))
+                .unwrap()
+                .ino(),
+            bound.ino()
+        );
+        decoy_unchanged();
+        let socket = SocketFile {
+            path: socket_dir.join("local.sock"),
+            parent,
+            name: name.to_os_string(),
+            dev: bound.dev(),
+            ino: bound.ino(),
+            _lock: lock,
+        };
+        drop(socket);
+        assert_eq!(names(&moved), ["local.sock.lock"]);
+        decoy_unchanged();
+        drop((listener, live));
     }
 
     #[tokio::test]

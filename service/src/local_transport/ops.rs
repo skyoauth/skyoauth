@@ -34,9 +34,14 @@ use crate::persistence::registry::{
 /// database's default.
 const BEGIN: &str = "BEGIN ISOLATION LEVEL READ COMMITTED";
 
-/// The transaction's `lock_timeout` and `statement_timeout`, both `$1`.
+/// The transaction's `lock_timeout` and `statement_timeout`, both `$1`, and
+/// its `idle_in_transaction_session_timeout`, `$2`: the transaction timeout,
+/// so a session whose client stopped answering, or whose close never
+/// reached the server, does not keep the transaction's locks (the
+/// `recovery_state` row's, say) once it has been idle that long.
 const SET_TIMEOUTS: &str = "SELECT set_config('lock_timeout', $1, true), \
-     set_config('statement_timeout', $1, true)";
+     set_config('statement_timeout', $1, true), \
+     set_config('idle_in_transaction_session_timeout', $2, true)";
 
 /// The longest `trust_anchor_ref`, in bytes (`0005`).
 const MAX_TRUST_ANCHOR_REF: usize = 2048;
@@ -226,8 +231,10 @@ async fn set_timeouts(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), Stop> {
     let timeout = format!("{}ms", shared.settings.statement_timeout.as_millis());
+    let idle = format!("{}ms", shared.settings.transaction_timeout.as_millis());
     sqlx::query(SET_TIMEOUTS)
         .bind(timeout)
+        .bind(idle)
         .execute(&mut **transaction)
         .await
         .map_err(|err| from_store_failure(&err))?;

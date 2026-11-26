@@ -7,16 +7,19 @@
 //!   shutdown, its lock file kept; another service UID (root only); an
 //!   unsafe parent directory, or an unsafe directory above it, refuses to
 //!   start, and so does a directory of the service UID when root binds for
-//!   it; a rename of the private directory during binds (by the process,
-//!   and by the service UID as the peer user) changes no file outside the
-//!   socket's directory; a path held by a file, a
-//!   directory, a symbolic link, another UID's socket or a live listener
-//!   refuses to start, and a stale socket of the service UID is replaced;
-//!   simultaneous binds and an overlapping restart, serialized by the lock
-//!   file; a bind killed while creating the lock file, and a lock file that
-//!   cannot be given away (not root), leave no lock file; a directory the
-//!   service UID cannot list (as the peer user); paths up to the platform's
-//!   limit (107 bytes on Linux), one more refused;
+//!   it, or one of the service UID above it; a rename of the private
+//!   directory during binds (by the process, and by the service UID as the
+//!   peer user), and a swap of a directory above the socket's by the
+//!   service UID, change no file outside the socket's directory; a path
+//!   held by a file, a directory, a symbolic link, another UID's socket or
+//!   a live listener refuses to start, and a stale socket of the service
+//!   UID is replaced; simultaneous binds, first binds and an overlapping
+//!   restart, serialized by the lock file; a bind killed while creating the
+//!   lock file, and a lock file that cannot be given away (not root), leave
+//!   no lock file; a directory the service UID cannot list (as the peer
+//!   user); paths up to the platform's limit (107 bytes on Linux), one more
+//!   refused, and without `/proc` (root, in a mount namespace); relative
+//!   paths, from the working directory of a child process;
 //! - the peer check: the process's own UID passes; another UID, run as a
 //!   real second user through `runuser` and `python3`, is `forbidden`
 //!   (before any read) when the service UID is a third one and passes when
@@ -174,8 +177,20 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
+        Self::in_dir(&env::temp_dir())
+    }
+
+    /// A fresh directory directly in `/tmp` (root's, sticky), whose
+    /// ancestors are all root's: a bind for another service UID trusts no
+    /// other owner above the socket's directory, wherever the temporary
+    /// directory is.
+    fn in_tmp() -> Self {
+        Self::in_dir(Path::new("/tmp"))
+    }
+
+    fn in_dir(base: &Path) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let path = env::temp_dir().join(format!(
+        let path = base.join(format!(
             "skyoauth-local-transport-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -355,13 +370,16 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
     let uid = effective_uid(&dir.0);
     let path = dir.socket();
     // Private directories a killed bind left behind, cleared under the
-    // lock: one with its staged socket, one with its staged lock file.
+    // lock: one with its staged socket, one with its staged lock file (as a
+    // bind leaves them: mode 0700, and an empty `l` with mode 0600).
     let leftover = dir.0.join(".local.sock.4194305.0.bind");
     fs::create_dir(&leftover).unwrap();
     drop(StdListener::bind(leftover.join("s")).unwrap());
     let staged_lock = dir.0.join(".local.sock.4194305.1.bind");
     fs::create_dir(&staged_lock).unwrap();
+    fs::set_permissions(&staged_lock, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(staged_lock.join("l"), b"").unwrap();
+    fs::set_permissions(staged_lock.join("l"), fs::Permissions::from_mode(0o600)).unwrap();
     let listener = transport(&unreachable_pool(), TestClock::new(), 1, None)
         .bind(&path)
         .await
@@ -424,7 +442,7 @@ fn uid_of(name: &str) -> u32 {
 /// ([`BindError::Io`]), and nothing is left.
 #[tokio::test]
 async fn another_service_uid_needs_the_privilege_to_give_the_socket_away() {
-    let dir = TempDir::new();
+    let dir = TempDir::in_tmp();
     let uid = effective_uid(&dir.0);
     let other = if uid == 0 { 65_534 } else { uid + 1 };
     let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(other))
@@ -523,7 +541,9 @@ async fn the_socket_directory_must_be_safe() {
 /// writable by group or others (not sticky), or a writable directory that
 /// holds a symbolic link on the way, refuses to start
 /// ([`BindError::UnsafeAncestor`], by depth) and nothing is created; a
-/// sticky one, and one owned by the service UID (root only), are safe.
+/// sticky one is safe. One of another owner (root only) is refused, also
+/// when that owner is the service UID root binds for: a bind for another
+/// UID trusts no one but root with the path.
 #[tokio::test]
 async fn an_unsafe_directory_above_the_socket_refuses_to_start() {
     let dir = TempDir::new();
@@ -561,13 +581,18 @@ async fn an_unsafe_directory_above_the_socket_refuses_to_start() {
     );
     assert!(!parent.join("b.sock.lock").exists());
     if effective_uid(&dir.0) == 0 {
-        // Owned by another UID: refused, unless it is the service UID.
+        // Owned by another UID: refused, the service UID's included.
         std::os::unix::fs::lchown(&grandparent, Some(65_534), None).unwrap();
-        let result = bind(parent.join("c.sock"), None).await;
-        assert!(
-            matches!(result, Err(BindError::UnsafeAncestor { depth: d }) if d == depth),
-            "{result:?}"
-        );
+        for uid in [None, Some(65_534)] {
+            let result = bind(parent.join("c.sock"), uid).await;
+            assert!(
+                matches!(result, Err(BindError::UnsafeAncestor { depth: d }) if d == depth),
+                "{uid:?}: {result:?}"
+            );
+            assert!(!parent.join("c.sock.lock").exists(), "{uid:?}");
+        }
+        // Root's again: served for the service UID.
+        std::os::unix::fs::lchown(&grandparent, Some(0), None).unwrap();
         drop(bind(parent.join("c.sock"), Some(65_534)).await.unwrap());
     }
 }
@@ -726,6 +751,56 @@ async fn simultaneous_binds_have_exactly_one_winner() {
     }
 }
 
+/// Binds of a path with no lock file yet, started together in their own
+/// threads: exactly one wins, every other is `InUse`. The winner clears,
+/// under the lock, the private directories it finds, empty ones of the
+/// other binds included, which may lose theirs between creating and
+/// checking it: that is a retry, never an error.
+#[test]
+fn simultaneous_first_binds_have_exactly_one_winner() {
+    const BINDS: usize = 8;
+    for round in 0..100 {
+        let dir = TempDir::new();
+        let path = dir.socket();
+        // Every bind waits for the others to end before it drops its
+        // listener: the winner holds the lock until then.
+        let (start, done) = (
+            Arc::new(std::sync::Barrier::new(BINDS)),
+            Arc::new(std::sync::Barrier::new(BINDS)),
+        );
+        let attempts: Vec<_> = (0..BINDS)
+            .map(|_| {
+                let (start, done) = (Arc::clone(&start), Arc::clone(&done));
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    start.wait();
+                    runtime.block_on(async {
+                        let result = transport(&unreachable_pool(), TestClock::new(), 1, None)
+                            .bind(&path)
+                            .await;
+                        done.wait();
+                        result.map(drop)
+                    })
+                })
+            })
+            .collect();
+        let mut winners = 0;
+        for attempt in attempts {
+            match attempt.join().unwrap() {
+                Ok(()) => winners += 1,
+                Err(BindError::InUse) => {}
+                Err(err) => panic!("round {round}: {err:?}"),
+            }
+        }
+        assert_eq!(winners, 1, "round {round}");
+        assert_eq!(dir.entries(), ["local.sock.lock"], "round {round}");
+    }
+}
+
 /// A new transport started while the old one shuts down: it is `InUse`
 /// until the old one has removed its socket, then binds, and its socket is
 /// never removed by the old one.
@@ -817,8 +892,10 @@ async fn a_socket_path_up_to_the_limit_works() {
 
 /// On the other Unix systems a socket path over [`MAX_SOCKET_PATH_BYTES`],
 /// the platform's `sun_path` size less its NUL (103 bytes on the BSDs and
-/// macOS), is `PathTooLong` before anything is created, and a short one
-/// works.
+/// macOS), is `PathTooLong` before anything is created; a short one is
+/// refused too, when the bind opens the lock file ([`BindError::Io`] of kind
+/// [`io::ErrorKind::Unsupported`]: the open flags are known only for Linux),
+/// and nothing is created for it either.
 #[cfg(not(target_os = "linux"))]
 #[tokio::test]
 async fn a_socket_path_over_the_limit_is_refused() {
@@ -835,12 +912,197 @@ async fn a_socket_path_over_the_limit_is_refused() {
         .await;
     assert!(matches!(result, Err(BindError::PathTooLong)), "{result:?}");
     assert!(dir.entries().is_empty(), "{:?}", dir.entries());
-    let server = Server::bind(
-        transport(&unreachable_pool(), TestClock::new(), 1, None),
-        &dir.0.join("s"),
-    )
-    .await;
+    let result = transport(&unreachable_pool(), TestClock::new(), 1, None)
+        .bind(&dir.0.join("s"))
+        .await;
+    assert!(
+        matches!(&result, Err(BindError::Io(err)) if err.kind() == io::ErrorKind::Unsupported),
+        "{result:?}"
+    );
+    assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+}
+
+/// The variable that tells [`a_bind_without_proc_in_its_namespace`] it runs
+/// without `/proc`.
+const NO_PROC_VAR: &str = "SKYOAUTH_IT_NO_PROC";
+
+/// Without `/proc/self/fd` (Linux with no `/proc` mounted): a bind for the
+/// process's own UID reaches the socket's directory by its path, so a
+/// socket path near the limit has a staging path that does not fit
+/// (`StagingPathTooLong`, only the lock file left), and a short one binds
+/// and serves; a bind for another UID is refused before anything is created
+/// (`NoDescriptorPaths`). As root with `unshare` available, this test runs
+/// [`a_bind_without_proc_in_its_namespace`] in a new mount namespace with an
+/// empty file system mounted on `/proc`; otherwise it prints a notice and
+/// passes.
+#[cfg(target_os = "linux")]
+#[test]
+fn without_proc_only_a_short_path_of_the_own_uid_binds() {
+    let probe = TempDir::new();
+    let unshare = Command::new("unshare").arg("--help").output();
+    if effective_uid(&probe.0) != 0 || !unshare.is_ok_and(|output| output.status.success()) {
+        eprintln!(
+            "NOTICE: a bind without /proc was NOT tested (it needs root and unshare to mount \
+             an empty /proc in a new mount namespace)"
+        );
+        return;
+    }
+    let output = Command::new("unshare")
+        .args(["--mount", "--propagation", "private", "sh", "-c"])
+        .arg("mount -t tmpfs tmpfs /proc && exec \"$0\" \"$@\"")
+        .arg(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_bind_without_proc_in_its_namespace",
+            "--nocapture",
+        ])
+        .env(NO_PROC_VAR, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+}
+
+/// The binds of [`without_proc_only_a_short_path_of_the_own_uid_binds`], in
+/// a mount namespace without `/proc`; without `SKYOAUTH_IT_NO_PROC` it does
+/// nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_bind_without_proc_in_its_namespace() {
+    if env::var_os(NO_PROC_VAR).is_none() {
+        return;
+    }
+    assert!(!Path::new("/proc/self/fd").exists());
+    let dir = TempDir::new();
+    let bind = |path: PathBuf, uid: Option<u32>| async move {
+        transport(&unreachable_pool(), TestClock::new(), 1, uid)
+            .bind(&path)
+            .await
+    };
+    // Near the limit: the socket path fits, its staging path does not.
+    let base = dir.0.as_os_str().len() + 1;
+    assert!(
+        base + 8 < MAX_SOCKET_PATH_BYTES,
+        "the temporary directory is too long"
+    );
+    let long = dir.0.join("p".repeat(MAX_SOCKET_PATH_BYTES - base));
+    assert_eq!(long.as_os_str().len(), MAX_SOCKET_PATH_BYTES);
+    let result = bind(long.clone(), None).await;
+    assert!(
+        matches!(result, Err(BindError::StagingPathTooLong)),
+        "{result:?}"
+    );
+    let mut lock = long.file_name().unwrap().to_os_string();
+    lock.push(".lock");
+    assert_eq!(dir.entries(), [lock.into_string().unwrap()]);
+    // For another UID: refused, nothing created.
+    let other = dir.0.join("other");
+    fs::create_dir(&other).unwrap();
+    let result = bind(other.join("s.sock"), Some(65_534)).await;
+    assert!(
+        matches!(result, Err(BindError::NoDescriptorPaths)),
+        "{result:?}"
+    );
+    assert_eq!(fs::read_dir(&other).unwrap().count(), 0);
+    // A short path of the process's own UID: bound and served.
+    let short = dir.0.join("s.sock");
+    let server = Server::start(bind(short.clone(), None).await.unwrap());
+    assert_eq!(
+        server.call(json!({"op": "nothing"})).await,
+        error("invalid_request")
+    );
     server.stop().await;
+    assert!(!short.exists());
+}
+
+/// The variable that tells [`relative_paths_in_the_working_directory`] it
+/// runs in its own working directory.
+const RELATIVE_VAR: &str = "SKYOAUTH_IT_RELATIVE";
+
+/// A relative socket path is taken from the working directory, read once:
+/// the bind joins it to the relative path and checks and uses that one
+/// absolute path, `..` and symbolic links resolved as the kernel resolves
+/// them. The working directory is the process's, so the binds run in a
+/// child process ([`relative_paths_in_the_working_directory`]) started in a
+/// fresh directory.
+#[test]
+fn a_relative_socket_path_is_taken_from_the_working_directory() {
+    let dir = TempDir::new();
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "relative_paths_in_the_working_directory",
+            "--nocapture",
+        ])
+        .env(RELATIVE_VAR, "1")
+        .current_dir(&dir.0)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    // Each socket was removed; its lock file stays, where the path led.
+    for lock in [
+        "state/admin.sock.lock",
+        "state/b.sock.lock",
+        "state/d.sock.lock",
+        "deep/state/c.sock.lock",
+        "e.sock.lock",
+    ] {
+        assert!(dir.0.join(lock).is_file(), "{lock}");
+    }
+    assert!(!dir.0.join("state/admin.sock").exists());
+}
+
+/// The binds of [`a_relative_socket_path_is_taken_from_the_working_directory`],
+/// in the working directory it gives; without `SKYOAUTH_IT_RELATIVE` it
+/// does nothing.
+#[tokio::test]
+async fn relative_paths_in_the_working_directory() {
+    if env::var_os(RELATIVE_VAR).is_none() {
+        return;
+    }
+    let cwd = env::current_dir().unwrap();
+    for sub in ["state", "sub", "deep/x", "deep/state"] {
+        fs::create_dir_all(cwd.join(sub)).unwrap();
+    }
+    // `via` is the working directory itself; `link` leads to `deep/x`, so
+    // `link/..` is `deep`; `slink` is a link as the socket's directory.
+    std::os::unix::fs::symlink(".", cwd.join("via")).unwrap();
+    std::os::unix::fs::symlink("deep/x", cwd.join("link")).unwrap();
+    std::os::unix::fs::symlink("state", cwd.join("slink")).unwrap();
+    for (path, at) in [
+        ("state/admin.sock", "state/admin.sock"),
+        ("sub/../state/b.sock", "state/b.sock"),
+        ("via/state/d.sock", "state/d.sock"),
+        ("link/../state/c.sock", "deep/state/c.sock"),
+        ("e.sock", "e.sock"),
+    ] {
+        let server = Server::bind(
+            transport(&unreachable_pool(), TestClock::new(), 1, None),
+            Path::new(path),
+        )
+        .await;
+        let metadata = fs::symlink_metadata(cwd.join(at)).unwrap();
+        assert!(metadata.file_type().is_socket(), "{path}");
+        assert_eq!(metadata.mode() & 0o7777, 0o600, "{path}");
+        assert_eq!(
+            server.call(json!({"op": "nothing"})).await,
+            error("invalid_request"),
+            "{path}"
+        );
+        server.stop().await;
+        assert!(!cwd.join(at).exists(), "{path}");
+    }
+    let result = transport(&unreachable_pool(), TestClock::new(), 1, None)
+        .bind(Path::new("slink/f.sock"))
+        .await;
+    assert!(
+        matches!(result, Err(BindError::UnsafeDirectory)),
+        "{result:?}"
+    );
+    assert!(!cwd.join("state/f.sock.lock").exists());
 }
 
 /// A bind killed while creating the lock file leaves no lock file, only
@@ -905,7 +1167,7 @@ async fn a_lock_file_that_cannot_be_given_away_is_not_published() {
     let shared = Path::new("/tmp");
     let usable = fs::symlink_metadata(shared)
         .is_ok_and(|metadata| metadata.uid() == 0 && metadata.mode() & 0o1002 == 0o1002);
-    let probe = TempDir::new();
+    let probe = TempDir::in_tmp();
     let uid = effective_uid(&probe.0);
     if uid == 0 || !usable {
         eprintln!(
@@ -945,6 +1207,99 @@ async fn a_lock_file_that_cannot_be_given_away_is_not_published() {
 
 // ---------------------------------------------------------------------------
 // The peer check
+
+/// The variables that hand [`a_bind_with_capabilities`] its directory and
+/// the outcome it expects (`ok` or `denied`).
+const CAPS_DIR_VAR: &str = "SKYOAUTH_IT_CAPS_DIR";
+const CAPS_EXPECT_VAR: &str = "SKYOAUTH_IT_CAPS_EXPECT";
+
+/// A process that is not root binds for another service UID with
+/// capabilities only: the lock file and the socket get their mode while the
+/// process owns them, and are given away (`CAP_CHOWN`) before they are
+/// linked into the socket's directory, which, with `fs.protected_hardlinks`
+/// set (the Linux default), needs `CAP_FOWNER` for a file of another owner.
+/// So `CAP_CHOWN` alone is refused there ([`BindError::Io`], nothing left)
+/// and suffices elsewhere; `CAP_CHOWN` and `CAP_FOWNER` bind. As root with
+/// `SKYOAUTH_IT_PEER_USER` set and `setpriv` available, this test runs
+/// [`a_bind_with_capabilities`] from a copy of this test binary as the peer
+/// user with those capabilities (ambient); otherwise it prints a notice and
+/// passes.
+#[test]
+fn a_bind_for_another_uid_needs_cap_chown_and_cap_fowner() {
+    let Ok(user) = env::var(PEER_USER_VAR) else {
+        eprintln!(
+            "NOTICE: {PEER_USER_VAR} is not set: a bind with capabilities was NOT tested (it \
+             needs root, setpriv and a second local user; set {PEER_USER_VAR}=<user> to run it)"
+        );
+        return;
+    };
+    let dir = TempDir::in_tmp();
+    assert_eq!(effective_uid(&dir.0), 0, "{PEER_USER_VAR} needs root");
+    let peer = uid_of(&user);
+    std::os::unix::fs::lchown(&dir.0, Some(peer), Some(peer)).unwrap();
+    let binary = dir.0.join("tests");
+    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let protected = fs::read_to_string("/proc/sys/fs/protected_hardlinks")
+        .is_ok_and(|value| value.trim() != "0");
+    let cases = [
+        ("+chown", if protected { "denied" } else { "ok" }),
+        ("+chown,+fowner", "ok"),
+    ];
+    for (caps, expect) in cases {
+        let output = Command::new("setpriv")
+            .arg(format!("--reuid={peer}"))
+            .arg(format!("--regid={peer}"))
+            .arg("--clear-groups")
+            .arg(format!("--inh-caps={caps}"))
+            .arg(format!("--ambient-caps={caps}"))
+            .arg("env")
+            .arg(format!("{CAPS_DIR_VAR}={}", dir.0.display()))
+            .arg(format!("{CAPS_EXPECT_VAR}={expect}"))
+            .arg(&binary)
+            .args(["--exact", "a_bind_with_capabilities", "--nocapture"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{caps}: {output:?}");
+        assert!(stdout.contains("1 passed"), "{caps}: {stdout}");
+        if expect == "ok" {
+            let lock = fs::symlink_metadata(dir.0.join("local.sock.lock")).unwrap();
+            assert_eq!((lock.uid(), lock.mode() & 0o7777), (65_534, 0o600));
+            assert_eq!(dir.entries(), ["local.sock.lock", "tests"], "{caps}");
+        } else {
+            assert_eq!(dir.entries(), ["tests"], "{caps}");
+        }
+    }
+}
+
+/// The bind of [`a_bind_for_another_uid_needs_cap_chown_and_cap_fowner`],
+/// run as the peer user with capabilities; without
+/// `SKYOAUTH_IT_CAPS_DIR` it does nothing.
+#[tokio::test]
+async fn a_bind_with_capabilities() {
+    let (Some(dir), Some(expect)) = (env::var_os(CAPS_DIR_VAR), env::var_os(CAPS_EXPECT_VAR))
+    else {
+        return;
+    };
+    let path = Path::new(&dir).join("local.sock");
+    let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(65_534))
+        .bind(&path)
+        .await;
+    if expect == "denied" {
+        assert!(
+            matches!(&result, Err(BindError::Io(err)) if err.kind() == io::ErrorKind::PermissionDenied),
+            "{result:?}"
+        );
+        return;
+    }
+    let listener = result.unwrap();
+    let metadata = fs::symlink_metadata(&path).unwrap();
+    assert!(metadata.file_type().is_socket());
+    assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (65_534, 0o600));
+    drop(listener);
+    assert!(fs::symlink_metadata(&path).is_err());
+}
 
 /// The variable that names a local user for the cross-UID peer test.
 const PEER_USER_VAR: &str = "SKYOAUTH_IT_PEER_USER";
@@ -1348,6 +1703,172 @@ fn the_renamer_as_the_peer_user() {
         stop.exists() || Instant::now() > until
     });
     eprintln!("{swaps} private directories swapped");
+}
+
+/// The variables that hand [`the_swapper_as_the_peer_user`] the directory
+/// it owns and the directory it points the path at.
+const SWAP_DIR_VAR: &str = "SKYOAUTH_IT_SWAP_DIR";
+const SWAP_TARGET_VAR: &str = "SKYOAUTH_IT_SWAP_TARGET";
+
+/// Until `stop` says so, swaps `top/mid` between the directory it is and a
+/// symbolic link to `target` (renaming the directory aside and back), so
+/// that a path through `top/mid` leads now below `top`, now below
+/// `target`. Returns how many times it put the link in place.
+fn swap_directory(top: &Path, target: &Path, stop: &dyn Fn() -> bool) -> u32 {
+    let (mid, held) = (top.join("mid"), top.join("held"));
+    let mut swaps = 0;
+    while !stop() {
+        if fs::rename(&mid, &held).is_ok() {
+            if std::os::unix::fs::symlink(target, &mid).is_ok() {
+                swaps += 1;
+                std::thread::yield_now();
+                let _ = fs::remove_file(&mid);
+            }
+            fs::rename(&held, &mid).unwrap();
+        }
+        std::thread::yield_now();
+    }
+    swaps
+}
+
+/// Every entry under `dir` (`dir` included), by path, with its owner, mode,
+/// size and inode.
+fn tree(dir: &Path) -> BTreeMap<PathBuf, (u32, u32, u64, u64)> {
+    let mut entries = BTreeMap::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        let metadata = fs::symlink_metadata(&at).unwrap();
+        if metadata.is_dir() {
+            pending.extend(
+                fs::read_dir(&at)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        }
+        entries.insert(
+            at,
+            (
+                metadata.uid(),
+                metadata.mode(),
+                metadata.len(),
+                metadata.ino(),
+            ),
+        );
+    }
+    entries
+}
+
+/// Root binding for the service UID below a directory the service UID owns
+/// (above the socket's directory, root's): refused before anything is
+/// created, every time ([`BindError::UnsafeAncestor`] at that directory's
+/// depth), while the service UID (the peer user, through `runuser`) swaps
+/// the directory below it for a symbolic link to a root-owned directory
+/// elsewhere and back ([`swap_directory`]); nothing in that directory (a
+/// stale socket of the service UID there, a canary a bind led there would
+/// remove as stale, included), or in the socket's, changes. A bind for
+/// another UID trusts no one but root
+/// with the path: with the service UID trusted above the socket's
+/// directory, the swaps lead binds into the other directory. It needs root
+/// and `SKYOAUTH_IT_PEER_USER`; otherwise it prints a notice and passes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owner_of_a_directory_above_cannot_redirect_a_bind() {
+    let Ok(user) = env::var(PEER_USER_VAR) else {
+        eprintln!(
+            "NOTICE: {PEER_USER_VAR} is not set: a swap of a directory above the socket's by \
+             the service UID was NOT tested (it needs root and a second local user; set \
+             {PEER_USER_VAR}=<user> to run it)"
+        );
+        return;
+    };
+    let dir = TempDir::new();
+    assert_eq!(effective_uid(&dir.0), 0, "{PEER_USER_VAR} needs root");
+    let peer = uid_of(&user);
+    let top = dir.0.join("top");
+    let mid = top.join("mid");
+    let socket_dir = mid.join("s");
+    let outside = dir.0.join("outside");
+    for at in [&socket_dir, &outside.join("s")] {
+        fs::create_dir_all(at).unwrap();
+    }
+    for at in [&top, &mid, &socket_dir, &outside, &outside.join("s")] {
+        fs::set_permissions(at, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for at in [&top, &mid] {
+        std::os::unix::fs::lchown(at, Some(peer), Some(peer)).unwrap();
+    }
+    fs::write(outside.join("s").join("keep"), b"keep").unwrap();
+    let canary = outside.join("s").join("local.sock");
+    drop(StdListener::bind(&canary).unwrap());
+    std::os::unix::fs::lchown(&canary, Some(peer), Some(peer)).unwrap();
+    let before = tree(&outside);
+    let binary = dir.0.join("tests");
+    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let swapper = Command::new("runuser")
+        .args(["-u", &user, "--", "env"])
+        .arg(format!("{SWAP_DIR_VAR}={}", top.display()))
+        .arg(format!("{SWAP_TARGET_VAR}={}", outside.display()))
+        .arg(&binary)
+        .args(["--exact", "the_swapper_as_the_peer_user", "--nocapture"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let ready = top.join("ready");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "the swapper never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut results = Vec::new();
+    for _ in 0..RACE_BINDS {
+        let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(peer))
+            .bind(&socket_dir.join("local.sock"))
+            .await;
+        results.push(result.map(drop));
+    }
+    fs::write(top.join("stop"), b"").unwrap();
+    let output = swapper.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(tree(&outside), before, "{stderr}");
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+        "{output:?}"
+    );
+    let depth = top.components().count() - 1;
+    assert!(
+        results.iter().all(
+            |result| matches!(result, Err(BindError::UnsafeAncestor { depth: d }) if *d == depth)
+        ),
+        "{:?}",
+        results.iter().find(
+            |result| !matches!(result, Err(BindError::UnsafeAncestor { depth: d }) if *d == depth)
+        )
+    );
+    // Nothing in the socket's directory either.
+    assert_eq!(fs::read_dir(&socket_dir).unwrap().count(), 0);
+    eprintln!("{stderr}");
+}
+
+/// The swapper of [`the_owner_of_a_directory_above_cannot_redirect_a_bind`],
+/// run as the peer user; without `SKYOAUTH_IT_SWAP_DIR` it does nothing. It
+/// marks the directory `ready`, then swaps until a `stop` file appears (at
+/// most a minute).
+#[test]
+fn the_swapper_as_the_peer_user() {
+    let (Ok(top), Ok(target)) = (env::var(SWAP_DIR_VAR), env::var(SWAP_TARGET_VAR)) else {
+        return;
+    };
+    let top = PathBuf::from(top);
+    fs::write(top.join("ready"), b"").unwrap();
+    let until = Instant::now() + Duration::from_secs(60);
+    let stop = top.join("stop");
+    let swaps = swap_directory(&top, Path::new(&target), &|| {
+        stop.exists() || Instant::now() > until
+    });
+    eprintln!("{swaps} swaps of the directory");
+    assert!(swaps > 0, "the swapper never swapped");
 }
 
 // ---------------------------------------------------------------------------
@@ -2485,14 +3006,18 @@ struct ProxyState {
     /// Bytes whose appearance in what a client sends stalls its connection
     /// before they are forwarded.
     trigger: Mutex<Option<Vec<u8>>>,
+    /// A client's close no longer reaches the server: its connection to
+    /// the server stays open until the proxy is dropped (a network
+    /// partition).
+    partitioned: AtomicBool,
     closed: AtomicBool,
 }
 
 /// A TCP proxy in front of the test database that can stop answering: on a
 /// stalled connection what the server sends is dropped, so the client waits
 /// for an answer that never comes (a stalled server or network, which no
-/// server-side timeout ends), while what the client sends, and its close,
-/// still reach the server.
+/// server-side timeout ends), while what the client sends, and its close
+/// (unless the proxy is partitioned), still reach the server.
 struct Proxy {
     address: std::net::SocketAddr,
     state: Arc<ProxyState>,
@@ -2533,6 +3058,11 @@ impl Proxy {
                         match from_client.read(&mut chunk) {
                             Ok(0) | Err(_) => {
                                 upstream.closed_by_client.store(true, Ordering::SeqCst);
+                                while state.partitioned.load(Ordering::SeqCst)
+                                    && !state.closed.load(Ordering::SeqCst)
+                                {
+                                    std::thread::sleep(Duration::from_millis(20));
+                                }
                                 let _ = to_server.shutdown(std::net::Shutdown::Write);
                                 return;
                             }
@@ -2601,6 +3131,12 @@ impl Proxy {
         for proxied in self.state.connections.lock().unwrap().iter() {
             proxied.stalled.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// Keeps every client's connection to the server open after the client
+    /// closes it, until the proxy is dropped.
+    fn partition(&self) {
+        self.state.partitioned.store(true, Ordering::SeqCst);
     }
 
     /// Stops answering on a connection once it sends `trigger`.
@@ -2727,6 +3263,85 @@ async fn a_database_that_stops_answering_is_cut_off() {
     server.stop().await;
     through.close().await;
     drop(holder);
+    db.drop([pool]).await;
+}
+
+/// A database connection that stops answering while its transaction holds
+/// the restore's locks, and whose close never reaches the server (a network
+/// partition): the server ends the session itself once it has been idle in
+/// the transaction for the transaction timeout (the transaction's
+/// `idle_in_transaction_session_timeout`), which releases the locks, so the
+/// same request, retried, is served within about two transaction timeouts,
+/// not refused at every lock timeout until the operating system notices
+/// the dead connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_partitioned_connection_does_not_keep_its_locks() {
+    let (db, pool) = migrated().await;
+    let proxy = Proxy::start(&pool.connect_options());
+    let through = proxy.pool(&pool.connect_options()).await;
+    let dir = TempDir::new();
+    let limits = Settings {
+        idle_timeout: Duration::from_secs(10),
+        deadline: Duration::from_secs(10),
+        statement_timeout: Duration::from_secs(1),
+        transaction_timeout: Duration::from_secs(3),
+        ..Settings::default()
+    };
+    let bound = limits.transaction_timeout;
+    let server = Server::bind(
+        transport(&through, TestClock::new(), 1, None)
+            .with_settings(limits)
+            .unwrap(),
+        &dir.socket(),
+    )
+    .await;
+    bootstrap(&server).await;
+    let (operation_id, challenge) = issue(&server, 2).await;
+    let request = signed("restore", &operation_id, &sign(&SEED, &challenge));
+    let line = {
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        line
+    };
+
+    // Every lock of the restore taken, the release of its savepoint (the
+    // last statement before the commit) gets no answer.
+    proxy.partition();
+    proxy.stall_on(Some(b"RELEASE SAVEPOINT"));
+    let started = Instant::now();
+    assert_eq!(server.raw(line).await.unwrap(), b"");
+    assert!(started.elapsed() >= bound, "{:?}", started.elapsed());
+    proxy.stall_on(None);
+    // Discarded: the client closed it (the proxy sees that a moment later).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while proxy.connections()[0] != (true, true) {
+        assert!(Instant::now() < deadline, "{:?}", proxy.connections());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Retried until served: refused (a lock timeout) only while the server
+    // still keeps the partitioned session.
+    let reply = loop {
+        let reply = server.call(request.clone()).await;
+        if reply.get("recovery_key_epoch").is_some() {
+            break reply;
+        }
+        assert_eq!(reply, error("auth_unavailable"));
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the partitioned session kept its locks"
+        );
+    };
+    assert_eq!(reply["recovery_key_epoch"], 2, "{reply}");
+    assert!(
+        started.elapsed() < bound * 2 + Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    server.stop().await;
+    through.close().await;
+    drop(proxy);
     db.drop([pool]).await;
 }
 

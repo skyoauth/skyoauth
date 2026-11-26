@@ -70,26 +70,44 @@
 //!    connect to;
 //! 2. it reads the process's effective UID from the kernel (the peer
 //!    credentials of a socket pair it creates), the default service UID,
-//!    and refuses the socket's directory ([`BindError::UnsafeDirectory`])
-//!    unless it is a directory, not a symbolic link, not writable by group
-//!    or others, or sticky (as `/tmp`), and owned by the service UID or
-//!    root; when the service UID is not the effective UID (root binding for
-//!    another UID), it must be owned by the effective UID itself, so the
-//!    service UID cannot rename what the bind creates there while the bind
-//!    gives it away. Then it walks the lookup of the directory from the
-//!    root directory, following symbolic links as the kernel does, and
-//!    refuses it ([`BindError::UnsafeAncestor`], naming the depth, not the
-//!    path) unless every directory looked up on the way, the root
-//!    directory included, is owned by root or the service UID (or the
-//!    effective UID: the binding process itself) and not writable by group
-//!    or others, or sticky: another UID could otherwise
-//!    rename the socket's directory, or a directory above it, and redirect
-//!    the paths used below. This is a precondition the operator's client
-//!    (T13.10) checks too before it connects;
+//!    and builds one absolute path of the socket's directory (the working
+//!    directory, read once, joined to a relative path). It opens the
+//!    directory once (`O_PATH | O_DIRECTORY | O_NOFOLLOW`: no read
+//!    permission needed, never through a symbolic link at the path) and
+//!    refuses it ([`BindError::UnsafeDirectory`]) unless the open
+//!    directory is a directory, not writable by group or others, or sticky
+//!    (as `/tmp`), and owned by the service UID or root; when the service
+//!    UID is not the effective UID (root binding for another UID), it must
+//!    be owned by the effective UID itself, so the service UID cannot
+//!    rename what the bind creates there while the bind gives it away.
+//!    Then it walks the lookup of the path from the root directory,
+//!    following symbolic links (and `..` after them) as the kernel does,
+//!    and refuses it ([`BindError::UnsafeAncestor`], naming the depth, not
+//!    the path) unless every directory looked up on the way, the root
+//!    directory included, is not writable by group or others, or sticky,
+//!    and is owned by a UID the bind trusts: root or the service UID when
+//!    the service UID is the effective UID; root alone when it is not, so
+//!    neither the service UID, which would gain what the bind gives away,
+//!    nor the binding UID itself can point the path elsewhere. A symbolic
+//!    link on the way in a sticky directory others may write must be a
+//!    trusted UID's too (its owner could replace it). The walk must end at
+//!    the open directory, else [`BindError::UnsafeDirectory`] (it was moved
+//!    in between). Every entry the steps below create, open, link or
+//!    remove in the socket's directory, the lock file, the private
+//!    directories and the socket, is reached through the open directory,
+//!    `/proc/self/fd/<fd>/<name>`, never through the path looked up again,
+//!    so a rename of the directory, or of one above it, after the check
+//!    redirects none of them. Where `/proc/self/fd` is missing (not Linux,
+//!    or no `/proc`), a bind for another UID is refused
+//!    ([`BindError::NoDescriptorPaths`]) and a bind for the effective UID
+//!    uses the absolute path, which only the effective UID or root can then
+//!    change. This is a precondition the operator's client (T13.10) checks
+//!    too before it connects;
 //! 3. it opens the lock file `<name>.lock` next to the socket, or, when
 //!    there is none, creates it as a private inode first: a new file, mode
-//!    0600, `l` in a fresh private directory (as in step 4), given to the
-//!    service UID on its open descriptor (`fchown`) and only then
+//!    0600 (set while the process owns it), `l` in a fresh private
+//!    directory (as in step 4), given to the service UID on its open
+//!    descriptor (`fchown`; see step 6 for the privileges) and only then
 //!    hard-linked to `<name>.lock` (`link` never replaces an entry: a lock
 //!    file another bind published meanwhile is opened instead), so the lock
 //!    path never holds a file of the wrong owner, also when the process is
@@ -98,10 +116,13 @@
 //!    a device never blocks the open), and the open file must be a regular
 //!    file owned by the service UID with mode 0600, checked with `fstat`
 //!    against the path (also after publishing it), so a symbolic link or
-//!    another file is [`BindError::PathOccupied`]. The crate does not
-//!    depend on `libc`, so the two flags are Linux's values for x86_64,
-//!    aarch64 and riscv64; elsewhere the bind refuses to start
-//!    ([`BindError::Io`] of kind [`std::io::ErrorKind::Unsupported`]). It
+//!    another file is [`BindError::PathOccupied`]. A private directory
+//!    another bind cleared (as in step 4) before this one opened it, or
+//!    before the link, is a retry. The crate does not depend on `libc`, so
+//!    the flags of steps 2 and 3 are Linux's values for x86_64, aarch64 and
+//!    riscv64; elsewhere the directory is checked by its path and the bind
+//!    refuses to start when it opens the lock file ([`BindError::Io`] of
+//!    kind [`std::io::ErrorKind::Unsupported`]). It
 //!    is locked exclusively without waiting
 //!    (`flock`, [`std::fs::File::try_lock`]): a lock another transport holds
 //!    is [`BindError::InUse`]. The lock is held for the listener's life, so
@@ -113,12 +134,16 @@
 //! 4. under the lock it clears the private directories a killed bind of the
 //!    same name left (`.<name>.<pid>.<n>.bind`, owned by the process's UID,
 //!    never a symbolic link): it unlinks only what a bind puts there, the
-//!    staged socket `s` (a socket) and the staged lock `l` (a regular file),
-//!    each owned by the service UID or the process's UID, and removes the
-//!    directory only when it is then empty (`rmdir`, never recursively);
-//!    anything else in it is left, and so is the directory. A directory the
-//!    process may write but not list (a sticky directory with mode 01733,
-//!    say) is not scanned: its leftovers stay. Then it creates a fresh
+//!    staged socket `s` (a socket) and the staged lock `l` (an empty
+//!    regular file, mode 0600 at most, in a directory with no group or
+//!    other bits), each owned by the service UID or the process's UID, and
+//!    removes the directory only when it is then empty (`rmdir`, never
+//!    recursively); anything else in it is left, and so is the directory.
+//!    A directory the process may write but not list (a sticky directory
+//!    with mode 01733, say) is not scanned: its leftovers stay. A private
+//!    directory of another bind still creating the lock file (step 3) may
+//!    be cleared too, empty or with its `l`: that bind retries. Then it
+//!    creates a fresh
 //!    private directory, mode 0700 (`mkdir` never reuses an entry), opens
 //!    it, and checks the open directory: the one at the path, owned by the
 //!    process's UID, no group or other bits, else
@@ -127,9 +152,11 @@
 //!    holds anything but a socket owned by the service UID (a file, a
 //!    directory, a symbolic link, another UID's socket), and
 //!    ([`BindError::InUse`]) when a process accepts a connection on it (one
-//!    that takes no lock file). A socket of the service UID that refuses the
-//!    connection is stale and is removed, only while it is still the same
-//!    inode;
+//!    that takes no lock file). The entry is opened (`O_PATH`, never
+//!    through a symbolic link), checked with `fstat` and connected to
+//!    through its own descriptor, so the address fits whatever the name's
+//!    length. A socket of the service UID that refuses the connection is
+//!    stale and is removed, only while it is still the same inode;
 //! 6. it computes the staged socket's address once, through the open
 //!    directory (`/proc/self/fd/<fd>/s`), and uses it for every call on the
 //!    staged socket: the bind, the change of owner, the mode, the check and
@@ -137,26 +164,32 @@
 //!    way), so a rename of the private directory's path, and a directory
 //!    with a symbolic link put in its place, redirect none of them; the
 //!    address is also short whatever the path's length. Where
-//!    `/proc/self/fd` is missing (not Linux, or no `/proc`) it uses the full
-//!    staging path, and one that does not fit a socket address is
-//!    [`BindError::StagingPathTooLong`]; that path is safe as well, because
-//!    of step 2: only the effective UID (or root) can rename entries in the
-//!    socket's directory and in the directories above it. It binds the
-//!    socket there, gives it to the service UID when that is not the
-//!    effective UID (`lchown`, which needs the privilege; a refusal is
-//!    [`BindError::Io`]) and sets mode 0600;
+//!    `/proc/self/fd` is missing (a bind for the effective UID only, step
+//!    2) it uses the full staging path, and one that does not fit a socket
+//!    address is [`BindError::StagingPathTooLong`]; that path is safe as
+//!    well, because of step 2: only the effective UID (or root) can rename
+//!    entries in the socket's directory and in the directories above it. It
+//!    binds the socket there, sets mode 0600 while the process owns it,
+//!    and only then gives it to the service UID when that is not the
+//!    effective UID (`lchown`). A bind for another UID needs `CAP_CHOWN`
+//!    to give the lock file and the socket away, and, where
+//!    `fs.protected_hardlinks` is set (the Linux default), `CAP_FOWNER` to
+//!    link them, files of another owner, into the socket's directory (steps
+//!    3 and 7); root has both, and a process that is not root may be given
+//!    them. A refusal is [`BindError::Io`] and leaves nothing;
 //! 7. it hard-links the staged socket, through the same address, to the
-//!    socket path: `link` never replaces an entry, so one that appeared
-//!    since step 5 is left in place ([`BindError::PathOccupied`]); then it
-//!    clears the private directory as in step 4 (its entries through the
-//!    open directory);
-//! 8. it checks the path again: the same inode, a socket, owned by the
-//!    service UID, permission bits exactly 0600, else
-//!    [`BindError::NotVerified`].
+//!    socket's name in the open directory: `link` never replaces an entry,
+//!    so one that appeared since step 5 is left in place
+//!    ([`BindError::PathOccupied`]); then it clears the private directory
+//!    as in step 4 (its entries through the open directory);
+//! 8. it checks the socket's name in the open directory again: the same
+//!    inode, a socket, owned by the service UID, permission bits exactly
+//!    0600, else [`BindError::NotVerified`].
 //!
-//! On shutdown, and when the [`LocalListener`] is dropped, the path is
-//! removed, still under the lock, only while it is the transport's socket;
-//! then the lock is released. A transport killed mid-bind leaves its
+//! On shutdown, and when the [`LocalListener`] is dropped, the socket is
+//! removed through the open directory, still under the lock, only while it
+//! is the transport's socket; then the lock is released. A transport killed
+//! mid-bind leaves its
 //! private directory, which the next bind of the name clears (step 4); one
 //! killed while creating the lock file leaves at most its private
 //! directory and `l` in it, never a lock file, and the next bind creates
@@ -293,6 +326,7 @@
 //! connection and holds it until the connection ends, so past the limit a
 //! new client waits in the socket's listen queue, unaccepted, until a
 //! connection ends (it is not refused; its own timeout bounds its wait).
+//! That wait is outside every limit below, which all start at the accept.
 //!
 //! Each read of the request must return within [`Settings::idle_timeout`].
 //! [`Settings::deadline`], from the accept, bounds only the read of the
@@ -309,7 +343,11 @@
 //! waiting on a socket, is ended by the transaction timeout alone. Past
 //! it the request's database connection is discarded, detached from the
 //! pool and closed at once, so it is never reused or tested mid-transaction
-//! and the server rolls back what it holds; the mutex is released, and the
+//! and the server rolls back what it holds (a close that never reaches the
+//! server, through a network partition, say, does not keep the locks: the
+//! transaction sets `idle_in_transaction_session_timeout` to the
+//! transaction timeout, and the server ends a session idle in it that
+//! long); the mutex is released, and the
 //! connection is closed **without a response**. Nothing was written,
 //! unless the commit had been sent: its outcome is then unknown, and the
 //! uncertain-commit rule applies (see "Transactions": reconcile, then
@@ -319,11 +357,20 @@
 //! written in time, the connection is closed: the transaction's outcome is
 //! then unknown to the client (see "Transactions", the lost response).
 //!
-//! So a connection lasts at most its deadline, the transaction timeout and
-//! the idle timeout: by default 30, 60 and 10 seconds, 100 seconds in all.
-//! That is the longest the operator's client (T13.10) must wait for a
-//! response before it treats the request as one whose outcome is unknown
-//! and reconciles; a response never comes later. On shutdown
+//! So an accepted connection lasts at most its deadline, the transaction
+//! timeout and the idle timeout: by default 30, 60 and 10 seconds, 100
+//! seconds in all from the accept, and a response never comes later than
+//! that after the accept. The bound covers accepted work only: the time a
+//! client spends in the listen queue before its accept (past
+//! [`Settings::max_connections`]) is outside it and has no bound of its
+//! own, and the client cannot see when the accept happens. A request the
+//! client stopped waiting for while it was still queued may yet run: the
+//! connection is accepted once a permit frees, and a request written in
+//! full is read and served, closed client or not. So the operator's client
+//! (T13.10) bounds its wait by its own timeout and treats a request that
+//! timed out, queued or accepted, as one whose outcome is unknown: it
+//! reconciles (see "Transactions") before it retries or reports failure.
+//! On shutdown
 //! [`LocalListener::serve`] waits for the open connections at most
 //! [`SHUTDOWN_GRACE`] (10 seconds) and then cuts the rest, as the
 //! transaction timeout does (no response, the connection discarded, a
@@ -476,8 +523,9 @@ pub struct Settings {
     pub challenge_ttl: Duration,
     /// The most connections served at once, 1 to [`MAX_CONNECTIONS`];
     /// default 32. Past it, the transport accepts no connection until one
-    /// ends: a new client waits in the socket's listen queue (see the module
-    /// docs, "Time limits").
+    /// ends: a new client waits in the socket's listen queue, a wait no
+    /// time limit covers (they start at the accept; see the module docs,
+    /// "Time limits").
     pub max_connections: usize,
 }
 
@@ -716,7 +764,10 @@ impl LocalListener {
     pub async fn serve(self, shutdown: impl Future<Output = ()>) {
         let mut connections = JoinSet::new();
         // A permit per connection, taken before its accept and held until it
-        // ends: past `max_connections`, new clients wait unaccepted.
+        // ends: past `max_connections`, new clients wait unaccepted in the
+        // listen queue, outside every time limit (they start at the accept),
+        // and a request whose client gave up there is still served once a
+        // permit frees (see the module docs, "Time limits").
         let permits = Arc::new(Semaphore::new(self.shared.settings.max_connections));
         tokio::pin!(shutdown);
         loop {
