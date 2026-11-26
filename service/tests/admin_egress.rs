@@ -2034,10 +2034,26 @@ async fn an_approval_after_the_writer_disables_its_entry_is_refused() {
 
 /// The text of the one statement of this test's database that waits for
 /// a lock, once there is one.
+///
+/// It reads in two steps, because one row of `pg_stat_activity` need not
+/// be of one moment: its `query` comes from the reading session's snapshot
+/// of the backend status array, taken once per transaction, while its
+/// `wait_event_type` is read live from the backend's `PGPROC`. A row read
+/// as the waiting backend moves on can pair the text of its previous
+/// statement with the lock wait of its next one. So it first finds the
+/// pid of the one backend that waits for a lock (more than one panics),
+/// and then reads that pid's `query` again, by the pid alone, in a new
+/// statement and so a new snapshot: one taken after the wait was seen.
+/// Both callers hold the conflicting lock until this returns, so the
+/// backend is still in the same waiting statement at that snapshot, and
+/// its `query` is that statement's text. The second read does not ask for
+/// the wait again: the backend can clear its wait event for a moment, as
+/// when it wakes to run the deadlock check, while it still waits in the
+/// same statement.
 async fn waiting_statement(pool: &PgPool) -> String {
     for _ in 0..1000 {
-        let waiting: Vec<String> = sqlx::query_scalar(
-            "SELECT query FROM pg_stat_activity \
+        let waiting: Vec<i32> = sqlx::query_scalar(
+            "SELECT pid FROM pg_stat_activity \
              WHERE datname = current_database() AND wait_event_type = 'Lock'",
         )
         .fetch_all(pool)
@@ -2045,8 +2061,14 @@ async fn waiting_statement(pool: &PgPool) -> String {
         .unwrap();
         match waiting.as_slice() {
             [] => tokio::time::sleep(Duration::from_millis(10)).await,
-            [one] => return one.clone(),
-            many => panic!("more than one statement waits: {many:?}"),
+            [pid] => {
+                return sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid = $1")
+                    .bind(pid)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            }
+            many => panic!("more than one backend waits: {many:?}"),
         }
     }
     panic!("no statement waits for a lock");
