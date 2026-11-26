@@ -85,16 +85,19 @@
 //!   matched directly, without `select_grant`, in both tenants
 //!   (`a02_neg_reusable_workflow_identity_pinned_by_binding`).
 //! - **Whitespace.** A `ref` or `event_name` padded with a space, a tab, a
-//!   newline or a carriage return, before or after the bound value, gives
-//!   no binding: no trimming
+//!   newline, a CRLF or a lone carriage return (`push\r`, a `ref` with a
+//!   leading or trailing `\r`), before or after the bound value, gives no
+//!   binding: no trimming, no stripping of `\r`
 //!   (`a02_neg_whitespace_padded_claims_against_push_binding`).
 //! - **Empty policy.** A binding with an empty `claim_match_policy`
 //!   matches nothing, not the push claims, not an empty claim map, and it
 //!   never displaces the grant's own binding when its ID sorts first. The
-//!   registry refuses an empty policy on create and on update
+//!   registry refuses an empty policy on create and on update, for a
+//!   `github_production` and a `generic_production` binding alike
 //!   (`RequiredPredicate` for the profile's first required predicate,
-//!   before any statement; the `0004` check stands behind it), so the
-//!   empty binding is built by hand from the selected one
+//!   before any statement; the `0004` check stands behind it), and the
+//!   refused update leaves the binding unchanged. So the empty binding is
+//!   built by hand from the selected one
 //!   (`a02_neg_empty_policy_binding_matches_nothing`).
 //!
 //! **T12.7's cross-actor clause.** T12.7 is one of A02's owners, and its
@@ -659,9 +662,10 @@ async fn a02_neg_reusable_workflow_identity_pinned_by_binding() {
 }
 
 /// Whitespace in a claim value is significant: a `ref` or `event_name`
-/// padded with a space, a tab, a newline or a carriage return, before or
-/// after the bound value, gives no binding (byte-wise comparison with no
-/// trimming, ADR-016 item 1). The exact values match (the in-test control),
+/// padded with a space, a tab, a newline, a CRLF or a lone carriage return
+/// (`push\r`, a `ref` with a leading or trailing `\r`), before or after the
+/// bound value, gives no binding (byte-wise comparison with no trimming and
+/// no stripping, ADR-016 item 1). The exact values match (the in-test control),
 /// for every grant of both tenants on both GitHub-issuer sources.
 #[tokio::test]
 async fn a02_neg_whitespace_padded_claims_against_push_binding() {
@@ -690,6 +694,21 @@ async fn a02_neg_whitespace_padded_claims_against_push_binding() {
             "event_name with a trailing CRLF",
             &[Change::Set("event_name", "push\r\n")],
         ),
+        // A lone carriage return: a matcher that strips `\r` from the
+        // evidence would accept these, while the CRLF above, which keeps a
+        // newline after stripping, would not show it.
+        (
+            "event_name with a trailing carriage return",
+            &[Change::Set("event_name", "push\r")],
+        ),
+        (
+            "ref with a trailing carriage return",
+            &[Change::Set("ref", "refs/heads/main\r")],
+        ),
+        (
+            "ref with a leading carriage return",
+            &[Change::Set("ref", "\rrefs/heads/main")],
+        ),
         (
             "ref and event_name both padded",
             &[
@@ -705,10 +724,12 @@ async fn a02_neg_whitespace_padded_claims_against_push_binding() {
 /// the push claim set, not the same with unnamed claims, not an empty claim
 /// map, and, listed next to the grant's own binding with an ID that sorts
 /// before it, it never displaces it. The registry never stores such a
-/// binding: an empty policy is refused on create and on update with
-/// `RequiredPredicate` for the first predicate the profile requires
-/// (`github_production` and `generic_production`), before any statement
-/// runs, and writes nothing; the `0004` check that refuses `'{}'` stands
+/// binding: an empty policy is refused, for a `github_production` binding
+/// on `src_gh` and a `generic_production` binding on `src_gen` alike, on
+/// create and on update (of the grant's own binding on that source) with
+/// `RequiredPredicate` for the first predicate the profile requires, before
+/// any statement runs, and writes nothing: no binding is created, and the
+/// updated one is unchanged; the `0004` check that refuses `'{}'` stands
 /// behind it. So the empty binding is built by hand, from the grant's own
 /// selected binding with its policy removed. Control: the same binding with
 /// its stored policy matches. Every grant of both tenants on both
@@ -747,32 +768,42 @@ async fn a02_neg_empty_policy_binding_matches_nothing() {
                 "{case}"
             );
         }
-        let own = side.id(GRANTS[0].eligible_on(Source::Github));
-        let stored = registry::get_principal_binding(&pool, side.tenant, &own)
-            .await
-            .unwrap();
-        let result = registry::test_support::update_principal_binding(
-            &pool,
-            side.tenant,
-            &own,
-            stored.revision,
-            &PrincipalBindingChanges {
-                name: stored.name.clone(),
-                profile: stored.profile,
-                claim_match_policy: BTreeMap::new(),
-                status: stored.status,
-            },
-        )
-        .await;
-        assert_empty_policy_refused(result, stored.profile, &format!("{} update", side.tenant));
-        assert_eq!(
-            registry::get_principal_binding(&pool, side.tenant, &own)
+        // The grant's own binding on each source: `github_production` on
+        // `src_gh`, `generic_production` on `src_gen`.
+        for (profile, source) in [
+            (BindingProfile::GithubProduction, Source::Github),
+            (BindingProfile::GenericProduction, Source::Generic),
+        ] {
+            let case = format!("{} {profile:?} update", side.tenant);
+            let own = side.id(GRANTS[0].eligible_on(source));
+            let stored = registry::get_principal_binding(&pool, side.tenant, &own)
                 .await
-                .unwrap(),
-            stored,
-            "{}",
-            side.tenant
-        );
+                .unwrap();
+            assert_eq!(stored.profile, profile, "{case}");
+            assert_eq!(stored.trust_source_id, source.id(side), "{case}");
+            assert!(!stored.claim_match_policy.is_empty(), "{case}");
+            let result = registry::test_support::update_principal_binding(
+                &pool,
+                side.tenant,
+                &own,
+                stored.revision,
+                &PrincipalBindingChanges {
+                    name: stored.name.clone(),
+                    profile: stored.profile,
+                    claim_match_policy: BTreeMap::new(),
+                    status: stored.status,
+                },
+            )
+            .await;
+            assert_empty_policy_refused(result, profile, &case);
+            assert_eq!(
+                registry::get_principal_binding(&pool, side.tenant, &own)
+                    .await
+                    .unwrap(),
+                stored,
+                "{case}"
+            );
+        }
     }
 
     let targets = targets(&pool).await;
