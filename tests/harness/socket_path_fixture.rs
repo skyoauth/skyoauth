@@ -117,14 +117,15 @@ fn unreachable_pool() -> PgPool {
         .connect_lazy_with(options)
 }
 
-/// A fresh directory under the system's temporary directory, mode 0755,
-/// removed when dropped.
+/// A fresh directory under the system's temporary directory, its symbolic
+/// links resolved (the fixture's `case_root`), mode 0755, removed when
+/// dropped.
 struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let path = env::temp_dir().join(format!(
+        let path = fs::canonicalize(env::temp_dir()).unwrap().join(format!(
             "skyoauth-socket-path-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
