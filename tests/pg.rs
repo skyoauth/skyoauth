@@ -17,7 +17,10 @@
 //! them is a scenario. The A04, A05, A22, A32, A37, A43,
 //! A48, A49, A53 and A54 tests are partial: they are registered on their
 //! scenario's planned M1a stage and count for nothing (see each module's
-//! docs). `harness::pg_teardown`
+//! docs). A22's are in two modules: `security::a22`, the operator registry
+//! lookup, and `security::a22_wire`, the admin read router of
+//! `skyoauth_service::admin_http` driven with an already-verified peer.
+//! `harness::pg_teardown`
 //! tests the harness's own database teardown (`src/pg.rs`), and
 //! `harness::wire_errors` the wire error catalogue
 //! `tests/conformance/fixtures/_wire/errors.v1.json` against the service's
@@ -34,6 +37,8 @@ mod security {
     mod a05;
     #[path = "a22.rs"]
     mod a22;
+    #[path = "a22_wire.rs"]
+    mod a22_wire;
     #[path = "a24.rs"]
     mod a24;
     #[path = "a25.rs"]
