@@ -939,46 +939,65 @@ async fn an_occupied_socket_path_refuses_to_start() {
     assert!(!path.exists());
 }
 
+/// The variable that tells [`simultaneous_binds_in_a_process_of_their_own`]
+/// it runs alone in its process.
+const SIMULTANEOUS_VAR: &str = "SKYOAUTH_IT_SIMULTANEOUS";
+
 /// Binds of one stale path started together: exactly one wins, every other
-/// is `InUse` (the lock file), and the winner's socket stays in place.
+/// is `InUse` (the lock file), and the winner's socket stays in place. They
+/// run in a child process, alone ([`simultaneous_binds_in_a_process_of_their_own`]):
+/// a child that another test of this process forked would hold the previous
+/// round's lock, or the stale socket's listener, until it executes its
+/// program (see [`try_rebind`]), and every bind of a round would be `InUse`.
+#[test]
+fn simultaneous_binds_have_exactly_one_winner() {
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "simultaneous_binds_in_a_process_of_their_own",
+            "--nocapture",
+        ])
+        .env(SIMULTANEOUS_VAR, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+}
+
+/// The binds of [`simultaneous_binds_have_exactly_one_winner`], the only
+/// test of their process: exactly one winner in every round's first and only
+/// batch. Without `SKYOAUTH_IT_SIMULTANEOUS` it does nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn simultaneous_binds_have_exactly_one_winner() {
+async fn simultaneous_binds_in_a_process_of_their_own() {
+    if env::var_os(SIMULTANEOUS_VAR).is_none() {
+        return;
+    }
     let dir = TempDir::new();
     let path = dir.socket();
     for round in 0..20 {
         drop(StdListener::bind(&path).unwrap());
-        // No winner, every bind `InUse`: the previous round's lock or the
-        // stale socket's listener is still held by a child another test
-        // forked (see [`try_rebind`]); the round is run again, for up to
-        // `REBIND_WAIT`. More than one winner is never retried.
-        let started = Instant::now();
-        let winners = loop {
-            let start = Arc::new(tokio::sync::Barrier::new(8));
-            let attempts: Vec<_> = (0..8)
-                .map(|_| {
-                    let start = Arc::clone(&start);
-                    let path = path.clone();
-                    tokio::spawn(async move {
-                        start.wait().await;
-                        transport(&unreachable_pool(), TestClock::new(), 1, None)
-                            .bind(&path)
-                            .await
-                    })
+        let start = Arc::new(tokio::sync::Barrier::new(8));
+        let attempts: Vec<_> = (0..8)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                let path = path.clone();
+                tokio::spawn(async move {
+                    start.wait().await;
+                    transport(&unreachable_pool(), TestClock::new(), 1, None)
+                        .bind(&path)
+                        .await
                 })
-                .collect();
-            let mut winners = Vec::new();
-            for attempt in attempts {
-                match attempt.await.unwrap() {
-                    Ok(listener) => winners.push(listener),
-                    Err(BindError::InUse) => {}
-                    Err(err) => panic!("round {round}: {err:?}"),
-                }
+            })
+            .collect();
+        let mut winners = Vec::new();
+        for attempt in attempts {
+            match attempt.await.unwrap() {
+                Ok(listener) => winners.push(listener),
+                Err(BindError::InUse) => {}
+                Err(err) => panic!("round {round}: {err:?}"),
             }
-            if !winners.is_empty() || started.elapsed() >= REBIND_WAIT {
-                break winners;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
+        }
         assert_eq!(winners.len(), 1, "round {round}");
         let metadata = fs::symlink_metadata(&path).unwrap();
         assert_eq!(metadata.mode() & 0o7777, 0o600, "round {round}");
@@ -1077,31 +1096,34 @@ async fn an_overlapping_restart_keeps_the_new_socket() {
 }
 
 /// The tests' [`try_rebind`] retries `InUse` only, and only for its wait:
-/// another error is returned at once, a listener dropped during the wait
-/// gives way, and one held past it is `InUse` at the end of the wait.
+/// another error is returned from the first bind, never retried; a
+/// listener dropped during the wait gives way; and one held past it is
+/// `InUse` at the end of the wait, after more than one bind.
 #[tokio::test]
 async fn a_rebind_retries_only_in_use() {
     let dir = TempDir::new();
     let path = dir.socket();
-    let own = || transport(&unreachable_pool(), TestClock::new(), 1, None);
+    // The transports made: one per bind.
+    let made = AtomicU32::new(0);
+    let own = || {
+        made.fetch_add(1, Ordering::SeqCst);
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+    };
     fs::write(&path, b"data").unwrap();
-    let started = Instant::now();
     let result = try_rebind(own, &path, REBIND_WAIT).await;
     assert!(matches!(result, Err(BindError::PathOccupied)), "{result:?}");
-    assert!(
-        started.elapsed() < REBIND_WAIT / 5,
-        "{:?}",
-        started.elapsed()
-    );
+    assert_eq!(made.load(Ordering::SeqCst), 1, "bound once, never retried");
     fs::remove_file(&path).unwrap();
 
     // The refusal above took the lock and released it: [`rebind`].
     let held = rebind(own, &path).await;
     let wait = Duration::from_millis(300);
+    made.store(0, Ordering::SeqCst);
     let started = Instant::now();
     let result = try_rebind(own, &path, wait).await;
     assert!(matches!(result, Err(BindError::InUse)), "{result:?}");
     assert!(started.elapsed() >= wait, "{:?}", started.elapsed());
+    assert!(made.load(Ordering::SeqCst) > 1, "retried");
 
     let (listener, ()) = tokio::join!(try_rebind(own, &path, REBIND_WAIT), async {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3763,10 +3785,11 @@ async fn shutdown_cuts_a_request_whose_database_stopped_answering() {
     db.drop([pool]).await;
 }
 
-/// A `BEGIN` without an answer past the deadline, and a rollback without
-/// one past the transaction timeout: each request is closed without a
-/// response, wrote nothing, and discards its connection (the next request
-/// is served at once, on a new one).
+/// A `BEGIN` without an answer, cut at the deadline (not the transaction
+/// timeout), and a rollback without one, cut at the transaction timeout
+/// (not the deadline): each request is closed without a response, wrote
+/// nothing, and discards its connection (the next request is served at
+/// once, on a new one).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
@@ -3782,10 +3805,17 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
         // which take a moment under load.
         deadline: Duration::from_secs(3),
         statement_timeout: Duration::from_millis(300),
-        transaction_timeout: Duration::from_secs(2),
+        // Past the `BEGIN`'s window: a rollback bounded by the deadline, or
+        // a `BEGIN` bounded by the transaction timeout, falls outside its
+        // own window.
+        transaction_timeout: Duration::from_secs(6),
         ..Settings::default()
     };
     let (deadline, bound) = (limits.deadline, limits.transaction_timeout);
+    // The windows the `BEGIN` and the rollback are cut in: apart.
+    let begin_cut = deadline - Duration::from_millis(100)..deadline + Duration::from_millis(2_500);
+    let rollback_cut = bound..bound + Duration::from_secs(3);
+    assert!(begin_cut.end <= rollback_cut.start);
     let server = Server::bind(
         transport(&through, TestClock::new(), 1, None)
             .with_settings(limits)
@@ -3804,11 +3834,7 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
     let started = Instant::now();
     assert_eq!(server.raw(line.clone()).await.unwrap(), b"");
     let waited = started.elapsed();
-    assert!(
-        waited >= deadline - Duration::from_millis(100)
-            && waited < deadline + Duration::from_secs(4),
-        "{waited:?}"
-    );
+    assert!(begin_cut.contains(&waited), "{waited:?}");
     assert!(get_recovery_state(&pool).await.unwrap().is_none());
     proxy.stall_on(None);
     let started = Instant::now();
@@ -3824,10 +3850,7 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
     let started = Instant::now();
     assert_eq!(server.raw(line.clone()).await.unwrap(), b"");
     let waited = started.elapsed();
-    assert!(
-        waited >= bound && waited < bound + Duration::from_secs(5),
-        "{waited:?}"
-    );
+    assert!(rollback_cut.contains(&waited), "{waited:?}");
     assert_eq!(snapshot(&pool).await, before);
     proxy.stall_on(None);
     let started = Instant::now();
