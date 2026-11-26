@@ -52,7 +52,12 @@
 //     §2 table names, and are first owned by their feature's task
 //     (FEATURE_TASK); required sub-IDs lie in the annex range that the
 //     parent's note declares (e.g. "A58.01–A58.89");
-//   - neither file repeats an ID or a (id, milestone) stage.
+//   - neither file repeats an ID or a (id, milestone) stage;
+//   - a planned subcase stage lists no tests (the partial-tests passage
+//     counts scenario stages only);
+//   - the partial-tests markers stand in §2 after the counts sentences and
+//     enclose only generated passage lines, so write mode overwrites nothing
+//     hand-written.
 //
 // matrix_sha256 is the SHA-256 of the UTF-8 bytes of the whole source line,
 // from its first character to its last, with no trailing newline.
@@ -375,7 +380,8 @@ export function findCounts(layout) {
 }
 
 // The partial-tests passage of §2: the line between these two marker lines,
-// each on a line of its own, is rendered from the registry.
+// each on a line of its own, is rendered from the registry. The passage must
+// start after the §2 table and its counts sentences (checked in generate()).
 export const PARTIAL_BEGIN = '<!-- BEGIN GENERATED partial-tests: rendered from tests/conformance/scenarios.toml by scripts/ci/gen-conformance-registry.mjs; do not edit -->';
 export const PARTIAL_END = '<!-- END GENERATED partial-tests -->';
 
@@ -395,6 +401,10 @@ export function partialStages(scenarios) {
   }
   return out;
 }
+
+// Every line that renderPartialTests() writes starts so; the markers may
+// enclose no other line.
+export const PARTIAL_LINE_RE = /^Partial tests by stage: /;
 
 // The lines of the partial-tests passage (without its markers).
 export function renderPartialTests(scenarios) {
@@ -899,7 +909,24 @@ export function generate(root) {
     if (!counts) errors.push(`${LAYOUT}: the "Counts by first stage: ... rows have more than one stage." sentences after the §2 table are missing`);
     const partial = findPartialTests(layout);
     if (partial.error) errors.push(partial.error);
-    else if (partial.begin < table.first + table.lines.length && partial.end >= table.first) errors.push(`${LAYOUT}:${partial.begin}: the partial-tests passage overlaps the §2 table`);
+    // The passage starts after the whole table and its counts sentences: a
+    // marker inside the table would cut it short (and the rows after the
+    // marker would survive next to the rendered ones), and one above the
+    // counts would replace them and whatever stands between.
+    // This also refuses markers that enclose the table.
+    else if (counts && partial.begin <= counts.n) {
+      errors.push(`${LAYOUT}:${partial.begin}: the partial-tests passage must start after the §2 table and its counts sentences (line ${counts.n})`);
+    } else {
+      // Write mode replaces everything between the markers, so they may
+      // enclose only earlier generated lines: a marker moved past a
+      // hand-written paragraph would otherwise delete it.
+      const layoutLines = layout.split('\n');
+      for (let n = partial.begin + 1; n < partial.end; n++) {
+        if (PARTIAL_LINE_RE.test(layoutLines[n - 1])) continue;
+        errors.push(`${LAYOUT}:${n}: the partial-tests markers (lines ${partial.begin} and ${partial.end}) enclose a line that is not a generated "Partial tests by stage: ..." line; move the markers so that they enclose only the passage`);
+        break;
+      }
+    }
 
     // Contract mapping: "| C01 <title> | A19, A14 | ... |" rows of layout §5.
     const covered = new Map();
@@ -979,6 +1006,11 @@ export function generate(root) {
       for (const st of s.stage) {
         stageErrors(st, stageAt(st), errors);
         if (st.implemented_sha256 !== undefined && typeof st.implemented_sha256 !== 'string') errors.push(`${stageAt(st)}: implemented_sha256 must be a string`);
+        // The partial-tests passage counts scenario stages only, so a sub-ID
+        // has no partial tests yet: a test it listed would go uncounted.
+        if (st.status === 'planned' && Array.isArray(st.tests) && st.tests.length) {
+          errors.push(`${stageAt(st)}: a planned subcase stage lists tests; partial tests of a sub-ID are not supported (the layout §2 partial-tests passage counts scenario stages only): keep tests = [] until the stage is implemented`);
+        }
       }
       const parent = byId.get(s.parent);
       if (s.conditional_on === undefined) {
@@ -1029,7 +1061,7 @@ export function generate(root) {
     if (counts) lines[counts.n - 1] = renderCounts(scenarios) + lines[counts.n - 1].slice(counts.text.length);
     // Splices from the bottom up, so that one does not move the other.
     const splices = [{ at: table.first - 1, n: table.lines.length, rows: rendered }];
-    if (!partial.error) splices.push({ at: partial.begin, n: partial.end - partial.begin - 1, rows: renderPartialTests(scenarios) });
+    if (!partial.error && counts && partial.begin > counts.n) splices.push({ at: partial.begin, n: partial.end - partial.begin - 1, rows: renderPartialTests(scenarios) });
     for (const s of splices.sort((x, y) => y.at - x.at)) lines.splice(s.at, s.n, ...s.rows);
 
     const scenariosToml =
@@ -1057,24 +1089,34 @@ export function generate(root) {
 export function describeDiff(path, committed, regenerated) {
   if (committed === null) return [`${path}: missing; run node scripts/ci/gen-conformance-registry.mjs`];
   if (path === LAYOUT) {
-    const a = committed.split('\n');
-    const b = regenerated.split('\n');
-    // Whether line i of `lines` lies between the partial-tests markers.
-    const inPassage = (lines, i) => {
-      if (i < 1) return false;
-      const begin = lines.lastIndexOf(PARTIAL_BEGIN, i - 1);
-      return begin >= 0 && lines.indexOf(PARTIAL_END, begin + 1) > i;
-    };
-    const out = [];
-    for (let i = 0; i < Math.max(a.length, b.length); i++) {
-      if (a[i] === b[i]) continue;
-      const row = /^\| (A\d\d) \|/.exec(b[i] ?? '') ?? /^\| (A\d\d) \|/.exec(a[i] ?? '');
-      if (!row && (inPassage(b, i) || inPassage(a, i))) {
-        out.push(`${path}:${i + 1}: the §2 partial-tests passage differs from the one rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
-        continue;
+    // The partial-tests passage is compared as one block, and the rest of the
+    // file line by line without it, so that a passage of another length does
+    // not shift every later line into a difference. Line numbers are the
+    // committed file's.
+    const split = (text) => {
+      const lines = text.split('\n').map((line, i) => ({ line, n: i + 1 }));
+      let p = { error: true };
+      try {
+        p = findPartialTests(text);
+      } catch (ex) {
+        if (!(ex instanceof SpecError)) throw ex;
       }
-      const what = row ? `§2 row ${row[1]}` : COUNTS_RE.test(b[i] ?? '') ? 'the §2 counts sentences' : 'line';
-      out.push(`${path}:${i + 1}: ${what} differs from the table rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
+      if (p.error) return { rest: lines, passage: null };
+      return { rest: [...lines.slice(0, p.begin), ...lines.slice(p.end - 1)], passage: { lines: lines.slice(p.begin, p.end - 1).map((l) => l.line), n: p.begin + 1 } };
+    };
+    const a = split(committed);
+    const b = split(regenerated);
+    const out = [];
+    if (a.passage && b.passage && a.passage.lines.join('\n') !== b.passage.lines.join('\n')) {
+      out.push(`${path}:${a.passage.n}: the §2 partial-tests passage differs from the one rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
+    }
+    for (let i = 0; i < Math.max(a.rest.length, b.rest.length); i++) {
+      const x = a.rest[i]?.line;
+      const y = b.rest[i]?.line;
+      if (x === y) continue;
+      const row = /^\| (A\d\d) \|/.exec(y ?? '') ?? /^\| (A\d\d) \|/.exec(x ?? '');
+      const what = row ? `§2 row ${row[1]}` : COUNTS_RE.test(y ?? '') ? 'the §2 counts sentences' : 'line';
+      out.push(`${path}:${(a.rest[i] ?? b.rest[i]).n}: ${what} differs from the table rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
     }
     return out;
   }

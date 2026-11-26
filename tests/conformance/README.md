@@ -8,7 +8,7 @@ This directory holds the conformance scenario registry of [the conformance layou
 | `subcases.toml` | Sub-IDs as `[[subcase]]` entries (`kind = "subcase"`, with `parent`). Today it holds the four conditional sub-IDs that layout §2 names; each carries `conditional_on` and `table_text`. |
 | `waivers.toml` | Optional; absent today. Flake waivers (format below). |
 | `fixtures/`, `schema/` | Absent today. Layout §1.3. |
-| [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Rewrites the derived fields of both files and renders the layout §2 table from them; `--check` verifies. Node 20 or later, no dependencies. |
+| [`scripts/ci/gen-conformance-registry.mjs`](../../scripts/ci/gen-conformance-registry.mjs) | Rewrites the derived fields of both files and renders the layout §2 table, its counts sentences and the partial-tests passage from them; `--check` verifies. Node 20 or later, no dependencies. |
 | [`scripts/ci/check-conformance-registry.mjs`](../../scripts/ci/check-conformance-registry.mjs) | The registry check (layout §3): the static part, and with a test list the resolution part. Needs `smol-toml` from [`scripts/ci/package.json`](../../scripts/ci/package.json). |
 | [`scripts/ci/report-conformance.mjs`](../../scripts/ci/report-conformance.mjs) | The result reporter (layout §3 "Result join", [below](#the-reporter)). Uses the registry check and `smol-toml`. |
 | `scripts/ci/*.test.mjs` | Self-tests of the three scripts (`node:test`). |
@@ -16,7 +16,7 @@ This directory holds the conformance scenario registry of [the conformance layou
 ## Generate and check
 
 ```sh
-node scripts/ci/gen-conformance-registry.mjs           # rewrite derived fields and the layout §2 table
+node scripts/ci/gen-conformance-registry.mjs           # rewrite derived fields, the layout §2 table and the partial-tests passage
 node scripts/ci/gen-conformance-registry.mjs --check   # exit 1 if any of the three files differs from regenerated output
 node --test scripts/ci/gen-conformance-registry.test.mjs
 
@@ -33,7 +33,7 @@ CI runs the checks and the three self-tests above in the `conformance-registry` 
 
 ## Source of truth
 
-`scenarios.toml` is authoritative for every column of the layout §2 scenario table, and `subcases.toml` for the conditional sub-ID sentences at the end of a row. The generator renders the table and the "Counts by first stage …" sentences after it into `docs/testing/conformance-layout.md`. It never parses the table back. To change a row, edit its registry entry and run the generator; a hand edit of the table is overwritten by the generator and fails `--check` and the registry check.
+`scenarios.toml` is authoritative for every column of the layout §2 scenario table, and `subcases.toml` for the conditional sub-ID sentences at the end of a row. The generator renders the table, the "Counts by first stage …" sentences after it and the partial-tests passage into `docs/testing/conformance-layout.md`. The passage is the line between the marker lines `<!-- BEGIN GENERATED partial-tests: … -->` and `<!-- END GENERATED partial-tests -->`, which must stand after the counts sentences in §2 and enclose nothing but an earlier generated passage line; it names each `planned` scenario stage that lists tests, with the number it lists, in registry order. The generator refuses a `planned` subcase stage that lists tests, since the passage does not count subcase stages yet. It never parses the table or the passage back. To change a row, edit its registry entry and run the generator; a hand edit of the table is overwritten by the generator and fails `--check` and the registry check.
 
 IDs and hashes are still derived from the specs: the tasks §8 rows decide which scenarios exist and in what order, the design §2 rows which contracts exist. A tasks §8 row without a registry entry, or an entry without a row, is an error, so a new scenario needs a hand-written entry in the same PR as its row.
 
@@ -48,6 +48,7 @@ IDs and hashes are still derived from the specs: the tasks §8 rows decide which
 | File | `gates_passed` | Hand-authored: a plain list of milestones. A gate PR adds to it and changes nothing else ([Gate PRs](#gate-prs), layout §3 **Gates**); a PR that only removes milestones (a revocation) is an ordinary reviewed PR, not a gate PR. |
 | File | comments | Generated; hand-written comments are dropped |
 | Layout §2 | the scenario table and its counts sentences | Rendered from the registry |
+| Layout §2 | the partial-tests passage between its markers | Rendered from the `tests` of the `planned` stages of `scenarios.toml` |
 
 ### How a row is rendered
 
@@ -131,7 +132,7 @@ The check never skips a test because its package is missing from the list: such 
 
 Locally, without cargo-nextest, `--libtest-list PKG/TARGET=FILE` takes the output of `cargo test -p PKG --test TARGET -- --list` for one target instead. That output lists every test, ignored ones included, without marking which are `#[ignore]`d, and the fallback reads only it, so with it the ignore rule is not checked, and a note says so; CI always uses `--nextest-list`. To see the ignored tests of a target by hand, run `cargo test -p PKG --test TARGET -- --list --ignored`, which lists only them: a registered test in that output fails in CI. Both options may be repeated and combined, as long as each nextest binary is in one list only. A list file that cannot be read is a usage error (exit 2); `--gate-pr` takes no list.
 
-These rules cover every `implemented` stage, of scenarios and subcases, and every `planned` stage that lists tests: partial tests, which leave the stage `planned` and count for nothing in the report, must still resolve. On a `planned` stage `resolve`, `same-job` and the own-entry half of `pos-neg` apply to the tests it lists, and its errors name it `(planned stage, partial test)`. The own-entry rule keeps any other test of the job (another entry's, an implemented stage's, or one not scenario-named) from padding a partial list, which would also hide an unregistered test from `orphans`. Its legs need not all produce tests yet, so neither the per-job half of `pos-neg` (a `pos` and a `neg` from each job) nor the runner check of its legs applies. A `planned` stage with `tests = []` has nothing to resolve.
+These rules cover every `implemented` stage, of scenarios and subcases, and every `planned` stage that lists tests (today a scenario stage only: the generator refuses a `planned` subcase stage that lists tests): partial tests, which leave the stage `planned` and count for nothing in the report, must still resolve. On a `planned` stage `resolve`, `same-job` and the own-entry half of `pos-neg` apply to the tests it lists, and its errors name it `(planned stage, partial test)`. The own-entry rule keeps any other test of the job (another entry's, an implemented stage's, or one not scenario-named) from padding a partial list, which would also hide an unregistered test from `orphans`. Its legs need not all produce tests yet, so neither the per-job half of `pos-neg` (a `pos` and a `neg` from each job) nor the runner check of its legs applies. A `planned` stage with `tests = []` has nothing to resolve.
 
 What this means when adding tests:
 
