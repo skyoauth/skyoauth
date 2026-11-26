@@ -1,14 +1,16 @@
 # Proposal: separate migrate and runtime database roles (T10.1 follow-up)
 
-Status: Draft, plan only. Drafted 2026-11-26 for the lead's review. Nothing
-here is implemented: this text changes no code, no migration, no contract
-and no test, adds no dependency and serves no endpoint. Each choice is
-labelled **lead pick** (an implementation choice open to ordinary review)
-or **open user question** (it changes a deployment contract or a ruling);
-the list is under "Decisions requested". Line numbers refer to `main` at
-`939c4cd`. The privilege claims below were checked by reading the SQL and
-the code; none was run against PostgreSQL for this text (see "Not
-verified").
+Status: Draft, plan only, revised 2026-11-26 after review. Nothing here is
+implemented: this text changes no code, no migration, no contract and no
+test, adds no dependency and serves no endpoint. Each choice is labelled
+**lead pick** (an implementation choice open to ordinary review) or **open
+user question** (it changes a deployment contract or a ruling); the list is
+under "Decisions requested". The review ran the proposal on a non-superuser
+migrate role on PostgreSQL 15.20, 16.15 and 17.12: R1, R7, R9, R10 and F5
+held, and its findings are applied below. This text's own claims were
+checked by reading the SQL and the code; its author ran nothing against
+PostgreSQL (see "Not verified"). Line numbers refer to this branch, `main`
+at `1c467e9` merged.
 
 T10.1 owns "a runtime database role that does not own the tables, separate
 from the migration role (today one `SKYOAUTH_DATABASE_URL` serves both),
@@ -42,7 +44,7 @@ with the pinned `search_path` of the guard functions".
   runtime roles split.
 - **No sequences.** IDs are random text (`service/src/ids.rs`); no table
   has a `serial` or identity column, so the runtime role needs no sequence
-  privilege.
+  privilege today.
 
 ## 1. The two roles
 
@@ -52,18 +54,42 @@ with the pinned `search_path` of the guard functions".
   schema"); no separate `NOLOGIN` owner role. The **runtime role** owns
   nothing and holds exactly the privileges of section 4. It is a `NOLOGIN`
   group role that receives the grants; the server logs in as a member of it
-  (`GRANT skyoauth_runtime TO <login role>`), so a credential rotates by
-  adding a new member without rerunning `migrate`. The documentation names
-  them "migrate role" and "runtime role"; the group role's default name is
-  part of R3.
-- **R2 (lead pick).** The grants live in one embedded SQL file that is not
-  a migration (sketched as `service/src/persistence/runtime_privileges.sql`,
-  outside `service/migrations/`, which `sqlx::migrate!` reads). `migrate`
-  applies it after the migrations, in one transaction, to the configured
-  runtime role: `REVOKE ALL` on the schema's tables from the role, then the
-  grants of section 4 and `USAGE` on the schema. Re-applied on every run, it
-  converges: a corrected grant reaches an existing database without a new
-  migration, and the migrations stay free of deployment role names.
+  (`GRANT <runtime role> TO <login role>`), so a credential rotates by
+  adding a new member without rerunning `migrate`. The login role must
+  inherit the group's privileges (the `INHERIT` attribute, and on
+  PostgreSQL 16 or later a membership granted `WITH INHERIT TRUE`): R8
+  checks inherited privileges only, so a non-inheriting login is refused as
+  lacking them.
+- **R2 (lead pick): the grants step.** The grants live in one embedded SQL
+  file that is not a migration (sketched as
+  `service/src/persistence/runtime_privileges.sql`, outside
+  `service/migrations/`, which `sqlx::migrate!` reads). `migrate` applies
+  it after the migrations, in one transaction, re-applied on every run so
+  it converges: a corrected grant reaches an existing database without a
+  new migration, and the migrations stay free of deployment role names. In
+  that transaction, in order:
+  1. `pg_advisory_xact_lock` on a dedicated key. sqlx releases its own session
+     lock (`pg_advisory_lock`, key derived from the database name;
+     sqlx-postgres 0.9.1 `src/migrate.rs:189-213`) when `run_direct` returns,
+     so without it concurrent runs fail with `tuple concurrently updated`
+     (`XX000`; the review saw about 24 of 60 runs per cluster). A dedicated
+     key keeps the step independent of sqlx's private key derivation; a run
+     that migrates while another grants converges on its own grants step.
+  2. Check that the migrate role owns every table, sequence and function of
+     the schema (or is a member of their owner). A non-owner with some
+     privilege gets only `WARNING`s from `GRANT` and `REVOKE`, and `migrate`
+     would exit successfully with nothing granted.
+  3. `REVOKE ALL` on `ALL TABLES IN SCHEMA` and `ALL SEQUENCES IN SCHEMA`
+     from the runtime role and from `PUBLIC` (a `PUBLIC` grant survives a
+     revoke from the role), then the grants of section 4 and `USAGE` on the
+     schema. Every name is quoted with `format('%I', …)`; the schema is
+     `current_schema()`.
+  4. Verify the result with R8's comparison for the runtime role, in the
+     same transaction, and roll back on any difference. Warn when another
+     role holds `INSERT`, `UPDATE` or `DELETE` on the schema's tables: a
+     renamed runtime role keeps its stale grants, which only the operator
+     removes (`REVOKE` or `DROP ROLE`).
+
   Rejected: `GRANT`s inside the migrations to a fixed role name (a
   cluster-wide name hard-coded into checksummed files, a role that must
   exist at migrate time, and from the first tagged release a new migration
@@ -71,36 +97,48 @@ with the pinned `search_path` of the guard functions".
 
 ## 2. Configuration
 
+R3, R6 and R8 depend on each other and are for the user to decide
+together: with R8 refusing an owner and no R6 opt-out, R3's single-URL
+fallback leaves a server that refuses to start once R8 is wired.
+
 - **R3 (open user question): the variables.** Recommendation:
   - `SKYOAUTH_DATABASE_URL` keeps its name and becomes the runtime URL: the
     server, and the later bootstrap and recovery subcommands, use it.
-  - `SKYOAUTH_MIGRATE_DATABASE_URL` (new) is read by `migrate` only.
-  - `SKYOAUTH_DATABASE_RUNTIME_ROLE` (new, default `skyoauth_runtime`) is
-    read by `migrate` only and names the group role of R2.
-  - Precedence: `migrate` uses `SKYOAUTH_MIGRATE_DATABASE_URL` when it is
+  - `SKYOAUTH_DATABASE_MIGRATE_URL` (new) is read by `migrate` only.
+  - `SKYOAUTH_DATABASE_RUNTIME_ROLE` (new) is read by `migrate` only, names
+    the group role of R1, and is **required** whenever the migrate URL is
+    set, with no default: with a default name, instance A's server could
+    write instance B's database in the same cluster (reproduced in review).
+  - Precedence: `migrate` uses `SKYOAUTH_DATABASE_MIGRATE_URL` when it is
     set and nonempty, and then applies the grants. When it is unset,
     `migrate` falls back to `SKYOAUTH_DATABASE_URL`, applies no grants and
     logs a WARN that the deployment has one role and the guards are a
-    tripwire only. Today's documented command keeps working.
+    tripwire only. Today's documented command keeps working (but see the
+    dependency above).
   - With the migrate URL set, `migrate` refuses before migrating when the
-    runtime role does not exist, is the migrate role, is a superuser, or is
-    a member of the migrate role (checked with `pg_has_role`).
-
-  The names, the default and the fallback change the deployment contract
-  (root `README.md`, "Database migrations"), so they are the user's.
-
+    runtime role does not exist, is the migrate role, or fails R8's role
+    checks (superuser, `CREATEROLE`, membership in the migrate role).
 - **R4 (lead pick): TLS, errors and `Debug`.** Both URLs go through the same
   `DatabaseConfig::from_lookup` path, with the variable name passed in
   instead of the constant at `config.rs:284`. Each gets the strict default
   on its own (`verify-full` for a remote host without `sslmode`, `PGSSLMODE`
-  ignored, a WARN for a weaker explicit mode; `config.rs:485`); nothing,
-  `sslrootcert` included, is inherited from the other URL. `ConfigError`'s
-  messages hard-code `SKYOAUTH_DATABASE_URL` today (`config.rs:130-170`);
-  they name the variable actually read, and still repeat nothing from the
-  URL. `Debug` (`config.rs:345-358`) gains a `purpose` field (`migrate` or
+  ignored, a WARN for a weaker explicit mode; `config.rs:485`); nothing
+  written in one URL is inherited by the other. `ConfigError`'s messages
+  hard-code `SKYOAUTH_DATABASE_URL` today (`config.rs:130-170`); they name
+  the variable actually read, and still repeat nothing from the URL.
+  `Debug` (`config.rs:345-358`) gains a `purpose` field (`migrate` or
   `runtime`) and still omits the password and the URL. The pool variables
   keep their meaning; `migrate` already runs on one dedicated connection
   (`service/src/persistence/mod.rs:94-104`).
+- **R4a: the ambient `PG*` variables.** sqlx reads `PGHOSTADDR`,
+  `PGPASSWORD`, `PGUSER`, `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`,
+  `PGOPTIONS` and `PGAPPNAME` (with `PGHOST`, `PGPORT`, `PGDATABASE`) for
+  any setting a URL omits (`config.rs:86-89`), so they apply to both
+  URLs. One `PGHOSTADDR` redirects both, and it decides the "remote" TLS
+  judgement of both (`from_lookup` falls back to it, `config.rs:279-326`).
+  Lead pick: T10.1's "documented as still read" covers the two-URL case in
+  the root README. Open user question (it amends T10.1's accepted
+  behaviour): refuse `PGHOSTADDR` when both URLs are set; recommended.
 - **R5 (lead pick): same-role detection is by privilege, not by URL.** Two
   URLs can name different login roles that share ownership through
   membership, and one role can be reached through two URLs, so comparing
@@ -108,24 +146,31 @@ with the pinned `search_path` of the guard functions".
   database at start (R8) and refuses an owner. `migrate`'s refusals of R3
   catch the same mistake from the other side.
 - **R6 (open user question): a development opt-out.** Whether the server
-  may start as an owner or superuser at all, for local development, behind
-  an explicit variable (for example `SKYOAUTH_DATABASE_ALLOW_OWNER_ROLE=true`)
-  that turns R8's role refusal into a WARN at every start. The config has
-  no development mode to key it on (the server's one variable today is
-  `SKYOAUTH_ADDR`, `main.rs:68`). Recommendation: allow it, with the WARN;
-  never for the schema check.
+  may start as the owner, for local development, behind an explicit
+  variable. The config has no development mode to key it on (the server's
+  one variable today is `SKYOAUTH_ADDR`, `main.rs:68`). Recommendation: no
+  opt-out. If convenience is wanted: the owner role only, never a
+  superuser or `CREATEROLE` role, behind an explicitly insecure name (for
+  example `SKYOAUTH_INSECURE_ALLOW_OWNER_ROLE=true`), with a WARN at every
+  start, and never for the schema check.
 
-## 3. Who migrates, and what the server checks at start
+## 3. Deployment, and what the server checks at start
 
 - **R7 (no change; lead pick on the shape).** `migrate` stays an explicit
   step and the server never migrates on start; that is already the rule
   (`persistence/mod.rs:6-7`, `main.rs:76-77`) and this proposal does not
   reopen it. Deployments run it as an operator step or a pre-deploy job with
-  the migrate URL, before the server rollout. The server's environment
-  should not carry the migrate URL: the server logs a WARN when
-  `SKYOAUTH_MIGRATE_DATABASE_URL` is set in its environment (refusing was
-  considered; it would break a shared environment file for no gain the
-  WARN does not give).
+  the migrate URL, before the server rollout. The migrate URL must be a
+  direct connection (the session advisory lock, `persistence/mod.rs:27-33`);
+  the runtime URL may go through a pooler such as PgBouncer in transaction
+  mode, since R8's probes and every write run inside transactions. The
+  server's environment should not carry the migrate URL: the server logs a
+  WARN when `SKYOAUTH_DATABASE_MIGRATE_URL` is set in its environment.
+- **R7a (open user question): PostgreSQL 15 as the minimum.** R8 needs
+  `has_parameter_privilege` (15 or later) and would refuse every default
+  PostgreSQL 14 deployment, where `PUBLIC` has `CREATE` on `public`. The
+  service states no minimum today (only the tests do, root
+  `README.md:114`). Recommendation: 15.
 - **R8 (lead pick): the start checks.** Once, before serving, on one
   runtime connection, the server runs two checks and refuses to start on
   either failure, with a message that names the step to run or the
@@ -135,15 +180,25 @@ with the pinned `search_path` of the guard functions".
     checksum mismatch, or an applied version the binary does not know is a
     refusal, the same three conditions `migrate` refuses
     (`persistence/mod.rs:9-15`). Needs `SELECT` on `_sqlx_migrations`.
-  - **Role.** A refusal when the role is a superuser; owns, or is a member
-    of the owner of, any table or function in the schema; has `CREATE` on
-    the schema; has `TRUNCATE`, `TRIGGER` or `REFERENCES` on any table; has
-    any `INSERT`, `UPDATE` or `DELETE` that section 4 does not list; lacks
-    one that it lists (a write would fail later with `42501`); or may `SET`
-    `session_replication_role` (`has_parameter_privilege`, PostgreSQL 15 or
-    later), which turns off the foreign keys. An extra `SELECT` is a WARN
-    only. The `has_*_privilege` functions count inherited privileges, so
-    membership is covered.
+  - **Role.** Let _R_ be the login role and every role it is a member of
+    (`pg_has_role(…, 'MEMBER')`, which also counts a membership without
+    `INHERIT` that `SET ROLE` can still use). A refusal when any role in _R_
+    is a superuser, has `CREATEROLE` (on 15 it can grant itself membership in
+    the owner role), owns any table, sequence or function of the schema, owns
+    the database (`pg_database.datdba`), or is a member of
+    `pg_execute_server_program` or `pg_write_server_files`; when the login has
+    `CREATE` on the schema or `TRUNCATE`, `TRIGGER` or `REFERENCES` on any
+    table; when, column by column (`has_column_privilege`, since
+    `has_table_privilege` is false when only column grants exist), it holds an
+    `INSERT`, `UPDATE` or `DELETE` that section 4 does not list, or lacks one
+    that it lists; when a `PUBLIC` grant gives it any of those; when any role
+    in _R_ owns objects or holds privileges in another database of the cluster
+    (`pg_shdepend` rows with another `dbid`); or when it may set
+    `session_replication_role`, which turns off the foreign keys:
+    `has_parameter_privilege` and a `SET LOCAL session_replication_role =
+replica` probe in a transaction that is rolled back. An extra `SELECT` is
+    a WARN only. `migrate`'s verify step (R2 step 4) reuses the same
+    comparison.
 
   The checks land as a library function now and are wired by the first
   slice that gives `serve()` a pool.
@@ -155,13 +210,14 @@ only callers in a normal build; "tests only" marks registry writers that
 are `#[cfg_attr(not(feature = "test-support"), expect(dead_code))]`, whose
 production callers are later slices. Every `UPDATE` column list includes
 `revision` where the table has one. Every table gets `SELECT` except
-`consumed_assertion`. No table gets `TRUNCATE`, `TRIGGER` or `REFERENCES`
-(foreign key checks run as the table owner, README :1032-1034).
+`consumed_assertion` and `schema_info`. No table gets `TRUNCATE`, `TRIGGER`
+or `REFERENCES` (foreign key checks run as the table owner, README
+:1032-1034).
 
 | Table                              | INSERT | UPDATE (columns)                                                                                                                    | DELETE | Writers (code)                                                                                                                     |
 | ---------------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `_sqlx_migrations`                 | no     | none                                                                                                                                | no     | `migrate` only (migrate role); `SELECT` for R8                                                                                     |
-| `schema_info`                      | no     | none                                                                                                                                | no     | none (no code reads it); no `SELECT` needed either                                                                                 |
+| `schema_info`                      | no     | none                                                                                                                                | no     | none (no code reads it); no `SELECT` either                                                                                        |
 | `tenant`                           | yes    | `name`, `status`                                                                                                                    | no     | `admin::workload` (`tenant.rs:43`, `:106-108`); locks `FOR SHARE` (`admin/workload.rs:284`), `FOR KEY SHARE` (`events.rs:521`)     |
 | `principal`                        | yes    | `name`, `status`                                                                                                                    | no     | `admin::workload` (`tenant.rs:135`, `:202-204`)                                                                                    |
 | `instance_security_policy`         | yes    | `widening_second_approver`; with the S8 mirror also `single_actor_mode`, `audit_sink_config_digest`, `audit_sink_validated_at` (F2) | no     | bootstrap (`bootstrap.rs:268`, lock `FOR UPDATE` :259); the toggle (`operation.rs:383-391`); locks `FOR SHARE`/`FOR NO KEY UPDATE` |
@@ -187,15 +243,15 @@ production callers are later slices. Every `UPDATE` column list includes
 | `admin_role_binding`               | yes    | `status`                                                                                                                            | no     | bootstrap (`operator.rs:761`); update tests only (`:602`, `:802`); locked `FOR SHARE` (`operation.rs:401`)                         |
 | `recovery_state`                   | yes    | `recovery_public_key`, `recovery_key_epoch`                                                                                         | no     | bootstrap (`bootstrap.rs:271`), restore (`recovery.rs:619`)                                                                        |
 | `administrative_operation`         | yes    | `consumed_at`, `revoked_at`, `revocation_operation_id`, `outcome`                                                                   | no     | `registry::operation` (`operation.rs:301`, `:362`, `:366`), recovery (`recovery.rs:570`, `:580`, `:626`)                           |
-| `consumed_assertion`               | yes    | **none**                                                                                                                            | **no** | `registry::assertion` only (`assertion.rs:147`, `:223`), no conflict target, so `INSERT` alone (README :1034-1039); no `SELECT`    |
+| `consumed_assertion`               | yes    | **none**                                                                                                                            | no     | `registry::assertion` only (`assertion.rs:147`, `:223`), no conflict target, so `INSERT` alone (README :1034-1039); no `SELECT`    |
 
 **Must not hold.** `UPDATE`, `DELETE` or `TRUNCATE` on `audit_event`;
 `INSERT`, `DELETE` or `TRUNCATE` on `audit_chain_head`; `UPDATE` on
 `consumed_assertion`; `DELETE` on any table that the `0001`, `0002` and
-`0006` guards keep undeletable (every table above marked "no", except
-`_sqlx_migrations` and the two below); `DELETE` on `principal_binding` and
-`service_grant`, which ADR-008 item 3 allows when disabled but no code
-does; `UPDATE` on any column the `0002` to `0004` immutability guards
+`0006` guards keep undeletable (every table above marked "no" except
+`_sqlx_migrations`, `consumed_assertion`, `principal_binding` and
+`service_grant`, whose `0006` guards allow a delete under a condition;
+F6); `UPDATE` on any column the `0002` to `0004` immutability guards
 protect, except the lock-only grant of F5. The guards refuse most of these
 anyway (`SK001`); the privileges make the refusal a `42501` that does not
 depend on the triggers being enabled.
@@ -214,9 +270,14 @@ depend on the triggers being enabled.
   toggle (`UPDATE ... widening_second_approver`). The test
   `a_table_level_update_lets_a_destination_writer_flip_an_entry`
   (`service/tests/schema_trust_source_egress_guard.rs:1340`) shows the
-  path that stays open. Closing it needs a second runtime role (an
-  exchange role without the admin writers); see Q-roles under "Decisions
-  requested". The README sentences need correcting either way.
+  path that stays open. Both sides of all three pairs are admin writers
+  (the list-row writers, the trust source destination writers and the
+  trust writes that take the policy row `FOR SHARE` on one side; the
+  assignment, entry and toggle writers on the other), so an exchange role
+  without the admin writers holds none of these grants and does not close
+  F1 (Q-roles below). Only a role per admin writer would, and those share
+  one process (D5); this text does not propose it. The README sentences
+  are corrected either way ("Reconciliation").
 - **F2. The mirror writes from the runtime role.** The S8 startup mirror
   (`docs/proposals/mirror-revision-rule.md`, O7) runs in the server, so the
   runtime role needs `UPDATE` on `single_actor_mode` and the sink columns.
@@ -224,12 +285,18 @@ depend on the triggers being enabled.
   rule; the database cannot tell the mirror from an online write (`0002`
   comment at :129-134). Running the mirror as the migrate role would put
   the owner credential in the server, which R7 avoids.
-- **F3. The split does not stop forged appends.** The runtime role can
-  insert operator rows (bootstrap and recovery need it) and append
-  correctly chained audit events (every audited write needs it). A stolen
-  runtime credential can therefore enroll an operator and record a
-  plausible event for it with raw SQL. What the split stops is rewriting or
-  deleting history, disabling guards and shadowing the chain head.
+- **F3. What a stolen runtime credential can still do.** With raw SQL and
+  only section 4's privileges it can: enroll an operator and append a
+  correctly chained audit event for it; set `widening_second_approver`
+  false; set `single_actor_mode` true (granted for the mirror, F2); replace
+  the recovery public key (it holds `UPDATE` on `recovery_public_key` and
+  `recovery_key_epoch`, and the `0005` rotation guard only requires the
+  epoch to advance with the key); and revoke every operator credential. In
+  TM-16's terms (`docs/threat-model.md:945`, `:948`), compromising a
+  replica that holds the runtime credential equals the "PostgreSQL write"
+  row: it "can rewrite policy, role bindings, operator credentials and
+  consumed state". What the split stops is rewriting or deleting history,
+  disabling guards, shadowing the chain head and changing the schema.
 - **F4. Row locks need `UPDATE` on a column.** Locks not in the README:
   `tenant` `FOR SHARE` and `FOR KEY SHARE`, `trust_keyset` and
   `trust_source` `FOR NO KEY UPDATE`, the operator rows and
@@ -239,15 +306,18 @@ depend on the triggers being enabled.
 - **F5. `service_grant_binding` under `REPEATABLE READ`.** The `0004` check
   locks the grant's binding rows `FOR KEY SHARE` only above
   `READ COMMITTED` (`0004`:640-644; README :796-801). Every wired write
-  runs at `READ COMMITTED` (`trust/write.rs:44-50`, `admin/mod.rs:14`,
+  runs at `READ COMMITTED` (`trust/write.rs:44-50`, `admin/mod.rs:13-15`,
   `operation/mod.rs:77`), but the registry list writers take any executor
   (lead pick: grant the lock-only `UPDATE (grant_id)`; every column of the
   row is immutable, `0004` `service_grant_binding_immutable`).
 - **F6. Not granted until a writer exists.** `DELETE` on
-  `consumed_assertion` (pruning, README :1038), `SELECT` on it (the
-  retired-version check, README :1283-1285), and `DELETE` on
-  `principal_binding` and `service_grant` (ADR-008 item 3). Each is added to
-  the grants file by the PR that adds its writer.
+  `consumed_assertion`: its `0006` guard
+  (`consumed_assertion_delete_after_retention`) allows a delete only after
+  `retain_until`, and pruning has no writer yet (README :1038). `SELECT` on
+  it (the retired-version check, README :1283-1285). `DELETE` on
+  `principal_binding` and `service_grant`, whose `0006` guards allow it for
+  a disabled row (never for an impersonation grant) under ADR-008 item 3.
+  Each is added to the grants file by the PR that adds its writer.
 - **R9 (lead pick): grant the registry surface, tests-only writers
   included.** Least privilege would leave out the binding, service
   identity, grant and keyset writers that no production code calls yet.
@@ -255,6 +325,29 @@ depend on the triggers being enabled.
   registry, the tests run those writers as it (section 6), and the grants
   file is the one place to narrow later. `trust_keyset` and
   `admin_role_binding` would need lock-only grants without it.
+
+**Q-roles (open user question): one runtime role or an exchange role and
+an admin role.** Recommendation: one runtime role for M1a; the exchange
+path gets its own role and pool in the M2 slice that wires it. The minimal
+matrix, the reviewer's reading checked against
+`service/src/persistence/registry/selection.rs` (:131-139),
+`ceilings.rs` (:96-108), `predicate.rs` (no SQL) and `assertion.rs`:
+
+| Role                              | Privileges                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Exchange (the readers that exist) | `SELECT` on `service_grant`, `service_grant_binding`, `service_grant_resource_server`, `principal_binding`, `trust_source`, `service_identity`, `service_identity_resource_server`, `resource_server`, `audience_tenant_assignment`, and `_sqlx_migrations` for R8; `INSERT` only on `consumed_assertion`, no `SELECT` on it |
+| Exchange, likely added at M2      | `SELECT` on `trust_keyset`, `trust_keyset_version`, `egress_allowlist_entry` (fetch-time match), `tenant`, `principal`, `resource_action` (inferred; no exchange handler exists to confirm it)                                                                                                                               |
+| Exchange, never                   | `UPDATE`, `DELETE`, `TRUNCATE`, `TRIGGER`, `REFERENCES`; no lock-only grant (`select_grant` and `load_scope_ceilings` take no row lock); no audit append unless M2 decides exchanges go into the hash chain                                                                                                                  |
+| Admin                             | section 4 minus `consumed_assertion`                                                                                                                                                                                                                                                                                         |
+
+What the split buys: an exchange compromise or SQL bug can no longer write
+the registry, enrol operators, flip policy or append to the audit chain.
+That is real isolation where token-issuing replicas deploy separately
+(TM-16, `docs/threat-model.md:945`), and only protection against SQL-level
+bugs when everything runs in one process. It does not close F1. Not
+confirmed: the M2 rows, and whether the exchange handler will call
+anything beyond `select_grant`, `load_scope_ceilings`, `consume_assertion`
+and `consume_assertion_set`.
 
 ## 5. The guard functions' `search_path`
 
@@ -313,30 +406,45 @@ root and migrations READMEs; the test session owns `service/tests/*`,
   `INSERT`-only role (`tests/security/a24.rs:799`). They keep using
   `create_login_role` (`service/tests/common/mod.rs:118`,
   `tests/src/pg.rs:187`).
-- **New: the real runtime role.** Both harnesses (kept in step, as
-  `tests/src/pg.rs:53-58` requires) apply the grants file when they build
-  the template, to a cluster-wide `NOLOGIN` group role of the harness's
-  own name, created if absent; the template digest covers the grants file.
-  `TestDb::runtime_pool()` returns a pool of a fresh login role that is a
-  member of it. That needs `CREATEROLE` for every database test, which CI's
-  superuser has; the root `README.md` test-role table says so. New tests:
-  the role's privileges equal section 4 (a catalog comparison over
-  `has_table_privilege` and `has_column_privilege`); each writer of
-  section 4 runs once as the runtime role; the temporary-table shadow tests
-  rerun as it; R8's refusals, one case each; `migrate` with two URLs and
-  with the fallback (`service/tests/cli.rs`); the redaction tests for the
-  new variable (`service/tests/redaction.rs`).
+- **The harness.** Both harnesses (kept in step, as `tests/src/pg.rs:53-58`
+  requires) apply the grants file when they build the template, to a
+  cluster-wide `NOLOGIN` group role of the harness's own name, created if
+  absent under the template advisory lock (`TEMPLATE_LOCK_KEY`,
+  `tests/src/pg.rs`; the review saw 2 of 30 concurrent unlocked creates
+  fail with `23505`); the template digest covers the grants file.
+  `TestDb::runtime_pool()` returns a pool of a fresh, inheriting login role
+  that is a member of it. That needs `CREATEROLE` for every database test,
+  which CI's superuser has; the root `README.md` test-role table says so.
+- **Tests the PRs commit to:**
+  - completeness: every table of the schema is classified in the grants
+    file (a table a later migration adds without an entry fails);
+  - the runtime role's privileges equal section 4, column by column;
+  - each writer of section 4 runs once as the runtime role, and the
+    temporary-table shadow tests rerun as it;
+  - concurrent `migrate` runs with the grants step all succeed (R2 step 1);
+  - the grants step fails, and `migrate` exits non-zero, when the migrate
+    role does not own the tables (R2 step 2), and a `PUBLIC` grant is gone
+    after it;
+  - R8 negatives, one each: superuser; `CREATEROLE`; membership in the
+    owner with and without `INHERIT`; a column-only extra grant; a missing
+    grant; a `PUBLIC` grant; `pg_execute_server_program` and
+    `pg_write_server_files`; the database owner; a role with privileges in
+    another database; `session_replication_role` settable; a pending, a
+    changed and an unknown migration;
+  - `migrate` with two URLs, with the fallback, and without the runtime
+    role variable (`service/tests/cli.rs`); the redaction tests for the new
+    variable (`service/tests/redaction.rs`).
 - **Rollout, each PR green on its own:**
-  1. **coding:** the grants file and its apply step, the `migrate`
-     variables and refusals of R3, R4's error and `Debug` changes with
-     their unit tests, the root README's variable table, and the migrations
-     README (section "Reconciliation"). Nothing changes unless
-     `SKYOAUTH_MIGRATE_DATABASE_URL` is set, so no existing test moves.
-  2. **test:** the harness group role, `runtime_pool()` and the new tests
-     above except R8's.
+  1. **coding:** the grants file and its step (R2), the `migrate` variables
+     and refusals of R3, R4's error and `Debug` changes with their unit
+     tests, the root README's variable table and deployment notes (R4a,
+     R7), and the reconciliation below. Nothing changes unless
+     `SKYOAUTH_DATABASE_MIGRATE_URL` is set, so no existing test moves.
+  2. **test:** the harness, `runtime_pool()` and the tests above except
+     R8's negatives.
   3. **coding:** R8's checks as a library function, not wired, with unit
-     tests.
-  4. **test:** R8's database tests.
+     tests; R2's verify step switches to it.
+  4. **test:** R8's negatives.
   5. **coding, in the slice that gives `serve()` a pool:** the server reads
      the runtime URL, runs R8 before binding, and warns per R7.
 
@@ -372,68 +480,102 @@ an anchor field that the lookups compare with `c.trust_anchor_ref`.
 
 ## Risks and open items
 
-- **Shared clusters.** Roles are cluster-wide. Two instances in one
-  cluster must use different runtime role names, or one instance's runtime
-  role holds the other's grants; R3's default makes the collision easy.
+- **Shared clusters.** Roles are cluster-wide. Without R3's required role
+  variable, two instances in one cluster would share a default runtime
+  role, and instance A's server could write instance B's database (the
+  review reproduced it). The required variable and R8's other-database
+  check close the default case; two instances configured with the same
+  name are still refused only by R8.
 - **Unknown applied version.** R8 refuses an applied migration the binary
   does not know, so an old replica restarting after a new `migrate` does
-  not start. Acceptable before the first tagged release (no upgrade path); to
-  revisit with the upgrade contract.
-- **PostgreSQL 15.** `has_parameter_privilege` exists from 15; the service
-  states no minimum version (only the tests do, root `README.md:114`).
-- **`REVOKE ALL` and column privileges.** R2 relies on a table-level
-  `REVOKE` also removing column grants; PR 1 tests it.
+  not start. Acceptable before the first tagged release (no upgrade path);
+  to revisit with the upgrade contract.
+- **Stale grants.** A renamed runtime role keeps its grants until the
+  operator revokes them (R2 step 4 warns).
+- **Sequences.** None today; the revoke already covers
+  `ALL SEQUENCES IN SCHEMA`, and a migration that adds one needs its grant
+  in the grants file (the completeness test catches a missing table, not a
+  missing sequence grant; the sequence grant is reviewed with it).
 - **F1, F2, F3** are limits of one runtime role, not bugs; the README text
   must stop promising more.
-- **Not verified.** No statement here was run against PostgreSQL; the
-  privilege rules used (row locks need `UPDATE` on a column, `RETURNING`
-  needs `SELECT`, foreign key checks run as the owner) are the README's and
-  are pinned by the existing tests only for the cases they cover. The
-  writer lists come from reading `service/src` (the `#[cfg(test)]` modules
-  left out); a statement built at run time from another table name would
-  have been missed (none was found: the two dynamic `UPDATE`s,
-  `admin/workload.rs:321-329`, pick from two fixed strings).
+- **Not verified.** This text's author ran nothing against PostgreSQL. The
+  review's runs on 15.20, 16.15 and 17.12 are the evidence for R1, R7, R9,
+  R10, F5 and for the failures R2 and R8 now handle (the lock race, the
+  silent non-owner grants, the escalation paths, the default role name,
+  the harness race). The privilege rules used (row locks need `UPDATE` on a
+  column, `RETURNING` needs `SELECT`, foreign key checks run as the owner)
+  are the README's and are pinned by the existing tests only for the cases
+  they cover. The writer lists come from reading `service/src` (the
+  `#[cfg(test)]` modules left out); a statement built at run time from
+  another table name would have been missed (none was found: the two
+  dynamic `UPDATE`s, `admin/workload.rs:321-329`, pick from two fixed
+  strings). The R8 catalog probes (`pg_shdepend`, the `SET LOCAL` probe,
+  the `MEMBER` lookup on 15 and on 16 or later) are designs for PR 3 and
+  were not run here.
 
 ## What this does not do
 
 No code, migration, test or contract changes in this PR; no new
 dependency; no endpoint. It does not change the rule that the server never
 migrates (R7), does not add row-level security, does not move the S8 mirror
-(F2), and does not split the runtime role further (Q-roles).
+(F2), and does not split the runtime role further now (Q-roles).
 
 ## Decisions requested
 
 - **R1 (lead pick):** migrate role owns everything; runtime role is a
-  `NOLOGIN` group role, the server logs in as a member.
-- **R2 (lead pick):** grants in one embedded, re-applied SQL file, not in
-  the migrations.
-- **R3 (open user question):** `SKYOAUTH_MIGRATE_DATABASE_URL`,
-  `SKYOAUTH_DATABASE_RUNTIME_ROLE` (default `skyoauth_runtime`), and the
-  fallback to `SKYOAUTH_DATABASE_URL` without grants.
+  `NOLOGIN` group role, the server logs in as an inheriting member.
+- **R2 (lead pick):** grants in one embedded, re-applied SQL file, under a
+  transaction-level advisory lock, after an ownership check, revoking from
+  `PUBLIC` too, and verified before commit.
+- **R3 (open user question):** recommended: `SKYOAUTH_DATABASE_URL` stays
+  the runtime URL; `SKYOAUTH_DATABASE_MIGRATE_URL` is new;
+  `SKYOAUTH_DATABASE_RUNTIME_ROLE` is required with the migrate URL, no
+  default; fallback to `SKYOAUTH_DATABASE_URL` without grants. Decided
+  with R6 and R8.
 - **R4 (lead pick):** same parsing and strict TLS per URL, errors name the
   variable, `Debug` gains `purpose`.
+- **R4a:** the two-URL case documented (lead pick); refuse `PGHOSTADDR`
+  when both URLs are set (open user question; recommended).
 - **R5 (lead pick):** same-role detection by privilege in the database.
-- **R6 (open user question):** a development opt-out from R8's role
-  refusal, with a WARN.
-- **R7 (lead pick):** `migrate` as an operator step or pre-deploy job; the
-  server warns when it sees the migrate URL.
+- **R6 (open user question):** recommended: no development opt-out; if
+  one is wanted, owner only, never superuser or `CREATEROLE`, an
+  explicitly insecure name and a WARN at every start.
+- **R7 (lead pick):** `migrate` as an operator step or pre-deploy job on a
+  direct connection; the runtime URL may be pooled; the server warns when
+  it sees the migrate URL.
+- **R7a (open user question):** PostgreSQL 15 as the minimum; recommended.
 - **R8 (lead pick):** the server refuses to start on pending or unknown
-  migrations and on an over- or under-privileged role.
+  migrations and on an over- or under-privileged role, with the escalation
+  checks of section 3.
 - **R9 (lead pick):** grant the full registry surface, tests-only writers
   included.
 - **R10 (lead pick):** no SQL change for the pin; prove it as the real
   runtime role; keep `TEMP`.
 - **F5 (lead pick):** lock-only `UPDATE (grant_id)` on
   `service_grant_binding`.
-- **Q-roles (open user question):** one runtime role (F1's closures stay
-  open), or an exchange role and an admin role.
+- **Q-roles (open user question):** recommended: one runtime role for
+  M1a, an exchange role and pool in the M2 slice that wires the exchange
+  (matrix in section 4); it does not close F1.
 - **S5/S6/S7 split (lead picks):** see the neighbouring note.
 
 ## Reconciliation
 
-When accepted, PR 1 updates: the migrations README "Limits" (:2548-2556),
-the grant sentences at :1150-1154, :2296-2301 and :2480-2485 (F1), the
-runtime-role follow-up at :2668-2698, and the root `README.md` variable
-table and migration notes; PR 5 updates the `persistence` module docs
-(`service/src/persistence/mod.rs:6-7`) and `main.rs`'s usage text. The
-`0002` comment at :129-134 stays true (F2).
+PR 1 changes these statements (the migration comments are frozen, so their
+errata go into the README, as its "Frozen comments" items do):
+
+- migrations README: "Limits" (:2548-2556); the grant sentences at
+  :1150-1154, :2296-2301 and :2480-2485, which say the lock-only closures
+  take effect once the roles split (F1); the runtime-role follow-up at
+  :2668-2698;
+- `0010`:66-72 and `0011`:86-91, which prescribe `UPDATE (id)` as the
+  closure: an erratum in "What 0010 adds" and "What 0011 adds";
+- `service/src/persistence/registry/operation.rs:83-87`, which gives the
+  proposal's `UPDATE (instance_id)` as the policy-row grant: say that the
+  runtime role holds `UPDATE (widening_second_approver)` anyway (F1);
+- `docs/proposals/second-approver-gated-writes.md:1090-1095`, "the grant
+  takes effect once the migrate and runtime roles split": point here;
+- the root `README.md` variable table and migration notes (R3, R4a, R7,
+  R7a).
+
+PR 5 updates the `persistence` module docs (`persistence/mod.rs:6-7`) and
+`main.rs`'s usage text. The `0002` comment at :129-134 stays true (F2).
