@@ -248,6 +248,9 @@ pub enum NotSent {
     /// [`Timeouts::total`] ran out while connecting; a connection made
     /// later is dropped before anything is written to it.
     TimedOut,
+    /// The connection refused the wait of the first write, with the error's
+    /// kind ([`HalfClose::set_write_wait`]); nothing was written to it.
+    Setup(io::ErrorKind),
 }
 
 impl fmt::Display for NotSent {
@@ -257,6 +260,7 @@ impl fmt::Display for NotSent {
             Self::InvalidTimeouts => "a timeout of the client is zero",
             Self::Connect(_) => "no connection to the local transport could be made",
             Self::TimedOut => "the wait ran out while connecting",
+            Self::Setup(_) => "the connection refused the time limit of the first write",
         })
     }
 }

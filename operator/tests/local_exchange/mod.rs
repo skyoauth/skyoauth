@@ -15,15 +15,21 @@
 //!   or a reset, the reply is still read and the bytes read are kept, but
 //!   only a refusal is believed: a success the server sent without reading
 //!   the request is unknown;
-//! - a wait whose setting is refused as invalid (macOS, once the server has
-//!   closed) is passed over, and the reply read as usual;
+//! - a wait the stream refuses ends the call: not sent before the first
+//!   write, unknown after it (the Unix socket's own refusal on macOS, once
+//!   the server has closed, is passed over by its adapter, checked in the
+//!   crate's unit tests);
+//! - nothing is sent once the total has run out, and a reply over the cap
+//!   is read one byte past it and no further (in-memory streams);
 //! - everything else once the request may have been written is unknown,
 //!   never refused and never a success: no reply, a partial reply, bytes
 //!   after the newline, a reply over the cap, a server too slow for the
 //!   total or idle timeout, a listener that accepts and never answers or
 //!   never accepts;
 //! - a connection that cannot be made is not sent, and a connect that
-//!   returns after the caller gave up is dropped unwritten;
+//!   returns after the caller gave up is dropped unwritten; a typed call
+//!   with an oversized value is not sent (checked before its values are
+//!   copied, which no test observes);
 //! - every call connects once: the client never retries;
 //! - the default timeouts are the server's default limits (the fixture's
 //!   `default_limits`), and `Debug` and `Display` show no value.
@@ -56,8 +62,9 @@ use serde_json::Value;
 use skyoauth_operator::{
     local::{
         BootstrapRequest, CallError, Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, ErrorCode,
-        HalfClose, IssueChallengeRequest, Issued, LocalClient, MAX_REPLY_BYTES, NotSent, Op, Reply,
-        Request, ResponseRequest, Retry, SocketPath, Timeouts, UnknownOutcome, parse_reply,
+        HalfClose, IssueChallengeRequest, Issued, LocalClient, MAX_REPLY_BYTES, MAX_REQUEST_BYTES,
+        NotSent, Op, Reply, Request, ResponseRequest, Retry, SocketPath, Timeouts, UnknownOutcome,
+        parse_reply,
     },
     recovery::RecoveryPublicKey,
 };
@@ -861,63 +868,123 @@ fn a_write_that_times_out_is_unknown() {
     }
 }
 
-/// A stream, not a socket, that takes the whole line written to it and
-/// answers `reply`, a few bytes per read, then the end of the stream; the
-/// end of its write half fails with `close`, and the setting of each wait
-/// with `waits`, when given.
-struct Scripted {
+/// What a [`Scripted`] stream saw: the bytes written to it, how many bytes
+/// were read from it, and whether it was flushed and its write half ended
+/// (asked to, failing or not).
+#[derive(Debug, Default, Clone)]
+struct Seen {
+    written: Vec<u8>,
+    read: usize,
+    flushed: bool,
+    closed: bool,
+}
+
+/// How a [`Scripted`] stream behaves.
+#[derive(Clone)]
+struct Plan {
+    /// What it answers, at most `per_read` bytes per read, then the end of
+    /// the stream.
     reply: Vec<u8>,
+    per_read: usize,
+    /// At most `per_write` bytes taken per write, each after `write_delay`.
+    per_write: usize,
+    write_delay: Duration,
+    flush_delay: Duration,
+    /// The failure of the end of its write half.
     close: Option<io::ErrorKind>,
-    waits: Option<io::ErrorKind>,
-    written: Arc<Mutex<Vec<u8>>>,
+    /// The failure of the setting of each read wait.
+    read_waits: Option<io::ErrorKind>,
+    /// The failure of the setting of the write wait, from the given one on
+    /// (0: the first, before any write).
+    write_waits: Option<(usize, io::ErrorKind)>,
+}
+
+impl Plan {
+    /// Answers `reply`, a few bytes per read; takes whole writes at once;
+    /// never fails.
+    fn new(reply: &[u8]) -> Self {
+        Self {
+            reply: reply.to_vec(),
+            per_read: 7,
+            per_write: usize::MAX,
+            write_delay: Duration::ZERO,
+            flush_delay: Duration::ZERO,
+            close: None,
+            read_waits: None,
+            write_waits: None,
+        }
+    }
+}
+
+/// A stream, not a socket, that behaves as its [`Plan`] says and records
+/// what it [`Seen`]. Its `_gone` sender ends with it.
+struct Scripted {
+    plan: Plan,
+    write_waits_set: usize,
+    seen: Arc<Mutex<Seen>>,
+    _gone: mpsc::Sender<()>,
+}
+
+fn fail(kind: Option<io::ErrorKind>) -> io::Result<()> {
+    kind.map_or(Ok(()), |kind| Err(io::Error::from(kind)))
 }
 
 impl io::Read for Scripted {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = self.reply.len().min(buf.len()).min(7);
-        buf[..read].copy_from_slice(&self.reply[..read]);
-        self.reply.drain(..read);
+        let mut seen = self.seen.lock().unwrap();
+        let rest = &self.plan.reply[seen.read..];
+        let read = rest.len().min(buf.len()).min(self.plan.per_read);
+        buf[..read].copy_from_slice(&rest[..read]);
+        seen.read += read;
         Ok(read)
     }
 }
 
 impl io::Write for Scripted {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.written.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
+        thread::sleep(self.plan.write_delay);
+        let taken = buf.len().min(self.plan.per_write);
+        self.seen
+            .lock()
+            .unwrap()
+            .written
+            .extend_from_slice(&buf[..taken]);
+        Ok(taken)
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        thread::sleep(self.plan.flush_delay);
+        self.seen.lock().unwrap().flushed = true;
         Ok(())
-    }
-}
-
-impl Scripted {
-    fn fail(kind: Option<io::ErrorKind>) -> io::Result<()> {
-        kind.map_or(Ok(()), |kind| Err(io::Error::from(kind)))
     }
 }
 
 impl HalfClose for Scripted {
     fn close_write(&mut self) -> io::Result<()> {
-        Self::fail(self.close)
+        self.seen.lock().unwrap().closed = true;
+        fail(self.plan.close)
     }
 
     fn set_read_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
-        Self::fail(self.waits)
+        fail(self.plan.read_waits)
     }
 
     fn set_write_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
-        Self::fail(self.waits)
+        let this = self.write_waits_set;
+        self.write_waits_set += 1;
+        fail(
+            self.plan
+                .write_waits
+                .and_then(|(from, kind)| (this >= from).then_some(kind)),
+        )
     }
 }
 
-/// The connector of [`Scripted`] streams, keeping what was written.
+/// The connector of one [`Scripted`] stream.
 struct Script {
-    reply: Vec<u8>,
-    close: Option<io::ErrorKind>,
-    waits: Option<io::ErrorKind>,
-    written: Arc<Mutex<Vec<u8>>>,
+    plan: Plan,
+    seen: Arc<Mutex<Seen>>,
+    gone: Mutex<Option<mpsc::Sender<()>>>,
 }
 
 impl Connector for Script {
@@ -925,32 +992,38 @@ impl Connector for Script {
 
     fn connect(&self) -> io::Result<Scripted> {
         Ok(Scripted {
-            reply: self.reply.clone(),
-            close: self.close,
-            waits: self.waits,
-            written: Arc::clone(&self.written),
+            plan: self.plan.clone(),
+            write_waits_set: 0,
+            seen: Arc::clone(&self.seen),
+            _gone: self.gone.lock().unwrap().take().unwrap(),
         })
     }
 }
 
-/// Calls `op` over a [`Scripted`] stream: the outcome, and the bytes
-/// written.
-fn scripted(
-    op: Op,
-    reply: &[u8],
-    close: Option<io::ErrorKind>,
-    waits: Option<io::ErrorKind>,
-) -> (Result<Reply, CallError>, Vec<u8>) {
-    let written = Arc::new(Mutex::new(Vec::new()));
+/// Calls `op` over a [`Scripted`] stream of `plan` with `timeouts`: the
+/// outcome and, once the call's thread has dropped the stream (bounded),
+/// what the stream saw.
+fn scripted_with(op: Op, plan: Plan, timeouts: Timeouts) -> (Result<Reply, CallError>, Seen) {
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let (gone, dropped) = mpsc::channel();
     let script = Script {
-        reply: reply.to_vec(),
-        close,
-        waits,
-        written: Arc::clone(&written),
+        plan,
+        seen: Arc::clone(&seen),
+        gone: Mutex::new(Some(gone)),
     };
-    let outcome = call(&LocalClient::with_connector(script, PATIENT), &request(op));
-    let written = written.lock().unwrap().clone();
-    (outcome, written)
+    let outcome = call(&LocalClient::with_connector(script, timeouts), &request(op));
+    assert_eq!(
+        dropped.recv_timeout(TEST_WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected),
+        "the call's thread ends"
+    );
+    let seen = seen.lock().unwrap().clone();
+    (outcome, seen)
+}
+
+/// [`scripted_with`], with timeouts no stream here comes close to.
+fn scripted(op: Op, plan: Plan) -> (Result<Reply, CallError>, Seen) {
+    scripted_with(op, plan, PATIENT)
 }
 
 /// An end of the write half that fails after the whole line was written
@@ -994,52 +1067,197 @@ fn a_half_close_that_fails_after_the_whole_line_still_reads_the_reply() {
             ));
         }
         for (op, reply, expected) in cases {
-            let (outcome, written) = scripted(op, &reply, Some(kind), None);
+            let plan = Plan {
+                close: Some(kind),
+                ..Plan::new(&reply)
+            };
+            let (outcome, seen) = scripted(op, plan);
             let case = format!("{kind:?}, {op:?}, {} bytes", reply.len());
             assert_eq!(outcome, expected, "{case}");
             assert_eq!(
-                written,
+                seen.written,
                 request(op).encode().unwrap().as_bytes(),
                 "{case}: the whole line"
+            );
+            assert_eq!(seen.read, reply.len(), "{case}: the whole reply");
+        }
+    }
+}
+
+/// A wait the stream refuses ends the call, whatever the error (only the
+/// Unix socket's own `HalfClose` passes over macOS's refusal of a closed
+/// socket's options): before the first write it is not sent, nothing
+/// written; after a write, a later write's or a read's, it is unknown.
+#[test]
+fn a_wait_the_stream_refuses_ends_the_call() {
+    for kind in [
+        io::ErrorKind::InvalidInput,
+        io::ErrorKind::Unsupported,
+        io::ErrorKind::Other,
+    ] {
+        for op in Op::ALL {
+            let case = format!("{kind:?}, {op:?}");
+            let plan = Plan {
+                write_waits: Some((0, kind)),
+                ..Plan::new(&golden_success(op))
+            };
+            let (outcome, seen) = scripted(op, plan);
+            assert_eq!(
+                outcome,
+                Err(CallError::NotSent(NotSent::Setup(kind))),
+                "{case}"
+            );
+            assert!(seen.written.is_empty(), "{case}");
+            assert!(!seen.closed && seen.read == 0, "{case}");
+
+            let plan = Plan {
+                per_write: 5,
+                write_waits: Some((1, kind)),
+                ..Plan::new(&golden_success(op))
+            };
+            let (outcome, seen) = scripted(op, plan);
+            assert_eq!(
+                outcome,
+                Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
+                "{case}: a later write"
+            );
+            assert_eq!(seen.written.len(), 5, "{case}: a later write");
+
+            let plan = Plan {
+                read_waits: Some(kind),
+                ..Plan::new(&golden_success(op))
+            };
+            let (outcome, seen) = scripted(op, plan);
+            assert_eq!(
+                outcome,
+                Err(CallError::Unknown(UnknownOutcome::ConnectionLost(kind))),
+                "{case}: a read"
+            );
+            assert_eq!(
+                seen.written,
+                request(op).encode().unwrap().as_bytes(),
+                "{case}: a read"
             );
         }
     }
 }
 
-/// A wait whose setting is refused as invalid (`EINVAL`, as macOS refuses
-/// every option of a socket once the server has closed) is passed over:
-/// each golden success is its operation's success, and a refusal a
-/// refusal. A setting that fails otherwise is an unknown outcome, before
-/// anything is written.
+/// Nothing is sent once the total has run out: not the rest of a line
+/// written a byte at a time, each write well within the idle timeout but
+/// all of them past the total; not the flush after a write that ended past
+/// it; not the end of the write half after such a flush. The caller has
+/// given up by then (unknown), and the call's thread stops.
 #[test]
-fn a_wait_refused_as_invalid_is_passed_over() {
-    for op in Op::ALL {
-        let reply = golden_success(op);
-        let expected = parse_reply(op, &reply).unwrap();
-        let (outcome, written) = scripted(op, &reply, None, Some(io::ErrorKind::InvalidInput));
-        assert_eq!(outcome, Ok(expected), "{op:?}");
-        assert_eq!(written, request(op).encode().unwrap().as_bytes(), "{op:?}");
+fn nothing_is_sent_once_the_total_has_run_out() {
+    let timeouts = Timeouts {
+        total: Duration::from_millis(100),
+        idle: TEST_WAIT,
+    };
+    let line = request(Op::Bootstrap).encode().unwrap();
+    let line = line.as_bytes();
+    // Two milliseconds a byte: the line would take far longer than the
+    // total.
+    assert!(line.len() > 100, "{}", line.len());
+    let slow_bytes = Plan {
+        per_write: 1,
+        write_delay: Duration::from_millis(2),
+        ..Plan::new(&golden_success(Op::Bootstrap))
+    };
+    let slow_write = Plan {
+        write_delay: Duration::from_millis(300),
+        ..Plan::new(&golden_success(Op::Bootstrap))
+    };
+    let slow_flush = Plan {
+        flush_delay: Duration::from_millis(300),
+        ..Plan::new(&golden_success(Op::Bootstrap))
+    };
+    for (case, plan, whole, flushed) in [
+        ("a byte at a time", slow_bytes, false, false),
+        ("a slow write", slow_write, true, false),
+        ("a slow flush", slow_flush, true, true),
+    ] {
+        let (outcome, seen) = scripted_with(Op::Bootstrap, plan, timeouts);
+        assert_eq!(
+            outcome,
+            Err(CallError::Unknown(UnknownOutcome::TimedOut)),
+            "{case}"
+        );
+        assert!(!seen.written.is_empty(), "{case}");
+        assert_eq!(seen.written.len() == line.len(), whole, "{case}: {seen:?}");
+        assert!(line.starts_with(&seen.written), "{case}");
+        assert_eq!(seen.flushed, flushed, "{case}");
+        assert!(!seen.closed, "{case}: the end of the write half");
+        assert_eq!(seen.read, 0, "{case}");
     }
-    let (outcome, _) = scripted(
-        Op::Restore,
-        &golden("error_forbidden"),
-        None,
-        Some(io::ErrorKind::InvalidInput),
+}
+
+/// However large each read may be, the client reads one byte past
+/// [`MAX_REPLY_BYTES`] and no further: the outcome is unknown, and the
+/// stream has given exactly that many bytes.
+#[test]
+fn a_reply_over_the_cap_is_read_one_byte_past_it() {
+    for extra in [1, 2, 8192, 3 * 8192 + 5] {
+        let plan = Plan {
+            per_read: usize::MAX,
+            ..Plan::new(&vec![b'a'; MAX_REPLY_BYTES + extra])
+        };
+        let (outcome, seen) = scripted(Op::Preview, plan);
+        assert_eq!(
+            outcome,
+            Err(CallError::Unknown(UnknownOutcome::TooLarge)),
+            "{extra}"
+        );
+        assert_eq!(seen.read, MAX_REPLY_BYTES + 1, "{extra}");
+    }
+    // At the cap, the whole reply and its end are read.
+    let plan = Plan {
+        per_read: usize::MAX,
+        ..Plan::new(&vec![b'a'; MAX_REPLY_BYTES])
+    };
+    let (outcome, seen) = scripted(Op::Preview, plan);
+    assert_eq!(seen.read, MAX_REPLY_BYTES);
+    assert!(
+        matches!(outcome, Err(CallError::Unknown(UnknownOutcome::Truncated))),
+        "{outcome:?}"
     );
-    assert_eq!(outcome, Err(CallError::Refused(ErrorCode::Forbidden)));
-    let (outcome, written) = scripted(
-        Op::Restore,
-        &golden_success(Op::Restore),
-        None,
-        Some(io::ErrorKind::Other),
-    );
-    assert_eq!(
-        outcome,
-        Err(CallError::Unknown(UnknownOutcome::ConnectionLost(
-            io::ErrorKind::Other
-        )))
-    );
-    assert!(written.is_empty());
+}
+
+/// A typed call whose values alone are longer than [`MAX_REQUEST_BYTES`]
+/// (by a mebibyte, or by one byte) is not sent, and nothing is connected.
+/// The typed calls check this before they copy the values into a
+/// [`Request`]; that no copy is made is not observable here (no test
+/// counts allocations).
+#[test]
+fn an_oversized_value_is_refused_before_it_is_copied() {
+    let dir = TempDir::new();
+    let (client, connects) = counted(&dir.join("s"), PATIENT);
+    let too_large = Err(CallError::NotSent(NotSent::TooLarge));
+    for len in [1024 * 1024, MAX_REQUEST_BYTES + 1] {
+        let Request::Bootstrap(mut bootstrap) = request(Op::Bootstrap) else {
+            unreachable!()
+        };
+        bootstrap.instance_id = String::new();
+        bootstrap.credential_spki = Vec::new();
+        bootstrap.trust_anchor_ref = "t".repeat(len);
+        assert_eq!(client.bootstrap(&bootstrap).map(|_| ()), too_large, "{len}");
+        let Request::IssueChallenge(mut issue) = request(Op::IssueChallenge) else {
+            unreachable!()
+        };
+        issue.credential_spki = Vec::new();
+        issue.trust_anchor_ref = "t".repeat(len);
+        assert_eq!(
+            client.issue_challenge(&issue).map(|_| ()),
+            too_large,
+            "{len}"
+        );
+        let Request::Restore(mut response) = request(Op::Restore) else {
+            unreachable!()
+        };
+        response.operation_id = "o".repeat(len);
+        assert_eq!(client.preview(&response).map(|_| ()), too_large, "{len}");
+        assert_eq!(client.restore(&response).map(|_| ()), too_large, "{len}");
+    }
+    assert_eq!(connects.load(Ordering::SeqCst), 0);
 }
 
 /// A connector whose connect blocks until the test hands it a stream.
@@ -1249,6 +1467,7 @@ fn debug_and_display_show_no_value() {
         CallError::NotSent(NotSent::InvalidTimeouts),
         CallError::NotSent(NotSent::Connect(io::ErrorKind::NotFound)),
         CallError::NotSent(NotSent::TimedOut),
+        CallError::NotSent(NotSent::Setup(io::ErrorKind::Unsupported)),
         CallError::Unknown(UnknownOutcome::TimedOut),
         CallError::Unknown(UnknownOutcome::ConnectionLost(
             io::ErrorKind::ConnectionReset,

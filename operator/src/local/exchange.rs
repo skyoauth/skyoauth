@@ -34,7 +34,7 @@ use std::{
 use super::{
     BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
     MAX_REPLY_BYTES, NotSent, Op, Previewed, Reply, Request, RequestLine, ResponseRequest,
-    Restored, UnknownOutcome, parse_reply,
+    Restored, UnknownOutcome, parse_reply, wire::fits,
 };
 use crate::recovery::{Challenge, parse_challenge};
 
@@ -96,35 +96,54 @@ pub trait HalfClose: Read + Write {
     ///
     /// # Errors
     ///
-    /// The stream's error. [`io::ErrorKind::InvalidInput`] is passed over,
-    /// here and for [`HalfClose::set_write_wait`]: the stream keeps the
-    /// wait it had, if any. A wait asked for is never zero, the one wait
-    /// `std` refuses; macOS refuses every option of a socket whose peer has
-    /// closed (`EINVAL`), and such a socket no longer blocks: a read
-    /// returns what is buffered, then the end of the stream, and a write
-    /// fails at once. Whatever the stream, the caller waits no longer than
-    /// [`Timeouts::total`].
+    /// The stream's error: the wait cannot be kept, so the call ends, an
+    /// unknown outcome once the request may have been written. A stream
+    /// that needs no wait at that point (its peer gone, say) returns
+    /// `Ok(())` itself: [`UnixStream`]'s does on macOS (see there).
     fn set_read_wait(&mut self, wait: Option<Duration>) -> io::Result<()>;
 
     /// Bounds each later write, as [`HalfClose::set_read_wait`] does reads.
     ///
     /// # Errors
     ///
-    /// The stream's error.
+    /// The stream's error, as for [`HalfClose::set_read_wait`]; before the
+    /// first write the call ends [`NotSent::Setup`].
     fn set_write_wait(&mut self, wait: Option<Duration>) -> io::Result<()>;
 }
 
+/// A Unix socket. Its waits are its read and write timeouts, but for one
+/// refusal: macOS's `EINVAL` once the peer has closed, passed over.
 impl HalfClose for UnixStream {
     fn close_write(&mut self) -> io::Result<()> {
         self.shutdown(Shutdown::Write)
     }
 
     fn set_read_wait(&mut self, wait: Option<Duration>) -> io::Result<()> {
-        self.set_read_timeout(wait)
+        unless_shut(self.set_read_timeout(wait))
     }
 
     fn set_write_wait(&mut self, wait: Option<Duration>) -> io::Result<()> {
-        self.set_write_timeout(wait)
+        unless_shut(self.set_write_timeout(wait))
+    }
+}
+
+/// The setting of a socket's timeout, but for the system's `EINVAL`
+/// ([`io::ErrorKind::InvalidInput`] with an OS error code), which is passed
+/// over: the socket keeps the timeout it had.
+///
+/// macOS refuses every option of a socket that can neither send nor
+/// receive with `EINVAL`, and a socket is that as soon as its peer has
+/// closed. Such a socket needs no wait: a read returns what is buffered,
+/// then the end of the stream, and a write fails at once (a broken pipe).
+/// Linux sets a timeout of any socket and refuses no wait asked for here.
+/// `std`'s own refusal of a zero timeout, which has no OS error code, is not
+/// passed over (no zero wait is asked for).
+fn unless_shut(result: io::Result<()>) -> io::Result<()> {
+    match result {
+        Err(err) if err.kind() == io::ErrorKind::InvalidInput && err.raw_os_error().is_some() => {
+            Ok(())
+        }
+        other => other,
     }
 }
 
@@ -175,11 +194,12 @@ impl Connector for SocketPath {
 pub enum Retry {
     /// A retry is safe: a `preview` writes nothing.
     Safe,
-    /// Reconcile first: the write may have committed. A retried
-    /// `bootstrap` or `restore` is refused (`conflict`, `not_restorable`)
-    /// whether the first committed or not, so a retry cannot tell; a
-    /// retried `issue_challenge` after a lost commit makes a second live
-    /// challenge.
+    /// Reconcile an uncertain outcome first: the write may have committed
+    /// or not, and a retry does not tell which. A retried `bootstrap` or
+    /// `restore` is refused (`conflict`, `not_restorable`) once the first
+    /// committed, but may succeed after a rollback if its preconditions
+    /// still hold; a retried `issue_challenge` after a lost commit makes a
+    /// second live challenge.
     ReconcileFirst,
 }
 
@@ -227,10 +247,15 @@ impl Op {
 /// end of the stream, which the failed end never sent: a server that
 /// closed before it can have answered with a refusal, never a success.
 ///
-/// On macOS a socket refuses every option (`EINVAL`) once it can neither
-/// send nor receive, which is the case once the server has closed: a wait
-/// whose setting fails as [`io::ErrorKind::InvalidInput`] is passed over
-/// (see [`HalfClose::set_read_wait`]), and the reply is read as usual.
+/// The line is written one `write` at a time. Before each (its wait set
+/// again), before the flush and before the end of the write half, what is
+/// left of [`Timeouts::total`] is checked: once the total has run out (the
+/// caller has then given up), nothing more is sent. A wait
+/// the stream refuses ends the call: before the first write as
+/// [`NotSent::Setup`], after it as [`UnknownOutcome::ConnectionLost`]. On
+/// macOS a socket refuses every option once its peer has closed, a refusal
+/// [`UnixStream`]'s [`HalfClose`] passes over (it needs no wait then), and
+/// the reply is read as usual.
 ///
 /// # Time limits
 ///
@@ -319,6 +344,7 @@ impl<C: Connector> LocalClient<C> {
     /// `server_error`) is [`UnknownOutcome::UncertainCommit`];
     /// [`Retry::ReconcileFirst`].
     pub fn bootstrap(&self, request: &BootstrapRequest) -> Result<Bootstrapped, CallError> {
+        fits(request.encoded_len_lower_bound())?;
         match self.call(&Request::Bootstrap(request.clone()))? {
             Reply::Bootstrapped(reply) => Ok(reply),
             _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
@@ -339,6 +365,7 @@ impl<C: Connector> LocalClient<C> {
     /// `M`'s, is [`UnknownOutcome::ChallengeMismatch`];
     /// [`Retry::ReconcileFirst`].
     pub fn issue_challenge(&self, request: &IssueChallengeRequest) -> Result<Challenge, CallError> {
+        fits(request.encoded_len_lower_bound())?;
         match self.call(&Request::IssueChallenge(request.clone()))? {
             Reply::Issued(reply) => challenge_of(&reply),
             _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
@@ -352,6 +379,7 @@ impl<C: Connector> LocalClient<C> {
     /// See "Outcomes": every refusal is [`CallError::Refused`];
     /// [`Retry::Safe`].
     pub fn preview(&self, response: &ResponseRequest) -> Result<Previewed, CallError> {
+        fits(response.encoded_len_lower_bound())?;
         match self.call(&Request::Preview(response.clone()))? {
             Reply::Previewed(reply) => Ok(reply),
             _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
@@ -366,13 +394,16 @@ impl<C: Connector> LocalClient<C> {
     /// `server_error`) is [`UnknownOutcome::UncertainCommit`];
     /// [`Retry::ReconcileFirst`].
     pub fn restore(&self, response: &ResponseRequest) -> Result<Restored, CallError> {
+        fits(response.encoded_len_lower_bound())?;
         match self.call(&Request::Restore(response.clone()))? {
             Reply::Restored(reply) => Ok(reply),
             _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
         }
     }
 
-    /// One exchange: the request line, the reply, its classification.
+    /// One exchange: the request line, the reply, its classification. The
+    /// typed calls check [`fits`] first, so a value too large is refused
+    /// before it is copied into `request`.
     fn call(&self, request: &Request) -> Result<Reply, CallError> {
         let op = request.op();
         let line = request.encode()?;
@@ -497,27 +528,45 @@ fn run<C: Connector>(
         // The caller has given up: the stream is dropped unwritten.
         return Err(NotSent::TimedOut.into());
     }
-    exchange(&mut stream, line.as_bytes(), deadline, idle).map_err(CallError::Unknown)
+    exchange(&mut stream, line.as_bytes(), deadline, idle)
 }
 
 /// Writes `line`, ends the write half, then reads until the end of the
 /// stream, or one byte past [`MAX_REPLY_BYTES`] and no further.
 ///
-/// A write or an end of the write half that fails other than by a timeout
-/// does not stop the read (the server may have answered before reading the
-/// whole request, and closed), and a reset ends the stream with what was
-/// read: both are noted in [`Received::lost`]. A wait whose setting is
-/// refused as invalid is passed over ([`settle`]). Any other failure, a
-/// timeout included, is an unknown outcome: the line may have been
-/// written.
+/// Nothing is written before the wait of the first write is set: a total
+/// already run out is [`NotSent::TimedOut`], a wait the stream refuses
+/// [`NotSent::Setup`]. Everything after is [`sent`]'s.
 fn exchange<S: HalfClose>(
     stream: &mut S,
     line: &[u8],
     deadline: Option<Instant>,
     idle: Duration,
+) -> Result<Received, CallError> {
+    let first = wait(deadline, Some(idle)).map_err(|_| NotSent::TimedOut)?;
+    stream
+        .set_write_wait(first)
+        .map_err(|err| NotSent::Setup(err.kind()))?;
+    sent(stream, line, deadline, idle).map_err(CallError::Unknown)
+}
+
+/// The exchange once the wait of the first write is set ([`exchange`]).
+///
+/// A write or an end of the write half that fails other than by a timeout
+/// does not stop the read (the server may have answered before reading the
+/// whole request, and closed), and a reset ends the stream with what was
+/// read: both are noted in [`Received::lost`]. Any other failure, a
+/// timeout or a wait the stream refuses included, is an unknown outcome:
+/// the line may have been written. The end of the write half is not sent
+/// once the total has run out.
+fn sent<S: HalfClose>(
+    stream: &mut S,
+    line: &[u8],
+    deadline: Option<Instant>,
+    idle: Duration,
 ) -> Result<Received, UnknownOutcome> {
-    settle(stream.set_write_wait(wait(deadline, Some(idle))?))?;
-    let lost = note(stream.write_all(line).and_then(|()| stream.flush()), None)?;
+    let lost = write_line(stream, line, deadline, idle)?;
+    wait(deadline, None)?;
     let lost = note(stream.close_write(), lost)?;
     let mut reply = Vec::new();
     let mut chunk = [0; 8192];
@@ -525,8 +574,12 @@ fn exchange<S: HalfClose>(
         // Until the reply begins, the server may be silent for as long as
         // its deadline and transaction last: only the total bounds it.
         let bound = if reply.is_empty() { None } else { Some(idle) };
-        settle(stream.set_read_wait(wait(deadline, bound)?))?;
-        match stream.read(&mut chunk) {
+        stream
+            .set_read_wait(wait(deadline, bound)?)
+            .map_err(failed)?;
+        // Never past the byte that shows the reply too large.
+        let room = (MAX_REPLY_BYTES + 1 - reply.len()).min(chunk.len());
+        match stream.read(&mut chunk[..room]) {
             Ok(0) => return Ok(Received { reply, lost }),
             Ok(read) => {
                 reply.extend_from_slice(&chunk[..read]);
@@ -542,6 +595,34 @@ fn exchange<S: HalfClose>(
             }
             Err(err) => return Err(failed(err)),
         }
+    }
+}
+
+/// Writes `line` one `write` at a time and flushes, the wait of the first
+/// write already set: before each later write, and before the flush, what
+/// is left of the total is checked and the wait set again, so that nothing
+/// is sent once the total has run out and no write blocks past it. The
+/// kind of a failure other than a timeout is returned, and the writing
+/// stops (see [`note`]).
+fn write_line<S: HalfClose>(
+    stream: &mut S,
+    line: &[u8],
+    deadline: Option<Instant>,
+    idle: Duration,
+) -> Result<Option<io::ErrorKind>, UnknownOutcome> {
+    let mut rest = line;
+    loop {
+        match stream.write(rest) {
+            Ok(0) => return note(Err(io::ErrorKind::WriteZero.into()), None),
+            Ok(written) => rest = rest.get(written..).unwrap_or_default(),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return note(Err(err), None),
+        }
+        let next = wait(deadline, Some(idle))?;
+        if rest.is_empty() {
+            return note(stream.flush(), None);
+        }
+        stream.set_write_wait(next).map_err(failed)?;
     }
 }
 
@@ -563,17 +644,6 @@ fn wait(
         return Err(UnknownOutcome::TimedOut);
     }
     Ok(Some(bound.map_or(left, |bound| bound.min(left))))
-}
-
-/// The outcome of the setting of a wait: a failure is an unknown outcome
-/// ([`failed`]), but for [`io::ErrorKind::InvalidInput`], which is passed
-/// over and the previous wait kept (macOS refuses every option of a socket
-/// whose peer has closed; see [`HalfClose::set_read_wait`]).
-fn settle(result: io::Result<()>) -> Result<(), UnknownOutcome> {
-    match result {
-        Err(err) if err.kind() != io::ErrorKind::InvalidInput => Err(failed(err)),
-        _ => Ok(()),
-    }
 }
 
 /// Notes the failure of a write or of the end of the write half, after
@@ -598,12 +668,59 @@ fn timed_out(err: &io::Error) -> bool {
     )
 }
 
-/// The unknown outcome of a read, or of the setting of a wait, that
-/// failed.
+/// The unknown outcome of a read, or of the setting of a wait after the
+/// first, that failed.
 fn failed(err: io::Error) -> UnknownOutcome {
     if timed_out(&err) {
         UnknownOutcome::TimedOut
     } else {
         UnknownOutcome::ConnectionLost(err.kind())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only the system's `EINVAL` is passed over; `std`'s own refusal and
+    /// every other error are kept.
+    #[test]
+    fn only_the_systems_einval_is_passed_over() {
+        let einval = io::Error::from_raw_os_error(22);
+        assert_eq!(einval.kind(), io::ErrorKind::InvalidInput);
+        assert!(unless_shut(Err(einval)).is_ok());
+        assert!(unless_shut(Ok(())).is_ok());
+        for kept in [
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot set a 0 duration timeout",
+            ),
+            io::Error::from(io::ErrorKind::InvalidInput),
+            io::Error::from(io::ErrorKind::Other),
+            io::Error::from_raw_os_error(9),
+        ] {
+            let kind = kept.kind();
+            assert_eq!(unless_shut(Err(kept)).map_err(|err| err.kind()), Err(kind));
+        }
+    }
+
+    /// A zero timeout of a real socket is `std`'s refusal, not passed
+    /// over; a wait is set on a live socket.
+    #[test]
+    fn a_zero_timeout_of_a_socket_is_not_passed_over() {
+        let (mut stream, _peer) = UnixStream::pair().unwrap();
+        assert!(stream.set_read_wait(Some(Duration::from_secs(1))).is_ok());
+        assert_eq!(
+            stream
+                .set_read_wait(Some(Duration::ZERO))
+                .map_err(|err| err.kind()),
+            Err(io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            stream
+                .set_write_wait(Some(Duration::ZERO))
+                .map_err(|err| err.kind()),
+            Err(io::ErrorKind::InvalidInput)
+        );
     }
 }
