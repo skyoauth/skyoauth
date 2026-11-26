@@ -4,8 +4,9 @@
 //!
 //! - the socket file: owned by the service UID with mode 0600, no private
 //!   directory left behind (a leftover one is cleared), removed on
-//!   shutdown, its lock file kept; another service UID (root only); an
-//!   unsafe parent directory, or an unsafe directory above it, refuses to
+//!   shutdown, its lock file kept; another service UID (root only: a process
+//!   that is not root is refused before anything is created); an unsafe
+//!   parent directory, or an unsafe directory above it, refuses to
 //!   start, and so does a directory of the service UID when root binds for
 //!   it, or one of the service UID above it; a rename of the private
 //!   directory during binds (by the process, and by the service UID as the
@@ -15,11 +16,11 @@
 //!   a live listener refuses to start, and a stale socket of the service
 //!   UID is replaced; simultaneous binds, first binds and an overlapping
 //!   restart, serialized by the lock file; a bind killed while creating the
-//!   lock file, and a lock file that cannot be given away (not root), leave
-//!   no lock file; a directory the service UID cannot list (as the peer
-//!   user); paths up to the platform's limit (107 bytes on Linux), one more
-//!   refused, and without `/proc` (root, in a mount namespace); relative
-//!   paths, from the working directory of a child process;
+//!   lock file leaves no lock file; a directory the service UID cannot list
+//!   (as the peer user); paths up to the platform's limit (107 bytes on
+//!   Linux), one more refused, and without `/proc` (root, in a mount
+//!   namespace); relative paths, from the working directory of a child
+//!   process; a path ending in `/` or `/.` refused;
 //! - the peer check: the process's own UID passes; another UID, run as a
 //!   real second user through `runuser` and `python3`, is `forbidden`
 //!   (before any read) when the service UID is a third one and passes when
@@ -374,6 +375,7 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
     // bind leaves them: mode 0700, and an empty `l` with mode 0600).
     let leftover = dir.0.join(".local.sock.4194305.0.bind");
     fs::create_dir(&leftover).unwrap();
+    fs::set_permissions(&leftover, fs::Permissions::from_mode(0o700)).unwrap();
     drop(StdListener::bind(leftover.join("s")).unwrap());
     let staged_lock = dir.0.join(".local.sock.4194305.1.bind");
     fs::create_dir(&staged_lock).unwrap();
@@ -438,10 +440,10 @@ fn uid_of(name: &str) -> u32 {
 }
 
 /// Another service UID: as root the socket and its lock file are given to
-/// it; otherwise the process may not give the lock file away
-/// ([`BindError::Io`]), and nothing is left.
+/// it; a process that is not root is refused ([`BindError::NotRoot`])
+/// before anything is created.
 #[tokio::test]
-async fn another_service_uid_needs_the_privilege_to_give_the_socket_away() {
+async fn another_service_uid_needs_root() {
     let dir = TempDir::in_tmp();
     let uid = effective_uid(&dir.0);
     let other = if uid == 0 { 65_534 } else { uid + 1 };
@@ -459,11 +461,146 @@ async fn another_service_uid_needs_the_privilege_to_give_the_socket_away() {
         drop(listener);
         assert_eq!(dir.entries(), ["local.sock.lock"]);
     } else {
-        assert!(
-            matches!(&result, Err(BindError::Io(err)) if err.kind() == io::ErrorKind::PermissionDenied),
-            "{result:?}"
-        );
+        assert!(matches!(&result, Err(BindError::NotRoot)), "{result:?}");
         assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+    }
+}
+
+/// The variable that hands [`a_bind_by_a_process_that_is_not_root`] its
+/// directory.
+const NOT_ROOT_DIR_VAR: &str = "SKYOAUTH_IT_NOT_ROOT_DIR";
+
+/// Binding for another UID requires root; a service that is not root binds
+/// as its own UID: a process that is not root, with another service UID
+/// (root's included), is refused ([`BindError::NotRoot`]) before anything
+/// is created, in a directory it owns and in `/tmp`, while the same bind
+/// for its own UID serves ([`binds_of_a_process_that_is_not_root`]). Not
+/// root, this test binds itself; as root with `SKYOAUTH_IT_PEER_USER` set,
+/// it runs [`a_bind_by_a_process_that_is_not_root`] from a copy of this
+/// test binary as the peer user; as root without it, it prints a notice
+/// and passes.
+#[test]
+fn a_process_that_is_not_root_binds_as_its_own_uid_only() {
+    let dir = TempDir::in_tmp();
+    if effective_uid(&dir.0) != 0 {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(binds_of_a_process_that_is_not_root(&dir.0));
+        return;
+    }
+    let Ok(user) = env::var(PEER_USER_VAR) else {
+        eprintln!(
+            "NOTICE: {PEER_USER_VAR} is not set: the refusal of a bind for another UID by a \
+             process that is not root was NOT tested as root (it needs a second local user; \
+             set {PEER_USER_VAR}=<user> to run it)"
+        );
+        return;
+    };
+    let peer = uid_of(&user);
+    std::os::unix::fs::lchown(&dir.0, Some(peer), Some(peer)).unwrap();
+    let binary = dir.0.join("tests");
+    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new("runuser")
+        .args(["-u", &user, "--", "env"])
+        .arg(format!("{NOT_ROOT_DIR_VAR}={}", dir.0.display()))
+        .arg(&binary)
+        .args([
+            "--exact",
+            "a_bind_by_a_process_that_is_not_root",
+            "--nocapture",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    // The own-UID bind's lock file, and nothing else.
+    assert_eq!(dir.entries(), ["local.sock.lock", "tests"]);
+}
+
+/// The binds of [`a_process_that_is_not_root_binds_as_its_own_uid_only`],
+/// run as the peer user; without `SKYOAUTH_IT_NOT_ROOT_DIR` it does
+/// nothing.
+#[tokio::test]
+async fn a_bind_by_a_process_that_is_not_root() {
+    let Some(dir) = env::var_os(NOT_ROOT_DIR_VAR) else {
+        return;
+    };
+    binds_of_a_process_that_is_not_root(Path::new(&dir)).await;
+}
+
+/// A process that is not root binds in `dir`, a directory it owns: for
+/// another UID, refused before anything is created (in `/tmp` too); for
+/// its own UID, served.
+async fn binds_of_a_process_that_is_not_root(dir: &Path) {
+    let uid = effective_uid(dir);
+    assert_ne!(uid, 0, "not root");
+    let names = |at: &Path, part: &str| {
+        let mut names: Vec<String> = fs::read_dir(at)
+            .unwrap()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.contains(part))
+            .collect();
+        names.sort();
+        names
+    };
+    let before = names(dir, "");
+    let shared = format!("skyoauth-lt-{}-not-root.sock", std::process::id());
+    for other in [uid + 1, 0] {
+        for path in [dir.join("local.sock"), Path::new("/tmp").join(&shared)] {
+            let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(other))
+                .bind(&path)
+                .await;
+            assert!(
+                matches!(result, Err(BindError::NotRoot)),
+                "{other}: {result:?}"
+            );
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "the local socket can be bound for another service UID by root only; a \
+                 service that is not root binds as its own UID"
+            );
+        }
+        assert_eq!(names(dir, ""), before, "{other}");
+        assert!(names(Path::new("/tmp"), &shared).is_empty(), "{other}");
+    }
+    // Its own UID, given or the default: served.
+    for service in [Some(uid), None] {
+        let path = dir.join("local.sock");
+        let listener = transport(&unreachable_pool(), TestClock::new(), 1, service)
+            .bind(&path)
+            .await
+            .unwrap();
+        assert_eq!(listener.service_uid(), uid);
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (uid, 0o600));
+        drop(listener);
+        assert!(fs::symlink_metadata(&path).is_err());
+    }
+}
+
+/// A socket path that ends in `/` or `/.` names a directory (`Path`'s
+/// accessors drop the ending, so `local.sock/` would bind `local.sock`):
+/// refused ([`BindError::InvalidPath`]) before anything is created.
+#[tokio::test]
+async fn a_path_that_names_a_directory_is_refused() {
+    let dir = TempDir::new();
+    let base = dir.socket().into_os_string().into_string().unwrap();
+    for ending in ["/", "/.", "//", "/./"] {
+        let path = PathBuf::from(format!("{base}{ending}"));
+        for service in [None, Some(65_534)] {
+            let result = transport(&unreachable_pool(), TestClock::new(), 1, service)
+                .bind(&path)
+                .await;
+            assert!(
+                matches!(result, Err(BindError::InvalidPath)),
+                "{ending}: {result:?}"
+            );
+        }
+        assert!(dir.entries().is_empty(), "{ending}: {:?}", dir.entries());
     }
 }
 
@@ -843,7 +980,10 @@ async fn an_overlapping_restart_keeps_the_new_socket() {
 /// its length, up to [`MAX_SOCKET_PATH_BYTES`], 107 bytes (`sun_path` is 108
 /// bytes with the terminating NUL): the socket is bound through the private
 /// directory's descriptor, `/proc/self/fd/<fd>/s`, not at a longer staging
-/// path. Linux only: the BSDs and macOS have a 104-byte `sun_path` and no
+/// path. Where `/proc/self/fd` is missing (no `/proc` mounted), the
+/// staging path of one near the limit does not fit: refused
+/// ([`BindError::StagingPathTooLong`], only the lock file left). Linux
+/// only: the BSDs and macOS have a 104-byte `sun_path` and no
 /// `/proc/self/fd`, where a path near the limit has a staging path that
 /// does not fit (see the unit test
 /// `local_transport::socket::tests::the_staging_address_fits_or_is_refused`
@@ -858,9 +998,31 @@ async fn a_socket_path_up_to_the_limit_works() {
         assert!(length > base + 8, "the temporary directory is too long");
         dir.0.join("p".repeat(length - base))
     };
+    // The outcome near the limit depends on the descriptor paths.
+    let descriptor_paths = Path::new("/proc/self/fd").is_dir();
+    if !descriptor_paths {
+        eprintln!(
+            "NOTICE: /proc/self/fd is missing: socket paths near the limit are expected to be \
+             refused (their staging paths do not fit)"
+        );
+    }
     for length in [90, 100, MAX_SOCKET_PATH_BYTES] {
         let path = path_of(length);
         assert_eq!(path.as_os_str().len(), length);
+        if !descriptor_paths {
+            // 90 bytes may fit or not, with the process ID's length.
+            if length > 90 {
+                let result = transport(&unreachable_pool(), TestClock::new(), 1, None)
+                    .bind(&path)
+                    .await;
+                assert!(
+                    matches!(result, Err(BindError::StagingPathTooLong)),
+                    "{length}: {result:?}"
+                );
+                assert!(!path.exists());
+            }
+            continue;
+        }
         let server = Server::bind(
             transport(&unreachable_pool(), TestClock::new(), 1, None),
             &path,
@@ -933,8 +1095,9 @@ const NO_PROC_VAR: &str = "SKYOAUTH_IT_NO_PROC";
 /// and serves; a bind for another UID is refused before anything is created
 /// (`NoDescriptorPaths`). As root with `unshare` available, this test runs
 /// [`a_bind_without_proc_in_its_namespace`] in a new mount namespace with an
-/// empty file system mounted on `/proc`; otherwise it prints a notice and
-/// passes.
+/// empty file system mounted on `/proc`, and fails on any failure there;
+/// otherwise, or when the namespace or the mount is denied (a container
+/// that does not give root the privilege), it prints a notice and passes.
 #[cfg(target_os = "linux")]
 #[test]
 fn without_proc_only_a_short_path_of_the_own_uid_binds() {
@@ -947,6 +1110,22 @@ fn without_proc_only_a_short_path_of_the_own_uid_binds() {
         );
         return;
     }
+    // The namespace and the mount alone: refused in a container that does
+    // not give root the privilege, which is no failure of the transport.
+    let namespace = Command::new("unshare")
+        .args(["--mount", "--propagation", "private", "sh", "-c"])
+        .arg("mount -t tmpfs tmpfs /proc")
+        .output()
+        .unwrap();
+    if !namespace.status.success() {
+        eprintln!(
+            "NOTICE: a bind without /proc was NOT tested: the mount namespace or the mount on \
+             /proc was denied ({})",
+            String::from_utf8_lossy(&namespace.stderr).trim()
+        );
+        return;
+    }
+    // From here on, any failure is one inside the namespace.
     let output = Command::new("unshare")
         .args(["--mount", "--propagation", "private", "sh", "-c"])
         .arg("mount -t tmpfs tmpfs /proc && exec \"$0\" \"$@\"")
@@ -1014,6 +1193,114 @@ async fn a_bind_without_proc_in_its_namespace() {
     );
     server.stop().await;
     assert!(!short.exists());
+}
+
+/// The variable that tells [`a_bind_for_another_uid_in_a_user_namespace`]
+/// it runs in a user namespace without `/proc`.
+const USERNS_VAR: &str = "SKYOAUTH_IT_USERNS";
+
+/// The script that runs a copy of this test binary, `$0/tests`, in a new
+/// user and mount namespace (the process's UID mapped to root), with `$0`
+/// as its root directory: `/usr` and `/etc` bound in (the binary's
+/// libraries), `/bin`, `/lib`, `/lib64` and `/sbin` as on the host (links,
+/// or bound in), an empty `/tmp`, and an empty file system on `/proc`.
+const USERNS_SCRIPT: &str = r#"set -e
+for d in usr etc; do mkdir -p "$0/$d"; mount --rbind "/$d" "$0/$d"; done
+for d in bin lib lib64 sbin; do
+  if [ -L "/$d" ]; then ln -s "$(readlink "/$d")" "$0/$d"
+  elif [ -d "/$d" ]; then mkdir -p "$0/$d"; mount --rbind "/$d" "$0/$d"; fi
+done
+mkdir -p "$0/proc" "$0/tmp"
+mount -t tmpfs tmpfs "$0/proc"
+exec chroot "$0" /tests "$@""#;
+
+/// Without `/proc/self/fd`, a bind for another UID is refused
+/// ([`BindError::NoDescriptorPaths`]) before anything is created, also
+/// without privileges: a process that is not root runs
+/// [`a_bind_for_another_uid_in_a_user_namespace`] as root in a user
+/// namespace of its own ([`USERNS_SCRIPT`]), where the root directory is
+/// its own (mapped to root), so every check before that refusal passes.
+/// Where user namespaces are not allowed to the process (a kernel or
+/// security module setting), it prints a notice and passes; any failure
+/// once the namespace exists fails the test.
+#[cfg(target_os = "linux")]
+#[test]
+fn without_proc_a_bind_for_another_uid_is_refused_in_a_user_namespace() {
+    let allowed = Command::new("unshare")
+        .args(["--user", "--map-root-user", "--mount", "true"])
+        .output();
+    match allowed {
+        Ok(output) if output.status.success() => {}
+        other => {
+            eprintln!(
+                "NOTICE: a user namespace was denied: a bind for another UID without /proc was \
+                 NOT tested without privileges ({other:?})"
+            );
+            return;
+        }
+    }
+    let root = TempDir::new();
+    let binary = root.0.join("tests");
+    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "--mount",
+            "--propagation",
+            "private",
+            "sh",
+            "-c",
+            USERNS_SCRIPT,
+        ])
+        .arg(&root.0)
+        .args([
+            "--exact",
+            "a_bind_for_another_uid_in_a_user_namespace",
+            "--nocapture",
+        ])
+        .env(USERNS_VAR, "1")
+        .env_remove("TMPDIR")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+}
+
+/// The binds of
+/// [`without_proc_a_bind_for_another_uid_is_refused_in_a_user_namespace`],
+/// as root in a user namespace with no `/proc`; without
+/// `SKYOAUTH_IT_USERNS` it does nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_bind_for_another_uid_in_a_user_namespace() {
+    if env::var_os(USERNS_VAR).is_none() {
+        return;
+    }
+    assert!(!Path::new("/proc/self/fd").exists());
+    let socket_dir = Path::new("/tmp/s");
+    fs::create_dir(socket_dir).unwrap();
+    fs::set_permissions(socket_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(effective_uid(socket_dir), 0, "root in the namespace");
+    let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(65_534))
+        .bind(&socket_dir.join("local.sock"))
+        .await;
+    assert!(
+        matches!(result, Err(BindError::NoDescriptorPaths)),
+        "{result:?}"
+    );
+    assert_eq!(fs::read_dir(socket_dir).unwrap().count(), 0);
+    // Its own UID: bound at the full staging path, and removed.
+    let path = socket_dir.join("local.sock");
+    drop(
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+            .bind(&path)
+            .await
+            .unwrap(),
+    );
+    assert!(!path.exists());
 }
 
 /// The variable that tells [`relative_paths_in_the_working_directory`] it
@@ -1154,152 +1441,8 @@ async fn a_bind_killed_while_creating_the_lock_file_leaves_no_lock_file() {
     }
 }
 
-/// The lock file is given to the service UID before it is published: when
-/// the process may not give it away, no lock file is left (one of the
-/// wrong owner would refuse every later start), and its private directory
-/// is cleared. In a directory the process does not own (`/tmp`: root's,
-/// sticky and writable by all) a bind for another UID is refused before
-/// anything is created. It needs a process that is not root (root may give
-/// files away) and a root-owned sticky `/tmp`; otherwise it prints a notice
-/// and passes.
-#[tokio::test]
-async fn a_lock_file_that_cannot_be_given_away_is_not_published() {
-    let shared = Path::new("/tmp");
-    let usable = fs::symlink_metadata(shared)
-        .is_ok_and(|metadata| metadata.uid() == 0 && metadata.mode() & 0o1002 == 0o1002);
-    let probe = TempDir::in_tmp();
-    let uid = effective_uid(&probe.0);
-    if uid == 0 || !usable {
-        eprintln!(
-            "NOTICE: a lock file that cannot be given away was NOT tested (it needs a process \
-             that is not root and a root-owned sticky /tmp)"
-        );
-        return;
-    }
-    let name = format!("skyoauth-lt-{}-lock.sock", std::process::id());
-    let path = shared.join(&name);
-    let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(uid + 1))
-        .bind(&path)
-        .await;
-    let leftovers: Vec<String> = fs::read_dir(shared)
-        .unwrap()
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|entry| entry.contains(&name))
-        .collect();
-    for entry in &leftovers {
-        let _ = fs::remove_file(shared.join(entry));
-    }
-    assert!(
-        matches!(&result, Err(BindError::UnsafeDirectory)),
-        "{result:?}"
-    );
-    assert!(leftovers.is_empty(), "{leftovers:?}");
-    // In its own directory: the lock file cannot be given away.
-    let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(uid + 1))
-        .bind(&probe.socket())
-        .await;
-    assert!(
-        matches!(&result, Err(BindError::Io(err)) if err.kind() == io::ErrorKind::PermissionDenied),
-        "{result:?}"
-    );
-    assert!(probe.entries().is_empty(), "{:?}", probe.entries());
-}
-
 // ---------------------------------------------------------------------------
 // The peer check
-
-/// The variables that hand [`a_bind_with_capabilities`] its directory and
-/// the outcome it expects (`ok` or `denied`).
-const CAPS_DIR_VAR: &str = "SKYOAUTH_IT_CAPS_DIR";
-const CAPS_EXPECT_VAR: &str = "SKYOAUTH_IT_CAPS_EXPECT";
-
-/// A process that is not root binds for another service UID with
-/// capabilities only: the lock file and the socket get their mode while the
-/// process owns them, and are given away (`CAP_CHOWN`) before they are
-/// linked into the socket's directory, which, with `fs.protected_hardlinks`
-/// set (the Linux default), needs `CAP_FOWNER` for a file of another owner.
-/// So `CAP_CHOWN` alone is refused there ([`BindError::Io`], nothing left)
-/// and suffices elsewhere; `CAP_CHOWN` and `CAP_FOWNER` bind. As root with
-/// `SKYOAUTH_IT_PEER_USER` set and `setpriv` available, this test runs
-/// [`a_bind_with_capabilities`] from a copy of this test binary as the peer
-/// user with those capabilities (ambient); otherwise it prints a notice and
-/// passes.
-#[test]
-fn a_bind_for_another_uid_needs_cap_chown_and_cap_fowner() {
-    let Ok(user) = env::var(PEER_USER_VAR) else {
-        eprintln!(
-            "NOTICE: {PEER_USER_VAR} is not set: a bind with capabilities was NOT tested (it \
-             needs root, setpriv and a second local user; set {PEER_USER_VAR}=<user> to run it)"
-        );
-        return;
-    };
-    let dir = TempDir::in_tmp();
-    assert_eq!(effective_uid(&dir.0), 0, "{PEER_USER_VAR} needs root");
-    let peer = uid_of(&user);
-    std::os::unix::fs::lchown(&dir.0, Some(peer), Some(peer)).unwrap();
-    let binary = dir.0.join("tests");
-    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
-    let protected = fs::read_to_string("/proc/sys/fs/protected_hardlinks")
-        .is_ok_and(|value| value.trim() != "0");
-    let cases = [
-        ("+chown", if protected { "denied" } else { "ok" }),
-        ("+chown,+fowner", "ok"),
-    ];
-    for (caps, expect) in cases {
-        let output = Command::new("setpriv")
-            .arg(format!("--reuid={peer}"))
-            .arg(format!("--regid={peer}"))
-            .arg("--clear-groups")
-            .arg(format!("--inh-caps={caps}"))
-            .arg(format!("--ambient-caps={caps}"))
-            .arg("env")
-            .arg(format!("{CAPS_DIR_VAR}={}", dir.0.display()))
-            .arg(format!("{CAPS_EXPECT_VAR}={expect}"))
-            .arg(&binary)
-            .args(["--exact", "a_bind_with_capabilities", "--nocapture"])
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "{caps}: {output:?}");
-        assert!(stdout.contains("1 passed"), "{caps}: {stdout}");
-        if expect == "ok" {
-            let lock = fs::symlink_metadata(dir.0.join("local.sock.lock")).unwrap();
-            assert_eq!((lock.uid(), lock.mode() & 0o7777), (65_534, 0o600));
-            assert_eq!(dir.entries(), ["local.sock.lock", "tests"], "{caps}");
-        } else {
-            assert_eq!(dir.entries(), ["tests"], "{caps}");
-        }
-    }
-}
-
-/// The bind of [`a_bind_for_another_uid_needs_cap_chown_and_cap_fowner`],
-/// run as the peer user with capabilities; without
-/// `SKYOAUTH_IT_CAPS_DIR` it does nothing.
-#[tokio::test]
-async fn a_bind_with_capabilities() {
-    let (Some(dir), Some(expect)) = (env::var_os(CAPS_DIR_VAR), env::var_os(CAPS_EXPECT_VAR))
-    else {
-        return;
-    };
-    let path = Path::new(&dir).join("local.sock");
-    let result = transport(&unreachable_pool(), TestClock::new(), 1, Some(65_534))
-        .bind(&path)
-        .await;
-    if expect == "denied" {
-        assert!(
-            matches!(&result, Err(BindError::Io(err)) if err.kind() == io::ErrorKind::PermissionDenied),
-            "{result:?}"
-        );
-        return;
-    }
-    let listener = result.unwrap();
-    let metadata = fs::symlink_metadata(&path).unwrap();
-    assert!(metadata.file_type().is_socket());
-    assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (65_534, 0o600));
-    drop(listener);
-    assert!(fs::symlink_metadata(&path).is_err());
-}
 
 /// The variable that names a local user for the cross-UID peer test.
 const PEER_USER_VAR: &str = "SKYOAUTH_IT_PEER_USER";

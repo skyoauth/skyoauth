@@ -64,31 +64,35 @@
 //! shared by every thread, and the standard library has no call to change
 //! it (the crate forbids `unsafe`), so the transport does not change it:
 //!
-//! 1. it refuses a socket path that does not fit a Unix socket address
-//!    ([`BindError::PathTooLong`]: over [`MAX_SOCKET_PATH_BYTES`], 107
-//!    bytes on Linux, 103 on the BSDs and macOS), which no client could
-//!    connect to;
+//! 1. it refuses a socket path that ends in `/` or `/.`, a directory's
+//!    spelling ([`BindError::InvalidPath`]), and one that does not fit a
+//!    Unix socket address ([`BindError::PathTooLong`]: over
+//!    [`MAX_SOCKET_PATH_BYTES`], 107 bytes on Linux, 103 on the BSDs and
+//!    macOS), which no client could connect to;
 //! 2. it reads the process's effective UID from the kernel (the peer
-//!    credentials of a socket pair it creates), the default service UID,
-//!    and builds one absolute path of the socket's directory (the working
+//!    credentials of a socket pair it creates), the default service UID.
+//!    Binding for another UID requires root; a service that is not root
+//!    binds as its own UID: a process that is not root with another
+//!    service UID is refused ([`BindError::NotRoot`]) before anything is
+//!    created. It builds one absolute path of the socket's directory (the working
 //!    directory, read once, joined to a relative path). It opens the
 //!    directory once (`O_PATH | O_DIRECTORY | O_NOFOLLOW`: no read
 //!    permission needed, never through a symbolic link at the path) and
 //!    refuses it ([`BindError::UnsafeDirectory`]) unless the open
 //!    directory is a directory, not writable by group or others, or sticky
-//!    (as `/tmp`), and owned by the service UID or root; when the service
-//!    UID is not the effective UID (root binding for another UID), it must
-//!    be owned by the effective UID itself, so the service UID cannot
+//!    (as `/tmp`), and owned by the service UID or root; when root binds
+//!    for another UID, it must be owned by root, so the service UID cannot
 //!    rename what the bind creates there while the bind gives it away.
 //!    Then it walks the lookup of the path from the root directory,
 //!    following symbolic links (and `..` after them) as the kernel does,
 //!    and refuses it ([`BindError::UnsafeAncestor`], naming the depth, not
 //!    the path) unless every directory looked up on the way, the root
-//!    directory included, is not writable by group or others, or sticky,
-//!    and is owned by a UID the bind trusts: root or the service UID when
-//!    the service UID is the effective UID; root alone when it is not, so
-//!    neither the service UID, which would gain what the bind gives away,
-//!    nor the binding UID itself can point the path elsewhere. A symbolic
+//!    directory and each one `..` is looked up in included, is not
+//!    writable by group or others, or sticky, and is owned by a UID the
+//!    bind trusts: root or the service UID when the service UID is the
+//!    effective UID; root alone when root binds for another UID, so the
+//!    service UID, which would gain what the bind gives away, cannot point
+//!    the path elsewhere. A symbolic
 //!    link on the way in a sticky directory others may write must be a
 //!    trusted UID's too (its owner could replace it). The walk must end at
 //!    the open directory, else [`BindError::UnsafeDirectory`] (it was moved
@@ -105,9 +109,8 @@
 //!    too before it connects;
 //! 3. it opens the lock file `<name>.lock` next to the socket, or, when
 //!    there is none, creates it as a private inode first: a new file, mode
-//!    0600 (set while the process owns it), `l` in a fresh private
-//!    directory (as in step 4), given to the service UID on its open
-//!    descriptor (`fchown`; see step 6 for the privileges) and only then
+//!    0600, `l` in a fresh private directory (as in step 4), given to the
+//!    service UID on its open descriptor (`fchown`) and only then
 //!    hard-linked to `<name>.lock` (`link` never replaces an entry: a lock
 //!    file another bind published meanwhile is opened instead), so the lock
 //!    path never holds a file of the wrong owner, also when the process is
@@ -132,13 +135,15 @@
 //!    another process holds it open would let two processes lock two files
 //!    of the same name);
 //! 4. under the lock it clears the private directories a killed bind of the
-//!    same name left (`.<name>.<pid>.<n>.bind`, owned by the process's UID,
-//!    never a symbolic link): it unlinks only what a bind puts there, the
-//!    staged socket `s` (a socket) and the staged lock `l` (an empty
-//!    regular file, mode 0600 at most, in a directory with no group or
-//!    other bits), each owned by the service UID or the process's UID, and
-//!    removes the directory only when it is then empty (`rmdir`, never
-//!    recursively); anything else in it is left, and so is the directory.
+//!    same name left (`.<name>.<pid>.<n>.bind`): only a private directory,
+//!    as a bind creates it (owned by the process's UID, mode 0700 at most,
+//!    never a symbolic link), is touched at all; another one of that name
+//!    is left with all it holds. In a private directory it unlinks only
+//!    what a bind puts there, the staged socket `s` (a socket) and the
+//!    staged lock `l` (an empty regular file, mode 0600 at most), each
+//!    owned by the service UID or the process's UID, and removes the
+//!    directory only when it is then empty (`rmdir`, never recursively);
+//!    anything else in it is left, and so is the directory.
 //!    A directory the process may write but not list (a sticky directory
 //!    with mode 01733, say) is not scanned: its leftovers stay. A private
 //!    directory of another bind still creating the lock file (step 3) may
@@ -169,14 +174,10 @@
 //!    address is [`BindError::StagingPathTooLong`]; that path is safe as
 //!    well, because of step 2: only the effective UID (or root) can rename
 //!    entries in the socket's directory and in the directories above it. It
-//!    binds the socket there, sets mode 0600 while the process owns it,
-//!    and only then gives it to the service UID when that is not the
-//!    effective UID (`lchown`). A bind for another UID needs `CAP_CHOWN`
-//!    to give the lock file and the socket away, and, where
-//!    `fs.protected_hardlinks` is set (the Linux default), `CAP_FOWNER` to
-//!    link them, files of another owner, into the socket's directory (steps
-//!    3 and 7); root has both, and a process that is not root may be given
-//!    them. A refusal is [`BindError::Io`] and leaves nothing;
+//!    binds the socket there, sets mode 0600, and only then gives it to the
+//!    service UID when that is not the effective UID (`lchown`). Cross-UID
+//!    binding requires root; a non-root service binds as its own UID
+//!    (step 2);
 //! 7. it hard-links the staged socket, through the same address, to the
 //!    socket's name in the open directory: `link` never replaces an entry,
 //!    so one that appeared since step 5 is left in place
@@ -359,8 +360,8 @@
 //!
 //! So an accepted connection lasts at most its deadline, the transaction
 //! timeout and the idle timeout: by default 30, 60 and 10 seconds, 100
-//! seconds in all from the accept, and a response never comes later than
-//! that after the accept. The bound covers accepted work only: the time a
+//! seconds in all, measured from the accept, and a response never comes
+//! later than that after the accept. The bound covers accepted work only: the time a
 //! client spends in the listen queue before its accept (past
 //! [`Settings::max_connections`]) is outside it and has no bound of its
 //! own, and the client cannot see when the accept happens. A request the
@@ -671,7 +672,9 @@ impl fmt::Debug for LocalTransport {
 impl LocalTransport {
     /// A transport with the default [`Settings`]. `service_uid` is the UID
     /// that owns the socket and that the peer check accepts besides root;
-    /// `None` is the process's effective UID.
+    /// `None` is the process's effective UID. Another UID than the
+    /// process's requires root ([`BindError::NotRoot`] at the bind); a
+    /// service that is not root binds as its own UID.
     pub fn new(
         pool: PgPool,
         clock: Arc<dyn Clock + Send>,
