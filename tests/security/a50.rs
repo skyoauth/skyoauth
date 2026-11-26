@@ -48,6 +48,20 @@
 //!   stored policy and current revision, never a merge of the two, in every
 //!   input order and on every selection
 //!   (`a50_neg_several_same_actor_matches_give_one_stable_id_no_union`).
+//! - **Negative, the actor pairing that selection relies on.** A grant of
+//!   `wld_a` that lists a binding of `wld_b` in the same tenant, alone or
+//!   beside its own, is refused at create with
+//!   `RegistryError::Invariant { ForeignKey,
+//!   service_grant_binding_binding_id_fkey }` and writes nothing, direct or
+//!   delegation; the same grant listing `wld_a`'s own binding is created and
+//!   selects exactly it
+//!   (`a50_neg_grant_listing_another_actors_binding_is_refused`). Adding a
+//!   binding of `wld_b` to such a grant is refused the same way and leaves
+//!   the grant and its revision unchanged; adding `wld_a`'s own is accepted
+//!   and selected
+//!   (`a50_neg_adding_another_actors_binding_to_a_grant_is_refused`). In
+//!   both, `bnd_0_repo` of `wld_b` fits the evidence and sorts first, and
+//!   no grant of `wld_a` lists or selects a binding of `wld_b`.
 //!
 //! **Precedence.** Design section 5.7 item 4 says that several eligible
 //! bindings of the same actor are ordered by "stable ID ordering" without
@@ -72,9 +86,10 @@
 //! equal, near-miss claim names and values, an empty policy, and
 //! permutations of hand-built binding lists;
 //! `service/tests/registry_predicates.rs`: required predicates, empty and
-//! whitespace-only values), and a listed binding of another actor, which
-//! the `0004` foreign keys refuse (ADR-022 item 13), so the statement's
-//! actor recheck is observable only with the keys dropped
+//! whitespace-only values), and the statement's own actor recheck: the
+//! `0004` foreign key refuses a listed binding of another actor (ADR-022
+//! item 13, tested above), so the recheck is observable only with the keys
+//! dropped
 //! (`selection_rechecks_the_tenant_and_actor_the_foreign_keys_guarantee`).
 //! The M2 stage: the denial on the wire, the selected binding and its
 //! revision recorded in the policy revision and audit, and that the issued
@@ -86,8 +101,9 @@ use skyoauth_service::{
     persistence::{
         PgPool,
         registry::{
-            self, BindingProfile, GrantMode, Page, PrincipalBinding, PrincipalBindingChanges,
-            Selection, SelectionError, Status, select_grant,
+            self, ActivationState, BindingProfile, GrantMode, InvariantKind, JsonObject,
+            NewServiceGrant, Page, PrincipalBinding, PrincipalBindingChanges, RegistryError,
+            Selection, SelectionError, ServiceGrant, Status, select_grant,
         },
     },
     policy::{EligibleBinding, Evidence, match_binding},
@@ -570,6 +586,320 @@ async fn a50_neg_several_same_actor_matches_give_one_stable_id_no_union() {
             (lowest.revision + 1, higher.revision + 1),
             "{t}"
         );
+    }
+    db.drop([pool]).await;
+}
+
+/// The foreign key of `service_grant_binding` that pairs a listed binding
+/// with the grant's tenant and actor (`0004`; ADR-022 item 13).
+const BINDING_FKEY: &str = "service_grant_binding_binding_id_fkey";
+
+/// The modes of the grants of `wld_a` built below: direct, and delegation
+/// to `svc_1`. Both list bindings the same way.
+const LISTING_MODES: [GrantMode; 2] = [GrantMode::Direct, GrantMode::Delegation];
+
+/// A short tag of `mode` for IDs and names.
+fn tag(mode: GrantMode) -> &'static str {
+    match mode {
+        GrantMode::Direct => "direct",
+        GrantMode::Delegation => "deleg",
+        GrantMode::Impersonation => "imp",
+    }
+}
+
+/// A new grant `base` of `wld_a` in `side` in `mode` (delegation and
+/// impersonation to `svc_1`), of the tenant's audience, listing the
+/// bindings `listed` (ID bases).
+fn grant_of_a(side: Side, base: &str, mode: GrantMode, listed: &[&str]) -> NewServiceGrant {
+    NewServiceGrant {
+        id: side.id(base),
+        tenant_id: side.tenant.into(),
+        name: base.replace('_', "-"),
+        actor_principal_id: side.id("wld_a"),
+        target_service_id: match mode {
+            GrantMode::Direct => None,
+            GrantMode::Delegation | GrantMode::Impersonation => Some(side.id("svc_1")),
+        },
+        mode,
+        scopes: vec!["read".into()],
+        default_scopes: Some(vec!["read".into()]),
+        resource_constraints: JsonObject::new(),
+        max_ttl: 300,
+        valid_until: None,
+        status: Status::Enabled,
+        activation_state: ActivationState::NotRequired,
+        allowed_binding_ids: listed.iter().map(|base| side.id(base)).collect(),
+        resource_server_ids: vec![side.audience()],
+    }
+}
+
+/// `result` is the refusal of a listed binding that is not the grant
+/// actor's: the foreign key [`BINDING_FKEY`], and no other error.
+#[track_caller]
+fn assert_actor_pairing_refused<T: std::fmt::Debug>(result: Result<T, RegistryError>, case: &str) {
+    match result {
+        Err(RegistryError::Invariant {
+            kind: InvariantKind::ForeignKey,
+            constraint: Some(constraint),
+        }) => assert_eq!(constraint, BINDING_FKEY, "{case}"),
+        other => panic!("{case}: expected Invariant {{ ForeignKey, {BINDING_FKEY} }}: {other:?}"),
+    }
+}
+
+/// Every grant of `side`.
+async fn all_grants(pool: &PgPool, side: Side) -> Vec<ServiceGrant> {
+    registry::list_service_grants(pool, side.tenant, Page::first(registry::MAX_PAGE_SIZE))
+        .await
+        .unwrap()
+}
+
+/// The selection of grant `id` of `side` in `mode` on `src_gen`.
+async fn select_on_generic(pool: &PgPool, side: Side, id: &str, mode: GrantMode) -> Selection {
+    select_grant(pool, side.tenant, id, &side.id(GENERIC), mode)
+        .await
+        .unwrap_or_else(|err| panic!("{} {id} {mode:?}: {err:?}", side.tenant))
+}
+
+/// Every grant of `wld_a` in `side` lists, and selects on `src_gen`,
+/// bindings of `wld_a` only, never one of `wld_b`. Every grant of `wld_a`
+/// lists an eligible binding on `src_gen`, so each is selected.
+async fn assert_no_grant_of_a_selects_b(pool: &PgPool, side: Side) {
+    let actors: BTreeMap<String, String> = all_bindings(pool, side)
+        .await
+        .into_iter()
+        .map(|binding| (binding.id, binding.workload_principal_id))
+        .collect();
+    let of_a = side.id("wld_a");
+    let mut grants = 0;
+    for grant in all_grants(pool, side).await {
+        if grant.actor_principal_id != of_a {
+            continue;
+        }
+        grants += 1;
+        let case = format!("{} {}", side.tenant, grant.id);
+        for id in &grant.allowed_binding_ids {
+            assert_eq!(actors.get(id), Some(&of_a), "{case}: {id}");
+        }
+        let selection = select_on_generic(pool, side, &grant.id, grant.mode).await;
+        assert!(!selection.eligible_bindings.is_empty(), "{case}");
+        for binding in &selection.eligible_bindings {
+            assert_eq!(
+                actors.get(&binding.id),
+                Some(&of_a),
+                "{case}: {}",
+                binding.id
+            );
+        }
+    }
+    // The fixture's five grants of wld_a and the ones the tests created.
+    assert!(grants > 5, "{}", side.tenant);
+}
+
+/// A grant of `wld_a` that lists `bnd_0_repo`, the binding of `wld_b` in
+/// the same tenant and on the same source that the deployment evidence fits
+/// and whose ID sorts first, alone or beside `wld_a`'s own `bnd_m2`, or
+/// that lists `wld_b`'s `bnd_b_other`, is refused at create by
+/// [`BINDING_FKEY`], direct or delegation, and writes nothing: no grant, and
+/// every grant of both tenants as before. The control, the same grant
+/// listing `bnd_m2` alone, is created and selects exactly `bnd_m2`, which
+/// the deployment evidence matches; the evidence that only `bnd_b_other`
+/// fits matches nothing. No grant of `wld_a` selects a binding of `wld_b`.
+#[tokio::test]
+async fn a50_neg_grant_listing_another_actors_binding_is_refused() {
+    let (db, pool) = two_tenants_with_matching().await;
+    let evidence = deployment_evidence();
+    let other_repository = other_repository_evidence();
+    for side in [A, B] {
+        let t = side.tenant;
+        // The other actor's bindings: same tenant, same source; bnd_0_repo
+        // fits the deployment evidence and sorts before bnd_m2.
+        let own = stored(&pool, side, "bnd_m2").await;
+        let (repo, other) = (
+            stored(&pool, side, "bnd_0_repo").await,
+            stored(&pool, side, "bnd_b_other").await,
+        );
+        assert_eq!(own.workload_principal_id, side.id("wld_a"), "{t}");
+        for foreign in [&repo, &other] {
+            assert_eq!(foreign.workload_principal_id, side.id("wld_b"), "{t}");
+            assert_eq!(foreign.tenant_id, t, "{t}");
+            assert_eq!(foreign.trust_source_id, own.trust_source_id, "{t}");
+            assert_eq!(foreign.status, Status::Enabled, "{t}");
+        }
+        assert!(fits(&own, &evidence) && fits(&repo, &evidence), "{t}");
+        assert!(fits(&other, &other_repository), "{t}");
+        assert!(!fits(&own, &other_repository), "{t}");
+        assert!(repo.id.as_bytes() < own.id.as_bytes(), "{t}");
+
+        for mode in LISTING_MODES {
+            let m = tag(mode);
+            let before = (all_grants(&pool, A).await, all_grants(&pool, B).await);
+            let refused: [&[&str]; 3] = [
+                &["bnd_0_repo"],
+                &["bnd_m2", "bnd_0_repo"],
+                &["bnd_b_other", "bnd_m2"],
+            ];
+            for (n, listed) in refused.into_iter().enumerate() {
+                let new = grant_of_a(side, &format!("grt_x{n}_{m}"), mode, listed);
+                let case = format!("{t} {mode:?} {listed:?}");
+                assert_actor_pairing_refused(
+                    registry::test_support::create_service_grant(&pool, &new).await,
+                    &case,
+                );
+                assert!(
+                    matches!(
+                        registry::get_service_grant(&pool, t, &new.id).await,
+                        Err(RegistryError::NotFound)
+                    ),
+                    "{case}"
+                );
+            }
+            assert_eq!(
+                (all_grants(&pool, A).await, all_grants(&pool, B).await),
+                before,
+                "{t} {mode:?}"
+            );
+
+            // Control: the grant actor's own binding is accepted and
+            // selected.
+            let new = grant_of_a(side, &format!("grt_own_{m}"), mode, &["bnd_m2"]);
+            let created = registry::test_support::create_service_grant(&pool, &new)
+                .await
+                .unwrap_or_else(|err| panic!("{t} {mode:?}: {err:?}"));
+            assert_eq!(
+                created.allowed_binding_ids,
+                [own.id.as_str()],
+                "{t} {mode:?}"
+            );
+            let selection = select_on_generic(&pool, side, &new.id, mode).await;
+            assert_eq!(selection.grant, created, "{t} {mode:?}");
+            assert_eq!(
+                selection.eligible_bindings,
+                [eligible(&own)],
+                "{t} {mode:?}"
+            );
+            assert_eq!(
+                match_binding(&selection.eligible_bindings, &evidence),
+                Some(&eligible(&own)),
+                "{t} {mode:?}"
+            );
+            assert_eq!(
+                match_binding(&selection.eligible_bindings, &other_repository),
+                None,
+                "{t} {mode:?}"
+            );
+        }
+        assert_no_grant_of_a_selects_b(&pool, side).await;
+    }
+    db.drop([pool]).await;
+}
+
+/// Adding `wld_b`'s `bnd_0_repo` or `bnd_b_other` to a grant of `wld_a`
+/// that lists `bnd_m2`, direct or delegation, is refused by
+/// [`BINDING_FKEY`] and changes nothing: the grant, its bindings and its
+/// revision are as before, and it still selects exactly `bnd_m2`, so the
+/// deployment evidence matches `bnd_m2` and not `bnd_0_repo`, whose ID
+/// sorts first, and the evidence that only `bnd_b_other` fits matches
+/// nothing. The control, adding `wld_a`'s own `bnd_m1` at the same
+/// revision, is accepted and selected: the eligible bindings become
+/// `bnd_m1` and `bnd_m2`, and the match is `bnd_m1`, the lowest ID.
+#[tokio::test]
+async fn a50_neg_adding_another_actors_binding_to_a_grant_is_refused() {
+    let (db, pool) = two_tenants_with_matching().await;
+    let evidence = deployment_evidence();
+    let other_repository = other_repository_evidence();
+    for side in [A, B] {
+        let t = side.tenant;
+        let (m1, m2) = (
+            stored(&pool, side, "bnd_m1").await,
+            stored(&pool, side, "bnd_m2").await,
+        );
+        // The overlap: wld_b's bnd_0_repo fits the evidence, on the same
+        // source, and sorts before both bindings of wld_a.
+        let repo = stored(&pool, side, "bnd_0_repo").await;
+        assert_eq!(repo.trust_source_id, m2.trust_source_id, "{t}");
+        assert!(
+            fits(&repo, &evidence) && fits(&m1, &evidence) && fits(&m2, &evidence),
+            "{t}"
+        );
+        assert!(repo.id.as_bytes() < m1.id.as_bytes(), "{t}");
+        assert!(m1.id.as_bytes() < m2.id.as_bytes(), "{t}");
+        for mode in LISTING_MODES {
+            let new = grant_of_a(side, &format!("grt_add_{}", tag(mode)), mode, &["bnd_m2"]);
+            let created = registry::test_support::create_service_grant(&pool, &new)
+                .await
+                .unwrap_or_else(|err| panic!("{t} {mode:?}: {err:?}"));
+            for foreign in ["bnd_0_repo", "bnd_b_other"] {
+                let case = format!("{t} {mode:?} {foreign}");
+                assert_eq!(
+                    stored(&pool, side, foreign).await.workload_principal_id,
+                    side.id("wld_b"),
+                    "{case}"
+                );
+                assert_actor_pairing_refused(
+                    registry::test_support::add_service_grant_binding(
+                        &pool,
+                        t,
+                        &new.id,
+                        created.revision,
+                        &side.id(foreign),
+                    )
+                    .await,
+                    &case,
+                );
+                assert_eq!(
+                    registry::get_service_grant(&pool, t, &new.id)
+                        .await
+                        .unwrap(),
+                    created,
+                    "{case}"
+                );
+            }
+            let selection = select_on_generic(&pool, side, &new.id, mode).await;
+            assert_eq!(selection.grant, created, "{t} {mode:?}");
+            assert_eq!(selection.eligible_bindings, [eligible(&m2)], "{t} {mode:?}");
+            assert_eq!(
+                match_binding(&selection.eligible_bindings, &evidence),
+                Some(&eligible(&m2)),
+                "{t} {mode:?}"
+            );
+            assert_eq!(
+                match_binding(&selection.eligible_bindings, &other_repository),
+                None,
+                "{t} {mode:?}"
+            );
+
+            // Control: the grant actor's own binding is added and selected.
+            assert_eq!(
+                registry::test_support::add_service_grant_binding(
+                    &pool,
+                    t,
+                    &new.id,
+                    created.revision,
+                    &m1.id,
+                )
+                .await
+                .unwrap_or_else(|err| panic!("{t} {mode:?}: {err:?}")),
+                created.revision + 1,
+                "{t} {mode:?}"
+            );
+            let selection = select_on_generic(&pool, side, &new.id, mode).await;
+            assert_eq!(
+                selection.grant.allowed_binding_ids,
+                [m1.id.as_str(), m2.id.as_str()],
+                "{t} {mode:?}"
+            );
+            assert_eq!(
+                selection.eligible_bindings,
+                [eligible(&m1), eligible(&m2)],
+                "{t} {mode:?}"
+            );
+            assert_eq!(
+                match_binding(&selection.eligible_bindings, &evidence),
+                Some(&eligible(&m1)),
+                "{t} {mode:?}"
+            );
+        }
+        assert_no_grant_of_a_selects_b(&pool, side).await;
     }
     db.drop([pool]).await;
 }

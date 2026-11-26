@@ -1358,6 +1358,8 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_no_eligible_match",
   "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_ineligible_bindings_never_match",
   "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_several_same_actor_matches_give_one_stable_id_no_union",
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_grant_listing_another_actors_binding_is_refused",
+  "nextest:skyoauth-scenarios/pg/security::a50::a50_neg_adding_another_actors_binding_to_a_grant_is_refused",
 ]
 
 [[scenario.stage]]
