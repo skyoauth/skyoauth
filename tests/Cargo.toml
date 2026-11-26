@@ -44,7 +44,8 @@ tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 # workspace's libraries without test targets, where such a use fails to
 # compile, and fails if a normal build turns the feature on.
 skyoauth-service = { path = "../service", features = ["test-support"] }
-# The A49 wire tests (`security/a49_wire.rs`) drive the admin router of
+# The A22 and A49 wire tests (`security/a22_wire.rs`, `security/a49_wire.rs`)
+# drive the admin router of
 # `skyoauth_service::admin_http` with `tower::ServiceExt::oneshot`: the same
 # versions as the service's.
 axum = "0.8.9"

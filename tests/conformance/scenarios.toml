@@ -572,6 +572,10 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_scope_and_role_never_inherit",
   "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_store_unavailable_is_an_error_not_a_grant",
   "nextest:skyoauth-scenarios/pg/security::a22::a22_neg_token_and_claim_shaped_keys_never_authorize",
+  "nextest:skyoauth-scenarios/pg/security::a22_wire::a22_pos_a_registered_credential_with_the_role_reads_on_the_wire",
+  "nextest:skyoauth-scenarios/pg/security::a22_wire::a22_neg_a_peer_naming_no_usable_credential_is_the_same_401",
+  "nextest:skyoauth-scenarios/pg/security::a22_wire::a22_neg_a_usable_credential_without_the_role_is_one_403_and_no_header_upgrades_it",
+  "nextest:skyoauth-scenarios/pg/security::a22_wire::a22_neg_no_peer_is_one_401_whatever_the_headers_say",
 ]
 
 [[scenario.stage]]
