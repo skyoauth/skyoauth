@@ -886,6 +886,7 @@ describe('the CI job (publish-badges-ci.sh)', () => {
     if (reports.junit) put('target/nextest-artifacts/service-nextest-junit-1/junit.xml', reports.junit);
     if (reports.tsCoverage) put('clients/typescript/coverage/coverage-summary.json', JSON.stringify(tsSummary(reports.tsCoverage)));
     if (reports.tsResults) put('clients/typescript/coverage/test-results.json', JSON.stringify(reports.tsResults));
+    for (const [path, text] of Object.entries(reports.files ?? {})) put(path, text);
     return spawnSync('sh', [CI_SCRIPT], {
       cwd,
       encoding: 'utf8',
@@ -975,6 +976,108 @@ describe('the CI job (publish-badges-ci.sh)', () => {
     assert.equal(badge(remote, 'main/rust-tests.svg').title, 'rust tests: 5 passed');
     assert.equal(badge(remote, 'main/typescript-tests.svg').title, 'typescript tests: 7 passed');
     assert.equal(badge(remote, 'main/typescript-coverage.svg').title, 'typescript coverage: 100.0%');
+  });
+
+  // The Rust tests badge must count the report of service-nextest's first
+  // run (target/nextest/ci/junit.xml), laid out as the job uploads it and
+  // as publish-badges downloads it with `pattern:`: download-artifact
+  // extracts one matching artifact directly into `path` and several into a
+  // directory each (ci.yml); upload-artifact keeps each file's path below
+  // the deepest directory common to the upload's paths. Both are read from
+  // ci.yml, so an upload that nests the report fails (the two-file upload
+  // of ci/junit.xml and ci-root/junit.xml once did: on a first attempt the
+  // script found both reports and took ci/junit.xml only because `sort -V`
+  // orders it after ci-root/junit.xml; after a re-run it found none).
+  const CI_YML = readFileSync(join(dirname(SCRIPT), '..', '..', '.github', 'workflows', 'ci.yml'), 'utf8');
+  const jobBody = (ci, job) => ci.match(new RegExp(`^  ${job}:\\n((?:(?: {4}.*)?\\n)*)`, 'm'))?.[1] ?? '';
+  // The upload steps of a job: [{ name, paths }].
+  const uploadsOf = (body) =>
+    body
+      .split(/^(?= {6}- )/m)
+      .filter((step) => /^ {8}uses: actions\/upload-artifact@/m.test(step))
+      .map((step) => {
+        const block = /^ {10}path: \|\n((?: {12}.*\n)+)/m.exec(step);
+        return {
+          name: /^ {10}name: (.+)$/m.exec(step)[1],
+          paths: block ? block[1].split('\n').filter(Boolean).map((l) => l.trim()) : [/^ {10}path: (.+)$/m.exec(step)[1]],
+        };
+      });
+  const underCommonDir = (paths) => {
+    const dirs = paths.map((p) => p.split('/').slice(0, -1));
+    let common = 0;
+    while (dirs.every((d) => common < d.length && d[common] === dirs[0][common])) common++;
+    return paths.map((p) => p.split('/').slice(common).join('/'));
+  };
+  // A download-artifact pattern (`*` only, as used here) as a RegExp.
+  const globOf = (pattern) => new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*')}$`);
+  // The files publish-badges-ci.sh finds after the download, for the given
+  // attempts of service-nextest; each source report counts `count(path,
+  // attempt)` tests.
+  const downloaded = (ci, attempts, count) => {
+    const download = jobBody(ci, 'publish-badges').match(/^ {10}pattern: (.+)\n {10}path: (.+)$/m);
+    assert.ok(download, 'publish-badges downloads no pattern');
+    const [, pattern, into] = download;
+    const glob = globOf(pattern);
+    const artifacts = attempts.flatMap((attempt) =>
+      uploadsOf(jobBody(ci, 'service-nextest'))
+        .map(({ name, paths }) => ({ name: name.replace(/\$\{\{\s*github\.run_attempt\s*\}\}/g, String(attempt)), paths, attempt }))
+        .filter(({ name }) => glob.test(name)),
+    );
+    const files = {};
+    for (const { name, paths, attempt } of artifacts) {
+      const dir = artifacts.length === 1 ? into : `${into}/${name}`;
+      underCommonDir(paths).forEach((rel, i) => {
+        files[`${dir}/${rel}`] = `<testsuites name="t" tests="${count(paths[i], attempt)}" failures="0" errors="0" skipped="0"><testsuite name="s"/></testsuites>`;
+      });
+    }
+    return files;
+  };
+  // The first run's report counts 100 + attempt tests, any other 54.
+  const count = (path, attempt) => (path === 'target/nextest/ci/junit.xml' ? 100 + attempt : 54);
+  const rustTestsBadge = (ci, attempts) => {
+    const { remote, sha, work } = setup();
+    const r = run(work[0], sha, { RUST_TESTS_RESULT: 'success' }, { files: downloaded(ci, attempts, count) });
+    return { r, title: r.status === 0 ? badge(remote, 'main/rust-tests.svg').title : null };
+  };
+
+  test('service-nextest-junit-N holds junit.xml at its top; the root run\'s artifact never matches the download pattern', () => {
+    const uploads = uploadsOf(jobBody(CI_YML, 'service-nextest'));
+    const junit = uploads.find(({ name }) => name === 'service-nextest-junit-${{ github.run_attempt }}');
+    assert.ok(junit, 'no service-nextest-junit upload');
+    assert.deepEqual(underCommonDir(junit.paths), ['junit.xml']);
+    assert.deepEqual(junit.paths, ['target/nextest/ci/junit.xml']);
+    const rootRun = uploads.find(({ paths }) => paths.includes('target/nextest/ci-root/junit.xml'));
+    assert.ok(rootRun, 'the root run is uploaded');
+    assert.deepEqual(underCommonDir(rootRun.paths), ['junit.xml']);
+    const glob = globOf(jobBody(CI_YML, 'publish-badges').match(/^ {10}pattern: (.+)$/m)[1]);
+    for (const n of [1, 2, 9, 10, 123]) {
+      assert.ok(glob.test(`service-nextest-junit-${n}`), `service-nextest-junit-${n}`);
+      assert.ok(!glob.test(rootRun.name.replace(/\$\{\{\s*github\.run_attempt\s*\}\}/g, String(n))), `${rootRun.name} attempt ${n}`);
+    }
+  });
+
+  test("the Rust tests badge counts service-nextest's first run, after the first attempt and after re-runs", () => {
+    // [2]: only attempt 2's artifact downloaded (one match, extracted
+    // flat); [1, 2] and [1, 2, 3]: one directory each, the latest counts.
+    for (const attempts of [[1], [2], [1, 2], [1, 2, 3]]) {
+      const { r, title } = rustTestsBadge(CI_YML, attempts);
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      assert.equal(title, `rust tests: ${100 + attempts.at(-1)} passed`, String(attempts));
+    }
+  });
+
+  test('a service-nextest artifact that nests the report fails the check above', () => {
+    const nested = CI_YML.replace(
+      '          name: service-nextest-junit-${{ github.run_attempt }}\n          path: target/nextest/ci/junit.xml\n',
+      '          name: service-nextest-junit-${{ github.run_attempt }}\n          path: |\n            target/nextest/ci/junit.xml\n            target/nextest/ci-root/junit.xml\n',
+    );
+    assert.notEqual(nested, CI_YML);
+    // First attempt: both reports are found, ci/ wins on sort order alone.
+    assert.deepEqual(Object.keys(downloaded(nested, [1], count)).sort(), ['target/nextest-artifacts/ci-root/junit.xml', 'target/nextest-artifacts/ci/junit.xml']);
+    // After a re-run: no report found, so the job fails.
+    const rerun = rustTestsBadge(nested, [1, 2]);
+    assert.equal(rerun.r.status, 1);
+    assert.match(rerun.r.stderr, /service-nextest succeeded without a junit\.xml/);
   });
 
   test('cancelled jobs publish red failing badges', () => {

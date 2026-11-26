@@ -1519,10 +1519,11 @@ describe('input errors', () => {
     assert.match(r.json.input_errors[0], /the artifacts directory does not exist/);
   });
 
-  test('only the known non-conformance artifacts (service-nextest-junit-N, coverage, conformance-report-N) may lack a leg file; they are ignored with a note', () => {
+  test('only the known non-conformance artifacts (service-nextest-junit-N, service-nextest-root-junit-N, coverage, conformance-report-N) may lack a leg file; they are ignored with a note', () => {
     const d = artifacts([
       { leg: null, name: 'service-nextest-junit-1', junit: junit([[A24_NEG, 'failed']]) },
       { leg: null, name: 'service-nextest-junit-12', junit: null },
+      { leg: null, name: 'service-nextest-root-junit-1', junit: junit([[A24_NEG, 'failed']]) },
       { leg: null, name: 'rust-coverage', junit: null },
       { leg: null, name: 'typescript-coverage', junit: null },
       { leg: null, name: 'conformance-report-3', junit: null },
@@ -1534,8 +1535,8 @@ describe('input errors', () => {
     const r = report(root(withA24), ['--artifacts', d]);
     assert.equal(r.code, 0, r.err);
     assert.equal(stage(r.json, 'A24', 'M1a').status, 'passed');
-    assert.deepEqual(r.json.ignored_artifacts, ['100/conformance-report-3', '100/rust-coverage', '100/service-nextest-junit-1', '100/service-nextest-junit-12', '100/typescript-coverage']);
-    assert.match(r.out, /note: 5 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/conformance-report-3`/);
+    assert.deepEqual(r.json.ignored_artifacts, ['100/conformance-report-3', '100/rust-coverage', '100/service-nextest-junit-1', '100/service-nextest-junit-12', '100/service-nextest-root-junit-1', '100/typescript-coverage']);
+    assert.match(r.out, /note: 6 artifact\(s\) without a `leg` file ignored \(not conformance legs\): `100\/conformance-report-3`/);
   });
 
   test('every artifact the workflows upload is a leg artifact or a known non-conformance artifact', () => {
@@ -1552,6 +1553,65 @@ describe('input errors', () => {
     });
     assert.deepEqual(bad, [], 'leg artifacts must end in attempt-${{ github.run_attempt }}; others need a NOT_CONFORMANCE entry');
     assert.deepEqual(NOT_CONFORMANCE.filter((re) => !uploads.some(({ name }) => re.test(asNamed(name)))).map(String), [], 'NOT_CONFORMANCE entries no workflow uploads');
+  });
+
+  // upload-artifact (v4 on) lays an artifact out relative to the deepest
+  // directory common to its paths: one file lands at the top, while
+  // target/nextest/ci/junit.xml with target/nextest/ci-root/junit.xml lands
+  // as ci/junit.xml and ci-root/junit.xml. The reporter refuses a junit.xml
+  // one level down in any artifact (an input error: exit 2 for every run
+  // that holds it), so each upload of the workflows is laid out that way
+  // and read. Uploads of a directory (`path: dir/`) hold files this cannot
+  // know; their names are checked above.
+  const uploadLayout = (paths) => {
+    const dirs = paths.map((p) => p.split('/').slice(0, -1));
+    let common = 0;
+    while (dirs.every((d) => common < d.length && d[common] === dirs[0][common])) common++;
+    return paths.map((p) => p.split('/').slice(common).join('/'));
+  };
+  const readsCleanly = (uploads) => {
+    const d = tmp('report-layout-');
+    runJson(d, 100);
+    for (const { name, paths } of uploads) {
+      for (const f of uploadLayout(paths)) {
+        const base = f.split('/').pop();
+        write(join(d, '100', inAttempt(name), f), base === 'leg' ? `${PG}\n` : base === 'junit.xml' ? allPass(A24) : '{}\n');
+      }
+    }
+    return report(root(withA24), ['--artifacts', d]);
+  };
+  // A `path: |` block parses with an empty first path.
+  const fileUploads = (text) =>
+    workflowUploads([['ci.yml', text]])
+      .map((u) => ({ ...u, paths: u.paths.filter(Boolean) }))
+      .filter(({ paths }) => paths.length > 0 && paths.every((p) => !p.endsWith('/')));
+
+  test('the layout model: one file at the top, several files under their deepest common directory', () => {
+    assert.deepEqual(uploadLayout(['target/nextest/ci/junit.xml']), ['junit.xml']);
+    assert.deepEqual(uploadLayout(['${{ runner.temp }}/conformance-report.json']), ['conformance-report.json']);
+    assert.deepEqual(uploadLayout(['target/nextest/ci/junit.xml', 'target/nextest/ci/leg']), ['junit.xml', 'leg']);
+    assert.deepEqual(uploadLayout(['target/nextest/ci/junit.xml', 'target/nextest/ci-root/junit.xml']), ['ci/junit.xml', 'ci-root/junit.xml']);
+    assert.deepEqual(uploadLayout(['a/b/c/x', 'a/b/y']), ['c/x', 'y']);
+  });
+
+  test('every artifact ci.yml uploads, laid out as upload-artifact lays it out, is read without an input error', () => {
+    const uploads = fileUploads(ciText());
+    assert.ok(uploads.some(({ name }) => /^service-nextest-junit-/.test(name)), 'no service-nextest-junit upload');
+    assert.ok(uploads.some(({ name }) => /^service-nextest-root-junit-/.test(name)), 'no service-nextest-root-junit upload');
+    const r = readsCleanly(uploads);
+    assert.deepEqual(r.json.input_errors, []);
+    assert.equal(r.code, 0, r.err);
+    assert.ok(r.json.ignored_artifacts.includes('100/service-nextest-junit-1'));
+    assert.ok(r.json.ignored_artifacts.includes('100/service-nextest-root-junit-1'));
+    // The two-file upload service-nextest once had is an input error.
+    const nested = replaceOnce(
+      ciText(),
+      '          name: service-nextest-junit-${{ github.run_attempt }}\n          path: target/nextest/ci/junit.xml\n',
+      '          name: service-nextest-junit-${{ github.run_attempt }}\n          path: |\n            target/nextest/ci/junit.xml\n            target/nextest/ci-root/junit.xml\n',
+    );
+    const bad = readsCleanly(fileUploads(nested));
+    assert.equal(bad.code, 2);
+    assert.deepEqual(bad.json.input_errors, ['100/service-nextest-junit-1: ci/, ci-root/ holds a leg or junit.xml file; they belong at the top of the artifact']);
   });
 
   // The scan above only sees block-style steps, so it must not pass over an
@@ -1583,7 +1643,7 @@ describe('input errors', () => {
     ]);
     assert.equal(r.code, 2);
     assert.deepEqual(r.json.input_errors, [
-      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$, ^conformance-report-[1-9]\\d*$); its results cannot be placed',
+      '100/junit-scenarios-pg-x86_64-attempt-1: no leg file, and not a known artifact of a non-conformance job (^service-nextest-junit-[1-9]\\d*$, ^service-nextest-root-junit-[1-9]\\d*$, ^rust-coverage$, ^typescript-coverage$, ^conformance-report-[1-9]\\d*$); its results cannot be placed',
     ]);
     assert.deepEqual(r.json.ignored_artifacts, []);
     assert.match(r.out, /\*\*Input errors: this report cannot be trusted \(1\)\.\*\*/);

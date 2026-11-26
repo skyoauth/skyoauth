@@ -1,5 +1,7 @@
-# cargo-nextest configuration. CI runs `cargo nextest run --profile ci`;
-# the default profile is left as nextest ships it for local runs.
+# cargo-nextest configuration. CI runs both profiles below, in the
+# `service-nextest` job: `ci` for the workspace tests, then `ci-root` for
+# the root-only run of skyoauth-service's `local_transport` tests. The
+# default profile is left as nextest ships it for local runs.
 
 # Used by the `service-nextest` job in .github/workflows/ci.yml.
 # Retries stay at 0: a test that passes only on retry counts as failed
@@ -11,4 +13,17 @@ fail-fast = false
 
 # Written to target/nextest/ci/junit.xml.
 [profile.ci.junit]
+path = "junit.xml"
+
+# The `service-nextest` job's second run, of the root-only local transport
+# tests (see the step "Run the root-only local transport tests"). Same
+# settings as `ci`; its own JUnit path, so it does not overwrite the first
+# run's report. Written to target/nextest/ci-root/junit.xml, uploaded as
+# its own artifact, service-nextest-root-junit-<attempt>, which exists only
+# when that step ran.
+[profile.ci-root]
+retries = 0
+fail-fast = false
+
+[profile.ci-root.junit]
 path = "junit.xml"
