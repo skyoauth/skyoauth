@@ -14,12 +14,22 @@
 //! One request per connection: the client writes **one JSON object on one
 //! line, then the newline, then closes its write half**
 //! (`shutdown(SHUT_WR)`); the server dispatches the request only once it
-//! has read that end of the stream, and never answers a client that keeps
-//! its write half open. A request line is at most [`MAX_REQUEST_BYTES`]
-//! (64 KiB) with its newline; [`Request::encode`] refuses a longer one
-//! ([`NotSent::TooLarge`]), so it is never written and no connection is
-//! made for it. The server answers with one JSON object on one line and
-//! its newline, then closes the connection.
+//! has read that end of the stream, so a well-formed line whose client
+//! keeps its write half open is never dispatched or answered (the server's
+//! idle timeout or deadline closes the connection). A request line is at
+//! most [`MAX_REQUEST_BYTES`] (64 KiB) with its newline;
+//! [`Request::encode`] refuses a longer one ([`NotSent::TooLarge`]), so it
+//! is never written and no connection is made for it. The server answers
+//! with one JSON object on one line and its newline, then closes the
+//! connection.
+//!
+//! The server may answer before it has read the whole request: a peer it
+//! refuses gets `forbidden` at once, before any read, and a line over
+//! 64 KiB or a byte after the newline gets `invalid_request` as soon as it
+//! is read. So the exchange (a later part of this module, with the socket
+//! I/O) must still read the reply after its write fails (`EPIPE`: the
+//! server answered and closed first), and must keep the bytes it read
+//! before an `ECONNRESET` (the server closed with request bytes unread).
 //!
 //! The wire format is inferred: the service's module docs say no contract
 //! text fixes it. The fixture
@@ -37,25 +47,37 @@
 //! - **refused**, `{"error":"<code>"}` with a code of the closed set
 //!   [`ErrorCode::ALL`] ([`CallError::Refused`]): the server answered, and
 //!   its transaction was rolled back. One exception, from the service's
-//!   docs ("Transactions"): a `COMMIT` that fails is answered as a store
-//!   failure, [`ErrorCode::AuthUnavailable`] (a lost connection) or
-//!   [`ErrorCode::ServerError`], and its outcome may be unknown, so a
-//!   bootstrap or a restore refused with either is reconciled first, as
-//!   an unknown outcome is;
+//!   docs ("Transactions"): a `COMMIT` that fails, or whose
+//!   acknowledgement is lost, is answered as a store failure,
+//!   [`ErrorCode::AuthUnavailable`] (a lost connection) or
+//!   [`ErrorCode::ServerError`], and its outcome is then unknown, for each
+//!   of the three operations that write: `bootstrap`, `issue_challenge`
+//!   and `restore`. A rollback after which a repeat could still succeed
+//!   can never be confirmed through this socket. The codec reports what
+//!   the server sent: [`parse_reply`] returns `Refused(AuthUnavailable)`
+//!   or `Refused(ServerError)` for these, for every operation. The
+//!   client's call (the exchange, a later part) reports these two codes as
+//!   an unknown outcome ([`CallError::Unknown`], carrying the wire code)
+//!   for `bootstrap`, `issue_challenge` and `restore`, and as
+//!   [`CallError::Refused`] only for `preview`, which writes nothing:
+//!   after a write, reconcile first;
 //! - **not sent** ([`CallError::NotSent`]): nothing was written to the
 //!   server, so nothing happened there;
 //! - **unknown** ([`CallError::Unknown`]): anything else. A missing,
 //!   truncated, oversized or malformed reply, bytes after its newline, a
 //!   second line, a refusal with a code outside the closed set: the
-//!   request may or may not have been served, and a bootstrap or a restore
-//!   may have committed. **Do not proceed: reconcile first** (read the
+//!   request may or may not have been served, and a bootstrap, an issue or
+//!   a restore may have committed. **Do not proceed: reconcile first** (read the
 //!   recovery state and the operator through another channel), then decide.
 //!
-//! **The client never retries on its own**, after any outcome: a retried
-//! bootstrap is `conflict` and a retried restore `not_restorable` whether
-//! or not the first one committed, so a retry cannot tell the two apart;
-//! a retried issue makes a second challenge. Retrying is the caller's
-//! decision, after reconciling.
+//! **The client never retries on its own**, after any outcome. Once a
+//! first bootstrap committed, a repeat of it is answered `conflict`; once
+//! a first restore of a challenge committed, a repeat of it is answered
+//! `not_restorable` (the service's docs, "Transactions"): the repeat's
+//! answer looks like a refusal and hides the first call's success. Once a
+//! first issue committed, a repeat of it makes a second live challenge
+//! (the first expires unused). No write is safe to repeat without
+//! reconciling first, `issue_challenge` included.
 //!
 //! # Key material
 //!
@@ -80,11 +102,22 @@ use crate::recovery::RecoveryPublicKey;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// The largest reply line [`parse_reply`] reads, its newline included:
-/// 64 KiB. Inferred: the service sets no bound on its replies. Its largest
-/// is an issue's, whose challenge `M` holds a `trust_anchor_ref` of at most
-/// 2048 bytes (at most 4096 once escaped) and is far below this in
-/// hexadecimal.
-pub const MAX_REPLY_BYTES: usize = 64 * 1024;
+/// 4 MiB. Inferred: the service sets no bound on its replies, and one of
+/// them has none of its own: a restore's `revoked_credential_ids` lists
+/// every credential the restore revoked (all of them), some 34 bytes per
+/// ID, so a reply over 64 KiB takes fewer than 2000 credentials. The cap
+/// is not a limit of the protocol: it only bounds what the client holds
+/// (it reads the whole reply before parsing it) when the peer misbehaves,
+/// and 4 MiB holds some 120,000 revoked IDs. A reply over it is
+/// [`UnknownOutcome::TooLarge`]: the request may have been served, a
+/// restore may have committed, so reconcile first. A request line stays
+/// at most [`MAX_REQUEST_BYTES`].
+///
+/// Open question for the service and the design, not settled here: a
+/// reply with no bound of its own. The 4 MiB figure is arbitrary; a
+/// bounded reply format (a count, or the revoked IDs read some other way)
+/// would need a change to the service.
+pub const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
 /// An operation of the transport, by its request's `op` member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,13 +167,16 @@ pub enum ErrorCode {
     Conflict,
     /// The signed response does not authorize a restoration.
     NotRestorable,
-    /// The store is unavailable or the transaction must be retried; nothing
-    /// was written, unless a failed `COMMIT` was answered this way (see the
-    /// [module documentation](self), "Outcomes").
+    /// The store was unavailable or the transaction was aborted
+    /// (serialization failure, timeout); nothing was written, unless a
+    /// failed `COMMIT` was answered this way: its outcome is then unknown,
+    /// so reconcile before retrying a bootstrap, an issue or a restore (see
+    /// the [module documentation](self), "Outcomes").
     AuthUnavailable,
     /// A server or data-integrity error; nothing was written, unless a
-    /// failed `COMMIT` was answered this way (see the [module
-    /// documentation](self), "Outcomes").
+    /// failed `COMMIT` was answered this way: its outcome is then unknown,
+    /// so reconcile first after a bootstrap, an issue or a restore (see the
+    /// [module documentation](self), "Outcomes").
     ServerError,
 }
 
@@ -180,7 +216,9 @@ impl fmt::Display for ErrorCode {
                 "not_restorable: the signed response does not authorize a restoration"
             }
             Self::AuthUnavailable => {
-                "auth_unavailable: the store is unavailable or the transaction must be retried"
+                "auth_unavailable: the store was unavailable or the transaction was aborted \
+                 (serialization failure, timeout); reconcile before retrying a bootstrap, an \
+                 issue or a restore"
             }
             Self::ServerError => "server_error: a server or data-integrity error",
         })
@@ -235,7 +273,7 @@ impl fmt::Display for UnknownOutcome {
         f.write_str(match self {
             Self::Truncated => "the reply does not end with a newline",
             Self::TrailingBytes => "the reply has bytes after its newline",
-            Self::TooLarge => "the reply is larger than 64 KiB",
+            Self::TooLarge => "the reply is larger than 4 MiB",
             Self::NotUtf8 => "the reply is not UTF-8",
             Self::Malformed => "the reply is not a reply of the request's operation",
             Self::UnknownCode => "the reply refuses with an unknown code",
@@ -251,11 +289,17 @@ pub enum CallError {
     /// Nothing was written to the server.
     NotSent(NotSent),
     /// The server refused the request with a code of the closed set; its
-    /// transaction was rolled back (but see [`ErrorCode::AuthUnavailable`]
-    /// and [`ErrorCode::ServerError`] after a bootstrap or a restore).
+    /// transaction was rolled back. [`parse_reply`] gives this for every
+    /// code and every operation, [`ErrorCode::AuthUnavailable`] and
+    /// [`ErrorCode::ServerError`] included. Since a failed `COMMIT` is
+    /// answered with one of these two, the client's call (the exchange, a
+    /// later part) reports them as [`CallError::Unknown`], carrying the
+    /// wire code, for `bootstrap`, `issue_challenge` and `restore`, and as
+    /// a refusal only for `preview`: after a write, reconcile first (see
+    /// the [module documentation](self), "Outcomes").
     Refused(ErrorCode),
-    /// The request may or may not have been served: reconcile before
-    /// anything else. Never retried by the client.
+    /// The request may or may not have been served: do not proceed;
+    /// reconcile first. Never repeated by the client.
     Unknown(UnknownOutcome),
 }
 
@@ -266,7 +310,7 @@ impl fmt::Display for CallError {
             Self::Refused(code) => write!(f, "the local transport refused the request: {code}"),
             Self::Unknown(why) => write!(
                 f,
-                "the outcome of the request is unknown ({why}): reconcile before retrying"
+                "the outcome of the request is unknown ({why}): do not proceed; reconcile first"
             ),
         }
     }

@@ -571,7 +571,15 @@ fn the_request_limit_is_64_kib_with_the_newline() {
         "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
     )
     .unwrap();
-    let make: [&dyn Fn(String) -> Request; 4] = [
+    let make: [&dyn Fn(String) -> Request; 5] = [
+        &|text| {
+            Request::Bootstrap(BootstrapRequest {
+                instance_id: text,
+                credential_spki: vec![0x30],
+                trust_anchor_ref: "t".into(),
+                recovery_public_key: key,
+            })
+        },
         &|text| {
             Request::Bootstrap(BootstrapRequest {
                 instance_id: "i".into(),
@@ -603,6 +611,8 @@ fn the_request_limit_is_64_kib_with_the_newline() {
     for make in make {
         let base = make(String::new()).encode().unwrap().as_bytes().len();
         let fill = MAX_REQUEST_BYTES - base;
+        let under = make("x".repeat(fill - 1)).encode().unwrap();
+        assert_eq!(under.as_bytes().len(), MAX_REQUEST_BYTES - 1);
         let at_limit = make("x".repeat(fill)).encode().unwrap();
         assert_eq!(at_limit.as_bytes().len(), MAX_REQUEST_BYTES);
         let over = make("x".repeat(fill + 1));
@@ -624,8 +634,84 @@ fn the_request_limit_is_64_kib_with_the_newline() {
     let bytes = (MAX_REQUEST_BYTES - base) / 2;
     let largest = spki(bytes).encode().unwrap().as_bytes().len();
     assert_eq!(largest, base + 2 * bytes);
+    assert_eq!(
+        spki(bytes - 1).encode().unwrap().as_bytes().len(),
+        largest - 2
+    );
     assert!(largest + 1 >= MAX_REQUEST_BYTES, "{largest}");
     assert_eq!(spki(bytes + 1).encode(), Err(NotSent::TooLarge));
+}
+
+/// A request whose values alone are longer than [`MAX_REQUEST_BYTES`] is
+/// [`NotSent::TooLarge`] (the encoder refuses it before building its line;
+/// the hexadecimal of the largest credential here would be 32 times the
+/// limit), and so is one whose values alone are exactly at the limit,
+/// refused by its encoded length. The boundary of a line that fits is
+/// `the_request_limit_is_64_kib_with_the_newline`'s.
+#[test]
+fn oversized_values_are_refused_before_the_line_is_built() {
+    const LARGE: usize = 16 * MAX_REQUEST_BYTES;
+    let key = RecoveryPublicKey::from_hex(
+        "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+    )
+    .unwrap();
+    let bootstrap = |instance_id: usize, spki: usize, anchor: usize| {
+        Request::Bootstrap(BootstrapRequest {
+            instance_id: "i".repeat(instance_id),
+            credential_spki: vec![0xab; spki],
+            trust_anchor_ref: "t".repeat(anchor),
+            recovery_public_key: key,
+        })
+    };
+    let issue = |spki: usize, anchor: usize| {
+        Request::IssueChallenge(IssueChallengeRequest {
+            credential_spki: vec![0xab; spki],
+            trust_anchor_ref: "t".repeat(anchor),
+            new_recovery_public_key: key,
+        })
+    };
+    let preview = |operation_id: usize| {
+        Request::Preview(ResponseRequest {
+            operation_id: "o".repeat(operation_id),
+            signature: [7; 64],
+        })
+    };
+    let restore = |operation_id: usize| {
+        Request::Restore(ResponseRequest {
+            operation_id: "o".repeat(operation_id),
+            signature: [7; 64],
+        })
+    };
+    let half = MAX_REQUEST_BYTES / 2;
+    let early = [
+        bootstrap(1, LARGE, 1),
+        issue(LARGE, 1),
+        bootstrap(LARGE, 1, 1),
+        bootstrap(1, 1, LARGE),
+        issue(1, LARGE),
+        preview(LARGE),
+        restore(LARGE),
+        // The values alone one byte over the limit.
+        bootstrap(1, half, 0),
+        bootstrap(0, half, 1),
+        issue(half, 1),
+        bootstrap(0, 0, MAX_REQUEST_BYTES + 1),
+        issue(0, MAX_REQUEST_BYTES + 1),
+        preview(MAX_REQUEST_BYTES + 1),
+        restore(MAX_REQUEST_BYTES + 1),
+    ];
+    for request in early {
+        assert_eq!(request.encode(), Err(NotSent::TooLarge), "{request:?}");
+    }
+    // The values alone exactly at the limit: too large once encoded.
+    for request in [
+        bootstrap(0, half, 0),
+        issue(half, 0),
+        preview(MAX_REQUEST_BYTES),
+        restore(MAX_REQUEST_BYTES),
+    ] {
+        assert_eq!(request.encode(), Err(NotSent::TooLarge), "{request:?}");
+    }
 }
 
 /// Every string a request carries is escaped as `serde_json` escapes it,
@@ -733,8 +819,8 @@ fn replies_with_escapes_lists_and_extremes_parse() {
 /// A reply line of exactly [`MAX_REPLY_BYTES`] with its newline is read;
 /// one over it is [`UnknownOutcome::TooLarge`], however well formed.
 #[test]
-fn the_reply_cap_is_64_kib_with_the_newline() {
-    assert_eq!(MAX_REPLY_BYTES, 65_536);
+fn the_reply_cap_is_4_mib_with_the_newline() {
+    assert_eq!(MAX_REPLY_BYTES, 4_194_304);
     let issued = |operation_id: &str, digits: usize| {
         line_of(&[
             ("operation_id", operation_id.into()),
@@ -769,6 +855,36 @@ fn the_reply_cap_is_64_kib_with_the_newline() {
     assert_eq!(
         parse_reply(Op::IssueChallenge, &one_over),
         Err(CallError::Unknown(UnknownOutcome::TooLarge))
+    );
+}
+
+/// A restore that revoked a few thousand credentials (the service revokes
+/// them all) answers with a reply over 64 KiB and under the cap: it is read
+/// as the restore it is, not as an unknown outcome.
+#[test]
+fn a_restore_reply_with_thousands_of_revoked_ids_is_read() {
+    let revoked: Vec<String> = (1..=3000)
+        .map(|n| format!("cred_0000000000000g{n:012}"))
+        .collect();
+    let line = line_of(&[
+        ("admin_id", "adm_0000000000000g000000000001".into()),
+        ("credential_id", "cred_0000000000000g000000009999".into()),
+        ("binding_id", "role_0000000000000g000000000002".into()),
+        ("revoked_credential_ids", revoked.clone().into()),
+        ("recovery_key_epoch", 2.into()),
+        ("recovery_state_revision", 3.into()),
+    ]);
+    assert!(line.len() > 64 * 1024 && line.len() < MAX_REPLY_BYTES);
+    assert_eq!(
+        parse_reply(Op::Restore, line.as_bytes()),
+        Ok(Reply::Restored(Restored {
+            admin_id: "adm_0000000000000g000000000001".into(),
+            credential_id: "cred_0000000000000g000000009999".into(),
+            binding_id: "role_0000000000000g000000000002".into(),
+            revoked_credential_ids: revoked,
+            recovery_key_epoch: 2,
+            recovery_state_revision: 3,
+        }))
     );
 }
 

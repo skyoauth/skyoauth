@@ -37,8 +37,13 @@ impl Request {
     ///
     /// [`NotSent::TooLarge`] when the line, its newline included, is longer
     /// than [`MAX_REQUEST_BYTES`]: such a request must not be written, and
-    /// no connection is made for it.
+    /// no connection is made for it. A request whose values alone are
+    /// longer than that is refused before anything is built, so an
+    /// oversized credential is never expanded to hexadecimal.
     pub fn encode(&self) -> Result<RequestLine, NotSent> {
+        if self.encoded_len_lower_bound() > MAX_REQUEST_BYTES {
+            return Err(NotSent::TooLarge);
+        }
         let mut line = String::with_capacity(256);
         line.push('{');
         push_name(&mut line, OP_MEMBER);
@@ -81,6 +86,30 @@ impl Request {
             return Err(NotSent::TooLarge);
         }
         Ok(RequestLine(line.into_bytes()))
+    }
+}
+
+impl Request {
+    /// A lower bound of the encoded line's length, from the values' lengths
+    /// alone: a string is written with at least its own bytes (escaping only
+    /// adds), a byte value with two hexadecimal digits per byte, and the
+    /// names, quotes and fixed-length keys come on top. Saturating, so it
+    /// cannot overflow. Only a refusal is decided from it: a line that may
+    /// fit is built and measured.
+    fn encoded_len_lower_bound(&self) -> usize {
+        match self {
+            Self::Bootstrap(request) => request
+                .instance_id
+                .len()
+                .saturating_add(request.credential_spki.len().saturating_mul(2))
+                .saturating_add(request.trust_anchor_ref.len()),
+            Self::IssueChallenge(request) => request
+                .credential_spki
+                .len()
+                .saturating_mul(2)
+                .saturating_add(request.trust_anchor_ref.len()),
+            Self::Preview(request) | Self::Restore(request) => request.operation_id.len(),
+        }
     }
 }
 

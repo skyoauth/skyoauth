@@ -2,11 +2,11 @@
   "fixture_version": 1,
   "kind": "local_transport_wire",
   "status": "proposed",
-  "description": "The wire format of the service's deployment-local bootstrap and recovery transport (service/src/local_transport, module docs \"Protocol\", \"Operations\" and \"Errors\"): the request members of each op, the reply shapes, the closed set of refusal codes, the framing and the size limits, with golden request and reply lines. Inferred: no contract text fixes this wire format (the service's module docs say so); the service's code is the source, and status stays \"proposed\" until a contract states it. Framing: one request per connection; the client writes one JSON object on one line, the newline, then closes its write half (shutdown(SHUT_WR)); no byte may follow the newline; the server answers one JSON object on one line with its newline and closes. Requests: op first, then the op's members in the order listed under ops, no whitespace, byte values in lowercase hexadecimal, strings escaped as serde_json escapes them. Replies: serde_json's compact output, each success with exactly its members in the order listed under replies, every refusal {\"error\":\"<code>\"} and nothing else. framing.max_request_bytes is the service's MAX_REQUEST_BYTES; framing.max_reply_bytes is the client's own cap (inferred: the service sets none). The golden lines of exchange are the bytes the real service sent, with the given ID seed (SequentialIds) and clock, for a fresh database: the preview and restore signature is over the issued challenge M by the bootstrap recovery key (a test key). unknown_replies are bytes the operator's client must classify as an unknown outcome (reconcile first), with the reason it gives. Checked by operator/tests/local_wire (skyoauth-operator, every member) and tests/harness/local_transport_wire.rs (skyoauth-scenarios, against the service: constants, codes, golden requests through the real transport with an unreachable store, and the exchange on a database).",
+  "description": "The wire format of the service's deployment-local bootstrap and recovery transport (service/src/local_transport, module docs \"Protocol\", \"Operations\" and \"Errors\"): the request members of each op, the reply shapes, the closed set of refusal codes, the framing and the size limits, with golden request and reply lines. Inferred: no contract text fixes this wire format (the service's module docs say so); the service's code is the source, and status stays \"proposed\" until a contract states it. Framing: one request per connection; the client writes one JSON object on one line, the newline, then closes its write half (shutdown(SHUT_WR)); no byte may follow the newline; the server answers one JSON object on one line with its newline and closes. Requests: op first, then the op's members in the order listed under ops, no whitespace, byte values in lowercase hexadecimal, strings escaped as serde_json escapes them. Replies: serde_json's compact output, each success with exactly its members in the order listed under replies, every refusal {\"error\":\"<code>\"} and nothing else. framing.max_request_bytes is the service's MAX_REQUEST_BYTES; framing.max_reply_bytes is the client's own cap, 4 MiB (inferred: the service sets none, and a restore's revoked_credential_ids lists every credential it revoked, so its reply has no bound of its own); a reply over it is an unknown outcome (reconcile first). The golden lines of exchange are the bytes the real service sent, with the given ID seed (SequentialIds) and clock, for a fresh database: the preview and restore signature is over the issued challenge M by the bootstrap recovery key (a test key). To regenerate exchange and the golden lines it names (the requests and replies of bootstrap, issue_challenge, preview and restore, and the not_restorable and conflict replies; every ID in them is a SequentialIds ID of exchange.id_seed): add for the time a test to tests/harness (wired in tests/pg.rs, run once with the database environment tests/pg.rs documents, then removed) that serves the service's LocalTransport::new(pool, a clock fixed at exchange.now_micros, SequentialIds::with_seed(exchange.id_seed), None), default Settings, on a fresh database (skyoauth-scenarios' TestDb, migrated), sends the requests of exchange.steps in order, each on its own connection framed as above, and prints each reply line verbatim. The requests are built from test keys: the bootstrap recovery key is the Ed25519 public key of the seed of 32 bytes 0x51 (SEED in service/tests/local_transport.rs), the new recovery key that of 32 bytes 0x52 (NEW_SEED); credential_spki is the Ed25519 SubjectPublicKeyInfo prefix 302a300506032b6570032100 followed by 32 bytes 0x01 (bootstrap) or 0x02 (issue_challenge); trust_anchor_ref is deployment/operator-ca and instance_id the bootstrap line's; the preview and restore signature is the 0x51 key's Ed25519 signature over the bytes of the challenge the issue_challenge reply carries. Ed25519 signatures are deterministic, so the same inputs give the same lines; a change to the ID format, to the order in which the transport draws IDs, to M or to a reply shape changes them, and tests/harness/local_transport_wire.rs (the_golden_exchange_is_the_services) fails until they are regenerated. issue_challenge_escapes and unknown_replies are written by hand, not captured. unknown_replies are bytes the operator's client must classify as an unknown outcome (reconcile first), with the reason it gives. Checked by operator/tests/local_wire (skyoauth-operator, every member) and tests/harness/local_transport_wire.rs (skyoauth-scenarios, against the service: constants, codes, golden requests through the real transport with an unreachable store, and the exchange on a database).",
   "framing": {
     "line_end": "\n",
     "max_request_bytes": 65536,
-    "max_reply_bytes": 65536
+    "max_reply_bytes": 4194304
   },
   "op_member": "op",
   "ops": {
@@ -171,13 +171,13 @@
     {
       "code": "auth_unavailable",
       "applies_when": [
-        "the store is unavailable or the transaction must be retried (serialization failure, deadlock, lock or statement timeout, a lost connection, a failed BEGIN or COMMIT of those); nothing was written"
+        "the store was unavailable or the transaction was aborted (serialization failure, deadlock, lock or statement timeout, a lost connection, a failed BEGIN or COMMIT of those); nothing was written, unless a failed COMMIT was answered this way: its outcome is then unknown (a bootstrap, issue_challenge or restore is reconciled first, never repeated at once; a preview writes nothing)"
       ]
     },
     {
       "code": "server_error",
       "applies_when": [
-        "a server or data-integrity error, an ID generator failure, an unreadable timestamp; nothing was written"
+        "a server or data-integrity error, an ID generator failure, an unreadable timestamp; nothing was written, unless a failed COMMIT was answered this way: its outcome is then unknown (a bootstrap, issue_challenge or restore is reconciled first, never repeated at once; a preview writes nothing)"
       ]
     }
   ],
@@ -453,7 +453,7 @@
         },
         {
           "text": " ",
-          "repeat": 65516
+          "repeat": 4194284
         },
         {
           "text": "\n"
@@ -499,7 +499,7 @@
         },
         {
           "text": " ",
-          "repeat": 65515
+          "repeat": 4194283
         },
         {
           "text": "\n"
