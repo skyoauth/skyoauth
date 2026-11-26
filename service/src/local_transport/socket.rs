@@ -1521,6 +1521,79 @@ mod tests {
         }
     }
 
+    /// A directory put in the place of the new private directory between
+    /// its `mkdir` and its open, which is not the verified private one:
+    /// [`PrivateDir::create`] refuses it, whichever term of its check of
+    /// the open directory it fails. Deterministic: the test hook swaps the
+    /// directory at that step. Each swap passes every other term, so that
+    /// removing one term (or the whole check) is caught here. The same
+    /// swaps after the open (the open directory is then the verified one
+    /// and the path is not) are refused by the comparison of the open
+    /// directory with the path. Not covered: the device term, which alone
+    /// refuses a link to another file system whose inode number equals the
+    /// link's (fresh tmpfs instances, btrfs subvolumes); a unit test cannot
+    /// set that up without mounts. The owner case needs root (others cannot
+    /// give a directory away) and is skipped otherwise: CI's root step runs
+    /// only `--test local_transport`, so it runs in a manual root run.
+    #[test]
+    fn a_directory_swapped_in_before_its_check_is_not_verified() {
+        // Swaps: the directory at the path is renamed away and `put`
+        // makes what is at the path instead.
+        type Put = fn(&Path, &Path);
+        let cases: [(&str, Put); 4] = [
+            // Any other user may enter it: the mode term.
+            ("open to all", |path, _| {
+                fs::DirBuilder::new().mode(0o755).create(path).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            }),
+            // A link to a private directory of the process's UID, which
+            // is what the open reaches: a directory, owned, closed, but
+            // not the entry at the path (the inode term).
+            ("a link", |path, away| {
+                let target = away.with_extension("target");
+                fs::DirBuilder::new().mode(0o700).create(&target).unwrap();
+                std::os::unix::fs::symlink(&target, path).unwrap();
+            }),
+            // A file nobody else may enter: not a directory (the open of a
+            // file succeeds), every other term holds.
+            ("a file", |path, _| {
+                fs::write(path, b"").unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+            }),
+            // A private directory of another user (root only: others
+            // cannot give a directory away): the owner term.
+            ("another owner", |path, _| {
+                fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+                std::os::unix::fs::lchown(path, Some(4_194_305), None).unwrap();
+            }),
+        ];
+        for (n, (what, put)) in cases.into_iter().enumerate() {
+            for step in [CreateStep::Made, CreateStep::Opened] {
+                let dir = Scratch::new(&format!("swapped-{n}-{step:?}"));
+                let uid = fs::symlink_metadata(&dir.0).unwrap().uid();
+                if what == "another owner" && uid != 0 {
+                    continue;
+                }
+                let parent = opened(&dir.0);
+                let name = OsStr::new("local.sock");
+                CREATE_HOOK.set(Some(Box::new(move |at, path: &Path| {
+                    if at == step {
+                        let away = path.with_extension("away");
+                        fs::rename(path, &away).unwrap();
+                        put(path, &away);
+                    }
+                })));
+                let created = PrivateDir::create(&parent, name, uid, uid);
+                CREATE_HOOK.set(None);
+                assert!(
+                    matches!(created, Err(BindError::NotVerified)),
+                    "{what} at {step:?}: {:?}",
+                    created.map(|dir| dir.map(|dir| dir.path.clone()))
+                );
+            }
+        }
+    }
+
     /// A directory the process may not list is not scanned; any other
     /// failure to list it is an error.
     #[test]
