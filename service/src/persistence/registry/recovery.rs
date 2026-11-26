@@ -973,8 +973,10 @@ fn bounded(value: &str) -> bool {
 /// The recovery key in `bytes`, if it passes the checks of the module
 /// docs, "Keys": 32 bytes, a point, canonically encoded, not of small
 /// order. Otherwise the fixed message of the first check it fails. Shared
-/// with [`bootstrap_instance`](super::bootstrap_instance).
-pub(super) fn recovery_key(bytes: &[u8]) -> Result<VerifyingKey, &'static str> {
+/// with [`bootstrap_instance`](super::bootstrap_instance) and with
+/// `crate::local_transport`, which checks a request's key before it calls
+/// the registry.
+pub(crate) fn recovery_key(bytes: &[u8]) -> Result<VerifyingKey, &'static str> {
     let bytes: &[u8; RECOVERY_PUBLIC_KEY_LENGTH] = bytes.try_into().map_err(|_| KEY_LENGTH)?;
     // ZIP-215 decoding: accepts a `y` at or above the field prime and a
     // negative zero `x`, so the re-encoding below is the canonical check.
