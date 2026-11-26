@@ -1,0 +1,59 @@
+{
+  "fixture_version": 1,
+  "kind": "recovery_public_key",
+  "description": "Known answers for the recovery public key: the raw 32-byte Ed25519 public key (identity-registry IR-059; ADR-013 item 7), and in text 64 lowercase hexadecimal digits (the restoration plan's new_recovery_public_key and the deployment-local transport). A key is refused when it is small-order, non-canonically encoded or undecodable (user ruling, 2026-11-24). The byte checks run in the order of checks, and each refusal carries the message of the first check that fails: so a non-canonical encoding of a small-order point is not_canonical. byte_cases are raw bytes, written here in hexadecimal; text_cases are text, checked for the text form first (exactly 64 bytes, each a lowercase hexadecimal digit) and then as bytes. The messages are the service's (service/src/persistence/registry/recovery.rs, recovery_key), except not_hex, which is the operator's; the service's restoration plan refuses the same text with service_plan_messages.not_hex. Readers: operator/tests/operator.rs (RecoveryPublicKey::from_bytes and from_hex) and tests/harness/recovery_key_fixture.rs (the service's bootstrap_instance for byte_cases, issue_recovery_challenge for text_cases). Sources of the vectors: the service's unit tests of recovery_key; RFC 8032 section 7.1, test 1, for the first valid key.",
+  "length_bytes": 32,
+  "checks": ["length", "undecodable", "not_canonical", "small_order"],
+  "messages": {
+    "not_hex": "recovery public key is not 64 lowercase hexadecimal digits",
+    "length": "recovery public key is not a 32-byte Ed25519 key",
+    "undecodable": "recovery public key is not an Ed25519 point",
+    "not_canonical": "recovery public key is not canonically encoded",
+    "small_order": "recovery public key is a small-order Ed25519 point"
+  },
+  "service_plan_messages": {
+    "not_hex": "plan new_recovery_public_key is not 64 lowercase hexadecimal digits"
+  },
+  "byte_cases": [
+    { "case": "valid_rfc8032_test1", "key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "expected": "valid" },
+    { "case": "valid_all_0x11", "key": "1111111111111111111111111111111111111111111111111111111111111111", "expected": "valid" },
+    { "case": "length_0", "key": "", "expected": "length" },
+    { "case": "length_1", "key": "11", "expected": "length" },
+    { "case": "length_31", "key": "11111111111111111111111111111111111111111111111111111111111111", "expected": "length" },
+    { "case": "length_33", "key": "111111111111111111111111111111111111111111111111111111111111111111", "expected": "length" },
+    { "case": "length_64", "key": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111", "expected": "length" },
+    { "case": "undecodable_all_0x07", "key": "0707070707070707070707070707070707070707070707070707070707070707", "expected": "undecodable" },
+    { "case": "undecodable_all_0xa3", "key": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3", "expected": "undecodable" },
+    { "case": "not_canonical_identity_y_p_plus_1", "key": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
+    { "case": "not_canonical_order_4_y_p", "key": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
+    { "case": "not_canonical_identity_negative_zero_x", "key": "0100000000000000000000000000000000000000000000000000000000000080", "expected": "not_canonical" },
+    { "case": "not_canonical_large_order_y_p_plus_3", "key": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
+    { "case": "small_order_identity", "key": "0100000000000000000000000000000000000000000000000000000000000000", "expected": "small_order" },
+    { "case": "small_order_2", "key": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "small_order" },
+    { "case": "small_order_4_x_positive", "key": "0000000000000000000000000000000000000000000000000000000000000000", "expected": "small_order" },
+    { "case": "small_order_4_x_negative", "key": "0000000000000000000000000000000000000000000000000000000000000080", "expected": "small_order" },
+    { "case": "small_order_8_a", "key": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05", "expected": "small_order" },
+    { "case": "small_order_8_b", "key": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85", "expected": "small_order" },
+    { "case": "small_order_8_c", "key": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a", "expected": "small_order" },
+    { "case": "small_order_8_d", "key": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "expected": "small_order" }
+  ],
+  "text_cases": [
+    { "case": "valid_rfc8032_test1", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "expected": "valid" },
+    { "case": "valid_all_0x11", "text": "1111111111111111111111111111111111111111111111111111111111111111", "expected": "valid" },
+    { "case": "not_hex_upper_case", "text": "D75A980182B10AB7D54BFED3C964073A0EE172F3DAA62325AF021A68F707511A", "expected": "not_hex" },
+    { "case": "not_hex_one_upper_case_digit", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511A", "expected": "not_hex" },
+    { "case": "not_hex_empty", "text": "", "expected": "not_hex" },
+    { "case": "not_hex_31_bytes", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f70751", "expected": "not_hex" },
+    { "case": "not_hex_63_digits", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511", "expected": "not_hex" },
+    { "case": "not_hex_33_bytes", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a00", "expected": "not_hex" },
+    { "case": "not_hex_non_digit", "text": "g75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "expected": "not_hex" },
+    { "case": "not_hex_0x_prefix", "text": "0x5a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "expected": "not_hex" },
+    { "case": "not_hex_space", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511 ", "expected": "not_hex" },
+    { "case": "not_hex_non_ascii_64_bytes", "text": "é5a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "expected": "not_hex" },
+    { "case": "undecodable_all_0x07", "text": "0707070707070707070707070707070707070707070707070707070707070707", "expected": "undecodable" },
+    { "case": "not_canonical_identity_y_p_plus_1", "text": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
+    { "case": "not_canonical_large_order_y_p_plus_3", "text": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
+    { "case": "small_order_identity", "text": "0100000000000000000000000000000000000000000000000000000000000000", "expected": "small_order" },
+    { "case": "small_order_8_d", "text": "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa", "expected": "small_order" }
+  ]
+}

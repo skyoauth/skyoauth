@@ -1,0 +1,55 @@
+{
+  "fixture_version": 1,
+  "kind": "public_identity",
+  "description": "Known answers for the canonical public identity of an mTLS public key (identity-registry section 5.2; lead decision, 2026-11-24): prefix followed by the 64 lowercase hexadecimal digits of the SHA-256 digest of the DER SubjectPublicKeyInfo, which must be 1 to max_der_bytes bytes. A case's DER bytes are der.hex, then fill_count copies of the byte fill_byte when the case has them. expected is an identity, or the error class whose message both sides give. The operator does not check the DER structure; the service does and refuses what is not a strict DER SubjectPublicKeyInfo: a case with service_expected gives that service message instead of expected. Readers: operator/tests/operator.rs (public_identity_of_spki) and tests/harness/public_identity_fixture.rs (the service's canonical_public_identity). Sources of the keys: RFC 8032 section 7.1, test 1 (Ed25519) and RFC 6979 appendix A.2.5 (P-256); rsa_shape_4096_bytes is an rsaEncryption SubjectPublicKeyInfo of exactly max_der_bytes bytes whose key octets are filler, which the service does not decode.",
+  "prefix": "spki-sha256:",
+  "max_der_bytes": 4096,
+  "messages": {
+    "empty": "the public key is empty",
+    "too_large": "the public key is too large"
+  },
+  "cases": [
+    {
+      "case": "ed25519_rfc8032_test1",
+      "der": { "hex": "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" },
+      "expected": { "identity": "spki-sha256:06e3fd8fda29bb60ab59557de61edb0aecdb231134be30e75b455f8e1b792fa9" }
+    },
+    {
+      "case": "ed25519_rfc8032_test1_null_parameters",
+      "der": { "hex": "302c300706032b65700500032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" },
+      "expected": { "identity": "spki-sha256:6cf22591d4a9fc1bdf279ef8b3d07a5dee46e8717d68b744750eedfe20edd894" }
+    },
+    {
+      "case": "p256_rfc6979_uncompressed",
+      "der": { "hex": "3059301306072a8648ce3d020106082a8648ce3d0301070342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299" },
+      "expected": { "identity": "spki-sha256:5a7a78cca4a0f420d9bc62bb669c3c2759e39f723d3ae10dcbe0f0815a07ecd4" }
+    },
+    {
+      "case": "rsa_shape_4096_bytes",
+      "der": { "hex": "30820ffc300d06092a864886f70d010101050003820fe900", "fill_byte": "5a", "fill_count": 4072 },
+      "expected": { "identity": "spki-sha256:e654183c9f61d6615163c19c7f9710ccc81550c669369ad8126bb9f036677bd2" }
+    },
+    {
+      "case": "one_byte_not_der",
+      "der": { "hex": "30" },
+      "expected": { "identity": "spki-sha256:5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9" },
+      "service_expected": { "error": "the public key encoding is truncated" }
+    },
+    {
+      "case": "ed25519_trailing_byte_not_der",
+      "der": { "hex": "302a300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a00" },
+      "expected": { "identity": "spki-sha256:0bb7d17afffa5391e7032269984bb26e68666a04d59cfffc678ee47f36742a5c" },
+      "service_expected": { "error": "the public key encoding has trailing bytes" }
+    },
+    {
+      "case": "empty",
+      "der": { "hex": "" },
+      "expected": { "error": "empty" }
+    },
+    {
+      "case": "too_large_4097_bytes",
+      "der": { "hex": "30820ffd300d06092a864886f70d010101050003820fea00", "fill_byte": "5a", "fill_count": 4073 },
+      "expected": { "error": "too_large" }
+    }
+  ]
+}

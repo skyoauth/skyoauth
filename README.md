@@ -10,6 +10,7 @@
 | --------------------- | ---------------------------------------------------- |
 | `service/`            | Rust service (`skyoauth-service`, axum + tokio)      |
 | `service/migrations/` | Versioned PostgreSQL migrations (sqlx, embedded)     |
+| `operator/`           | Workstation operator library (`skyoauth-operator`)   |
 | `clients/typescript`  | TypeScript client library (`@skyoauth/client`)       |
 
 ## Service
