@@ -604,17 +604,42 @@ jobs:
         with:
           tool: cargo-nextest@0.9.151
 
-      # The operator's tests read the fixtures byte for byte, and
-      # .gitattributes pins LF for tests/conformance/**; this proves the
-      # checkout honoured it (a CR in a fixture would change what the known
-      # answers hash or compare), on every leg.
+      # The fixtures are shared by the service and operator tests, which
+      # parse them as JSON, where a CR outside a string is only whitespace;
+      # this guards the bytes that .gitattributes pins for
+      # tests/conformance/**, on every leg. The check first proves that it
+      # can see a CR on this leg's own grep (Git for Windows ships one): the
+      # same function, run on a planted file with a CR and on one without,
+      # must find exactly the first. The real check then maps grep's status:
+      # 1 is clean, 0 is a CR, anything else (a wrong path, an error) fails
+      # the step instead of passing as "no CR".
       - name: Check the fixtures have LF line endings
         shell: bash
         run: |
-          if grep -rl "$(printf '\r')" tests/conformance/fixtures; then
-            echo "::error::A fixture under tests/conformance/fixtures has CR line endings"
+          cr=$(printf '\r')
+          has_cr() { grep -rlF "$cr" "$@"; }
+          probe=$(mktemp -d)
+          printf 'a%sb\n' "$cr" > "$probe/with-cr"
+          printf 'ab\n' > "$probe/without-cr"
+          found=$(has_cr "$probe" || true)
+          rm -rf "$probe"
+          if [ "$found" != "$probe/with-cr" ]; then
+            echo "::error::The CR check did not find exactly a planted CR (found: '$found'): it cannot be trusted on this runner"
             exit 1
           fi
+          status=0
+          has_cr tests/conformance/fixtures || status=$?
+          case $status in
+            1) ;;
+            0)
+              echo "::error::A fixture under tests/conformance/fixtures has CR line endings"
+              exit 1
+              ;;
+            *)
+              echo "::error::The CR check of tests/conformance/fixtures failed (grep exited $status)"
+              exit 1
+              ;;
+          esac
 
       - name: Test
         run: cargo nextest run --locked -p skyoauth-operator --all-features --profile ci
