@@ -96,7 +96,9 @@
 //! # Not covered here
 //!
 //! - The mTLS leg (handshake, chain against `trust_anchor_ref`, key
-//!   canonicalization by the server): S5, S6 and S7.
+//!   canonicalization by the server): S6 for the handshake and the chain, S7
+//!   for the canonicalization, S5 for enrolment and credential state (the
+//!   lead's split; tasks §13 does not say).
 //! - Writes: the router exposes none, so no cross-tenant write probe goes
 //!   over the wire; the typed write probe is [`super::a49`]'s
 //!   (`a49_neg_other_tenants_principal_id_is_not_found_as_a_missing_one`).
