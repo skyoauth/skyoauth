@@ -385,8 +385,9 @@ fn encode_error(message: &'static str) -> BootstrapError {
 
 /// Whether `id` is a UUIDv7 in lowercase hyphenated form (IR-057): the
 /// 8-4-4-4-12 layout of lowercase hex digits, version `7` and the RFC 9562
-/// variant `10xx`.
-fn is_lowercase_uuid_v7(id: &str) -> bool {
+/// variant `10xx`. Shared with `crate::local_transport`, which checks a
+/// request's value before it calls [`bootstrap_instance`].
+pub(crate) fn is_lowercase_uuid_v7(id: &str) -> bool {
     let bytes = id.as_bytes();
     bytes.len() == 36
         && bytes.iter().enumerate().all(|(index, &byte)| match index {

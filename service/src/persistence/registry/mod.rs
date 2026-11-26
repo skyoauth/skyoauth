@@ -473,6 +473,11 @@ pub use bootstrap::{
     BootstrapError, BootstrapOutcome, BootstrapRequest, RECOVERY_PUBLIC_KEY_LENGTH,
     bootstrap_instance,
 };
+// Crate-private: `crate::local_transport` (Unix only) checks a request's
+// values with the registry's own checks before it calls bootstrap and
+// recovery.
+#[cfg(unix)]
+pub(crate) use bootstrap::is_lowercase_uuid_v7;
 pub use ceilings::{CeilingRecord, LoadedCeilings, load_scope_ceilings};
 pub use error::{
     ASSIGNMENT_ACTIVE, DISTINCT_APPROVER, EGRESS_ENTRY_ENABLED, InvariantKind, KNOWN_CONSTRAINTS,
@@ -491,6 +496,8 @@ pub use grant::{
 pub use instance::{
     get_egress_allowlist_entry, get_instance_security_policy, list_egress_allowlist_entries,
 };
+#[cfg(unix)]
+pub(crate) use recovery::recovery_key;
 // Crate-private: `crate::admin::egress` calls them from its audited,
 // authorized writes; tests reach them through `test_support`.
 pub(crate) use instance::{create_egress_allowlist_entry, update_egress_allowlist_entry};

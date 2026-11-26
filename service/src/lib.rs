@@ -8,6 +8,9 @@ pub mod admin_http;
 pub mod identity;
 pub mod ids;
 pub mod jwk;
+// Unix-domain sockets: see the module docs, "Security".
+#[cfg(unix)]
+pub mod local_transport;
 pub mod operation;
 pub mod persistence;
 pub mod policy;
