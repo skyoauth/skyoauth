@@ -8,6 +8,10 @@
 //!   public key, with the service's checks in the service's order (32
 //!   bytes, decodable, canonically encoded, not of small order) and its
 //!   messages;
+//! - [`recovery::parse_challenge`] and [`recovery::check_challenge`]: the
+//!   recovery challenge `M` the service issues, read strictly and compared
+//!   byte for byte with its canonical re-encoding, then checked against
+//!   the operator's expectations and clock;
 //! - [`identity::public_identity_of_spki`]: the canonical public identity
 //!   `spki-sha256:<hex>` of a DER `SubjectPublicKeyInfo`.
 //!
@@ -18,7 +22,7 @@
 //! `operator` test target checks every case, and the `pg` target of
 //! `skyoauth-scenarios` feeds the same cases to the service.
 //!
-//! No I/O, clock or random source is used.
+//! No I/O, clock or random source is used: a time is always the caller's.
 
 #![forbid(unsafe_code)]
 
