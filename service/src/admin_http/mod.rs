@@ -209,10 +209,14 @@
 //! frozen reasons of errors-retry section 2 (ERR-070; the admin store
 //! outage is the "store outage" of `auth_unavailable`), and
 //! `invalid_request` and `server_error`, the OAuth `error` values
-//! (RFC 6749). Proposed here, since no catalogue names them yet
-//! (`tests/conformance/fixtures/_wire/errors.v1.json` does not exist):
+//! (RFC 6749). Proposed here (origin `proposed` in the catalogue):
 //! `not_found`, `stale_revision`, `conflict`, `not_approvable`,
-//! `tenant_disabled` and `widening_not_acknowledged`.
+//! `tenant_disabled` and `widening_not_acknowledged`. The wire error
+//! catalogue `tests/conformance/fixtures/_wire/errors.v1.json` lists these
+//! eleven codes, each with its status and `Retry-After`, and the
+//! `harness::wire_errors` tests of the `pg` test target (`tests/pg.rs`) pin
+//! it to [`ErrorCode::ALL`], [`ErrorCode::status`] and
+//! [`RETRY_AFTER_SECONDS`].
 
 mod error;
 mod operations;
