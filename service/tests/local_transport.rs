@@ -1885,16 +1885,48 @@ async fn the_unlistable_directory_as_the_peer_user() {
 const RACE_DIR_VAR: &str = "SKYOAUTH_IT_RACE_DIR";
 const RACE_TARGET_VAR: &str = "SKYOAUTH_IT_RACE_TARGET";
 
-/// How many binds race the renamer.
+/// How many binds race the renamer, at least.
 const RACE_BINDS: usize = 400;
 
-/// Until `stop` says so, renames every private directory of `local.sock`
-/// that appears in `dir` out of the way and puts a directory of its own in
-/// its place, with a symbolic link to `target` where the staged socket
-/// would be: a bind that changed the staged socket by its path would change
-/// `target`'s mode. Returns how many directories it swapped.
-fn rename_private_dirs(dir: &Path, target: &Path, stop: &dyn Fn() -> bool) -> u32 {
-    let mut swaps = 0;
+/// How long binds go on racing the renamer, after [`RACE_BINDS`], while no
+/// directory was swapped during one of them.
+const RACE_LIMIT: Duration = Duration::from_secs(60);
+
+/// Whether the binds of the race go on: until [`RACE_BINDS`] were made, and
+/// then, while the renamer has swapped no directory, until `retrying_for`
+/// (how long they have gone on past [`RACE_BINDS`]) reaches [`RACE_LIMIT`].
+fn race_goes_on(binds: usize, swaps: u32, retrying_for: Duration) -> bool {
+    binds < RACE_BINDS || (swaps == 0 && retrying_for < RACE_LIMIT)
+}
+
+#[test]
+fn the_race_binds_go_on_until_a_swap_or_the_limit() {
+    let none = Duration::ZERO;
+    assert!(race_goes_on(0, 0, none));
+    assert!(race_goes_on(RACE_BINDS - 1, 5, none));
+    // The first binds, however long they took, leave the whole limit.
+    assert!(race_goes_on(RACE_BINDS, 0, none));
+    assert!(race_goes_on(
+        RACE_BINDS,
+        0,
+        RACE_LIMIT - Duration::from_nanos(1)
+    ));
+    assert!(!race_goes_on(RACE_BINDS, 0, RACE_LIMIT));
+    // One swap, counted whenever, ends the retries.
+    assert!(!race_goes_on(RACE_BINDS, 1, none));
+}
+
+/// The in-process renamer's pause between two scans of the directory once
+/// the binds go on past [`RACE_BINDS`].
+const RACE_PAUSE: Duration = Duration::from_micros(50);
+
+/// Until `stop` says so (asked before every scan of `dir`), renames every
+/// private directory of `local.sock` that appears in `dir` out of the way
+/// and puts a directory of its own in its place, with a symbolic link to
+/// `target` where the staged socket would be: a bind that changed the
+/// staged socket by its path would change `target`'s mode. It adds one to
+/// `swaps` for every directory it renamed, as soon as it renamed it.
+fn rename_private_dirs(dir: &Path, target: &Path, swaps: &AtomicU32, stop: &dyn Fn() -> bool) {
     while !stop() {
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
@@ -1909,14 +1941,14 @@ fn rename_private_dirs(dir: &Path, target: &Path, stop: &dyn Fn() -> bool) -> u3
             if fs::symlink_metadata(path.join("s")).is_ok_and(|m| m.file_type().is_symlink()) {
                 continue;
             }
-            if fs::rename(&path, dir.join(format!("away.{swaps}"))).is_ok() {
+            let away = dir.join(format!("away.{}", swaps.load(Ordering::SeqCst)));
+            if fs::rename(&path, away).is_ok() {
+                swaps.fetch_add(1, Ordering::SeqCst);
                 let _ = fs::create_dir(&path);
                 let _ = std::os::unix::fs::symlink(target, path.join("s"));
-                swaps += 1;
             }
         }
     }
-    swaps
 }
 
 /// The private directory renamed while binds run, and a directory with a
@@ -1928,6 +1960,16 @@ fn rename_private_dirs(dir: &Path, target: &Path, stop: &dyn Fn() -> bool) -> u3
 /// put in its place. Here the renamer is a thread of the process itself
 /// (any UID); [`the_service_uid_cannot_redirect_a_bind`] runs it as the
 /// service UID.
+///
+/// A private directory exists only while a bind runs, so every swap lands
+/// in one; when no swap was counted during any of the first [`RACE_BINDS`]
+/// binds, the binds go on until one was (at most [`RACE_LIMIT`]), and the
+/// renamer, which scans without a break during the first ones, pauses
+/// between its scans ([`RACE_PAUSE`]): on a CPU it shares with the binds, a
+/// renamer that never sleeps gets the CPU only when the binding thread
+/// waits on the runtime, which it does outside a bind's private
+/// directories, and so may never see one; a renamer woken from a pause can
+/// take the CPU wherever the bind is.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_renamed_private_directory_redirects_nothing() {
     let dir = TempDir::new();
@@ -1938,14 +1980,38 @@ async fn a_renamed_private_directory_redirects_nothing() {
     fs::write(&target, b"keep").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
+    // Set when the binds go on past `RACE_BINDS`.
+    let pause = Arc::new(AtomicBool::new(false));
+    let swaps = Arc::new(AtomicU32::new(0));
     let renamer = {
-        let (socket_dir, target, stop) = (socket_dir.clone(), target.clone(), Arc::clone(&stop));
+        let (socket_dir, target) = (socket_dir.clone(), target.clone());
+        let (stop, pause, swaps) = (Arc::clone(&stop), Arc::clone(&pause), Arc::clone(&swaps));
         std::thread::spawn(move || {
-            rename_private_dirs(&socket_dir, &target, &|| stop.load(Ordering::SeqCst))
+            rename_private_dirs(&socket_dir, &target, &swaps, &|| {
+                if pause.load(Ordering::SeqCst) {
+                    std::thread::sleep(RACE_PAUSE);
+                }
+                stop.load(Ordering::SeqCst)
+            });
         })
     };
-    let mut served = 0;
-    for _ in 0..RACE_BINDS {
+    let started = Instant::now();
+    // When the binds went past `RACE_BINDS`: the limit counts from there.
+    let mut retry_from = None;
+    // `raced`: the binds during which the renamer was seen to swap a
+    // directory (a diagnostic: a swap counted a moment after its bind is not
+    // one of them).
+    let (mut binds, mut served, mut raced) = (0, 0, 0);
+    while race_goes_on(
+        binds,
+        swaps.load(Ordering::SeqCst),
+        retry_from.map_or(Duration::ZERO, |from: Instant| from.elapsed()),
+    ) {
+        if binds >= RACE_BINDS && retry_from.is_none() {
+            retry_from = Some(Instant::now());
+            pause.store(true, Ordering::SeqCst);
+        }
+        let before = swaps.load(Ordering::SeqCst);
         if let Ok(listener) = transport(&unreachable_pool(), TestClock::new(), 1, None)
             .bind(&socket_dir.join("local.sock"))
             .await
@@ -1953,11 +2019,16 @@ async fn a_renamed_private_directory_redirects_nothing() {
             served += 1;
             drop(listener);
         }
+        binds += 1;
+        if swaps.load(Ordering::SeqCst) != before {
+            raced += 1;
+        }
         // The next bind creates the lock file again.
         let _ = fs::remove_file(socket_dir.join("local.sock.lock"));
     }
     stop.store(true, Ordering::SeqCst);
-    let swaps = renamer.join().unwrap();
+    renamer.join().unwrap();
+    let swaps = swaps.load(Ordering::SeqCst);
     let metadata = fs::metadata(&target).unwrap();
     assert_eq!(metadata.mode() & 0o7777, 0o644, "{swaps} swaps");
     // The renamer's directories hold only its link.
@@ -1968,9 +2039,18 @@ async fn a_renamed_private_directory_redirects_nothing() {
         }
     }
     assert_eq!(fs::read(&target).unwrap(), b"keep");
-    assert!(swaps > 0, "the renamer never swapped a directory");
+    // Every swap lands in a bind: a private directory exists only while one
+    // runs.
+    assert!(
+        swaps > 0,
+        "the renamer swapped no directory: {binds} binds in {:?}",
+        started.elapsed()
+    );
     assert!(served > 0, "no bind was served");
-    eprintln!("{swaps} private directories swapped during {RACE_BINDS} binds, {served} served");
+    eprintln!(
+        "{swaps} private directories swapped during {binds} binds ({raced} of them raced a \
+         swap), {served} served"
+    );
 }
 
 /// Root binding for the service UID in a directory the service UID owns:
@@ -2073,10 +2153,11 @@ fn the_renamer_as_the_peer_user() {
     fs::write(dir.join("ready"), b"").unwrap();
     let until = Instant::now() + Duration::from_secs(60);
     let stop = dir.join("stop");
-    let swaps = rename_private_dirs(&dir, Path::new(&target), &|| {
+    let swaps = AtomicU32::new(0);
+    rename_private_dirs(&dir, Path::new(&target), &swaps, &|| {
         stop.exists() || Instant::now() > until
     });
-    eprintln!("{swaps} private directories swapped");
+    eprintln!("{} private directories swapped", swaps.into_inner());
 }
 
 /// The variables that hand [`the_swapper_as_the_peer_user`] the directory
