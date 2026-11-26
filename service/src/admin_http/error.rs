@@ -1,6 +1,7 @@
 //! The admin error-to-HTTP mapping: one pure function per error family,
-//! each an exhaustive `match` (a new variant fails the build), and the one
-//! response shape. The whole table is in the module docs of
+//! each an exhaustive `match` that names every variant of the crate's
+//! error enums, the ones inside an [`ApprovalError`] included (a new
+//! variant fails the build), and the one response shape. The whole table is in the module docs of
 //! [`crate::admin_http`], "Errors".
 
 use axum::{
@@ -23,8 +24,9 @@ pub const RETRY_AFTER_SECONDS: u32 = 1;
 const CONNECTION_EXCEPTION_CLASS: &str = "08";
 /// SQLSTATE class 53, `insufficient_resources`.
 const INSUFFICIENT_RESOURCES_CLASS: &str = "53";
-/// The SQLSTATEs `57P01` to `57P05` of class 57, `operator_intervention`:
-/// `admin_shutdown`, `crash_shutdown`, `cannot_connect_now`,
+/// The SQLSTATEs of class 57, `operator_intervention`, that start with
+/// `57P0`, matched as a prefix (any `57P0x`): the defined ones are `57P01`
+/// to `57P05`, `admin_shutdown`, `crash_shutdown`, `cannot_connect_now`,
 /// `database_dropped` and `idle_session_timeout`. Not `57014`
 /// ([`QUERY_CANCELED`]).
 const SHUTDOWN_PREFIX: &str = "57P0";
@@ -232,7 +234,8 @@ const fn from_invariant(kind: InvariantKind) -> AdminHttpError {
 ///   [`sqlx::Error::Tls`]), no pooled connection in time or a closed pool
 ///   ([`sqlx::Error::PoolTimedOut`], [`sqlx::Error::PoolClosed`]), and the
 ///   SQLSTATE classes 08 (`connection_exception`) and 53
-///   (`insufficient_resources`) and the codes `57P01` to `57P05` (a server
+///   (`insufficient_resources`) and every code with the prefix `57P0` (a
+///   prefix match; PostgreSQL defines `57P01` to `57P05`: a server
 ///   shutting down, starting up or dropping the database, an idle session
 ///   timed out).
 /// - 503 with `Retry-After`: `55P03` (`lock_not_available`) and `57014`
@@ -353,14 +356,32 @@ pub fn from_source_write(err: &SourceWriteError) -> AdminHttpError {
 /// at approve only), and a cancel, reject or toggle submits no value a
 /// constraint checks, so a check or not-null refusal is one by the stored
 /// state, 409 `not_approvable`; every other error maps as
-/// [`from_registry`].
+/// [`from_registry`]. Every variant is named, so a new one fails the build
+/// here too.
 fn from_applied_registry(err: &RegistryError) -> AdminHttpError {
     match err {
         RegistryError::Invariant {
             kind: InvariantKind::Check | InvariantKind::NotNull,
             ..
         } => code(ErrorCode::NotApprovable),
-        err => from_registry(err),
+        RegistryError::Invariant {
+            kind:
+                InvariantKind::ForeignKey
+                | InvariantKind::AssignmentActive
+                | InvariantKind::EgressEntryEnabled
+                | InvariantKind::SameTenantOperation
+                | InvariantKind::DistinctApprover,
+            ..
+        }
+        | RegistryError::NotFound
+        | RegistryError::StaleRevision
+        | RegistryError::AlreadyExists { .. }
+        | RegistryError::Guard
+        | RegistryError::UnreadableTimestamp { .. }
+        | RegistryError::Retry(_)
+        | RegistryError::Other(_)
+        | RegistryError::ReservedActorId
+        | RegistryError::RequiredPredicate { .. } => from_registry(err),
     }
 }
 
@@ -400,8 +421,26 @@ pub fn from_approval(err: &ApprovalError) -> AdminHttpError {
         ApprovalError::Keyset(KeysetWriteError::Registry(err))
         | ApprovalError::Source(SourceWriteError::Registry(err))
         | ApprovalError::Registry(err) => from_applied_registry(err),
-        ApprovalError::Keyset(err) => from_keyset_write(err),
-        ApprovalError::Source(err) => from_source_write(err),
+        // Every other variant, named so that a new one fails the build.
+        ApprovalError::Keyset(
+            err @ (KeysetWriteError::Unauthorized
+            | KeysetWriteError::Overlap(_)
+            | KeysetWriteError::StoredVersion { .. }
+            | KeysetWriteError::StoredFingerprintMismatch
+            | KeysetWriteError::TooManyEnabledVersions
+            | KeysetWriteError::UnsupportedIsolation
+            | KeysetWriteError::WorkerUnavailable
+            | KeysetWriteError::ValidationBusy
+            | KeysetWriteError::WideningNotAcknowledged
+            | KeysetWriteError::PolicyUnavailable),
+        ) => from_keyset_write(err),
+        ApprovalError::Source(
+            err @ (SourceWriteError::Unauthorized
+            | SourceWriteError::EgressNotAllowed { .. }
+            | SourceWriteError::UnsupportedIsolation
+            | SourceWriteError::WideningNotAcknowledged
+            | SourceWriteError::PolicyUnavailable),
+        ) => from_source_write(err),
     }
 }
 
@@ -643,6 +682,7 @@ mod tests {
             ("53100", UNAVAILABLE),
             ("53200", UNAVAILABLE),
             ("53300", UNAVAILABLE),
+            // The prefix `57P0` (a prefix match), whose defined codes are
             // 57P01 to 57P05: shutdown, startup, a dropped database, an
             // idle session timeout.
             ("57P01", UNAVAILABLE),
