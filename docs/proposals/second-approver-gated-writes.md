@@ -2345,11 +2345,14 @@ value of a global option before an llvm-cov subcommand
 
 Still open after PRs 7, 9 and 10:
 
-- Other registry writers that widen or change the security posture stay
-  public, with no authorization, no gate and, but for the audited ones,
-  no audit event. PR 9 surveyed them and changed none; PR 10 made the
+- Other registry writers that widen or change the security posture stayed
+  public after PR 9, with no authorization, no gate and, but for the
+  audited ones, no audit event. PR 9 surveyed them and changed none; PR 10 made the
   writers of rows 2, 6 and 7 below crate-private (marked done there; see
-  "PR 10 as implemented"). The rest have no caller in the crate outside
+  "PR 10 as implemented"), and the hardening PR, the registry writers
+  follow-up and T13.3 those of rows 4, 5 and 8 (marked done there too; see
+  "Registry writers follow-up as implemented"), so only the writers of
+  rows 1 and 3 stay public. The rest have no caller in the crate outside
   tests, so they would need PR 7's `expect(dead_code)` form; for
   `issue_recovery_challenge` and `restore_operator` see the recovery writers
   below (decided; since PR #139 `restore_operator` verifies the signature itself), and `bootstrap_instance` has no in-crate caller either. Which of

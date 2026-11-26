@@ -42,8 +42,9 @@
 //! 6. appends the write's audit event, whose ID the generator gives too,
 //!    and returns the row with the stored event ([`Audited`]).
 //!
-//! The functions are library-level only: no endpoint calls them yet
-//! (slice S4 of M1a wires the router), and nothing wires them at startup.
+//! The functions are library-level only: no endpoint calls them yet (the
+//! router of [`crate::admin_http`] serves the operation reads and no
+//! write), and nothing wires them at startup.
 //!
 //! # Who
 //!
