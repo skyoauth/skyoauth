@@ -94,7 +94,10 @@
 //! - A refused duplicate uses up the ID it generated (`skyoauth_service::admin`,
 //!   "Errors and rollback"); no test asserts either way about that.
 //! - The request layer (slice S4): no endpoint calls these writes yet, so
-//!   the refusals here are typed errors, not wire responses.
+//!   the refusals here are typed errors, not wire responses. Only reads
+//!   have a route: A49's cross-tenant probe of the four operation reads
+//!   through the admin read router, with an already-verified peer (no mTLS
+//!   leg), is in [`super::a49_wire`].
 
 use std::{
     collections::HashSet,

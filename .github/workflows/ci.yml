@@ -502,6 +502,7 @@ jobs:
       # the exit status, in the job summary. The colour is off so that the
       # summary holds no escape sequences.
       - name: Run the root-only local transport tests
+        id: root
         if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
         run: |
           set -euo pipefail
@@ -526,8 +527,13 @@ jobs:
       # artifact (upload-artifact strips the files' common directory): the
       # conformance reporter and the badge publisher read it there. The
       # badges count the first run's report only; the root run's artifact
-      # exists only when its step ran, and the reporter ignores both
-      # (NOT_CONFORMANCE in scripts/ci/report-conformance.mjs).
+      # exists only when its step got far enough to write the JUnit, and
+      # the reporter ignores both (NOT_CONFORMANCE in
+      # scripts/ci/report-conformance.mjs). The root upload runs only when
+      # the root step started, so a run whose root step was skipped (the
+      # normal run never started, or the job was cancelled first) has no
+      # missing-file warning, while a root step that started but wrote no
+      # report still warns.
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7
@@ -537,7 +543,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload the root run's JUnit report
-        if: always()
+        if: ${{ always() && steps.root.outcome != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: service-nextest-root-junit-${{ github.run_attempt }}
