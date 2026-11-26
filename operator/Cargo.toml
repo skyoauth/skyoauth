@@ -2,7 +2,7 @@
 name = "skyoauth-operator"
 version.workspace = true
 edition.workspace = true
-description = "The skyoauth workstation operator library: recovery key and public identity formats."
+description = "The skyoauth workstation operator library: recovery key, challenge, signature and public identity formats."
 license-file = "../LICENSE"
 rust-version.workspace = true
 # Not published until a registry and a release policy are decided.
@@ -17,8 +17,11 @@ autotests = false
 # service are reimplemented here and pinned by the fixtures under
 # `tests/conformance/fixtures/`, which both sides check.
 [dependencies]
-# The recovery key checks: decode, re-encode, small order. The same version
-# and features as the service's.
+# The recovery key checks (decode, re-encode, small order), the signing of
+# a challenge and its `verify_strict` check. The same version and features
+# as the service's: without `zeroize`, so a `SoftwareSigner`'s seed is not
+# wiped on drop (documented there), and without `rand_core`, since Ed25519
+# signing is deterministic.
 ed25519-dalek = { version = "3.0.0", default-features = false }
 # The SHA-256 of a public identity. The same version and features as the
 # service's.

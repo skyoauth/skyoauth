@@ -38,12 +38,16 @@
 //! to the service's recovery key checks (through bootstrap and the
 //! challenge issue, on a database), `harness::public_identity_fixture`
 //! those of `_recovery/public_identity.v1.json` to its
-//! `canonical_public_identity` (no database needed), and
+//! `canonical_public_identity` (no database needed),
 //! `harness::recovery_challenge_fixture` checks the vectors of
 //! `_recovery/challenge.v1.json` against its `DigestEnvelope` (no database
-//! needed) and its `issue_recovery_challenge` (on a database): the cases the
-//! `skyoauth-operator` tests check against the workstation's copies. Their
-//! tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
+//! needed) and its `issue_recovery_challenge` (on a database), and
+//! `harness::recovery_signature_fixture` checks the cases of
+//! `_recovery/signature.v1.json`, signed with the test keys of
+//! `_recovery/recovery.test-key.json`, against its
+//! `preview_recovery_response` and `restore_operator` (on a database): the
+//! cases the `skyoauth-operator` tests check against the workstation's
+//! copies. Their tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
 
 mod security {
@@ -104,6 +108,8 @@ mod harness {
     mod recovery_challenge_fixture;
     #[path = "recovery_key_fixture.rs"]
     mod recovery_key_fixture;
+    #[path = "recovery_signature_fixture.rs"]
+    mod recovery_signature_fixture;
     #[path = "wire_errors.rs"]
     mod wire_errors;
     #[path = "wire_fixture_keys.rs"]
