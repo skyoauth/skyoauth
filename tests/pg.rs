@@ -41,7 +41,10 @@
 //! `canonical_public_identity` (no database needed), and
 //! `harness::recovery_challenge_fixture` checks the vectors of
 //! `_recovery/challenge.v1.json` against its `DigestEnvelope` (no database
-//! needed) and its `issue_recovery_challenge` (on a database): the cases the
+//! needed) and its `issue_recovery_challenge` (on a database), and
+//! `harness::local_transport_wire` checks `_wire/local_transport.v1.json`
+//! against its `local_transport` (constants and golden request lines with
+//! no database, the golden exchange on one): the cases the
 //! `skyoauth-operator` tests check against the workstation's copies. Their
 //! tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
@@ -96,6 +99,9 @@ mod security {
 }
 
 mod harness {
+    #[cfg(unix)]
+    #[path = "local_transport_wire.rs"]
+    mod local_transport_wire;
     #[path = "pg_teardown.rs"]
     mod pg_teardown;
     #[path = "public_identity_fixture.rs"]

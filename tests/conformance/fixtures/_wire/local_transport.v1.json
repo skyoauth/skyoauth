@@ -1,0 +1,1071 @@
+{
+  "fixture_version": 1,
+  "kind": "local_transport_wire",
+  "status": "proposed",
+  "description": "The wire format of the service's deployment-local bootstrap and recovery transport (service/src/local_transport, module docs \"Protocol\", \"Operations\" and \"Errors\"): the request members of each op, the reply shapes, the closed set of refusal codes, the framing and the size limits, with golden request and reply lines. Inferred: no contract text fixes this wire format (the service's module docs say so); the service's code is the source, and status stays \"proposed\" until a contract states it. Framing: one request per connection; the client writes one JSON object on one line, the newline, then closes its write half (shutdown(SHUT_WR)); no byte may follow the newline; the server answers one JSON object on one line with its newline and closes. Requests: op first, then the op's members in the order listed under ops, no whitespace, byte values in lowercase hexadecimal, strings escaped as serde_json escapes them. Replies: serde_json's compact output, each success with exactly its members in the order listed under replies, every refusal {\"error\":\"<code>\"} and nothing else. framing.max_request_bytes is the service's MAX_REQUEST_BYTES; framing.max_reply_bytes is the client's own cap (inferred: the service sets none). The golden lines of exchange are the bytes the real service sent, with the given ID seed (SequentialIds) and clock, for a fresh database: the preview and restore signature is over the issued challenge M by the bootstrap recovery key (a test key). unknown_replies are bytes the operator's client must classify as an unknown outcome (reconcile first), with the reason it gives. Checked by operator/tests/local_wire (skyoauth-operator, every member) and tests/harness/local_transport_wire.rs (skyoauth-scenarios, against the service: constants, codes, golden requests through the real transport with an unreachable store, and the exchange on a database).",
+  "framing": {
+    "line_end": "\n",
+    "max_request_bytes": 65536,
+    "max_reply_bytes": 65536
+  },
+  "op_member": "op",
+  "ops": {
+    "bootstrap": [
+      "instance_id",
+      "credential_spki",
+      "trust_anchor_ref",
+      "recovery_public_key"
+    ],
+    "issue_challenge": [
+      "credential_spki",
+      "trust_anchor_ref",
+      "new_recovery_public_key"
+    ],
+    "preview": [
+      "operation_id",
+      "signature"
+    ],
+    "restore": [
+      "operation_id",
+      "signature"
+    ]
+  },
+  "replies": {
+    "bootstrapped": {
+      "op": "bootstrap",
+      "members": [
+        [
+          "instance_id",
+          "string"
+        ],
+        [
+          "admin_id",
+          "string"
+        ],
+        [
+          "credential_id",
+          "string"
+        ],
+        [
+          "binding_id",
+          "string"
+        ],
+        [
+          "recovery_key_epoch",
+          "integer"
+        ]
+      ]
+    },
+    "issued": {
+      "op": "issue_challenge",
+      "members": [
+        [
+          "operation_id",
+          "string"
+        ],
+        [
+          "expires_at",
+          "integer"
+        ],
+        [
+          "expected_revision",
+          "integer"
+        ],
+        [
+          "challenge",
+          "hex"
+        ]
+      ]
+    },
+    "previewed": {
+      "op": "preview",
+      "members": [
+        [
+          "admin_id",
+          "string"
+        ],
+        [
+          "credential_id",
+          "string"
+        ],
+        [
+          "binding_id",
+          "string"
+        ],
+        [
+          "new_recovery_key_epoch",
+          "integer"
+        ],
+        [
+          "expires_at",
+          "integer"
+        ]
+      ]
+    },
+    "restored": {
+      "op": "restore",
+      "members": [
+        [
+          "admin_id",
+          "string"
+        ],
+        [
+          "credential_id",
+          "string"
+        ],
+        [
+          "binding_id",
+          "string"
+        ],
+        [
+          "revoked_credential_ids",
+          "string_list"
+        ],
+        [
+          "recovery_key_epoch",
+          "integer"
+        ],
+        [
+          "recovery_state_revision",
+          "integer"
+        ]
+      ]
+    },
+    "error": {
+      "members": [
+        [
+          "error",
+          "code"
+        ]
+      ]
+    }
+  },
+  "error_codes": [
+    {
+      "code": "forbidden",
+      "applies_when": [
+        "the peer's UID is neither the service UID nor root (0), or its credentials cannot be read; answered before the request is read"
+      ]
+    },
+    {
+      "code": "invalid_request",
+      "applies_when": [
+        "a malformed or oversized request: over 64 KiB with its newline, a byte after the newline, the end of the stream before it, invalid UTF-8 or JSON, a root that is not an object, an unknown op, a missing, repeated, unknown or mistyped member",
+        "a value the transport's checks refuse: not lowercase hexadecimal, an instance_id that is not a lowercase UUIDv7, a key that is not a canonical Ed25519 point of large order, a DER that is not one SubjectPublicKeyInfo, a bad trust_anchor_ref, an operation ID with a NUL"
+      ]
+    },
+    {
+      "code": "conflict",
+      "applies_when": [
+        "bootstrap is closed or the instance ID is not the stored one",
+        "no challenge can be issued (no closed recovery state), or the replacement key is already registered",
+        "the registry's NotFound, StaleRevision, AlreadyExists, Guard and foreign-key class invariants"
+      ]
+    },
+    {
+      "code": "not_restorable",
+      "applies_when": [
+        "the signed response does not authorize a restoration, for every reason (a bad signature, an expired, consumed or unknown challenge, an unchanged recovery key): one code, no reason"
+      ]
+    },
+    {
+      "code": "auth_unavailable",
+      "applies_when": [
+        "the store is unavailable or the transaction must be retried (serialization failure, deadlock, lock or statement timeout, a lost connection, a failed BEGIN or COMMIT of those); nothing was written"
+      ]
+    },
+    {
+      "code": "server_error",
+      "applies_when": [
+        "a server or data-integrity error, an ID generator failure, an unreadable timestamp; nothing was written"
+      ]
+    }
+  ],
+  "golden_requests": [
+    {
+      "case": "bootstrap",
+      "op": "bootstrap",
+      "values": {
+        "instance_id": "019a9f3c-5b2e-7c41-9d8e-0000000c1001",
+        "credential_spki": "302a300506032b65700321000101010101010101010101010101010101010101010101010101010101010101",
+        "trust_anchor_ref": "deployment/operator-ca",
+        "recovery_public_key": "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a"
+      },
+      "line": "{\"op\":\"bootstrap\",\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"credential_spki\":\"302a300506032b65700321000101010101010101010101010101010101010101010101010101010101010101\",\"trust_anchor_ref\":\"deployment/operator-ca\",\"recovery_public_key\":\"c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a\"}\n"
+    },
+    {
+      "case": "issue_challenge",
+      "op": "issue_challenge",
+      "values": {
+        "credential_spki": "302a300506032b65700321000202020202020202020202020202020202020202020202020202020202020202",
+        "trust_anchor_ref": "deployment/operator-ca",
+        "new_recovery_public_key": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7"
+      },
+      "line": "{\"op\":\"issue_challenge\",\"credential_spki\":\"302a300506032b65700321000202020202020202020202020202020202020202020202020202020202020202\",\"trust_anchor_ref\":\"deployment/operator-ca\",\"new_recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\"}\n"
+    },
+    {
+      "case": "issue_challenge_escapes",
+      "op": "issue_challenge",
+      "values": {
+        "credential_spki": "302a300506032b65700321000303030303030303030303030303030303030303030303030303030303030303",
+        "trust_anchor_ref": "ca/\"quoted\"\\back\\slash/été/🔑",
+        "new_recovery_public_key": "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7"
+      },
+      "line": "{\"op\":\"issue_challenge\",\"credential_spki\":\"302a300506032b65700321000303030303030303030303030303030303030303030303030303030303030303\",\"trust_anchor_ref\":\"ca/\\\"quoted\\\"\\\\back\\\\slash/été/🔑\",\"new_recovery_public_key\":\"2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7\"}\n"
+    },
+    {
+      "case": "preview",
+      "op": "preview",
+      "values": {
+        "operation_id": "oper_0000000000000g000000000001",
+        "signature": "5eacbdc31f6a8aa3660a6b0d10a47e29037159075df3bb36ee8b2a321589c77fb4b431ab247612cf08a1ef42c218b96e8fa1e8ad4821fb0fd71d284067382902"
+      },
+      "line": "{\"op\":\"preview\",\"operation_id\":\"oper_0000000000000g000000000001\",\"signature\":\"5eacbdc31f6a8aa3660a6b0d10a47e29037159075df3bb36ee8b2a321589c77fb4b431ab247612cf08a1ef42c218b96e8fa1e8ad4821fb0fd71d284067382902\"}\n"
+    },
+    {
+      "case": "restore",
+      "op": "restore",
+      "values": {
+        "operation_id": "oper_0000000000000g000000000001",
+        "signature": "5eacbdc31f6a8aa3660a6b0d10a47e29037159075df3bb36ee8b2a321589c77fb4b431ab247612cf08a1ef42c218b96e8fa1e8ad4821fb0fd71d284067382902"
+      },
+      "line": "{\"op\":\"restore\",\"operation_id\":\"oper_0000000000000g000000000001\",\"signature\":\"5eacbdc31f6a8aa3660a6b0d10a47e29037159075df3bb36ee8b2a321589c77fb4b431ab247612cf08a1ef42c218b96e8fa1e8ad4821fb0fd71d284067382902\"}\n"
+    }
+  ],
+  "golden_replies": [
+    {
+      "case": "bootstrapped",
+      "reply": "bootstrapped",
+      "values": {
+        "instance_id": "019a9f3c-5b2e-7c41-9d8e-0000000c1001",
+        "admin_id": "adm_0000000000000g000000000001",
+        "credential_id": "cred_0000000000000g000000000001",
+        "binding_id": "role_0000000000000g000000000001",
+        "recovery_key_epoch": 1
+      },
+      "line": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1}\n"
+    },
+    {
+      "case": "issued",
+      "reply": "issued",
+      "values": {
+        "operation_id": "oper_0000000000000g000000000001",
+        "expires_at": 1790000300000000,
+        "expected_revision": 1,
+        "challenge": "736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d"
+      },
+      "line": "{\"operation_id\":\"oper_0000000000000g000000000001\",\"expires_at\":1790000300000000,\"expected_revision\":1,\"challenge\":\"736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+    },
+    {
+      "case": "previewed",
+      "reply": "previewed",
+      "values": {
+        "admin_id": "adm_0000000000000g000000000002",
+        "credential_id": "cred_0000000000000g000000000002",
+        "binding_id": "role_0000000000000g000000000002",
+        "new_recovery_key_epoch": 2,
+        "expires_at": 1790000300000000
+      },
+      "line": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2,\"expires_at\":1790000300000000}\n"
+    },
+    {
+      "case": "restored",
+      "reply": "restored",
+      "values": {
+        "admin_id": "adm_0000000000000g000000000002",
+        "credential_id": "cred_0000000000000g000000000002",
+        "binding_id": "role_0000000000000g000000000002",
+        "revoked_credential_ids": [
+          "cred_0000000000000g000000000001"
+        ],
+        "recovery_key_epoch": 2,
+        "recovery_state_revision": 2
+      },
+      "line": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+    },
+    {
+      "case": "error_forbidden",
+      "reply": "error",
+      "values": {
+        "error": "forbidden"
+      },
+      "line": "{\"error\":\"forbidden\"}\n"
+    },
+    {
+      "case": "error_invalid_request",
+      "reply": "error",
+      "values": {
+        "error": "invalid_request"
+      },
+      "line": "{\"error\":\"invalid_request\"}\n"
+    },
+    {
+      "case": "error_conflict",
+      "reply": "error",
+      "values": {
+        "error": "conflict"
+      },
+      "line": "{\"error\":\"conflict\"}\n"
+    },
+    {
+      "case": "error_not_restorable",
+      "reply": "error",
+      "values": {
+        "error": "not_restorable"
+      },
+      "line": "{\"error\":\"not_restorable\"}\n"
+    },
+    {
+      "case": "error_auth_unavailable",
+      "reply": "error",
+      "values": {
+        "error": "auth_unavailable"
+      },
+      "line": "{\"error\":\"auth_unavailable\"}\n"
+    },
+    {
+      "case": "error_server_error",
+      "reply": "error",
+      "values": {
+        "error": "server_error"
+      },
+      "line": "{\"error\":\"server_error\"}\n"
+    }
+  ],
+  "exchange": {
+    "id_seed": 1,
+    "now_micros": 1790000000000000,
+    "challenge_ttl_seconds": 300,
+    "steps": [
+      {
+        "request": "bootstrap",
+        "reply": "bootstrapped"
+      },
+      {
+        "request": "issue_challenge",
+        "reply": "issued"
+      },
+      {
+        "request": "preview",
+        "reply": "previewed"
+      },
+      {
+        "request": "restore",
+        "reply": "restored"
+      },
+      {
+        "request": "restore",
+        "reply": "error_not_restorable"
+      },
+      {
+        "request": "bootstrap",
+        "reply": "error_conflict"
+      }
+    ]
+  },
+  "unknown_replies": [
+    {
+      "case": "empty",
+      "op": "restore",
+      "parts": [
+        {
+          "text": ""
+        }
+      ],
+      "expected": "truncated"
+    },
+    {
+      "case": "no_newline",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}"
+        }
+      ],
+      "expected": "truncated"
+    },
+    {
+      "case": "cut_short",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-"
+        }
+      ],
+      "expected": "truncated"
+    },
+    {
+      "case": "error_without_newline",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\"}"
+        }
+      ],
+      "expected": "truncated"
+    },
+    {
+      "case": "two_lines",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "trailing_bytes"
+    },
+    {
+      "case": "refusal_then_success",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\"}\n{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "trailing_bytes"
+    },
+    {
+      "case": "byte_after_newline",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2,\"expires_at\":1790000300000000}\n "
+        }
+      ],
+      "expected": "trailing_bytes"
+    },
+    {
+      "case": "second_newline",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1}\n\n"
+        }
+      ],
+      "expected": "trailing_bytes"
+    },
+    {
+      "case": "over_cap",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\"}"
+        },
+        {
+          "text": " ",
+          "repeat": 65516
+        },
+        {
+          "text": "\n"
+        }
+      ],
+      "expected": "too_large"
+    },
+    {
+      "case": "not_utf8",
+      "op": "restore",
+      "parts": [
+        {
+          "hex": "ff"
+        },
+        {
+          "text": "\n"
+        }
+      ],
+      "expected": "not_utf8"
+    },
+    {
+      "case": "not_utf8_in_a_string",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"error\":\"conf"
+        },
+        {
+          "hex": "c3"
+        },
+        {
+          "text": "lict\"}\n"
+        }
+      ],
+      "expected": "not_utf8"
+    },
+    {
+      "case": "at_cap_with_whitespace",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\"}"
+        },
+        {
+          "text": " ",
+          "repeat": 65515
+        },
+        {
+          "text": "\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "bare_newline",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "crlf",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\r\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "root_array",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "[\"not_restorable\"]\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "root_string",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "\"not_restorable\"\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "root_null",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "null\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "root_number",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "1\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "root_true",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "true\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "empty_object",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "no_opening_brace",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "\"error\":\"conflict\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "no_closing_brace",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\"\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "success_without_closing_brace",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "byte_after_object",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\"}x\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "unknown_member_last",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1,\"extra\":1}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "unknown_member_first",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"extra\":1,\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "missing_member",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "missing_first_member",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2,\"expires_at\":1790000300000000}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "repeated_member",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"admin_id\":\"adm_x\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2,\"expires_at\":1790000300000000}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "reordered_members",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"operation_id\":\"oper_0000000000000g000000000001\",\"expected_revision\":1,\"expires_at\":1790000300000000,\"challenge\":\"736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "integer_as_string",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":\"1\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "integer_with_fraction",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2.0,\"expires_at\":1790000300000000}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "integer_with_exponent",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2,\"expires_at\":1.7900003e15}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "integer_leading_zero",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":02,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "integer_negative_zero",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":-0}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "integer_above_i64",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"operation_id\":\"oper_0000000000000g000000000001\",\"expires_at\":1790000300000000,\"expected_revision\":9223372036854775808,\"challenge\":\"736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "string_as_integer",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"operation_id\":1,\"expires_at\":1790000300000000,\"expected_revision\":1,\"challenge\":\"736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "string_as_null",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":null,\"recovery_key_epoch\":1}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "string_as_object",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":{},\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "list_as_string",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":\"cred_0000000000000g000000000001\",\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "list_of_integers",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[1],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "list_trailing_comma",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\",],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "challenge_upper_case",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"operation_id\":\"oper_0000000000000g000000000001\",\"expires_at\":1790000300000000,\"expected_revision\":1,\"challenge\":\"736B796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "challenge_odd_length",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"operation_id\":\"oper_0000000000000g000000000001\",\"expires_at\":1790000300000000,\"expected_revision\":1,\"challenge\":\"736796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "whitespace_after_colon",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"error\": \"conflict\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "whitespace_before_object",
+      "op": "preview",
+      "parts": [
+        {
+          "text": " {\"error\":\"conflict\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "whitespace_after_object",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1} \n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "escaped_solidus",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm\\/0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "escaped_letter",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"\\u0061dm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "escape_upper_case_digits",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm\\u001F0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "long_escape_of_a_short_one",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm\\u000a0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "raw_control_character",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm\t0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "escaped_member_name",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"\\u0061dmin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "another_operations_success_preview_for_restore",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"new_recovery_key_epoch\":2,\"expires_at\":1790000300000000}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "another_operations_success_restore_for_preview",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "another_operations_success_bootstrap_for_issue",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"instance_id\":\"019a9f3c-5b2e-7c41-9d8e-0000000c1001\",\"admin_id\":\"adm_0000000000000g000000000001\",\"credential_id\":\"cred_0000000000000g000000000001\",\"binding_id\":\"role_0000000000000g000000000001\",\"recovery_key_epoch\":1}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "another_operations_success_issue_for_bootstrap",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"operation_id\":\"oper_0000000000000g000000000001\",\"expires_at\":1790000300000000,\"expected_revision\":1,\"challenge\":\"736b796f617574682e7265636f766572795f6368616c6c656e67652e76310a7b226163746f725f6964223a226465706c6f796d656e745f6f70657261746f72222c2265787065637465645f7265766973696f6e223a312c22657870697265735f6174223a313739303030303330303030303030302c226964223a226f7065725f3030303030303030303030303067303030303030303030303031222c226b696e64223a226f70657261746f725f726573746f726174696f6e222c22706c616e223a7b2261646d696e5f6964223a2261646d5f3030303030303030303030303067303030303030303030303032222c2262696e64696e675f6964223a22726f6c655f3030303030303030303030303067303030303030303030303032222c2263726564656e7469616c5f6964223a22637265645f3030303030303030303030303067303030303030303030303032222c22696e7374616e63655f6964223a2230313961396633632d356232652d376334312d396438652d303030303030306331303031222c226e65775f7265636f766572795f7075626c69635f6b6579223a2232303132636239306361363065386535643864616636366532323732643232333365303438366435353765386336363134316564383932303137376437656237222c227075626c69635f6964656e74697479223a2273706b692d7368613235363a39653637316231636364656438353636633736393165353636346366653738383536326365393436633231363134356630336530623833396466393330316632222c227265636f766572795f6b65795f65706f6368223a312c2274727573745f616e63686f725f726566223a226465706c6f796d656e742f6f70657261746f722d6361227d2c2274656e616e745f6964223a6e756c6c7d\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_extra_member",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"not_restorable\",\"detail\":\"bad signature\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_repeated",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict\",\"error\":\"conflict\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_after_success_members",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"admin_id\":\"adm_0000000000000g000000000002\",\"credential_id\":\"cred_0000000000000g000000000002\",\"binding_id\":\"role_0000000000000g000000000002\",\"revoked_credential_ids\":[\"cred_0000000000000g000000000001\"],\"recovery_key_epoch\":2,\"recovery_state_revision\":2,\"error\":\"conflict\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_integer",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":1}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_null",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":null}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_escaped_code",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflic\\u0074\"}\n"
+        }
+      ],
+      "expected": "malformed"
+    },
+    {
+      "case": "error_unknown_code",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"teapot\"}\n"
+        }
+      ],
+      "expected": "unknown_code"
+    },
+    {
+      "case": "error_code_upper_case",
+      "op": "bootstrap",
+      "parts": [
+        {
+          "text": "{\"error\":\"Conflict\"}\n"
+        }
+      ],
+      "expected": "unknown_code"
+    },
+    {
+      "case": "error_code_hyphen",
+      "op": "preview",
+      "parts": [
+        {
+          "text": "{\"error\":\"invalid-request\"}\n"
+        }
+      ],
+      "expected": "unknown_code"
+    },
+    {
+      "case": "error_code_empty",
+      "op": "issue_challenge",
+      "parts": [
+        {
+          "text": "{\"error\":\"\"}\n"
+        }
+      ],
+      "expected": "unknown_code"
+    },
+    {
+      "case": "error_code_padded",
+      "op": "restore",
+      "parts": [
+        {
+          "text": "{\"error\":\"conflict \"}\n"
+        }
+      ],
+      "expected": "unknown_code"
+    }
+  ]
+}
