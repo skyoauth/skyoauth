@@ -44,6 +44,11 @@ tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 # workspace's libraries without test targets, where such a use fails to
 # compile, and fails if a normal build turns the feature on.
 skyoauth-service = { path = "../service", features = ["test-support"] }
+# The A22 wire tests (`security/a22_wire.rs`) drive the admin router of
+# `skyoauth_service::admin_http` with `tower::ServiceExt::oneshot`: the same
+# versions as the service's.
+axum = "0.8.9"
+tower = { version = "0.5.3", features = ["util"] }
 # The A32 tests sign recovery challenges with test keys, as the workstation
 # would: `restore_operator` verifies the Ed25519 signature itself
 # (docs/proposals/recovery-verified-response.md). The same version and
