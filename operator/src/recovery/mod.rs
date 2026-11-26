@@ -41,14 +41,32 @@
 //! expects ([`Expectations`]) and the operator's clock; only its result, a
 //! [`VerifiedChallenge`], is meant to be signed.
 //!
-//! The fixtures `tests/conformance/fixtures/_recovery/key.v1.json` and
-//! `challenge.v1.json` hold the known answers both sides check.
+//! # Signing and verifying
+//!
+//! [`sign_challenge`] signs a [`VerifiedChallenge`] with a
+//! [`RecoverySigner`] ([`SoftwareSigner`] for a seed held in memory): only
+//! a challenge whose replacement the operator confirmed (both the public
+//! identity and the new recovery public key were expected and matched),
+//! never with the plan's new key, over `M` itself, and only once the
+//! signature verifies as the service verifies it. [`verify_response`]
+//! checks a signature over a challenge's `M` as the service's restore
+//! does: 64 bytes, then `ed25519-dalek`'s `verify_strict`. The result,
+//! [`SignedResponse`], is the challenge's operation ID and the 64 bytes.
+//!
+//! The seed of a [`SoftwareSigner`] is never written or shown, but it is
+//! not wiped from memory on drop (see [`SoftwareSigner`], "The seed").
+//!
+//! The fixtures `tests/conformance/fixtures/_recovery/key.v1.json`,
+//! `challenge.v1.json` and `signature.v1.json` hold the known answers both
+//! sides check; `recovery.test-key.json` holds the test-only keys that
+//! sign them.
 //!
 //! No I/O, clock or random source is used: the time is the caller's.
 
 mod canonical;
 mod challenge;
 mod key;
+mod sign;
 
 use std::time::Duration;
 
@@ -58,10 +76,18 @@ pub use challenge::{
     check_challenge, parse_challenge,
 };
 pub use key::{KeyError, RecoveryPublicKey};
+pub use sign::{
+    RecoverySigner, SignError, SignedResponse, SignerError, SoftwareSigner, VerifyError,
+    sign_challenge, verify_response,
+};
 
 /// The length of a recovery public key, in bytes (the service's
 /// `RECOVERY_PUBLIC_KEY_LENGTH`).
 pub const RECOVERY_PUBLIC_KEY_LENGTH: usize = 32;
+
+/// The length of a recovery signature, in bytes: a pure Ed25519 signature
+/// (RFC 8032).
+pub const SIGNATURE_LENGTH: usize = 64;
 
 /// The domain-separation prefix of `M`, with its newline (the service's
 /// `CHALLENGE_PREFIX`).

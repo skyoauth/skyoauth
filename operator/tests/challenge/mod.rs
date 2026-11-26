@@ -1168,3 +1168,46 @@ fn check_challenge_binds_instance_time_epoch_and_replacement() {
         assert_eq!(check(&expected), Err(refusal), "{refusal:?}");
     }
 }
+
+/// `check_challenge` records the replacement as confirmed exactly when it
+/// was given both the replacement's identity and the new key, which then
+/// matched; the epoch plays no part. A mismatch is still refused.
+#[test]
+fn check_challenge_records_a_confirmed_replacement() {
+    let challenge = parse_challenge(&message(&fixture_canonical("op_1"))).unwrap();
+    let rfc_key = RecoveryPublicKey::from_hex(RFC_KEY).unwrap();
+    let other_key = RecoveryPublicKey::from_hex(OTHER_KEY).unwrap();
+    let base = expectations(EXPIRES_AT - 1);
+    let confirmed = |expected: &Expectations<'_>| {
+        check_challenge(&challenge, expected).map(|verified| verified.replacement_confirmed())
+    };
+    for (identity, key, epoch, expected) in [
+        (None, None, None, false),
+        (Some("spki-sha256:new"), None, None, false),
+        (None, Some(&rfc_key), None, false),
+        (None, Some(&rfc_key), Some(1), false),
+        (Some("spki-sha256:new"), None, Some(1), false),
+        (Some("spki-sha256:new"), Some(&rfc_key), None, true),
+        (Some("spki-sha256:new"), Some(&rfc_key), Some(1), true),
+    ] {
+        let expectations = Expectations {
+            replacement_public_identity: identity,
+            new_recovery_public_key: key,
+            recovery_key_epoch: epoch,
+            ..base
+        };
+        assert_eq!(
+            confirmed(&expectations),
+            Ok(expected),
+            "{identity:?} {:?} {epoch:?}",
+            key.is_some()
+        );
+    }
+    let mismatched = Expectations {
+        replacement_public_identity: Some("spki-sha256:new"),
+        new_recovery_public_key: Some(&other_key),
+        ..base
+    };
+    assert_eq!(confirmed(&mismatched), Err(Refusal::OtherNewRecoveryKey));
+    assert_eq!(format!("{mismatched:?}"), "Expectations(..)");
+}

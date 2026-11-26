@@ -1,0 +1,158 @@
+{
+  "fixture_version": 1,
+  "kind": "recovery_signature",
+  "description": "Known answers for the signature of a recovery challenge (service/src/persistence/registry/recovery.rs, module docs \"What is signed\" and \"Keys\"; docs/proposals/recovery-verified-response.md sections 4 and \"Tests\"): signature = Ed25519(recovery private key, M), pure RFC 8032, 64 bytes, over M itself (not its hash), checked with ed25519-dalek's verify_strict, which refuses an S not below the group order, a non-canonical R and a small-order R or key. Every case is a signature checked with the recovery key of recovery.test-key.json over the M of the challenge fixture's vector named by challenge_case (challenge.v1.json). expected is the workstation's class (operator verify_response): valid, length (not 64 bytes) or not_verified; service_expected maps each class to the service's outcome for a response with that signature to the issued challenge (preview_recovery_response and restore_operator): ok, or NotRestorable(BadSignature). signed_by and signed_over name, for a case that is a real signature, the key of recovery.test-key.json that made it and the bytes it signs: message (M), challenge_hash (SHA-256(M)), canonical (C without the prefix), prefix_without_newline (the prefix less its newline, then C), request_digest_prefixed (the request digest prefix, then C) or request_digest (SHA-256 of that); the other cases are made from valid. lax_verify (64-byte cases only) is whether a cofactorless verify without the small-order and canonical checks (ed25519-dalek's verify) accepts the case over M: only valid and small_order_r. rfc8032_test1 is RFC 8032 section 7.1, test 1: the key of recovery.test-key.json of that name signs the empty message. The values were computed independently of both crates (a Python implementation of RFC 8032, plain signatures cross-checked with another library). Readers: operator/tests/operator.rs (SoftwareSigner, sign_challenge and verify_response) and tests/harness/recovery_signature_fixture.rs (ed25519-dalek's SigningKey for the signed cases, then every case through the service's preview_recovery_response and restore_operator on a database).",
+  "signature_length_bytes": 64,
+  "challenge_case": "op_1",
+  "signer": "recovery",
+  "service_expected": {
+    "valid": "ok",
+    "length": "bad_signature",
+    "not_verified": "bad_signature"
+  },
+  "rfc8032_test1": {
+    "key": "rfc8032_test1",
+    "message_hex": "",
+    "signature": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+  },
+  "cases": [
+    {
+      "case": "valid",
+      "note": "the recovery test key's signature over op_1's M: deterministic (RFC 8032), so this is what the workstation's sign_challenge returns and what the service's restore accepts",
+      "signed_by": "recovery",
+      "signed_over": "message",
+      "signature": "af9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1d5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c9720f",
+      "expected": "valid",
+      "lax_verify": true
+    },
+    {
+      "case": "bit_flipped_r",
+      "note": "valid with the low bit of its first byte (R) flipped",
+      "signature": "ae9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1d5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c9720f",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "bit_flipped_s",
+      "note": "valid with the low bit of its 33rd byte (S) flipped",
+      "signature": "af9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1c5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c9720f",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "all_zeros",
+      "note": "64 zero bytes",
+      "signature": "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "length_0",
+      "note": "no byte",
+      "signature": "",
+      "expected": "length"
+    },
+    {
+      "case": "length_63",
+      "note": "valid without its last byte",
+      "signature": "af9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1d5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c972",
+      "expected": "length"
+    },
+    {
+      "case": "length_65",
+      "note": "valid and a zero byte",
+      "signature": "af9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1d5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c9720f00",
+      "expected": "length"
+    },
+    {
+      "case": "length_128",
+      "note": "valid twice",
+      "signature": "af9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1d5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c9720faf9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca1d5d643ae40c93672396238bc864bde440a49f600e06ce67218699a351c9720f",
+      "expected": "length"
+    },
+    {
+      "case": "s_plus_l",
+      "note": "valid with S replaced by S + L (malleability): the same point equation, S not below the group order",
+      "signature": "af9aac00ede572cd706093ecf0e86eb586fd8c4c2811763a00a0882ffae6f2ca0a315a97fe6fa5bff9321b2ea75e9cf940a49f600e06ce67218699a351c9721f",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "small_order_r",
+      "note": "R the identity (small order) and S = k * a mod L for the test key's secret scalar a and k = SHA-512(R || A || M): the plain equation holds, so a cofactorless verify without the small-order check accepts it; verify_strict refuses it",
+      "signature": "01000000000000000000000000000000000000000000000000000000000000001b87cb4e0139c141e5b012080317bd1e6689f8540b61b109914dbcd6b21fba00",
+      "expected": "not_verified",
+      "lax_verify": true
+    },
+    {
+      "case": "non_canonical_r",
+      "note": "R the identity encoded as y = p + 1 (not canonical) and S = k * a mod L for its own k",
+      "signature": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7fb99f08afadf9c3eb91a69e3e9489dee4aa4736eaa47a7782f96b08ae98845608",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_key_other",
+      "note": "a signature over M by another key",
+      "signed_by": "other",
+      "signed_over": "message",
+      "signature": "5a2d8e1e72c2ae1b6c353edc5576352080fd8d5ae3f9a5d322162fc84e58a1ee9ed94ff370812f157360f093f9c1094baa3499b26373aaf9fbf9a56c83a5cd05",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_key_plan_new_key",
+      "note": "a signature over M by the key op_1's plan enrolls as the new recovery key (the RFC 8032 test 1 key)",
+      "signed_by": "rfc8032_test1",
+      "signed_over": "message",
+      "signature": "8d532abca0ba43a8df6deec00cc88c598f8904d233825f42f89b0758dd8ec0a14ceaac114eafefb5c2e3b1f3a3c15624178b254c391f6c995bf7a247f3023106",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_message_challenge_hash",
+      "note": "the test key's signature over challenge_hash = SHA-256(M), not over M",
+      "signed_by": "recovery",
+      "signed_over": "challenge_hash",
+      "signature": "5095967c8ea7c8f5af4158346f872a44449ba62168bf1d4e0f49d66bd8bc69a2f4420dede86459f876d6bb5f9554676b3d4e06fb483a59f74440dc50d50e2001",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_message_canonical",
+      "note": "the test key's signature over C without the prefix",
+      "signed_by": "recovery",
+      "signed_over": "canonical",
+      "signature": "382424e5857cbdfa1a1b17120240170e0dcac449dd001ff4af909076477ec01d4ba99c828ae6005f9b46c86ddafc8a41ee0d77c1e084d95c867aacdb19c7010f",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_message_prefix_without_newline",
+      "note": "the test key's signature over the prefix without its newline, then C",
+      "signed_by": "recovery",
+      "signed_over": "prefix_without_newline",
+      "signature": "57fd83a7b16fe6153f5a7e5ff398811f1745be2f6391134a65521620f52a255540fc995f180a9c9fd224a8d99e09b4a4859ec03eec23ca8c660bc584530b5507",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_message_request_digest_prefixed",
+      "note": "the test key's signature over request_digest_prefix || C, the bytes the request digest hashes",
+      "signed_by": "recovery",
+      "signed_over": "request_digest_prefixed",
+      "signature": "4ba9e5064ce66799a786aa10ae2711cc50804f6c4ea525edd632ef87ae2aae3a9978d5269daf9b3ab3e66ed515c81621f67d7fb0463624829385e1596ba6320c",
+      "expected": "not_verified",
+      "lax_verify": false
+    },
+    {
+      "case": "wrong_message_request_digest",
+      "note": "the test key's signature over request_digest",
+      "signed_by": "recovery",
+      "signed_over": "request_digest",
+      "signature": "3b7bce9499c924650803cd1913e60a84c3ff09c988f52dd505000ababb810d7abf094e6323d1a78fecf6410cc276556c7a0c998347391e95679903e777eb870c",
+      "expected": "not_verified",
+      "lax_verify": false
+    }
+  ]
+}

@@ -581,7 +581,16 @@ pub fn parse_challenge(message: &[u8]) -> Result<Challenge, ChallengeError> {
 }
 
 /// What the operator expects of a challenge, and the operator's clock.
-#[derive(Debug, Clone, Copy)]
+///
+/// [`sign_challenge`](super::sign_challenge) signs only a challenge checked
+/// with both [`Expectations::replacement_public_identity`] and
+/// [`Expectations::new_recovery_public_key`] given (see
+/// [`VerifiedChallenge::replacement_confirmed`]).
+///
+/// `Debug` prints `Expectations(..)`, none of the values: the instance and
+/// the identity are not secret, but they are kept out of logs like the
+/// challenge's own values.
+#[derive(Clone, Copy)]
 pub struct Expectations<'a> {
     /// The instance the operator means to restore, compared byte-wise with
     /// the plan's `instance_id`.
@@ -596,6 +605,12 @@ pub struct Expectations<'a> {
     pub replacement_public_identity: Option<&'a str>,
     /// The new recovery public key the operator approves, when known.
     pub new_recovery_public_key: Option<&'a RecoveryPublicKey>,
+}
+
+impl fmt::Debug for Expectations<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Expectations(..)")
+    }
 }
 
 /// Why [`check_challenge`] refused a challenge. `Debug` names the reason
@@ -644,6 +659,7 @@ impl std::error::Error for Refusal {}
 /// `Debug` prints `VerifiedChallenge(..)`, none of the values.
 pub struct VerifiedChallenge<'c> {
     challenge: &'c Challenge,
+    replacement_confirmed: bool,
 }
 
 impl fmt::Debug for VerifiedChallenge<'_> {
@@ -662,6 +678,16 @@ impl<'c> VerifiedChallenge<'c> {
     pub fn message(&self) -> &'c [u8] {
         &self.challenge.message
     }
+
+    /// Whether the operator confirmed the replacement: the check was given
+    /// both the replacement's public identity and the new recovery public
+    /// key, and both are the plan's. [`sign_challenge`](super::sign_challenge)
+    /// refuses a challenge without it (interim pick: the replacement is
+    /// what the signature authorizes, so the operator must have compared
+    /// it, not only read it).
+    pub const fn replacement_confirmed(&self) -> bool {
+        self.replacement_confirmed
+    }
 }
 
 /// Checks `challenge` against what the operator expects, in this order:
@@ -678,6 +704,11 @@ impl<'c> VerifiedChallenge<'c> {
 /// 4. the plan's `recovery_key_epoch`, `public_identity` and
 ///    `new_recovery_public_key` are the expected ones, for each that
 ///    `expected` gives.
+///
+/// The result records whether `expected` gave both the replacement's
+/// public identity and the new recovery public key
+/// ([`VerifiedChallenge::replacement_confirmed`]): a challenge checked
+/// without either passes, but is not signed.
 ///
 /// The new recovery public key itself already passed the service's key
 /// checks in [`parse_challenge`].
@@ -719,7 +750,11 @@ pub fn check_challenge<'c>(
     {
         return Err(Refusal::OtherNewRecoveryKey);
     }
-    Ok(VerifiedChallenge { challenge })
+    Ok(VerifiedChallenge {
+        challenge,
+        replacement_confirmed: expected.replacement_public_identity.is_some()
+            && expected.new_recovery_public_key.is_some(),
+    })
 }
 
 #[cfg(test)]
