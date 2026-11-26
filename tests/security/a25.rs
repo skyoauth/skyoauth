@@ -35,6 +35,20 @@
 //!   same `SelectionError::NotSelectable`, with the same `Display` and
 //!   `Debug` text, no source error and no selector in its text
 //!   (`a25_neg_miss_reveals_no_cause`).
+//! - **Negative, status.** Each grant disabled through the registry's own
+//!   update, its source, actor and eligible binding still enabled
+//!   (`a25_neg_disabled_grant_selects_nothing`), each source disabled the
+//!   same way, every grant still enabled
+//!   (`a25_neg_disabled_source_selects_nothing`), and the dormant
+//!   impersonation grant, stored disabled and requiring reapproval, which
+//!   cannot be created enabled or enabled later, in every mode
+//!   (`a25_neg_dormant_impersonation_grant_selects_nothing`), select
+//!   nothing on any source, with exactly the miss of a grant that does not
+//!   exist: `NotSelectable`, the same `Display` and `Debug` text, no source
+//!   error. Controls: every other grant or source still selects; the grant
+//!   or source re-enabled selects again, as stored; the delegation of the
+//!   same actor to the same target selects the very bindings the dormant
+//!   grant lists.
 //!
 //! "Selector" here is the `(tenant, grant ID, source ID, expected mode)`
 //! that `select_grant` takes; the IDs are the fixture's, not generated
@@ -60,9 +74,8 @@
 //! with the `0004` foreign keys dropped
 //! (`selection_rechecks_the_tenant_and_actor_the_foreign_keys_guarantee`),
 //! the `WHERE EXISTS` gate that keeps a miss from decoding a corrupt row
-//! (`a_miss_decodes_no_grant_row_even_a_corrupt_one`), disabled grants and
-//! sources, the dormant impersonation grant, and a grant and source that
-//! are both found but with no eligible binding on that source
+//! (`a_miss_decodes_no_grant_row_even_a_corrupt_one`), a grant and source
+//! that are both found but with no eligible binding on that source
 //! (`every_miss_is_the_same_not_selectable`), and the exact-string matching
 //! rules, near-miss claim names and values included. With the foreign keys
 //! in place, a grant can list only bindings of its own actor, so the
@@ -76,7 +89,11 @@ use std::error::Error as _;
 use skyoauth_service::{
     persistence::{
         PgPool,
-        registry::{self, GrantMode, Selection, SelectionError, select_grant},
+        registry::{
+            self, ActivationState, GrantMode, InvariantKind, JsonObject, NewServiceGrant,
+            RegistryError, Selection, SelectionError, ServiceGrant, ServiceGrantChanges, Status,
+            TrustSource, TrustSourceChanges, select_grant,
+        },
     },
     policy::{EligibleBinding, match_binding},
 };
@@ -424,6 +441,363 @@ async fn a25_neg_grant_name_is_not_a_selector() {
                     &format!("{} {} {src}", side.tenant, grant.name),
                 );
                 select_own(&pool, side, grant, source).await;
+            }
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// The miss of grant `grt_none` of `side`, which never existed, on `src_gh`
+/// of `side`: the reference that every status miss below must equal, with
+/// its `Display` and `Debug` text.
+async fn missing_grant(pool: &PgPool, side: Side) -> (String, String) {
+    let err = select(
+        pool,
+        side.tenant,
+        &side.id("grt_none"),
+        &Source::Github.id(side),
+        GrantMode::Direct,
+    )
+    .await
+    .expect_err("grt_none");
+    assert_eq!(err, SelectionError::NotSelectable, "{}", side.tenant);
+    (err.to_string(), format!("{err:?}"))
+}
+
+/// The selector selects nothing, with exactly the miss of a grant that
+/// does not exist (`reference`, from [`missing_grant`]): `NotSelectable`,
+/// no source error, the same `Display` and `Debug` text.
+#[track_caller]
+fn assert_same_miss(
+    result: Result<Selection, SelectionError>,
+    reference: &(String, String),
+    case: &str,
+) {
+    let err = match result {
+        Err(err @ SelectionError::NotSelectable) => err,
+        other => panic!("{case}: expected NotSelectable: {other:?}"),
+    };
+    assert!(err.source().is_none(), "{case}");
+    assert_eq!(
+        (err.to_string(), format!("{err:?}")),
+        reference.clone(),
+        "{case}"
+    );
+}
+
+/// The mutable columns of `grant` as they are, with `status`.
+fn grant_with_status(grant: &ServiceGrant, status: Status) -> ServiceGrantChanges {
+    ServiceGrantChanges {
+        name: grant.name.clone(),
+        scopes: grant.scopes.clone(),
+        default_scopes: grant.default_scopes.clone(),
+        resource_constraints: grant.resource_constraints.clone(),
+        max_ttl: grant.max_ttl,
+        valid_until: grant.valid_until,
+        status,
+        activation_state: grant.activation_state,
+    }
+}
+
+/// The mutable columns of `source` as they are, with `status`.
+fn source_with_status(source: &TrustSource, status: Status) -> TrustSourceChanges {
+    TrustSourceChanges {
+        name: source.name.clone(),
+        exact_issuer: source.exact_issuer.clone(),
+        discovery_url: source.discovery_url.clone(),
+        token_review_endpoint: source.token_review_endpoint.clone(),
+        ca_bundle_ref: source.ca_bundle_ref.clone(),
+        ca_fingerprint: source.ca_fingerprint.clone(),
+        reviewer_credential_ref: source.reviewer_credential_ref.clone(),
+        review_timeout_ms: source.review_timeout_ms,
+        audiences: source.audiences.clone(),
+        algorithms: source.algorithms.clone(),
+        proof_bounds: source.proof_bounds.clone(),
+        assertion_profile: source.assertion_profile,
+        stale_revocation_acknowledged: source.stale_revocation_acknowledged,
+        replay_mode: source.replay_mode,
+        status,
+    }
+}
+
+/// Sets the status of grant `grant` of `side` through the registry's own
+/// update, at its current revision, and returns the stored grant.
+async fn set_grant_status(pool: &PgPool, side: Side, grant: Grant, status: Status) -> ServiceGrant {
+    let id = side.id(grant.id);
+    let current = registry::get_service_grant(pool, side.tenant, &id)
+        .await
+        .unwrap();
+    let updated = registry::test_support::update_service_grant(
+        pool,
+        side.tenant,
+        &id,
+        current.revision,
+        &grant_with_status(&current, status),
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{} {id} {status:?}: {err:?}", side.tenant));
+    assert_eq!(
+        (updated.status, updated.revision),
+        (status, current.revision + 1)
+    );
+    updated
+}
+
+/// Sets the status of source `source` of `side` through the registry's own
+/// update, at its current revision, and returns the stored source.
+async fn set_source_status(
+    pool: &PgPool,
+    side: Side,
+    source: Source,
+    status: Status,
+) -> TrustSource {
+    let id = source.id(side);
+    let current = registry::get_trust_source(pool, side.tenant, &id)
+        .await
+        .unwrap();
+    let updated = registry::test_support::update_trust_source(
+        pool,
+        side.tenant,
+        &id,
+        current.revision,
+        &source_with_status(&current, status),
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{} {id} {status:?}: {err:?}", side.tenant));
+    assert_eq!(
+        (updated.status, updated.revision),
+        (status, current.revision + 1)
+    );
+    updated
+}
+
+/// Each grant, disabled through the registry's own update while its
+/// source, actor and eligible binding stay enabled, selects nothing on
+/// every source, in its own mode, with the miss of a grant that does not
+/// exist; every other grant still selects. Re-enabled, it selects again,
+/// as stored. Both tenants.
+#[tokio::test]
+async fn a25_neg_disabled_grant_selects_nothing() {
+    let (db, pool) = two_tenants().await;
+    for side in [A, B] {
+        let t = side.tenant;
+        let reference = missing_grant(&pool, side).await;
+        for grant in GRANTS {
+            let id = side.id(grant.id);
+            // Control: enabled, it selects on every source.
+            for source in SOURCES {
+                select_own(&pool, side, grant, source).await;
+            }
+            let disabled = set_grant_status(&pool, side, grant, Status::Disabled).await;
+            for source in SOURCES {
+                let src = source.id(side);
+                let case = format!("{t} {id} {src} disabled");
+                // The grant's eligible binding on the source is still there
+                // and enabled: only the grant's status changed.
+                let own =
+                    registry::get_principal_binding(&pool, t, &side.id(grant.eligible_on(source)))
+                        .await
+                        .unwrap();
+                assert_eq!(own.status, Status::Enabled, "{case}");
+                assert!(disabled.allowed_binding_ids.contains(&own.id), "{case}");
+                assert_same_miss(
+                    select(&pool, t, &id, &src, grant.mode).await,
+                    &reference,
+                    &case,
+                );
+                // Every other grant of the tenant still selects.
+                for other in GRANTS.into_iter().filter(|other| other.id != grant.id) {
+                    select_own(&pool, side, other, source).await;
+                }
+            }
+            // Re-enabled, it selects again, as stored.
+            let enabled = set_grant_status(&pool, side, grant, Status::Enabled).await;
+            for source in SOURCES {
+                let selected = select_own(&pool, side, grant, source).await;
+                assert_eq!(selected.grant, enabled, "{t} {id} {source:?} re-enabled");
+            }
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// Each source, disabled through the registry's own update while every
+/// grant and binding stays enabled, gives every grant the miss of a grant
+/// that does not exist on that source, in its own mode; the other sources
+/// still select every grant. Re-enabled, every grant selects again on it,
+/// with the stored source. Both tenants.
+#[tokio::test]
+async fn a25_neg_disabled_source_selects_nothing() {
+    let (db, pool) = two_tenants().await;
+    for side in [A, B] {
+        let t = side.tenant;
+        let reference = missing_grant(&pool, side).await;
+        for source in SOURCES {
+            let src = source.id(side);
+            // Control: enabled, it selects every grant.
+            for grant in GRANTS {
+                select_own(&pool, side, grant, source).await;
+            }
+            let disabled = set_source_status(&pool, side, source, Status::Disabled).await;
+            assert_eq!(disabled.id, src, "{t}");
+            for grant in GRANTS {
+                let id = side.id(grant.id);
+                let case = format!("{t} {id} {src} source disabled");
+                let stored = registry::get_service_grant(&pool, t, &id).await.unwrap();
+                assert_eq!(stored.status, Status::Enabled, "{case}");
+                assert_same_miss(
+                    select(&pool, t, &id, &src, grant.mode).await,
+                    &reference,
+                    &case,
+                );
+                // The tenant's other sources still select the grant.
+                for other in SOURCES.into_iter().filter(|other| *other != source) {
+                    select_own(&pool, side, grant, other).await;
+                }
+            }
+            // Re-enabled, every grant selects on it again, with the stored
+            // source.
+            let enabled = set_source_status(&pool, side, source, Status::Enabled).await;
+            for grant in GRANTS {
+                let selected = select_own(&pool, side, grant, source).await;
+                assert_eq!(selected.source, enabled, "{t} {src} re-enabled");
+                assert_eq!(
+                    selected.grant,
+                    registry::get_service_grant(&pool, t, &side.id(grant.id))
+                        .await
+                        .unwrap(),
+                    "{t} {src} re-enabled"
+                );
+            }
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// The impersonation grant `grt_a_imp` of `wld_a` to `svc_1`, listing the
+/// eligible binding of `wld_a` on every source, as v0.1 stores it: disabled
+/// and requiring reapproval. One created enabled is refused, and the stored
+/// one cannot be enabled (the `0009` guard, `SK001`). In its own mode, and
+/// in every other, it selects nothing on any source, with the miss of a
+/// grant that does not exist. Control: `grt_a_svc1`, the delegation of the
+/// same actor to the same target, selects on every source the very binding
+/// the dormant grant lists there. Both tenants.
+#[tokio::test]
+async fn a25_neg_dormant_impersonation_grant_selects_nothing() {
+    let (db, pool) = two_tenants().await;
+    let delegation = GRANTS[1];
+    assert_eq!(
+        (delegation.mode, delegation.actor, delegation.target),
+        (GrantMode::Delegation, "wld_a", Some("svc_1"))
+    );
+    for side in [A, B] {
+        let t = side.tenant;
+        let reference = missing_grant(&pool, side).await;
+        let dormant = NewServiceGrant {
+            id: side.id("grt_a_imp"),
+            tenant_id: t.into(),
+            name: "a-imp".into(),
+            actor_principal_id: side.id("wld_a"),
+            target_service_id: Some(side.id("svc_1")),
+            mode: GrantMode::Impersonation,
+            scopes: vec!["read".into()],
+            default_scopes: Some(vec!["read".into()]),
+            resource_constraints: JsonObject::new(),
+            max_ttl: 300,
+            valid_until: None,
+            status: Status::Disabled,
+            activation_state: ActivationState::RequiresReapproval,
+            allowed_binding_ids: SOURCES
+                .into_iter()
+                .map(|source| side.id(delegation.eligible_on(source)))
+                .collect(),
+            resource_server_ids: vec![side.audience()],
+        };
+        // Never stored enabled.
+        match registry::test_support::create_service_grant(
+            &pool,
+            &NewServiceGrant {
+                status: Status::Enabled,
+                ..dormant.clone()
+            },
+        )
+        .await
+        {
+            Err(RegistryError::Invariant {
+                kind: InvariantKind::Check,
+                constraint: Some(constraint),
+            }) => assert_eq!(
+                constraint, "service_grant_impersonation_disabled_check",
+                "{t}"
+            ),
+            other => panic!("{t}: an enabled impersonation grant: {other:?}"),
+        }
+        assert!(
+            matches!(
+                registry::get_service_grant(&pool, t, &dormant.id).await,
+                Err(RegistryError::NotFound)
+            ),
+            "{t}"
+        );
+        let stored = registry::test_support::create_service_grant(&pool, &dormant)
+            .await
+            .unwrap_or_else(|err| panic!("{t}: {err:?}"));
+        assert_eq!(
+            (stored.status, stored.activation_state),
+            (Status::Disabled, ActivationState::RequiresReapproval),
+            "{t}"
+        );
+        // And never enabled: the update is refused and changes nothing.
+        for activation_state in [
+            ActivationState::RequiresReapproval,
+            ActivationState::NotRequired,
+        ] {
+            let result = registry::test_support::update_service_grant(
+                &pool,
+                t,
+                &dormant.id,
+                stored.revision,
+                &ServiceGrantChanges {
+                    activation_state,
+                    ..grant_with_status(&stored, Status::Enabled)
+                },
+            )
+            .await;
+            assert!(
+                matches!(result, Err(RegistryError::Guard)),
+                "{t} {activation_state:?}: {result:?}"
+            );
+            assert_eq!(
+                registry::get_service_grant(&pool, t, &dormant.id)
+                    .await
+                    .unwrap(),
+                stored,
+                "{t} {activation_state:?}"
+            );
+        }
+        for source in SOURCES {
+            let src = source.id(side);
+            // Control: the same actor's binding on the source, listed by the
+            // dormant grant, is eligible for the delegation to the same
+            // target.
+            let control = select_own(&pool, side, delegation, source).await;
+            let listed = side.id(delegation.eligible_on(source));
+            assert_eq!(
+                control
+                    .eligible_bindings
+                    .iter()
+                    .map(|binding| binding.id.as_str())
+                    .collect::<Vec<_>>(),
+                [listed.as_str()],
+                "{t} {src}"
+            );
+            assert!(stored.allowed_binding_ids.contains(&listed), "{t} {src}");
+            for mode in MODES {
+                assert_same_miss(
+                    select(&pool, t, &dormant.id, &src, mode).await,
+                    &reference,
+                    &format!("{t} {} {src} {mode}", dormant.id),
+                );
             }
         }
     }
