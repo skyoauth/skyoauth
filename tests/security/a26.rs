@@ -123,8 +123,9 @@
 //!   only and for the other loads nothing, the same `None`: the target
 //!   service must list the requested audience's resource server, not just
 //!   any resource server of the grant (IR-083). Once the service lists
-//!   both, both load; once that listing is removed, the first loads
-//!   nothing again and the other still loads, in both tenants
+//!   both, both load; once the listing it gained is removed, the unlisted
+//!   audience (`AUDIENCE`) loads nothing again and the one the service
+//!   still lists (`OTHER_AUDIENCE`) still loads, in both tenants
 //!   (`a26_neg_target_service_off_one_of_the_grants_audiences_loads_only_the_other`).
 //! - **Negative, audience outside the grant.** A direct grant and a
 //!   delegation loaded for another resource server's audience, which the

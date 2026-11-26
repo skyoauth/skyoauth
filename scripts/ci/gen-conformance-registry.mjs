@@ -907,15 +907,26 @@ export function generate(root) {
     const table = findTable(layout);
     const counts = findCounts(layout);
     if (!counts) errors.push(`${LAYOUT}: the "Counts by first stage: ... rows have more than one stage." sentences after the §2 table are missing`);
+    // The table ends at its first line that is not a row, so a line inside
+    // it would cut it short, and write mode would keep the rows after that
+    // line next to the rendered ones: a scenario row after the table's last
+    // line is refused, whatever interrupts the table (the partial-tests
+    // markers or the counts sentences, wherever the other one stands).
+    const tableEnd = table.first + table.lines.length - 1;
+    const stray = section(layout, LAYOUT, '2.').find((l) => l.n > tableEnd && /^\| A\d\d \|/.test(l.line));
+    if (stray) errors.push(`${LAYOUT}:${stray.n}: §2 row ${stray.line.slice(2, 5)} is not part of the §2 table, which ends at line ${tableEnd}; keep the table's rows together, with no other line between them`);
     const partial = findPartialTests(layout);
     if (partial.error) errors.push(partial.error);
     // The passage starts after the whole table and its counts sentences: a
     // marker inside the table would cut it short (and the rows after the
     // marker would survive next to the rendered ones), and one above the
-    // counts would replace them and whatever stands between.
+    // counts would replace them and whatever stands between. Both bounds are
+    // checked, as the counts sentences need not stand below the table.
     // This also refuses markers that enclose the table.
     else if (counts && partial.begin <= counts.n) {
       errors.push(`${LAYOUT}:${partial.begin}: the partial-tests passage must start after the §2 table and its counts sentences (line ${counts.n})`);
+    } else if (partial.begin <= tableEnd) {
+      errors.push(`${LAYOUT}:${partial.begin}: the partial-tests passage must start after the §2 table (line ${tableEnd}) and its counts sentences`);
     } else {
       // Write mode replaces everything between the markers, so they may
       // enclose only earlier generated lines: a marker moved past a

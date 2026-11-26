@@ -1408,6 +1408,38 @@ describe('the §2 partial-tests passage', () => {
       fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${PARTIAL_BEGIN}\n`, ''), '| ID | Layer | Env |', `${PARTIAL_BEGIN}\n| ID | Layer | Env |`) : t)),
       placement,
     );
+    // The counts sentences need not stand below the table, so they alone do
+    // not keep the passage out of it. `cut(t)` is the layout without its
+    // counts line and the blank line after it, and that line.
+    const cut = (t) => {
+      const counts = /^Counts by first stage: [^\n]*\n\n/m.exec(t);
+      assert.ok(counts, 'counts sentences');
+      return { rest: replaceOnce(t, counts[0], ''), counts: counts[0] };
+    };
+    const countsAbove = (t) => {
+      const { rest, counts } = cut(t);
+      return replaceOnce(rest, '| ID | Layer | Env |', `${counts}| ID | Layer | Env |`);
+    };
+    const stray = /conformance-layout\.md:\d+: §2 row A06 is not part of the §2 table, which ends at line \d+/;
+    // The counts sentences above the table and the passage between rows A05
+    // and A06: write mode used to render the whole table above the passage
+    // and keep rows A06-A64 below it.
+    layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? moved(countsAbove(t), '| A06 |') : t)), stray);
+    // The counts sentences between rows A05 and A06, the passage after them.
+    layoutUnchanged(
+      fixture((rel, t) => {
+        if (rel !== LAYOUT) return t;
+        const { rest, counts } = cut(t);
+        return replaceOnce(rest, '| A06 |', `${counts.trimEnd()}\n| A06 |`);
+      }),
+      stray,
+    );
+    // The counts sentences above the table and the passage between them and
+    // the table, so after the counts but not after the table.
+    layoutUnchanged(
+      fixture((rel, t) => (rel === LAYOUT ? moved(countsAbove(t), '| ID | Layer | Env |') : t)),
+      /conformance-layout\.md:\d+: the partial-tests passage must start after the §2 table \(line \d+\) and its counts sentences/,
+    );
     // Write mode replaces everything between the markers, so they may enclose
     // only generated lines. The opening marker above the hand-written
     // "Partial tests." lead-in, after the counts:
