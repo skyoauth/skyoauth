@@ -1031,6 +1031,7 @@ fn challenge_errors_and_refusals_show_no_value() {
         Refusal::ExpiresTooLate,
         Refusal::OtherEpoch,
         Refusal::OtherReplacementIdentity,
+        Refusal::OtherTrustAnchor,
         Refusal::OtherNewRecoveryKey,
     ];
     let mut texts: Vec<String> = errors.iter().map(ToString::to_string).collect();
@@ -1065,14 +1066,15 @@ fn expectations(now_micros: i64) -> Expectations<'static> {
         now_micros,
         recovery_key_epoch: None,
         replacement_public_identity: None,
+        trust_anchor_ref: None,
         new_recovery_public_key: None,
     }
 }
 
 /// `check_challenge` on op_1, issued with the default TTL: the instance
 /// binding, the expiry at the service's boundary (`now < expires_at`),
-/// the horizon of the longest TTL, and the epoch, replacement identity and
-/// new key when expected.
+/// the horizon of the longest TTL, and the epoch, replacement identity,
+/// trust anchor and new key when expected, in that order.
 #[test]
 fn check_challenge_binds_instance_time_epoch_and_replacement() {
     let challenge = parse_challenge(&message(&fixture_canonical("op_1"))).unwrap();
@@ -1118,12 +1120,14 @@ fn check_challenge_binds_instance_time_epoch_and_replacement() {
     };
     assert_eq!(check(&expected), Err(Refusal::OtherInstance));
 
-    // The epoch, the replacement identity and the new key, when expected.
+    // The epoch, the replacement identity, its trust anchor and the new key,
+    // when expected.
     let rfc_key = RecoveryPublicKey::from_hex(RFC_KEY).unwrap();
     let other_key = RecoveryPublicKey::from_hex(OTHER_KEY).unwrap();
     let all = Expectations {
         recovery_key_epoch: Some(1),
         replacement_public_identity: Some("spki-sha256:new"),
+        trust_anchor_ref: Some("deployment/operator-ca"),
         new_recovery_public_key: Some(&rfc_key),
         ..expectations(issued_at)
     };
@@ -1159,12 +1163,110 @@ fn check_challenge_binds_instance_time_epoch_and_replacement() {
         ),
         (
             Expectations {
+                trust_anchor_ref: Some("deployment/other-ca"),
+                ..all
+            },
+            Refusal::OtherTrustAnchor,
+        ),
+        (
+            Expectations {
+                trust_anchor_ref: Some("deployment/operator-c"),
+                ..all
+            },
+            Refusal::OtherTrustAnchor,
+        ),
+        (
+            Expectations {
+                trust_anchor_ref: Some("Deployment/operator-ca"),
+                ..all
+            },
+            Refusal::OtherTrustAnchor,
+        ),
+        (
+            Expectations {
+                trust_anchor_ref: Some(""),
+                ..all
+            },
+            Refusal::OtherTrustAnchor,
+        ),
+        (
+            Expectations {
                 new_recovery_public_key: Some(&other_key),
                 ..all
             },
             Refusal::OtherNewRecoveryKey,
         ),
+        // The first refusal wins: identity before anchor before key.
+        (
+            Expectations {
+                replacement_public_identity: Some("spki-sha256:other"),
+                trust_anchor_ref: Some("deployment/other-ca"),
+                ..all
+            },
+            Refusal::OtherReplacementIdentity,
+        ),
+        (
+            Expectations {
+                trust_anchor_ref: Some("deployment/other-ca"),
+                new_recovery_public_key: Some(&other_key),
+                ..all
+            },
+            Refusal::OtherTrustAnchor,
+        ),
     ] {
         assert_eq!(check(&expected), Err(refusal), "{refusal:?}");
     }
+}
+
+/// `check_challenge` records the replacement as confirmed exactly when it
+/// was given the replacement's identity, its trust anchor and the new key,
+/// which then matched; the epoch plays no part. A mismatch is still
+/// refused.
+#[test]
+fn check_challenge_records_a_confirmed_replacement() {
+    let challenge = parse_challenge(&message(&fixture_canonical("op_1"))).unwrap();
+    let rfc_key = RecoveryPublicKey::from_hex(RFC_KEY).unwrap();
+    let other_key = RecoveryPublicKey::from_hex(OTHER_KEY).unwrap();
+    let base = expectations(EXPIRES_AT - 1);
+    let confirmed = |expected: &Expectations<'_>| {
+        check_challenge(&challenge, expected).map(|verified| verified.replacement_confirmed())
+    };
+    // Every combination of the three, with and without the epoch: only
+    // all three confirm.
+    for given in 0..16_u8 {
+        let identity = (given & 1 != 0).then_some("spki-sha256:new");
+        let anchor = (given & 2 != 0).then_some("deployment/operator-ca");
+        let key = (given & 4 != 0).then_some(&rfc_key);
+        let epoch = (given & 8 != 0).then_some(1);
+        let expectations = Expectations {
+            replacement_public_identity: identity,
+            trust_anchor_ref: anchor,
+            new_recovery_public_key: key,
+            recovery_key_epoch: epoch,
+            ..base
+        };
+        assert_eq!(
+            confirmed(&expectations),
+            Ok(given & 7 == 7),
+            "{identity:?} {anchor:?} {:?} {epoch:?}",
+            key.is_some()
+        );
+    }
+    let all = Expectations {
+        replacement_public_identity: Some("spki-sha256:new"),
+        trust_anchor_ref: Some("deployment/operator-ca"),
+        new_recovery_public_key: Some(&rfc_key),
+        ..base
+    };
+    let mismatched = Expectations {
+        new_recovery_public_key: Some(&other_key),
+        ..all
+    };
+    assert_eq!(confirmed(&mismatched), Err(Refusal::OtherNewRecoveryKey));
+    let other_anchor = Expectations {
+        trust_anchor_ref: Some("deployment/other-ca"),
+        ..all
+    };
+    assert_eq!(confirmed(&other_anchor), Err(Refusal::OtherTrustAnchor));
+    assert_eq!(format!("{mismatched:?}"), "Expectations(..)");
 }

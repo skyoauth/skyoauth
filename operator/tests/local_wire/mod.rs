@@ -511,6 +511,7 @@ fn the_golden_exchange_holds_together() {
             now_micros: now,
             recovery_key_epoch: Some(bootstrapped.recovery_key_epoch),
             replacement_public_identity: Some(&identity),
+            trust_anchor_ref: Some(&issue.trust_anchor_ref),
             new_recovery_public_key: Some(&issue.new_recovery_public_key),
         },
     )

@@ -12,6 +12,10 @@
 //!   recovery challenge `M` the service issues, read strictly and compared
 //!   byte for byte with its canonical re-encoding, then checked against
 //!   the operator's expectations and clock;
+//! - [`recovery::sign_challenge`] and [`recovery::verify_response`]: the
+//!   signature of a checked challenge by a [`recovery::RecoverySigner`]
+//!   ([`recovery::SoftwareSigner`] for a seed held in memory), checked
+//!   before it is returned as the service checks it at the restore;
 //! - [`identity::public_identity_of_spki`]: the canonical public identity
 //!   `spki-sha256:<hex>` of a DER `SubjectPublicKeyInfo`;
 //! - `local` (Unix only): the wire codec of the service's deployment-local
@@ -25,7 +29,8 @@
 //! `operator` test target checks every case, and the `pg` target of
 //! `skyoauth-scenarios` feeds the same cases to the service.
 //!
-//! No I/O, clock or random source is used: a time is always the caller's.
+//! No I/O, clock or random source is used: a time is always the caller's,
+//! and Ed25519 signing is deterministic.
 
 #![forbid(unsafe_code)]
 

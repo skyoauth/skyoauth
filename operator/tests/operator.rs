@@ -1,11 +1,15 @@
 //! Target `operator`: the workstation library against the shared fixture
 //! files `tests/conformance/fixtures/_recovery/key.v1.json`,
-//! `public_identity.v1.json` and `challenge.v1.json` (in `challenge`, with
-//! the strictness of the challenge reader and the challenge checks), whose
-//! cases the `pg` target of `skyoauth-scenarios` also checks against the
-//! service (`tests/harness/`). Every case of every file is run, and a test
-//! fails when a file, a member or a case is not
-//! (`every_fixture_file_and_case_is_covered`).
+//! `public_identity.v1.json`, `challenge.v1.json` (in `challenge`, with
+//! the strictness of the challenge reader and the challenge checks),
+//! `recovery.test-key.json` and `signature.v1.json` (in `signature`, with
+//! the refusals of signing), whose cases the `pg` target of
+//! `skyoauth-scenarios` also checks against the service
+//! (`tests/harness/`). Every case of every file is run, and a test fails
+//! when a file, a member or a case is not
+//! (`every_fixture_file_and_case_is_covered`). `redaction` checks that no
+//! key, signature or challenge value is shown, and that no source writes a
+//! file.
 //!
 //! `local_wire` (Unix only, like `skyoauth_operator::local`) checks the
 //! deployment-local transport's wire codec against
@@ -23,6 +27,8 @@
 mod challenge;
 #[cfg(unix)]
 mod local_wire;
+mod redaction;
+mod signature;
 mod support;
 
 use std::collections::BTreeSet;
@@ -30,6 +36,10 @@ use std::collections::BTreeSet;
 use challenge::{CHALLENGE_FIXTURE, VECTOR_MEMBERS, run_challenge_vectors};
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
+use signature::{
+    CASE_MEMBERS, KEY_MEMBERS, SIGNATURE_FIXTURE, TEST_KEY_FIXTURE, run_signature_cases,
+    run_test_keys,
+};
 use skyoauth_operator::{
     identity::{
         IdentityError, MAX_SPKI_DER_BYTES, PUBLIC_IDENTITY_PREFIX, public_identity_of_spki,
@@ -365,7 +375,16 @@ fn every_fixture_file_and_case_is_covered() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     files.sort();
-    assert_eq!(files, [CHALLENGE_FIXTURE, KEY_FIXTURE, IDENTITY_FIXTURE]);
+    assert_eq!(
+        files,
+        [
+            CHALLENGE_FIXTURE,
+            KEY_FIXTURE,
+            IDENTITY_FIXTURE,
+            TEST_KEY_FIXTURE,
+            SIGNATURE_FIXTURE
+        ]
+    );
 
     let challenge = recovery_fixture(CHALLENGE_FIXTURE);
     assert_eq!(
@@ -533,4 +552,97 @@ fn every_fixture_file_and_case_is_covered() {
             assert!(allowed.contains(&member), "{member} in {case}");
         }
     }
+
+    let test_key = recovery_fixture(TEST_KEY_FIXTURE);
+    assert_eq!(
+        members(&test_key),
+        BTreeSet::from(["fixture_version", "kind", "description", "keys"])
+    );
+    let keys = list(&test_key, "keys");
+    let key_names: BTreeSet<String> = keys.iter().map(|k| text(k, "name").to_owned()).collect();
+    assert_eq!(key_names.len(), keys.len(), "key names are unique");
+    assert_eq!(
+        run_test_keys(&test_key)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        key_names
+    );
+    assert_eq!(
+        key_names,
+        BTreeSet::from(["recovery", "other", "rfc8032_test1"].map(String::from))
+    );
+    for key in keys {
+        assert_eq!(members(key), BTreeSet::from(KEY_MEMBERS), "{key}");
+    }
+
+    let signature = recovery_fixture(SIGNATURE_FIXTURE);
+    assert_eq!(
+        members(&signature),
+        BTreeSet::from([
+            "fixture_version",
+            "kind",
+            "description",
+            "signature_length_bytes",
+            "challenge_case",
+            "signer",
+            "service_expected",
+            "rfc8032_test1",
+            "cases",
+        ])
+    );
+    assert_eq!(
+        members(&signature["rfc8032_test1"]),
+        BTreeSet::from(["key", "message_hex", "signature"])
+    );
+    assert!(key_names.contains(text(&signature["rfc8032_test1"], "key")));
+    assert!(key_names.contains(text(&signature, "signer")));
+    assert!(case_names(vectors).contains(text(&signature, "challenge_case")));
+    let signature_cases = list(&signature, "cases");
+    assert_eq!(
+        run_signature_cases(&signature)
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        case_names(signature_cases)
+    );
+    assert_eq!(
+        key_classes(signature_cases),
+        BTreeSet::from(["valid", "length", "not_verified"])
+    );
+    // The proposal's list (docs/proposals/recovery-verified-response.md,
+    // "Tests"): bad signatures, lengths, malleability, wrong keys and
+    // wrong messages.
+    for case in [
+        "valid",
+        "bit_flipped_r",
+        "bit_flipped_s",
+        "all_zeros",
+        "length_0",
+        "length_63",
+        "length_65",
+        "length_128",
+        "s_plus_l",
+        "small_order_r",
+        "non_canonical_r",
+        "mixed_order_r",
+        "wrong_key_other",
+        "wrong_key_plan_new_key",
+        "wrong_message_challenge_hash",
+        "wrong_message_canonical",
+        "wrong_message_request_digest_prefixed",
+    ] {
+        assert!(
+            case_names(signature_cases).contains(case),
+            "no signature case {case}"
+        );
+    }
+    let mut signed_by = BTreeSet::new();
+    for case in signature_cases {
+        for member in members(case) {
+            assert!(CASE_MEMBERS.contains(&member), "{member} in {case}");
+        }
+        if let Some(by) = case.get("signed_by") {
+            signed_by.insert(by.as_str().unwrap().to_owned());
+        }
+    }
+    assert_eq!(signed_by, key_names, "every test key signs a case");
 }
