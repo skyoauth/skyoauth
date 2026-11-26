@@ -1,0 +1,123 @@
+{
+  "fixture_version": 1,
+  "kind": "wire_error_catalogue",
+  "catalogue": "errors",
+  "status": "proposed",
+  "description": "The wire error codes of the admin HTTP surface (/admin/v1), each with its one HTTP status and when it applies. Every error body is {\"error\":\"<code>\"}, application/json, and nothing else: no description, no value of the request or of a row (no ID, name, constraint, member or claim name), no key byte, no version member (ERR-072). A fixture refers to a code as _wire/errors.v1.json#<code>. Source of the mapping: the module docs of service/src/admin_http/mod.rs, \"Errors\" and \"Wire codes\" (the S4 PR, lead decision 2026-11-24 and the ruling of 2026-11-26). Entries marked origin \"reused\" are the frozen reasons of errors-retry section 2 (ERR-070) or OAuth error values (RFC 6749); entries marked \"proposed\" are named by no other catalogue and are inferred. The wire codes of the token endpoint are not in this file. tests/harness/wire_errors.rs pins every code, status and Retry-After here to service::admin_http::ErrorCode.",
+  "body": { "content_type": "application/json", "shape": { "error": "<code>" }, "additional_members": false },
+  "cache_control": "no-store",
+  "retry_after_seconds_when_present": 1,
+  "errors": {
+    "unauthenticated": {
+      "http_status": 401,
+      "origin": "reused",
+      "retry_after": "never",
+      "applies_when": [
+        "the request has no verified peer identity (no client certificate the acceptor verified)",
+        "a verified identity names no usable credential: none that is enabled and unrevoked, of an enabled operator",
+        "an unknown path or method under the router, when the request has no peer"
+      ],
+      "notes": "The two causes give the same bytes (ERR-001, ERR-010, ERR-011). It is not an oracle: the peer proved possession of the key in the handshake and learns the state of its own credential only."
+    },
+    "forbidden": {
+      "http_status": 403,
+      "origin": "reused",
+      "retry_after": "never",
+      "applies_when": [
+        "a usable credential has no binding of the role and scope the request needs: one value for every cause (another role, another scope, a disabled binding or operator)",
+        "a principal kind the path does not reach (PrincipalKindNotAllowed; IR-043)",
+        "an approval by the requester itself (SelfApproval) or by a credential without the role"
+      ],
+      "notes": "Decided before any target is read: a refused caller learns nothing of the target, not even whether it exists."
+    },
+    "not_found": {
+      "http_status": 404,
+      "origin": "proposed",
+      "retry_after": "never",
+      "applies_when": [
+        "the target object does not exist, or exists outside the caller's scope: the same bytes for both",
+        "an unknown path or method under the router (HEAD included), when the request has a peer"
+      ],
+      "notes": "Never says whether another tenant's object exists."
+    },
+    "invalid_request": {
+      "http_status": 400,
+      "origin": "reused",
+      "retry_after": "never",
+      "applies_when": [
+        "a malformed path, query or cursor: another query parameter, a repeated one, a limit that is not an unsigned 32-bit integer, a cursor with a NUL character",
+        "a submitted value that breaks a syntax or value rule, whatever the stored state: a column check or not-null violation, a reserved actor ID, a missing required predicate, a malformed public key identity, a keyset upload the upload checks refuse, a private member in provenance, the destination of an egress create or a trust source write that fails the destination rule"
+      ],
+      "notes": "A value the request did not submit (a stored plan's or a stored row's) is the stored state's: 409, not 400. The status depends on the request's bytes only, so it is no oracle about the store."
+    },
+    "stale_revision": {
+      "http_status": 409,
+      "origin": "proposed",
+      "retry_after": "never",
+      "applies_when": [
+        "the expected revision of an update, disable or approval no longer matches the stored one: read the target again"
+      ]
+    },
+    "conflict": {
+      "http_status": 409,
+      "origin": "proposed",
+      "retry_after": "never",
+      "applies_when": [
+        "a duplicate (AlreadyExists) or a guard refusal",
+        "a missing or disabled referenced row, an assignment that is not active, an egress entry that is still enabled",
+        "a keyset version window that overlaps another's or too many enabled versions",
+        "a trust source destination with no enabled egress entry",
+        "an egress enable whose stored destination fails the destination rule (InvalidStoredDestination)",
+        "an approval whose echo does not match or whose requester is no longer authorized",
+        "a gated write where the second-approver flow has no operation kind for it yet"
+      ]
+    },
+    "not_approvable": {
+      "http_status": 409,
+      "origin": "proposed",
+      "retry_after": "never",
+      "applies_when": [
+        "the operation is consumed, revoked, expired or not of the flow",
+        "the stored plan fails a check at approval: a keyset upload, a private member in provenance, a source destination, or a column constraint, which run at approve only (D7)"
+      ]
+    },
+    "tenant_disabled": {
+      "http_status": 409,
+      "origin": "proposed",
+      "retry_after": "never",
+      "applies_when": [
+        "the write's tenant is disabled and the write is not disable-only (a tenant enable is allowed)"
+      ]
+    },
+    "widening_not_acknowledged": {
+      "http_status": 422,
+      "origin": "proposed",
+      "retry_after": "never",
+      "applies_when": [
+        "a well-formed write that widens, without the acknowledge_widening the server's rule asks for (a gated trust, keyset, source or egress write, or an approval)"
+      ],
+      "notes": "422 only for this case (the second-approver proposal, section 10)."
+    },
+    "server_error": {
+      "http_status": 500,
+      "origin": "reused",
+      "retry_after": "never",
+      "applies_when": [
+        "the ID generator has no ID to give (SourceFailed, Exhausted): nothing is written",
+        "a server or data-integrity error: an unreadable stored timestamp, a stored plan that fails its integrity check, a stored keyset version or fingerprint that does not decode or match, a tripwire (same-tenant operation, distinct approver), an unsupported isolation level",
+        "any store failure not otherwise mapped: a decode failure, an unknown SQLSTATE, a constraint not in the known list"
+      ],
+      "notes": "Nothing was written."
+    },
+    "auth_unavailable": {
+      "http_status": 503,
+      "origin": "reused",
+      "retry_after": "sometimes",
+      "applies_when": [
+        "the store or another dependency is unavailable: an I/O or TLS failure, pool timeout or closure, SQLSTATE class 08 or 53, 57P01 to 57P05, the validation worker unavailable (no Retry-After)",
+        "a retryable failure: a serialization failure or deadlock (40001, 40P01), a lock or statement timeout (55P03, 57014), a busy validation worker, no instance security policy row (effectively unreachable after authorization): with Retry-After: 1"
+      ],
+      "notes": "Retry-After: 1 is present when a retry of the whole request may succeed (the second-approver proposal's mapping)."
+    }
+  }
+}
