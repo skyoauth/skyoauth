@@ -80,6 +80,17 @@ const CLASSES: [&str; 11] = [
 /// owner it cannot make root.
 const DECIDED_BEFORE_THE_WALK: [&str; 3] = ["invalid_path", "too_long", "unsafe_directory"];
 
+/// The most symbolic links the kernel follows in one lookup: 40 on Linux,
+/// as the fixture's (and the service's) walk; 32 on the BSDs and macOS
+/// (`MAXSYMLINKS`), whose kernel fails a longer lookup itself.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const KERNEL_MAX_SYMLINKS: u64 = 40;
+/// The most symbolic links the kernel follows in one lookup: 40 on Linux,
+/// as the fixture's (and the service's) walk; 32 on the BSDs and macOS
+/// (`MAXSYMLINKS`), whose kernel fails a longer lookup itself.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const KERNEL_MAX_SYMLINKS: u64 = 32;
+
 /// The fixture, parsed.
 pub fn socket_path_fixture() -> Value {
     let path = fixtures_dir().join("_wire").join(SOCKET_PATH_FIXTURE);
@@ -88,18 +99,23 @@ pub fn socket_path_fixture() -> Value {
     serde_json::from_str(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
 }
 
-/// A fresh directory under the system's temporary directory, mode 0755,
-/// removed when dropped.
+/// A fresh directory under the system's temporary directory, its symbolic
+/// links resolved (the fixture's `case_root`: macOS's lives under `/var`, a
+/// link to `private/var`, which would add to a case's own links), mode
+/// 0755, removed when dropped. Its name is short: macOS's temporary
+/// directory is long and its socket paths end at 103 bytes.
 struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "skyoauth-operator-path-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "sko-path-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
         fs::create_dir(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         Self(path)
@@ -314,6 +330,16 @@ fn io_kind(case: &Value) -> io::ErrorKind {
     }
 }
 
+/// The links of the case's longest `symlink_chain`, 0 without one.
+fn chain_links(case: &Value) -> u64 {
+    list(case, "entries")
+        .iter()
+        .filter(|entry| text(entry, "type") == "symlink_chain")
+        .map(|entry| entry["links"].as_u64().expect("links is an integer"))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Runs every case this process can build, each in a fresh case root,
 /// and returns the names of the cases run and of those skipped.
 pub fn run_socket_path_cases(fixture: &Value) -> (BTreeSet<String>, BTreeSet<String>) {
@@ -341,6 +367,19 @@ pub fn run_socket_path_cases(fixture: &Value) -> (BTreeSet<String>, BTreeSet<Str
         }
         let (got, kind) = class(result.map(drop));
         let expect = text(case, "expect");
+        if expect == "accept" && chain_links(case) > KERNEL_MAX_SYMLINKS {
+            // The fixture's walk follows up to 40 links; a kernel that
+            // follows fewer fails the lookup of the socket's directory
+            // first (its error's kind is the platform's: not compared),
+            // and could not connect either.
+            eprintln!(
+                "NOTICE: {name}: this kernel follows at most {KERNEL_MAX_SYMLINKS} symbolic \
+                 links: expected refused as lookup, not accept"
+            );
+            assert_eq!(got, "lookup", "{name}");
+            ran.insert(name);
+            continue;
+        }
         assert_eq!(
             got, expect,
             "{name}: (an accept case refused as unsafe_ancestor may mean that a directory above \
@@ -764,9 +803,10 @@ fn a_relative_path_is_checked_as_its_absolute_form() {
 #[test]
 fn errors_name_no_path() {
     let dir = TempDir::new();
-    let sentinel = dir.0.join("SENTINEL-DIRECTORY");
+    // Short names: the socket path must fit macOS's 103 bytes too.
+    let sentinel = dir.0.join("SENTINEL-D");
     fs::create_dir(&sentinel).unwrap();
-    let path = sentinel.join("SENTINEL-SOCKET");
+    let path = sentinel.join("SENTINEL-S");
     let listener = listen(&path);
     let expectations = SocketExpectations {
         owner_uid: dir.uid(),
