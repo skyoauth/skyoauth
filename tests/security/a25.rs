@@ -438,8 +438,9 @@ async fn a25_neg_miss_reveals_no_cause() {
 /// error, never `NotSelectable` and equal to nothing (`Store` has no
 /// equality). The selectors are each grant (direct and delegations) on
 /// each source in its own mode, which selects on an open pool, and genuine
-/// misses: a wrong tenant, the other tenant's source, a mode override, a
-/// grant name and an unknown grant. Controls: before the close, the same
+/// misses: a wrong tenant, the other tenant's source, mode overrides (to
+/// each of the other modes, impersonation included), a grant name and an
+/// unknown grant. Controls: before the close, the same
 /// pool selects every hit and gives `NotSelectable` for every miss; after
 /// it, an open pool of the same database still does both, the hits with
 /// the very selections the closed pool gave before, so the outage and the
@@ -472,6 +473,26 @@ async fn a25_neg_store_failure_is_not_a_miss() {
                 owner.id(delegation.id),
                 gh.id(owner),
                 GrantMode::Direct,
+            ),
+            // Mode overrides to each of the other modes, impersonation
+            // included, so an early miss for one mode cannot hide an outage.
+            (
+                owner.tenant,
+                owner.id(delegation.id),
+                gh.id(owner),
+                GrantMode::Impersonation,
+            ),
+            (
+                owner.tenant,
+                own.clone(),
+                gh.id(owner),
+                GrantMode::Delegation,
+            ),
+            (
+                owner.tenant,
+                own.clone(),
+                gh.id(owner),
+                GrantMode::Impersonation,
             ),
             (owner.tenant, direct.name.into(), gh.id(owner), direct.mode),
             (
