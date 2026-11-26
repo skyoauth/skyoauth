@@ -3,26 +3,33 @@
 //! Unix socket in a temporary directory:
 //!
 //! - the socket file: owned by the service UID with mode 0600, no private
-//!   directory left behind, removed on shutdown; another service UID
-//!   (root only); a path held by a file, a directory, a symbolic link,
-//!   another UID's socket or a live listener refuses to start, and a stale
-//!   socket of the service UID is replaced;
+//!   directory left behind (a leftover one is cleaned), removed on
+//!   shutdown, its lock file kept; another service UID (root only); an
+//!   unsafe parent directory refuses to start; a path held by a file, a
+//!   directory, a symbolic link, another UID's socket or a live listener
+//!   refuses to start, and a stale socket of the service UID is replaced;
+//!   simultaneous binds and an overlapping restart, serialized by the lock
+//!   file; paths up to 107 bytes, 108 refused;
 //! - the peer check: the process's own UID passes; another UID, run as a
-//!   real second user through `runuser` and `python3`, is `forbidden` when
-//!   the service UID is a third one and passes when it is the service UID
-//!   (only with `SKYOAUTH_IT_PEER_USER`, see
+//!   real second user through `runuser` and `python3`, is `forbidden`
+//!   (before any read) when the service UID is a third one and passes when
+//!   it is the service UID (only with `SKYOAUTH_IT_PEER_USER`, see
 //!   [`a_peer_of_another_uid_is_refused`]);
-//! - the protocol: the 64 KiB limit, exactly; the idle timeout and the
-//!   deadline close a silent or slow client without a response; malformed
+//! - the protocol: one line and the end of the stream, however the bytes
+//!   arrive; the 64 KiB limit, exactly; the idle timeout and the deadline
+//!   close a silent or slow client without a response, and a silent client
+//!   delays no other; connections past the limit wait; malformed, non-object
 //!   and unknown-member requests are `invalid_request` before the store;
 //! - the operations, on a database (`#[ignore]`d, `SKYOAUTH_IT_DATABASE_URL`,
 //!   see `common/mod.rs`): bootstrap and its closure, durable across a new
 //!   transport; concurrent bootstraps on two transports with exactly one
-//!   winner; issue, preview, restore and a refused replay; a wrong
-//!   signature, an expired challenge, a missing store, a failed audit
-//!   append and an ID generator failure, each writing nothing; a database
-//!   whose default isolation is `SERIALIZABLE`; requests serialized per
-//!   transport.
+//!   winner; issue, preview, restore and a refused replay; an issue for a
+//!   registered key; the trust anchor check against the database's; a
+//!   wrong signature, an expired challenge, a missing store, a failed audit
+//!   append, an ID generator failure and an unframed request, each writing
+//!   nothing; a database whose default isolation is `SERIALIZABLE`;
+//!   requests serialized per transport; the deadline covering the wait for
+//!   a connection but not a transaction.
 //!
 //! The tests sign with fixed test keys, as `registry_recovery.rs` does, and
 //! check `M` as the workstation would. No test name here may match the
@@ -333,6 +340,10 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
     let dir = TempDir::new();
     let uid = effective_uid(&dir.0);
     let path = dir.socket();
+    // A private directory a killed bind left behind: removed under the lock.
+    let leftover = dir.0.join(".local.sock.4194305.0.bind");
+    fs::create_dir(&leftover).unwrap();
+    fs::write(leftover.join("s"), b"").unwrap();
     let listener = transport(&unreachable_pool(), TestClock::new(), 1, None)
         .bind(&path)
         .await
@@ -344,8 +355,11 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
     assert_eq!(metadata.uid(), uid);
     assert_eq!(metadata.mode() & 0o7777, 0o600);
     assert_eq!(metadata.nlink(), 1, "the private directory's link is gone");
-    // Only the socket: the private directory is removed.
-    assert_eq!(dir.entries(), ["local.sock"]);
+    // The socket and its lock file: the private directories are removed.
+    assert_eq!(dir.entries(), ["local.sock", "local.sock.lock"]);
+    let lock = fs::symlink_metadata(dir.0.join("local.sock.lock")).unwrap();
+    assert!(lock.is_file());
+    assert_eq!((lock.uid(), lock.mode() & 0o7777), (uid, 0o600));
 
     let server = Server::start(listener);
     // The process's own UID passes the peer check.
@@ -354,7 +368,8 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
         error("invalid_request")
     );
     server.stop().await;
-    assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+    // The lock file stays (see the module docs, "The socket file").
+    assert_eq!(dir.entries(), ["local.sock.lock"]);
 
     // Dropped without serving, the listener removes its socket too.
     let listener = transport(&unreachable_pool(), TestClock::new(), 1, None)
@@ -362,7 +377,7 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
         .await
         .unwrap();
     drop(listener);
-    assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+    assert_eq!(dir.entries(), ["local.sock.lock"]);
 
     // A path that is no longer its socket is left alone.
     let listener = transport(&unreachable_pool(), TestClock::new(), 1, None)
@@ -386,8 +401,9 @@ fn uid_of(name: &str) -> u32 {
         .unwrap()
 }
 
-/// Another service UID: as root the socket is given to it; otherwise the
-/// change of owner is refused and nothing is left at the path.
+/// Another service UID: as root the socket and its lock file are given to
+/// it; otherwise the socket's directory, the process's own, is not the
+/// service UID's or root's, and nothing is created.
 #[tokio::test]
 async fn another_service_uid_needs_the_privilege_to_give_the_socket_away() {
     let dir = TempDir::new();
@@ -402,24 +418,75 @@ async fn another_service_uid_needs_the_privilege_to_give_the_socket_away() {
         let metadata = fs::symlink_metadata(dir.socket()).unwrap();
         assert_eq!(metadata.uid(), other);
         assert_eq!(metadata.mode() & 0o7777, 0o600);
+        let lock = fs::symlink_metadata(dir.0.join("local.sock.lock")).unwrap();
+        assert_eq!((lock.uid(), lock.mode() & 0o7777), (other, 0o600));
         drop(listener);
+        assert_eq!(dir.entries(), ["local.sock.lock"]);
     } else {
         assert!(
-            matches!(&result, Err(BindError::Io(err)) if err.kind() == io::ErrorKind::PermissionDenied),
+            matches!(&result, Err(BindError::UnsafeDirectory)),
+            "{result:?}"
+        );
+        assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+    }
+}
+
+/// The socket's directory: owned by the service UID or root, not a
+/// symbolic link, and not writable by group or others unless sticky.
+#[tokio::test]
+async fn the_socket_directory_must_be_safe() {
+    let dir = TempDir::new();
+    let bind = |path: PathBuf| async move {
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+            .bind(&path)
+            .await
+    };
+    let sub = dir.0.join("sub");
+    fs::create_dir(&sub).unwrap();
+    for mode in [0o775, 0o757, 0o777, 0o722] {
+        fs::set_permissions(&sub, fs::Permissions::from_mode(mode)).unwrap();
+        let result = bind(sub.join("a.sock")).await;
+        assert!(
+            matches!(result, Err(BindError::UnsafeDirectory)),
+            "{mode:o}: {result:?}"
+        );
+        assert_eq!(fs::read_dir(&sub).unwrap().count(), 0, "{mode:o}");
+    }
+    for mode in [0o1777, 0o755, 0o700, 0o1775] {
+        fs::set_permissions(&sub, fs::Permissions::from_mode(mode)).unwrap();
+        drop(bind(sub.join("a.sock")).await.unwrap());
+    }
+    // A symbolic link as the directory.
+    let link = dir.0.join("link");
+    std::os::unix::fs::symlink(&sub, &link).unwrap();
+    let result = bind(link.join("b.sock")).await;
+    // `link/b.sock`'s parent is `link`, a symbolic link.
+    assert!(
+        matches!(result, Err(BindError::UnsafeDirectory)),
+        "{result:?}"
+    );
+    assert!(!sub.join("b.sock.lock").exists());
+    // Another owner (root only: the owner of a directory can be changed by
+    // root alone).
+    if effective_uid(&dir.0) == 0 {
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::lchown(&sub, Some(65_534), None).unwrap();
+        let result = bind(sub.join("c.sock")).await;
+        assert!(
+            matches!(result, Err(BindError::UnsafeDirectory)),
             "{result:?}"
         );
     }
-    assert!(dir.entries().is_empty(), "{:?}", dir.entries());
 }
 
 #[tokio::test]
 async fn an_occupied_socket_path_refuses_to_start() {
     let dir = TempDir::new();
     let path = dir.socket();
-    let bind = |uid| {
+    let bind = || {
         let path = path.clone();
         async move {
-            transport(&unreachable_pool(), TestClock::new(), 1, uid)
+            transport(&unreachable_pool(), TestClock::new(), 1, None)
                 .bind(&path)
                 .await
         }
@@ -428,20 +495,20 @@ async fn an_occupied_socket_path_refuses_to_start() {
     // A regular file, a directory, a symbolic link (to nothing, and to a
     // socket): left in place.
     fs::write(&path, b"data").unwrap();
-    assert!(matches!(bind(None).await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
     assert_eq!(fs::read(&path).unwrap(), b"data");
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
-    assert!(matches!(bind(None).await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
     assert!(path.is_dir());
     fs::remove_dir(&path).unwrap();
     std::os::unix::fs::symlink(dir.0.join("nowhere"), &path).unwrap();
-    assert!(matches!(bind(None).await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
     let elsewhere = dir.0.join("elsewhere.sock");
     drop(StdListener::bind(&elsewhere).unwrap());
     fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
-    assert!(matches!(bind(None).await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
     assert!(
         fs::symlink_metadata(&path)
             .unwrap()
@@ -451,24 +518,26 @@ async fn an_occupied_socket_path_refuses_to_start() {
     fs::remove_file(&path).unwrap();
     fs::remove_file(&elsewhere).unwrap();
 
-    // A live listener of the service UID: in use, left in place.
+    // A live listener of the service UID that takes no lock file: in use,
+    // left in place.
     let live = StdListener::bind(&path).unwrap();
-    assert!(matches!(bind(None).await, Err(BindError::InUse)));
+    assert!(matches!(bind().await, Err(BindError::InUse)));
     assert!(fs::symlink_metadata(&path).unwrap().file_type().is_socket());
     drop(live);
 
-    // The same socket, now stale, owned by a UID that is not the service
-    // UID: occupied, left in place.
-    let uid = effective_uid(&dir.0);
-    assert!(matches!(
-        bind(Some(uid.wrapping_add(1))).await,
-        Err(BindError::PathOccupied)
-    ));
+    // The same socket, now stale, owned by another UID (root only):
+    // occupied, left in place.
     let stale = fs::symlink_metadata(&path).unwrap();
     assert!(stale.file_type().is_socket());
+    if effective_uid(&dir.0) == 0 {
+        std::os::unix::fs::lchown(&path, Some(65_534), None).unwrap();
+        assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+        assert_eq!(fs::symlink_metadata(&path).unwrap().uid(), 65_534);
+        std::os::unix::fs::lchown(&path, Some(0), None).unwrap();
+    }
 
     // Stale and the service UID's: replaced.
-    let listener = bind(None).await.unwrap();
+    let listener = bind().await.unwrap();
     // (The inode number may be reused: the mode and a live listener show
     // the replacement.)
     assert_ne!(stale.mode() & 0o7777, 0o600);
@@ -476,11 +545,153 @@ async fn an_occupied_socket_path_refuses_to_start() {
     assert_eq!(bound.mode() & 0o7777, 0o600);
     drop(StdStream::connect(&path).unwrap());
     // No private directory left by the refusals.
-    assert_eq!(dir.entries(), ["local.sock"]);
-    // A second transport on the same path: in use.
-    assert!(matches!(bind(None).await, Err(BindError::InUse)));
+    assert_eq!(dir.entries(), ["local.sock", "local.sock.lock"]);
+    // A second transport on the same path: in use (the lock).
+    assert!(matches!(bind().await, Err(BindError::InUse)));
     drop(listener);
-    assert!(dir.entries().is_empty(), "{:?}", dir.entries());
+    assert_eq!(dir.entries(), ["local.sock.lock"]);
+
+    // A lock path that is not a 0600 regular file of the service UID:
+    // occupied, left in place, and nothing is bound.
+    let lock = dir.0.join("local.sock.lock");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+    assert_eq!(fs::symlink_metadata(&lock).unwrap().mode() & 0o7777, 0o644);
+    fs::remove_file(&lock).unwrap();
+    fs::create_dir(&lock).unwrap();
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+    fs::remove_dir(&lock).unwrap();
+    let target = dir.0.join("target");
+    fs::write(&target, b"").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+    assert!(
+        fs::symlink_metadata(&lock)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!path.exists());
+}
+
+/// Binds of one stale path started together: exactly one wins, every other
+/// is `InUse` (the lock file), and the winner's socket stays in place.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_binds_have_exactly_one_winner() {
+    let dir = TempDir::new();
+    let path = dir.socket();
+    for round in 0..20 {
+        drop(StdListener::bind(&path).unwrap());
+        let start = Arc::new(tokio::sync::Barrier::new(8));
+        let attempts: Vec<_> = (0..8)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                let path = path.clone();
+                tokio::spawn(async move {
+                    start.wait().await;
+                    transport(&unreachable_pool(), TestClock::new(), 1, None)
+                        .bind(&path)
+                        .await
+                })
+            })
+            .collect();
+        let mut winners = Vec::new();
+        for attempt in attempts {
+            match attempt.await.unwrap() {
+                Ok(listener) => winners.push(listener),
+                Err(BindError::InUse) => {}
+                Err(err) => panic!("round {round}: {err:?}"),
+            }
+        }
+        assert_eq!(winners.len(), 1, "round {round}");
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert_eq!(metadata.mode() & 0o7777, 0o600, "round {round}");
+        drop(StdStream::connect(&path).unwrap());
+        drop(winners);
+        assert!(!path.exists(), "round {round}");
+    }
+}
+
+/// A new transport started while the old one shuts down: it is `InUse`
+/// until the old one has removed its socket, then binds, and its socket is
+/// never removed by the old one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_overlapping_restart_keeps_the_new_socket() {
+    let dir = TempDir::new();
+    let path = dir.socket();
+    let mut old = transport(&unreachable_pool(), TestClock::new(), 1, None)
+        .bind(&path)
+        .await
+        .unwrap();
+    for round in 0..20 {
+        let dropping = tokio::task::spawn_blocking(move || drop(old));
+        let started = Instant::now();
+        let new = loop {
+            match transport(&unreachable_pool(), TestClock::new(), 1, None)
+                .bind(&path)
+                .await
+            {
+                Ok(listener) => break listener,
+                Err(BindError::InUse) => {
+                    assert!(started.elapsed() < Duration::from_secs(10), "round {round}");
+                    tokio::task::yield_now().await;
+                }
+                Err(err) => panic!("round {round}: {err:?}"),
+            }
+        };
+        dropping.await.unwrap();
+        // The old transport is gone; the new socket is in place and live.
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_socket(), "round {round}");
+        drop(StdStream::connect(&path).unwrap());
+        old = new;
+    }
+    drop(old);
+    assert!(!path.exists());
+}
+
+/// A socket path that fits a Unix socket address works whatever its length
+/// (the socket is bound through the private directory's descriptor, not at
+/// a longer staging path); one that does not fit is `PathTooLong`.
+#[tokio::test]
+async fn a_socket_path_up_to_107_bytes_works() {
+    let dir = TempDir::new();
+    let base = dir.0.as_os_str().len() + 1;
+    let path_of = |length: usize| {
+        assert!(length > base + 8, "the temporary directory is too long");
+        dir.0.join("p".repeat(length - base))
+    };
+    for length in [90, 100, 107] {
+        let path = path_of(length);
+        assert_eq!(path.as_os_str().len(), length);
+        let server = Server::bind(
+            transport(&unreachable_pool(), TestClock::new(), 1, None),
+            &path,
+        )
+        .await;
+        assert_eq!(
+            server.call(json!({"op": "nothing"})).await,
+            error("invalid_request"),
+            "{length}"
+        );
+        server.stop().await;
+        assert!(!path.exists());
+    }
+    let path = path_of(108);
+    let result = transport(&unreachable_pool(), TestClock::new(), 1, None)
+        .bind(&path)
+        .await;
+    assert!(matches!(result, Err(BindError::PathTooLong)), "{result:?}");
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "the local socket path is too long for a Unix socket address (108 bytes on Linux, \
+         104 on the BSDs and macOS, its terminating NUL included)"
+    );
+    // Nothing was created for it.
+    let mut lock = path.into_os_string();
+    lock.push(".lock");
+    assert!(!Path::new(&lock).exists());
 }
 
 // ---------------------------------------------------------------------------
@@ -490,9 +701,10 @@ async fn an_occupied_socket_path_refuses_to_start() {
 const PEER_USER_VAR: &str = "SKYOAUTH_IT_PEER_USER";
 
 /// A client run as `user` (through `runuser` and `python3`): connects to
-/// `path`, sends `line` and prints what it receives, or `connect-error
-/// <errno>`.
-fn client_as(user: &str, path: &Path, line: &str) -> String {
+/// `path`, sends `line` and closes its write half (or, for `None`, sends
+/// nothing and keeps the connection open), and prints what it receives, or
+/// `connect-error <errno>`.
+fn client_as(user: &str, path: &Path, line: Option<&str>) -> String {
     const CLIENT: &str = "import socket, sys
 s = socket.socket(socket.AF_UNIX)
 try:
@@ -500,10 +712,12 @@ try:
 except OSError as e:
     print('connect-error', e.errno)
     sys.exit(0)
-try:
-    s.sendall(sys.argv[2].encode() + b'\\n')
-except OSError:
-    pass
+if sys.argv[2] == 'send':
+    try:
+        s.sendall(sys.argv[3].encode() + b'\\n')
+        s.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
 s.settimeout(20)
 data = b''
 while True:
@@ -516,32 +730,39 @@ while True:
     data += chunk
 sys.stdout.write(data.decode())
 ";
-    let output = Command::new("runuser")
+    let mut command = Command::new("runuser");
+    command
         .args(["-u", user, "--", "python3", "-I", "-c", CLIENT])
-        .arg(path)
-        .arg(line)
-        .output()
-        .unwrap();
+        .arg(path);
+    match line {
+        Some(line) => command.args(["send", line]),
+        None => command.args(["silent", ""]),
+    };
+    let output = command.output().unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
 
 /// A peer whose UID is neither the service UID nor root is `forbidden`,
-/// also once the socket's mode lets it connect; with the service UID set
-/// to the peer's, it passes the check.
+/// also once the socket's mode lets it connect, and at once, before any
+/// read (a refused peer that sends nothing is answered well within the idle
+/// timeout); with the service UID set to the peer's, it passes the check.
 ///
 /// It needs a second local user and root (to run a client as that user
 /// and to give the socket to another UID): set `SKYOAUTH_IT_PEER_USER` to
 /// the user's name, and have `runuser` and `python3`. Without the variable
 /// only the process's own UID is checked (by
-/// `the_socket_is_owned_by_the_service_uid_with_mode_0600`) and this test
-/// says so on stderr; with it, a missing prerequisite fails the test.
+/// `the_socket_is_owned_by_the_service_uid_with_mode_0600`, and, when the
+/// tests do not run as root, by the unit test
+/// `local_transport::connection::tests::a_refused_peer_is_answered_before_any_read`),
+/// and this test prints a notice on stderr and passes; with it, a missing
+/// prerequisite fails the test.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peer_of_another_uid_is_refused() {
     let Ok(user) = env::var(PEER_USER_VAR) else {
         eprintln!(
-            "{PEER_USER_VAR} is not set: the cross-UID peer check was not run \
-             (it needs root and a second local user)"
+            "NOTICE: {PEER_USER_VAR} is not set: the cross-UID peer check was NOT run \
+             (it needs root and a second local user; set {PEER_USER_VAR}=<user> to run it)"
         );
         return;
     };
@@ -553,21 +774,36 @@ async fn a_peer_of_another_uid_is_refused() {
     let malformed = r#"{"op":"nothing"}"#;
 
     // The service UID is a third UID: the file mode stops the peer at
-    // `connect`; loosened, the peer check refuses it.
+    // `connect`; loosened, the peer check refuses it, before any read.
     let server = Server::bind(
-        transport(&unreachable_pool(), TestClock::new(), 1, Some(third)),
-        &dir.socket(),
+        transport(&unreachable_pool(), TestClock::new(), 1, Some(third))
+            .with_settings(Settings {
+                idle_timeout: Duration::from_secs(10),
+                ..settings()
+            })
+            .unwrap(),
+        &dir.0.join("third.sock"),
     )
     .await;
     assert_eq!(server.service_uid, third);
     assert_eq!(
-        client_as(&user, &server.path, malformed),
+        client_as(&user, &server.path, Some(malformed)),
         "connect-error 13\n"
     );
     fs::set_permissions(&server.path, fs::Permissions::from_mode(0o666)).unwrap();
     assert_eq!(
-        client_as(&user, &server.path, malformed),
+        client_as(&user, &server.path, Some(malformed)),
         "{\"error\":\"forbidden\"}\n"
+    );
+    let started = Instant::now();
+    assert_eq!(
+        client_as(&user, &server.path, None),
+        "{\"error\":\"forbidden\"}\n"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
     );
     // Root passes whatever the service UID.
     assert_eq!(
@@ -580,13 +816,13 @@ async fn a_peer_of_another_uid_is_refused() {
     // peer passes the check (its malformed request is answered as such).
     let server = Server::bind(
         transport(&unreachable_pool(), TestClock::new(), 1, Some(peer)),
-        &dir.socket(),
+        &dir.0.join("peer.sock"),
     )
     .await;
     let metadata = fs::symlink_metadata(&server.path).unwrap();
     assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (peer, 0o600));
     assert_eq!(
-        client_as(&user, &server.path, malformed),
+        client_as(&user, &server.path, Some(malformed)),
         "{\"error\":\"invalid_request\"}\n"
     );
     server.stop().await;
@@ -647,6 +883,7 @@ async fn a_silent_or_slow_client_is_closed_without_a_response() {
     let limits = Settings {
         idle_timeout: Duration::from_millis(300),
         deadline: Duration::from_millis(1_500),
+        statement_timeout: Duration::from_secs(1),
         ..settings()
     };
     let server = Server::bind(
@@ -727,6 +964,18 @@ async fn malformed_requests_are_refused_before_the_store() {
         r#"{"op":"restore","operation_id":"oper_1","signature":"AB"}"#.to_owned(),
         r#"{"op":"preview","operation_id":"oper\u0000","signature":"00"}"#.to_owned(),
         r#"[1]"#.to_owned(),
+        // Positional (array) forms of valid requests, and roots that are not
+        // objects: refused before the store.
+        r#"["restore","oper_1","00"]"#.to_owned(),
+        r#"  ["preview","oper_1","00"]"#.to_owned(),
+        format!(
+            r#"["bootstrap","{INSTANCE}","{}","{ANCHOR}","{key}"]"#,
+            spki(1)
+        ),
+        r#"null"#.to_owned(),
+        r#""restore""#.to_owned(),
+        r#"1"#.to_owned(),
+        r#"true"#.to_owned(),
     ]
     .map(String::into_bytes)
     .into();
@@ -754,6 +1003,8 @@ async fn malformed_requests_are_refused_before_the_store() {
     };
     issue(&|r| r["new_recovery_public_key"] = json!(hex(&weak)));
     issue(&|r| r["trust_anchor_ref"] = json!("a\tb"));
+    issue(&|r| r["trust_anchor_ref"] = json!("a\u{85}b"));
+    issue(&|r| r["trust_anchor_ref"] = json!("a\u{9f}"));
     issue(&|r| r["credential_spki"] = json!(""));
     issue(&|r| r["ttl"] = json!(900));
     for mut line in lines {
@@ -781,6 +1032,183 @@ async fn malformed_requests_are_refused_before_the_store() {
         server.call(bootstrap_request(1, &public_key(&SEED))).await,
         error("auth_unavailable")
     );
+    server.stop().await;
+}
+
+/// Sends `pieces` with `pause` between them, then closes the write half
+/// unless `keep_open`, and returns what the server sent back and when its
+/// connection ended.
+fn exchange_in_pieces(
+    path: &Path,
+    pieces: &[&[u8]],
+    pause: Duration,
+    keep_open: bool,
+) -> (Vec<u8>, Duration) {
+    let start = Instant::now();
+    let mut stream = StdStream::connect(path).unwrap();
+    stream.set_read_timeout(Some(CLIENT_WAIT)).unwrap();
+    for (at, piece) in pieces.iter().enumerate() {
+        if at > 0 {
+            std::thread::sleep(pause);
+        }
+        if stream.write_all(piece).is_err() {
+            break;
+        }
+    }
+    if !keep_open {
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+    }
+    let mut received = Vec::new();
+    match stream.read_to_end(&mut received) {
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::ConnectionReset => {}
+        Err(err) => panic!("{err}"),
+    }
+    (received, start.elapsed())
+}
+
+/// The request is the line and then the end of the stream, however the
+/// bytes arrive: the same bytes in one write or in pieces with pauses give
+/// the same answer; a byte after the newline, arriving late, is
+/// `invalid_request`; a complete line whose client never closes its write
+/// half is never dispatched (the store here is unreachable: a dispatched
+/// request would be answered `auth_unavailable` in 300 ms).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_is_framed_by_the_end_of_the_stream() {
+    let dir = TempDir::new();
+    let limits = Settings {
+        idle_timeout: Duration::from_millis(1_000),
+        deadline: Duration::from_secs(10),
+        statement_timeout: Duration::from_secs(5),
+        ..settings()
+    };
+    let server = Server::bind(
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+            .with_settings(limits)
+            .unwrap(),
+        &dir.socket(),
+    )
+    .await;
+    let path = server.path.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        let valid: &[u8] = br#"{"op":"restore","operation_id":"oper_1","signature":"00"}"#;
+        let line = [valid, b"\n"].concat();
+        let pause = Duration::from_millis(150);
+        let mut results = Vec::new();
+        // The valid line: together, in two pieces, byte by byte in places.
+        for pieces in [
+            vec![&line[..]],
+            vec![&line[..10], &line[10..]],
+            vec![valid, b"\n"],
+            vec![&line[..1], &line[1..30], &line[30..line.len() - 1], b"\n"],
+        ] {
+            results.push(("valid", exchange_in_pieces(&path, &pieces, pause, false)));
+        }
+        // Trailing bytes, late: after a pause, after the newline.
+        for pieces in [
+            vec![&line[..], b"x"],
+            vec![&line[..], b"\n"],
+            vec![&line[..], b" "],
+            vec![valid, b"\n", b"{}"],
+            vec![&line[..], &line[..]],
+        ] {
+            results.push(("trailing", exchange_in_pieces(&path, &pieces, pause, false)));
+        }
+        // A complete line, never followed by the end of the stream.
+        results.push(("open", exchange_in_pieces(&path, &[&line], pause, true)));
+        results
+    })
+    .await
+    .unwrap();
+    for (kind, (received, elapsed)) in results {
+        match kind {
+            "valid" => assert_eq!(parse_reply(&received), error("auth_unavailable")),
+            "trailing" => assert_eq!(parse_reply(&received), error("invalid_request")),
+            _ => {
+                assert_eq!(received, b"", "dispatched without the end of the stream");
+                assert!(elapsed >= Duration::from_millis(900), "{elapsed:?}");
+            }
+        }
+    }
+    server.stop().await;
+}
+
+/// The request mutex is taken only once a request is read: a client that
+/// sends nothing does not delay another one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_client_does_not_delay_another() {
+    let dir = TempDir::new();
+    let limits = Settings {
+        idle_timeout: Duration::from_secs(8),
+        ..settings()
+    };
+    let server = Server::bind(
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+            .with_settings(limits)
+            .unwrap(),
+        &dir.socket(),
+    )
+    .await;
+    let silent = StdStream::connect(&server.path).unwrap();
+    // Let the server accept it and start its read.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    // A valid request reaches the store (unreachable: 300 ms).
+    let reply = server.call(signed("restore", "oper_1", &[0; 64])).await;
+    assert_eq!(reply, error("auth_unavailable"));
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(silent);
+    server.stop().await;
+}
+
+/// At most `max_connections` connections are served at once (default 32):
+/// the next client waits, unaccepted, until one of them ends, and is then
+/// served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connections_past_the_limit_wait() {
+    assert_eq!(Settings::default().max_connections, 32);
+    let dir = TempDir::new();
+    let limits = Settings {
+        idle_timeout: Duration::from_secs(3),
+        ..settings()
+    };
+    let server = Server::bind(
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+            .with_settings(limits)
+            .unwrap(),
+        &dir.socket(),
+    )
+    .await;
+    // 31 silent connections leave room for one more.
+    let mut silent: Vec<StdStream> = (0..31)
+        .map(|_| StdStream::connect(&server.path).unwrap())
+        .collect();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    assert_eq!(
+        server.call(json!({"op": "nothing"})).await,
+        error("invalid_request")
+    );
+    assert!(started.elapsed() < Duration::from_millis(1_000));
+    // The 32nd silent one fills the limit: the 33rd waits for the idle
+    // timeout (3 s) of the first ones.
+    silent.push(StdStream::connect(&server.path).unwrap());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let started = Instant::now();
+    assert_eq!(
+        server.call(json!({"op": "nothing"})).await,
+        error("invalid_request")
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(1_500) && waited < Duration::from_secs(10),
+        "{waited:?}"
+    );
+    drop(silent);
     server.stop().await;
 }
 
@@ -1467,6 +1895,55 @@ async fn a_held_lock_times_the_request_out() {
     db.drop([pool]).await;
 }
 
+/// The deadline covers the wait for a pooled connection: with the pool's
+/// only connection held elsewhere (and a pool acquire timeout far past the
+/// deadline), a request is closed without a response at the deadline and
+/// writes nothing; it is answered once the connection is free.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_deadline_covers_the_wait_for_a_connection() {
+    let (db, pool) = migrated().await;
+    let single = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(60))
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let dir = TempDir::new();
+    let limits = Settings {
+        idle_timeout: Duration::from_secs(10),
+        deadline: Duration::from_secs(1),
+        statement_timeout: Duration::from_millis(500),
+        ..Settings::default()
+    };
+    let server = Server::bind(
+        transport(&single, TestClock::new(), 1, None)
+            .with_settings(limits)
+            .unwrap(),
+        &dir.socket(),
+    )
+    .await;
+
+    let held = single.acquire().await.unwrap();
+    let before = snapshot(&pool).await;
+    let mut line = serde_json::to_vec(&bootstrap_request(1, &public_key(&SEED))).unwrap();
+    line.push(b'\n');
+    let start = Instant::now();
+    assert_eq!(server.raw(line).await.unwrap(), b"");
+    let waited = start.elapsed();
+    assert!(
+        waited >= Duration::from_millis(900) && waited < Duration::from_secs(5),
+        "{waited:?}"
+    );
+    assert_eq!(snapshot(&pool).await, before);
+
+    drop(held);
+    bootstrap(&server).await;
+    server.stop().await;
+    single.close().await;
+    db.drop([pool]).await;
+}
+
 /// One request at a time per transport: while a restore waits for a lock
 /// another transaction holds, a preview (which takes no lock) waits for the
 /// restore, and both are answered once the lock is released.
@@ -1521,6 +1998,254 @@ async fn requests_are_serialized_per_transport() {
     let restored = restore.await.unwrap();
     assert_eq!(restored["recovery_key_epoch"], 2, "{restored}");
     // Served after the restore: the challenge is consumed.
+    assert_eq!(preview.await.unwrap(), error("not_restorable"));
+    holder.close().await.unwrap();
+    let Ok(server) = Arc::try_unwrap(server) else {
+        panic!("the requests hold no server any more")
+    };
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// An issue for a key that a credential already has, live or revoked, is
+/// `conflict` before anything is written: the restore could never enroll
+/// it (the credential key is unique).
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_issue_for_a_registered_key_is_a_conflict() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    bootstrap(&server).await;
+    // Key 1 is the bootstrap operator's, live.
+    let before = snapshot(&pool).await;
+    assert_eq!(
+        server.call(issue_request(1, &public_key(&NEW_SEED))).await,
+        error("conflict")
+    );
+    assert_eq!(snapshot(&pool).await, before);
+    // A restore to key 2 revokes key 1.
+    let (operation_id, challenge) = issue(&server, 2).await;
+    let reply = server
+        .call(signed("restore", &operation_id, &sign(&SEED, &challenge)))
+        .await;
+    assert_eq!(reply["recovery_key_epoch"], 2, "{reply}");
+    assert!(!is_security_admin(&pool, 1).await);
+    let before = snapshot(&pool).await;
+    for (credential, what) in [(1, "revoked"), (2, "live")] {
+        assert_eq!(
+            server
+                .call(issue_request(credential, &public_key(&THIRD_SEED)))
+                .await,
+            error("conflict"),
+            "{what}"
+        );
+    }
+    assert_eq!(snapshot(&pool).await, before);
+    // A new key is issued.
+    let reply = server
+        .call(issue_request(3, &public_key(&THIRD_SEED)))
+        .await;
+    assert!(reply["challenge"].is_string(), "{reply}");
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// The transport refuses at the issue exactly the `trust_anchor_ref`
+/// characters that the credential table's own check refuses (read from the
+/// catalog and evaluated by the database): over U+0001 to U+00A1 and other
+/// Unicode spaces, every value the transport accepts the database accepts,
+/// and the other way round. U+0085 (a C1 control) is refused by both.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_trust_anchor_check_is_the_databases() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    // Not bootstrapped: a value the checks pass is a `conflict` (no
+    // recovery state), one they refuse is `invalid_request`.
+    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let definition: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint \
+         WHERE conname = 'admin_credential_trust_anchor_ref_no_space_check'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let expression = definition
+        .strip_prefix("CHECK ")
+        .unwrap_or_else(|| panic!("{definition}"));
+    assert_eq!(
+        expression.matches("trust_anchor_ref").count(),
+        1,
+        "{expression}"
+    );
+    // The catalog's text, with the column replaced by the value.
+    let evaluate = format!(
+        "SELECT {}",
+        expression.replace("trust_anchor_ref", "($1::text)")
+    );
+    let mut characters: Vec<char> = (1..=0xa1_u32).filter_map(char::from_u32).collect();
+    characters.extend([
+        '\u{1680}',
+        '\u{2000}',
+        '\u{200a}',
+        '\u{200b}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{202f}',
+        '\u{205f}',
+        '\u{3000}',
+        '\u{feff}',
+        '\u{fffd}',
+        '\u{e9}',
+        '\u{10ffff}',
+    ]);
+    let mut refused = Vec::new();
+    for c in characters {
+        let value = format!("a{c}b");
+        let database: bool = sqlx::query_scalar(AssertSqlSafe(evaluate.clone()))
+            .bind(&value)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut request = issue_request(2, &public_key(&NEW_SEED));
+        request["trust_anchor_ref"] = json!(value);
+        let reply = server.call(request).await;
+        let transport = match reply["error"].as_str() {
+            Some("conflict") => true,
+            Some("invalid_request") => false,
+            _ => panic!("U+{:04X}: {reply}", u32::from(c)),
+        };
+        assert_eq!(transport, database, "U+{:04X}", u32::from(c));
+        if !database {
+            refused.push(u32::from(c));
+        }
+    }
+    let expected: Vec<u32> = (0x01..=0x20).chain(0x7f..=0x9f).collect();
+    assert_eq!(refused, expected);
+    assert!(refused.contains(&0x85));
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// A byte after the newline that arrives late, and a line whose client
+/// never closes its write half, write nothing: the request is not
+/// dispatched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn an_unframed_request_writes_nothing() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let server = Server::bind(
+        transport(&pool, Arc::clone(&clock), 1, None)
+            .with_settings(Settings {
+                idle_timeout: Duration::from_millis(800),
+                ..settings()
+            })
+            .unwrap(),
+        &dir.socket(),
+    )
+    .await;
+    let before = snapshot(&pool).await;
+    let mut line = serde_json::to_vec(&bootstrap_request(1, &public_key(&SEED))).unwrap();
+    line.push(b'\n');
+    let path = server.path.clone();
+    let (late, open) = tokio::task::spawn_blocking(move || {
+        let pause = Duration::from_millis(300);
+        (
+            exchange_in_pieces(&path, &[&line, b"{}"], pause, false),
+            exchange_in_pieces(&path, &[&line], pause, true),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(parse_reply(&late.0), error("invalid_request"));
+    assert_eq!(open.0, b"");
+    assert_eq!(snapshot(&pool).await, before);
+    assert!(get_recovery_state(&pool).await.unwrap().is_none());
+    bootstrap(&server).await;
+    server.stop().await;
+    db.drop([pool]).await;
+}
+
+/// The deadline bounds the read, the mutex wait and the pool's acquire,
+/// not the transaction: a restore whose request took most of the deadline
+/// to arrive and then waited for a lock past the deadline still commits and
+/// is answered, and the mutex is held until its transaction ends, so a
+/// preview sent meanwhile is served after it (the challenge is consumed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn the_deadline_does_not_cut_a_transaction() {
+    let (db, pool) = migrated().await;
+    let dir = TempDir::new();
+    let clock = TestClock::new();
+    let limits = Settings {
+        idle_timeout: Duration::from_secs(1),
+        deadline: Duration::from_secs(2),
+        statement_timeout: Duration::from_millis(1_800),
+        ..settings()
+    };
+    let server = Arc::new(
+        Server::bind(
+            transport(&pool, Arc::clone(&clock), 1, None)
+                .with_settings(limits)
+                .unwrap(),
+            &dir.socket(),
+        )
+        .await,
+    );
+    bootstrap(&server).await;
+    let (operation_id, challenge) = issue(&server, 2).await;
+    let signature = sign(&SEED, &challenge);
+
+    let mut holder = PgConnection::connect_with(&pool.connect_options())
+        .await
+        .unwrap();
+    let mut lock = holder.begin().await.unwrap();
+    sqlx::query("SELECT FROM recovery_state FOR UPDATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    // The restore's request arrives over 1.2 s, then waits for the lock.
+    let mut line = serde_json::to_vec(&signed("restore", &operation_id, &signature)).unwrap();
+    line.push(b'\n');
+    let path = server.path.clone();
+    let started = Instant::now();
+    let restore = tokio::task::spawn_blocking(move || {
+        let pieces = [
+            &line[..10],
+            &line[10..11],
+            &line[11..12],
+            &line[12..13],
+            &line[13..],
+        ];
+        exchange_in_pieces(&path, &pieces, Duration::from_millis(300), false)
+    });
+    // Past the restore's deadline, while its transaction waits.
+    tokio::time::sleep_until((started + Duration::from_millis(2_100)).into()).await;
+    let waiting: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT FROM pg_stat_activity WHERE wait_event_type = 'Lock' \
+         AND datname = current_database())",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(waiting, "the restore is not waiting for the lock");
+    let preview = {
+        let server = Arc::clone(&server);
+        let request = signed("preview", &operation_id, &signature);
+        tokio::spawn(async move { server.call(request).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!preview.is_finished(), "the preview ran during the restore");
+    lock.rollback().await.unwrap();
+    let (received, elapsed) = restore.await.unwrap();
+    assert!(elapsed > Duration::from_secs(2), "{elapsed:?}");
+    let restored = parse_reply(&received);
+    assert_eq!(restored["recovery_key_epoch"], 2, "{restored}");
     assert_eq!(preview.await.unwrap(), error("not_restorable"));
     holder.close().await.unwrap();
     let Ok(server) = Arc::try_unwrap(server) else {

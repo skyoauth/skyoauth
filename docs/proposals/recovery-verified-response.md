@@ -308,16 +308,21 @@ implementation PR picks).
 | `issue_recovery_challenge`, `get_recovery_state`                            | public: an issue alone writes an expiring row and an event, enrolls no one |
 | `bootstrap_instance`                                                        | public, separate decision; gains the key checks                            |
 | `ChallengeBinding`; `IssueChallenge::request_digest`, `::challenge_hash`    | removed                                                                    |
-| the row query, the encoder of `C` and `M`, the key checks                   | private to `recovery` (or the registry, section 7)                         |
+| the row query, the encoder of `C` and `M`                                   | private to `recovery` (or the registry, section 7)                         |
+| the key check `recovery_key`                                                | `pub(crate)`: the local transport checks a submitted key with it           |
 
-Nothing becomes `pub(crate)` and no `test_support` wrapper is added: tests sign
-with a test key. `service/tests/ungated_writes_private.rs` would change (not
-written here): `restore_operator` and `issue_recovery_challenge` leave
-`REGISTRY_KEPT_PUBLIC` (:195-201), whose doc (:190-194) then names
-`bootstrap_instance` alone, and join the control probe (:874) with the new
-public names; one new probe: `persistence::registry::ChallengeBinding` is
-unresolved (E0432, `assert_unreachable`, :513). No E0451, E0599 or E0277 probes
-are needed. That the restore verifies is a database test, not a probe.
+Only `recovery_key` became `pub(crate)` (with bootstrap's `is_lowercase_uuid_v7`,
+both re-exported from the registry on Unix only): the local transport
+(`service/src/local_transport`, T13.4) refuses a bad recovery key or instance
+ID with the registry's own check before it calls bootstrap or the issue. No
+`test_support` wrapper is added: tests sign with a test key.
+`service/tests/ungated_writes_private.rs` would change (not written here):
+`restore_operator` and `issue_recovery_challenge` leave `REGISTRY_KEPT_PUBLIC`
+(:195-201), whose doc (:190-194) then names `bootstrap_instance` alone, and join
+the control probe (:874) with the new public names; one new probe:
+`persistence::registry::ChallengeBinding` is unresolved (E0432,
+`assert_unreachable`, :513). No E0451, E0599 or E0277 probes are needed. That
+the restore verifies is a database test, not a probe.
 
 ## Tests
 

@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
+use tokio::time::{Instant, timeout_at};
 
 use super::{
     Shared,
@@ -39,15 +40,44 @@ const SET_TIMEOUTS: &str = "SELECT set_config('lock_timeout', $1, true), \
 /// The longest `trust_anchor_ref`, in bytes (`0005`).
 const MAX_TRUST_ANCHOR_REF: usize = 2048;
 
-/// Runs `request` (see the module docs, "Operations").
-pub(super) async fn execute(shared: &Shared, request: Request) -> Reply {
+/// Whether an issue's replacement key is already registered: a credential
+/// with that `public_identity`, revoked or not (the key is unique across
+/// every credential, so the restore could not enroll it).
+const CREDENTIAL_REGISTERED: &str =
+    "SELECT EXISTS (SELECT FROM admin_credential WHERE public_identity = $1)";
+
+/// Why an operation stopped without its result.
+pub(super) enum Stop {
+    /// Refused with this code; nothing was written.
+    Refused(ErrorCode),
+    /// The connection's deadline passed before the transaction began (while
+    /// a pooled connection was acquired): closed without a response, and
+    /// nothing was written.
+    Expired,
+}
+
+impl From<ErrorCode> for Stop {
+    fn from(code: ErrorCode) -> Self {
+        Self::Refused(code)
+    }
+}
+
+/// Runs `request` (see the module docs, "Operations"); `None` when the
+/// `deadline` passed before its transaction began. Once the transaction has
+/// begun, it runs to its end, bounded by the statement and lock timeouts
+/// and not by the deadline (the module docs, "Time limits").
+pub(super) async fn execute(shared: &Shared, request: Request, deadline: Instant) -> Option<Reply> {
     let result = match request {
-        Request::Bootstrap(wire) => bootstrap(shared, wire).await,
-        Request::IssueChallenge(wire) => issue(shared, wire).await,
-        Request::Preview(wire) => preview(shared, wire).await,
-        Request::Restore(wire) => restore(shared, wire).await,
+        Request::Bootstrap(wire) => bootstrap(shared, wire, deadline).await,
+        Request::IssueChallenge(wire) => issue(shared, wire, deadline).await,
+        Request::Preview(wire) => preview(shared, wire, deadline).await,
+        Request::Restore(wire) => restore(shared, wire, deadline).await,
     };
-    result.unwrap_or_else(refusal)
+    match result {
+        Ok(reply) => Some(reply),
+        Err(Stop::Refused(code)) => Some(refusal(code)),
+        Err(Stop::Expired) => None,
+    }
 }
 
 /// The canonical public identity of the DER `SubjectPublicKeyInfo` in
@@ -58,16 +88,18 @@ fn credential_identity(hex: &str) -> Result<String, ErrorCode> {
 }
 
 /// The `0005` checks of `admin_credential.trust_anchor_ref`: 1 to 2048
-/// bytes, no ASCII whitespace or control character. Checked here for the
-/// issue too, whose plan the restore stores later, so a challenge is never
-/// issued for a replacement the restore could not enroll.
+/// bytes, and none of the characters that `(trust_anchor_ref COLLATE "C")
+/// !~ '[[:space:][:cntrl:]]'` refuses. Under the `C` collation PostgreSQL's
+/// `[:space:]` is the ASCII space and U+0009 to U+000D, and `[:cntrl:]` is
+/// U+0000 to U+001F and U+007F to U+009F (the C1 controls included, U+0085
+/// say): together, the space and Unicode's `Cc` category, which is
+/// [`char::is_control`]. Other Unicode spaces (U+00A0, U+2028, U+3000) pass
+/// the database's check and this one. Checked here for the issue too, whose
+/// plan the restore stores later, so a challenge is never issued for a
+/// replacement the restore could not enroll.
 fn check_trust_anchor_ref(value: &str) -> Result<(), ErrorCode> {
     let bounded = (1..=MAX_TRUST_ANCHOR_REF).contains(&value.len());
-    if bounded
-        && !value
-            .bytes()
-            .any(|byte| byte == b' ' || byte.is_ascii_control())
-    {
+    if bounded && !value.chars().any(|c| c == ' ' || c.is_control()) {
         Ok(())
     } else {
         Err(ErrorCode::InvalidRequest)
@@ -107,10 +139,15 @@ fn micros(time: SystemTime) -> Result<i64, ErrorCode> {
 }
 
 /// Begins the request's transaction: `READ COMMITTED`, with the transport's
-/// lock and statement timeouts set for this transaction only.
-async fn begin(shared: &Shared) -> Result<Transaction<'static, Postgres>, ErrorCode> {
+/// lock and statement timeouts set for this transaction only. The pool's
+/// acquire and the `BEGIN` must end before `deadline`
+/// ([`Stop::Expired`]); nothing after them is bounded by it.
+async fn begin(shared: &Shared, deadline: Instant) -> Result<Transaction<'static, Postgres>, Stop> {
     let store = |err: sqlx::Error| from_store_failure(&err);
-    let mut transaction = shared.pool.begin_with(BEGIN).await.map_err(store)?;
+    let mut transaction = timeout_at(deadline, shared.pool.begin_with(BEGIN))
+        .await
+        .map_err(|_| Stop::Expired)?
+        .map_err(store)?;
     let timeout = format!("{}ms", shared.settings.statement_timeout.as_millis());
     sqlx::query(SET_TIMEOUTS)
         .bind(timeout)
@@ -144,9 +181,9 @@ async fn finish<T>(
 }
 
 /// `bootstrap`: [`bootstrap_instance`].
-async fn bootstrap(shared: &Shared, wire: BootstrapWire) -> Result<Reply, ErrorCode> {
+async fn bootstrap(shared: &Shared, wire: BootstrapWire, deadline: Instant) -> Result<Reply, Stop> {
     if !is_lowercase_uuid_v7(&wire.instance_id) {
-        return Err(ErrorCode::InvalidRequest);
+        return Err(ErrorCode::InvalidRequest.into());
     }
     let public_identity = credential_identity(&wire.credential_spki)?;
     check_trust_anchor_ref(&wire.trust_anchor_ref)?;
@@ -156,7 +193,7 @@ async fn bootstrap(shared: &Shared, wire: BootstrapWire) -> Result<Reply, ErrorC
     let binding_id = new_id(shared, IdKind::AdminRoleBinding)?;
     let audit_event_id = new_id(shared, IdKind::AuditEvent)?;
 
-    let mut transaction = begin(shared).await?;
+    let mut transaction = begin(shared, deadline).await?;
     let request = BootstrapRequest {
         instance_id: &wire.instance_id,
         admin_id: &admin_id,
@@ -223,7 +260,7 @@ fn plan(instance_id: &str, recovery_key_epoch: i64, replacement: &Replacement<'_
 
 /// `issue_challenge`: [`issue_recovery_challenge`] for the plan built from
 /// the recovery state and the replacement.
-async fn issue(shared: &Shared, wire: IssueWire) -> Result<Reply, ErrorCode> {
+async fn issue(shared: &Shared, wire: IssueWire, deadline: Instant) -> Result<Reply, Stop> {
     let public_identity = credential_identity(&wire.credential_spki)?;
     check_trust_anchor_ref(&wire.trust_anchor_ref)?;
     // Checked as the registry checks it; the plan carries the hex text.
@@ -242,7 +279,7 @@ async fn issue(shared: &Shared, wire: IssueWire) -> Result<Reply, ErrorCode> {
         new_recovery_public_key: &wire.new_recovery_public_key,
     };
 
-    let mut transaction = begin(shared).await?;
+    let mut transaction = begin(shared, deadline).await?;
     let result = async {
         // The issue reads the row again `FOR SHARE` and refuses a plan
         // whose instance or epoch it no longer holds.
@@ -251,6 +288,18 @@ async fn issue(shared: &Shared, wire: IssueWire) -> Result<Reply, ErrorCode> {
             .map_err(|err| from_registry(&err))?
             .filter(|state| state.bootstrap_closed)
             .ok_or(ErrorCode::Conflict)?;
+        // A key already registered, by a live or a revoked credential,
+        // would make a challenge that previews but never restores
+        // (`admin_credential`'s unique `public_identity`): refused before
+        // the issue writes anything.
+        let registered: bool = sqlx::query_scalar(CREDENTIAL_REGISTERED)
+            .bind(&public_identity)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|err| from_store_failure(&err))?;
+        if registered {
+            return Err(ErrorCode::Conflict);
+        }
         let plan = plan(&state.instance_id, state.recovery_key_epoch, &replacement);
         issue_recovery_challenge(
             &mut transaction,
@@ -284,13 +333,13 @@ fn signature(wire: &ResponseWire) -> Result<Vec<u8>, ErrorCode> {
 
 /// `preview`: [`preview_recovery_response`], in a transaction that is
 /// always rolled back (it writes nothing).
-async fn preview(shared: &Shared, wire: ResponseWire) -> Result<Reply, ErrorCode> {
+async fn preview(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Result<Reply, Stop> {
     let signature = signature(&wire)?;
     let response = SignedRecoveryResponse {
         operation_id: &wire.operation_id,
         signature: &signature,
     };
-    let mut transaction = begin(shared).await?;
+    let mut transaction = begin(shared, deadline).await?;
     let result = preview_recovery_response(&mut transaction, &response, shared.clock.now())
         .await
         .map_err(|err| from_restore(&err));
@@ -306,7 +355,7 @@ async fn preview(shared: &Shared, wire: ResponseWire) -> Result<Reply, ErrorCode
 }
 
 /// `restore`: [`restore_operator`], which verifies the signature itself.
-async fn restore(shared: &Shared, wire: ResponseWire) -> Result<Reply, ErrorCode> {
+async fn restore(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Result<Reply, Stop> {
     let signature = signature(&wire)?;
     let audit_event_id = new_id(shared, IdKind::AuditEvent)?;
     let rotation_audit_event_id = new_id(shared, IdKind::AuditEvent)?;
@@ -314,7 +363,7 @@ async fn restore(shared: &Shared, wire: ResponseWire) -> Result<Reply, ErrorCode
         operation_id: &wire.operation_id,
         signature: &signature,
     };
-    let mut transaction = begin(shared).await?;
+    let mut transaction = begin(shared, deadline).await?;
     // `now` immediately before the call (the recovery module, "Time").
     let request = RestoreRequest {
         audit_event_id: &audit_event_id,
@@ -347,7 +396,12 @@ mod tests {
             "a",
             "deployment/operator-ca",
             "caf\u{e9}",
+            "a\u{a0}b",
+            "a\u{2028}b",
+            "a\u{3000}b",
+            "a\u{1680}b",
             &"k".repeat(2048),
+            &"\u{e9}".repeat(1024),
         ] {
             assert_eq!(check_trust_anchor_ref(good), Ok(()), "{good}");
         }
@@ -360,7 +414,12 @@ mod tests {
             "a\u{7f}",
             "a\0",
             "a\u{b}",
+            "a\u{1f}",
+            "a\u{80}",
+            "a\u{85}",
+            "a\u{9f}",
             &"k".repeat(2049),
+            &"\u{e9}".repeat(1025),
         ] {
             assert_eq!(
                 check_trust_anchor_ref(bad),

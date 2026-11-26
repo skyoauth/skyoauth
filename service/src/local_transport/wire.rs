@@ -18,6 +18,22 @@ pub(super) enum Request {
 }
 
 impl Request {
+    /// The request in `line`, which must be one JSON object: serde's
+    /// internally tagged enum would also take a positional array (`["restore",
+    /// "oper_1", "00"]`), so a root that is not an object (an array, a
+    /// string, a number, `true`, `false`, `null`) is refused before serde
+    /// sees it. JSON whitespace may precede the object; serde refuses
+    /// anything but whitespace after it.
+    pub(super) fn parse(line: &[u8]) -> Option<Self> {
+        let first = line
+            .iter()
+            .find(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))?;
+        if *first != b'{' {
+            return None;
+        }
+        serde_json::from_slice(line).ok()
+    }
+
     /// The operation's name, as the `op` member spells it.
     #[cfg(test)]
     pub(super) const fn op(&self) -> &'static str {
@@ -155,8 +171,34 @@ pub(super) fn decode_hex(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn parse(text: &str) -> Result<Request, serde_json::Error> {
-        serde_json::from_str(text)
+    fn parse(text: &str) -> Result<Request, ()> {
+        Request::parse(text.as_bytes()).ok_or(())
+    }
+
+    /// Serde's internally tagged enum takes a positional array too; the
+    /// transport takes only an object.
+    #[test]
+    fn the_root_must_be_an_object() {
+        let positional = r#"["restore","oper_1","00"]"#;
+        assert!(serde_json::from_str::<Request>(positional).is_ok());
+        for text in [
+            positional,
+            r#" ["preview","oper_1","00"]"#,
+            r#"["bootstrap","i","00","t","00"]"#,
+            r#"["issue_challenge","00","t","00"]"#,
+            "null",
+            "true",
+            "1",
+            r#""restore""#,
+            "",
+            " ",
+            "\u{feff}{}",
+        ] {
+            assert!(parse(text).is_err(), "{text}");
+        }
+        assert!(
+            parse("\t\r {\"op\":\"restore\",\"operation_id\":\"o\",\"signature\":\"\"}").is_ok()
+        );
     }
 
     #[test]
