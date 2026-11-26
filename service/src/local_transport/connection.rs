@@ -121,9 +121,10 @@ pub(super) async fn read_request(
 
 /// Serves one connection (see the module docs, "Time limits"): the
 /// connection's deadline bounds the read of the request, the wait for the
-/// transport's mutex and the pool's acquire; once its transaction has
-/// begun, the request runs to its end (bounded by the statement and lock
-/// timeouts), and the response is written within the idle timeout.
+/// transport's mutex and the pool's acquire and `BEGIN`; the transaction
+/// timeout bounds everything after `BEGIN` (past it the connection is
+/// closed without a response), and the response is written within the
+/// idle timeout.
 pub(super) async fn serve(stream: UnixStream, shared: &Shared) {
     // `Settings` bound the deadline (`MAX_TIMEOUT`): it always fits.
     let Some(deadline) = Instant::now().checked_add(shared.settings.deadline) else {
@@ -158,7 +159,8 @@ async fn answer(stream: &UnixStream, shared: &Shared, deadline: Instant) -> Opti
     };
     // One request at a time per transport (see the module docs,
     // "Serialization"), taken only once the request is read, and held until
-    // its transaction has ended.
+    // its transaction has ended or the transaction timeout cut it (its
+    // connection then discarded).
     let _serial = timeout_at(deadline, shared.serial.lock()).await.ok()?;
     ops::execute(shared, request, deadline).await
 }

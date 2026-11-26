@@ -6,8 +6,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use sqlx::{Postgres, Transaction};
-use tokio::time::{Instant, timeout_at};
+use sqlx::{Connection as _, PgConnection, Postgres, Transaction, pool::PoolConnection};
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{
     Shared,
@@ -23,9 +23,10 @@ use crate::ids::IdKind;
 use crate::persistence::registry::{
     BootstrapRequest, IssueChallenge, JsonObject, OPERATOR_RESTORATION, PLAN_ADMIN_ID,
     PLAN_BINDING_ID, PLAN_CREDENTIAL_ID, PLAN_INSTANCE_ID, PLAN_NEW_RECOVERY_PUBLIC_KEY,
-    PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH, PLAN_TRUST_ANCHOR_REF, RestoreRequest,
-    SignedRecoveryResponse, bootstrap_instance, get_recovery_state, is_lowercase_uuid_v7,
-    issue_recovery_challenge, preview_recovery_response, recovery_key, restore_operator,
+    PLAN_PUBLIC_IDENTITY, PLAN_RECOVERY_KEY_EPOCH, PLAN_TRUST_ANCHOR_REF, RecoveryChallenge,
+    RestoreRequest, SignedRecoveryResponse, bootstrap_instance, get_recovery_state,
+    is_lowercase_uuid_v7, issue_recovery_challenge, preview_recovery_response, recovery_key,
+    restore_operator,
 };
 
 /// Every transaction of the transport: `restore_operator` runs only at
@@ -50,9 +51,15 @@ const CREDENTIAL_REGISTERED: &str =
 pub(super) enum Stop {
     /// Refused with this code; nothing was written.
     Refused(ErrorCode),
-    /// The connection's deadline passed before the transaction began (while
-    /// a pooled connection was acquired): closed without a response, and
-    /// nothing was written.
+    /// Closed without a response: the connection's deadline passed before
+    /// the transaction began (while a pooled connection was acquired or
+    /// `BEGIN` ran), and nothing was written; or the transaction did not end
+    /// within the transaction timeout ([`Settings::transaction_timeout`]),
+    /// and nothing was written unless the commit had been sent, whose
+    /// outcome is then unknown (see the module docs, "Transactions"). A
+    /// connection cut mid-exchange is discarded ([`Link`]).
+    ///
+    /// [`Settings::transaction_timeout`]: super::Settings::transaction_timeout
     Expired,
 }
 
@@ -63,9 +70,9 @@ impl From<ErrorCode> for Stop {
 }
 
 /// Runs `request` (see the module docs, "Operations"); `None` when the
-/// `deadline` passed before its transaction began. Once the transaction has
-/// begun, it runs to its end, bounded by the statement and lock timeouts
-/// and not by the deadline (the module docs, "Time limits").
+/// `deadline` passed before its transaction began, or the transaction did
+/// not end within the transaction timeout, which bounds everything after
+/// `BEGIN` (the deadline does not; the module docs, "Time limits").
 pub(super) async fn execute(shared: &Shared, request: Request, deadline: Instant) -> Option<Reply> {
     let result = match request {
         Request::Bootstrap(wire) => bootstrap(shared, wire, deadline).await,
@@ -138,31 +145,102 @@ fn micros(time: SystemTime) -> Result<i64, ErrorCode> {
     micros.map_err(|_| ErrorCode::ServerError)
 }
 
-/// Begins the request's transaction: `READ COMMITTED`, with the transport's
-/// lock and statement timeouts set for this transaction only. The pool's
-/// acquire and the `BEGIN` must end before `deadline`
-/// ([`Stop::Expired`]); nothing after them is bounded by it.
-async fn begin(shared: &Shared, deadline: Instant) -> Result<Transaction<'static, Postgres>, Stop> {
-    let store = |err: sqlx::Error| from_store_failure(&err);
-    let mut transaction = timeout_at(deadline, shared.pool.begin_with(BEGIN))
+/// The request's pooled connection. Dropped before [`Link::release`] (its
+/// transaction cut by the transaction timeout, its `BEGIN` by the
+/// deadline, or the request's task aborted at shutdown), it is discarded:
+/// detached from the pool, which may open a replacement, and closed at
+/// once, never reused or tested mid-exchange; the server rolls back its
+/// open transaction, if any, when it sees the connection end.
+struct Link(Option<PoolConnection<Postgres>>);
+
+impl Link {
+    /// The connection (always there until [`Link::release`] or the drop).
+    fn connection(&mut self) -> Result<&mut PgConnection, Stop> {
+        self.0
+            .as_deref_mut()
+            .ok_or(Stop::Refused(ErrorCode::ServerError))
+    }
+
+    /// Returns the connection to the pool: the request's use of it ended
+    /// without being cut ([`settle`]).
+    fn release(mut self) {
+        drop(self.0.take());
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.take() {
+            drop(connection.detach());
+        }
+    }
+}
+
+/// Ends the request's use of `link` after `outcome`: returned to the pool,
+/// unless the request was cut ([`Stop::Expired`]), when it is discarded.
+fn settle<T>(link: Link, outcome: &Result<T, Stop>) {
+    if !matches!(outcome, Err(Stop::Expired)) {
+        link.release();
+    }
+}
+
+/// A pooled connection for the request; the pool's acquire must end
+/// before `deadline` ([`Stop::Expired`]).
+async fn acquire(shared: &Shared, deadline: Instant) -> Result<Link, Stop> {
+    let connection = timeout_at(deadline, shared.pool.acquire())
         .await
         .map_err(|_| Stop::Expired)?
-        .map_err(store)?;
+        .map_err(|err| from_store_failure(&err))?;
+    Ok(Link(Some(connection)))
+}
+
+/// Begins the request's transaction on `link`: `READ COMMITTED`. The
+/// `BEGIN` must end before `deadline` ([`Stop::Expired`]; the connection,
+/// cut mid-exchange, is then discarded).
+async fn begin(link: &mut Link, deadline: Instant) -> Result<Transaction<'_, Postgres>, Stop> {
+    let begin = link.connection()?.begin_with(BEGIN);
+    timeout_at(deadline, begin)
+        .await
+        .map_err(|_| Stop::Expired)?
+        .map_err(|err| Stop::from(from_store_failure(&err)))
+}
+
+/// Runs `work`, everything after `BEGIN` (setting the timeouts, the
+/// operation's statements, the commit or the rollback), within the
+/// transaction timeout: the backstop for a database that stopped answering,
+/// which the server's own timeouts cannot end. On expiry `work` is dropped
+/// mid-exchange and the request stops with [`Stop::Expired`] (no response;
+/// the caller discards the connection).
+async fn within<T>(
+    shared: &Shared,
+    work: impl Future<Output = Result<T, Stop>>,
+) -> Result<T, Stop> {
+    timeout(shared.settings.transaction_timeout, work)
+        .await
+        .unwrap_or(Err(Stop::Expired))
+}
+
+/// Sets the transport's lock and statement timeouts for `transaction` only.
+async fn set_timeouts(
+    shared: &Shared,
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), Stop> {
     let timeout = format!("{}ms", shared.settings.statement_timeout.as_millis());
     sqlx::query(SET_TIMEOUTS)
         .bind(timeout)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await
-        .map_err(store)?;
-    Ok(transaction)
+        .map_err(|err| from_store_failure(&err))?;
+    Ok(())
 }
 
 /// Commits `transaction` when `result` is `Ok`, else rolls it back: a
-/// refusal writes nothing.
+/// refusal writes nothing (a failed rollback too: the connection is closed
+/// or the server aborts the transaction).
 async fn finish<T>(
-    transaction: Transaction<'static, Postgres>,
+    transaction: Transaction<'_, Postgres>,
     result: Result<T, ErrorCode>,
-) -> Result<T, ErrorCode> {
+) -> Result<T, Stop> {
     match result {
         Ok(value) => {
             transaction
@@ -172,10 +250,8 @@ async fn finish<T>(
             Ok(value)
         }
         Err(code) => {
-            // A failed rollback leaves nothing either: the connection is
-            // closed or the server aborts the transaction.
             let _ = transaction.rollback().await;
-            Err(code)
+            Err(code.into())
         }
     }
 }
@@ -193,22 +269,32 @@ async fn bootstrap(shared: &Shared, wire: BootstrapWire, deadline: Instant) -> R
     let binding_id = new_id(shared, IdKind::AdminRoleBinding)?;
     let audit_event_id = new_id(shared, IdKind::AuditEvent)?;
 
-    let mut transaction = begin(shared, deadline).await?;
-    let request = BootstrapRequest {
-        instance_id: &wire.instance_id,
-        admin_id: &admin_id,
-        credential_id: &credential_id,
-        public_identity: &public_identity,
-        trust_anchor_ref: &wire.trust_anchor_ref,
-        binding_id: &binding_id,
-        recovery_public_key: &recovery_public_key,
-        audit_event_id: &audit_event_id,
-        now: shared.clock.now(),
-    };
-    let result = bootstrap_instance(&mut transaction, &request)
+    let mut link = acquire(shared, deadline).await?;
+    let outcome = async {
+        let mut transaction = begin(&mut link, deadline).await?;
+        within(shared, async {
+            set_timeouts(shared, &mut transaction).await?;
+            let request = BootstrapRequest {
+                instance_id: &wire.instance_id,
+                admin_id: &admin_id,
+                credential_id: &credential_id,
+                public_identity: &public_identity,
+                trust_anchor_ref: &wire.trust_anchor_ref,
+                binding_id: &binding_id,
+                recovery_public_key: &recovery_public_key,
+                audit_event_id: &audit_event_id,
+                now: shared.clock.now(),
+            };
+            let result = bootstrap_instance(&mut transaction, &request)
+                .await
+                .map_err(|err| from_bootstrap(&err));
+            finish(transaction, result).await
+        })
         .await
-        .map_err(|err| from_bootstrap(&err));
-    let outcome = finish(transaction, result).await?;
+    }
+    .await;
+    settle(link, &outcome);
+    let outcome = outcome?;
     Ok(Reply::Bootstrapped {
         instance_id: outcome.instance_id,
         admin_id: outcome.admin_id,
@@ -279,50 +365,78 @@ async fn issue(shared: &Shared, wire: IssueWire, deadline: Instant) -> Result<Re
         new_recovery_public_key: &wire.new_recovery_public_key,
     };
 
-    let mut transaction = begin(shared, deadline).await?;
-    let result = async {
-        // The issue reads the row again `FOR SHARE` and refuses a plan
-        // whose instance or epoch it no longer holds.
-        let state = get_recovery_state(&mut *transaction)
-            .await
-            .map_err(|err| from_registry(&err))?
-            .filter(|state| state.bootstrap_closed)
-            .ok_or(ErrorCode::Conflict)?;
-        // A key already registered, by a live or a revoked credential,
-        // would make a challenge that previews but never restores
-        // (`admin_credential`'s unique `public_identity`): refused before
-        // the issue writes anything.
-        let registered: bool = sqlx::query_scalar(CREDENTIAL_REGISTERED)
-            .bind(&public_identity)
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(|err| from_store_failure(&err))?;
-        if registered {
-            return Err(ErrorCode::Conflict);
-        }
-        let plan = plan(&state.instance_id, state.recovery_key_epoch, &replacement);
-        issue_recovery_challenge(
-            &mut transaction,
-            &IssueChallenge {
-                operation_id: &operation_id,
-                kind: OPERATOR_RESTORATION,
-                immutable_plan: &plan,
-                ttl: shared.settings.challenge_ttl,
-                now: shared.clock.now(),
-                audit_event_id: &audit_event_id,
-            },
-        )
+    let mut link = acquire(shared, deadline).await?;
+    let challenge = async {
+        let mut transaction = begin(&mut link, deadline).await?;
+        within(shared, async {
+            set_timeouts(shared, &mut transaction).await?;
+            let result = issue_step(
+                shared,
+                &mut transaction,
+                &public_identity,
+                &replacement,
+                &operation_id,
+                &audit_event_id,
+            )
+            .await;
+            finish(transaction, result).await
+        })
         .await
-        .map_err(|err| from_challenge(&err))
     }
     .await;
-    let challenge = finish(transaction, result).await?;
+    settle(link, &challenge);
+    let challenge = challenge?;
     Ok(Reply::Issued {
         operation_id: challenge.operation_id,
         expires_at: micros(challenge.expires_at)?,
         expected_revision: challenge.expected_revision,
         challenge: encode_hex(&challenge.challenge),
     })
+}
+
+/// The statements of an issue in `transaction`: the recovery state, the
+/// lookup of the replacement key, and [`issue_recovery_challenge`].
+async fn issue_step(
+    shared: &Shared,
+    transaction: &mut Transaction<'_, Postgres>,
+    public_identity: &str,
+    replacement: &Replacement<'_>,
+    operation_id: &str,
+    audit_event_id: &str,
+) -> Result<RecoveryChallenge, ErrorCode> {
+    // The issue reads the row again `FOR SHARE` and refuses a plan
+    // whose instance or epoch it no longer holds.
+    let state = get_recovery_state(&mut **transaction)
+        .await
+        .map_err(|err| from_registry(&err))?
+        .filter(|state| state.bootstrap_closed)
+        .ok_or(ErrorCode::Conflict)?;
+    // A key already registered, by a live or a revoked credential,
+    // would make a challenge that previews but never restores
+    // (`admin_credential`'s unique `public_identity`): refused before
+    // the issue writes anything.
+    let registered: bool = sqlx::query_scalar(CREDENTIAL_REGISTERED)
+        .bind(public_identity)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|err| from_store_failure(&err))?;
+    if registered {
+        return Err(ErrorCode::Conflict);
+    }
+    let plan = plan(&state.instance_id, state.recovery_key_epoch, replacement);
+    issue_recovery_challenge(
+        transaction,
+        &IssueChallenge {
+            operation_id,
+            kind: OPERATOR_RESTORATION,
+            immutable_plan: &plan,
+            ttl: shared.settings.challenge_ttl,
+            now: shared.clock.now(),
+            audit_event_id,
+        },
+    )
+    .await
+    .map_err(|err| from_challenge(&err))
 }
 
 /// The signed response of a `preview` or `restore`, decoded.
@@ -339,12 +453,22 @@ async fn preview(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Resu
         operation_id: &wire.operation_id,
         signature: &signature,
     };
-    let mut transaction = begin(shared, deadline).await?;
-    let result = preview_recovery_response(&mut transaction, &response, shared.clock.now())
+    let mut link = acquire(shared, deadline).await?;
+    let preview = async {
+        let mut transaction = begin(&mut link, deadline).await?;
+        within(shared, async {
+            set_timeouts(shared, &mut transaction).await?;
+            let result =
+                preview_recovery_response(&mut transaction, &response, shared.clock.now()).await;
+            // Written nothing to keep: a failed rollback changes no answer.
+            let _ = transaction.rollback().await;
+            result.map_err(|err| Stop::from(from_restore(&err)))
+        })
         .await
-        .map_err(|err| from_restore(&err));
-    let _ = transaction.rollback().await;
-    let preview = result?;
+    }
+    .await;
+    settle(link, &preview);
+    let preview = preview?;
     Ok(Reply::Previewed {
         admin_id: preview.admin_id,
         credential_id: preview.credential_id,
@@ -363,17 +487,27 @@ async fn restore(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Resu
         operation_id: &wire.operation_id,
         signature: &signature,
     };
-    let mut transaction = begin(shared, deadline).await?;
-    // `now` immediately before the call (the recovery module, "Time").
-    let request = RestoreRequest {
-        audit_event_id: &audit_event_id,
-        rotation_audit_event_id: &rotation_audit_event_id,
-        now: shared.clock.now(),
-    };
-    let result = restore_operator(&mut transaction, &response, &request)
+    let mut link = acquire(shared, deadline).await?;
+    let restored = async {
+        let mut transaction = begin(&mut link, deadline).await?;
+        within(shared, async {
+            set_timeouts(shared, &mut transaction).await?;
+            // `now` immediately before the call (the recovery module, "Time").
+            let request = RestoreRequest {
+                audit_event_id: &audit_event_id,
+                rotation_audit_event_id: &rotation_audit_event_id,
+                now: shared.clock.now(),
+            };
+            let result = restore_operator(&mut transaction, &response, &request)
+                .await
+                .map_err(|err| from_restore(&err));
+            finish(transaction, result).await
+        })
         .await
-        .map_err(|err| from_restore(&err));
-    let restored = finish(transaction, result).await?;
+    }
+    .await;
+    settle(link, &restored);
+    let restored = restored?;
     Ok(Reply::Restored {
         admin_id: restored.admin_id,
         credential_id: restored.credential_id,

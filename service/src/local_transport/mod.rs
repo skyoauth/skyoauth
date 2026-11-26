@@ -52,8 +52,8 @@
 //! the service UID (`None`: the process's effective UID);
 //! [`LocalTransport::bind`] creates the socket and returns a
 //! [`LocalListener`], whose [`LocalListener::serve`] accepts connections
-//! until its shutdown future resolves, waits for the open connections and
-//! removes the socket. Time and IDs come only from the injected [`Clock`]
+//! until its shutdown future resolves, removes the socket and waits for
+//! the open connections (at most [`SHUTDOWN_GRACE`]). Time and IDs come only from the injected [`Clock`]
 //! and [`IdGenerator`] (D1: no other source of randomness; tests use
 //! `ids::test_support::SequentialIds`).
 //!
@@ -65,18 +65,44 @@
 //! it (the crate forbids `unsafe`), so the transport does not change it:
 //!
 //! 1. it refuses a socket path that does not fit a Unix socket address
-//!    ([`BindError::PathTooLong`]: at least 108 bytes on Linux, 104 on the
-//!    BSDs and macOS), which no client could connect to;
+//!    ([`BindError::PathTooLong`]: over [`MAX_SOCKET_PATH_BYTES`], 107
+//!    bytes on Linux, 103 on the BSDs and macOS), which no client could
+//!    connect to;
 //! 2. it reads the process's effective UID from the kernel (the peer
 //!    credentials of a socket pair it creates), the default service UID,
 //!    and refuses the socket's directory ([`BindError::UnsafeDirectory`])
-//!    unless it is a directory, not a symbolic link, owned by the service
-//!    UID or root, and not writable by group or others, or sticky (as
-//!    `/tmp`): another UID could otherwise replace the socket;
-//! 3. it opens or creates the lock file `<name>.lock` next to the socket (a
-//!    regular file owned by the service UID with mode 0600, checked on the
-//!    open file against the path, so a symbolic link or another file is
-//!    [`BindError::PathOccupied`]) and locks it exclusively without waiting
+//!    unless it is a directory, not a symbolic link, not writable by group
+//!    or others, or sticky (as `/tmp`), and owned by the service UID or
+//!    root; when the service UID is not the effective UID (root binding for
+//!    another UID), it must be owned by the effective UID itself, so the
+//!    service UID cannot rename what the bind creates there while the bind
+//!    gives it away. Then it walks the lookup of the directory from the
+//!    root directory, following symbolic links as the kernel does, and
+//!    refuses it ([`BindError::UnsafeAncestor`], naming the depth, not the
+//!    path) unless every directory looked up on the way, the root
+//!    directory included, is owned by root or the service UID (or the
+//!    effective UID: the binding process itself) and not writable by group
+//!    or others, or sticky: another UID could otherwise
+//!    rename the socket's directory, or a directory above it, and redirect
+//!    the paths used below. This is a precondition the operator's client
+//!    (T13.10) checks too before it connects;
+//! 3. it opens the lock file `<name>.lock` next to the socket, or, when
+//!    there is none, creates it as a private inode first: a new file, mode
+//!    0600, `l` in a fresh private directory (as in step 4), given to the
+//!    service UID on its open descriptor (`fchown`) and only then
+//!    hard-linked to `<name>.lock` (`link` never replaces an entry: a lock
+//!    file another bind published meanwhile is opened instead), so the lock
+//!    path never holds a file of the wrong owner, also when the process is
+//!    killed in between. It is opened with `O_NOFOLLOW` (a symbolic link
+//!    at the path fails, and is never followed) and `O_NONBLOCK` (a FIFO or
+//!    a device never blocks the open), and the open file must be a regular
+//!    file owned by the service UID with mode 0600, checked with `fstat`
+//!    against the path (also after publishing it), so a symbolic link or
+//!    another file is [`BindError::PathOccupied`]. The crate does not
+//!    depend on `libc`, so the two flags are Linux's values for x86_64,
+//!    aarch64 and riscv64; elsewhere the bind refuses to start
+//!    ([`BindError::Io`] of kind [`std::io::ErrorKind::Unsupported`]). It
+//!    is locked exclusively without waiting
 //!    (`flock`, [`std::fs::File::try_lock`]): a lock another transport holds
 //!    is [`BindError::InUse`]. The lock is held for the listener's life, so
 //!    steps 4 to 8 and the removal at shutdown run in one transport at a
@@ -84,12 +110,19 @@
 //!    other's socket. The lock file is never removed (removing it while
 //!    another process holds it open would let two processes lock two files
 //!    of the same name);
-//! 4. under the lock it removes the private directories a killed bind of
-//!    the same name left (`.<name>.<pid>.<n>.bind`, owned by the process's
-//!    UID, never a symbolic link), then creates a fresh one, mode 0700
-//!    (`mkdir` never reuses an entry), opens it, and checks the open
-//!    directory: the one at the path, owned by the process's UID, no group
-//!    or other bits, else [`BindError::NotVerified`];
+//! 4. under the lock it clears the private directories a killed bind of the
+//!    same name left (`.<name>.<pid>.<n>.bind`, owned by the process's UID,
+//!    never a symbolic link): it unlinks only what a bind puts there, the
+//!    staged socket `s` (a socket) and the staged lock `l` (a regular file),
+//!    each owned by the service UID or the process's UID, and removes the
+//!    directory only when it is then empty (`rmdir`, never recursively);
+//!    anything else in it is left, and so is the directory. A directory the
+//!    process may write but not list (a sticky directory with mode 01733,
+//!    say) is not scanned: its leftovers stay. Then it creates a fresh
+//!    private directory, mode 0700 (`mkdir` never reuses an entry), opens
+//!    it, and checks the open directory: the one at the path, owned by the
+//!    process's UID, no group or other bits, else
+//!    [`BindError::NotVerified`];
 //! 5. it refuses to start ([`BindError::PathOccupied`]) when the socket path
 //!    holds anything but a socket owned by the service UID (a file, a
 //!    directory, a symbolic link, another UID's socket), and
@@ -97,17 +130,26 @@
 //!    that takes no lock file). A socket of the service UID that refuses the
 //!    connection is stale and is removed, only while it is still the same
 //!    inode;
-//! 6. it binds the socket inside the private directory, through the open
-//!    directory (`/proc/self/fd/<fd>/s`), so the address is short whatever
-//!    the path's length; where `/proc/self/fd` is missing (not Linux, or no
-//!    `/proc`) it binds at the full staging path, and one that does not fit
-//!    a socket address is [`BindError::StagingPathTooLong`]. It gives the
-//!    socket to the service UID when that is not the effective UID
-//!    (`lchown`, which needs the privilege; a refusal is [`BindError::Io`])
-//!    and sets mode 0600;
-//! 7. it hard-links the socket to the socket path: `link` never replaces an
-//!    entry, so one that appeared since step 5 is left in place
-//!    ([`BindError::PathOccupied`]); then it removes the private directory;
+//! 6. it computes the staged socket's address once, through the open
+//!    directory (`/proc/self/fd/<fd>/s`), and uses it for every call on the
+//!    staged socket: the bind, the change of owner, the mode, the check and
+//!    the link of step 7 (the staged lock `l` of step 3 is reached the same
+//!    way), so a rename of the private directory's path, and a directory
+//!    with a symbolic link put in its place, redirect none of them; the
+//!    address is also short whatever the path's length. Where
+//!    `/proc/self/fd` is missing (not Linux, or no `/proc`) it uses the full
+//!    staging path, and one that does not fit a socket address is
+//!    [`BindError::StagingPathTooLong`]; that path is safe as well, because
+//!    of step 2: only the effective UID (or root) can rename entries in the
+//!    socket's directory and in the directories above it. It binds the
+//!    socket there, gives it to the service UID when that is not the
+//!    effective UID (`lchown`, which needs the privilege; a refusal is
+//!    [`BindError::Io`]) and sets mode 0600;
+//! 7. it hard-links the staged socket, through the same address, to the
+//!    socket path: `link` never replaces an entry, so one that appeared
+//!    since step 5 is left in place ([`BindError::PathOccupied`]); then it
+//!    clears the private directory as in step 4 (its entries through the
+//!    open directory);
 //! 8. it checks the path again: the same inode, a socket, owned by the
 //!    service UID, permission bits exactly 0600, else
 //!    [`BindError::NotVerified`].
@@ -115,9 +157,11 @@
 //! On shutdown, and when the [`LocalListener`] is dropped, the path is
 //! removed, still under the lock, only while it is the transport's socket;
 //! then the lock is released. A transport killed mid-bind leaves its
-//! private directory, which the next bind of the name removes (step 4); one
-//! killed while serving leaves a stale socket, which the next bind replaces
-//! (step 5).
+//! private directory, which the next bind of the name clears (step 4); one
+//! killed while creating the lock file leaves at most its private
+//! directory and `l` in it, never a lock file, and the next bind creates
+//! the lock file and clears the directory; one killed while serving leaves
+//! a stale socket, which the next bind replaces (step 5).
 //!
 //! # Protocol
 //!
@@ -208,11 +252,14 @@
 //! refusal, a store failure or a failed audit append writes nothing. A
 //! `preview` writes nothing and is always rolled back. A commit that fails
 //! is mapped as a store failure (`auth_unavailable` for a lost connection,
-//! see "Errors"); its outcome may be unknown, and the uncertain-commit rule
-//! of the registry applies (reconcile, then retry).
+//! see "Errors"); a commit that does not end within the transaction
+//! timeout, or that shutdown cuts, gets no response (see "Time limits").
+//! Either outcome may be unknown, and the uncertain-commit rule of the
+//! registry applies (reconcile, then retry).
 //!
 //! A response lost after its transaction committed (the client crashed or
-//! timed out, the write failed or timed out) cannot be told apart, by the
+//! timed out, the write failed or timed out, the transaction timeout or
+//! shutdown cut the request during its commit) cannot be told apart, by the
 //! client, from a request that was not served: it must reconcile before it
 //! retries. A retried bootstrap is `conflict` once the first one committed
 //! (read the recovery state and the operator); a retried restore of the
@@ -225,8 +272,10 @@
 //! Requests are serialized per transport: one in-process mutex is taken
 //! only after the request is read and parsed (a silent client never holds
 //! it) and held until its transaction has ended, committed or rolled back,
-//! also past the connection's deadline (see "Time limits"), so one process
-//! runs one bootstrap, issue, preview or restore at a time and holds one
+//! or was cut by the transaction timeout or at shutdown (its connection
+//! discarded), also past the connection's deadline (see "Time limits"), so
+//! one process runs one bootstrap, issue, preview or restore at a time and
+//! holds one
 //! database connection for it. It is not what makes bootstrap and a
 //! challenge one-shot: the database is (`bootstrap_instance`'s "Closure":
 //! the policy row lock and the `recovery_state` unique keys;
@@ -246,24 +295,47 @@
 //! connection ends (it is not refused; its own timeout bounds its wait).
 //!
 //! Each read of the request must return within [`Settings::idle_timeout`].
-//! [`Settings::deadline`], from the accept, bounds the read of the request,
-//! the wait for the mutex and the pool's acquire and `BEGIN`; past it the
-//! connection is closed without a response, and nothing was written. Once
-//! the transaction has begun, the deadline no longer applies: the
-//! transaction runs to its end, commit or rollback, bounded by its
-//! `lock_timeout` and `statement_timeout` (each statement, each lock wait;
-//! a timeout ends in `auth_unavailable`), with the mutex held, and the
-//! response is then written within the idle timeout. So a request is never
-//! cancelled mid-transaction, and the mutex is never released while its
-//! transaction is open. If the response cannot be written in time, the
-//! connection is closed: the transaction's outcome is then unknown to the
-//! client (see "Transactions", the lost response).
+//! [`Settings::deadline`], from the accept, bounds only the read of the
+//! request, the wait for the mutex and the pool's acquire and `BEGIN`; past
+//! it the connection is closed without a response, and nothing was written
+//! (a `BEGIN` cut short discards its connection, as below). Once the
+//! transaction has begun, the deadline no longer applies:
+//! [`Settings::transaction_timeout`] (default 60 seconds) bounds everything
+//! after `BEGIN`, setting the timeouts, the operation's statements and the
+//! commit or rollback, with the mutex held. Within it, the server's
+//! `lock_timeout` and `statement_timeout` ([`Settings::statement_timeout`])
+//! end a slow statement or lock wait (`auth_unavailable`), but only while
+//! the server answers: a stalled server or network, or a client library
+//! waiting on a socket, is ended by the transaction timeout alone. Past
+//! it the request's database connection is discarded, detached from the
+//! pool and closed at once, so it is never reused or tested mid-transaction
+//! and the server rolls back what it holds; the mutex is released, and the
+//! connection is closed **without a response**. Nothing was written,
+//! unless the commit had been sent: its outcome is then unknown, and the
+//! uncertain-commit rule applies (see "Transactions": reconcile, then
+//! retry). No response is the one answer that is true in every case.
+//!
+//! The response is then written within the idle timeout. If it cannot be
+//! written in time, the connection is closed: the transaction's outcome is
+//! then unknown to the client (see "Transactions", the lost response).
+//!
+//! So a connection lasts at most its deadline, the transaction timeout and
+//! the idle timeout: by default 30, 60 and 10 seconds, 100 seconds in all.
+//! That is the longest the operator's client (T13.10) must wait for a
+//! response before it treats the request as one whose outcome is unknown
+//! and reconciles; a response never comes later. On shutdown
+//! [`LocalListener::serve`] waits for the open connections at most
+//! [`SHUTDOWN_GRACE`] (10 seconds) and then cuts the rest, as the
+//! transaction timeout does (no response, the connection discarded, a
+//! commit's outcome unknown), so serving ends within the grace whatever
+//! the database does.
 //!
 //! [`Settings`] bound every value: each timeout at most [`MAX_TIMEOUT`]
 //! (`i32::MAX` milliseconds, PostgreSQL's limit), the statement timeout
-//! under the deadline, the TTL 1 second to 15 minutes, and
-//! [`Settings::max_connections`] 1 to [`MAX_CONNECTIONS`]
-//! ([`InvalidSettings`] names the value out of bounds).
+//! under the deadline and at most the transaction timeout, the TTL 1
+//! second to 15 minutes, and [`Settings::max_connections`] 1 to
+//! [`MAX_CONNECTIONS`] ([`InvalidSettings`] names the value out of bounds);
+//! no timer overflows.
 //!
 //! # Crashes
 //!
@@ -307,6 +379,7 @@
 //! | a malformed or oversized request (see "Protocol") | `invalid_request` |
 //! | a value the transport's checks refuse: not lowercase hexadecimal, an `instance_id` that is not a lowercase UUIDv7, a key that is not a canonical Ed25519 point of large order, a DER that is not one `SubjectPublicKeyInfo`, a bad `trust_anchor_ref`, an operation ID with a NUL | `invalid_request` |
 //! | idle timeout, deadline before the transaction began, no end of stream after the line | (closed, no response, nothing written) |
+//! | the transaction not ended within the transaction timeout, or cut at shutdown (the database connection is discarded; nothing written unless the commit was sent, whose outcome is then unknown) | (closed, no response) |
 //! | an issue whose replacement key a credential (live or revoked) already has | `conflict` |
 //! | [`BootstrapError`](crate::persistence::registry::BootstrapError) `AlreadyClosed`, `InstanceIdMismatch` | `conflict` |
 //! | [`ChallengeError`](crate::persistence::registry::ChallengeError) `NotIssuable`; no closed recovery state at the issue | `conflict` |
@@ -380,12 +453,24 @@ pub struct Settings {
     /// The longest wait for each read of the request, up to the end of the
     /// stream; over zero, at most [`MAX_TIMEOUT`]; default 10 seconds.
     pub idle_timeout: Duration,
-    /// The longest a connection lasts, from accept to the response's last
-    /// byte; over zero, at most [`MAX_TIMEOUT`]; default 30 seconds.
+    /// The connection's deadline, from the accept: it bounds the read of the
+    /// request, the wait for the transport's mutex and the pool's acquire
+    /// and `BEGIN`, and nothing after `BEGIN` (that is
+    /// [`Settings::transaction_timeout`]'s); over zero, at most
+    /// [`MAX_TIMEOUT`]; default 30 seconds.
     pub deadline: Duration,
     /// The transaction's `lock_timeout` and `statement_timeout`, in whole
-    /// milliseconds: 1 millisecond to [`MAX_TIMEOUT`]; default 5 seconds.
+    /// milliseconds: 1 millisecond to [`MAX_TIMEOUT`], under `deadline`;
+    /// default 5 seconds. The server enforces them, while it answers.
     pub statement_timeout: Duration,
+    /// The longest time from the end of `BEGIN` to the end of the commit or
+    /// rollback, everything on the transaction's connection included: the
+    /// backstop for a database or network that stopped answering, which
+    /// `statement_timeout` cannot end. Past it the connection is discarded
+    /// and closed without a response (a commit's outcome is then unknown;
+    /// see the module docs, "Time limits"). At least `statement_timeout`,
+    /// at most [`MAX_TIMEOUT`]; default 60 seconds.
+    pub transaction_timeout: Duration,
     /// The TTL of an issued challenge, [`MIN_CHALLENGE_TTL`] to
     /// [`MAX_CHALLENGE_TTL`]; default [`DEFAULT_CHALLENGE_TTL`] (5 minutes).
     pub challenge_ttl: Duration,
@@ -402,13 +487,15 @@ impl Default for Settings {
             idle_timeout: Duration::from_secs(10),
             deadline: Duration::from_secs(30),
             statement_timeout: Duration::from_secs(5),
+            transaction_timeout: Duration::from_secs(60),
             challenge_ttl: DEFAULT_CHALLENGE_TTL,
             max_connections: 32,
         }
     }
 }
 
-/// The longest `idle_timeout`, `deadline` and `statement_timeout`:
+/// The longest `idle_timeout`, `deadline`, `statement_timeout` and
+/// `transaction_timeout`:
 /// `i32::MAX` milliseconds (about 24.8 days), PostgreSQL's limit for
 /// `lock_timeout` and `statement_timeout`. It also keeps the connection's
 /// deadline, `now` plus [`Settings::deadline`], far from the end of the
@@ -417,6 +504,17 @@ pub const MAX_TIMEOUT: Duration = Duration::from_millis(2_147_483_647);
 
 /// The largest [`Settings::max_connections`].
 pub const MAX_CONNECTIONS: usize = 1024;
+
+/// The longest socket path, in bytes: one under the size of
+/// `sockaddr_un.sun_path`, which also holds the path's terminating NUL (107
+/// bytes on Linux, 103 on the BSDs and macOS). A longer one is
+/// [`BindError::PathTooLong`].
+pub const MAX_SOCKET_PATH_BYTES: usize = socket::SUN_PATH_BYTES - 1;
+
+/// How long [`LocalListener::serve`] waits for the open connections once
+/// its shutdown future resolves; past it the remaining connections are cut
+/// (see the module docs, "Time limits").
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 /// A [`Settings`] value out of its bounds, by field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,6 +526,9 @@ pub enum InvalidSettings {
     /// `statement_timeout` is under 1 millisecond, over [`MAX_TIMEOUT`], or
     /// not under `deadline`.
     StatementTimeout,
+    /// `transaction_timeout` is under `statement_timeout` or over
+    /// [`MAX_TIMEOUT`].
+    TransactionTimeout,
     /// `challenge_ttl` is outside 1 second to 15 minutes.
     ChallengeTtl,
     /// `max_connections` is outside 1 to [`MAX_CONNECTIONS`].
@@ -448,6 +549,10 @@ impl fmt::Display for InvalidSettings {
             Self::StatementTimeout => {
                 "the local transport's statement_timeout must be 1 to 2147483647 milliseconds \
                  and under its deadline"
+            }
+            Self::TransactionTimeout => {
+                "the local transport's transaction_timeout must be at least its \
+                 statement_timeout and at most 2147483647 milliseconds"
             }
             Self::ChallengeTtl => {
                 "the local transport's challenge_ttl must be 1 second to 15 minutes"
@@ -472,6 +577,9 @@ impl Settings {
             || self.statement_timeout >= self.deadline
         {
             return Err(InvalidSettings::StatementTimeout);
+        }
+        if !(self.statement_timeout..=MAX_TIMEOUT).contains(&self.transaction_timeout) {
+            return Err(InvalidSettings::TransactionTimeout);
         }
         if !(MIN_CHALLENGE_TTL..=MAX_CHALLENGE_TTL).contains(&self.challenge_ttl) {
             return Err(InvalidSettings::ChallengeTtl);
@@ -600,7 +708,11 @@ impl LocalListener {
 
     /// Accepts connections, each served on a task of its own, until
     /// `shutdown` resolves; then stops accepting, removes the socket and
-    /// waits for the open connections, each bounded by the deadline.
+    /// waits for the open connections, at most [`SHUTDOWN_GRACE`]: the
+    /// connections still open then are cut (closed without a response,
+    /// their database connections discarded, a commit in flight left with
+    /// an unknown outcome; see the module docs, "Time limits"), so serving
+    /// ends within the grace whatever the database does.
     pub async fn serve(self, shutdown: impl Future<Output = ()>) {
         let mut connections = JoinSet::new();
         // A permit per connection, taken before its accept and held until it
@@ -633,7 +745,12 @@ impl LocalListener {
         }
         drop(self.listener);
         drop(self.socket);
-        while connections.join_next().await.is_some() {}
+        let drained = async { while connections.join_next().await.is_some() {} };
+        if tokio::time::timeout(SHUTDOWN_GRACE, drained).await.is_err() {
+            // Aborted: each task's request future is dropped, which discards
+            // its database connection and releases the mutex.
+            connections.shutdown().await;
+        }
     }
 }
 
@@ -652,6 +769,10 @@ mod tests {
         );
         assert_eq!(Settings::default().check(), Ok(()));
         assert_eq!(Settings::default().challenge_ttl, DEFAULT_CHALLENGE_TTL);
+        assert_eq!(
+            Settings::default().transaction_timeout,
+            Duration::from_secs(60)
+        );
         let with = |change: fn(&mut Settings)| {
             let mut settings = Settings::default();
             change(&mut settings);
@@ -692,6 +813,18 @@ mod tests {
                 |s| s.statement_timeout = s.deadline,
                 InvalidSettings::StatementTimeout,
             ),
+            (
+                |s| s.transaction_timeout = s.statement_timeout - Duration::from_nanos(1),
+                InvalidSettings::TransactionTimeout,
+            ),
+            (
+                |s| s.transaction_timeout = MAX_TIMEOUT + Duration::from_nanos(1),
+                InvalidSettings::TransactionTimeout,
+            ),
+            (
+                |s| s.transaction_timeout = Duration::ZERO,
+                InvalidSettings::TransactionTimeout,
+            ),
             (|s| s.max_connections = 0, InvalidSettings::MaxConnections),
             (
                 |s| s.max_connections = MAX_CONNECTIONS + 1,
@@ -703,10 +836,6 @@ mod tests {
         for change in [
             (|s: &mut Settings| s.statement_timeout = Duration::from_millis(1))
                 as fn(&mut Settings),
-            |s| {
-                s.statement_timeout = MAX_TIMEOUT - Duration::from_nanos(1);
-                s.deadline = MAX_TIMEOUT;
-            },
             |s| s.statement_timeout = s.deadline - Duration::from_nanos(1),
             |s| s.idle_timeout = Duration::from_nanos(1),
             |s| s.idle_timeout = MAX_TIMEOUT,
@@ -717,6 +846,13 @@ mod tests {
             |s| s.deadline = MAX_TIMEOUT,
             |s| s.max_connections = 1,
             |s| s.max_connections = MAX_CONNECTIONS,
+            |s| s.transaction_timeout = s.statement_timeout,
+            |s| s.transaction_timeout = MAX_TIMEOUT,
+            |s| {
+                s.statement_timeout = MAX_TIMEOUT - Duration::from_nanos(1);
+                s.deadline = MAX_TIMEOUT;
+                s.transaction_timeout = MAX_TIMEOUT;
+            },
             |s| s.challenge_ttl = MIN_CHALLENGE_TTL,
             |s| s.challenge_ttl = MAX_CHALLENGE_TTL,
         ] {
@@ -726,6 +862,11 @@ mod tests {
             InvalidSettings::StatementTimeout.to_string(),
             "the local transport's statement_timeout must be 1 to 2147483647 milliseconds and \
              under its deadline"
+        );
+        assert_eq!(
+            InvalidSettings::TransactionTimeout.to_string(),
+            "the local transport's transaction_timeout must be at least its statement_timeout \
+             and at most 2147483647 milliseconds"
         );
     }
 
