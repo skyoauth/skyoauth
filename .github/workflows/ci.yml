@@ -470,12 +470,58 @@ jobs:
       - name: Run tests
         run: cargo nextest run --locked --workspace --exclude skyoauth-scenarios --all-features --profile ci --run-ignored all
 
+      # The local transport tests that need root and a second local user
+      # (`SKYOAUTH_IT_PEER_USER`: the cross-UID peer check, the bind for
+      # another UID, the swap and rename races, the unlistable directory).
+      # The run above is not root, so those tests print a notice and pass
+      # there; this run gives them the user and root, through the runner's
+      # passwordless sudo (the step fails if there is none). Output is not
+      # captured, so a notice a test prints is in the log: the step fails
+      # on any notice that says the peer user is missing, and shows every
+      # other notice (a user namespace the runner denied, a bind without
+      # /proc not tested) as a warning annotation and in the job summary.
+      - name: Run the root-only local transport tests
+        run: |
+          set -euo pipefail
+          sudo -n true || { echo "::error::This runner has no passwordless sudo; the root-only local transport tests cannot run"; exit 1; }
+          peer=skyoauth-peer
+          sudo useradd --no-create-home --shell /usr/sbin/nologin "$peer"
+          log="$RUNNER_TEMP/local-transport-root.log"
+          status=0
+          sudo env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
+            "CARGO_TERM_COLOR=$CARGO_TERM_COLOR" "SKYOAUTH_IT_DATABASE_URL=$SKYOAUTH_IT_DATABASE_URL" "SKYOAUTH_IT_PEER_USER=$peer" \
+            cargo nextest run --locked -p skyoauth-service --test local_transport --all-features --profile ci-root --run-ignored all --no-capture \
+            2>&1 | tee "$log" || status=$?
+          # The files the root run wrote belong to root; give them back.
+          sudo chown -R "$(id -u):$(id -g)" target
+          notices="$(grep -a 'NOTICE:' "$log" | sort -u || true)"
+          {
+            echo "### Root-only local transport tests"
+            grep -a 'tests run:' "$log" | tail -1 | sed 's/^ *//' || true
+            if [ -n "$notices" ]; then
+              echo "Notices printed by tests (a test that could not run its check):"
+              printf '%s\n' "$notices" | sed 's/^/- /'
+            else
+              echo "No test printed a notice: every root-only check ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$notices" ]; then
+            printf '%s\n' "$notices" | while IFS= read -r line; do echo "::warning::$line"; done
+          fi
+          if printf '%s\n' "$notices" | grep -q 'SKYOAUTH_IT_PEER_USER'; then
+            echo "::error::A test printed a notice about SKYOAUTH_IT_PEER_USER although the step sets it to $peer: the root-only checks did not run"
+            exit 1
+          fi
+          exit "$status"
+
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: service-nextest-junit-${{ github.run_attempt }}
-          path: target/nextest/ci/junit.xml
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci-root/junit.xml
           if-no-files-found: warn
 
   msrv:

@@ -12,3 +12,14 @@ fail-fast = false
 # Written to target/nextest/ci/junit.xml.
 [profile.ci.junit]
 path = "junit.xml"
+
+# The `service-nextest` job's second run, of the root-only local transport
+# tests (see the step "Run the root-only local transport tests"). Same
+# settings as `ci`; its own JUnit path, so it does not overwrite the first
+# run's report. Written to target/nextest/ci-root/junit.xml.
+[profile.ci-root]
+retries = 0
+fail-fast = false
+
+[profile.ci-root.junit]
+path = "junit.xml"
