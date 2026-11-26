@@ -2042,10 +2042,14 @@ async fn an_approval_after_the_writer_disables_its_entry_is_refused() {
 /// as the waiting backend moves on can pair the text of its previous
 /// statement with the lock wait of its next one. So it first finds the
 /// pid of the one backend that waits for a lock (more than one panics),
-/// and then reads that pid's `query` again in a new statement, and so a
-/// new snapshot: one taken after the wait was seen, while the backend
-/// still waits (the caller releases the lock only after this returns), so
-/// it holds the waiting statement's text.
+/// and then reads that pid's `query` again, by the pid alone, in a new
+/// statement and so a new snapshot: one taken after the wait was seen.
+/// Both callers hold the conflicting lock until this returns, so the
+/// backend is still in the same waiting statement at that snapshot, and
+/// its `query` is that statement's text. The second read does not ask for
+/// the wait again: the backend can clear its wait event for a moment, as
+/// when it wakes to run the deadlock check, while it still waits in the
+/// same statement.
 async fn waiting_statement(pool: &PgPool) -> String {
     for _ in 0..1000 {
         let waiting: Vec<i32> = sqlx::query_scalar(
@@ -2058,14 +2062,11 @@ async fn waiting_statement(pool: &PgPool) -> String {
         match waiting.as_slice() {
             [] => tokio::time::sleep(Duration::from_millis(10)).await,
             [pid] => {
-                return sqlx::query_scalar(
-                    "SELECT query FROM pg_stat_activity \
-                     WHERE pid = $1 AND wait_event_type = 'Lock'",
-                )
-                .bind(pid)
-                .fetch_one(pool)
-                .await
-                .unwrap();
+                return sqlx::query_scalar("SELECT query FROM pg_stat_activity WHERE pid = $1")
+                    .bind(pid)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
             }
             many => panic!("more than one backend waits: {many:?}"),
         }

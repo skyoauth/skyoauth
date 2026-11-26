@@ -29,6 +29,7 @@ use skyoauth_service::persistence::{
     },
 };
 use skyoauth_service::policy::{EligibleBinding, Evidence, match_binding};
+use sqlx::postgres::PgPoolOptions;
 
 /// The `sub` every binding of the seed names.
 const SUB: &str = "repo:acme/platform:environment:production";
@@ -576,10 +577,11 @@ fn assert_not_selectable(err: &SelectionError, case: &str) {
 
 /// A store failure is `Store`, never `NotSelectable`, so a caller can tell
 /// "retry" from "deny". A selection whose connection the server terminates
-/// while the statement waits for a lock is `Store` with the server's
-/// `57P01`, not a decode error; and on a pool the client closed, every
-/// selector (a hit and each kind of miss alike) is `Store` with sqlx's
-/// `PoolClosed`. Before either, the same misses are each the one
+/// while the statement waits for the lock another transaction holds is
+/// `Store` with the server's `57P01`, not a decode error; on a full pool
+/// every selector (a hit and each kind of miss alike) is `Store` with
+/// sqlx's `PoolTimedOut`, and on a pool the client closed with its
+/// `PoolClosed`. Before any of these, the same misses are each the one
 /// `NotSelectable`.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -607,6 +609,12 @@ async fn a_store_failure_is_store_never_not_selectable() {
     }
 
     // The server ends the connection while the statement waits for a lock.
+    // The observer owns the lock holder and always rolls it back before it
+    // returns, and gives up when the selection returns first or after
+    // `LOCK_WAIT_DEADLINE` without seeing the wait; so the selection cannot
+    // stay blocked and the join always ends, and a selection that never
+    // waited is a prompt failure, not a hang.
+    const LOCK_WAIT_DEADLINE: Duration = Duration::from_secs(10);
     let mut blocker = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE service_grant IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
@@ -617,31 +625,59 @@ async fn a_store_failure_is_store_never_not_selectable() {
         .fetch_one(&mut victim)
         .await
         .unwrap();
-    let (result, ()) = tokio::join!(
-        select_grant(&mut victim, "ten_a", "grt_a", "src_gh", GrantMode::Direct),
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    let returned = std::cell::Cell::new(false);
+    let (result, (blocked_by, terminated)) = tokio::join!(
         async {
-            loop {
-                let waits: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT FROM pg_stat_activity \
-                     WHERE pid = $1 AND wait_event_type = 'Lock')",
-                )
-                .bind(pid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-                if waits {
-                    break;
+            let result =
+                select_grant(&mut victim, "ten_a", "grt_a", "src_gh", GrantMode::Direct).await;
+            returned.set(true);
+            result
+        },
+        async {
+            // The pids that block the selection, once it waits for a lock.
+            let blocked_by = tokio::time::timeout(LOCK_WAIT_DEADLINE, async {
+                loop {
+                    if returned.get() {
+                        return None;
+                    }
+                    let blocking: Option<Vec<i32>> = sqlx::query_scalar(
+                        "SELECT pg_blocking_pids(pid) FROM pg_stat_activity \
+                         WHERE pid = $1 AND wait_event_type = 'Lock'",
+                    )
+                    .bind(pid)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                    if blocking.is_some() {
+                        return blocking;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
-                .bind(pid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            assert!(terminated);
+            })
+            .await
+            .unwrap_or(None);
+            let terminated = blocked_by.is_some()
+                && sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                    .bind(pid)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            blocker.rollback().await.unwrap();
+            (blocked_by, terminated)
         }
     );
+    let Some(blocked_by) = blocked_by else {
+        panic!(
+            "the selection on backend {pid} never waited for the lock within \
+             {LOCK_WAIT_DEADLINE:?}; it returned {result:?}"
+        );
+    };
+    assert_eq!(blocked_by, [blocker_pid], "backend {pid}");
+    assert!(terminated, "backend {pid} was not terminated: {result:?}");
     let err = result.unwrap_err();
     match &err {
         SelectionError::Store(RegistryError::Other(sqlx::Error::Database(database))) => {
@@ -655,7 +691,32 @@ async fn a_store_failure_is_store_never_not_selectable() {
     );
     assert!(err.source().is_some());
     drop(victim);
-    blocker.rollback().await.unwrap();
+
+    // A full pool: its one connection is held, so every selector times out
+    // acquiring one and is the store failure.
+    let full = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_millis(200))
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let held = full.acquire().await.unwrap();
+    for (tenant, grant, source, mode) in selectors {
+        let err = select(&full, tenant, grant, source, mode)
+            .await
+            .unwrap_err();
+        let case = format!("{tenant} {grant} {source} {mode}");
+        assert!(
+            matches!(
+                err,
+                SelectionError::Store(RegistryError::Other(sqlx::Error::PoolTimedOut))
+            ),
+            "{case}: {err:?}"
+        );
+        assert_store_failure(&err, &case);
+    }
+    drop(held);
+    full.close().await;
 
     // A pool the client closed: every selector is the store failure.
     pool.close().await;
@@ -671,15 +732,21 @@ async fn a_store_failure_is_store_never_not_selectable() {
             ),
             "{case}: {err:?}"
         );
-        assert_eq!(
-            err.to_string(),
-            "grant selection failed: registry database error",
-            "{case}"
-        );
-        assert!(err.source().is_some(), "{case}");
-        assert_ne!(err, SelectionError::NotSelectable, "{case}");
+        assert_store_failure(&err, &case);
     }
     db.drop([pool]).await;
+}
+
+/// Asserts that `err`, a pool failure, reads as a store failure: its
+/// text, a source, and not equal to `NotSelectable`.
+fn assert_store_failure(err: &SelectionError, case: &str) {
+    assert_eq!(
+        err.to_string(),
+        "grant selection failed: registry database error",
+        "{case}"
+    );
+    assert!(err.source().is_some(), "{case}");
+    assert_ne!(*err, SelectionError::NotSelectable, "{case}");
 }
 
 fn binding(id: &str, policy: &[(&str, &str)]) -> EligibleBinding {
