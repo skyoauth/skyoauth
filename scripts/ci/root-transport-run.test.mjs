@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, test } from 'node:test';
@@ -209,6 +209,8 @@ describe('run', () => {
     return { ...r, log: logText, lines: r.stdout.split('\n') };
   }
   const TOKEN = /^::stop-commands::([0-9a-f]{32})$/;
+  // How many lines resume commands (the token on a line of its own).
+  const resumes = (lines, token) => lines.filter((l) => l === `::${token}::`).length;
 
   test('workflow commands are stopped around the output, which is also in the log; the status is the command\'s', () => {
     const r = runWith('echo "::error::from a test"\necho "to stderr ::warning::x" >&2\nexit 3\n');
@@ -233,36 +235,73 @@ describe('run', () => {
     assert.deepEqual(r.lines.slice(1), ['no newline', `::${token}::`, '']);
   });
 
-  test('commands resume when the log cannot be written', () => {
-    const r = runWith('echo x\n', join(TOP, 'missing-dir', 'run.log'));
-    assert.equal(r.status, 2);
-    const token = TOKEN.exec(r.lines[0])[1];
-    const resumed = r.lines.indexOf(`::${token}::`);
-    assert.ok(resumed > 0, r.stdout);
-    assert.match(r.lines.slice(resumed + 1).join('\n'), /^::error::could not write the log /m);
+  test('when the log cannot be written: commands resume once, then the error is a live annotation, and the exit is 2', () => {
+    for (const exit of [0, 3]) {
+      const logPath = join(TOP, 'missing-dir', 'run.log');
+      const r = runWith(`echo x\nexit ${exit}\n`, logPath);
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      const token = TOKEN.exec(r.lines[0])?.[1];
+      assert.ok(token, r.stdout);
+      // The token line comes before the annotation: an annotation inside
+      // the stopped region would be read as plain text.
+      assert.deepEqual(r.lines.slice(1), ['x', '', `::${token}::`, `::error::could not write the log ${logPath} (tee exited 1)`, '']);
+      assert.equal(resumes(r.lines, token), 1, r.stdout);
+    }
   });
 
-  // Starts `run` of a command that prints `ready` and then waits for its
-  // stdin to close (`cat`) in a process group of its own, sends SIGNAL once
-  // `ready` is out, to the whole group (as a cancelled job's process tree
-  // gets it) or to the script alone, and returns the exit status and
-  // stdout's lines. The signal follows the command's own output, and with
-  // `toGroup` false stdin is closed only after the signal was sent; the one
-  // timer is a backstop that kills the group, so a broken script fails the
-  // test instead of hanging it.
-  function runSignalled(signal, toGroup) {
+  // The signal tests below cover signals delivered to the helper, that is
+  // when the script itself gets TERM, INT or HUP (a signal to its process
+  // group, e.g. from a terminal or `timeout`); on a cancel the Actions
+  // runner signals only the step's shell, so the script usually gets none,
+  // and a stop it leaves ends with the step. None of them is a hosted
+  // cancellation.
+  //
+  // runSignalled starts `run` of a command that prints `ready` and then
+  // waits for its stdin to close (the `read` builtin) in a process group of
+  // its own, and sends SIGNAL to the helper:
+  //   - to: 'group': to the whole group once `ready` is out;
+  //   - to: 'script': to the script alone once `ready` is out, and stdin is
+  //     closed only after the signal was sent;
+  //   - hook: NAME: from a stand-in for the external command NAME, put
+  //     first on PATH, the first time the script runs it: the stand-in
+  //     sends SIGNAL to the script (whose PID the test wrote to a file
+  //     before closing stdin, so before the command can end), records that
+  //     it did, and then runs the real NAME. `kill` returns once the signal
+  //     is pending, so it reaches the script at that point of its run.
+  // It returns the exit status, the signal that killed the script (null if
+  // none), stdout's lines and whether the hook fired. The one timer is a
+  // backstop that kills the group, so a broken script fails the test
+  // instead of hanging it.
+  function runSignalled(signal, { to, hook } = {}) {
     const cmd = fresh('cmd.sh');
-    writeFileSync(cmd, 'echo ready\ncat >/dev/null\necho done\n');
-    const child = spawn('sh', [SCRIPT, 'run', fresh('run.log'), 'sh', cmd], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    writeFileSync(cmd, 'echo ready\nwhile read -r _; do :; done\necho done\n');
+    const env = { ...process.env };
+    const pidFile = fresh('pid');
+    const fired = fresh('fired');
+    if (hook) {
+      const bin = fresh('bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, hook),
+        `#!/bin/sh\nif [ ! -e "$HOOK_FIRED" ]; then\n  : > "$HOOK_FIRED"\n  read -r pid < "$HOOK_PID"\n  kill -${signal.replace(/^SIG/, '')} "$pid"\nfi\nPATH=$HOOK_REAL_PATH exec ${hook} "$@"\n`,
+      );
+      chmodSync(join(bin, hook), 0o755);
+      Object.assign(env, { PATH: `${bin}:${process.env.PATH}`, HOOK_REAL_PATH: process.env.PATH, HOOK_PID: pidFile, HOOK_FIRED: fired });
+    }
+    const child = spawn('sh', [SCRIPT, 'run', fresh('run.log'), 'sh', cmd], { detached: true, stdio: ['pipe', 'pipe', 'pipe'], env });
+    if (hook) {
+      writeFileSync(pidFile, `${child.pid}\n`);
+      child.stdin.end();
+    }
     let stdout = '';
     let sent = false;
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
       stdout += chunk;
-      if (!sent && /^ready$/m.test(stdout)) {
+      if (to && !sent && /^ready$/m.test(stdout)) {
         sent = true;
-        process.kill(toGroup ? -child.pid : child.pid, signal);
-        if (!toGroup) child.stdin.end();
+        process.kill(to === 'group' ? -child.pid : child.pid, signal);
+        child.stdin.end();
       }
     });
     const backstop = setTimeout(() => {
@@ -274,28 +313,67 @@ describe('run', () => {
       child.on('error', reject);
       child.on('close', (status, sig) => {
         clearTimeout(backstop);
-        resolve({ status, signal: sig, lines: stdout.split('\n') });
+        resolve({ status, signal: sig, lines: stdout.split('\n'), fired: existsSync(fired) });
       });
     });
   }
 
-  for (const [signal, status] of [['SIGTERM', 143], ['SIGINT', 130], ['SIGHUP', 129]]) {
-    test(`a ${signal} to the process group still resumes commands and exits ${status}`, async () => {
-      const r = await runSignalled(signal, true);
-      assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
-      assert.equal(r.status, status, r.lines.join('\n'));
-      const token = TOKEN.exec(r.lines[0])?.[1];
-      assert.ok(token, r.lines.join('\n'));
-      assert.deepEqual(r.lines.slice(1), ['ready', '', `::${token}::`, '']);
-    });
-  }
+  describe('a signal delivered to the helper', () => {
+    for (const [signal, status] of [['SIGTERM', 143], ['SIGINT', 130], ['SIGHUP', 129]]) {
+      test(`a ${signal} delivered to the helper's process group still resumes commands, once, and exits ${status}`, async () => {
+        const r = await runSignalled(signal, { to: 'group' });
+        assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
+        assert.equal(r.status, status, r.lines.join('\n'));
+        const token = TOKEN.exec(r.lines[0])?.[1];
+        assert.ok(token, r.lines.join('\n'));
+        assert.deepEqual(r.lines.slice(1), ['ready', '', `::${token}::`, '']);
+      });
+    }
 
-  test('a SIGTERM to the script alone resumes commands after the command ends, and exits 143', async () => {
-    const r = await runSignalled('SIGTERM', false);
-    assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
-    assert.equal(r.status, 143, r.lines.join('\n'));
-    const token = TOKEN.exec(r.lines[0])?.[1];
-    assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
+    test('a SIGTERM delivered to the helper alone resumes commands, once, after the command ends, and exits 143', async () => {
+      const r = await runSignalled('SIGTERM', { to: 'script' });
+      assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
+      assert.equal(r.status, 143, r.lines.join('\n'));
+      const token = TOKEN.exec(r.lines[0])?.[1];
+      assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
+    });
+
+    // After the command and the copy have ended and before the script
+    // exits: `cat` reads the command's status, `rm` removes that file on
+    // the way out. The resume token is printed exactly once either way.
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+      test(`a ${signal} delivered to the helper after the command ended, while it reads the status, resumes commands once`, async () => {
+        const r = await runSignalled(signal, { hook: 'cat' });
+        assert.ok(r.fired, 'the cat stand-in did not run: the test no longer reaches this point of the script');
+        assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
+        assert.equal(r.status, { SIGTERM: 143, SIGINT: 130, SIGHUP: 129 }[signal], r.lines.join('\n'));
+        const token = TOKEN.exec(r.lines[0])?.[1];
+        assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
+      });
+    }
+
+    test('a SIGTERM delivered to the helper while it cleans up on the way out neither kills it nor repeats the token', async () => {
+      const r = await runSignalled('SIGTERM', { hook: 'rm' });
+      assert.ok(r.fired, 'the rm stand-in did not run: the test no longer reaches this point of the script');
+      assert.equal(r.signal, null, `killed by ${r.signal}: the signal was not trapped on the way out`);
+      // The command's status, or 143 if the signal is honoured: either
+      // way, commands resume exactly once.
+      assert.ok([0, 143].includes(r.status), String(r.status));
+      const token = TOKEN.exec(r.lines[0])?.[1];
+      assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
+    });
+  });
+
+  test('the EXIT trap is the only place that prints the resume token, and it is never cleared', () => {
+    const source = readFileSync(SCRIPT, 'utf8');
+    const body = source.slice(source.indexOf('\nrun() {'), source.indexOf('\nsummarize() {'));
+    assert.ok(body.length > 0);
+    // One printf of the token, inside `resume`, and `resume` is the EXIT trap.
+    assert.equal(body.split("printf '\\n::%s::\\n' \"$token\"").length - 1, 1, 'the resume token is printed from more than one place');
+    const resume = body.slice(body.indexOf('resume() {'), body.indexOf('\n    }\n', body.indexOf('resume() {')));
+    assert.match(resume, /printf '\\n::%s::\\n' "\$token"/);
+    assert.deepEqual(body.match(/^\s*trap\b.*\bEXIT\b.*$/gm), ['    trap resume EXIT']);
+    assert.doesNotMatch(body, /^\s*trap\s+-/m, 'a trap is cleared');
   });
 
   test('usage errors exit 2', () => {
