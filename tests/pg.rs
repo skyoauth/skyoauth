@@ -31,10 +31,16 @@
 //! tests the harness's own database teardown (`src/pg.rs`),
 //! `harness::wire_errors` the wire error catalogue
 //! `tests/conformance/fixtures/_wire/errors.v1.json` against the service's
-//! `admin_http::ErrorCode` (no server needed), and
+//! `admin_http::ErrorCode` (no server needed),
 //! `harness::wire_fixture_keys` pins `security::wire_fixture::key` to
-//! known answers (no database needed); their tests are
-//! not scenario tests, no name in them matches `a\d\d_`, and the registry
+//! known answers (no database needed), `harness::recovery_key_fixture`
+//! feeds the cases of `tests/conformance/fixtures/_recovery/key.v1.json`
+//! to the service's recovery key checks (through bootstrap and the
+//! challenge issue, on a database), and `harness::public_identity_fixture`
+//! those of `_recovery/public_identity.v1.json` to its
+//! `canonical_public_identity` (no database needed): the cases the
+//! `skyoauth-operator` tests check against the workstation's copies. Their
+//! tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
 
 mod security {
@@ -89,6 +95,10 @@ mod security {
 mod harness {
     #[path = "pg_teardown.rs"]
     mod pg_teardown;
+    #[path = "public_identity_fixture.rs"]
+    mod public_identity_fixture;
+    #[path = "recovery_key_fixture.rs"]
+    mod recovery_key_fixture;
     #[path = "wire_errors.rs"]
     mod wire_errors;
     #[path = "wire_fixture_keys.rs"]

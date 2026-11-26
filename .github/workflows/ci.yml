@@ -567,6 +567,58 @@ jobs:
       - name: Check
         run: cargo check --locked --workspace --all-targets --all-features
 
+  # The tests of `skyoauth-operator` on the three native OSes (conformance
+  # layout §1.1, environment `native-3os`: the legs operator/ubuntu,
+  # operator/macos and operator/windows). Only the tests run here: format
+  # and lint are OS-independent and the `rust` job already runs them over
+  # the whole workspace, this crate included. The conformance wiring (JUnit
+  # leg artifacts, `conformance-report`) comes with the PR that makes these
+  # tests registry evidence.
+  operator:
+    name: Operator (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu
+            runner: ubuntu-24.04
+          - os: macos
+            runner: macos-15
+          - os: windows
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.151
+
+      # The operator's tests read the fixtures byte for byte, and
+      # .gitattributes pins LF for tests/conformance/**; this proves the
+      # checkout honoured it (a CR in a fixture would change what the known
+      # answers hash or compare), on every leg.
+      - name: Check the fixtures have LF line endings
+        shell: bash
+        run: |
+          if grep -rl "$(printf '\r')" tests/conformance/fixtures; then
+            echo "::error::A fixture under tests/conformance/fixtures has CR line endings"
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo nextest run --locked -p skyoauth-operator --all-features --profile ci
+
   # The release build's guard for `test-support`, the feature that exposes
   # the ungated registry and trust writers to tests
   # (scripts/ci/check-release-features.mjs): the feature resolution of a
@@ -813,7 +865,7 @@ jobs:
       - name: Check that the registered tests exist
         if: success() || failure()
         run: |
-          cargo nextest list --locked -p skyoauth-scenarios --profile ci --message-format json > "$RUNNER_TEMP/nextest-list.json"
+          cargo nextest list --locked -p skyoauth-operator -p skyoauth-scenarios --profile ci --message-format json > "$RUNNER_TEMP/nextest-list.json"
           node scripts/ci/check-conformance-registry.mjs --nextest-list "$RUNNER_TEMP/nextest-list.json"
 
   # Informational conformance report: runs scripts/ci/report-conformance.mjs
@@ -1158,6 +1210,7 @@ jobs:
       - rust-coverage
       - service-nextest
       - msrv
+      - operator
       - release-features
       - scenarios-pg
       - typescript

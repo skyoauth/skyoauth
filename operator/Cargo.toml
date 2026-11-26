@@ -1,0 +1,36 @@
+[package]
+name = "skyoauth-operator"
+version.workspace = true
+edition.workspace = true
+description = "The skyoauth workstation operator library: recovery key and public identity formats."
+license-file = "../LICENSE"
+rust-version.workspace = true
+# Not published until a registry and a release policy are decided.
+publish = false
+# One test target per CI job (conformance layout §6); a target is added
+# with its first test.
+autotests = false
+
+# No dependency on skyoauth-service, not even as a dev-dependency: the
+# crate builds and tests on Linux, macOS and Windows with no server or
+# database (ADR-013 item 6, ADR-017 item 15). The formats it shares with the
+# service are reimplemented here and pinned by the fixtures under
+# `tests/conformance/fixtures/`, which both sides check.
+[dependencies]
+# The recovery key checks: decode, re-encode, small order. The same version
+# and features as the service's.
+ed25519-dalek = { version = "3.0.0", default-features = false }
+# The SHA-256 of a public identity. The same version and features as the
+# service's.
+sha2 = { version = "0.11.1", default-features = false }
+
+[dev-dependencies]
+# Reads the fixture files.
+serde_json = "1.0.154"
+
+# Target `operator`: the tests of the `operator` job, whose legs are
+# ubuntu, macos and windows (conformance layout §1.1, environment
+# `native-3os`).
+[[test]]
+name = "operator"
+path = "tests/operator.rs"
