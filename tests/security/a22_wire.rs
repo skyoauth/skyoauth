@@ -21,7 +21,9 @@
 //! certificate chain is verified against the deployment trust anchor (the
 //! credential's `trust_anchor_ref`), and no presented key is canonicalized
 //! into `public_identity` by the server. Those legs stay open, with slices
-//! S5, S6 and S7; the admin router is served nowhere until the in-process
+//! S6 (the handshake and the chain against the trust anchor), S7 (the
+//! canonicalization of the presented key) and S5 (enrolment and the
+//! credential state, as the lead's working split); the admin router is served nowhere until the in-process
 //! rustls acceptor of S6 lands (D5), and nothing here serves it. The
 //! operator client of the OP harness component, `skyoauth-operator`
 //! (T13.10), does not exist either. The fixture's keys are canonical
@@ -110,7 +112,9 @@
 //! # Not covered here
 //!
 //! - The mTLS legs above (handshake, chain against `trust_anchor_ref`, key
-//!   canonicalization by the server): S5, S6 and S7.
+//!   canonicalization by the server): S6 for the handshake and the chain, S7
+//!   for the canonicalization, S5 for enrolment and credential state (the
+//!   lead's split; tasks §13 does not say).
 //! - Any write: the router exposes none yet, so no write endpoint is shown
 //!   to ignore a claim (`admin_http`, "Served nowhere").
 //! - What a request with the right key but an expired or untrusted
