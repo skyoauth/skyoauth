@@ -40,6 +40,15 @@
 //!   unknown tenant or source, is refused by
 //!   `consumed_assertion_trust_source_id_fkey` and writes nothing
 //!   (`a24_neg_consume_names_other_tenants_source`).
+//!   A set holding one key twice, under the same or another digest-key
+//!   version, alone, next to another key or separated by another key
+//!   (`1, 2, 1`), is refused before any statement with the registry's
+//!   encode error (`RegistryError::Other`), never a replay, and writes
+//!   nothing. On a closed pool it is the same encode error, not
+//!   `PoolClosed`, so the check needs no database. Afterwards each member
+//!   of the refused sets still consumes once, then replays. As a control,
+//!   a set of distinct keys consumes once as a set and replays the second
+//!   time (`a24_neg_duplicate_key_in_set_is_refused_not_a_replay`).
 //!
 //! **Once per source.** The key is `(tenant_id, trust_source_id,
 //! replay_key_digest)`. A tenant that registers the same issuer as two
@@ -72,7 +81,7 @@
 //! across grants, a missing `jti`, the wire error of OQ-ERR-7, a retry that
 //! needs a fresh assertion); digest-key rotation and restore (A35); the
 //! function-level contract that `service/tests/registry_assertion.rs`
-//! covers (encode errors before any statement, `SERIALIZABLE`, a deadlock
+//! covers (the other encode errors before any statement, `SERIALIZABLE`, a deadlock
 //! between caller transactions, the mapping of every `consumed_assertion`
 //! check, the no-update trigger).
 
@@ -930,4 +939,103 @@ async fn a24_neg_consume_names_other_tenants_source() {
     }
     assert_eq!(rows(&pool).await.len(), 4);
     db.drop([pool]).await;
+}
+
+/// A set that holds one key twice is refused before any statement runs:
+/// `RegistryError::Other` with the encode error the registry gives for it,
+/// never `Consumption::Replay`, since no member was ever consumed. Twice
+/// under the same or another digest-key version, alone, next to another
+/// key, or separated by another key (`1, 2, 1`, which a check of
+/// neighbours in the caller's order misses), in both tenants. It writes
+/// nothing: no row, and each member then consumes exactly once and replays
+/// after. Before any statement: on a closed pool, where any statement fails
+/// with `PoolClosed`, every one of these sets is still the same encode
+/// error. Control: the same members with distinct keys are one set that
+/// consumes once and replays the second time.
+#[tokio::test]
+async fn a24_neg_duplicate_key_in_set_is_refused_not_a_replay() {
+    let (db, pool) = two_tenants().await;
+    // Closed on the client side, as in a24_neg_store_failure_never_consumes.
+    let closed = db.pool().await;
+    closed.close().await;
+    for side in [A, B] {
+        let t = side.tenant;
+        let sets = [
+            (
+                "twice",
+                vec![proof(side, 1, "dk_1"), proof(side, 1, "dk_1")],
+            ),
+            (
+                "twice under two versions",
+                vec![proof(side, 1, "dk_1"), proof(side, 1, "dk_2")],
+            ),
+            (
+                "twice after another key",
+                vec![
+                    proof(side, 2, "dk_1"),
+                    proof(side, 1, "dk_1"),
+                    proof(side, 1, "dk_2"),
+                ],
+            ),
+            (
+                "twice, separated by another key",
+                vec![
+                    proof(side, 1, "dk_1"),
+                    proof(side, 2, "dk_1"),
+                    proof(side, 1, "dk_2"),
+                ],
+            ),
+        ];
+        let before = rows(&pool).await;
+        for (name, set) in &sets {
+            for (pool_name, executor) in [("pool", &pool), ("closed pool", &closed)] {
+                let case = format!("{t} {name} ({} members), {pool_name}", set.len());
+                match registry::consume_assertion_set(executor, set).await {
+                    Err(RegistryError::Other(sqlx::Error::Encode(err))) => {
+                        assert_eq!(err.to_string(), "duplicate key in assertion set", "{case}");
+                    }
+                    other => panic!("{case}: expected an encode error, not a replay: {other:?}"),
+                }
+                assert_eq!(rows(&pool).await, before, "{case}");
+            }
+        }
+        // Nothing was consumed: each member consumes once, then replays.
+        for n in [1, 2] {
+            assert_eq!(
+                registry::consume_assertion(&pool, &proof(side, n, "dk_1"))
+                    .await
+                    .unwrap(),
+                Consumption::Consumed,
+                "{t} {n}"
+            );
+            assert_eq!(
+                registry::consume_assertion(&pool, &proof(side, n, "dk_2"))
+                    .await
+                    .unwrap(),
+                Consumption::Replay,
+                "{t} {n}"
+            );
+            assert_eq!(versions(&pool, side, n).await, ["dk_1"], "{t} {n}");
+        }
+        // Control: distinct keys consume once as one set, then replay.
+        let distinct = [proof(side, 3, "dk_1"), proof(side, 4, "dk_2")];
+        assert_eq!(
+            registry::consume_assertion_set(&pool, &distinct)
+                .await
+                .unwrap(),
+            Consumption::Consumed,
+            "{t}"
+        );
+        assert_eq!(
+            registry::consume_assertion_set(&pool, &distinct)
+                .await
+                .unwrap(),
+            Consumption::Replay,
+            "{t}"
+        );
+        assert_eq!(versions(&pool, side, 3).await, ["dk_1"], "{t}");
+        assert_eq!(versions(&pool, side, 4).await, ["dk_2"], "{t}");
+    }
+    assert_eq!(rows(&pool).await.len(), 8);
+    db.drop([pool, closed]).await;
 }

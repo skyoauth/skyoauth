@@ -56,6 +56,8 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_wrong_ref_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_wrong_repo_against_push_binding",
   "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_wrong_workflow_against_push_binding",
+  "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_whitespace_padded_claims_against_push_binding",
+  "nextest:skyoauth-scenarios/pg/security::a02::a02_neg_empty_policy_binding_matches_nothing",
 ]
 
 [[scenario.stage]]
@@ -625,6 +627,7 @@ tests = [
   "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_consume_names_other_tenants_source",
   "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_replay_after_consumption",
   "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_store_failure_never_consumes",
+  "nextest:skyoauth-scenarios/pg/security::a24::a24_neg_duplicate_key_in_set_is_refused_not_a_replay",
 ]
 
 [[scenario.stage]]
