@@ -130,9 +130,9 @@
 //! it. A create, enabled or disabled, is widening (IR-052, IR-152), so
 //! [`seed_entry`] acknowledges it and runs while `widening_second_approver`
 //! is still off (outcome `success_widening`), before a gated fixture turns
-//! it on; a disable is not widening and needs neither. No entry is SQL-seeded, so A05 no longer uses the shared fixture
-//! `skyoauth_scenarios::egress` (conformance layout §1.3). The writer has no
-//! endpoint yet; its library call is what one will make.
+//! it on; a disable is not widening and needs neither. No entry is
+//! SQL-seeded. The writer has no endpoint yet; its library call is what one
+//! will make.
 //!
 //! # Spec and registry picks
 //!

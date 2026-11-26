@@ -80,7 +80,7 @@
 
 use std::collections::BTreeMap;
 
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
     persistence::{
         PgPool,
@@ -94,6 +94,7 @@ use skyoauth_service::{
     policy::Evidence,
 };
 
+use super::egress_fixture::Egress;
 use super::grant_fixture::github_policy;
 
 const GITHUB_ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -375,8 +376,9 @@ fn grant(side: Side, grant: Grant) -> NewServiceGrant {
     }
 }
 
-/// Creates the records of `side` described in the module docs.
-async fn seed(pool: &PgPool, side: Side) {
+/// Creates the records of `side` described in the module docs; `egress`
+/// allows the sources' destinations first.
+async fn seed(pool: &PgPool, egress: &Egress, side: Side) {
     registry::test_support::create_tenant(
         pool,
         &NewTenant {
@@ -452,7 +454,7 @@ async fn seed(pool: &PgPool, side: Side) {
         .unwrap();
     }
     for on in SOURCES {
-        egress::allow_destinations(pool, &source(side, on)).await;
+        egress.allow_destinations(pool, &source(side, on)).await;
         registry::test_support::create_trust_source(pool, &source(side, on))
             .await
             .unwrap();
@@ -473,12 +475,14 @@ async fn seed(pool: &PgPool, side: Side) {
 }
 
 /// A fresh database holding both tenants, `ten_a` and `ten_b`, each with
-/// the records described in the module docs.
+/// the records described in the module docs, on an instance the egress
+/// fixture bootstraps to allow the sources' destinations.
 pub(super) async fn two_tenants() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
+    let egress = Egress::bootstrap(&pool).await;
     for side in [A, B] {
-        seed(&pool, side).await;
+        seed(&pool, &egress, side).await;
     }
     (db, pool)
 }

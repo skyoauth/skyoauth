@@ -19,7 +19,7 @@ use std::{
 };
 
 use serde_json::json;
-use skyoauth_scenarios::{egress, pg::TestDb};
+use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::persistence::{
     PgPool,
     registry::{
@@ -30,6 +30,8 @@ use skyoauth_service::persistence::{
         Status, TrustSourceKind,
     },
 };
+
+use super::egress_fixture::Egress;
 
 pub(super) const TENANT: &str = "ten_a";
 /// The grant's workload actor.
@@ -97,10 +99,12 @@ fn strings(values: &[&str]) -> Vec<String> {
 /// A fresh database with one tenant holding a workload actor with a
 /// binding (on a GitHub source), a service principal with a service
 /// identity, and a resource server assigned to the tenant: everything a
-/// grant of any mode refers to.
+/// grant of any mode refers to. The source's destination is allowed by the
+/// egress fixture, on the instance it bootstraps.
 pub(super) async fn tenant() -> (TestDb, PgPool) {
     let db = TestDb::create().await;
     let pool = db.pool().await;
+    let egress = Egress::bootstrap(&pool).await;
     registry::test_support::create_tenant(
         &pool,
         &NewTenant {
@@ -152,7 +156,7 @@ pub(super) async fn tenant() -> (TestDb, PgPool) {
         replay_mode: ReplayMode::Reusable,
         status: Status::Enabled,
     };
-    egress::allow_destinations(&pool, &source).await;
+    egress.allow_destinations(&pool, &source).await;
     registry::test_support::create_trust_source(&pool, &source)
         .await
         .unwrap();
