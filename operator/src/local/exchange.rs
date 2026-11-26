@@ -34,7 +34,7 @@ use std::{
 use super::{
     BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
     MAX_REPLY_BYTES, NotSent, Op, Previewed, Reply, Request, RequestLine, ResponseRequest,
-    Restored, UnknownOutcome, parse_reply, wire::fits,
+    Restored, UnknownOutcome, parse_reply, path::not_sent, wire::fits,
 };
 use crate::recovery::{Challenge, parse_challenge};
 
@@ -160,12 +160,17 @@ pub trait Connector: Send + Sync + 'static {
     /// # Errors
     ///
     /// Why no connection was made: the call is then
-    /// [`NotSent::Connect`] with the error's kind.
+    /// [`NotSent::Connect`] with the error's kind, or [`NotSent::Path`]
+    /// for an error that carries a [`PathError`](super::PathError)
+    /// ([`CheckedSocketPath`](super::CheckedSocketPath)'s refusals).
     fn connect(&self) -> io::Result<Self::Stream>;
 }
 
 /// The connection to the transport's Unix socket at a path, made as is:
-/// the socket's owner, mode and directories are not checked here.
+/// the socket's owner, mode and directories are not checked here. A real
+/// caller uses [`CheckedSocketPath`](super::CheckedSocketPath), through
+/// [`LocalClient::with_checked_socket`], which checks them before every
+/// connect; this one serves tests and bridges that check otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketPath(PathBuf);
 
@@ -323,7 +328,9 @@ impl<C> fmt::Debug for LocalClient<C> {
 }
 
 impl LocalClient<SocketPath> {
-    /// The client of the socket at `path`.
+    /// The client of the socket at `path`, connected to unchecked
+    /// ([`SocketPath`]). A real caller uses
+    /// [`LocalClient::with_checked_socket`] instead.
     pub fn new(path: impl Into<PathBuf>, timeouts: Timeouts) -> Self {
         Self::with_connector(SocketPath::new(path), timeouts)
     }
@@ -531,9 +538,7 @@ fn run<C: Connector>(
     deadline: Option<Instant>,
     idle: Duration,
 ) -> Result<Received, CallError> {
-    let mut stream = connector
-        .connect()
-        .map_err(|err| NotSent::Connect(err.kind()))?;
+    let mut stream = connector.connect().map_err(|err| not_sent(&err))?;
     let first = wait(deadline, Some(idle)).map_err(|_| NotSent::TimedOut)?;
     stream
         .set_write_wait(first)

@@ -1,0 +1,818 @@
+{
+  "fixture_version": 1,
+  "kind": "local_socket_path",
+  "status": "proposed",
+  "description": "Known answers for the checks of the deployment-local transport's socket path: the service's own rules for its socket file (service/src/local_transport, module docs \"The socket file\", steps 1, 2, 5 and 8, and socket.rs: write_safe, check_directory, check_ancestors, the final check) and the operator client's copy of them (skyoauth_operator::local::check_socket), which must agree on every tree. Each case is a tree of entries created in a fresh case root, the path to check relative to it, and the expected outcome: accept, or the class of the first check that refuses it. The operator's test target `operator` (operator/tests/local_path) runs every case through check_socket; the `pg` target of skyoauth-scenarios (tests/harness/socket_path_fixture.rs) builds the same trees and binds the service's LocalTransport at the path, whose result must be the outcome's `bind` (accept iff the bind succeeds where the outcome's bind is ok, and the socket the bind makes is then a socket of the service UID with mode exactly 0600). Inferred: no contract text fixes these rules or the client's trust set; the service's code is the source, and status stays \"proposed\" until a contract states them. Modes are octal strings with the leading zero; the socket's mode is set after its owner, so a set-ID bit survives the owner's change.",
+  "socket_mode": "0600",
+  "max_symlinks": 40,
+  "max_socket_path_bytes": {
+    "linux": 107,
+    "other_unix": 103
+  },
+  "roles": {
+    "service": "The service UID: the socket's expected owner, SocketExpectations.owner_uid on the client, the service UID of the bind on the service. Never root.",
+    "root": "UID 0.",
+    "other": "A UID that is neither root nor the service UID."
+  },
+  "trust": {
+    "service_or_root": "The client's AncestorTrust::ServiceOrRoot (an inferred pick: the usual case). The service's bind for its own effective UID (LocalTransport::new(.., None)), run as the service UID: it trusts root and the service UID with the directories.",
+    "root_only": "The client's AncestorTrust::RootOnly (the stricter option). The service's bind by root for another service UID (LocalTransport::new(.., Some(service UID))): it trusts root alone with the directories, and the socket's directory must be root's."
+  },
+  "case_root": "Each case runs in a fresh directory, the case root, owned by root with mode 0755, under the system's temporary directory, whose directories are all root's or the running UID's and not writable by group or others unless sticky. `path` and every entry's `path` are relative to the case root; a symbolic link's `target` is used as is, but for a leading `$ROOT`, which stands for the case root's absolute path. Entries are created in their order, each with its owner (lchown, not followed) and then its mode (not for a symbolic link). A `symlink_chain` of `links` links puts its first link at `path` and link i (1 to links-1) at `path` followed by `.i`, each pointing to the next by its name, and the last one to `target`. A case with `pad` extends the last component of `path` with `p` until the absolute path is exactly the platform's max_socket_path_bytes (`limit`) or one byte more (`over_limit`); an entry at the same `path` is padded the same way. Who can run what: a process that is not root cannot give an entry to root or to the other role, nor own the case root as root, so it runs only the cases whose entries are all the service's (as its own UID), and of those under root_only only the ones whose outcome is invalid_path, too_long or unsafe_directory (decided before the walk reaches the case root). The service's root_only bind needs root; as root, its service_or_root bind runs in a child process as the service UID (a local user the harness is given). A case a reader cannot run is skipped with a printed NOTICE, never passed.",
+  "outcomes": [
+    {
+      "expect": "accept",
+      "bind": "ok",
+      "applies_when": "Every check passes: the client connects. The service binds (a stale socket of its UID at the path is replaced), and its socket is then a socket of the service UID with mode exactly 0600."
+    },
+    {
+      "expect": "invalid_path",
+      "bind": "InvalidPath",
+      "applies_when": "The path ends in / or /., or has no parent directory or no name (it ends in ..)."
+    },
+    {
+      "expect": "too_long",
+      "bind": "PathTooLong",
+      "applies_when": "The path is longer than max_socket_path_bytes for the platform."
+    },
+    {
+      "expect": "unsafe_directory",
+      "bind": "UnsafeDirectory",
+      "applies_when": "The socket's directory, its path not followed, is a symbolic link or not a directory, has an owner the trust set does not hold, or is writable by group or others without the sticky bit."
+    },
+    {
+      "expect": "unsafe_ancestor",
+      "bind": "UnsafeAncestor",
+      "applies_when": "A directory the lookup of the socket's directory looks an entry or .. up in (the root directory included, symbolic links followed as the kernel does) has an owner the trust set does not hold or is writable by group or others without the sticky bit; or a symbolic link on the way, in a directory writable by group or others (so sticky), has an owner the trust set does not hold."
+    },
+    {
+      "expect": "too_many_symlinks",
+      "bind": "Io",
+      "applies_when": "The lookup of the socket's directory follows more than max_symlinks symbolic links."
+    },
+    {
+      "expect": "lookup",
+      "bind": "Io",
+      "applies_when": "A lookup on the way to the socket's directory fails: a missing entry (io_kind NotFound) or a file where a directory should be (io_kind NotADirectory). The case's io_kind is the error's kind on both sides."
+    },
+    {
+      "expect": "missing",
+      "bind": "ok",
+      "applies_when": "Nothing is at the socket path: the client has nothing to connect to; the service creates its socket there."
+    },
+    {
+      "expect": "not_a_socket",
+      "bind": "PathOccupied",
+      "applies_when": "The socket path, not followed, holds a file, a directory or a symbolic link (to a socket or to nothing)."
+    },
+    {
+      "expect": "wrong_owner",
+      "bind": "PathOccupied",
+      "applies_when": "The socket path holds a socket whose owner is not the service UID."
+    },
+    {
+      "expect": "wrong_mode",
+      "bind": "ok",
+      "applies_when": "The socket path holds a socket of the service UID whose permission bits (set-ID and sticky bits included) are not exactly 0600: the client refuses it; the service replaces it, as a stale socket of its UID, with one of mode 0600."
+    }
+  ],
+  "cases": [
+    {
+      "case": "socket_in_a_service_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "socket_in_a_private_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0700", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "socket_in_a_sticky_world_writable_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01777", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "socket_in_a_sticky_group_writable_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01775", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "socket_in_a_sticky_directory_of_root",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01777", "owner": "root"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "root_only_socket_in_a_directory_of_root",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "root_only_socket_in_a_sticky_directory_of_root",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01777", "owner": "root"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "accept"
+    },
+    {
+      "case": "socket_mode_0644",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0644", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_0640",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0640", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_0660",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0660", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_0666",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0666", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_0602",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0602", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_0700",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0700", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_01600",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "01600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_02600",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "02600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "socket_mode_04600",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "04600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_mode"
+    },
+    {
+      "case": "regular_file_at_the_socket_path",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "file", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "not_a_socket"
+    },
+    {
+      "case": "directory_at_the_socket_path",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "dir", "mode": "0700", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "not_a_socket"
+    },
+    {
+      "case": "symlink_to_a_socket_at_the_socket_path",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/real", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "d/s", "type": "symlink", "target": "real", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "not_a_socket"
+    },
+    {
+      "case": "symlink_to_nothing_at_the_socket_path",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "symlink", "target": "nowhere", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "not_a_socket"
+    },
+    {
+      "case": "nothing_at_the_socket_path",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "missing"
+    },
+    {
+      "case": "socket_of_another_uid",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "other"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_owner"
+    },
+    {
+      "case": "socket_of_root",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "root"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_owner"
+    },
+    {
+      "case": "root_only_socket_of_root",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "root"}
+      ],
+      "path": "d/s",
+      "expect": "wrong_owner"
+    },
+    {
+      "case": "directory_mode_0775",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0775", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "directory_mode_0757",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0757", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "directory_mode_0777",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0777", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "directory_mode_0722",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0722", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "directory_of_another_uid",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "other"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "sticky_directory_of_another_uid",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01777", "owner": "other"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "directory_is_a_symlink",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "d", "owner": "service"}
+      ],
+      "path": "l/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "directory_is_a_file",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "f", "type": "file", "mode": "0600", "owner": "service"}
+      ],
+      "path": "f/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "root_only_directory_of_the_service",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "root_only_sticky_directory_of_the_service",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01777", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "unsafe_directory"
+    },
+    {
+      "case": "ancestor_mode_0777",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0777", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "ancestor_mode_0775",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0775", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "ancestor_mode_0757",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0757", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "sticky_ancestor",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "01777", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "ancestor_of_another_uid",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "other"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "sticky_ancestor_of_another_uid",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "01777", "owner": "other"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "ancestor_of_root",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "root_only_ancestor_of_the_service",
+      "trust": "root_only",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "root_only_ancestors_of_root",
+      "trust": "root_only",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "relative_symlink_on_the_way",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "g", "owner": "service"}
+      ],
+      "path": "l/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "absolute_symlink_on_the_way",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "$ROOT/g", "owner": "service"}
+      ],
+      "path": "l/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "var_to_private_var_symlink",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "private", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "private/var", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "private/var/run", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "private/var/run/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "var", "type": "symlink", "target": "private/var", "owner": "service"}
+      ],
+      "path": "var/run/s",
+      "expect": "accept"
+    },
+    {
+      "case": "symlink_through_an_unsafe_target",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "w", "type": "dir", "mode": "0777", "owner": "service"},
+        {"path": "w/g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "w/g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "w/g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "w/g", "owner": "service"}
+      ],
+      "path": "l/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "symlink_in_a_writable_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "0777", "owner": "service"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "service"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "symlink_of_the_service_in_a_sticky_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "01777", "owner": "service"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "service"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "symlink_of_another_uid_in_a_sticky_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "01777", "owner": "root"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "other"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "symlink_of_root_in_a_sticky_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "01777", "owner": "root"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "root"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "symlink_of_another_uid_in_a_safe_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "other"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "root_only_symlink_of_the_service_in_a_sticky_directory",
+      "trust": "root_only",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "01777", "owner": "root"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "service"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "root_only_symlink_of_root_in_a_sticky_directory",
+      "trust": "root_only",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "o", "type": "dir", "mode": "01777", "owner": "root"},
+        {"path": "o/l", "type": "symlink", "target": "../g", "owner": "root"}
+      ],
+      "path": "o/l/p/s",
+      "expect": "accept"
+    },
+    {
+      "case": "dotdot_after_a_symlink",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "x", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "x/y", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "x/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "x/y", "owner": "service"}
+      ],
+      "path": "l/../s",
+      "expect": "accept"
+    },
+    {
+      "case": "dotdot_in_a_writable_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "e", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "e/f", "type": "dir", "mode": "0777", "owner": "service"},
+        {"path": "e/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "e/f", "owner": "service"}
+      ],
+      "path": "l/../s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "dotdot_in_a_directory_of_another_uid",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "e", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "e/f", "type": "dir", "mode": "0755", "owner": "other"},
+        {"path": "e/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink", "target": "e/f", "owner": "service"}
+      ],
+      "path": "l/../s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "forty_symlinks",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/sub", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/sub/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink_chain", "links": 40, "target": "d", "owner": "service"}
+      ],
+      "path": "l/sub/s",
+      "expect": "accept"
+    },
+    {
+      "case": "forty_one_symlinks",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/sub", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/sub/s", "type": "socket", "mode": "0600", "owner": "service"},
+        {"path": "l", "type": "symlink_chain", "links": 41, "target": "d", "owner": "service"}
+      ],
+      "path": "l/sub/s",
+      "expect": "too_many_symlinks"
+    },
+    {
+      "case": "symlink_loop",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "l", "type": "symlink", "target": "l", "owner": "service"}
+      ],
+      "path": "l/sub/s",
+      "expect": "too_many_symlinks"
+    },
+    {
+      "case": "missing_directory",
+      "trust": "service_or_root",
+      "entries": [],
+      "path": "d/s",
+      "expect": "lookup",
+      "io_kind": "NotFound"
+    },
+    {
+      "case": "file_on_the_way",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "f", "type": "file", "mode": "0600", "owner": "service"}
+      ],
+      "path": "f/x/s",
+      "expect": "lookup",
+      "io_kind": "NotADirectory"
+    },
+    {
+      "case": "path_ending_in_a_slash",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s/",
+      "expect": "invalid_path"
+    },
+    {
+      "case": "path_ending_in_a_slash_and_a_dot",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s/.",
+      "expect": "invalid_path"
+    },
+    {
+      "case": "path_ending_in_dotdot",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
+      ],
+      "path": "d/..",
+      "expect": "invalid_path"
+    },
+    {
+      "case": "root_only_path_ending_in_a_slash",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "root"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s/",
+      "expect": "invalid_path"
+    },
+    {
+      "case": "path_at_the_limit",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"},
+        {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "pad": "limit",
+      "expect": "accept"
+    },
+    {
+      "case": "path_over_the_limit",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
+      ],
+      "path": "d/s",
+      "pad": "over_limit",
+      "expect": "too_long"
+    },
+    {
+      "case": "root_only_path_over_the_limit",
+      "trust": "root_only",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
+      ],
+      "path": "d/s",
+      "pad": "over_limit",
+      "expect": "too_long"
+    }
+  ]
+}
