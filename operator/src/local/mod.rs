@@ -4,10 +4,12 @@
 //! writes and the reply line it reads, for the four operations
 //! `bootstrap`, `issue_challenge`, `preview` and `restore`.
 //!
-//! This part has no socket I/O and no socket path checks: it turns a
-//! [`Request`] into the exact bytes to write ([`Request::encode`]) and the
-//! bytes read back into a [`Reply`], a refusal or an unknown outcome
-//! ([`parse_reply`]).
+//! The codec turns a [`Request`] into the exact bytes to write
+//! ([`Request::encode`]) and the bytes read back into a [`Reply`], a
+//! refusal or an unknown outcome ([`parse_reply`]); [`LocalClient`]
+//! exchanges one request for its reply over a connection, with its time
+//! limits and the classification of its outcome (see its documentation).
+//! The socket's path, owner and mode are not checked here.
 //!
 //! # Framing
 //!
@@ -89,10 +91,15 @@
 //!
 //! Unix only, like the service's transport (`cfg(unix)` in `lib.rs`).
 
+mod exchange;
 mod wire;
 
-use std::fmt;
+use std::{fmt, io};
 
+pub use exchange::{
+    Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, HalfClose, LocalClient, Retry, SocketPath,
+    Timeouts,
+};
 pub use wire::parse_reply;
 
 use crate::recovery::RecoveryPublicKey;
@@ -231,12 +238,25 @@ impl fmt::Display for ErrorCode {
 pub enum NotSent {
     /// The request line is longer than [`MAX_REQUEST_BYTES`].
     TooLarge,
+    /// [`Timeouts::total`] or [`Timeouts::idle`] is zero; nothing was
+    /// connected.
+    InvalidTimeouts,
+    /// No connection was made, with the error's kind (a missing path, a
+    /// path that is not a listening socket, a permission refused, ...), or
+    /// the call's thread could not start.
+    Connect(io::ErrorKind),
+    /// [`Timeouts::total`] ran out while connecting; a connection made
+    /// later is dropped before anything is written to it.
+    TimedOut,
 }
 
 impl fmt::Display for NotSent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::TooLarge => "the request line is larger than 64 KiB",
+            Self::InvalidTimeouts => "a timeout of the client is zero",
+            Self::Connect(_) => "no connection to the local transport could be made",
+            Self::TimedOut => "the wait ran out while connecting",
         })
     }
 }
@@ -266,6 +286,22 @@ pub enum UnknownOutcome {
     Malformed,
     /// A refusal whose code is not in [`ErrorCode::ALL`].
     UnknownCode,
+    /// [`Timeouts::total`] or [`Timeouts::idle`] ran out once the request
+    /// may have been written, before the end of the reply.
+    TimedOut,
+    /// The connection failed, with the error's kind: a write or a reset
+    /// after which what was read is not a refusal (the server did not read
+    /// the whole request), or any other failed read (see [`LocalClient`]).
+    ConnectionLost(io::ErrorKind),
+    /// A write refused with a store failure, the code carried
+    /// ([`ErrorCode::AuthUnavailable`] or [`ErrorCode::ServerError`]),
+    /// which a failed `COMMIT` is also answered with (see [`LocalClient`]).
+    UncertainCommit(ErrorCode),
+    /// An issue's reply whose challenge
+    /// [`parse_challenge`](crate::recovery::parse_challenge) refuses, or
+    /// whose `operation_id`, `expires_at` or `expected_revision` is not its
+    /// challenge's.
+    ChallengeMismatch,
 }
 
 impl fmt::Display for UnknownOutcome {
@@ -277,6 +313,10 @@ impl fmt::Display for UnknownOutcome {
             Self::NotUtf8 => "the reply is not UTF-8",
             Self::Malformed => "the reply is not a reply of the request's operation",
             Self::UnknownCode => "the reply refuses with an unknown code",
+            Self::TimedOut => "the wait for the reply ran out",
+            Self::ConnectionLost(_) => "the connection failed before a reply could be believed",
+            Self::UncertainCommit(_) => "a write failed in the store, maybe in its commit",
+            Self::ChallengeMismatch => "the issued reply does not match its challenge",
         })
     }
 }
