@@ -611,9 +611,10 @@ async fn a_store_failure_is_store_never_not_selectable() {
     // The server ends the connection while the statement waits for a lock.
     // The observer owns the lock holder and always rolls it back before it
     // returns, and gives up when the selection returns first or after
-    // `LOCK_WAIT_DEADLINE` without seeing the wait; so the selection cannot
-    // stay blocked and the join always ends, and a selection that never
-    // waited is a prompt failure, not a hang.
+    // `LOCK_WAIT_DEADLINE` without seeing the wait (each with its own
+    // failure text); so the selection cannot stay blocked and the join
+    // always ends, and a selection that never waited is a prompt failure,
+    // not a hang.
     const LOCK_WAIT_DEADLINE: Duration = Duration::from_secs(10);
     let mut blocker = pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE service_grant IN ACCESS EXCLUSIVE MODE")
@@ -638,8 +639,9 @@ async fn a_store_failure_is_store_never_not_selectable() {
             result
         },
         async {
-            // The pids that block the selection, once it waits for a lock.
-            let blocked_by = tokio::time::timeout(LOCK_WAIT_DEADLINE, async {
+            // The pids that block the selection, once it waits for a lock;
+            // or why the observer stopped without seeing it wait.
+            let blocked_by = match tokio::time::timeout(LOCK_WAIT_DEADLINE, async {
                 loop {
                     if returned.get() {
                         return None;
@@ -659,8 +661,14 @@ async fn a_store_failure_is_store_never_not_selectable() {
                 }
             })
             .await
-            .unwrap_or(None);
-            let terminated = blocked_by.is_some()
+            {
+                Ok(Some(pids)) => Ok(pids),
+                Ok(None) => Err("returned before it was seen waiting for the lock".to_owned()),
+                Err(_) => Err(format!(
+                    "was not seen waiting for the lock within {LOCK_WAIT_DEADLINE:?}"
+                )),
+            };
+            let terminated = blocked_by.is_ok()
                 && sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
                     .bind(pid)
                     .fetch_one(&pool)
@@ -670,13 +678,14 @@ async fn a_store_failure_is_store_never_not_selectable() {
             (blocked_by, terminated)
         }
     );
-    let Some(blocked_by) = blocked_by else {
-        panic!(
-            "the selection on backend {pid} never waited for the lock within \
-             {LOCK_WAIT_DEADLINE:?}; it returned {result:?}"
-        );
-    };
-    assert_eq!(blocked_by, [blocker_pid], "backend {pid}");
+    let blocked_by = blocked_by.unwrap_or_else(|why| {
+        panic!("the selection on backend {pid} {why}; it returned {result:?}")
+    });
+    assert_eq!(
+        blocked_by,
+        [blocker_pid],
+        "the backends blocking the selection on backend {pid}; it returned {result:?}"
+    );
     assert!(terminated, "backend {pid} was not terminated: {result:?}");
     let err = result.unwrap_err();
     match &err {
@@ -693,19 +702,57 @@ async fn a_store_failure_is_store_never_not_selectable() {
     drop(victim);
 
     // A full pool: its one connection is held, so every selector times out
-    // acquiring one and is the store failure.
+    // acquiring one and is the store failure. The short acquire timeout is
+    // the point of the leg, but an `acquire` also opens a connection under
+    // it, and opening one can take longer on a loaded or slow database; a
+    // retry of such an `acquire` cuts each attempt off at the timeout and
+    // may never get one. So the pool is built lazily (building it opens
+    // nothing) with `min_connections(1)` and no idle timeout or lifetime,
+    // so that the pool's own background task opens the one connection
+    // under its own long deadline (sqlx's `connect_lazy_with`); the test
+    // waits, under its own deadline, until that connection is idle, and
+    // only then takes it, which neither opens nor (`test_before_acquire`
+    // off) pings one. The six selections then run concurrently, so the leg
+    // costs one acquire timeout.
     let full = PgPoolOptions::new()
         .max_connections(1)
+        .min_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
         .acquire_timeout(Duration::from_millis(200))
-        .connect_with((*pool.connect_options()).clone())
-        .await
-        .unwrap();
-    let held = full.acquire().await.unwrap();
-    for (tenant, grant, source, mode) in selectors {
-        let err = select(&full, tenant, grant, source, mode)
-            .await
-            .unwrap_err();
+        .test_before_acquire(false)
+        .connect_lazy_with((*pool.connect_options()).clone());
+    let held = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if full.num_idle() > 0 {
+                match full.acquire().await {
+                    Ok(connection) => return connection,
+                    Err(sqlx::Error::PoolTimedOut) => {}
+                    Err(err) => panic!("{err}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the full pool never opened its one connection");
+    let select_full =
+        |(tenant, grant, source, mode): (&'static str, &'static str, &'static str, GrantMode)| {
+            select(&full, tenant, grant, source, mode)
+        };
+    let (r0, r1, r2, r3, r4, r5) = tokio::join!(
+        select_full(selectors[0]),
+        select_full(selectors[1]),
+        select_full(selectors[2]),
+        select_full(selectors[3]),
+        select_full(selectors[4]),
+        select_full(selectors[5]),
+    );
+    for ((tenant, grant, source, mode), result) in
+        selectors.into_iter().zip([r0, r1, r2, r3, r4, r5])
+    {
         let case = format!("{tenant} {grant} {source} {mode}");
+        let err = result.expect_err(&case);
         assert!(
             matches!(
                 err,
