@@ -35,11 +35,18 @@
 //!   same `SelectionError::NotSelectable`, with the same `Display` and
 //!   `Debug` text, no source error and no selector in its text
 //!   (`a25_neg_miss_reveals_no_cause`).
+//! - **Negative, store failure.** A store outage is not reported as a
+//!   miss: on a pool the client has closed, every selector of both
+//!   tenants, each hit and each of those misses, is
+//!   `SelectionError::Store(RegistryError::Other(PoolClosed))`, never
+//!   `NotSelectable`, while an open pool of the same database still selects
+//!   each hit and gives the one `NotSelectable` for each miss
+//!   (`a25_neg_store_failure_is_not_a_miss`).
 //! - **Negative, status.** Each grant disabled through the registry's own
 //!   update, its source, actor and eligible binding still enabled
 //!   (`a25_neg_disabled_grant_selects_nothing`), each source disabled the
-//!   same way, every grant still enabled
-//!   (`a25_neg_disabled_source_selects_nothing`), and the dormant
+//!   same way, every grant and its eligible binding on that source still
+//!   enabled (`a25_neg_disabled_source_selects_nothing`), and the dormant
 //!   impersonation grant, stored disabled and requiring reapproval, which
 //!   cannot be created enabled or enabled later, in every mode
 //!   (`a25_neg_dormant_impersonation_grant_selects_nothing`), select
@@ -74,7 +81,9 @@
 //! with the `0004` foreign keys dropped
 //! (`selection_rechecks_the_tenant_and_actor_the_foreign_keys_guarantee`),
 //! the `WHERE EXISTS` gate that keeps a miss from decoding a corrupt row
-//! (`a_miss_decodes_no_grant_row_even_a_corrupt_one`), a grant and source
+//! (`a_miss_decodes_no_grant_row_even_a_corrupt_one`, which is also where a
+//! hit that cannot decode its row is `Store`: a corrupt row needs raw SQL,
+//! not the typed API), a grant and source
 //! that are both found but with no eligible binding on that source
 //! (`every_miss_is_the_same_not_selectable`), and the exact-string matching
 //! rules, near-miss claim names and values included. With the foreign keys
@@ -423,6 +432,114 @@ async fn a25_neg_miss_reveals_no_cause() {
     db.drop([pool]).await;
 }
 
+/// A store failure is never reported as a miss: on a pool the client has
+/// closed, every selector, in both tenants, gives
+/// `SelectionError::Store(RegistryError::Other(PoolClosed))`, with a source
+/// error, never `NotSelectable` and equal to nothing (`Store` has no
+/// equality). The selectors are each grant (direct and delegations) on
+/// each source in its own mode, which selects on an open pool, and genuine
+/// misses: a wrong tenant, the other tenant's source, a mode override, a
+/// grant name and an unknown grant. Controls: before the close, the same
+/// pool selects every hit and gives `NotSelectable` for every miss; after
+/// it, an open pool of the same database still does both, the hits with
+/// the very selections the closed pool gave before, so the outage and the
+/// miss stay distinguishable (a caller can tell "retry" from "deny").
+#[tokio::test]
+async fn a25_neg_store_failure_is_not_a_miss() {
+    let (db, pool) = two_tenants().await;
+    let direct = GRANTS[0];
+    let delegation = GRANTS[3];
+    let gh = Source::Github;
+    let mut hits = Vec::new();
+    let mut misses = Vec::new();
+    for (owner, other) in DIRECTIONS {
+        for grant in GRANTS {
+            for source in SOURCES {
+                hits.push((
+                    owner.tenant,
+                    owner.id(grant.id),
+                    source.id(owner),
+                    grant.mode,
+                ));
+            }
+        }
+        let own = owner.id(direct.id);
+        misses.extend([
+            (other.tenant, own.clone(), gh.id(owner), direct.mode),
+            (owner.tenant, own.clone(), gh.id(other), direct.mode),
+            (
+                owner.tenant,
+                owner.id(delegation.id),
+                gh.id(owner),
+                GrantMode::Direct,
+            ),
+            (owner.tenant, direct.name.into(), gh.id(owner), direct.mode),
+            (
+                owner.tenant,
+                owner.id("grt_none"),
+                gh.id(owner),
+                direct.mode,
+            ),
+        ]);
+    }
+
+    // Control: open, the pool to be closed selects every hit and misses
+    // every miss.
+    let closed = db.pool().await;
+    let mut selected = Vec::new();
+    for (tenant, grant, source, mode) in &hits {
+        let case = format!("{tenant} {grant} {source} {mode} open");
+        let selection = select(&closed, tenant, grant, source, *mode)
+            .await
+            .unwrap_or_else(|err| panic!("{case}: {err:?}"));
+        assert_eq!(selection.grant.id, *grant, "{case}");
+        selected.push(selection);
+    }
+    for (tenant, grant, source, mode) in &misses {
+        assert_not_selectable(
+            select(&closed, tenant, grant, source, *mode).await,
+            &format!("{tenant} {grant} {source} {mode} open"),
+        );
+    }
+    let miss_text = SelectionError::NotSelectable.to_string();
+
+    // Closed by the client: every selector, hit or miss, is a store failure.
+    closed.close().await;
+    for (tenant, grant, source, mode) in hits.iter().chain(&misses) {
+        let case = format!("{tenant} {grant} {source} {mode} closed");
+        let err = select(&closed, tenant, grant, source, *mode)
+            .await
+            .expect_err(&case);
+        assert!(
+            matches!(
+                err,
+                SelectionError::Store(RegistryError::Other(sqlx::Error::PoolClosed))
+            ),
+            "{case}: {err:?}"
+        );
+        assert_ne!(err, SelectionError::NotSelectable, "{case}");
+        assert!(err.source().is_some(), "{case}");
+        assert_ne!(err.to_string(), miss_text, "{case}");
+    }
+
+    // The store itself is fine: an open pool still selects every hit, as
+    // before, and gives the one miss for every miss.
+    for ((tenant, grant, source, mode), before) in hits.iter().zip(&selected) {
+        let case = format!("{tenant} {grant} {source} {mode} other pool");
+        let selection = select(&pool, tenant, grant, source, *mode)
+            .await
+            .unwrap_or_else(|err| panic!("{case}: {err:?}"));
+        assert_eq!(&selection, before, "{case}");
+    }
+    for (tenant, grant, source, mode) in &misses {
+        assert_not_selectable(
+            select(&pool, tenant, grant, source, *mode).await,
+            &format!("{tenant} {grant} {source} {mode} other pool"),
+        );
+    }
+    db.drop([pool, closed]).await;
+}
+
 #[tokio::test]
 async fn a25_neg_grant_name_is_not_a_selector() {
     let (db, pool) = two_tenants().await;
@@ -622,10 +739,12 @@ async fn a25_neg_disabled_grant_selects_nothing() {
 }
 
 /// Each source, disabled through the registry's own update while every
-/// grant and binding stays enabled, gives every grant the miss of a grant
-/// that does not exist on that source, in its own mode; the other sources
-/// still select every grant. Re-enabled, every grant selects again on it,
-/// with the stored source. Both tenants.
+/// grant and each grant's eligible binding on that source stay enabled
+/// (and the binding listed by the grant, of its actor, on that source),
+/// gives every grant the miss of a grant that does not exist on that
+/// source, in its own mode; the other sources still select every grant.
+/// Re-enabled, every grant selects again on it, with the stored source.
+/// Both tenants.
 #[tokio::test]
 async fn a25_neg_disabled_source_selects_nothing() {
     let (db, pool) = two_tenants().await;
@@ -645,6 +764,23 @@ async fn a25_neg_disabled_source_selects_nothing() {
                 let case = format!("{t} {id} {src} source disabled");
                 let stored = registry::get_service_grant(&pool, t, &id).await.unwrap();
                 assert_eq!(stored.status, Status::Enabled, "{case}");
+                // The grant's eligible binding on the source is still there,
+                // enabled, of the grant's actor and listed by the grant: only
+                // the source's status changed.
+                let own =
+                    registry::get_principal_binding(&pool, t, &side.id(grant.eligible_on(source)))
+                        .await
+                        .unwrap();
+                assert_eq!(
+                    (
+                        own.status,
+                        own.trust_source_id.as_str(),
+                        own.workload_principal_id.as_str(),
+                    ),
+                    (Status::Enabled, src.as_str(), side.id(grant.actor).as_str()),
+                    "{case}"
+                );
+                assert!(stored.allowed_binding_ids.contains(&own.id), "{case}");
                 assert_same_miss(
                     select(&pool, t, &id, &src, grant.mode).await,
                     &reference,
