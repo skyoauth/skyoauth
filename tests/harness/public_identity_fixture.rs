@@ -13,7 +13,7 @@
 
 use serde_json::Value;
 use skyoauth_service::identity::{
-    MAX_SPKI_DER_BYTES, PUBLIC_IDENTITY_PREFIX, canonical_public_identity,
+    IdentityError, MAX_SPKI_DER_BYTES, PUBLIC_IDENTITY_PREFIX, canonical_public_identity,
 };
 
 fn fixture() -> Value {
@@ -76,18 +76,47 @@ fn identity_cases_through_canonical_public_identity() {
     for case in cases {
         let name = text(case, "case");
         let result = canonical_public_identity(&der_bytes(&case["der"]));
-        let expected = case.get("service_expected").unwrap_or(&case["expected"]);
-        if let Some(identity) = expected.get("identity") {
-            assert_eq!(result.as_deref().ok(), identity.as_str(), "{name}");
-            continue;
-        }
-        let message = match case.get("service_expected") {
-            Some(service) => text(service, "error"),
-            None => text(&fixture["messages"], text(expected, "error")),
+        let service_expected = case.get("service_expected");
+        let expected = service_expected.unwrap_or(&case["expected"]);
+        // Exactly one member, `identity` or `error`, and it is a string.
+        let members: Vec<(&String, &Value)> = expected
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}: expected is not an object: {expected}"))
+            .iter()
+            .collect();
+        let [(member, Value::String(value))] = members.as_slice() else {
+            panic!("{name}: expected is not one string member: {expected}");
         };
-        match result {
-            Err(err) => assert_eq!(err.to_string(), message, "{name}"),
-            Ok(identity) => panic!("{name}: expected {message:?}, got {identity}"),
+        match member.as_str() {
+            "identity" => assert_eq!(result.as_deref(), Ok(value.as_str()), "{name}"),
+            "error" => {
+                let message = match service_expected {
+                    Some(_) => value.as_str(),
+                    None => text(&fixture["messages"], value),
+                };
+                let err = result.expect_err(name);
+                assert_eq!(err.to_string(), message, "{name}");
+            }
+            other => panic!("{name}: expected has {other}, not identity or error"),
         }
+    }
+    // Each way the service refuses bytes that the operator hashes has a
+    // `service_expected` case.
+    let refused: Vec<&str> = cases
+        .iter()
+        .filter_map(|case| case.get("service_expected"))
+        .map(|service| text(service, "error"))
+        .collect();
+    for err in [
+        IdentityError::Truncated,
+        IdentityError::NotDer,
+        IdentityError::TrailingBytes,
+        IdentityError::NotSpki,
+    ] {
+        let message = err.to_string();
+        assert!(
+            refused.contains(&message.as_str()),
+            "no case of {message:?}"
+        );
     }
 }

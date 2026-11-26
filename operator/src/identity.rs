@@ -54,6 +54,11 @@ impl std::error::Error for IdentityError {}
 /// `SubjectPublicKeyInfo` is `spki_der`: 1 to [`MAX_SPKI_DER_BYTES`] bytes,
 /// whose structure is not checked (see the module documentation).
 ///
+/// The identity of undecoded DER is unchecked: this function does not parse
+/// the DER, so it also gives an identity for bytes the service refuses, and a
+/// displayed identity is only trustworthy once the service has accepted the
+/// same bytes as a `SubjectPublicKeyInfo`.
+///
 /// # Errors
 ///
 /// [`IdentityError::Empty`] for no bytes, [`IdentityError::TooLarge`] for

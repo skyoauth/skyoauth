@@ -42,6 +42,18 @@
       "service_expected": { "error": "the public key encoding has trailing bytes" }
     },
     {
+      "case": "ed25519_indefinite_length_not_der",
+      "der": { "hex": "3080300506032b6570032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a0000" },
+      "expected": { "identity": "spki-sha256:cd2e9e67b97dbd5b64d87603416dfe1c6ecd00752eefc51c6cf15bfd4f16c6d9" },
+      "service_expected": { "error": "the public key is not in DER encoding" }
+    },
+    {
+      "case": "ed25519_octet_string_key_not_spki",
+      "der": { "hex": "302a300506032b6570042100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" },
+      "expected": { "identity": "spki-sha256:1e71e0ccea13ecfaec9de2b37b40a72c2b0dcecb35b35102856ebd5141f7f376" },
+      "service_expected": { "error": "the public key is not a SubjectPublicKeyInfo" }
+    },
+    {
       "case": "empty",
       "der": { "hex": "" },
       "expected": { "error": "empty" }

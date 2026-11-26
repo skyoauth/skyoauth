@@ -404,6 +404,21 @@ fn every_fixture_file_and_case_is_covered() {
             "small_order"
         ])
     );
+    // Nothing is trimmed: padded text is not_hex whether its length is 64
+    // bytes (62 digits once trimmed) or more (64 digits once trimmed).
+    let trimmed_lengths: BTreeSet<(usize, usize)> = text_cases
+        .iter()
+        .map(|c| text(c, "text"))
+        .filter(|t| t.trim() != *t)
+        .map(|t| (t.len(), t.trim().len()))
+        .collect();
+    assert!(trimmed_lengths.contains(&(64, 62)), "{trimmed_lengths:?}");
+    assert!(
+        trimmed_lengths
+            .iter()
+            .any(|&(len, trimmed)| len > 64 && trimmed == 64),
+        "{trimmed_lengths:?}"
+    );
 
     let identity = recovery_fixture(IDENTITY_FIXTURE);
     assert_eq!(
@@ -425,7 +440,9 @@ fn every_fixture_file_and_case_is_covered() {
             .collect::<BTreeSet<_>>(),
         case_names(cases)
     );
-    // Both bounds, both errors and a case the service refuses as not DER.
+    // Both bounds, both errors and, for each way the service refuses bytes
+    // that this crate hashes, a case: truncated, not DER (an indefinite
+    // length), trailing bytes and not a SubjectPublicKeyInfo.
     let lengths: BTreeSet<usize> = cases.iter().map(|c| der_bytes(&c["der"]).len()).collect();
     for length in [0, 1, MAX_SPKI_DER_BYTES, MAX_SPKI_DER_BYTES + 1] {
         assert!(lengths.contains(&length), "no case of {length} bytes");
@@ -435,7 +452,23 @@ fn every_fixture_file_and_case_is_covered() {
         .filter_map(|c| c["expected"].get("error").and_then(Value::as_str))
         .collect();
     assert_eq!(errors, BTreeSet::from(["empty", "too_large"]));
-    assert!(cases.iter().any(|c| c.get("service_expected").is_some()));
+    let service_errors: BTreeSet<&str> = cases
+        .iter()
+        .filter_map(|c| c.get("service_expected"))
+        .map(|service| text(service, "error"))
+        .collect();
+    assert_eq!(
+        service_errors,
+        BTreeSet::from([
+            "the public key encoding is truncated",
+            "the public key is not in DER encoding",
+            "the public key encoding has trailing bytes",
+            "the public key is not a SubjectPublicKeyInfo",
+        ])
+    );
+    for case in cases.iter().filter(|c| c.get("service_expected").is_some()) {
+        assert!(case["expected"].get("identity").is_some(), "{case}");
+    }
     for case in cases {
         let allowed = ["case", "der", "expected", "service_expected"];
         for member in members(case) {
