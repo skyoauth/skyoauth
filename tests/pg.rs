@@ -50,7 +50,11 @@
 //! `_recovery/recovery.test-key.json`, against its
 //! `preview_recovery_response` and `restore_operator` (on a database): the
 //! cases the `skyoauth-operator` tests check against the workstation's
-//! copies. Their tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
+//! copies; `harness::socket_path_fixture` (Unix only) builds the trees of
+//! `_wire/socket_path.v1.json` and binds its `local_transport` in each, as
+//! the operator's socket path checks are run on the same trees (no
+//! database needed; the cases that need root, or as root the peer user
+//! `SKYOAUTH_IT_PEER_USER`, print a notice). Their tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
 
 mod security {
@@ -116,6 +120,9 @@ mod harness {
     mod recovery_key_fixture;
     #[path = "recovery_signature_fixture.rs"]
     mod recovery_signature_fixture;
+    #[cfg(unix)]
+    #[path = "socket_path_fixture.rs"]
+    mod socket_path_fixture;
     #[path = "wire_errors.rs"]
     mod wire_errors;
     #[path = "wire_fixture_keys.rs"]
