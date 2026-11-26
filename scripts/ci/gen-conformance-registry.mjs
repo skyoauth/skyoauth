@@ -6,7 +6,8 @@
 //
 // Outputs tests/conformance/scenarios.toml, tests/conformance/subcases.toml
 // and the §2 scenario table (with its "Counts by first stage ..." sentences)
-// in docs/testing/conformance-layout.md.
+// and the §2 partial-tests passage (between its PARTIAL_BEGIN and
+// PARTIAL_END marker lines) in docs/testing/conformance-layout.md.
 //
 // Source of truth (layout §2, §3): scenarios.toml is authoritative for every
 // scenario column of the §2 table, and subcases.toml for the conditional
@@ -21,7 +22,10 @@
 //     table rows and the layout doc §5 (Q11) contract table;
 //   - subcase matrix_sha256 from the tasks bullet line of the subcase's first
 //     owner, and every comment in both files;
-//   - the layout §2 table and its counts sentences, rendered from the registry.
+//   - the layout §2 table and its counts sentences, rendered from the registry;
+//   - the layout §2 partial-tests passage: each `planned` stage of
+//     scenarios.toml that lists tests, with the number it lists, in registry
+//     order (partialStages()).
 // Hand-authored (kept from the committed files):
 //   - gates_passed;
 //   - every scenario column (layers, envs, harness, owners, note, positive,
@@ -368,6 +372,52 @@ export function findCounts(layout) {
     if (m) return { n, text: m[0] };
   }
   return null;
+}
+
+// The partial-tests passage of §2: the line between these two marker lines,
+// each on a line of its own, is rendered from the registry.
+export const PARTIAL_BEGIN = '<!-- BEGIN GENERATED partial-tests: rendered from tests/conformance/scenarios.toml by scripts/ci/gen-conformance-registry.mjs; do not edit -->';
+export const PARTIAL_END = '<!-- END GENERATED partial-tests -->';
+
+// The planned stages that list tests (partial tests: registered, but they
+// count for nothing), as { id, milestone, count }, in registry order: entries
+// in tasks §8 order, then each entry's stages in milestone order. Implemented
+// stages and planned stages with `tests = []` are left out. The entries may
+// have the generator's shape (stages, every field defaulted) or the
+// registry's (stage, status and tests optional).
+export function partialStages(scenarios) {
+  const out = [];
+  for (const e of scenarios) {
+    for (const s of e.stages ?? e.stage ?? []) {
+      const tests = s.tests ?? [];
+      if ((s.status ?? 'planned') === 'planned' && tests.length) out.push({ id: e.id, milestone: s.milestone, count: tests.length });
+    }
+  }
+  return out;
+}
+
+// The lines of the partial-tests passage (without its markers).
+export function renderPartialTests(scenarios) {
+  const st = partialStages(scenarios);
+  if (!st.length) return ['Partial tests by stage: none. No `planned` stage lists tests.'];
+  const total = st.reduce((n, s) => n + s.count, 0);
+  const stages = st.length === 1 ? '1 `planned` stage lists' : `${st.length} \`planned\` stages list`;
+  const tests = total === 1 ? '1 partial test' : `${total} partial tests`;
+  return [`Partial tests by stage: ${st.map((s) => `${show(s.id)} ${show(s.milestone)} ${s.count}`).join(' · ')}. ${stages} ${tests}.`];
+}
+
+// Locates the partial-tests passage in §2: { begin, end } (1-based lines of
+// its two markers), or { error } when a marker is missing, repeated or out
+// of order.
+export function findPartialTests(layout) {
+  const lines = section(layout, LAYOUT, '2.');
+  const at = (marker) => lines.filter((l) => l.line === marker).map((l) => l.n);
+  const b = at(PARTIAL_BEGIN);
+  const e = at(PARTIAL_END);
+  const want = `a line "${PARTIAL_BEGIN}" and, after it, a line "${PARTIAL_END}" in §2`;
+  if (b.length !== 1 || e.length !== 1) return { error: `${LAYOUT}: the generated partial-tests passage needs exactly ${want}; found ${b.length} and ${e.length}` };
+  if (e[0] < b[0]) return { error: `${LAYOUT}:${e[0]}: the partial-tests END marker comes before its BEGIN marker (line ${b[0]}); expected ${want}` };
+  return { begin: b[0], end: e[0] };
 }
 
 // The stamp an implemented stage carries in implemented_sha256: SHA-256 of
@@ -847,6 +897,9 @@ export function generate(root) {
     const table = findTable(layout);
     const counts = findCounts(layout);
     if (!counts) errors.push(`${LAYOUT}: the "Counts by first stage: ... rows have more than one stage." sentences after the §2 table are missing`);
+    const partial = findPartialTests(layout);
+    if (partial.error) errors.push(partial.error);
+    else if (partial.begin < table.first + table.lines.length && partial.end >= table.first) errors.push(`${LAYOUT}:${partial.begin}: the partial-tests passage overlaps the §2 table`);
 
     // Contract mapping: "| C01 <title> | A19, A14 | ... |" rows of layout §5.
     const covered = new Map();
@@ -974,7 +1027,10 @@ export function generate(root) {
     );
     const lines = layout.split('\n');
     if (counts) lines[counts.n - 1] = renderCounts(scenarios) + lines[counts.n - 1].slice(counts.text.length);
-    lines.splice(table.first - 1, table.lines.length, ...rendered);
+    // Splices from the bottom up, so that one does not move the other.
+    const splices = [{ at: table.first - 1, n: table.lines.length, rows: rendered }];
+    if (!partial.error) splices.push({ at: partial.begin, n: partial.end - partial.begin - 1, rows: renderPartialTests(scenarios) });
+    for (const s of splices.sort((x, y) => y.at - x.at)) lines.splice(s.at, s.n, ...s.rows);
 
     const scenariosToml =
       `${SCENARIOS_HEADER}\n${kv('gates_passed', gates)}\n\n` +
@@ -1003,10 +1059,20 @@ export function describeDiff(path, committed, regenerated) {
   if (path === LAYOUT) {
     const a = committed.split('\n');
     const b = regenerated.split('\n');
+    // Whether line i of `lines` lies between the partial-tests markers.
+    const inPassage = (lines, i) => {
+      if (i < 1) return false;
+      const begin = lines.lastIndexOf(PARTIAL_BEGIN, i - 1);
+      return begin >= 0 && lines.indexOf(PARTIAL_END, begin + 1) > i;
+    };
     const out = [];
     for (let i = 0; i < Math.max(a.length, b.length); i++) {
       if (a[i] === b[i]) continue;
       const row = /^\| (A\d\d) \|/.exec(b[i] ?? '') ?? /^\| (A\d\d) \|/.exec(a[i] ?? '');
+      if (!row && (inPassage(b, i) || inPassage(a, i))) {
+        out.push(`${path}:${i + 1}: the §2 partial-tests passage differs from the one rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
+        continue;
+      }
       const what = row ? `§2 row ${row[1]}` : COUNTS_RE.test(b[i] ?? '') ? 'the §2 counts sentences' : 'line';
       out.push(`${path}:${i + 1}: ${what} differs from the table rendered from the registry; run node scripts/ci/gen-conformance-registry.mjs`);
     }
