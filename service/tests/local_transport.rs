@@ -1892,6 +1892,30 @@ const RACE_BINDS: usize = 400;
 /// directory was swapped during one of them.
 const RACE_LIMIT: Duration = Duration::from_secs(60);
 
+/// Whether the binds of the race go on: until [`RACE_BINDS`] were made, and
+/// then, while the renamer has swapped no directory, until `retrying_for`
+/// (how long they have gone on past [`RACE_BINDS`]) reaches [`RACE_LIMIT`].
+fn race_goes_on(binds: usize, swaps: u32, retrying_for: Duration) -> bool {
+    binds < RACE_BINDS || (swaps == 0 && retrying_for < RACE_LIMIT)
+}
+
+#[test]
+fn the_race_binds_go_on_until_a_swap_or_the_limit() {
+    let none = Duration::ZERO;
+    assert!(race_goes_on(0, 0, none));
+    assert!(race_goes_on(RACE_BINDS - 1, 5, none));
+    // The first binds, however long they took, leave the whole limit.
+    assert!(race_goes_on(RACE_BINDS, 0, none));
+    assert!(race_goes_on(
+        RACE_BINDS,
+        0,
+        RACE_LIMIT - Duration::from_nanos(1)
+    ));
+    assert!(!race_goes_on(RACE_BINDS, 0, RACE_LIMIT));
+    // One swap, counted whenever, ends the retries.
+    assert!(!race_goes_on(RACE_BINDS, 1, none));
+}
+
 /// The in-process renamer's pause between two scans of the directory once
 /// the binds go on past [`RACE_BINDS`].
 const RACE_PAUSE: Duration = Duration::from_micros(50);
@@ -1972,10 +1996,19 @@ async fn a_renamed_private_directory_redirects_nothing() {
         })
     };
     let started = Instant::now();
-    // `raced`: the binds during which the renamer swapped a directory.
+    // When the binds went past `RACE_BINDS`: the limit counts from there.
+    let mut retry_from = None;
+    // `raced`: the binds during which the renamer was seen to swap a
+    // directory (a diagnostic: a swap counted a moment after its bind is not
+    // one of them).
     let (mut binds, mut served, mut raced) = (0, 0, 0);
-    while binds < RACE_BINDS || (raced == 0 && started.elapsed() < RACE_LIMIT) {
-        if binds == RACE_BINDS {
+    while race_goes_on(
+        binds,
+        swaps.load(Ordering::SeqCst),
+        retry_from.map_or(Duration::ZERO, |from: Instant| from.elapsed()),
+    ) {
+        if binds >= RACE_BINDS && retry_from.is_none() {
+            retry_from = Some(Instant::now());
             pause.store(true, Ordering::SeqCst);
         }
         let before = swaps.load(Ordering::SeqCst);
@@ -2006,9 +2039,11 @@ async fn a_renamed_private_directory_redirects_nothing() {
         }
     }
     assert_eq!(fs::read(&target).unwrap(), b"keep");
+    // Every swap lands in a bind: a private directory exists only while one
+    // runs.
     assert!(
-        raced > 0,
-        "the renamer swapped no directory during a bind: {swaps} swaps, {binds} binds in {:?}",
+        swaps > 0,
+        "the renamer swapped no directory: {binds} binds in {:?}",
         started.elapsed()
     );
     assert!(served > 0, "no bind was served");
