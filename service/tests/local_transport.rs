@@ -268,6 +268,12 @@ impl Server {
         Self::start(transport.bind(path).await.unwrap())
     }
 
+    /// [`Server::bind`] at a path whose previous listener was dropped or
+    /// stopped ([`rebind`]).
+    async fn rebind(make: impl Fn() -> LocalTransport, path: &Path) -> Self {
+        Self::start(rebind(make, path).await)
+    }
+
     async fn stop(mut self) {
         let _ = self.shutdown.take().unwrap().send(());
         tokio::time::timeout(Duration::from_secs(30), self.task.take().unwrap())
@@ -289,6 +295,64 @@ impl Server {
         let mut line = serde_json::to_vec(&request).unwrap();
         line.push(b'\n');
         parse_reply(&self.raw(line).await.unwrap())
+    }
+}
+
+/// How long [`rebind`] retries a bind refused as [`BindError::InUse`].
+const REBIND_WAIT: Duration = Duration::from_secs(5);
+
+/// Binds a transport made by `make` at `path`, where the bind must not be
+/// `InUse` although a listener or an earlier bind held the path a moment
+/// ago (dropped, its server stopped, a stale socket's listener closed, or
+/// a refused bind that took the lock): [`BindError::InUse`] is retried until
+/// `wait` has passed, any other result is returned at once.
+///
+/// This is the tests' own race, not the transport's. Another test of this
+/// binary that runs a child process (`Command`: `id`, `runuser`, `unshare`,
+/// `mkfifo`, this binary) forks, and the child holds a duplicate of every
+/// descriptor the process had open at the fork until it executes its
+/// program, when `O_CLOEXEC` closes them. The old listener's lock file and
+/// listening socket are among them: its `flock` ends only when the last
+/// descriptor of the open file is closed, and its socket still accepts a
+/// connection, so for that moment the bind is `InUse`. The service runs no
+/// child process (and opens its lock file `O_CLOEXEC`, as `std` always
+/// does). A bind that must be `InUse` (a live listener holds the path) is
+/// never retried.
+async fn try_rebind(
+    make: impl Fn() -> LocalTransport,
+    path: &Path,
+    wait: Duration,
+) -> Result<LocalListener, BindError> {
+    let started = Instant::now();
+    loop {
+        match make().bind(path).await {
+            Err(BindError::InUse) if started.elapsed() < wait => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+}
+
+/// [`try_rebind`] for [`REBIND_WAIT`], which must bind.
+async fn rebind(make: impl Fn() -> LocalTransport, path: &Path) -> LocalListener {
+    try_rebind(make, path, REBIND_WAIT)
+        .await
+        .unwrap_or_else(|err| panic!("{}: {err:?}", path.display()))
+}
+
+/// The bind number `index` (from 0) of a series at `path`, each right after
+/// the previous one's listener is dropped: the first one binds directly (no
+/// listener held the path before it, so `InUse` there fails the test), a
+/// later one through [`rebind`].
+async fn nth_bind(index: usize, make: impl Fn() -> LocalTransport, path: &Path) -> LocalListener {
+    if index == 0 {
+        make()
+            .bind(path)
+            .await
+            .unwrap_or_else(|err| panic!("{}: {err:?}", path.display()))
+    } else {
+        rebind(make, path).await
     }
 }
 
@@ -410,18 +474,13 @@ async fn the_socket_is_owned_by_the_service_uid_with_mode_0600() {
     assert_eq!(dir.entries(), ["local.sock.lock"]);
 
     // Dropped without serving, the listener removes its socket too.
-    let listener = transport(&unreachable_pool(), TestClock::new(), 1, None)
-        .bind(&path)
-        .await
-        .unwrap();
+    let own = || transport(&unreachable_pool(), TestClock::new(), 1, None);
+    let listener = rebind(own, &path).await;
     drop(listener);
     assert_eq!(dir.entries(), ["local.sock.lock"]);
 
     // A path that is no longer its socket is left alone.
-    let listener = transport(&unreachable_pool(), TestClock::new(), 1, None)
-        .bind(&path)
-        .await
-        .unwrap();
+    let listener = rebind(own, &path).await;
     fs::remove_file(&path).unwrap();
     fs::write(&path, b"replaced").unwrap();
     drop(listener);
@@ -437,6 +496,25 @@ fn uid_of(name: &str) -> u32 {
         .trim()
         .parse()
         .unwrap()
+}
+
+/// Copies this test binary to `to`, mode 0755, for a child process to run
+/// as another user or under another root directory. `cp` writes the copy,
+/// so it is never open for writing in this process: a child that another
+/// test forks meanwhile would hold that descriptor until it executes its
+/// program (see [`try_rebind`]), and running the copy until then fails with
+/// `ETXTBSY` ("Text file busy"). `to`'s directory must be root's (or this
+/// process's) while it runs: a test gives a directory to the peer user only
+/// after the copy, so the peer cannot turn the write or the `chmod`
+/// elsewhere.
+fn copy_of_this_binary(to: &Path) {
+    let status = Command::new("cp")
+        .arg(env::current_exe().unwrap())
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(status.success(), "cp: {status}");
+    fs::set_permissions(to, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// Another service UID: as root the socket and its lock file are given to
@@ -499,10 +577,13 @@ fn a_process_that_is_not_root_binds_as_its_own_uid_only() {
         return;
     };
     let peer = uid_of(&user);
-    std::os::unix::fs::lchown(&dir.0, Some(peer), Some(peer)).unwrap();
+    // The copy is written and its mode set while the directory is still
+    // root's: in a directory the peer user owned, the peer could put a
+    // symbolic link at the path and lead root's write or `chmod` to another
+    // file. Only then is the directory given to the peer user.
     let binary = dir.0.join("tests");
-    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    copy_of_this_binary(&binary);
+    std::os::unix::fs::lchown(&dir.0, Some(peer), Some(peer)).unwrap();
     let output = Command::new("runuser")
         .args(["-u", &user, "--", "env"])
         .arg(format!("{NOT_ROOT_DIR_VAR}={}", dir.0.display()))
@@ -567,13 +648,16 @@ async fn binds_of_a_process_that_is_not_root(dir: &Path) {
         assert_eq!(names(dir, ""), before, "{other}");
         assert!(names(Path::new("/tmp"), &shared).is_empty(), "{other}");
     }
-    // Its own UID, given or the default: served.
-    for service in [Some(uid), None] {
+    // Its own UID, given or the default: served (the second bind right
+    // after the first one's drop).
+    for (index, service) in [Some(uid), None].into_iter().enumerate() {
         let path = dir.join("local.sock");
-        let listener = transport(&unreachable_pool(), TestClock::new(), 1, service)
-            .bind(&path)
-            .await
-            .unwrap();
+        let listener = nth_bind(
+            index,
+            || transport(&unreachable_pool(), TestClock::new(), 1, service),
+            &path,
+        )
+        .await;
         assert_eq!(listener.service_uid(), uid);
         let metadata = fs::symlink_metadata(&path).unwrap();
         assert_eq!((metadata.uid(), metadata.mode() & 0o7777), (uid, 0o600));
@@ -625,9 +709,17 @@ async fn the_socket_directory_must_be_safe() {
         );
         assert_eq!(fs::read_dir(&sub).unwrap().count(), 0, "{mode:o}");
     }
-    for mode in [0o1777, 0o755, 0o700, 0o1775] {
+    for (index, mode) in [0o1777, 0o755, 0o700, 0o1775].into_iter().enumerate() {
         fs::set_permissions(&sub, fs::Permissions::from_mode(mode)).unwrap();
-        drop(bind(sub.join("a.sock")).await.unwrap());
+        // Each bind after the first right after the previous one's drop.
+        drop(
+            nth_bind(
+                index,
+                || transport(&unreachable_pool(), TestClock::new(), 1, None),
+                &sub.join("a.sock"),
+            )
+            .await,
+        );
     }
     // A symbolic link as the directory.
     let link = dir.0.join("link");
@@ -702,9 +794,17 @@ async fn an_unsafe_directory_above_the_socket_refuses_to_start() {
         );
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0, "{mode:o}");
     }
-    for mode in [0o1777, 0o755] {
+    for (index, mode) in [0o1777, 0o755].into_iter().enumerate() {
         fs::set_permissions(&grandparent, fs::Permissions::from_mode(mode)).unwrap();
-        drop(bind(parent.join("a.sock"), None).await.unwrap());
+        // The second bind right after the first one's drop.
+        drop(
+            nth_bind(
+                index,
+                || transport(&unreachable_pool(), TestClock::new(), 1, None),
+                &parent.join("a.sock"),
+            )
+            .await,
+        );
     }
     // A symbolic link on the way, in a writable directory.
     let open = dir.0.join("open");
@@ -746,6 +846,19 @@ async fn an_occupied_socket_path_refuses_to_start() {
                 .await
         }
     };
+    // A bind right after an earlier one at the path released the lock, which
+    // must not be `InUse` ([`try_rebind`]).
+    let bind_again = || {
+        let path = path.clone();
+        async move {
+            try_rebind(
+                || transport(&unreachable_pool(), TestClock::new(), 1, None),
+                &path,
+                REBIND_WAIT,
+            )
+            .await
+        }
+    };
 
     // A regular file, a directory, a symbolic link (to nothing, and to a
     // socket): left in place.
@@ -754,16 +867,16 @@ async fn an_occupied_socket_path_refuses_to_start() {
     assert_eq!(fs::read(&path).unwrap(), b"data");
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
-    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind_again().await, Err(BindError::PathOccupied)));
     assert!(path.is_dir());
     fs::remove_dir(&path).unwrap();
     std::os::unix::fs::symlink(dir.0.join("nowhere"), &path).unwrap();
-    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind_again().await, Err(BindError::PathOccupied)));
     let elsewhere = dir.0.join("elsewhere.sock");
     drop(StdListener::bind(&elsewhere).unwrap());
     fs::remove_file(&path).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
-    assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+    assert!(matches!(bind_again().await, Err(BindError::PathOccupied)));
     assert!(
         fs::symlink_metadata(&path)
             .unwrap()
@@ -786,13 +899,14 @@ async fn an_occupied_socket_path_refuses_to_start() {
     assert!(stale.file_type().is_socket());
     if effective_uid(&dir.0) == 0 {
         std::os::unix::fs::lchown(&path, Some(65_534), None).unwrap();
-        assert!(matches!(bind().await, Err(BindError::PathOccupied)));
+        assert!(matches!(bind_again().await, Err(BindError::PathOccupied)));
         assert_eq!(fs::symlink_metadata(&path).unwrap().uid(), 65_534);
         std::os::unix::fs::lchown(&path, Some(0), None).unwrap();
     }
 
-    // Stale and the service UID's: replaced.
-    let listener = bind().await.unwrap();
+    // Stale and the service UID's: replaced (right after its listener's
+    // drop).
+    let listener = bind_again().await.unwrap();
     // (The inode number may be reused: the mode and a live listener show
     // the replacement.)
     assert_ne!(stale.mode() & 0o7777, 0o600);
@@ -850,13 +964,64 @@ async fn an_occupied_socket_path_refuses_to_start() {
     assert!(!path.exists());
 }
 
+/// The variable that hands [`simultaneous_binds_in_a_process_of_their_own`]
+/// its directory, and tells it it runs alone in its process.
+const SIMULTANEOUS_VAR: &str = "SKYOAUTH_IT_SIMULTANEOUS";
+
+/// The rounds of [`simultaneous_binds_in_a_process_of_their_own`].
+const SIMULTANEOUS_ROUNDS: usize = 20;
+
+/// The file in which [`simultaneous_binds_in_a_process_of_their_own`]
+/// records its rounds and their winners once every round has passed.
+const SIMULTANEOUS_RECORD: &str = "simultaneous-binds";
+
 /// Binds of one stale path started together: exactly one wins, every other
-/// is `InUse` (the lock file), and the winner's socket stays in place.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn simultaneous_binds_have_exactly_one_winner() {
+/// is `InUse` (the lock file), and the winner's socket stays in place. They
+/// run in a child process, alone ([`simultaneous_binds_in_a_process_of_their_own`]):
+/// a child that another test of this process forked would hold the previous
+/// round's lock, or the stale socket's listener, until it executes its
+/// program (see [`try_rebind`]), and every bind of a round would be `InUse`.
+/// The child binds in this test's directory and records its rounds there:
+/// a child that did nothing (one not handed the directory) passes too, but
+/// leaves no record.
+#[test]
+fn simultaneous_binds_have_exactly_one_winner() {
     let dir = TempDir::new();
-    let path = dir.socket();
-    for round in 0..20 {
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "simultaneous_binds_in_a_process_of_their_own",
+            "--nocapture",
+        ])
+        .env(SIMULTANEOUS_VAR, &dir.0)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{output:?}");
+    assert!(stdout.contains("1 passed"), "{stdout}");
+    let record = fs::read_to_string(dir.0.join(SIMULTANEOUS_RECORD))
+        .unwrap_or_else(|err| panic!("no record of the binds ({err}): {output:?}"));
+    assert_eq!(
+        record,
+        format!("{SIMULTANEOUS_ROUNDS} rounds, {SIMULTANEOUS_ROUNDS} winners\n")
+    );
+    // The last winner's lock file, and the record.
+    assert_eq!(dir.entries(), ["local.sock.lock", SIMULTANEOUS_RECORD]);
+}
+
+/// The binds of [`simultaneous_binds_have_exactly_one_winner`], the only
+/// test of their process, in the directory `SKYOAUTH_IT_SIMULTANEOUS`
+/// names: exactly one winner in every round's first and only batch, then
+/// the record of the rounds. Without the variable it does nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn simultaneous_binds_in_a_process_of_their_own() {
+    let Some(dir) = env::var_os(SIMULTANEOUS_VAR) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let path = dir.join("local.sock");
+    let mut won = 0;
+    for round in 0..SIMULTANEOUS_ROUNDS {
         drop(StdListener::bind(&path).unwrap());
         let start = Arc::new(tokio::sync::Barrier::new(8));
         let attempts: Vec<_> = (0..8)
@@ -880,12 +1045,18 @@ async fn simultaneous_binds_have_exactly_one_winner() {
             }
         }
         assert_eq!(winners.len(), 1, "round {round}");
+        won += winners.len();
         let metadata = fs::symlink_metadata(&path).unwrap();
         assert_eq!(metadata.mode() & 0o7777, 0o600, "round {round}");
         drop(StdStream::connect(&path).unwrap());
         drop(winners);
         assert!(!path.exists(), "round {round}");
     }
+    fs::write(
+        dir.join(SIMULTANEOUS_RECORD),
+        format!("{SIMULTANEOUS_ROUNDS} rounds, {won} winners\n"),
+    )
+    .unwrap();
 }
 
 /// Binds of a path with no lock file yet, started together in their own
@@ -974,6 +1145,66 @@ async fn an_overlapping_restart_keeps_the_new_socket() {
     }
     drop(old);
     assert!(!path.exists());
+}
+
+/// The tests' [`try_rebind`] retries `InUse` only, and only for its wait:
+/// another error is returned from the first bind, never retried; a
+/// listener held past the wait is `InUse` at its end, not before; one
+/// dropped during the wait gives way; and one dropped as the third bind
+/// starts is bound by that bind, after two `InUse`.
+#[tokio::test]
+async fn a_rebind_retries_only_in_use() {
+    let dir = TempDir::new();
+    let path = dir.socket();
+    // The transports made: one per bind.
+    let made = AtomicU32::new(0);
+    let own = || {
+        made.fetch_add(1, Ordering::SeqCst);
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+    };
+    fs::write(&path, b"data").unwrap();
+    let result = try_rebind(own, &path, REBIND_WAIT).await;
+    assert!(matches!(result, Err(BindError::PathOccupied)), "{result:?}");
+    assert_eq!(made.load(Ordering::SeqCst), 1, "bound once, never retried");
+    fs::remove_file(&path).unwrap();
+
+    // The refusal above took the lock and released it: [`rebind`].
+    let held = rebind(own, &path).await;
+    // Held past the wait: `InUse`, and only once the wait has passed (how
+    // many binds that took depends on the scheduler: a pause may take the
+    // whole wait in the first one).
+    let wait = Duration::from_millis(300);
+    let started = Instant::now();
+    let result = try_rebind(own, &path, wait).await;
+    assert!(matches!(result, Err(BindError::InUse)), "{result:?}");
+    assert!(started.elapsed() >= wait, "{:?}", started.elapsed());
+
+    let (listener, ()) = tokio::join!(try_rebind(own, &path, REBIND_WAIT), async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(held);
+    });
+    drop(listener.unwrap());
+    assert_eq!(dir.entries(), ["local.sock.lock"]);
+
+    // Dropped by the factory as it makes the third transport: the first
+    // two binds are `InUse`, the third binds (so a single retry is not
+    // enough). A bind after that one would only be another test's fork
+    // still holding the dropped listener's lock (see [`try_rebind`]), so
+    // the count is at least three, not exactly three.
+    let held = Mutex::new(Some(rebind(own, &path).await));
+    let calls = AtomicU32::new(0);
+    let releasing = || {
+        if calls.fetch_add(1, Ordering::SeqCst) + 1 == 3 {
+            drop(held.lock().unwrap().take().unwrap());
+        }
+        transport(&unreachable_pool(), TestClock::new(), 1, None)
+    };
+    let listener = try_rebind(releasing, &path, REBIND_WAIT).await;
+    let calls = calls.load(Ordering::SeqCst);
+    assert!(listener.is_ok(), "{listener:?}");
+    assert!(calls >= 3, "bound after {calls} binds");
+    drop(listener);
+    assert_eq!(dir.entries(), ["local.sock.lock"]);
 }
 
 /// On Linux a socket path that fits a Unix socket address works whatever
@@ -1241,8 +1472,7 @@ fn without_proc_a_bind_for_another_uid_is_refused_in_a_user_namespace() {
     }
     let root = TempDir::new();
     let binary = root.0.join("tests");
-    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    copy_of_this_binary(&binary);
     let output = Command::new("unshare")
         .args([
             "--user",
@@ -1431,12 +1661,14 @@ async fn a_bind_killed_while_creating_the_lock_file_leaves_no_lock_file() {
         assert!(matches!(result, Err(BindError::PathOccupied)), "{result:?}");
         assert_eq!(fs::symlink_metadata(&lock).unwrap().uid(), 0);
         assert_eq!(dir.entries(), ["local.sock.lock"]);
-        // It is root's own: served when root is the service UID.
+        // It is root's own: served when root is the service UID (right
+        // after the first listener's drop).
         drop(
-            transport(&unreachable_pool(), TestClock::new(), 1, None)
-                .bind(&dir.socket())
-                .await
-                .unwrap(),
+            rebind(
+                || transport(&unreachable_pool(), TestClock::new(), 1, None),
+                &dir.socket(),
+            )
+            .await,
         );
     }
 }
@@ -1601,8 +1833,7 @@ fn a_directory_the_service_uid_cannot_list_takes_a_socket() {
     fs::create_dir(&unlistable).unwrap();
     fs::set_permissions(&unlistable, fs::Permissions::from_mode(0o1733)).unwrap();
     let binary = dir.0.join("tests");
-    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    copy_of_this_binary(&binary);
     let output = Command::new("runuser")
         .args(["-u", &user, "--", "env"])
         .arg(format!("{UNLISTABLE_DIR_VAR}={}", unlistable.display()))
@@ -1763,6 +1994,9 @@ async fn the_service_uid_cannot_redirect_a_bind() {
     let dir = TempDir::new();
     assert_eq!(effective_uid(&dir.0), 0, "{PEER_USER_VAR} needs root");
     let peer = uid_of(&user);
+    // The copy first, before anything is given to the peer user.
+    let binary = dir.0.join("tests");
+    copy_of_this_binary(&binary);
     let socket_dir = dir.0.join("sockets");
     fs::create_dir(&socket_dir).unwrap();
     fs::set_permissions(&socket_dir, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1770,9 +2004,6 @@ async fn the_service_uid_cannot_redirect_a_bind() {
     let target = dir.0.join("target");
     fs::write(&target, b"keep").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
-    let binary = dir.0.join("tests");
-    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
     let renamer = Command::new("runuser")
         .args(["-u", &user, "--", "env"])
         .arg(format!("{RACE_DIR_VAR}={}", socket_dir.display()))
@@ -1926,6 +2157,9 @@ async fn the_owner_of_a_directory_above_cannot_redirect_a_bind() {
     let dir = TempDir::new();
     assert_eq!(effective_uid(&dir.0), 0, "{PEER_USER_VAR} needs root");
     let peer = uid_of(&user);
+    // The copy first, before anything is given to the peer user.
+    let binary = dir.0.join("tests");
+    copy_of_this_binary(&binary);
     let top = dir.0.join("top");
     let mid = top.join("mid");
     let socket_dir = mid.join("s");
@@ -1944,9 +2178,6 @@ async fn the_owner_of_a_directory_above_cannot_redirect_a_bind() {
     drop(StdListener::bind(&canary).unwrap());
     std::os::unix::fs::lchown(&canary, Some(peer), Some(peer)).unwrap();
     let before = tree(&outside);
-    let binary = dir.0.join("tests");
-    fs::copy(env::current_exe().unwrap(), &binary).unwrap();
-    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
     let swapper = Command::new("runuser")
         .args(["-u", &user, "--", "env"])
         .arg(format!("{SWAP_DIR_VAR}={}", top.display()))
@@ -2486,6 +2717,25 @@ async fn serve(
     .await
 }
 
+/// [`serve`] at a path whose previous server was stopped ([`rebind`]).
+async fn serve_again(
+    dir: &TempDir,
+    name: &str,
+    pool: &PgPool,
+    clock: &Arc<TestClock>,
+    seed: u64,
+) -> Server {
+    Server::rebind(
+        || {
+            transport(pool, Arc::clone(clock), seed, None)
+                .with_settings(settings())
+                .unwrap()
+        },
+        &dir.0.join(name),
+    )
+    .await
+}
+
 /// Bootstrap is answered with what it wrote, closes for good, and stays
 /// closed for a new transport on the same database.
 #[tokio::test]
@@ -2532,7 +2782,7 @@ async fn bootstrap_closes_for_good_across_a_restart() {
         error("conflict")
     );
     server.stop().await;
-    let server = serve(&dir, "a.sock", &pool, &clock, 2).await;
+    let server = serve_again(&dir, "a.sock", &pool, &clock, 2).await;
     for request in [bootstrap_request(4, &public_key(&THIRD_SEED)), {
         let mut other = bootstrap_request(5, &public_key(&THIRD_SEED));
         other["instance_id"] = json!("019a9f3c-5b2e-7c41-ad8e-ba9876543210");
@@ -2812,21 +3062,13 @@ async fn a_challenge_outlives_a_restart_until_it_expires() {
         challenge_ttl: Duration::from_secs(60),
         ..settings()
     };
-    let start = |seed| {
-        let pool = pool.clone();
-        let clock = Arc::clone(&clock);
-        let path = dir.0.join("a.sock");
-        async move {
-            Server::bind(
-                transport(&pool, clock, seed, None)
-                    .with_settings(short)
-                    .unwrap(),
-                &path,
-            )
-            .await
-        }
+    let make = |seed| {
+        transport(&pool, Arc::clone(&clock), seed, None)
+            .with_settings(short)
+            .unwrap()
     };
-    let server = start(1).await;
+    let path = dir.0.join("a.sock");
+    let server = Server::bind(make(1), &path).await;
     bootstrap(&server).await;
     let (expired, expired_m) = issue(&server, 2).await;
     clock.advance(Duration::from_secs(60));
@@ -2841,7 +3083,7 @@ async fn a_challenge_outlives_a_restart_until_it_expires() {
 
     let (operation_id, challenge) = issue(&server, 3).await;
     server.stop().await;
-    let server = start(2).await;
+    let server = Server::rebind(|| make(2), &path).await;
     clock.advance(Duration::from_secs(59));
     let reply = server
         .call(signed("restore", &operation_id, &sign(&SEED, &challenge)))
@@ -2875,7 +3117,7 @@ async fn a_missing_store_writes_nothing() {
     bootstrap(&server).await;
     let (operation_id, challenge) = issue(&server, 2).await;
     server.stop().await;
-    let server = serve(&dir, "closed.sock", &closed, &clock, 3).await;
+    let server = serve_again(&dir, "closed.sock", &closed, &clock, 3).await;
     let before = snapshot(&pool).await;
     for request in [
         issue_request(3, &public_key(&NEW_SEED)),
@@ -3302,6 +3544,20 @@ impl Proxy {
             })
             .collect()
     }
+
+    /// Waits until [`Proxy::connections`] is `expected`: the proxy sees a
+    /// client's close a moment after the client has closed.
+    async fn until_connections(&self, expected: &[(bool, bool)]) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.connections() != expected {
+            assert!(
+                Instant::now() < deadline,
+                "{:?}, not {expected:?}",
+                self.connections()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
 
 impl Drop for Proxy {
@@ -3361,7 +3617,17 @@ async fn a_database_that_stops_answering_is_cut_off() {
     assert_eq!(proxy.connections(), [(false, false)]);
 
     // The restore waits for a lock inside its transaction; then its
-    // connection stops answering, and the lock is released.
+    // connection stops answering (the error that ends the wait at the
+    // statement timeout never arrives), and the lock is released only once
+    // the request has been cut. The server closes a session idle in its
+    // transaction for the transaction timeout
+    // (`idle_in_transaction_session_timeout`), which ends the request with
+    // an error (`auth_unavailable`) if it reaches the transport before the
+    // cut. Released before the cut, the lock would let the restore's
+    // statement end at once, and the session go idle a moment after the
+    // transport's clock started, a margin a starved scheduler can lose;
+    // held, the session goes idle only at the statement timeout, two
+    // seconds later.
     let mut holder = PgConnection::connect_with(&pool.connect_options())
         .await
         .unwrap();
@@ -3381,9 +3647,9 @@ async fn a_database_that_stops_answering_is_cut_off() {
     let restore = tokio::task::spawn_blocking(move || exchange(&path, &line, false));
     until_a_lock_wait(&pool).await;
     proxy.stall_all();
-    lock.rollback().await.unwrap();
     let reply = restore.await.unwrap().unwrap();
     let waited = started.elapsed();
+    lock.rollback().await.unwrap();
     assert_eq!(reply, b"", "{}", String::from_utf8_lossy(&reply));
     assert!(
         waited >= bound && waited < bound + Duration::from_secs(5),
@@ -3538,7 +3804,9 @@ async fn a_commit_without_an_answer_gets_no_response() {
     let reply = server.raw(line).await.unwrap();
     assert_eq!(parse_reply(&reply), error("conflict"));
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(proxy.connections(), [(true, true), (false, false)]);
+    proxy
+        .until_connections(&[(true, true), (false, false)])
+        .await;
     server.stop().await;
     through.close().await;
     db.drop([pool]).await;
@@ -3603,10 +3871,11 @@ async fn shutdown_cuts_a_request_whose_database_stopped_answering() {
     db.drop([pool]).await;
 }
 
-/// A `BEGIN` without an answer past the deadline, and a rollback without
-/// one past the transaction timeout: each request is closed without a
-/// response, wrote nothing, and discards its connection (the next request
-/// is served at once, on a new one).
+/// A `BEGIN` without an answer, cut at the deadline (not the transaction
+/// timeout), and a rollback without one, cut at the transaction timeout
+/// (not the deadline): each request is closed without a response, wrote
+/// nothing, and discards its connection (the next request is served at
+/// once, on a new one).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
@@ -3616,12 +3885,23 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
     let dir = TempDir::new();
     let limits = Settings {
         idle_timeout: Duration::from_secs(10),
-        deadline: Duration::from_secs(1),
+        // It cuts the unanswered `BEGIN`, and it also bounds each next
+        // request's wait for a new connection (the pool's only one was
+        // discarded): a connect through the proxy and its authentication,
+        // which take a moment under load.
+        deadline: Duration::from_secs(3),
         statement_timeout: Duration::from_millis(300),
-        transaction_timeout: Duration::from_secs(2),
+        // Past the `BEGIN`'s window: a rollback bounded by the deadline, or
+        // a `BEGIN` bounded by the transaction timeout, falls outside its
+        // own window.
+        transaction_timeout: Duration::from_secs(6),
         ..Settings::default()
     };
-    let bound = limits.transaction_timeout;
+    let (deadline, bound) = (limits.deadline, limits.transaction_timeout);
+    // The windows the `BEGIN` and the rollback are cut in: apart.
+    let begin_cut = deadline - Duration::from_millis(100)..deadline + Duration::from_millis(2_500);
+    let rollback_cut = bound..bound + Duration::from_secs(3);
+    assert!(begin_cut.end <= rollback_cut.start);
     let server = Server::bind(
         transport(&through, TestClock::new(), 1, None)
             .with_settings(limits)
@@ -3640,16 +3920,15 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
     let started = Instant::now();
     assert_eq!(server.raw(line.clone()).await.unwrap(), b"");
     let waited = started.elapsed();
-    assert!(
-        waited >= Duration::from_millis(900) && waited < Duration::from_secs(5),
-        "{waited:?}"
-    );
+    assert!(begin_cut.contains(&waited), "{waited:?}");
     assert!(get_recovery_state(&pool).await.unwrap().is_none());
     proxy.stall_on(None);
     let started = Instant::now();
     bootstrap(&server).await;
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(proxy.connections(), [(true, true), (false, false)]);
+    proxy
+        .until_connections(&[(true, true), (false, false)])
+        .await;
 
     // A refused bootstrap whose rollback is never answered: no response.
     let before = snapshot(&pool).await;
@@ -3657,10 +3936,7 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
     let started = Instant::now();
     assert_eq!(server.raw(line.clone()).await.unwrap(), b"");
     let waited = started.elapsed();
-    assert!(
-        waited >= bound && waited < bound + Duration::from_secs(5),
-        "{waited:?}"
-    );
+    assert!(rollback_cut.contains(&waited), "{waited:?}");
     assert_eq!(snapshot(&pool).await, before);
     proxy.stall_on(None);
     let started = Instant::now();
@@ -3669,10 +3945,9 @@ async fn a_begin_or_rollback_without_an_answer_discards_its_connection() {
         error("conflict")
     );
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(
-        proxy.connections(),
-        [(true, true), (true, true), (false, false)]
-    );
+    proxy
+        .until_connections(&[(true, true), (true, true), (false, false)])
+        .await;
     server.stop().await;
     through.close().await;
     db.drop([pool]).await;
