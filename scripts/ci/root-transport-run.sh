@@ -110,6 +110,11 @@ run() {
     echo "::stop-commands::$token"
     { "$@" 2>&1 || echo "$?" > "$status_file"; } | tee "$log" || copied=$?
     status=$(cat "$status_file")
+    # A signal that arrived while COMMAND ran has been handled by now; one
+    # that arrives from here on is ignored, so it cannot kill the script
+    # between this point and `resume` (it would lose the resume token) and
+    # the script reports COMMAND's own status.
+    trap '' TERM INT HUP
     if [ "$copied" -ne 0 ]; then
         copy_error="could not write the log $log (tee exited $copied)"
         exit 2

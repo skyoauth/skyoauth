@@ -391,9 +391,11 @@ describe('run', () => {
   // up to its `trap ''` run only builtins, so no stand-in runs in that gap,
   // and signals sent together are not run one after another (dash runs the
   // trap of the lowest-numbered pending one, which exits). So the source is
-  // read: every handler ignores the three signals before it exits, and
-  // `resume` ignores them first.
-  test('each signal handler, and resume, ignores TERM, INT and HUP first', () => {
+  // read: every handler ignores the three signals before it exits, the
+  // script ignores them once COMMAND's status is read (a later signal would
+  // otherwise land between the last trap check and `resume`, and lose the
+  // token), and `resume` ignores them first.
+  test('each signal handler, the script after the status read, and resume ignore TERM, INT and HUP', () => {
     const source = readFileSync(SCRIPT, 'utf8');
     const body = source.slice(source.indexOf('\nrun() {'), source.indexOf('\nsummarize() {'));
     assert.deepEqual(body.match(/^\s*trap\b.*$/gm), [
@@ -402,6 +404,7 @@ describe('run', () => {
       `    trap 'trap "" TERM INT HUP; exit 143' TERM`,
       `    trap 'trap "" TERM INT HUP; exit 130' INT`,
       `    trap 'trap "" TERM INT HUP; exit 129' HUP`,
+      "    trap '' TERM INT HUP",
     ]);
     const resume = body.slice(body.indexOf('resume() {'), body.indexOf('\n    }\n', body.indexOf('resume() {')));
     assert.equal(resume.split('\n')[1], "        trap '' TERM INT HUP", 'resume does not ignore signals first');
