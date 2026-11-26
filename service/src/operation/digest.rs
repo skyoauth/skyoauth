@@ -143,6 +143,17 @@ impl DigestEnvelope<'_> {
     }
 }
 
+/// The plan's canonical text: exactly the bytes the preimage `C` embeds as
+/// its `plan` member (see the module docs), so a client that splices it
+/// into the envelope recomputes the digest without parsing a number of the
+/// plan (D29; the operation reads of [`crate::admin_http`] return it
+/// verbatim). A plan with no canonical form is [`NotCanonical`].
+pub fn canonical_plan(plan: &JsonObject) -> Result<String, NotCanonical> {
+    let mut out = String::with_capacity(128);
+    push_object(&mut out, plan)?;
+    Ok(out)
+}
+
 /// Appends `members` with their names sorted byte-wise.
 fn push_object(out: &mut String, members: &JsonObject) -> Result<(), NotCanonical> {
     let mut sorted: Vec<(&String, &Value)> = members.iter().collect();
@@ -284,6 +295,32 @@ mod tests {
             hex(tenant.digest().unwrap().as_bytes()),
             "adf18319a76355511f56dc2a21422b1a80a21631aa00c05be720108bff99dda3"
         );
+    }
+
+    /// The plan's canonical text is the very substring the preimage embeds
+    /// as `plan`, so splicing it back reproduces `C` byte for byte.
+    #[test]
+    fn the_canonical_plan_is_the_preimages_plan_member() {
+        let nested = object(json!({
+            "z": [1, -2, null, false, {"b": "\u{1}\"\\", "a": "é"}],
+            "B": {"y": 9_223_372_036_854_775_807_i64, "x": "\n"},
+            "a": "",
+        }));
+        for plan in [toggle_plan(), nested, JsonObject::new()] {
+            let text = canonical_plan(&plan).unwrap();
+            let whole = envelope(&plan).canonical_json().unwrap();
+            assert!(
+                whole.contains(&format!(",\"plan\":{text},\"tenant_id\":")),
+                "{whole}"
+            );
+        }
+        assert_eq!(
+            canonical_plan(&toggle_plan()).unwrap(),
+            r#"{"requester_credential_id":"crd_1","widening_second_approver":true}"#
+        );
+        assert_eq!(canonical_plan(&JsonObject::new()).unwrap(), "{}");
+        let float = object(json!({ "deep": [{ "n": 1.5 }] }));
+        assert_eq!(canonical_plan(&float), Err(NotCanonical));
     }
 
     /// The envelope's members are in byte-wise order, and so are a plan's

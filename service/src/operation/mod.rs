@@ -21,6 +21,11 @@
 //! Nothing calls these functions yet: no endpoint, and nothing at startup.
 //! No endpoint lands before the request layer exists (generated IDs, T10.2;
 //! the raw body bound; NUL rejection; the role of each endpoint; T13.3).
+//! The one exception is the read path ([`read_operation`],
+//! [`list_operations`]; Q1, D22, D29, and D4 of the M1a lead decisions),
+//! whose `GET` endpoints the admin router of [`crate::admin_http`] serves;
+//! that router itself is served nowhere until the rustls acceptor lands
+//! (D5).
 //! [`OperationKind`] has the toggle, the two keyset kinds
 //! (`trust_keyset_version_create`, `_enable`) and the two trust source
 //! kinds (`trust_source_create`, `_update`); any other stored kind is
@@ -225,6 +230,7 @@
 mod approval;
 mod digest;
 pub(crate) mod keyset_plan;
+mod read;
 pub(crate) mod source_plan;
 mod toggle;
 
@@ -236,7 +242,10 @@ use std::{
 pub use approval::{
     PreparedApproval, approve_operation, cancel_operation, prepare_approval, reject_operation,
 };
-pub use digest::{DIGEST_PREFIX, DigestEnvelope, DigestLengthError, NotCanonical, RequestDigest};
+pub use digest::{
+    DIGEST_PREFIX, DigestEnvelope, DigestLengthError, NotCanonical, RequestDigest, canonical_plan,
+};
+pub use read::{OperationReadError, OperationRecord, list_operations, read_operation};
 pub use toggle::submit_widening_toggle;
 pub(crate) use toggle::{PendingRequest, encode_error, insert_pending};
 

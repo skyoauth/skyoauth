@@ -1,6 +1,7 @@
 //! Operator identities, their mTLS credentials and their role bindings
-//! (`0005`), and the operator authorization lookups [`authorize_operator`]
-//! and [`authorize_operator_locked`] (design section 7.2; identity-registry
+//! (`0005`), the operator authorization lookups [`authorize_operator`]
+//! and [`authorize_operator_locked`], and the credential lookup
+//! [`authenticate_operator`] (design section 7.2; identity-registry
 //! section 5.2; ADR-013 items 1 and 2; public-api API-002 and API-120;
 //! T13.1, T13.2).
 //!
@@ -165,6 +166,18 @@
 //! can commit between the lookup and the caller's write, also when both run
 //! in one transaction. A decision that must hold until the caller's
 //! transaction commits uses [`authorize_operator_locked`].
+//!
+//! # Authentication lookup
+//!
+//! [`authenticate_operator`] answers the first half of that question only:
+//! is there an enabled, unrevoked credential with exactly this
+//! `public_identity`, of an enabled operator identity? It is the same
+//! statement without the binding join, role and scope, one row of
+//! `EXISTS`, byte-wise, unlocked and clock-free, with the same handling of
+//! inputs and store failures. A request layer that has denied a request
+//! after [`authorize_operator`] uses it to tell a credential that
+//! authenticates no one (401) from an operator that lacks the role
+//! (403; errors-retry ERR-001, ERR-010, ERR-011). It grants nothing.
 //!
 //! # Locked lookup
 //!
@@ -541,6 +554,16 @@ macro_rules! authorize_statement {
 /// `public_identity`.
 const AUTHORIZE_OPERATOR: &str = authorize_statement!("c.public_identity = $1");
 
+/// The statement of [`authenticate_operator`]: the credential and identity
+/// predicates of [`AUTHORIZE_OPERATOR`], without the binding. `$1` is the
+/// `public_identity`.
+const AUTHENTICATE_OPERATOR: &str = "SELECT EXISTS (SELECT FROM admin_credential c \
+     JOIN admin_identity i ON i.id = c.admin_id \
+     WHERE c.public_identity = $1 \
+       AND c.status = 'enabled' \
+       AND c.revoked_at IS NULL \
+       AND i.status = 'enabled')";
+
 /// The same lookup by the credential's ID (`$1`) and its operator's ID
 /// (`$4`), for an operator known by its IDs rather than by a presented key:
 /// the requester of an approval
@@ -816,6 +839,22 @@ pub async fn authorize_operator<'e>(
         .await?)
 }
 
+/// Whether `public_identity` names a usable credential: the enabled,
+/// unrevoked credential with exactly that `public_identity`, of an enabled
+/// identity, whatever its bindings (see the module documentation,
+/// "Authentication lookup"). Every miss is the same `Ok(false)`. Reads no
+/// clock, writes nothing and takes no row locks: the answer is a point in
+/// time.
+pub async fn authenticate_operator<'e>(
+    executor: impl PgExecutor<'e>,
+    public_identity: &str,
+) -> Result<bool, RegistryError> {
+    Ok(sqlx::query_scalar(AUTHENTICATE_OPERATOR)
+        .bind(public_identity)
+        .fetch_one(executor)
+        .await?)
+}
+
 /// [`authorize_operator`] for the credential `credential_id` of the operator
 /// `admin_id`, by their IDs instead of a presented `public_identity`: the
 /// same statuses, role and scope, every miss the same `Ok(None)`, no lock
@@ -990,6 +1029,37 @@ mod tests {
             "lower(",
         ] {
             assert!(!AUTHORIZE_OPERATOR.contains(absent), "{absent}");
+        }
+    }
+
+    /// The credential lookup has the credential and identity predicates of
+    /// the authorization statement, and nothing of a binding.
+    #[test]
+    fn the_credential_lookup_checks_the_credential_and_its_identity() {
+        for predicate in [
+            "JOIN admin_identity i ON i.id = c.admin_id",
+            "c.public_identity = $1",
+            "c.status = 'enabled'",
+            "c.revoked_at IS NULL",
+            "i.status = 'enabled'",
+        ] {
+            assert_eq!(
+                AUTHENTICATE_OPERATOR.matches(predicate).count(),
+                1,
+                "{predicate}"
+            );
+            assert_eq!(AUTHORIZE_OPERATOR.matches(predicate).count(), 1);
+        }
+        for absent in [
+            "admin_role_binding",
+            "b.",
+            "$2",
+            ";",
+            "now()",
+            "LIKE",
+            "lower(",
+        ] {
+            assert!(!AUTHENTICATE_OPERATOR.contains(absent), "{absent}");
         }
     }
 }

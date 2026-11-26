@@ -4,6 +4,7 @@ use axum::{Json, Router, routing::get};
 use serde::Serialize;
 
 pub mod admin;
+pub mod admin_http;
 pub mod identity;
 pub mod ids;
 pub mod jwk;

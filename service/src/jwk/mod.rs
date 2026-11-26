@@ -311,7 +311,7 @@
 //! - Selecting the live verification key of the explicitly selected source
 //!   (T11.7) from [`live_keys`].
 
-mod base64url;
+pub(crate) mod base64url;
 mod key;
 mod overlap;
 mod point;
