@@ -604,14 +604,31 @@ jobs:
         with:
           tool: cargo-nextest@0.9.151
 
-      # The operator's tests read the fixtures byte for byte, and
-      # .gitattributes pins LF for tests/conformance/**; this proves the
-      # checkout honoured it (a CR in a fixture would change what the known
-      # answers hash or compare), on every leg.
+      # .gitattributes pins LF for tests/conformance/**, and the operator's
+      # tests read the fixtures as bytes (a hash of a fixture changes with a
+      # CR); this proves that the checkout honoured it, on every leg. A CR
+      # in JSON outside a string is only whitespace, so what this guards is
+      # the bytes, not the parse. The check first proves that it can see a
+      # CR on this leg's own grep (Git for Windows ships one): a planted file
+      # with a CR must be found and one without must not, else the step
+      # fails instead of passing on a check that finds nothing.
       - name: Check the fixtures have LF line endings
         shell: bash
         run: |
-          if grep -rl "$(printf '\r')" tests/conformance/fixtures; then
+          cr=$(printf '\r')
+          probe=$(mktemp -d)
+          printf 'a%sb\n' "$cr" > "$probe/with-cr"
+          printf 'ab\n' > "$probe/without-cr"
+          found=$(grep -rlF "$cr" "$probe" || true)
+          rm -rf "$probe"
+          case $found in
+            */with-cr) ;;
+            *) echo "::error::The CR check did not find a planted CR: it cannot be trusted on this runner"; exit 1 ;;
+          esac
+          case $found in
+            *without-cr*) echo "::error::The CR check found a CR in a file without one: it cannot be trusted on this runner"; exit 1 ;;
+          esac
+          if grep -rlF "$cr" tests/conformance/fixtures; then
             echo "::error::A fixture under tests/conformance/fixtures has CR line endings"
             exit 1
           fi
