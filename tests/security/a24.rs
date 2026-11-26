@@ -44,10 +44,11 @@
 //!   version, alone, next to another key or separated by another key
 //!   (`1, 2, 1`), is refused before any statement with the registry's
 //!   encode error (`RegistryError::Other`), never a replay, and writes
-//!   nothing; on a closed pool it is the same encode error, not
-//!   `PoolClosed`, so the check needs no database: each member then consumes once;
-//!   the same members with distinct keys consume once as a set and replay
-//!   the second time (`a24_neg_duplicate_key_in_set_is_refused_not_a_replay`).
+//!   nothing. On a closed pool it is the same encode error, not
+//!   `PoolClosed`, so the check needs no database. Afterwards each member
+//!   of the refused sets still consumes once, then replays. As a control,
+//!   a set of distinct keys consumes once as a set and replays the second
+//!   time (`a24_neg_duplicate_key_in_set_is_refused_not_a_replay`).
 //!
 //! **Once per source.** The key is `(tenant_id, trust_source_id,
 //! replay_key_digest)`. A tenant that registers the same issuer as two
@@ -991,10 +992,7 @@ async fn a24_neg_duplicate_key_in_set_is_refused_not_a_replay() {
                 let case = format!("{t} {name} ({} members), {pool_name}", set.len());
                 match registry::consume_assertion_set(executor, set).await {
                     Err(RegistryError::Other(sqlx::Error::Encode(err))) => {
-                        assert!(
-                            err.to_string().contains("duplicate key in assertion set"),
-                            "{case}: {err}"
-                        );
+                        assert_eq!(err.to_string(), "duplicate key in assertion set", "{case}");
                     }
                     other => panic!("{case}: expected an encode error, not a replay: {other:?}"),
                 }

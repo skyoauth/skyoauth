@@ -229,7 +229,8 @@ pub(super) async fn get_with(
 /// The canonical public identity of the Ed25519 key with secret `seed`
 /// repeated: `identity::canonical_public_identity` of its DER
 /// `SubjectPublicKeyInfo` (RFC 8410), the form the acceptor will compute.
-pub(super) fn key(seed: u8) -> String {
+/// `harness::wire_fixture_keys` pins `key(1)` and `key(2)`.
+pub(crate) fn key(seed: u8) -> String {
     const ED25519_SPKI_PREFIX: [u8; 12] = [
         0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
     ];

@@ -29,7 +29,9 @@
 //! tests the harness's own database teardown (`src/pg.rs`), and
 //! `harness::wire_errors` the wire error catalogue
 //! `tests/conformance/fixtures/_wire/errors.v1.json` against the service's
-//! `admin_http::ErrorCode` (no server needed); their tests are
+//! `admin_http::ErrorCode` (no server needed), and
+//! `harness::wire_fixture_keys` pins `security::wire_fixture::key` to
+//! known answers (no database needed); their tests are
 //! not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
 
@@ -79,7 +81,7 @@ mod security {
     #[path = "selection_fixture.rs"]
     mod selection_fixture;
     #[path = "wire_fixture.rs"]
-    mod wire_fixture;
+    pub(crate) mod wire_fixture;
 }
 
 mod harness {
@@ -87,4 +89,6 @@ mod harness {
     mod pg_teardown;
     #[path = "wire_errors.rs"]
     mod wire_errors;
+    #[path = "wire_fixture_keys.rs"]
+    mod wire_fixture_keys;
 }
