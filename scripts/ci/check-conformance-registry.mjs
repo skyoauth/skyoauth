@@ -746,7 +746,7 @@ export function checkRegistry(root, { requireHistory = false, hist: given = null
   const table = spec('table', () => findTable(texts[LAYOUT]));
   if (!env || !a || !c || !table) return done();
   const { codes, catalogue } = env;
-  const counts = findCounts(texts[LAYOUT]);
+  const counts = findCounts(texts[LAYOUT], table);
   for (const msg of [...a.errors, ...c.errors]) report.error(null, null, 'ids', msg);
   const tasksById = taskLines(texts[TASKS]);
 

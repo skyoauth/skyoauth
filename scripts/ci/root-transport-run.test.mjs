@@ -6,7 +6,7 @@
 // directory, removed afterwards; nothing runs as root or reaches a network.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -242,6 +242,62 @@ describe('run', () => {
     assert.match(r.lines.slice(resumed + 1).join('\n'), /^::error::could not write the log /m);
   });
 
+  // Starts `run` of a command that prints `ready` and then waits for its
+  // stdin to close (`cat`) in a process group of its own, sends SIGNAL once
+  // `ready` is out, to the whole group (as a cancelled job's process tree
+  // gets it) or to the script alone, and returns the exit status and
+  // stdout's lines. The signal follows the command's own output, and with
+  // `toGroup` false stdin is closed only after the signal was sent; the one
+  // timer is a backstop that kills the group, so a broken script fails the
+  // test instead of hanging it.
+  function runSignalled(signal, toGroup) {
+    const cmd = fresh('cmd.sh');
+    writeFileSync(cmd, 'echo ready\ncat >/dev/null\necho done\n');
+    const child = spawn('sh', [SCRIPT, 'run', fresh('run.log'), 'sh', cmd], { detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let sent = false;
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (!sent && /^ready$/m.test(stdout)) {
+        sent = true;
+        process.kill(toGroup ? -child.pid : child.pid, signal);
+        if (!toGroup) child.stdin.end();
+      }
+    });
+    const backstop = setTimeout(() => {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {}
+    }, 30_000);
+    return new Promise((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (status, sig) => {
+        clearTimeout(backstop);
+        resolve({ status, signal: sig, lines: stdout.split('\n') });
+      });
+    });
+  }
+
+  for (const [signal, status] of [['SIGTERM', 143], ['SIGINT', 130], ['SIGHUP', 129]]) {
+    test(`a ${signal} to the process group still resumes commands and exits ${status}`, async () => {
+      const r = await runSignalled(signal, true);
+      assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
+      assert.equal(r.status, status, r.lines.join('\n'));
+      const token = TOKEN.exec(r.lines[0])?.[1];
+      assert.ok(token, r.lines.join('\n'));
+      assert.deepEqual(r.lines.slice(1), ['ready', '', `::${token}::`, '']);
+    });
+  }
+
+  test('a SIGTERM to the script alone resumes commands after the command ends, and exits 143', async () => {
+    const r = await runSignalled('SIGTERM', false);
+    assert.equal(r.signal, null, `killed by ${r.signal}: the EXIT trap did not run`);
+    assert.equal(r.status, 143, r.lines.join('\n'));
+    const token = TOKEN.exec(r.lines[0])?.[1];
+    assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
+  });
+
   test('usage errors exit 2', () => {
     for (const args of [[], ['run'], ['run', fresh('x.log')], ['summarize', fresh('x.log')], ['other']]) {
       assert.equal(sh(args, { env: { ...process.env, GITHUB_STEP_SUMMARY: fresh('s.md') } }).status, 2, args.join(' '));
@@ -271,7 +327,10 @@ const problems = (ci) => {
   const uploads = stepsOf(job).filter((s) => /^ {8}uses: actions\/upload-artifact@/m.test(s)).map(upload);
   const want = [
     { name: 'service-nextest-junit-${{ github.run_attempt }}', paths: ['target/nextest/ci/junit.xml'], if: 'always()' },
-    { name: 'service-nextest-root-junit-${{ github.run_attempt }}', paths: ['target/nextest/ci-root/junit.xml'], if: 'always()' },
+    // Only when the root step started: when it was skipped (the normal run
+    // never started, or the job was cancelled first) there is nothing to
+    // upload, and `if-no-files-found: warn` would warn for nothing.
+    { name: 'service-nextest-root-junit-${{ github.run_attempt }}', paths: ['target/nextest/ci-root/junit.xml'], if: "${{ always() && steps.root.outcome != 'skipped' }}" },
   ];
   // One file each, so it is at the top of its artifact (upload-artifact
   // strips the files' common directory): a nested junit.xml breaks the
@@ -281,6 +340,11 @@ const problems = (ci) => {
   const root = stepNamed(job, 'Run the root-only local transport tests')[0] ?? '';
   if (!root) return [...out, 'no root step'];
   if (!/^ {8}id: tests$/m.test(tests)) out.push('the normal run has no `id: tests`');
+  if (!/^ {8}id: root$/m.test(root)) out.push('the root step has no `id: root`, which gates its upload');
+  // A missing report after a root step that started is not silent.
+  for (const step of stepsOf(job).filter((s) => /^ {8}uses: actions\/upload-artifact@/m.test(s))) {
+    if (!/^ {10}if-no-files-found: warn$/m.test(step)) out.push(`upload ${upload(step).name} does not warn when its file is missing`);
+  }
   if (stepsOf(job).indexOf(root) !== stepsOf(job).indexOf(tests) + 1) out.push('the root step does not follow the normal run');
   // It runs after a failed normal run too, not when that never ran.
   if (!/^ {8}if: \$\{\{ !cancelled\(\) && steps\.tests\.outcome != 'skipped' \}\}$/m.test(root)) out.push('the root step does not run after a failed normal run');
@@ -315,6 +379,10 @@ describe('the service-nextest job in ci.yml', () => {
       [(b) => b.replace(/^( {10}sh scripts\/ci\/root-transport-run\.sh summarize .*)$/m, '$1\n          echo "::warning::$x"'), /unescaped/],
       [(b) => b.replace('          unshare --user --map-root-user --mount true || userns=$?\n', '          sudo unshare --user --map-root-user --mount true || userns=$?\n'), /probe/],
       [(b) => b.replace('        id: tests\n', ''), /id: tests/],
+      [(b) => b.replace('        id: root\n', ''), /id: root/],
+      // The upload as it was: it warned when the root step was skipped.
+      [(b) => b.replace("if: ${{ always() && steps.root.outcome != 'skipped' }}", 'if: always()'), /uploads/],
+      [(b) => b.replace(/(service-nextest-root-junit-.*\n.*\n {10}if-no-files-found: )warn/, '$1ignore'), /service-nextest-root-junit-.* does not warn/],
       [(b) => b.replace('summarize "$log" "$userns" "$status"', 'summarize "$log" "$userns" 0'), /with the run's status/],
     ];
     for (const [f, re] of cases) {

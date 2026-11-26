@@ -57,7 +57,13 @@
 //     counts scenario stages only);
 //   - the partial-tests markers stand in §2 after the counts sentences and
 //     enclose only generated passage lines, so write mode overwrites nothing
-//     hand-written.
+//     hand-written;
+//   - every stray scenario row is refused: a §2 line that starts with
+//     `| A`, two digits, a space and `|` (a bare scenario ID cell such as
+//     `| A24 |`; `| A24.01 |` or `|A24|` is not one) above the table header
+//     or after the table's last row (the first line that does not start
+//     with `|` ends the table), as write mode would keep it next to the
+//     rendered table. The counts sentences are taken only after the table.
 //
 // matrix_sha256 is the SHA-256 of the UTF-8 bytes of the whole source line,
 // from its first character to its last, with no trailing newline.
@@ -369,10 +375,13 @@ export function renderCounts(scenarios) {
 
 export const COUNTS_RE = /^Counts by first stage: [^.]*\. Counts by final stage: [^.]*\. \d+ rows have more than one stage\./;
 
-// Locates the counts sentences in §2: { n, text } (1-based line, the matched
-// sentences), or null.
-export function findCounts(layout) {
+// Locates the counts sentences in §2 after the §2 table: { n, text } (1-based
+// line, the matched sentences), or null. A counts line above the table is not
+// taken (it is not rendered, and the sentences after the table are missing).
+export function findCounts(layout, table = findTable(layout)) {
+  const tableEnd = table.first + table.lines.length - 1;
   for (const { line, n } of section(layout, LAYOUT, '2.')) {
+    if (n <= tableEnd) continue;
     const m = COUNTS_RE.exec(line);
     if (m) return { n, text: m[0] };
   }
@@ -905,23 +914,28 @@ export function generate(root) {
     errors.push(...a.errors, ...c.errors);
     const aIds = a.rows.map((r) => r.id);
     const table = findTable(layout);
-    const counts = findCounts(layout);
+    const counts = findCounts(layout, table);
     if (!counts) errors.push(`${LAYOUT}: the "Counts by first stage: ... rows have more than one stage." sentences after the §2 table are missing`);
     // The table ends at its first line that is not a row, so a line inside
     // it would cut it short, and write mode would keep the rows after that
     // line next to the rendered ones: a scenario row after the table's last
     // line is refused, whatever interrupts the table (the partial-tests
-    // markers or the counts sentences, wherever the other one stands).
+    // markers or the counts sentences, wherever the other one stands). So
+    // is one above its header, which write mode would keep too, next to the
+    // same row rendered in the table. A stray row is any §2 line that starts
+    // with "| A" and two digits and then " |" (a bare `| A24 |` cell
+    // included), outside the header-to-last-row span.
     const tableEnd = table.first + table.lines.length - 1;
-    const stray = section(layout, LAYOUT, '2.').find((l) => l.n > tableEnd && /^\| A\d\d \|/.test(l.line));
-    if (stray) errors.push(`${LAYOUT}:${stray.n}: §2 row ${stray.line.slice(2, 5)} is not part of the §2 table, which ends at line ${tableEnd}; keep the table's rows together, with no other line between them`);
+    const stray = section(layout, LAYOUT, '2.').find((l) => (l.n < table.first || l.n > tableEnd) && /^\| A\d\d \|/.test(l.line));
+    if (stray) errors.push(`${LAYOUT}:${stray.n}: §2 row ${stray.line.slice(2, 5)} is not part of the §2 table, which spans lines ${table.first}-${tableEnd}; keep the table's rows together, under its header, with no other line between them`);
     const partial = findPartialTests(layout);
     if (partial.error) errors.push(partial.error);
     // The passage starts after the whole table and its counts sentences: a
     // marker inside the table would cut it short (and the rows after the
     // marker would survive next to the rendered ones), and one above the
-    // counts would replace them and whatever stands between. Both bounds are
-    // checked, as the counts sentences need not stand below the table.
+    // counts would replace them and whatever stands between. Counts are
+    // only taken after the table, so the first bound implies the second;
+    // the second still applies when the counts sentences are missing.
     // This also refuses markers that enclose the table.
     else if (counts && partial.begin <= counts.n) {
       errors.push(`${LAYOUT}:${partial.begin}: the partial-tests passage must start after the §2 table and its counts sentences (line ${counts.n})`);

@@ -1373,6 +1373,48 @@ describe('the §2 partial-tests passage', () => {
     assert.equal(read(root, LAYOUT), registry(LAYOUT));
   });
 
+  test('a scenario row above the table header stops generation', () => {
+    // Write mode renders the table from its header down and keeps every
+    // other line, so a row moved above the header would stay there, next to
+    // the same row rendered in the table.
+    const rowOf = (t, id) => new RegExp(`^\\| ${id} \\|[^\\n]*\\n`, 'm').exec(t)[0];
+    const above = (sep) => (t) => {
+      const row = rowOf(t, 'A05');
+      return replaceOnce(replaceOnce(t, row, ''), '| ID | Layer | Env |', `${row}${sep}| ID | Layer | Env |`);
+    };
+    for (const sep of ['', '\n', 'Some prose.\n\n']) {
+      layoutUnchanged(
+        fixture((rel, t) => (rel === LAYOUT ? above(sep)(t) : t)),
+        /conformance-layout\.md:\d+: §2 row A05 is not part of the §2 table, which spans lines \d+-\d+/,
+      );
+    }
+    // Only a bare `| Axx |` cell at the start of a line is a scenario row.
+    for (const line of ['| A05.01 | x |', '|A05| x |', 'See | A05 | here.', '| A5 | x |', '| A050 | x |']) {
+      const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, '| ID | Layer | Env |', `${line}\n\n| ID | Layer | Env |`) : t));
+      const r = cli('--root', root, '--check');
+      assert.equal(r.status, 0, `${line}: ${r.stderr}`);
+    }
+  });
+
+  test('only counts sentences after the table are taken', () => {
+    const counts = /^Counts by first stage: [^\n]*$/m.exec(registry(LAYOUT))[0];
+    const stale = counts.replace(/^Counts by first stage: M1a \d+ /, 'Counts by first stage: M1a 99 ');
+    assert.notEqual(stale, counts);
+    // Alone above the table: missing.
+    layoutUnchanged(
+      fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${counts}\n\n`, ''), '| ID | Layer | Env |', `${counts}\n\n| ID | Layer | Env |`) : t)),
+      /the "Counts by first stage: \.\.\. rows have more than one stage\." sentences after the §2 table are missing/,
+    );
+    // A stale copy above the table is left alone; the stale counts after the
+    // table fail --check and are the ones rendered back.
+    const root = fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, counts, stale), '| ID | Layer | Env |', `${stale}\n\n| ID | Layer | Env |`) : t));
+    assert.match(cli('--root', root, '--check').stderr, /the §2 counts sentences differ/);
+    assert.equal(cli('--root', root).status, 0);
+    const want = replaceOnce(registry(LAYOUT), '| ID | Layer | Env |', `${stale}\n\n| ID | Layer | Env |`);
+    assert.equal(read(root, LAYOUT), want);
+    assert.equal(cli('--root', root, '--check').status, 0);
+  });
+
   test('a missing, repeated or misplaced marker stops generation', () => {
     const missing = /the generated partial-tests passage needs exactly a line "<!-- BEGIN GENERATED partial-tests: .*" in §2; found/;
     layoutUnchanged(fixture((rel, t) => (rel === LAYOUT ? replaceOnce(t, `${PARTIAL_BEGIN}\n`, '') : t)), missing);
@@ -1408,9 +1450,10 @@ describe('the §2 partial-tests passage', () => {
       fixture((rel, t) => (rel === LAYOUT ? replaceOnce(replaceOnce(t, `${PARTIAL_BEGIN}\n`, ''), '| ID | Layer | Env |', `${PARTIAL_BEGIN}\n| ID | Layer | Env |`) : t)),
       placement,
     );
-    // The counts sentences need not stand below the table, so they alone do
-    // not keep the passage out of it. `cut(t)` is the layout without its
-    // counts line and the blank line after it, and that line.
+    // Counts sentences above the table are not taken (they are reported
+    // missing), so they do not keep the passage out of it either. `cut(t)`
+    // is the layout without its counts line and the blank line after it, and
+    // that line.
     const cut = (t) => {
       const counts = /^Counts by first stage: [^\n]*\n\n/m.exec(t);
       assert.ok(counts, 'counts sentences');
@@ -1420,7 +1463,7 @@ describe('the §2 partial-tests passage', () => {
       const { rest, counts } = cut(t);
       return replaceOnce(rest, '| ID | Layer | Env |', `${counts}| ID | Layer | Env |`);
     };
-    const stray = /conformance-layout\.md:\d+: §2 row A06 is not part of the §2 table, which ends at line \d+/;
+    const stray = /conformance-layout\.md:\d+: §2 row A06 is not part of the §2 table, which spans lines \d+-\d+/;
     // The counts sentences above the table and the passage between rows A05
     // and A06: write mode used to render the whole table above the passage
     // and keep rows A06-A64 below it.

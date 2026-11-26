@@ -7,9 +7,10 @@
 #       Runs COMMAND with its stdout and stderr copied to LOG and to
 #       stdout, with workflow commands stopped meanwhile
 #       (`::stop-commands::` with a random token, resumed afterwards on a
-#       line of its own, also when COMMAND or the copy fails), so no line
-#       a test prints is read as a workflow command. Exits with COMMAND's
-#       status, or 2 when the log cannot be written.
+#       line of its own, also when COMMAND or the copy fails and when the
+#       script gets TERM, INT or HUP), so no line a test prints is read as
+#       a workflow command. Exits with COMMAND's status, 2 when the log
+#       cannot be written, or 143, 130 or 129 after TERM, INT or HUP.
 #
 #   sh root-transport-run.sh summarize LOG USERNS_STATUS RUN_STATUS
 #       Reads the log of that run (RUN_STATUS: its exit status) and appends
@@ -63,13 +64,21 @@ run() {
     status_file=$(mktemp)
     # From here on, commands resume whatever happens. The leading newline
     # ends a last output line that has none, which would otherwise swallow
-    # the resume token.
+    # the resume token. A shell killed by a signal it does not trap runs no
+    # EXIT trap, so a cancel or timeout (TERM, INT, HUP) exits through it,
+    # with the status a shell reports for that signal (128 + its number).
+    # A signal sent to the script alone, not to its process group, takes
+    # effect once COMMAND and the copy have ended (POSIX defers traps
+    # while a foreground command runs).
     trap 'printf "\n::%s::\n" "$token"; rm -f "$status_file"' EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    trap 'exit 129' HUP
     echo "::stop-commands::$token"
     copied=0
     { "$@" 2>&1 || echo "$?" > "$status_file"; } | tee "$log" || copied=$?
     status=$(cat "$status_file")
-    trap - EXIT
+    trap - EXIT TERM INT HUP
     printf '\n::%s::\n' "$token"
     rm -f "$status_file"
     if [ "$copied" -ne 0 ]; then

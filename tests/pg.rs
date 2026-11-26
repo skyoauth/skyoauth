@@ -8,15 +8,17 @@
 //! `security::a29::a29_neg_binding_on_other_tenants_source`, and its
 //! registry test ID is `nextest:skyoauth-scenarios/pg/<that name>`
 //! (layout §3). `security::grant_fixture` is a helper module of the A38 and
-//! A53 tests, `security::selection_fixture` one of the A02, A25 and A50
-//! tests, and `security::egress_fixture` one of every test that writes
-//! trust sources through the bare registry writers (A02, A22, A24, A25,
-//! A26, A29, A37, A38, A43, A50, A53 and A54): it bootstraps the instance,
-//! or adopts one the test bootstrapped, and writes the sources' egress
-//! allowlist entries through the audited egress allowlist writer; and
-//! `security::wire_fixture` one of the A22 and A49 wire tests: the wire
-//! error catalogue reader, requests through the admin router, the keys and
-//! the operation seeding. None of them is a scenario. A scenario's tests
+//! A53 tests (its `github_policy` also of the A26, A29 and A43 tests and of
+//! `security::selection_fixture`), `security::selection_fixture` one of the
+//! A02, A25 and A50 tests, and `security::egress_fixture` one of every test
+//! that writes trust sources through the bare registry writers (A02, A22,
+//! A24, A25, A26, A29, A37, A38, A43, A50, A53 and A54). The egress fixture
+//! bootstraps the instance, or adopts one the test bootstrapped, and writes
+//! the sources' egress allowlist entries through the audited egress
+//! allowlist writer. `security::wire_fixture` is a helper module of the A22
+//! and A49 wire tests: the wire error catalogue reader, requests through
+//! the admin router, the keys and the operation seeding. None of them is a
+//! scenario. A scenario's tests
 //! may be in more than one module: a `security::aNN_wire` module drives the
 //! admin read router of `skyoauth_service::admin_http` with an
 //! already-verified peer, next to `security::aNN`. Some modules hold
@@ -26,7 +28,7 @@
 //! "Partial tests" is generated from them, and each module's docs say what
 //! its tests cover.
 //! `harness::pg_teardown`
-//! tests the harness's own database teardown (`src/pg.rs`), and
+//! tests the harness's own database teardown (`src/pg.rs`),
 //! `harness::wire_errors` the wire error catalogue
 //! `tests/conformance/fixtures/_wire/errors.v1.json` against the service's
 //! `admin_http::ErrorCode` (no server needed), and
