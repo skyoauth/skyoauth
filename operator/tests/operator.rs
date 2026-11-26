@@ -454,6 +454,19 @@ fn every_fixture_file_and_case_is_covered() {
             .any(|&(len, trimmed)| len > 64 && trimmed == 64),
         "{trimmed_lengths:?}"
     );
+    // Independently: leading whitespace before a valid 64-digit key, so a
+    // reader that trims the start before its length check accepts it.
+    assert!(
+        text_cases.iter().any(|c| {
+            let padded = text(c, "text");
+            let rest = padded.trim_start();
+            rest.len() < padded.len()
+                && rest.len() == 2 * RECOVERY_PUBLIC_KEY_LENGTH
+                && RecoveryPublicKey::from_hex(rest).is_ok()
+                && text(c, "expected") == "not_hex"
+        }),
+        "no text case of leading whitespace and a valid 64-digit key"
+    );
 
     let identity = recovery_fixture(IDENTITY_FIXTURE);
     assert_eq!(

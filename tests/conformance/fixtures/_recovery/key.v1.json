@@ -53,6 +53,7 @@
     { "case": "not_hex_two_leading_spaces_62_digits", "text": "  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f70751", "expected": "not_hex" },
     { "case": "not_hex_62_digits_trailing_crlf", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f70751\r\n", "expected": "not_hex" },
     { "case": "not_hex_64_digits_trailing_newline", "text": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a\n", "expected": "not_hex" },
+    { "case": "not_hex_one_leading_space_64_digits", "text": " d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", "expected": "not_hex" },
     { "case": "undecodable_all_0x07", "text": "0707070707070707070707070707070707070707070707070707070707070707", "expected": "undecodable" },
     { "case": "not_canonical_identity_y_p_plus_1", "text": "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
     { "case": "not_canonical_large_order_y_p_plus_3", "text": "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "expected": "not_canonical" },
