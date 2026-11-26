@@ -13,11 +13,13 @@
 //! trust sources through the bare registry writers (A02, A22, A24, A25,
 //! A26, A29, A37, A38, A43, A50, A53 and A54): it bootstraps the instance,
 //! or adopts one the test bootstrapped, and writes the sources' egress
-//! allowlist entries through the audited egress allowlist writer. None of
-//! them is a scenario. The A04, A05, A22, A32, A37, A43,
-//! A48, A49, A53 and A54 tests are partial: they are registered on their
-//! scenario's planned M1a stage and count for nothing (see each module's
-//! docs). A22's are in two modules: `security::a22`, the operator registry
+//! allowlist entries through the audited egress allowlist writer; and
+//! `security::wire_fixture` one of the A22 and A49 wire tests: the wire
+//! error catalogue reader, requests through the admin router, the keys and
+//! the operation seeding. None of them is a scenario. The A04, A05, A22,
+//! A32, A37, A43, A48, A49, A53 and A54 tests are partial: they are
+//! registered on their scenario's planned M1a stage and count for nothing
+//! (see each module's docs). A22's are in two modules: `security::a22`, the operator registry
 //! lookup, and `security::a22_wire`, the admin read router of
 //! `skyoauth_service::admin_http` driven with an already-verified peer;
 //! A49's are in two as well: `security::a49`, the generated IDs through the
@@ -76,6 +78,8 @@ mod security {
     mod grant_fixture;
     #[path = "selection_fixture.rs"]
     mod selection_fixture;
+    #[path = "wire_fixture.rs"]
+    mod wire_fixture;
 }
 
 mod harness {
