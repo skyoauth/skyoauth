@@ -41,9 +41,10 @@
 //! **The wire values come from the catalogue.** The status,
 //! `Content-Type`, `Cache-Control`, the absence of `Retry-After` and the
 //! body bytes of every 403 and 404 are read from
-//! `tests/conformance/fixtures/_wire/errors.v1.json` ([`WireError`]), never
-//! typed here; the body is also parsed and must hold the shape's members
-//! and no other. "The same answer" below means the same status, the same
+//! `tests/conformance/fixtures/_wire/errors.v1.json` by the shared
+//! [`super::wire_fixture`] ([`WireError`](super::wire_fixture::WireError)),
+//! never typed here; the body is also parsed and must hold the shape's
+//! members and no other. "The same answer" below means the same status, the same
 //! header map and the same body bytes ([`Answer`]'s equality).
 //!
 //! **The fixture** ([`fixture`]), one fresh database per test: an instance
@@ -108,160 +109,33 @@
 //! - Timing: the same bytes do not show the same latency; no test measures
 //!   it.
 
-use std::{
-    collections::BTreeSet,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use axum::{
     Router,
-    body::{Body, Bytes, to_bytes},
-    http::{HeaderMap, Request, StatusCode, header},
+    http::{StatusCode, header},
 };
 use ed25519_dalek::SigningKey;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use skyoauth_scenarios::pg::TestDb;
 use skyoauth_service::{
-    admin_http::{AdminState, admin_router, test_support::with_admin_peer},
-    identity::canonical_public_identity,
-    operation::{Clock, DigestEnvelope},
+    admin_http::{AdminState, admin_router},
     persistence::{
         PgPool,
         registry::{
-            self, AdminRole, AuditActor, BootstrapRequest, JsonObject, NewAdminCredential,
-            NewAdminIdentity, NewAdminRoleBinding, NewAdministrativeOperation, NewAuditEvent,
-            NewTenant, Status, bootstrap_instance,
+            self, AdminRole, BootstrapRequest, JsonObject, NewAdminCredential, NewAdminIdentity,
+            NewAdminRoleBinding, NewTenant, Status, bootstrap_instance,
         },
     },
 };
-use tower::ServiceExt;
 
-// ---------------------------------------------------------------------------
-// The wire error catalogue
-
-/// The catalogue file, read as `tests/harness/wire_errors.rs` reads it.
-fn catalogue() -> Value {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/conformance/fixtures/_wire/errors.v1.json"
-    );
-    let text = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("{path}: {err}"));
-    serde_json::from_str(&text).unwrap_or_else(|err| panic!("{path}: {err}"))
-}
-
-/// What a client sees for one error code, as the catalogue gives it.
-#[derive(Debug)]
-struct WireError {
-    code: &'static str,
-    status: StatusCode,
-    content_type: String,
-    cache_control: String,
-    /// The body: `body.shape` with its `<code>` placeholder filled in.
-    body: Bytes,
-    /// The body's members: the shape's, and no other
-    /// (`additional_members` is `false`).
-    members: BTreeSet<String>,
-}
-
-/// The catalogue's entry for `code`. Panics for a code the catalogue does
-/// not list, or one that may carry `Retry-After` (the checks here assert
-/// its absence, which the catalogue promises only for `never`).
-fn wire_error(code: &'static str) -> WireError {
-    let catalogue = catalogue();
-    let entry = &catalogue["errors"][code];
-    assert!(entry.is_object(), "{code} is not in the catalogue");
-    assert_eq!(
-        entry["retry_after"], "never",
-        "{code}: these checks assert that Retry-After is absent"
-    );
-    let status = entry["http_status"]
-        .as_u64()
-        .and_then(|status| u16::try_from(status).ok())
-        .and_then(|status| StatusCode::from_u16(status).ok())
-        .unwrap_or_else(|| panic!("{code}: http_status {}", entry["http_status"]));
-    let body = &catalogue["body"];
-    assert_eq!(body["additional_members"], false, "body.additional_members");
-    let shape = body["shape"].as_object().expect("body.shape is an object");
-    let filled: Map<String, Value> = shape
-        .iter()
-        .map(|(member, placeholder)| {
-            assert_eq!(placeholder, "<code>", "body.shape.{member}");
-            (member.clone(), Value::from(code))
-        })
-        .collect();
-    WireError {
-        code,
-        status,
-        content_type: body["content_type"]
-            .as_str()
-            .expect("body.content_type")
-            .to_owned(),
-        cache_control: catalogue["cache_control"]
-            .as_str()
-            .expect("cache_control")
-            .to_owned(),
-        body: Bytes::from(serde_json::to_vec(&Value::Object(filled)).unwrap()),
-        members: shape.keys().cloned().collect(),
-    }
-}
-
-/// `answer` is exactly `expected`: status, `Content-Type`,
-/// `Cache-Control`, no `Retry-After`, the body bytes, and a body whose
-/// members are the shape's and no other.
-#[track_caller]
-fn assert_wire_error(answer: &Answer, expected: &WireError, what: &str) {
-    let code = expected.code;
-    assert_eq!(
-        answer.status, expected.status,
-        "{what}: {code}: status ({:?})",
-        answer.body
-    );
-    assert_eq!(
-        answer.header(header::CONTENT_TYPE).as_deref(),
-        Some(expected.content_type.as_str()),
-        "{what}: {code}: Content-Type"
-    );
-    assert_eq!(
-        answer.header(header::CACHE_CONTROL).as_deref(),
-        Some(expected.cache_control.as_str()),
-        "{what}: {code}: Cache-Control"
-    );
-    assert!(
-        !answer.headers.contains_key(header::RETRY_AFTER),
-        "{what}: {code}: Retry-After"
-    );
-    assert_eq!(answer.body, expected.body, "{what}: {code}: body");
-    let body: Map<String, Value> = serde_json::from_slice(&answer.body)
-        .unwrap_or_else(|err| panic!("{what}: {code}: body is no JSON object: {err}"));
-    let members: BTreeSet<String> = body.keys().cloned().collect();
-    assert_eq!(members, expected.members, "{what}: {code}: body members");
-    assert_eq!(body["error"], code, "{what}: body error");
-}
+use super::wire_fixture::{
+    Answer, FixedClock, SeededOperation, assert_wire_error, at, get_with, key, seed_operation,
+    wire_error,
+};
 
 // ---------------------------------------------------------------------------
 // Requests
-
-/// A response: status, headers and body bytes. Two answers are equal when
-/// all three are.
-#[derive(Debug, Clone, PartialEq)]
-struct Answer {
-    status: StatusCode,
-    headers: HeaderMap,
-    body: Bytes,
-}
-
-impl Answer {
-    fn header(&self, name: header::HeaderName) -> Option<String> {
-        self.headers
-            .get(name)
-            .map(|value| value.to_str().unwrap().to_owned())
-    }
-
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body).unwrap()
-    }
-}
 
 /// The URI of a tenant's list, with `query` (empty for none).
 fn list_uri(tenant: &str, query: &str) -> String {
@@ -285,39 +159,6 @@ fn instance_op_uri(operation: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // The fixture
-
-const T0: u64 = 1_790_000_000;
-const HOUR: u64 = 3_600;
-const DAY: u64 = 86_400;
-
-fn at(seconds: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(T0 + seconds)
-}
-
-/// The server's clock for a list's "open at now": an hour after bootstrap,
-/// before every seeded operation expires.
-struct FixedClock;
-
-impl Clock for FixedClock {
-    fn now(&self) -> SystemTime {
-        at(HOUR)
-    }
-}
-
-/// The canonical public identity of the Ed25519 key with secret `seed`
-/// repeated: `identity::canonical_public_identity` of its DER
-/// `SubjectPublicKeyInfo` (RFC 8410), the form the acceptor will compute.
-fn key(seed: u8) -> String {
-    const ED25519_SPKI_PREFIX: [u8; 12] = [
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    let public = SigningKey::from_bytes(&[seed; 32])
-        .verifying_key()
-        .to_bytes();
-    let mut spki = ED25519_SPKI_PREFIX.to_vec();
-    spki.extend_from_slice(&public);
-    canonical_public_identity(&spki).unwrap()
-}
 
 /// `adm_first`, the bootstrapped instance `security_admin`.
 const SEC: u8 = 0x41;
@@ -486,17 +327,7 @@ struct Fixture {
 impl Fixture {
     /// `GET uri` with the verified peer of `seed`.
     async fn get(&self, seed: u8, uri: &str) -> Answer {
-        let request = Request::get(uri).body(Body::empty()).unwrap();
-        let request = with_admin_peer(request, &key(seed));
-        let response = self.router.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let headers = response.headers().clone();
-        let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-        Answer {
-            status,
-            headers,
-            body,
-        }
+        get_with(&self.router, Some(&key(seed)), uri, &[]).await
     }
 
     /// `answer` is a 200 JSON body with the catalogue's `Cache-Control`.
@@ -612,65 +443,22 @@ async fn operator(pool: &PgPool, name: &str, seed: u8, role: AdminRole, tenant: 
 }
 
 /// Writes `op`, after its `administrative_operation.create` event, in one
-/// transaction: pending until a day after bootstrap, or, for an `approve`,
-/// an approval of `op_a1` with no expiry and a placeholder digest.
-async fn seed_operation(pool: &PgPool, op: &Op) {
-    let plan = plan(op);
-    let approve = op.kind == "approve";
-    let expires_at_us = i64::try_from((T0 + DAY) * 1_000_000).unwrap();
-    let request_digest = if approve {
-        vec![7; 32]
-    } else {
-        DigestEnvelope {
+/// transaction ([`seed_operation`]): pending until a day after bootstrap,
+/// or, for an `approve`, an approval of `op_a1` with no expiry and a
+/// placeholder digest.
+async fn seed_op(pool: &PgPool, op: &Op) {
+    seed_operation(
+        pool,
+        &SeededOperation {
             id: op.id,
-            tenant_id: op.tenant,
-            actor_id: op.actor,
+            tenant: op.tenant,
+            actor: op.actor,
             kind: op.kind,
-            expected_revision: 1,
-            expires_at_us,
-            plan: &plan,
-        }
-        .digest()
-        .unwrap()
-        .as_bytes()
-        .to_vec()
-    };
-    let mut transaction = pool.begin().await.unwrap();
-    registry::test_support::append_audit_event(
-        &mut transaction,
-        &NewAuditEvent {
-            id: format!("evt_{}", op.id),
-            tenant_id: op.tenant.map(Into::into),
-            timestamp: at(1),
-            actor: AuditActor::Operator(op.actor.into()),
-            action: "administrative_operation.create".into(),
-            object_id: op.id.into(),
-            previous_revision: None,
-            new_revision: Some(1),
-            outcome: "success".into(),
+            plan: plan(op),
+            approves: (op.kind == "approve").then_some("op_a1"),
         },
     )
-    .await
-    .unwrap();
-    registry::test_support::insert_administrative_operation(
-        &mut transaction,
-        &NewAdministrativeOperation {
-            id: op.id.into(),
-            tenant_id: op.tenant.map(Into::into),
-            actor_id: op.actor.into(),
-            kind: op.kind.into(),
-            request_digest,
-            expected_revision: 1,
-            immutable_plan: plan,
-            expires_at: (!approve).then(|| at(DAY)),
-            approves_operation_id: approve.then(|| "op_a1".into()),
-            outcome: if approve { "success" } else { "pending" }.into(),
-            audit_id: format!("evt_{}", op.id),
-        },
-    )
-    .await
-    .unwrap();
-    transaction.commit().await.unwrap();
+    .await;
 }
 
 /// The instance bootstrapped with `adm_first` ([`SEC`]); tenants `ten_a`
@@ -723,7 +511,7 @@ async fn fixture() -> Fixture {
         operator(&pool, name, seed, role, tenant).await;
     }
     for op in &OPS {
-        seed_operation(&pool, op).await;
+        seed_op(&pool, op).await;
     }
     let router = admin_router(AdminState::new(pool.clone(), Arc::new(FixedClock)));
     let cache_control = wire_error("not_found").cache_control;
