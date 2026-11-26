@@ -17,7 +17,10 @@
 //!   ([`recovery::SoftwareSigner`] for a seed held in memory), checked
 //!   before it is returned as the service checks it at the restore;
 //! - [`identity::public_identity_of_spki`]: the canonical public identity
-//!   `spki-sha256:<hex>` of a DER `SubjectPublicKeyInfo`.
+//!   `spki-sha256:<hex>` of a DER `SubjectPublicKeyInfo`;
+//! - `local` (Unix only): the wire codec of the service's deployment-local
+//!   transport, its request lines and its replies, pinned by
+//!   `tests/conformance/fixtures/_wire/local_transport.v1.json`.
 //!
 //! The crate does not depend on `skyoauth-service`: it builds and tests on
 //! Linux, macOS and Windows without a server or a database (ADR-017 item
@@ -32,5 +35,7 @@
 #![forbid(unsafe_code)]
 
 pub mod identity;
+#[cfg(unix)]
+pub mod local;
 pub mod recovery;
 mod text;
