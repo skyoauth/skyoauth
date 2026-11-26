@@ -37,10 +37,12 @@
 //!   (`a25_neg_miss_reveals_no_cause`).
 //! - **Negative, store failure.** A store outage is not reported as a
 //!   miss: on a pool the client has closed, every selector of both
-//!   tenants, each hit and each of those misses, is
-//!   `SelectionError::Store(RegistryError::Other(PoolClosed))`, never
-//!   `NotSelectable`, while an open pool of the same database still selects
-//!   each hit and gives the one `NotSelectable` for each miss
+//!   tenants, each hit and each miss of the table above (and the direct
+//!   grant overridden to impersonation), is
+//!   `SelectionError::Store(RegistryError::Other(PoolClosed))`, and for a
+//!   role the server refuses (SQLSTATE 42501) it is that database error,
+//!   never `NotSelectable`, while an open pool of the same database still
+//!   selects each hit and gives the one `NotSelectable` for each miss
 //!   (`a25_neg_store_failure_is_not_a_miss`).
 //! - **Negative, status.** Each grant disabled through the registry's own
 //!   update, its source, actor and eligible binding still enabled
@@ -357,6 +359,44 @@ async fn a25_neg_wrong_tenant_selects_nothing() {
     db.drop([pool]).await;
 }
 
+/// Every kind of miss, for a tenant and the other: a wrong tenant, the
+/// other tenant's source, the other tenant's grant, both crossed, mode
+/// overrides, a grant name in place of its ID, and unknown tenant, grant
+/// and source. Each gives `NotSelectable` on a working store.
+fn miss_selectors(owner: Side, other: Side) -> Vec<(&'static str, String, String, GrantMode)> {
+    let direct = GRANTS[0];
+    let delegation = GRANTS[3];
+    let gh = Source::Github;
+    let own = owner.id(direct.id);
+    vec![
+        // A wrong tenant, the other tenant's source, the other tenant's
+        // grant, and both crossed.
+        (other.tenant, own.clone(), gh.id(owner), direct.mode),
+        (owner.tenant, own.clone(), gh.id(other), direct.mode),
+        (owner.tenant, other.id(direct.id), gh.id(owner), direct.mode),
+        (other.tenant, own.clone(), gh.id(other), direct.mode),
+        // Mode overrides.
+        (
+            owner.tenant,
+            own.clone(),
+            gh.id(owner),
+            GrantMode::Delegation,
+        ),
+        (
+            owner.tenant,
+            owner.id(delegation.id),
+            gh.id(owner),
+            GrantMode::Impersonation,
+        ),
+        // The grant's tenant-local name in place of its ID.
+        (owner.tenant, direct.name.into(), gh.id(owner), direct.mode),
+        // Unknown tenant, grant and source.
+        ("ten_none", own.clone(), gh.id(owner), direct.mode),
+        (owner.tenant, "grt_none".into(), gh.id(owner), direct.mode),
+        (owner.tenant, own.clone(), "src_none".into(), direct.mode),
+    ]
+}
+
 /// In both directions, a wrong tenant, the other tenant's source or grant,
 /// both crossed, a mode override, a grant name and unknown IDs all give one
 /// value: `NotSelectable`, with the same `Display` and `Debug` text across
@@ -370,34 +410,7 @@ async fn a25_neg_miss_reveals_no_cause() {
     let gh = Source::Github;
     let mut texts = Vec::new();
     for (owner, other) in DIRECTIONS {
-        let own = owner.id(direct.id);
-        let misses = [
-            // A wrong tenant, the other tenant's source, the other tenant's
-            // grant, and both crossed.
-            (other.tenant, own.clone(), gh.id(owner), direct.mode),
-            (owner.tenant, own.clone(), gh.id(other), direct.mode),
-            (owner.tenant, other.id(direct.id), gh.id(owner), direct.mode),
-            (other.tenant, own.clone(), gh.id(other), direct.mode),
-            // Mode overrides.
-            (
-                owner.tenant,
-                own.clone(),
-                gh.id(owner),
-                GrantMode::Delegation,
-            ),
-            (
-                owner.tenant,
-                owner.id(delegation.id),
-                gh.id(owner),
-                GrantMode::Impersonation,
-            ),
-            // The grant's tenant-local name in place of its ID.
-            (owner.tenant, direct.name.into(), gh.id(owner), direct.mode),
-            // Unknown tenant, grant and source.
-            ("ten_none", own.clone(), gh.id(owner), direct.mode),
-            (owner.tenant, "grt_none".into(), gh.id(owner), direct.mode),
-            (owner.tenant, own.clone(), "src_none".into(), direct.mode),
-        ];
+        let misses = miss_selectors(owner, other);
         for (tenant, grant, source, mode) in &misses {
             let case = format!("{tenant} {grant} {source} {mode}");
             let err = select(&pool, tenant, grant, source, *mode)
@@ -432,25 +445,24 @@ async fn a25_neg_miss_reveals_no_cause() {
     db.drop([pool]).await;
 }
 
-/// A store failure is never reported as a miss: on a pool the client has
-/// closed, every selector, in both tenants, gives
-/// `SelectionError::Store(RegistryError::Other(PoolClosed))`, with a source
-/// error, never `NotSelectable` and equal to nothing (`Store` has no
-/// equality). The selectors are each grant (direct and delegations) on
-/// each source in its own mode, which selects on an open pool, and genuine
-/// misses: a wrong tenant, the other tenant's source, mode overrides (to
-/// each of the other modes, impersonation included), a grant name and an
-/// unknown grant. Controls: before the close, the same
-/// pool selects every hit and gives `NotSelectable` for every miss; after
-/// it, an open pool of the same database still does both, the hits with
-/// the very selections the closed pool gave before, so the outage and the
-/// miss stay distinguishable (a caller can tell "retry" from "deny").
+/// A store failure is never reported as a miss. The selectors are each
+/// grant (direct and delegations) on each source in its own mode, which
+/// selects on an open pool, and the genuine misses of `miss_selectors`
+/// (plus the direct grant overridden to impersonation), in both tenants.
+/// Controls: before the close, the pool to be closed selects every hit and
+/// gives `NotSelectable` for every miss. Closed by the client, every
+/// selector is `SelectionError::Store(RegistryError::Other(PoolClosed))`
+/// with a source error, never `NotSelectable` and equal to nothing (`Store`
+/// has no equality). For a login role with no privilege on the registry,
+/// every selector is the server's own error, SQLSTATE 42501, again a
+/// `Store`. After it, an open pool of the same database still selects each
+/// hit, with the very selections the closed pool gave before, and misses
+/// each miss, so the outage and the miss stay distinguishable (a caller can
+/// tell "retry" from "deny").
 #[tokio::test]
 async fn a25_neg_store_failure_is_not_a_miss() {
-    let (db, pool) = two_tenants().await;
+    let (mut db, pool) = two_tenants().await;
     let direct = GRANTS[0];
-    let delegation = GRANTS[3];
-    let gh = Source::Github;
     let mut hits = Vec::new();
     let mut misses = Vec::new();
     for (owner, other) in DIRECTIONS {
@@ -464,44 +476,14 @@ async fn a25_neg_store_failure_is_not_a_miss() {
                 ));
             }
         }
-        let own = owner.id(direct.id);
-        misses.extend([
-            (other.tenant, own.clone(), gh.id(owner), direct.mode),
-            (owner.tenant, own.clone(), gh.id(other), direct.mode),
-            (
-                owner.tenant,
-                owner.id(delegation.id),
-                gh.id(owner),
-                GrantMode::Direct,
-            ),
-            // Mode overrides to each of the other modes, impersonation
-            // included, so an early miss for one mode cannot hide an outage.
-            (
-                owner.tenant,
-                owner.id(delegation.id),
-                gh.id(owner),
-                GrantMode::Impersonation,
-            ),
-            (
-                owner.tenant,
-                own.clone(),
-                gh.id(owner),
-                GrantMode::Delegation,
-            ),
-            (
-                owner.tenant,
-                own.clone(),
-                gh.id(owner),
-                GrantMode::Impersonation,
-            ),
-            (owner.tenant, direct.name.into(), gh.id(owner), direct.mode),
-            (
-                owner.tenant,
-                owner.id("grt_none"),
-                gh.id(owner),
-                direct.mode,
-            ),
-        ]);
+        misses.extend(miss_selectors(owner, other));
+        // The direct grant overridden to impersonation too.
+        misses.push((
+            owner.tenant,
+            owner.id(direct.id),
+            Source::Github.id(owner),
+            GrantMode::Impersonation,
+        ));
     }
 
     // Control: open, the pool to be closed selects every hit and misses
@@ -558,7 +540,30 @@ async fn a25_neg_store_failure_is_not_a_miss() {
             &format!("{tenant} {grant} {source} {mode} other pool"),
         );
     }
-    db.drop([pool, closed]).await;
+
+    // A store error the server sends, not the client's own: a role with no
+    // privilege on the registry tables is refused (SQLSTATE 42501, insufficient
+    // privilege) by the first statement of every selector, hit or miss. None
+    // of them is a miss, whatever the error.
+    let (_, no_privilege) = db.create_login_role(&[], 1).await;
+    for (tenant, grant, source, mode) in hits.iter().chain(&misses) {
+        let case = format!("{tenant} {grant} {source} {mode} no privilege");
+        let err = select(&no_privilege, tenant, grant, source, *mode)
+            .await
+            .expect_err(&case);
+        let SelectionError::Store(RegistryError::Other(error)) = &err else {
+            panic!("{case}: {err:?}");
+        };
+        let code = error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned());
+        assert_eq!(code.as_deref(), Some("42501"), "{case}: {err:?}");
+        assert_ne!(err, SelectionError::NotSelectable, "{case}");
+        assert!(err.source().is_some(), "{case}");
+        assert_ne!(err.to_string(), miss_text, "{case}");
+    }
+    db.drop([pool, closed, no_privilege]).await;
 }
 
 #[tokio::test]
