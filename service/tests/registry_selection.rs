@@ -17,6 +17,8 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::error::Error as _;
+use std::time::Duration;
 
 use common::TestDb;
 use skyoauth_service::persistence::{
@@ -560,6 +562,123 @@ async fn a_miss_decodes_no_grant_row_even_a_corrupt_one() {
     );
     sqlx::raw_sql("ROLLBACK").execute(&mut *conn).await.unwrap();
     drop(conn);
+    db.drop([pool]).await;
+}
+
+/// Asserts that `err` is a genuine miss: the one `NotSelectable`, with its
+/// one text and no source.
+fn assert_not_selectable(err: &SelectionError, case: &str) {
+    assert_eq!(*err, SelectionError::NotSelectable, "{case}");
+    assert_eq!(err.to_string(), "no grant can be selected", "{case}");
+    assert_eq!(format!("{err:?}"), "NotSelectable", "{case}");
+    assert!(err.source().is_none(), "{case}");
+}
+
+/// A store failure is `Store`, never `NotSelectable`, so a caller can tell
+/// "retry" from "deny". A selection whose connection the server terminates
+/// while the statement waits for a lock is `Store` with the server's
+/// `57P01`, not a decode error; and on a pool the client closed, every
+/// selector (a hit and each kind of miss alike) is `Store` with sqlx's
+/// `PoolClosed`. Before either, the same misses are each the one
+/// `NotSelectable`.
+#[tokio::test]
+#[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
+async fn a_store_failure_is_store_never_not_selectable() {
+    let (db, pool) = seeded().await;
+    let selectors = [
+        // A hit.
+        ("ten_a", "grt_a", "src_gh", GrantMode::Direct),
+        // An unknown grant, a disabled grant, a wrong tenant, a disabled
+        // source and no eligible binding.
+        ("ten_a", "grt_none", "src_gh", GrantMode::Direct),
+        ("ten_a", "grt_a_dis", "src_gh", GrantMode::Direct),
+        ("ten_b", "grt_a", "src_gh", GrantMode::Direct),
+        ("ten_a", "grt_a_srcoff", "src_off", GrantMode::Direct),
+        ("ten_a", "grt_a_off", "src_gh", GrantMode::Direct),
+    ];
+    for (index, (tenant, grant, source, mode)) in selectors.into_iter().enumerate() {
+        let result = select(&pool, tenant, grant, source, mode).await;
+        let case = format!("{tenant} {grant} {source} {mode}");
+        if index == 0 {
+            assert_eq!(ids(&result.unwrap()), ["bnd_Z_env", "bnd_a_repo"], "{case}");
+        } else {
+            assert_not_selectable(&result.unwrap_err(), &case);
+        }
+    }
+
+    // The server ends the connection while the statement waits for a lock.
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("LOCK TABLE service_grant IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let mut victim = pool.acquire().await.unwrap().detach();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut victim)
+        .await
+        .unwrap();
+    let (result, ()) = tokio::join!(
+        select_grant(&mut victim, "ten_a", "grt_a", "src_gh", GrantMode::Direct),
+        async {
+            loop {
+                let waits: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT FROM pg_stat_activity \
+                     WHERE pid = $1 AND wait_event_type = 'Lock')",
+                )
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waits {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert!(terminated);
+        }
+    );
+    let err = result.unwrap_err();
+    match &err {
+        SelectionError::Store(RegistryError::Other(sqlx::Error::Database(database))) => {
+            assert_eq!(database.code().as_deref(), Some("57P01"), "{err:?}");
+        }
+        other => panic!("expected a store failure with 57P01: {other:?}"),
+    }
+    assert!(
+        err.to_string().starts_with("grant selection failed: "),
+        "{err}"
+    );
+    assert!(err.source().is_some());
+    drop(victim);
+    blocker.rollback().await.unwrap();
+
+    // A pool the client closed: every selector is the store failure.
+    pool.close().await;
+    for (tenant, grant, source, mode) in selectors {
+        let err = select(&pool, tenant, grant, source, mode)
+            .await
+            .unwrap_err();
+        let case = format!("{tenant} {grant} {source} {mode}");
+        assert!(
+            matches!(
+                err,
+                SelectionError::Store(RegistryError::Other(sqlx::Error::PoolClosed))
+            ),
+            "{case}: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "grant selection failed: registry database error",
+            "{case}"
+        );
+        assert!(err.source().is_some(), "{case}");
+        assert_ne!(err, SelectionError::NotSelectable, "{case}");
+    }
     db.drop([pool]).await;
 }
 
