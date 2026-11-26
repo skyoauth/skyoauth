@@ -8,7 +8,7 @@
 //! refuses them; the closed shape (members, types, fixed values, order and
 //! duplicates) is checked while reading, each with a reason of its own.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use super::{
     CHALLENGE_PREFIX, DEPLOYMENT_OPERATOR_ACTOR, KeyError, MAX_CHALLENGE_TTL, OPERATOR_RESTORATION,
@@ -46,6 +46,17 @@ const MAX_EXACT_STRING: usize = 2048;
 
 /// The deepest object nesting of `C`: `C` itself and its plan.
 const MAX_DEPTH: usize = 2;
+
+/// How far after the operator's time [`check_challenge`] accepts an
+/// `expires_at`: the longest TTL the service gives a challenge.
+///
+/// Inferred, an interim pick: `M` carries no issue time, so the TTL cannot
+/// be checked against the issue, and this bounds the expiry from the
+/// operator's clock instead. By design, an operator clock that lags the
+/// service's by more than the longest TTL less the challenge's own TTL
+/// refuses the challenge. The check uses only this constant, so it can be
+/// dropped or changed here alone.
+const EXPIRY_HORIZON: Duration = MAX_CHALLENGE_TTL;
 
 /// Why bytes are not a challenge [`parse_challenge`] accepts. Carries no
 /// input byte: `Debug` names the reason only, `Display` is fixed text.
@@ -124,6 +135,11 @@ impl std::error::Error for ChallengeError {
 
 /// The plan of an operator restoration: the instance and the key epoch the
 /// challenge is bound to, and the replacement operator it enrolls.
+///
+/// The operator does not copy the service's refusal of a reserved
+/// `admin_id` (`deployment_operator`, or one beginning with
+/// `recovery_key:`): the service stays authoritative and refuses such a
+/// plan at the issue and again at the restore.
 ///
 /// `Debug` prints `RestorationPlan(..)`, none of the values.
 #[derive(Clone, PartialEq, Eq)]
@@ -559,7 +575,7 @@ pub enum Refusal {
     /// `expires_at`.
     Expired,
     /// `expires_at` is more than [`MAX_CHALLENGE_TTL`] after the operator's
-    /// time.
+    /// time (an inferred horizon; see [`check_challenge`]).
     ExpiresTooLate,
     /// The plan names another recovery key epoch.
     OtherEpoch,
@@ -621,11 +637,11 @@ impl<'c> VerifiedChallenge<'c> {
 /// 2. `expected.now_micros < expires_at`, as the service checks it at the
 ///    restore: a challenge is refused from its `expires_at` on;
 /// 3. `expires_at` is at most [`MAX_CHALLENGE_TTL`] after
-///    `expected.now_micros`. The service issues no challenge with a longer
-///    TTL, but `M` carries no issue time, so this bounds the expiry from
-///    the operator's clock instead (inferred). An operator clock behind the
-///    service's by more than the longest TTL less the challenge's own
-///    refuses it;
+///    `expected.now_micros`. This horizon is inferred, an interim pick:
+///    the service issues no challenge with a longer TTL, but `M` carries no
+///    issue time, so the expiry is bounded from the operator's clock
+///    instead. By design, an operator clock that lags the service's by more
+///    than the longest TTL less the challenge's own TTL refuses it;
 /// 4. the plan's `recovery_key_epoch`, `public_identity` and
 ///    `new_recovery_public_key` are the expected ones, for each that
 ///    `expected` gives.
@@ -647,8 +663,9 @@ pub fn check_challenge<'c>(
     if expected.now_micros >= challenge.expires_at_micros {
         return Err(Refusal::Expired);
     }
+    // The inferred horizon (see `EXPIRY_HORIZON`).
     let ahead = i128::from(challenge.expires_at_micros) - i128::from(expected.now_micros);
-    if u128::try_from(ahead).is_ok_and(|ahead| ahead > MAX_CHALLENGE_TTL.as_micros()) {
+    if u128::try_from(ahead).is_ok_and(|ahead| ahead > EXPIRY_HORIZON.as_micros()) {
         return Err(Refusal::ExpiresTooLate);
     }
     if expected
