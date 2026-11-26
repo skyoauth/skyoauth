@@ -100,11 +100,13 @@ run() {
     # none, and a stop it leaves ends with the step. A signal sent to the
     # script alone, not to its process group, takes effect once COMMAND
     # and the copy have ended (POSIX defers traps while a foreground
-    # command runs).
+    # command runs). Each handler ignores TERM, INT and HUP before it
+    # exits, so that a second signal cannot run another handler between it
+    # and `resume`.
     trap resume EXIT
-    trap 'exit 143' TERM
-    trap 'exit 130' INT
-    trap 'exit 129' HUP
+    trap 'trap "" TERM INT HUP; exit 143' TERM
+    trap 'trap "" TERM INT HUP; exit 130' INT
+    trap 'trap "" TERM INT HUP; exit 129' HUP
     echo "::stop-commands::$token"
     { "$@" 2>&1 || echo "$?" > "$status_file"; } | tee "$log" || copied=$?
     status=$(cat "$status_file")
