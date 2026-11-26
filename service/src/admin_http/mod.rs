@@ -109,8 +109,12 @@
 //! it the same way before it maps it.
 //!
 //! The mapping, by family (one pure function each in `error`, an
-//! exhaustive `match`, so a new variant fails the build; the unit tests
-//! pin each row):
+//! exhaustive `match` that names every variant of the crate's error
+//! enums, the `Keyset(_)`, `Source(_)` and `Registry(_)` inside an
+//! [`ApprovalError`](crate::operation::ApprovalError) included, so a new
+//! variant fails the build; only the foreign [`sqlx::Error`] of
+//! `RegistryError::Other` has a catch-all, a 500; the unit tests pin each
+//! row):
 //!
 //! | Family | Variant | Status | Code |
 //! | ------ | ------- | ------ | ---- |
@@ -127,7 +131,7 @@
 //! | | `Invariant` `SameTenantOperation`, `DistinctApprover` (tripwires) | 500 | `server_error` |
 //! | | `UnreadableTimestamp` | 500 | `server_error` |
 //! | | `Retry` (`40001`, `40P01`) | 503 + `Retry-After: 1` | `auth_unavailable` |
-//! | | `Other`: `Io`, `Tls`, `PoolTimedOut`, `PoolClosed`; SQLSTATE class `08`, `53`, `57P01` to `57P05` | 503 | `auth_unavailable` |
+//! | | `Other`: `Io`, `Tls`, `PoolTimedOut`, `PoolClosed`; SQLSTATE class `08`, `53`, prefix `57P0` (`57P01` to `57P05`) | 503 | `auth_unavailable` |
 //! | | `Other`: `55P03`, `57014` (lock or statement timeout) | 503 + `Retry-After: 1` | `auth_unavailable` |
 //! | | `Other`: anything else (a decode failure, an unknown SQLSTATE, a constraint not in [`KNOWN_CONSTRAINTS`](crate::persistence::registry::KNOWN_CONSTRAINTS)) | 500 | `server_error` |
 //! | | `ReservedActorId`, `RequiredPredicate` | 400 | `invalid_request` |

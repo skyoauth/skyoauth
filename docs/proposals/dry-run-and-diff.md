@@ -124,7 +124,10 @@ Two outputs fit, and the plan proposes both, one per kind of write
   members byte-wise and writes `i64` integers as JSON integers, and writes
   every other number (the floats of a trust source's `proof_bounds`, say)
   as its decimal string, exactly as stored, so no value is rounded through
-  a binary float (inferred). Nothing digests the diff.
+  a binary float (inferred). The registry decodes `proof_bounds` into a
+  `serde_json` map, whose numbers outside `i64` and `u64` pass through
+  `f64`, so the diff reads that column as text (`proof_bounds::text`) or as
+  a `RawValue`, never from the decoded row. Nothing digests the diff.
 - **Generated IDs in a gated create's plan.** A gated create's plan embeds
   the ID the request generates for the new object (D1): the `id` of a
   trust source create plan (`service/src/operation/source_plan.rs`) and

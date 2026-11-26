@@ -257,6 +257,11 @@ enum Form {
 /// recommendation text. No universal tag has both forms in DER: BER leaves
 /// the form to the sender only for `BIT STRING`, `OCTET STRING` and the
 /// restricted character strings, and DER makes those primitive.
+///
+/// Only the tag and the framing are checked. For `EXTERNAL`, `EMBEDDED PDV`
+/// and `CHARACTER STRING` (`08`, `0b` and `1d`, constructed) the contents
+/// must be well-framed DER elements ([`check_elements`]), but they are not
+/// checked against the components of the `SEQUENCE` each is encoded as.
 fn der_universal_form(number: u8) -> Option<Form> {
     use Form::{Constructed, Primitive};
     match number {
@@ -854,23 +859,55 @@ mod tests {
     /// and the tag numbers of X.680 rather
     /// than taken from the implementation: every one of the 64 universal
     /// octets `0x00` to `0x3f`, both forms, is listed exactly once, accepted
-    /// or refused, and checked in the parameters and nested in them.
+    /// or refused, and asserted on [`check_tag`]. Through
+    /// [`canonical_public_identity`], in the parameters and nested in them,
+    /// each accepted tag carries a representative valid value and each
+    /// refused one an empty element.
     #[test]
     fn tags_der_does_not_allow_are_refused() {
-        const ACCEPTED: [u8; 28] = [
+        // Each accepted octet with a representative valid DER value.
+        const ACCEPTED: [(u8, &[u8]); 28] = [
             // Primitive: BOOLEAN, INTEGER, BIT STRING, OCTET STRING, NULL,
             // OBJECT IDENTIFIER, ObjectDescriptor.
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-            // Primitive: REAL, ENUMERATED, UTF8String, RELATIVE-OID.
-            0x09, 0x0a, 0x0c, 0x0d,
+            (0x01, &[0x01, 0x01, 0xff]),
+            (0x02, &[0x02, 0x01, 0x00]),
+            (0x03, &[0x03, 0x01, 0x00]),
+            (0x04, &[0x04, 0x01, 0x00]),
+            (0x05, &[0x05, 0x00]),
+            (0x06, &[0x06, 0x01, 0x2b]),
+            (0x07, b"\x07\x01a"),
+            // Primitive: REAL (zero, no contents), ENUMERATED, UTF8String,
+            // RELATIVE-OID.
+            (0x09, &[0x09, 0x00]),
+            (0x0a, &[0x0a, 0x01, 0x00]),
+            (0x0c, b"\x0c\x01a"),
+            (0x0d, &[0x0d, 0x01, 0x01]),
             // Primitive: NumericString, PrintableString, TeletexString,
             // VideotexString, IA5String, UTCTime, GeneralizedTime,
             // GraphicString, VisibleString, GeneralString, UniversalString,
             // BMPString.
-            0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1e,
-            // Constructed: EXTERNAL (and INSTANCE OF), EMBEDDED PDV,
-            // SEQUENCE (OF), SET (OF), CHARACTER STRING.
-            0x28, 0x2b, 0x30, 0x31, 0x3d,
+            (0x12, b"\x12\x011"),
+            (0x13, b"\x13\x01a"),
+            (0x14, b"\x14\x01a"),
+            (0x15, b"\x15\x01a"),
+            (0x16, b"\x16\x01a"),
+            (0x17, b"\x17\x0d250101000000Z"),
+            (0x18, b"\x18\x0f20250101000000Z"),
+            (0x19, b"\x19\x01a"),
+            (0x1a, b"\x1a\x01a"),
+            (0x1b, b"\x1b\x01a"),
+            (0x1c, &[0x1c, 0x04, 0x00, 0x00, 0x00, 0x61]),
+            (0x1e, &[0x1e, 0x02, 0x00, 0x61]),
+            // Constructed: EXTERNAL (and INSTANCE OF) with a direct
+            // reference and octet-aligned data, EMBEDDED PDV and CHARACTER
+            // STRING with the `fixed` identification and empty data,
+            // SEQUENCE (OF), SET (OF). Only the framing of `08`, `0b` and
+            // `1d` is checked (see `der_universal_form`).
+            (0x28, &[0x28, 0x05, 0x06, 0x01, 0x2b, 0x81, 0x00]),
+            (0x2b, &[0x2b, 0x06, 0xa0, 0x02, 0x85, 0x00, 0x82, 0x00]),
+            (0x30, &[0x30, 0x03, 0x02, 0x01, 0x00]),
+            (0x31, &[0x31, 0x03, 0x02, 0x01, 0x00]),
+            (0x3d, &[0x3d, 0x06, 0xa0, 0x02, 0x85, 0x00, 0x82, 0x00]),
         ];
         const REFUSED: [u8; 36] = [
             // Primitive: end-of-contents, EXTERNAL, EMBEDDED PDV, TIME,
@@ -888,34 +925,40 @@ mod tests {
             0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3e, 0x3f,
         ];
         // The two lists partition the 64 universal octets.
-        let mut all: Vec<u8> = ACCEPTED.iter().chain(&REFUSED).copied().collect();
+        let mut all: Vec<u8> = ACCEPTED
+            .iter()
+            .map(|(tag, _)| *tag)
+            .chain(REFUSED)
+            .collect();
         all.sort_unstable();
         assert_eq!(all, (0x00..=0x3f).collect::<Vec<u8>>());
-        for tag in 0x00..=0x3f_u8 {
-            // A minimal valid element of each tag: an OID and a
-            // RELATIVE-OID need contents.
-            let element: &[u8] = match tag {
-                0x06 | 0x0d => &[tag, 0x01, 0x2b],
-                _ => &[tag, 0x00],
-            };
-            let expected = if ACCEPTED.contains(&tag) {
-                Ok(())
-            } else {
-                Err(IdentityError::NotDer)
-            };
+        for (tag, value) in ACCEPTED {
+            assert_eq!(check_tag(tag), Ok(()), "{tag:02x}");
+            assert_eq!(value[0], tag);
+            assert_eq!(usize::from(value[1]), value.len() - 2, "{tag:02x}");
+            for der in [with_parameters(value), with_parameters(&nested(1, value))] {
+                assert!(
+                    canonical_public_identity(&der).is_ok(),
+                    "{tag:02x} {der:02x?}"
+                );
+            }
+        }
+        for tag in REFUSED {
+            assert_eq!(check_tag(tag), Err(IdentityError::NotDer), "{tag:02x}");
             for der in [
-                with_parameters(element),
-                with_parameters(&nested(1, element)),
+                with_parameters(&[tag, 0x00]),
+                with_parameters(&nested(1, &[tag, 0x00])),
             ] {
                 assert_eq!(
-                    canonical_public_identity(&der).map(|_| ()),
-                    expected,
+                    canonical_public_identity(&der),
+                    Err(IdentityError::NotDer),
                     "{tag:02x} {der:02x?}"
                 );
             }
         }
         // Constructed and primitive tags of the other classes pass.
         for tag in [0x40, 0x60, 0x80, 0xa0, 0xc0, 0xe0, 0xa3, 0x83] {
+            assert_eq!(check_tag(tag), Ok(()), "{tag:02x}");
             assert!(
                 canonical_public_identity(&with_parameters(&[tag, 0x00])).is_ok(),
                 "{tag:02x}"
@@ -923,6 +966,7 @@ mod tests {
         }
         // The high-tag-number form, in each class.
         for tag in [0x1f, 0x3f, 0x5f, 0x7f, 0x9f, 0xbf, 0xdf, 0xff] {
+            assert_eq!(check_tag(tag), Err(IdentityError::NotDer), "{tag:02x}");
             assert_eq!(
                 canonical_public_identity(&with_parameters(&[tag, 0x01, 0x00])),
                 Err(IdentityError::NotDer),
