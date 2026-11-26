@@ -103,6 +103,28 @@
 //!   no lock, so nothing here waits; each load outside the transaction is
 //!   bounded by a 10 s deadline, so a loader that took a lock fails the
 //!   test instead of hanging it.
+//! - **Negative, empty target ceiling.** A delegation whose target service
+//!   has `max_scopes` `[]`, which the registry accepts, loads that ceiling
+//!   as `Some([])`, not as no ceiling, and denies both an omitted scope and
+//!   an explicit `read` that every other ceiling contains; the same
+//!   delegation to a service with `read`, and the same grant once its
+//!   target's ceiling is widened to `read`, resolve `read`, in both tenants
+//!   (`a26_neg_empty_target_service_ceiling_denies_every_scope`).
+//! - **Negative, target service off the audience.** A delegation whose
+//!   target service does not list the grant's audience (IR-083), which the
+//!   registry lets a grant be created with, loads nothing, the same `None`
+//!   as a grant that does not exist; once the service lists the resource
+//!   server it loads and resolves, and once the listing is removed it loads
+//!   nothing again, in both tenants
+//!   (`a26_neg_target_service_off_the_audience_loads_nothing`).
+//! - **Negative, audience outside the grant.** A direct grant and a
+//!   delegation loaded for another resource server's audience, which the
+//!   tenant is assigned and the target service lists, or for an audience no
+//!   resource server has, load nothing, the same `None`; once the grant
+//!   lists that resource server it loads with that server's ceilings and
+//!   the tenant's assignment of it, and once the listing is removed it
+//!   loads nothing again, in both tenants
+//!   (`a26_neg_audience_outside_the_grant_loads_nothing`).
 //!
 //! # Spec and registry picks
 //!
@@ -167,8 +189,10 @@
 //!   (T21.1).
 //! - The rest of the row's negative, tagged M2 in the registry: any
 //!   `resource` parameter and an audience not in the grant's set or not
-//!   assigned give `invalid_target` (the loader's `None`; the service
-//!   tests pin it at the registry level), and an unsupported
+//!   assigned give `invalid_target` (the loader's `None`, pinned here for
+//!   an audience outside the grant's set and for a target service that does
+//!   not list it; an unassigned audience only by the service tests), and an
+//!   unsupported
 //!   `requested_token_type` gives `invalid_request`: A26's M2 stage (T21.1,
 //!   T21.5).
 //! - The status part of design §5.7 step 5: the loader returns disabled
@@ -1242,5 +1266,391 @@ async fn a26_neg_uncommitted_ceiling_changes_never_apply() {
         decide(&after, &ScopeRequest::Omitted),
         "committed narrowing",
     );
+    db.drop([pool]).await;
+}
+
+/// A second resource server, assigned to both tenants, that no grant of
+/// the fixture lists: an audience outside every grant's set.
+const RS_OTHER: &str = "rs_other";
+const OTHER_AUDIENCE: &str = "https://other.example";
+/// An audience no resource server has.
+const UNKNOWN_AUDIENCE: &str = "https://none.example";
+
+/// Per tenant: its suffix, workload, binding and the direct grant of the
+/// fixture.
+const SIDES: [(&str, &str, &str, &str, &str); 2] = [
+    (TEN_A, "a", "wld_a", "bnd_a", DIRECT),
+    (TEN_B, "b", "wld_b", "bnd_b", GRT_B),
+];
+
+/// The ID `base` of the tenant with `suffix`.
+fn of(base: &str, suffix: &str) -> String {
+    format!("{base}_{suffix}")
+}
+
+/// The ceilings of `grant` of `tenant` for `audience`, or the loader's
+/// `None`.
+async fn load_at(
+    pool: &PgPool,
+    tenant: &str,
+    grant: &str,
+    audience: &str,
+) -> Option<LoadedCeilings> {
+    load_scope_ceilings(pool, tenant, grant, audience)
+        .await
+        .unwrap_or_else(|err| panic!("{tenant} {grant} {audience}: {err:?}"))
+}
+
+/// The miss every `None` below must equal: a grant that does not exist, on
+/// the tenant's own audience.
+async fn assert_miss(pool: &PgPool, tenant: &str, grant: &str, audience: &str) {
+    let missing = load_at(pool, tenant, "grt_missing", AUDIENCE).await;
+    assert_eq!(missing, None, "{tenant}");
+    assert_eq!(
+        load_at(pool, tenant, grant, audience).await,
+        missing,
+        "{tenant} {grant} {audience}"
+    );
+}
+
+/// Sets the `max_scopes` of service `service` of `tenant` through the
+/// registry's own update.
+async fn set_target_scopes(pool: &PgPool, tenant: &str, service: &str, scopes: &[&str]) {
+    let current = registry::get_service_identity(pool, tenant, service)
+        .await
+        .unwrap();
+    let updated = registry::test_support::update_service_identity(
+        pool,
+        tenant,
+        service,
+        current.revision,
+        &ServiceIdentityChanges {
+            name: current.name,
+            max_scopes: strings(scopes),
+            max_resource_constraints: current.max_resource_constraints,
+            status: current.status,
+        },
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{tenant} {service} {scopes:?}: {err:?}"));
+    assert_eq!(updated.max_scopes, strings(scopes), "{tenant} {service}");
+}
+
+/// [`fixture`] plus, written through the registry API: [`RS_OTHER`]
+/// (`read`), assigned to both tenants (`read`); and per tenant `x`, three
+/// service identities and a delegation of the tenant's workload to each,
+/// with the scopes and defaults `read` on [`RS`]:
+///
+/// - `svc_empty_x`, `max_scopes` `[]`, on [`RS`]: grant `grt_to_empty_x`;
+/// - `svc_read_x`, `max_scopes` `read`, on [`RS`] and [`RS_OTHER`]: grant
+///   `grt_to_read_x`;
+/// - `svc_unlisted_x`, `max_scopes` `read`, on [`RS_OTHER`] only, so not
+///   on the grant's audience: grant `grt_to_unlisted_x`.
+///
+/// `read` is in every other ceiling of these grants in both tenants: the
+/// resource server's, the tenant's assignment's and the grant's own.
+async fn delegation_fixture() -> (TestDb, PgPool) {
+    let (db, pool) = fixture().await;
+    registry::test_support::create_resource_server(
+        &pool,
+        &NewResourceServer {
+            id: RS_OTHER.into(),
+            audience: OTHER_AUDIENCE.into(),
+            name: "Other API".into(),
+            allowed_profiles: vec![Profile::Wif],
+            scopes: strings(&["read"]),
+            constraint_versions: vec![],
+            status: Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    for (tenant, suffix, workload, binding, _) in SIDES {
+        registry::test_support::create_audience_tenant_assignment(
+            &pool,
+            &NewAudienceTenantAssignment {
+                resource_server_id: RS_OTHER.into(),
+                ..assignment(&of("ata_other", suffix), tenant, &["read"])
+            },
+        )
+        .await
+        .unwrap();
+        for (base, name, scopes, servers) in [
+            ("svc_empty", "empty-api", &[][..], &[RS][..]),
+            ("svc_read", "read-api", &["read"][..], &[RS, RS_OTHER][..]),
+            (
+                "svc_unlisted",
+                "unlisted-api",
+                &["read"][..],
+                &[RS_OTHER][..],
+            ),
+        ] {
+            let id = of(base, suffix);
+            registry::test_support::create_principal(
+                &pool,
+                &principal(tenant, &id, PrincipalKind::Service, name),
+            )
+            .await
+            .unwrap();
+            registry::test_support::create_service_identity(
+                &pool,
+                &NewServiceIdentity {
+                    id: id.clone(),
+                    tenant_id: tenant.into(),
+                    name: name.into(),
+                    max_scopes: strings(scopes),
+                    max_resource_constraints: JsonObject::new(),
+                    resource_server_ids: strings(servers),
+                    status: Status::Enabled,
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{tenant} {id}: {err:?}"));
+            let grant = of(&base.replace("svc", "grt_to"), suffix);
+            registry::test_support::create_service_grant(
+                &pool,
+                &NewServiceGrant {
+                    tenant_id: tenant.into(),
+                    actor_principal_id: workload.into(),
+                    target_service_id: Some(id.clone()),
+                    allowed_binding_ids: strings(&[binding]),
+                    ..grant_a(&grant, true, &["read"], Some(&["read"]))
+                },
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{tenant} {grant}: {err:?}"));
+        }
+    }
+    (db, pool)
+}
+
+/// A delegation whose target service has `max_scopes` `[]` loads that
+/// empty ceiling as it is stored, `Some([])`, not as no ceiling, and it
+/// denies everything: an omitted scope, whose defaults `read` every other
+/// ceiling contains, and an explicit `read` each give
+/// [`ScopeError::Invalid`]. Controls: the same delegation to a service with
+/// `max_scopes` `read` resolves both to `read`; widening the empty ceiling
+/// to `read` through the registry makes the same grant resolve, and
+/// emptying it again denies again. Both tenants.
+#[tokio::test]
+async fn a26_neg_empty_target_service_ceiling_denies_every_scope() {
+    let (db, pool) = delegation_fixture().await;
+    let requests = [ScopeRequest::Omitted, explicit(&["read"])];
+    for (tenant, suffix, _, _, _) in SIDES {
+        let (empty, to_empty) = (of("svc_empty", suffix), of("grt_to_empty", suffix));
+        let loaded = assert_loaded_exactly(&pool, tenant, &to_empty).await;
+        let ceilings = loaded.scope_ceilings();
+        assert_eq!(ceilings.target_service, Some(vec![]), "{tenant}");
+        assert_eq!(
+            loaded.default_scopes(),
+            Some(&strings(&["read"])[..]),
+            "{tenant}"
+        );
+        for (name, ceiling) in [
+            ("resource server", &ceilings.resource_server),
+            ("assignment", &ceilings.assignment),
+            ("grant", &ceilings.grant),
+        ] {
+            assert!(ceiling.contains(&"read".to_string()), "{tenant} {name}");
+        }
+        for request in &requests {
+            assert_invalid(decide(&loaded, request), &format!("{tenant} {request:?}"));
+        }
+        // Control: the same delegation to a service whose ceiling is `read`.
+        let to_read = of("grt_to_read", suffix);
+        let control = assert_loaded_exactly(&pool, tenant, &to_read).await;
+        assert_eq!(
+            control.scope_ceilings().target_service,
+            Some(strings(&["read"])),
+            "{tenant}"
+        );
+        for request in &requests {
+            assert_eq!(
+                decide(&control, request),
+                Ok(strings(&["read"])),
+                "{tenant} {request:?}"
+            );
+        }
+        // The same grant once its target's ceiling is `read`, and again
+        // once it is emptied.
+        set_target_scopes(&pool, tenant, &empty, &["read"]).await;
+        for request in &requests {
+            assert_eq!(
+                resolve(&pool, tenant, &to_empty, request).await,
+                Ok(strings(&["read"])),
+                "{tenant} {request:?} widened"
+            );
+        }
+        set_target_scopes(&pool, tenant, &empty, &[]).await;
+        let emptied = assert_loaded_exactly(&pool, tenant, &to_empty).await;
+        assert_eq!(
+            emptied.scope_ceilings().target_service,
+            Some(vec![]),
+            "{tenant}"
+        );
+        for request in &requests {
+            assert_invalid(
+                decide(&emptied, request),
+                &format!("{tenant} {request:?} emptied"),
+            );
+        }
+    }
+    db.drop([pool]).await;
+}
+
+/// A delegation whose target service does not list the grant's audience
+/// (IR-083), although the grant lists it and the tenant is assigned it,
+/// loads nothing: the same `None` as a grant that does not exist. Control:
+/// once the service lists the resource server, through the registry's own
+/// list write, the grant loads exactly as the getters give it and resolves
+/// `read`; once the listing is removed, it loads nothing again. A
+/// delegation to a service that lists it loads throughout. Both tenants.
+#[tokio::test]
+async fn a26_neg_target_service_off_the_audience_loads_nothing() {
+    let (db, pool) = delegation_fixture().await;
+    for (tenant, suffix, _, _, _) in SIDES {
+        let (unlisted, to_unlisted) = (of("svc_unlisted", suffix), of("grt_to_unlisted", suffix));
+        // Only the service's listing is missing.
+        let grant = get_grant(&pool, tenant, &to_unlisted).await;
+        assert_eq!(grant.resource_server_ids, [RS], "{tenant}");
+        assert_eq!(grant.target_service_id.as_deref(), Some(unlisted.as_str()));
+        let service = registry::get_service_identity(&pool, tenant, &unlisted)
+            .await
+            .unwrap();
+        assert_eq!(service.resource_server_ids, [RS_OTHER], "{tenant}");
+        assert_eq!(
+            registry::get_audience_tenant_assignment(&pool, own_assignment(tenant))
+                .await
+                .unwrap()
+                .resource_server_id,
+            RS,
+            "{tenant}"
+        );
+        assert_miss(&pool, tenant, &to_unlisted, AUDIENCE).await;
+        assert_loaded_exactly(&pool, tenant, &of("grt_to_read", suffix)).await;
+
+        // Control: listed, it loads and resolves.
+        let listed = registry::test_support::add_service_identity_resource_server(
+            &pool,
+            tenant,
+            &unlisted,
+            service.revision,
+            RS,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{tenant} {unlisted}: {err:?}"));
+        let loaded = assert_loaded_exactly(&pool, tenant, &to_unlisted).await;
+        assert_eq!(
+            loaded
+                .target_service
+                .as_ref()
+                .map(|service| service.id.as_str()),
+            Some(unlisted.as_str()),
+            "{tenant}"
+        );
+        assert_eq!(
+            decide(&loaded, &ScopeRequest::Omitted),
+            Ok(strings(&["read"])),
+            "{tenant}"
+        );
+        // Removed again, it loads nothing again.
+        registry::test_support::remove_service_identity_resource_server(
+            &pool, tenant, &unlisted, listed, RS,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{tenant} {unlisted}: {err:?}"));
+        assert_miss(&pool, tenant, &to_unlisted, AUDIENCE).await;
+    }
+    db.drop([pool]).await;
+}
+
+/// A grant loaded for the audience of a resource server outside its
+/// audience set loads nothing, the same `None` as a grant that does not
+/// exist, although the tenant is assigned that resource server and, for
+/// the delegation, the target service lists it; so does an audience no
+/// resource server has. The direct grant of the fixture and a delegation,
+/// in both tenants. Control: each loads for its own audience, with
+/// [`RS`]'s ceilings; once the grant lists [`RS_OTHER`], through the
+/// registry's own list write, it loads for [`OTHER_AUDIENCE`] with
+/// [`RS_OTHER`]'s ceilings and the tenant's assignment of it, and once
+/// the listing is removed, it loads nothing for that audience again.
+#[tokio::test]
+async fn a26_neg_audience_outside_the_grant_loads_nothing() {
+    let (db, pool) = delegation_fixture().await;
+    for (tenant, suffix, _, _, direct) in SIDES {
+        let other_assignment = of("ata_other", suffix);
+        let assigned = registry::get_audience_tenant_assignment(&pool, &other_assignment)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                assigned.tenant_id.as_str(),
+                assigned.resource_server_id.as_str()
+            ),
+            (tenant, RS_OTHER)
+        );
+        let service = registry::get_service_identity(&pool, tenant, &of("svc_read", suffix))
+            .await
+            .unwrap();
+        assert!(
+            service.resource_server_ids.contains(&RS_OTHER.to_string()),
+            "{tenant}"
+        );
+        for grant in [direct.to_string(), of("grt_to_read", suffix)] {
+            let case = format!("{tenant} {grant}");
+            let stored = get_grant(&pool, tenant, &grant).await;
+            assert_eq!(stored.resource_server_ids, [RS], "{case}");
+            // Control: its own audience loads, with RS's ceilings.
+            let own = assert_loaded_exactly(&pool, tenant, &grant).await;
+            assert_eq!(own.resource_server.id, RS, "{case}");
+            for audience in [OTHER_AUDIENCE, UNKNOWN_AUDIENCE] {
+                assert_miss(&pool, tenant, &grant, audience).await;
+            }
+            // Listed by the grant, the other audience loads, with its own
+            // resource server and assignment.
+            let listed = registry::test_support::add_service_grant_resource_server(
+                &pool,
+                tenant,
+                &grant,
+                stored.revision,
+                RS_OTHER,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{case}: {err:?}"));
+            let other = load_at(&pool, tenant, &grant, OTHER_AUDIENCE)
+                .await
+                .unwrap_or_else(|| panic!("{case}: listed, no ceilings"));
+            assert_eq!(
+                (
+                    other.resource_server.id.as_str(),
+                    other.resource_server.scopes.clone(),
+                    other.assignment.id.as_str(),
+                    other.grant.id.as_str(),
+                ),
+                (
+                    RS_OTHER,
+                    strings(&["read"]),
+                    other_assignment.as_str(),
+                    grant.as_str()
+                ),
+                "{case}"
+            );
+            assert_eq!(
+                decide(&other, &explicit(&["read"])),
+                Ok(strings(&["read"])),
+                "{case}"
+            );
+            assert_miss(&pool, tenant, &grant, UNKNOWN_AUDIENCE).await;
+            // Removed again, it loads nothing for that audience again, and
+            // its own audience still loads.
+            registry::test_support::remove_service_grant_resource_server(
+                &pool, tenant, &grant, listed, RS_OTHER,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{case}: {err:?}"));
+            assert_miss(&pool, tenant, &grant, OTHER_AUDIENCE).await;
+            assert_loaded_exactly(&pool, tenant, &grant).await;
+        }
+    }
     db.drop([pool]).await;
 }
