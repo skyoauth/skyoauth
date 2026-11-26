@@ -268,13 +268,15 @@ describe('run', () => {
   //     before closing stdin, so before the command can end), records that
   //     it did, and then runs the real NAME. `kill` returns once the signal
   //     is pending, so it reaches the script at that point of its run.
+  // The command then prints `done` and exits with `exit` (default 0); the
+  // log is written to `logPath` (default: a new file).
   // It returns the exit status, the signal that killed the script (null if
   // none), stdout's lines and whether the hook fired. The one timer is a
   // backstop that kills the group, so a broken script fails the test
   // instead of hanging it.
-  function runSignalled(signal, { to, hook } = {}) {
+  function runSignalled(signal, { to, hook, exit = 0, logPath = fresh('run.log') } = {}) {
     const cmd = fresh('cmd.sh');
-    writeFileSync(cmd, 'echo ready\nwhile read -r _; do :; done\necho done\n');
+    writeFileSync(cmd, `echo ready\nwhile read -r _; do :; done\necho done\nexit ${exit}\n`);
     const env = { ...process.env };
     const pidFile = fresh('pid');
     const fired = fresh('fired');
@@ -288,7 +290,7 @@ describe('run', () => {
       chmodSync(join(bin, hook), 0o755);
       Object.assign(env, { PATH: `${bin}:${process.env.PATH}`, HOOK_REAL_PATH: process.env.PATH, HOOK_PID: pidFile, HOOK_FIRED: fired });
     }
-    const child = spawn('sh', [SCRIPT, 'run', fresh('run.log'), 'sh', cmd], { detached: true, stdio: ['pipe', 'pipe', 'pipe'], env });
+    const child = spawn('sh', [SCRIPT, 'run', logPath, 'sh', cmd], { detached: true, stdio: ['pipe', 'pipe', 'pipe'], env });
     if (hook) {
       writeFileSync(pidFile, `${child.pid}\n`);
       child.stdin.end();
@@ -352,16 +354,60 @@ describe('run', () => {
       });
     }
 
-    test('a SIGTERM delivered to the helper while it cleans up on the way out neither kills it nor repeats the token', async () => {
-      const r = await runSignalled('SIGTERM', { hook: 'rm' });
-      assert.ok(r.fired, 'the rm stand-in did not run: the test no longer reaches this point of the script');
-      assert.equal(r.signal, null, `killed by ${r.signal}: the signal was not trapped on the way out`);
-      // The command's status, or 143 if the signal is honoured: either
-      // way, commands resume exactly once.
-      assert.ok([0, 143].includes(r.status), String(r.status));
-      const token = TOKEN.exec(r.lines[0])?.[1];
-      assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
-    });
+    // While `resume` runs, after it printed the token: `rm` removes the
+    // status file, and for a failed copy `awk` writes the `::error::`
+    // annotation (`annotate`; neither runs earlier in `run`). `resume`
+    // ignores TERM, INT and HUP, so the signal changes nothing: neither the
+    // exit status (the command's, or 2 for a failed copy, never 143, 130 or
+    // 129), nor the token (once), nor the annotation after it.
+    for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+      test(`a ${signal} delivered to the helper while it cleans up on the way out is ignored: the command's status, the token once`, async () => {
+        const r = await runSignalled(signal, { hook: 'rm', exit: 3 });
+        assert.ok(r.fired, 'the rm stand-in did not run: the test no longer reaches this point of the script');
+        assert.equal(r.signal, null, `killed by ${r.signal}: the signal was not trapped on the way out`);
+        assert.equal(r.status, 3, `${r.status}: the signal was not ignored while resume ran\n${r.lines.join('\n')}`);
+        const token = TOKEN.exec(r.lines[0])?.[1];
+        assert.ok(token, r.lines.join('\n'));
+        assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, '']);
+      });
+
+      for (const hook of ['rm', 'awk']) {
+        test(`a ${signal} delivered to the helper while it reports a failed copy (${hook}) is ignored: exit 2, the token once, then the error`, async () => {
+          const logPath = join(TOP, 'missing-dir', 'run.log');
+          const r = await runSignalled(signal, { hook, exit: 3, logPath });
+          assert.ok(r.fired, `the ${hook} stand-in did not run: the test no longer reaches this point of the script`);
+          assert.equal(r.signal, null, `killed by ${r.signal}: the signal was not trapped on the way out`);
+          assert.equal(r.status, 2, `${r.status}: the signal was not ignored while resume ran\n${r.lines.join('\n')}`);
+          const token = TOKEN.exec(r.lines[0])?.[1];
+          assert.ok(token, r.lines.join('\n'));
+          assert.deepEqual(r.lines.slice(1), ['ready', 'done', '', `::${token}::`, `::error::could not write the log ${logPath} (tee exited 1)`, '']);
+        });
+      }
+    }
+  });
+
+  // A second signal that arrives while a handler runs, before `resume`
+  // ignores signals, cannot be placed by a test: the handlers and `resume`
+  // up to its `trap ''` run only builtins, so no stand-in runs in that gap,
+  // and signals sent together are not run one after another (dash runs the
+  // trap of the lowest-numbered pending one, which exits). So the source is
+  // read: every handler ignores the three signals before it exits, the
+  // script ignores them once COMMAND's status is read (a later signal would
+  // otherwise land between the last trap check and `resume`, and lose the
+  // token), and `resume` ignores them first.
+  test('each signal handler, the script after the status read, and resume ignore TERM, INT and HUP', () => {
+    const source = readFileSync(SCRIPT, 'utf8');
+    const body = source.slice(source.indexOf('\nrun() {'), source.indexOf('\nsummarize() {'));
+    assert.deepEqual(body.match(/^\s*trap\b.*$/gm), [
+      "        trap '' TERM INT HUP",
+      '    trap resume EXIT',
+      `    trap 'trap "" TERM INT HUP; exit 143' TERM`,
+      `    trap 'trap "" TERM INT HUP; exit 130' INT`,
+      `    trap 'trap "" TERM INT HUP; exit 129' HUP`,
+      "    trap '' TERM INT HUP",
+    ]);
+    const resume = body.slice(body.indexOf('resume() {'), body.indexOf('\n    }\n', body.indexOf('resume() {')));
+    assert.equal(resume.split('\n')[1], "        trap '' TERM INT HUP", 'resume does not ignore signals first');
   });
 
   test('the EXIT trap is the only place that prints the resume token, and it is never cleared', () => {
