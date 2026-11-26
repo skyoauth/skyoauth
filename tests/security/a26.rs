@@ -1582,6 +1582,7 @@ async fn a26_neg_target_service_off_the_audience_loads_nothing() {
             Ok(strings(&["read"])),
             "{tenant}"
         );
+        assert_loaded_exactly(&pool, tenant, &of("grt_to_read", suffix)).await;
         // Removed again, it loads nothing again.
         registry::test_support::remove_service_identity_resource_server(
             &pool, tenant, &unlisted, listed, RS,
@@ -1589,6 +1590,7 @@ async fn a26_neg_target_service_off_the_audience_loads_nothing() {
         .await
         .unwrap_or_else(|err| panic!("{tenant} {unlisted}: {err:?}"));
         assert_miss(&pool, tenant, &to_unlisted, AUDIENCE).await;
+        assert_loaded_exactly(&pool, tenant, &of("grt_to_read", suffix)).await;
     }
     db.drop([pool]).await;
 }
