@@ -34,7 +34,7 @@ use std::{
 use super::{
     BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
     MAX_REPLY_BYTES, NotSent, Op, Previewed, Reply, Request, RequestLine, ResponseRequest,
-    Restored, UnknownOutcome, parse_reply, path::not_sent, wire::fits,
+    Restored, Status, StatusRequest, UnknownOutcome, parse_reply, path::not_sent, wire::fits,
 };
 use crate::recovery::{Challenge, parse_challenge};
 
@@ -316,11 +316,11 @@ impl Op {
 /// reconcile first** ([`Op::retry`]). The client never retries on its
 /// own.
 ///
-/// The transport's `status` operation reads the state a reconcile needs
-/// (`docs/proposals/local-read-operation.md`); this client has no typed
-/// call for it yet, nor the paging of its revoked IDs (the operator slice
-/// C4), so the codec ([`Request::Status`], [`parse_reply`]) is all this
-/// crate offers for it today.
+/// To reconcile, read the state with [`LocalClient::status`] and decide by
+/// [`RestoreVerdict`](super::RestoreVerdict) or
+/// [`BootstrapVerdict`](super::BootstrapVerdict); the credentials a restore
+/// revoked are read with [`LocalClient::revoked_credential_ids`] (see the
+/// [module documentation](super), "Reconciling").
 ///
 /// `Debug` shows the timeouts only.
 pub struct LocalClient<C = super::CheckedSocketPath> {
@@ -420,6 +420,27 @@ impl<C: Connector> LocalClient<C> {
         fits(response.encoded_len_lower_bound())?;
         match self.call(&Request::Restore(response.clone()))? {
             Reply::Restored(reply) => Ok(reply),
+            _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
+        }
+    }
+
+    /// Reads the recovery state, the state of a recovery challenge and the
+    /// enrollment of an mTLS key, as `request` asks ([`Status`]); changes
+    /// no row. The reconcile step after a `bootstrap` or a `restore` of
+    /// unknown outcome ([`StatusRequest::reconciling_bootstrap`],
+    /// [`StatusRequest::reconciling_restore`]) and the page of a restore's
+    /// revoked IDs after `revoked_after`
+    /// ([`LocalClient::revoked_credential_ids`] walks them). The codec
+    /// checks the reply's shape only, not how its members agree.
+    ///
+    /// # Errors
+    ///
+    /// See "Outcomes": every refusal is [`CallError::Refused`];
+    /// [`Retry::Safe`].
+    pub fn status(&self, request: &StatusRequest) -> Result<Status, CallError> {
+        fits(request.encoded_len_lower_bound())?;
+        match self.call(&Request::Status(request.clone()))? {
+            Reply::Status(reply) => Ok(*reply),
             _ => Err(CallError::Unknown(UnknownOutcome::Malformed)),
         }
     }
@@ -854,8 +875,8 @@ mod tests {
 
     /// A store failure is an uncertain commit after each of the three
     /// writes, and a refusal after `preview` and `status`, which change no
-    /// row; every other code is a refusal after every operation. `status`
-    /// has no typed call yet, so this is its one check (mutant M9).
+    /// row; every other code is a refusal after every operation (mutant
+    /// M9; `local_exchange` checks it through the typed calls too).
     #[test]
     fn only_the_three_writes_make_a_store_failure_uncertain() {
         for op in Op::ALL {

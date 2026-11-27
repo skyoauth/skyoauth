@@ -75,9 +75,8 @@
 //!   truncated, oversized or malformed reply, bytes after its newline, a
 //!   second line, a refusal with a code outside the closed set: the
 //!   request may or may not have been served, and a bootstrap, an issue or
-//!   a restore may have committed. **Do not proceed: reconcile first** (read the
-//!   recovery state and the operator, with the transport's `status`
-//!   operation or through another channel), then decide.
+//!   a restore may have committed. **Do not proceed: reconcile first**
+//!   (see "Reconciling"), then decide.
 //!
 //! **The client never retries on its own**, after any outcome. Once a
 //! first bootstrap committed, a repeat of it is answered `conflict`; once
@@ -91,6 +90,69 @@
 //! operation ID), so after an unknown outcome the operator issues again,
 //! and the first challenge, if it committed, expires unused (lead ruling,
 //! Q5).
+//!
+//! # Reconciling
+//!
+//! The transport's `status` ([`LocalClient::status`]) changes no row and
+//! reads what decides a write whose outcome is unknown
+//! (`docs/proposals/local-read-operation.md`, "Finality, the 100 s wait,
+//! and the reconcile procedure"). It is one more request with the same
+//! bounds and cannot see the listen queue, where a request the client gave
+//! up on may still wait, so only the operation states `not_found`,
+//! `restored`, `revoked` and `retired` are final, and a recovery state
+//! once reported (bootstrap closes once). The client still never retries
+//! on its own; the operator follows this procedure:
+//!
+//! - **`restore`, outcome unknown:** `status` with its operation ID
+//!   ([`StatusRequest::reconciling_restore`]), decided by
+//!   [`RestoreVerdict::of`]. `restored`: it committed; the reply has the
+//!   replacement's IDs, and the revoked IDs page by `revoked_after`
+//!   ([`LocalClient::revoked_credential_ids`]). The verdict is decided by the state alone: the
+//!   replacement's IDs are not part of the reconcile decision, they are
+//!   reported, not checked. `retired`, `revoked`: it
+//!   did not commit and never will; issue a new challenge. `issued`:
+//!   repeat the same restore, which is single use: it restores, or is
+//!   `not_restorable` because the first one committed, which the next
+//!   `status` shows. `expiring`: ask again after `settles_at`. `expired`:
+//!   it did not commit through this transport; issue a new challenge (the
+//!   old one is not final: if it is restored after all, it rotates the
+//!   epoch, so the new one's restore is `not_restorable` and `status` on
+//!   the old one shows `restored`). `not_found`, or no state: do not
+//!   proceed. **After any retry** (lead ruling (c)), a `conflict` from the
+//!   new issue (a late restore has enrolled the replacement's key) or a
+//!   `not_restorable` from the repeated or new restore means: query the
+//!   **original** operation ID again and act on the state it reports; a
+//!   late restore can commit after `expired` was seen.
+//! - **`bootstrap`, outcome unknown** (lead rulings F4 and (b)): `status`
+//!   with the bootstrap's mTLS key, the same DER bytes it sent
+//!   ([`StatusRequest::reconciling_bootstrap`]), decided by
+//!   [`BootstrapVerdict::of`]. The instance ID, the recovery public key,
+//!   the mTLS key (enrolled, in any state) and the SHA-256 of the trust
+//!   anchor reference (of the UTF-8 bytes of the value sent, not its
+//!   escaped wire form) all equal the request's: the current state matches
+//!   it, consistent with it having committed; do not repeat it. Which
+//!   request won is not known, `status` shows neither the operator's
+//!   status nor its role, and the key may have been enrolled by a later
+//!   write: the credential is usable only when it is `enabled`. No
+//!   recovery state: repeat the same bootstrap, which the database closes
+//!   once. Anything else: the current state does not match; do not claim
+//!   the bootstrap committed, and stop (with an equal instance and another
+//!   recovery key, the recovery key the operator holds cannot restore this
+//!   instance).
+//! - **`issue_challenge`, outcome unknown:** no reconcile possible: issue
+//!   again. A stray challenge expires unused, and any restore retires the
+//!   others. [`Op::retry`] stays [`Retry::ReconcileFirst`] for it (lead
+//!   ruling, Q5): it writes a row and an audit event.
+//!
+//! A successful `restore` reply lists at most [`MAX_REVOKED_IDS_PER_REPLY`]
+//! of the IDs it revoked, the first in byte order, with their count; the
+//! list is complete exactly when its length equals the count, and
+//! [`LocalClient::revoked_credential_ids`] reads the rest with `status`,
+//! checking the pages against the count and each other; its list holds at
+//! least the largest count seen in the walk and every ID of the restore
+//! reply's list. The walk has no overall bound beyond each call's own time
+//! limits: a hostile server on the already trusted socket could keep it
+//! going.
 //!
 //! # Key material
 //!
@@ -114,6 +176,7 @@
 mod exchange;
 #[cfg(unix)]
 mod path;
+mod reconcile;
 mod wire;
 
 use std::{fmt, io};
@@ -128,6 +191,7 @@ pub use path::{
     AncestorTrust, CheckedSocket, CheckedSocketPath, MAX_SOCKET_PATH_BYTES, MAX_SYMLINKS,
     PathError, PathProblem, SOCKET_MODE, SocketExpectations, check_socket,
 };
+pub use reconcile::{BootstrapVerdict, RestoreVerdict};
 pub use wire::parse_reply;
 
 use crate::recovery::RecoveryPublicKey;
@@ -351,6 +415,12 @@ pub enum UnknownOutcome {
     /// whose `operation_id`, `expires_at` or `expected_revision` is not its
     /// challenge's.
     ChallengeMismatch,
+    /// The pages of a restore's revoked credential IDs do not hold
+    /// together: a page of another length than its count leaves, an ID not
+    /// after the one before, a count that changed after the one restart,
+    /// a `status` that does not report the restore
+    /// ([`LocalClient::revoked_credential_ids`]).
+    PageMismatch,
 }
 
 impl fmt::Display for UnknownOutcome {
@@ -366,6 +436,7 @@ impl fmt::Display for UnknownOutcome {
             Self::ConnectionLost(_) => "the connection failed before a reply could be believed",
             Self::UncertainCommit(_) => "a write failed in the store, maybe in its commit",
             Self::ChallengeMismatch => "the issued reply does not match its challenge",
+            Self::PageMismatch => "the pages of revoked credential IDs do not hold together",
         })
     }
 }
@@ -384,8 +455,8 @@ pub enum CallError {
     /// answered with one of these two, the client's call ([`LocalClient`])
     /// reports them as [`CallError::Unknown`], carrying the
     /// wire code, for `bootstrap`, `issue_challenge` and `restore`, and as
-    /// a refusal only for `preview`: after a write, reconcile first (see
-    /// the [module documentation](self), "Outcomes").
+    /// a refusal only for `preview` and `status`: after a write, reconcile
+    /// first (see the [module documentation](self), "Outcomes").
     Refused(ErrorCode),
     /// The request may or may not have been served: do not proceed;
     /// reconcile first. Never repeated by the client.
