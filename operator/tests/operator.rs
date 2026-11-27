@@ -37,11 +37,14 @@
 //! `_recovery` fixtures, every refusal, usage error and file error, and
 //! mutated artifacts; `cli::sign` signs every challenge vector with the
 //! recovery test key's seed file and checks the seed file's and the output
-//! file's rules (docs/proposals/operator-cli-artifacts.md). Portable, with
-//! its Unix-only cases gated.
+//! file's rules (docs/proposals/operator-cli-artifacts.md); `cli::online`
+//! runs the online `preview` and `status` (docs/proposals/operator-cli-online.md,
+//! slice 1), on Unix against a fake service at a socket in a fresh
+//! temporary directory (`cli::online::unix`). Portable, with its Unix-only
+//! cases gated.
 //!
-//! Portable but for `local_exchange` and `local_path`: no network,
-//! database or socket, and no clock (a time is always injected) but in
+//! Portable but for `local_exchange`, `local_path` and `cli::online::unix`:
+//! no network or database, no socket but theirs, and no clock (a time is always injected) but in
 //! `cli::without_now_the_system_clock_is_used_and_printed`, which checks
 //! the binary's default clock; it runs on Linux, macOS and Windows. These are not scenario
 //! tests: no name here may match the scenario pattern `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, and the

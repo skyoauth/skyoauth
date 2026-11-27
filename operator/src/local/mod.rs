@@ -167,7 +167,10 @@
 //! this module, [`Request::encode`] and [`parse_reply`]) has no I/O and is
 //! built on every platform: the offline workstation, which may run macOS
 //! or Windows, reads an `issue_challenge` reply carried to it as a file
-//! (the `skyoauth-operator` binary's challenge artifact).
+//! (the `skyoauth-operator` binary's challenge artifact). On the host,
+//! [`LocalClient::issue_challenge_verbatim`] gives that reply line exactly
+//! as the server sent it, with its checked challenge, so the artifact is
+//! the reply's own bytes.
 
 // Off Unix, the links of these docs to the client's items have no target.
 #![cfg_attr(not(unix), allow(rustdoc::broken_intra_doc_links))]
@@ -183,8 +186,8 @@ use std::{fmt, io};
 
 #[cfg(unix)]
 pub use exchange::{
-    Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, HalfClose, LocalClient, Retry, SocketPath,
-    Timeouts,
+    Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, HalfClose, IssuedChallenge, LocalClient,
+    Retry, SocketPath, Timeouts,
 };
 #[cfg(unix)]
 pub use path::{

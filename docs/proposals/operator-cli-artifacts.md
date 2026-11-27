@@ -49,9 +49,11 @@ carries a recovery challenge from the service's host to the workstation that
 holds the recovery key, and the signed response back. The carrier is two
 files, the artifacts. The binary `skyoauth-operator`, in the
 `skyoauth-operator` package (`operator/src/bin/skyoauth-operator/`), checks
-and signs them offline: it reads no socket, no environment and no
-configuration file, and writes no file but the one `sign --out` names, which
-it creates new.
+and signs them offline: the commands of D1 read no socket, no environment
+and no configuration file, and write no file but the one `sign --out` names,
+which `sign` creates new. The online commands of D2, in
+[the online commands proposal](operator-cli-online.md), do read a socket: the
+service's deployment-local one.
 
 ## Commands
 

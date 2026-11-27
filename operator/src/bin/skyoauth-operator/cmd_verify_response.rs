@@ -13,7 +13,7 @@ use crate::{Failure, Outcome, args::VerifyResponse, artifact, input, show::quote
 /// The largest response artifact: a response is sent as a `restore`
 /// request, whose line is at most [`MAX_REQUEST_BYTES`] and holds more than
 /// the artifact.
-const MAX_RESPONSE_BYTES: usize = MAX_REQUEST_BYTES;
+pub const MAX_RESPONSE_BYTES: usize = MAX_REQUEST_BYTES;
 
 pub fn run(flags: &VerifyResponse) -> Outcome {
     match check(flags) {
