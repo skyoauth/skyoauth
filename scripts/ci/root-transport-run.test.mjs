@@ -1250,6 +1250,7 @@ describe('summarize', () => {
         'skyoauth-operator::operator operator/tests/local_path/mod.rs local_path::',
         'skyoauth-operator::operator operator/tests/support/mod.rs support::',
         'skyoauth-scenarios::pg tests/pg.rs ',
+        'skyoauth-scenarios::pg tests/harness/local_client_round_trip.rs harness::local_client_round_trip::',
         'skyoauth-scenarios::pg tests/harness/local_transport_wire.rs harness::local_transport_wire::',
         'skyoauth-scenarios::pg tests/harness/pg_teardown.rs harness::pg_teardown::',
         'skyoauth-scenarios::pg tests/harness/public_identity_fixture.rs harness::public_identity_fixture::',

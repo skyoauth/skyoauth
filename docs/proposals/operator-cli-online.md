@@ -37,9 +37,8 @@ It depends on C4 (`LocalClient::status`, `RestoreVerdict`,
   in the repository): the five subcommands on `LocalClient`, the D1
   artifacts reused, unknown outcomes as exit codes, and that a
   dev-dependency of `skyoauth-scenarios` on `skyoauth-operator` is approved
-  for the C4 follow-up. The repository still records that edge as awaiting
-  approval ([demo walkthroughs](demo-walkthroughs.md), "Extra
-  dependencies").
+  for the C4 follow-up; it landed with #214 ([demo
+  walkthroughs](demo-walkthroughs.md), "Extra dependencies").
 - **Everything else is proposed here**, marked "(proposed)" where it is a
   pick; the eight that most need a ruling are under
   [Rulings](#rulings).
