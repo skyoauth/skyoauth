@@ -1,0 +1,96 @@
+name: Demo
+
+# Renders the demo walk-through videos (docs/proposals/demo-walkthroughs.md
+# §2 and §5, scripts/demo/README.md). No journey exists yet, so it renders
+# only the sample transcript, after the renderer's end-to-end test.
+#
+# A demo failure makes this workflow red and visible, but it must not block
+# a merge or a release: only conformance gates a release. This workflow is
+# therefore separate from ci.yml and not in `ci-passed`; do not make it a
+# required check. The transcript check that does gate merges (secret shapes
+# in committed transcripts) is the `demo-transcripts` job of ci.yml.
+#
+# It publishes nothing outside this run's artifacts: no release assets yet
+# (the release job and its open questions are §5), no Pages, no push, no
+# comment, no secret. The videos are never committed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - scripts/demo/**
+      - tests/demo/**
+      - .github/workflows/demo.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  render:
+    name: Render demo videos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/demo/package-lock.json
+
+      - name: Install demo dependencies
+        working-directory: scripts/demo
+        run: npm ci --ignore-scripts
+
+      # The Chromium build the pinned playwright expects, with the system
+      # libraries it needs.
+      - name: Install Chromium for Playwright
+        working-directory: scripts/demo
+        run: npx playwright install --with-deps chromium
+
+      - name: Install ffmpeg if missing
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -hide_banner -version | head -n 1
+
+      - name: Check the transcripts
+        run: node scripts/demo/transcript.mjs check scripts/demo/sample/sample.transcript.jsonl
+
+      - name: End-to-end test of the renderer
+        run: node --test scripts/demo/render.e2e.test.mjs
+
+      - name: Render the sample
+        run: node scripts/demo/render.mjs scripts/demo/sample/sample.transcript.jsonl --out "$RUNNER_TEMP/demo"
+
+      - name: Verify the checksums
+        working-directory: ${{ runner.temp }}/demo
+        run: sha256sum --strict -c SHA256SUMS
+
+      # Not a conformance leg: NOT_CONFORMANCE in scripts/ci/report-conformance.mjs
+      # lists it. 90 days is the most a public repository keeps an artifact
+      # (unverified on this repository's settings).
+      - name: Upload the videos
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-videos-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/demo/*.mp4
+            ${{ runner.temp }}/demo/*.vtt
+            ${{ runner.temp }}/demo/*.transcript.jsonl
+            ${{ runner.temp }}/demo/SHA256SUMS
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}
+          if-no-files-found: error

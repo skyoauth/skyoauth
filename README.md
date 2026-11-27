@@ -236,6 +236,15 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   reporter's `NOT_CONFORMANCE` list, and a new layout job needs a
   `JOB_RUNNER` decision, or its self-test fails. See
   `tests/conformance/README.md`.
+- Demo transcripts also run on every change, and `CI passed` requires them to
+  pass: the pure self-tests of `scripts/demo` and `node
+  scripts/demo/transcript.mjs check` over the sample and every committed
+  transcript under `tests/demo`, which refuses secret shapes, wall-clock
+  values and control characters. The demo videos themselves are rendered by
+  a separate workflow, `.github/workflows/demo.yml` (Chromium and ffmpeg),
+  and kept only as run artifacts (`demo-videos-N`); it is not part of `CI
+  passed`, so a demo failure never blocks a merge or a release. See
+  `scripts/demo/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. On pushes to `main`, CI generates separate Rust and TypeScript tests and

@@ -144,6 +144,62 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/root-transport-run.test.mjs
 
+  # Demo walk-through transcripts (docs/proposals/demo-walkthroughs.md §2
+  # and §5, scripts/demo/README.md): the pure self-tests of scripts/demo
+  # (every *.test.mjs but *.e2e.test.mjs: no browser, no ffmpeg) and the
+  # transcript check over every committed transcript, which refuses
+  # secret shapes (PEM blocks, JWT-shaped strings, Bearer credentials),
+  # wall-clock values and control characters, so a leaked credential in a
+  # golden transcript fails the merge. Like docs-check it runs for every
+  # change, docs-only ones included, so it does not need `changes`. The
+  # rendering (Chromium, ffmpeg) is in demo.yml, which `ci-passed` does
+  # not need. `npm ci` installs playwright from the scripts/demo lockfile
+  # without lifecycle scripts and fails if package.json and the lockfile
+  # disagree; no browser is downloaded.
+  demo-transcripts:
+    name: Demo transcripts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/demo/package-lock.json
+
+      - name: Install demo dependencies
+        working-directory: scripts/demo
+        run: npm ci --ignore-scripts
+
+      - name: Self-test the transcript checker, timing and WebVTT
+        shell: bash
+        run: |
+          mapfile -d '' tests < <(find scripts/demo -maxdepth 1 -type f -name '*.test.mjs' ! -name '*.e2e.test.mjs' -print0 | LC_ALL=C sort -z)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No pure self-tests found in scripts/demo"
+            exit 1
+          fi
+          node --test "${tests[@]}"
+
+      # The golden transcripts under tests/demo (none yet: the directory
+      # holds only .gitkeep) and the sample. The checker refuses an empty
+      # file list (exit 2); the sample keeps the list non-empty, and the
+      # golden count is printed, so no golden is a visible state, not a
+      # vacuous pass.
+      - name: Check the committed transcripts
+        if: success() || failure()
+        shell: bash
+        run: |
+          test -d tests/demo/golden
+          mapfile -d '' goldens < <(find tests/demo -type f -name '*.jsonl' -print0 | LC_ALL=C sort -z)
+          echo "Golden transcripts under tests/demo: ${#goldens[@]}"
+          node scripts/demo/transcript.mjs check scripts/demo/sample/sample.transcript.jsonl "${goldens[@]}"
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes
@@ -1254,8 +1310,9 @@ jobs:
   # docs-only change satisfies a required check, except a matrix job: it
   # reports under its unexpanded name, so requiring one would never
   # arrive. This job passes when every job it needs passed or was skipped,
-  # except docs-check and conformance-registry: they have no condition, so
-  # they must have passed; a skip there would mean they never ran.
+  # except docs-check, conformance-registry and demo-transcripts: they have
+  # no condition, so they must have passed; a skip there would mean they
+  # never ran.
   ci-passed:
     name: CI passed
     if: always()
@@ -1263,6 +1320,7 @@ jobs:
       - changes
       - docs-check
       - conformance-registry
+      - demo-transcripts
       - rust
       - rust-coverage
       - service-nextest
@@ -1280,6 +1338,7 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
           DOCS_CHECK: ${{ needs.docs-check.result }}
           REGISTRY: ${{ needs.conformance-registry.result }}
+          DEMO_TRANSCRIPTS: ${{ needs.demo-transcripts.result }}
         run: |
           echo "Job results: $RESULTS"
           if [ "$DOCS_CHECK" != success ]; then
@@ -1288,6 +1347,10 @@ jobs:
           fi
           if [ "$REGISTRY" != success ]; then
             echo "Conformance registry did not pass: '$REGISTRY'"
+            exit 1
+          fi
+          if [ "$DEMO_TRANSCRIPTS" != success ]; then
+            echo "Demo transcripts did not pass: '$DEMO_TRANSCRIPTS'"
             exit 1
           fi
           for result in $RESULTS; do

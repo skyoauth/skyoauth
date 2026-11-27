@@ -430,15 +430,16 @@ const RANK = { passed: 0, skipped: 1, failed: 2 };
 // hold: a leg string is short, and the reports are not read unbounded.
 const LEG_FILES = ['leg', 'junit.xml'];
 export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
-// Artifacts of jobs that are not conformance legs (ci.yml): the only ones
+// Artifacts of jobs that are not conformance legs (ci.yml, demo.yml): the only ones
 // that may lack a leg file. Any other artifact without one is an input error.
 // The self-test checks this list against the workflows' upload steps.
 // conformance-report-N is the JSON this reporter writes in the
 // `conformance-report` job; service-nextest-root-junit-N is the JUnit of
 // that job's root-only run (the `local_transport` tests of skyoauth-service,
 // operator `local_path` and the `pg` target's `harness::socket_path_fixture`,
-// none of them a scenario test).
-export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^service-nextest-root-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/, /^conformance-report-[1-9]\d*$/];
+// none of them a scenario test). demo-videos-N holds the demo walk-through
+// videos of demo.yml (scripts/demo), which are not evidence.
+export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^service-nextest-root-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/, /^conformance-report-[1-9]\d*$/, /^demo-videos-[1-9]\d*$/];
 
 // What a path is, without following a symbolic link: dir, file, symlink,
 // other or missing. Other file system errors are thrown.
