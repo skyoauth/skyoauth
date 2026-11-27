@@ -54,7 +54,12 @@
 //! `_wire/socket_path.v1.json` and binds its `local_transport` in each, as
 //! the operator's socket path checks are run on the same trees (no
 //! database needed; the cases that need root, or as root the peer user
-//! `SKYOAUTH_IT_PEER_USER`, print a notice). Their tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
+//! `SKYOAUTH_IT_PEER_USER`, print a notice); `harness::local_client_round_trip`
+//! (Unix only) runs the `skyoauth-operator` library's `LocalClient`
+//! against the service's `LocalTransport` on a socket in a private
+//! directory (on a database): the bootstrap, a signed restore and their
+//! reconcile, the page walk over more than a page with a tie, and every
+//! operation state. Their tests are not scenario tests, no name in them matches `a\d\d_`, and the registry
 //! (`tests/conformance/scenarios.toml`) does not list them.
 
 mod security {
@@ -107,6 +112,9 @@ mod security {
 }
 
 mod harness {
+    #[cfg(unix)]
+    #[path = "local_client_round_trip.rs"]
+    mod local_client_round_trip;
     #[cfg(unix)]
     #[path = "local_transport_wire.rs"]
     mod local_transport_wire;
