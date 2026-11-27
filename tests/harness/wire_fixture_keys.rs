@@ -5,10 +5,11 @@
 //! lists them (layout §3). They need no server and no database; they run
 //! in the `pg` target, the one CI runs.
 //!
-//! `identity::canonical_public_identity` checks the shape of a DER
-//! `SubjectPublicKeyInfo`, not its algorithm OID, so a helper that built a
-//! wrong prefix, or ignored its seed, would still hand the tests
-//! well-formed identities. The literals below were computed once from the
+//! `identity::canonical_public_identity` refuses a DER
+//! `SubjectPublicKeyInfo` that is malformed, not the one form of Ed25519 or
+//! P-256, or not a valid key, but a helper that ignored its seed, or derived
+//! another valid key from it, would still hand the tests valid identities.
+//! The literals below were computed once from the
 //! helper; they are also the SHA-256 of the DER `SubjectPublicKeyInfo`
 //! that OpenSSL exports for the Ed25519 key with the same secret.
 

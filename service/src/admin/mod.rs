@@ -444,10 +444,9 @@
 //!   decision, 2026-11-25). That function accepts only Ed25519 and
 //!   ECDSA P-256 keys, each in its one `SubjectPublicKeyInfo` form
 //!   ([`crate::identity`], "One form per accepted algorithm"; the user,
-//!   2026-11-27), so one key has one identity. Not done: the key is not
-//!   decoded, so a point off its curve is not refused ([`crate::identity`],
-//!   "What is not checked"), and no HTTP route exposes the checker writers
-//!   yet.
+//!   2026-11-27), and only a valid key ("Key validity": canonical,
+//!   decodable, on the curve, not of small order), so one key has one
+//!   identity. Not done: no HTTP route exposes the checker writers yet.
 //! - A service principal create: a service principal is created
 //!   atomically with its service identity (identity-registry section 5.1),
 //!   a write of the service identity path, not of this module (lead
@@ -564,8 +563,8 @@ pub enum AdminWriteError {
     /// 2026-11-24). Checked after the authorization.
     TenantDisabled,
     /// A checker create or key rotation gave bytes that are not one
-    /// well-formed DER `SubjectPublicKeyInfo` of an accepted Ed25519 or
-    /// P-256 key in its one accepted form, so no canonical public identity
+    /// well-formed DER `SubjectPublicKeyInfo` of a valid Ed25519 or P-256
+    /// key in its one accepted form, so no canonical public identity
     /// ([`crate::identity::canonical_public_identity`]); checked after the
     /// authorization and before any ID is generated.
     PublicKey(IdentityError),

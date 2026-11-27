@@ -5,7 +5,7 @@
 //! `SubjectPublicKeyInfo`.
 //!
 //! Only the bounds and the digest are reimplemented here. The service also
-//! checks that the bytes are a strict DER `SubjectPublicKeyInfo` of an
+//! checks that the bytes are a strict DER `SubjectPublicKeyInfo` of a valid
 //! Ed25519 or ECDSA P-256 key in its one accepted form, and refuses them
 //! otherwise; this function does not, so it gives an identity for bytes
 //! the service refuses. The service, which derives the identity it stores

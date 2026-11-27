@@ -50,9 +50,14 @@
 //! Every other algorithm (RSA under any identifier, Ed448, X25519, X448,
 //! another curve, any other `OBJECT IDENTIFIER`) and every other form of
 //! these two (Ed25519 with `NULL` or any parameters, a key or point of
-//! another length, a P-256 point that is not uncompressed) is refused. With
-//! the strict DER framing below, the two forms are fixed byte layouts, so a
-//! key has one identity, and the `0005` unique key on
+//! another length, a P-256 point that is not uncompressed) is refused, and
+//! so is a key of an accepted form that fails the key check of "Key
+//! validity" below. With the strict DER framing below, the two forms are
+//! fixed byte layouts; the key check refuses a coordinate at or above the
+//! field prime, the one other way to spell the same point in those layouts
+//! (an Ed25519 `y + p`, a P-256 `x + p` or `y + p` that fits in 32 octets),
+//! and an Ed25519 `x = 0` with its sign bit set. So a key has one identity,
+//! and the `0005` unique key on
 //! `admin_credential.public_identity`, which keeps an identity registered at
 //! most once, revoked credentials included, holds per key for every
 //! identity derived here. Enrollment and authentication agree on that single
@@ -69,12 +74,36 @@
 //! slice, S6). `bootstrap_instance` and the operator writers still take the
 //! identity string from their caller.
 //!
+//! # Key validity
+//!
+//! Weak, non-canonical and undecodable keys are refused at every enrollment
+//! point (ADR-013 item 7; the user, 2026-11-24), and this function is the
+//! enrollment and handshake check of an mTLS key (the lead, 2026-11-27). A
+//! key of an accepted form is then checked with the point validation of
+//! `crate::jwk::point` (hand-written arithmetic, no elliptic-curve
+//! dependency), and refused as [`IdentityError::UnsupportedKey`]:
+//!
+//! - Ed25519 (`check_ed25519`): the RFC 8032 section 5.1.3 decoding, so a
+//!   `y` at or above `p = 2^255 - 19`, a `y` that does not decode to a
+//!   point and `x = 0` with the sign bit set are refused, and so are the
+//!   eight points of small order (the identity, the point of order 2 and
+//!   those of order 4 and 8): some verifiers accept a fixed signature for
+//!   any message under such a key, so it would prove no possession. A
+//!   point with a torsion component (a prime-order point plus a small-order
+//!   one) is accepted, as the recovery key check (`ed25519-dalek`'s
+//!   `is_weak`) accepts it; the tests check that the two agree.
+//! - P-256 (`check_ec`): each coordinate below the field prime and
+//!   `y^2 = x^3 - 3x + b (mod p)`. The curve has cofactor 1, so a point on
+//!   it is in the prime-order group; the point at infinity has no
+//!   uncompressed form (its `00` encoding is refused by the form check).
+//!
 //! # What is checked
 //!
 //! The input must be one well-formed DER `SubjectPublicKeyInfo` and nothing
 //! else, checked structurally first, in this order; only bytes that pass
 //! every structural check reach the algorithm check of "One form per
-//! accepted algorithm" above ([`IdentityError::UnsupportedKey`]):
+//! accepted algorithm" and the key check of "Key validity" above
+//! ([`IdentityError::UnsupportedKey`]):
 //!
 //! - 1 to [`MAX_SPKI_DER_BYTES`] (4096) bytes, before any parsing
 //!   ([`IdentityError::Empty`], [`IdentityError::TooLarge`]);
@@ -110,17 +139,15 @@
 //! DER is a canonical encoding of a structure, and these rules refuse every
 //! other framing of the same structure: PEM text, a long-form or
 //! zero-padded length, an indefinite length, a constructed string, trailing
-//! bytes. So one structure has one identity; the algorithm check above
-//! makes one key one structure.
+//! bytes. So one structure has one identity; the form and key checks
+//! above make one key one structure.
 //!
 //! # What is not checked
 //!
-//! - The key itself. The Ed25519 key and the P-256 point are not decoded,
-//!   so curve membership is not checked here: 32 octets that are not a
-//!   valid Ed25519 point, or 64 coordinate octets that are not a point on
-//!   P-256, pass with the identity of their bytes (this crate takes no
-//!   elliptic-curve dependency for it). A caller that needs a valid point
-//!   must check it itself; this module only names the key.
+//! - The key's strength beyond "Key validity": an Ed25519 key with a
+//!   torsion component is accepted (cofactor handling belongs to the
+//!   verifier), and no key is checked against a list of known or
+//!   compromised keys.
 //! - DER rules inside primitive elements other than `NULL`, `OBJECT
 //!   IDENTIFIER` and `RELATIVE-OID`: for example the minimal encoding of an
 //!   `INTEGER` or the `BOOLEAN` values in explicit curve parameters, or the
@@ -137,6 +164,9 @@
 use std::fmt;
 
 use sha2::{Digest as _, Sha256};
+
+use crate::jwk::EcCurve;
+use crate::jwk::point::{check_ec, check_ed25519};
 
 /// The largest accepted DER `SubjectPublicKeyInfo`: 4 KiB covers RSA keys
 /// up to 16384 bits (about 2.1 KB) and ML-DSA-87 keys (about 2.6 KB)
@@ -178,8 +208,10 @@ pub enum IdentityError {
     /// A well-formed DER `SubjectPublicKeyInfo`, but not the one accepted
     /// form of Ed25519 or of ECDSA P-256 (see the module documentation,
     /// "One form per accepted algorithm"): another algorithm, parameters,
-    /// curve, point form or key length. Checked only after every
-    /// structural check has passed.
+    /// curve, point form or key length; or a key of that form that is not
+    /// a valid point ("Key validity"): non-canonical, undecodable, off the
+    /// curve or of small order. Checked only after every structural check
+    /// has passed.
     UnsupportedKey,
 }
 
@@ -508,10 +540,16 @@ fn check_spki(der: &[u8]) -> Result<Spki<'_>, IdentityError> {
 /// parameters and a 32-octet key, or `id-ecPublicKey` with the P-256 named
 /// curve and a 65-octet uncompressed point. The DER framing that
 /// [`check_spki`] has checked fixes every other byte, so each is one byte
-/// layout (44 and 91 bytes). The key octets are not decoded.
+/// layout (44 and 91 bytes). Then the key itself (see "Key validity"):
+/// [`check_ed25519`] and [`check_ec`], whose refusals are all
+/// [`IdentityError::UnsupportedKey`].
 fn check_accepted_key(spki: &Spki<'_>) -> Result<(), IdentityError> {
     let accepted = match spki.algorithm {
-        ID_ED25519 => spki.parameters.is_none() && spki.key.len() == ED25519_KEY_OCTETS,
+        ID_ED25519 => {
+            spki.parameters.is_none()
+                && spki.key.len() == ED25519_KEY_OCTETS
+                && check_ed25519(spki.key).is_ok()
+        }
         ID_EC_PUBLIC_KEY => {
             matches!(
                 spki.parameters,
@@ -521,6 +559,7 @@ fn check_accepted_key(spki: &Spki<'_>) -> Result<(), IdentityError> {
                 })
             ) && spki.key.len() == P256_POINT_OCTETS
                 && spki.key[0] == UNCOMPRESSED_POINT
+                && check_ec(EcCurve::P256, &spki.key[1..33], &spki.key[33..]).is_ok()
         }
         _ => false,
     };
@@ -722,9 +761,8 @@ mod tests {
     }
 
     /// The two accepted forms are the fixed 44-byte and 91-byte layouts of
-    /// the module documentation, whatever the key octets: another Ed25519
-    /// key (all zero, as no real key) and another P-256 point (one OpenSSL
-    /// generated) pass, with an identity each.
+    /// the module documentation: another Ed25519 key (RFC 8032's) and another
+    /// P-256 point (one OpenSSL generated) pass, with an identity each.
     #[test]
     fn the_two_accepted_forms() {
         let ed25519_prefix = [
@@ -736,15 +774,19 @@ mod tests {
         ];
         assert_eq!(ED25519[..12], ed25519_prefix);
         assert_eq!(P256[..27], p256_prefix);
-        let mut zero_key = ed25519_prefix.to_vec();
-        zero_key.extend([0; 32]);
+        // The Ed25519 key of RFC 8032 section 7.1, test 1.
+        let rfc8032 = unhex(
+            "302a300506032b6570032100\
+             d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        );
+        assert_eq!(rfc8032[..12], ed25519_prefix);
         let generated = unhex(
             "3059301306072a8648ce3d020106082a8648ce3d03010703420004\
              26b98d241d13ab59f39f2f2a64971b5f5f0fc1a7fb2f98c946ab93dbf5f31677\
              3da55d98f4e40188b207932165a2b6624aa44f1ef18d6072d1cb3d857986c9be",
         );
         assert_eq!(generated[..27], p256_prefix);
-        for (der, len) in [(zero_key, 44), (generated, 91)] {
+        for (der, len) in [(rfc8032, 44), (generated, 91)] {
             assert_eq!(der.len(), len);
             let identity = canonical_public_identity(&der).unwrap();
             assert!(identity.starts_with(PUBLIC_IDENTITY_PREFIX));
@@ -1051,7 +1093,7 @@ mod tests {
 
     /// The key lengths one octet either side of the accepted ones, and
     /// further out: 32 octets for Ed25519, 65 for P-256 (with the `04`
-    /// tag).
+    /// tag); and zero padding that keeps the key's value.
     #[test]
     fn key_lengths_either_side_are_refused() {
         for len in [0usize, 1, 31, 33, 64, 65] {
@@ -1074,6 +1116,264 @@ mod tests {
             assert_eq!(canonical_public_identity(&der), UNSUPPORTED, "{len}");
         }
         assert!(canonical_public_identity(&spki(P256_ALGORITHM, &P256[26..])).is_ok());
+        // A valid key padded with zero octets that leave its value
+        // unchanged: an Ed25519 `y` (little-endian) with zeros after it, a
+        // P-256 coordinate (big-endian) with a zero before it. Each would be
+        // a second spelling of an accepted key, so only the length refuses
+        // it.
+        let mut y3 = vec![0u8; 32];
+        y3[0] = 3;
+        assert!(canonical_public_identity(&spki(ED25519_ALGORITHM, &y3)).is_ok());
+        for len in [33usize, 64] {
+            let mut key = y3.clone();
+            key.resize(len, 0);
+            let der = spki(ED25519_ALGORITHM, &key);
+            assert_eq!(canonical_public_identity(&der), UNSUPPORTED, "{len}");
+        }
+        let point = &P256[26..];
+        for padded in [
+            [&point[..33], &[0], &point[33..]].concat(),
+            [&point[..1], &[0], &point[1..33], &[0], &point[33..]].concat(),
+        ] {
+            let der = spki(P256_ALGORITHM, &padded);
+            assert_eq!(
+                canonical_public_identity(&der),
+                UNSUPPORTED,
+                "{padded:02x?}"
+            );
+        }
+    }
+
+    /// The Ed25519 key checks of "Key validity", each probe a 32-octet key in
+    /// the accepted form: accepted, or refused as
+    /// [`IdentityError::UnsupportedKey`]. Little-endian `y`, sign of `x` in
+    /// the top bit; `p = 2^255 - 19`.
+    const ED25519_PROBES: [(&str, &str, bool); 18] = [
+        // Accepted: RFC 8410's key; y = 3 and 32 octets 01, points with a
+        // torsion component (computed in Python: 8P is not the identity,
+        // LP is not either).
+        (
+            "RFC 8410",
+            "19bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1",
+            true,
+        ),
+        (
+            "y = 3",
+            "0300000000000000000000000000000000000000000000000000000000000000",
+            true,
+        ),
+        (
+            "01 x 32",
+            "0101010101010101010101010101010101010101010101010101010101010101",
+            true,
+        ),
+        // One key, one identity: y = 3 + p spells the y = 3 point again.
+        (
+            "y = 3 + p",
+            "f0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            false,
+        ),
+        // The eight small-order points: y = 0 (order 4, both signs of x),
+        // the identity y = 1, y = p - 1 (order 2), the order-8 y and p - y.
+        (
+            "all zero (order 4)",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            false,
+        ),
+        (
+            "y = 0, sign set (order 4)",
+            "0000000000000000000000000000000000000000000000000000000000000080",
+            false,
+        ),
+        (
+            "identity",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            false,
+        ),
+        (
+            "y = p - 1 (order 2)",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            false,
+        ),
+        (
+            "order 8",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+            false,
+        ),
+        (
+            "order 8, p - y",
+            "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+            false,
+        ),
+        (
+            "order 8, sign set",
+            "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+            false,
+        ),
+        // Non-canonical: y = p + 1 (the identity again), x = 0 with the
+        // sign bit set (y = 1 and y = p - 1), y = 2^255 - 1.
+        (
+            "y = p + 1",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            false,
+        ),
+        (
+            "identity, sign set",
+            "0100000000000000000000000000000000000000000000000000000000000080",
+            false,
+        ),
+        (
+            "y = p - 1, sign set",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            false,
+        ),
+        (
+            "all ff",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            false,
+        ),
+        // Undecodable: (y^2 - 1) / (d y^2 + 1) is not a square.
+        (
+            "07 x 32",
+            "0707070707070707070707070707070707070707070707070707070707070707",
+            false,
+        ),
+        (
+            "02 x 32",
+            "0202020202020202020202020202020202020202020202020202020202020202",
+            false,
+        ),
+        (
+            "y = 2",
+            "0200000000000000000000000000000000000000000000000000000000000000",
+            false,
+        ),
+    ];
+
+    #[test]
+    fn ed25519_keys_are_validated() {
+        for (name, key, accepted) in ED25519_PROBES {
+            let key = unhex(key);
+            assert_eq!(key.len(), 32, "{name}");
+            let result = canonical_public_identity(&spki(ED25519_ALGORITHM, &key));
+            if accepted {
+                assert!(result.is_ok(), "{name}");
+            } else {
+                assert_eq!(result, UNSUPPORTED, "{name}");
+            }
+        }
+    }
+
+    /// The Ed25519 check here ([`check_ed25519`]) and the recovery key
+    /// check (`recovery_key`, through `ed25519-dalek`: decoding,
+    /// re-encoding, `is_weak`) accept and refuse the same keys: the probes
+    /// above, the keys of 32 equal octets 00 to 1f, and `y` from 0 to 15
+    /// with either sign. (Few, since the hand-written arithmetic is slow
+    /// in a debug build.)
+    #[test]
+    fn the_ed25519_check_agrees_with_the_recovery_key_check() {
+        let mut keys: Vec<Vec<u8>> = ED25519_PROBES
+            .iter()
+            .map(|(_, key, _)| unhex(key))
+            .collect();
+        keys.extend((0..0x20).map(|byte| vec![byte; 32]));
+        for y in 0..16u8 {
+            for sign in [0x00, 0x80] {
+                let mut key = vec![0; 32];
+                key[0] = y;
+                key[31] = sign;
+                keys.push(key);
+            }
+        }
+        let mut accepted = 0;
+        for key in &keys {
+            let here = canonical_public_identity(&spki(ED25519_ALGORITHM, key)).is_ok();
+            let recovery = crate::persistence::registry::recovery_key(key).is_ok();
+            assert_eq!(here, recovery, "{key:02x?}");
+            accepted += usize::from(here);
+        }
+        // Both outcomes occur.
+        assert!(accepted > 0 && accepted < keys.len(), "{accepted}");
+    }
+
+    /// The P-256 key checks of "Key validity", each probe the two 32-octet
+    /// big-endian coordinates after `04`: accepted, or refused as
+    /// [`IdentityError::UnsupportedKey`]. The two accepted points with a
+    /// small coordinate were found in Python (a square root, and the roots
+    /// of a cubic, mod `p`) and pass `openssl pkey -pubcheck`.
+    const P256_PROBES: [(&str, &str, bool); 9] = [
+        (
+            "RFC 6979",
+            "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6\
+             7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+            true,
+        ),
+        (
+            "x = 0",
+            "0000000000000000000000000000000000000000000000000000000000000000\
+             66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4",
+            true,
+        ),
+        (
+            "y = 1",
+            "8d0177ebab9c6e9e10db6dd095dbac0d6375e8a97b70f611875d877f0069d2c7\
+             0000000000000000000000000000000000000000000000000000000000000001",
+            true,
+        ),
+        // One key, one identity: x + p and y + p spell the two points
+        // above again (each fits in 32 octets).
+        (
+            "x = 0 + p",
+            "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff\
+             66485c780e2f83d72433bd5d84a06bb6541c2af31dae871728bf856a174f93f4",
+            false,
+        ),
+        (
+            "y = 1 + p",
+            "8d0177ebab9c6e9e10db6dd095dbac0d6375e8a97b70f611875d877f0069d2c7\
+             ffffffff00000001000000000000000000000001000000000000000000000000",
+            false,
+        ),
+        // Off the curve: the RFC 6979 point with y's last bit flipped.
+        (
+            "off the curve",
+            "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6\
+             7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462298",
+            false,
+        ),
+        (
+            "(0, 0)",
+            "0000000000000000000000000000000000000000000000000000000000000000\
+             0000000000000000000000000000000000000000000000000000000000000000",
+            false,
+        ),
+        (
+            "all ff",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\
+             ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            false,
+        ),
+        (
+            "(p, p)",
+            "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff\
+             ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+            false,
+        ),
+    ];
+
+    #[test]
+    fn p256_points_are_validated() {
+        for (name, coordinates, accepted) in P256_PROBES {
+            let mut point = vec![0x04];
+            point.extend(unhex(coordinates));
+            assert_eq!(point.len(), 65, "{name}");
+            let result = canonical_public_identity(&spki(P256_ALGORITHM, &point));
+            if accepted {
+                assert!(result.is_ok(), "{name}");
+            } else {
+                assert_eq!(result, UNSUPPORTED, "{name}");
+            }
+        }
     }
 
     /// The structural errors come first, in their own order: bytes with a

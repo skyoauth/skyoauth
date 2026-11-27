@@ -1994,8 +1994,9 @@ fn the_checker_keys_have_their_known_identities() {
 }
 
 /// A checker create or rotation whose key is not one well-formed DER
-/// `SubjectPublicKeyInfo`, or is the fixture key in a form that is not the
-/// one accepted P-256 form, is `PublicKey`, after the authorization: no row,
+/// `SubjectPublicKeyInfo`, is the fixture key in a form that is not the one
+/// accepted P-256 form, or is not a valid key (a small-order Ed25519
+/// point), is `PublicKey`, after the authorization: no row,
 /// no event, no ID taken, the stored identity kept. A status-only update
 /// keeps the stored identity, and a valid key then applies with the next
 /// checker ID.
@@ -2018,7 +2019,12 @@ async fn a_malformed_checker_key_writes_nothing() {
     compressed.extend_from_slice(&P256_SPKI[2..23]);
     compressed.extend([0x03, 0x22, 0x00, 0x03]);
     compressed.extend_from_slice(&P256_SPKI[27..59]);
-    let cases: [(Vec<u8>, IdentityError); 6] = [
+    // The Ed25519 identity point (y = 1), of small order: the one form, but
+    // not a valid key.
+    let mut small_order = ED25519_SPKI[..12].to_vec();
+    small_order.push(0x01);
+    small_order.extend([0; 31]);
+    let cases: [(Vec<u8>, IdentityError); 7] = [
         (Vec::new(), IdentityError::Empty),
         (pem.to_vec(), IdentityError::NotDer),
         (
@@ -2029,6 +2035,7 @@ async fn a_malformed_checker_key_writes_nothing() {
         // The AlgorithmIdentifier alone: DER, but not an SPKI.
         (P256_SPKI[2..23].to_vec(), IdentityError::NotSpki),
         (compressed, IdentityError::UnsupportedKey),
+        (small_order, IdentityError::UnsupportedKey),
     ];
     let before = snapshot(&pool).await;
     for (der, error) in &cases {

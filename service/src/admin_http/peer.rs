@@ -36,10 +36,11 @@ impl AdminPeer {
     /// The peer identity of a verified client certificate's
     /// `SubjectPublicKeyInfo` (DER): the acceptor's constructor.
     ///
-    /// Refuses, as [`canonical_public_identity`] does, every key but an
+    /// Refuses, as [`canonical_public_identity`] does, every key but a valid
     /// Ed25519 or ECDSA P-256 key in its one accepted `SubjectPublicKeyInfo`
-    /// form ([`crate::identity`], "One form per accepted algorithm"), so a
-    /// key has one peer identity.
+    /// form ([`crate::identity`], "One form per accepted algorithm" and "Key
+    /// validity"), so a key has one peer identity and a small-order key
+    /// none.
     ///
     /// Not yet called: the rustls acceptor is a later slice (S6). Before it
     /// may call this, it must enforce the chain anchor's equality with the

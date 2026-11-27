@@ -147,7 +147,7 @@ pub struct CheckerCreate {
     /// The DER `SubjectPublicKeyInfo` of the checker's mTLS key. The write
     /// derives `public_mtls_identity` from it with
     /// [`canonical_public_identity`]; bytes that are not one well-formed
-    /// DER `SubjectPublicKeyInfo` of an Ed25519 or P-256 key in its one
+    /// DER `SubjectPublicKeyInfo` of a valid Ed25519 or P-256 key in its one
     /// accepted form are [`AdminWriteError::PublicKey`].
     pub public_key_der: Vec<u8>,
     pub status: Status,
@@ -917,7 +917,7 @@ pub async fn disable_audience_tenant_assignment(
 /// ([`IdKind::Checker`]) and the canonical public identity of
 /// `new.public_key_der` ([`canonical_public_identity`]), and appends
 /// `resource_server_checker.create`. Key bytes that are not one well-formed
-/// DER `SubjectPublicKeyInfo` of an Ed25519 or P-256 key in its one
+/// DER `SubjectPublicKeyInfo` of a valid Ed25519 or P-256 key in its one
 /// accepted form ([`crate::identity`], "One form per accepted algorithm")
 /// are [`AdminWriteError::PublicKey`], after the authorization and before
 /// any ID is generated; an identity another checker has is

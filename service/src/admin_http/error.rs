@@ -195,7 +195,8 @@ pub const fn from_id(err: &IdError) -> AdminHttpError {
 }
 
 /// [`IdentityError`]: the submitted key bytes are not one DER
-/// `SubjectPublicKeyInfo`, or not an accepted Ed25519 or P-256 key, a
+/// `SubjectPublicKeyInfo`, or not a valid Ed25519 or P-256 key in its
+/// accepted form, a
 /// malformed value.
 pub const fn from_identity(err: &IdentityError) -> AdminHttpError {
     match err {
