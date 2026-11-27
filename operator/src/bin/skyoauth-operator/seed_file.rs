@@ -41,9 +41,9 @@
 //!   with no other buffer in between (`File::read` reads into it
 //!   directly);
 //! - the seed is decoded in place into the caller's [`Seed`], an array
-//!   wiped on drop, so it is never returned or moved by value; `sign`
-//!   copies it once, into the library's software signer, which wipes that
-//!   copy once its signing key is made, and the signing key when it is
+//!   wiped on drop, so it is never returned, moved or copied by value;
+//!   `sign` lends it to the library's software signer, which wipes it in
+//!   place once its signing key is made, and the signing key when it is
 //!   dropped.
 //!
 //! Both types are checked at compile time to be wiped on drop
@@ -51,7 +51,8 @@
 //! (the kernel's page cache of the file, swap, a core dump, a hibernation
 //! image), registers and spilled temporaries of the decoding, any
 //! bitwise copy the compiler makes when it moves a value, and the
-//! library signer's own limits (its documentation, "The seed").
+//! library signer's own limits, such as the intermediate values of
+//! `ed25519-dalek` (its documentation, "The seed").
 
 use std::{
     fs::{self, File, Metadata},
