@@ -1,7 +1,7 @@
 {
   "fixture_version": 1,
   "kind": "public_identity",
-  "description": "Known answers for the canonical public identity of an mTLS public key (identity-registry section 5.2; lead decision, 2026-11-24): prefix followed by the 64 lowercase hexadecimal digits of the SHA-256 digest of the DER SubjectPublicKeyInfo, which must be 1 to max_der_bytes bytes. A case's DER bytes are der.hex, then fill_count copies of the byte fill_byte when the case has them. expected is an identity, or the error class whose message both sides give. The operator does not check the DER structure; the service does and refuses what is not a strict DER SubjectPublicKeyInfo: a case with service_expected gives that service message instead of expected. Readers: operator/tests/operator.rs (public_identity_of_spki) and tests/harness/public_identity_fixture.rs (the service's canonical_public_identity). Sources of the keys: RFC 8032 section 7.1, test 1 (Ed25519) and RFC 6979 appendix A.2.5 (P-256); rsa_shape_4096_bytes is an rsaEncryption SubjectPublicKeyInfo of exactly max_der_bytes bytes whose key octets are filler, which the service does not decode.",
+  "description": "Known answers for the canonical public identity of an mTLS public key (identity-registry section 5.2; lead decision, 2026-11-24): prefix followed by the 64 lowercase hexadecimal digits of the SHA-256 digest of the DER SubjectPublicKeyInfo, which must be 1 to max_der_bytes bytes. A case's DER bytes are der.hex, then fill_count copies of the byte fill_byte when the case has them. expected is an identity, or the error class whose message both sides give. The operator does not check the DER structure or the algorithm; the service does and refuses what is not a strict DER SubjectPublicKeyInfo, and then what is not the one accepted form of Ed25519 (parameters absent, a 32-octet key) or of ECDSA P-256 (id-ecPublicKey, the prime256v1 named curve, a 65-octet uncompressed point) (the user, 2026-11-27): a case with service_expected gives that service message instead of expected. Readers: operator/tests/operator.rs (public_identity_of_spki) and tests/harness/public_identity_fixture.rs (the service's canonical_public_identity). Sources of the keys: RFC 8032 section 7.1, test 1 (Ed25519) and RFC 6979 appendix A.2.5 (P-256; p256_rfc6979_compressed is the same point compressed, as openssl pkey -ec_conv_form compressed exports it); rsa_shape_4096_bytes is an rsaEncryption SubjectPublicKeyInfo of exactly max_der_bytes bytes whose key octets are filler, which the service does not decode and refuses as not an accepted algorithm.",
   "prefix": "spki-sha256:",
   "max_der_bytes": 4096,
   "messages": {
@@ -17,7 +17,8 @@
     {
       "case": "ed25519_rfc8032_test1_null_parameters",
       "der": { "hex": "302c300706032b65700500032100d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" },
-      "expected": { "identity": "spki-sha256:6cf22591d4a9fc1bdf279ef8b3d07a5dee46e8717d68b744750eedfe20edd894" }
+      "expected": { "identity": "spki-sha256:6cf22591d4a9fc1bdf279ef8b3d07a5dee46e8717d68b744750eedfe20edd894" },
+      "service_expected": { "error": "the public key is not an accepted Ed25519 or P-256 key" }
     },
     {
       "case": "p256_rfc6979_uncompressed",
@@ -25,9 +26,16 @@
       "expected": { "identity": "spki-sha256:5a7a78cca4a0f420d9bc62bb669c3c2759e39f723d3ae10dcbe0f0815a07ecd4" }
     },
     {
+      "case": "p256_rfc6979_compressed",
+      "der": { "hex": "3039301306072a8648ce3d020106082a8648ce3d0301070322000360fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6" },
+      "expected": { "identity": "spki-sha256:a9a7369789892d40719256b6d0e2905087d1eb8da7fc8d3b3e9c73d65496640f" },
+      "service_expected": { "error": "the public key is not an accepted Ed25519 or P-256 key" }
+    },
+    {
       "case": "rsa_shape_4096_bytes",
       "der": { "hex": "30820ffc300d06092a864886f70d010101050003820fe900", "fill_byte": "5a", "fill_count": 4072 },
-      "expected": { "identity": "spki-sha256:e654183c9f61d6615163c19c7f9710ccc81550c669369ad8126bb9f036677bd2" }
+      "expected": { "identity": "spki-sha256:e654183c9f61d6615163c19c7f9710ccc81550c669369ad8126bb9f036677bd2" },
+      "service_expected": { "error": "the public key is not an accepted Ed25519 or P-256 key" }
     },
     {
       "case": "one_byte_not_der",

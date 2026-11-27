@@ -5,11 +5,11 @@
 //! `SubjectPublicKeyInfo`.
 //!
 //! Only the bounds and the digest are reimplemented here. The service also
-//! checks that the bytes are a strict DER `SubjectPublicKeyInfo` and refuses
-//! them otherwise; this function does not, so it gives an identity for bytes
-//! the service refuses. Which key algorithms and forms are accepted is not
-//! decided yet, and the service, which derives the identity it stores from
-//! the DER bytes it is given, stays the authority. The operator shows this
+//! checks that the bytes are a strict DER `SubjectPublicKeyInfo` of an
+//! Ed25519 or ECDSA P-256 key in its one accepted form, and refuses them
+//! otherwise; this function does not, so it gives an identity for bytes
+//! the service refuses. The service, which derives the identity it stores
+//! from the DER bytes it is given, stays the authority. The operator shows this
 //! identity to check what the service reports, never to replace the service's
 //! derivation.
 //!

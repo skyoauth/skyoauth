@@ -20,72 +20,61 @@
 //! identity string from a client. At bootstrap and enrollment the operator
 //! tooling only supplies the DER key; the service derives its identity.
 //!
-//! # One identity per encoding, not per key
+//! # One form per accepted algorithm
 //!
 //! The digest covers the exact bytes, so an identity names one DER encoding
-//! of a key, not the key. A key has more than one valid DER
-//! `SubjectPublicKeyInfo`, and this module accepts each of them, with an
-//! identity of its own:
+//! of a key. A key has more than one valid DER `SubjectPublicKeyInfo` (an EC
+//! point compressed or not, named or explicit curve parameters, `NULL` or
+//! absent parameters, several algorithm identifiers for one RSA key, RFC
+//! 4055 section 1.2), so [`canonical_public_identity`] accepts exactly one
+//! form for each accepted algorithm and refuses every other, after the
+//! structural checks below and before the hash
+//! ([`IdentityError::UnsupportedKey`]). The accepted algorithms are exactly
+//! these two (the user, 2026-11-27, relayed by the lead; identity-registry
+//! section 7.3):
 //!
-//! - an EC key (P-256 and the other curves) with its point uncompressed
-//!   (`04`), compressed (`02`, `03`) or hybrid (`06`, `07`), and with
-//!   named-curve parameters (an `OBJECT IDENTIFIER`) or explicit ones
-//!   (`specifiedCurve`);
-//! - an RSA key with `NULL` parameters or with none, with a BER length
-//!   (long-form or zero-padded) inside the `RSAPublicKey` that the `BIT
-//!   STRING` holds, which is not decoded, and under another algorithm
-//!   `OBJECT IDENTIFIER` for the same modulus and exponent: `rsaEncryption`
-//!   (1.2.840.113549.1.1.1), `id-RSASSA-PSS` (1.2.840.113549.1.1.10, with
-//!   its parameters absent) or `id-RSAES-OAEP` (1.2.840.113549.1.1.7, with
-//!   its `RSAES-OAEP-params` `SEQUENCE` as the parameters, of which only the
-//!   DER framing is checked, as for any parameters: the hash and mask
-//!   functions it names are not read);
-//! - an Ed25519 or Ed448 key with its parameters absent or `NULL`
-//!   (`05 00`).
+//! - Ed25519 (RFC 8410): the `AlgorithmIdentifier` holds only the
+//!   `OBJECT IDENTIFIER` `id-Ed25519` (1.3.101.112, `2b 65 70`), its
+//!   parameters absent, and the `BIT STRING` holds the 32-octet key: the
+//!   44-byte form `30 2a 30 05 06 03 2b 65 70 03 21 00` followed by the key;
+//! - ECDSA P-256 (RFC 5480): the `OBJECT IDENTIFIER` `id-ecPublicKey`
+//!   (1.2.840.10045.2.1, `2a 86 48 ce 3d 02 01`) with the named curve
+//!   `prime256v1` (1.2.840.10045.3.1.7, `2a 86 48 ce 3d 03 01 07`) as its
+//!   parameters, an `OBJECT IDENTIFIER` (not `NULL`, not explicit
+//!   `specifiedCurve` parameters, no other curve), and the `BIT STRING`
+//!   holds the 65-octet uncompressed point (`04`, then the two
+//!   coordinates; neither compressed, `02` or `03`, nor hybrid, `06` or
+//!   `07`): the 91-byte form `30 59 30 13 06 07 2a 86 48 ce 3d 02 01 06 08
+//!   2a 86 48 ce 3d 03 01 07 03 42 00 04` followed by the coordinates.
 //!
-//! So the `0005` unique key on `admin_credential.public_identity`, which
-//! keeps an identity registered at most once, revoked credentials included,
-//! holds per encoding only: a revoked RSA key enrolled again with its
-//! parameters absent instead of `NULL` has a new identity, and the unique
-//! key does not fire.
+//! Every other algorithm (RSA under any identifier, Ed448, X25519, X448,
+//! another curve, any other `OBJECT IDENTIFIER`) and every other form of
+//! these two (Ed25519 with `NULL` or any parameters, a key or point of
+//! another length, a P-256 point that is not uncompressed) is refused. With
+//! the strict DER framing below, the two forms are fixed byte layouts, so a
+//! key has one identity, and the `0005` unique key on
+//! `admin_credential.public_identity`, which keeps an identity registered at
+//! most once, revoked credentials included, holds per key for every
+//! identity derived here. Enrollment and authentication agree on that single
+//! representation as long as both derive the identity with this function
+//! (the callers below).
 //!
-//! **A hard requirement on the callers (S3, S5 and S7).** Before a slice
-//! computes an identity with this function, it must accept exactly one
-//! `SubjectPublicKeyInfo` form for each algorithm it accepts, and refuse
-//! every other form of that algorithm:
-//!
-//! - EC: the algorithm `id-ecPublicKey` (1.2.840.10045.2.1), the named
-//!   curve (the curve's `OBJECT IDENTIFIER` as the parameters) and the
-//!   uncompressed point (`04`) only;
-//! - RSA: the algorithm `rsaEncryption` (1.2.840.113549.1.1.1) with `NULL`
-//!   parameters, and a DER `RSAPublicKey` inside the `BIT STRING`;
-//!   `id-RSASSA-PSS` and `id-RSAES-OAEP` are refused, or one of them is the
-//!   only RSA form, never several;
-//! - Ed25519 and Ed448: the parameters absent.
-//!
-//! Enrollment and authentication must agree on the same single
-//! representation of a key across all the profiles they support, since
-//! several algorithm identifiers can describe the same underlying public
-//! key (RFC 4055 section 1.2: `rsaEncryption`, `id-RSASSA-PSS` and
-//! `id-RSAES-OAEP` for one RSA key).
-//!
-//! Only then does a key have one identity and the `0005` unique key hold
-//! per key. This module stays algorithm-agnostic and does not enforce it.
-//!
-//! The checker writer calls this: [`crate::admin`]'s
+//! The checker writers call this: [`crate::admin`]'s
 //! `create_resource_server_checker` and a key rotation through its
 //! `update_resource_server_checker` take the key's DER and store the
-//! identity this function derives (lead decision, 2026-11-25). The
-//! per-algorithm form rule above is still outstanding, so the checker
-//! writers must not be exposed on any HTTP surface until it lands. Nothing
-//! else calls this module yet: `bootstrap_instance` and the operator
-//! writers still take the identity string from their caller, and the
-//! slices that wire enrollment and authentication (S5, S7) call it.
+//! identity this function derives (lead decision, 2026-11-25); so do the
+//! deployment-local transport ([`crate::local_transport`]) for the operator
+//! key of a bootstrap or a recovery, and the admin peer of a verified client
+//! certificate (`admin_http`'s `AdminPeer`, whose acceptor is a later
+//! slice, S6). `bootstrap_instance` and the operator writers still take the
+//! identity string from their caller.
 //!
 //! # What is checked
 //!
 //! The input must be one well-formed DER `SubjectPublicKeyInfo` and nothing
-//! else; the check is structural:
+//! else, checked structurally first, in this order; only bytes that pass
+//! every structural check reach the algorithm check of "One form per
+//! accepted algorithm" above ([`IdentityError::UnsupportedKey`]):
 //!
 //! - 1 to [`MAX_SPKI_DER_BYTES`] (4096) bytes, before any parsing
 //!   ([`IdentityError::Empty`], [`IdentityError::TooLarge`]);
@@ -121,25 +110,23 @@
 //! DER is a canonical encoding of a structure, and these rules refuse every
 //! other framing of the same structure: PEM text, a long-form or
 //! zero-padded length, an indefinite length, a constructed string, trailing
-//! bytes. So one structure has one identity. They do not make one key one
-//! structure: see "One identity per encoding, not per key" above.
+//! bytes. So one structure has one identity; the algorithm check above
+//! makes one key one structure.
 //!
 //! # What is not checked
 //!
-//! - The algorithm. There is no algorithm list here: any `OBJECT
-//!   IDENTIFIER` passes, and the key bytes are not decoded, so neither the
-//!   key's validity (a point on its curve, an RSA modulus) nor its strength
-//!   is checked. A caller that needs a particular algorithm or strength (for
-//!   example the operator's mTLS key policy, T13.1) must check the key
-//!   itself; this module only names it.
+//! - The key itself. The Ed25519 key and the P-256 point are not decoded,
+//!   so curve membership is not checked here: 32 octets that are not a
+//!   valid Ed25519 point, or 64 coordinate octets that are not a point on
+//!   P-256, pass with the identity of their bytes (this crate takes no
+//!   elliptic-curve dependency for it). A caller that needs a valid point
+//!   must check it itself; this module only names the key.
 //! - DER rules inside primitive elements other than `NULL`, `OBJECT
-//!   IDENTIFIER` and `RELATIVE-OID`, and inside the key bytes: for example
-//!   the minimal encoding of an `INTEGER` or the `BOOLEAN` values in
-//!   explicit curve parameters, or the order of a `SET OF`. Such a key with
-//!   a non-DER parameter is accepted and its identity is that of its exact
-//!   bytes, so the same key spelled two ways there would have two
-//!   identities; the requirement on the callers above refuses such
-//!   parameters for the algorithms it names.
+//!   IDENTIFIER` and `RELATIVE-OID`: for example the minimal encoding of an
+//!   `INTEGER` or the `BOOLEAN` values in explicit curve parameters, or the
+//!   order of a `SET OF`. The structural check passes such parameters, and
+//!   the algorithm check then refuses them, since neither accepted form has
+//!   parameters other than the P-256 curve's `OBJECT IDENTIFIER`.
 //! - The identity is a name, not a proof: authentication still needs the
 //!   TLS handshake's proof of possession and the credential and role check
 //!   on every call (design section 7.2).
@@ -188,6 +175,12 @@ pub enum IdentityError {
     /// bits or no key octet, or parameters deeper than
     /// [`MAX_PARAMETERS_DEPTH`].
     NotSpki,
+    /// A well-formed DER `SubjectPublicKeyInfo`, but not the one accepted
+    /// form of Ed25519 or of ECDSA P-256 (see the module documentation,
+    /// "One form per accepted algorithm"): another algorithm, parameters,
+    /// curve, point form or key length. Checked only after every
+    /// structural check has passed.
+    UnsupportedKey,
 }
 
 impl fmt::Display for IdentityError {
@@ -199,6 +192,7 @@ impl fmt::Display for IdentityError {
             Self::NotDer => "the public key is not in DER encoding",
             Self::TrailingBytes => "the public key encoding has trailing bytes",
             Self::NotSpki => "the public key is not a SubjectPublicKeyInfo",
+            Self::UnsupportedKey => "the public key is not an accepted Ed25519 or P-256 key",
         })
     }
 }
@@ -214,6 +208,23 @@ const CONSTRUCTED: u8 = 0x20;
 /// The class bits of a tag octet; 0 is the universal class.
 const CLASS: u8 = 0xc0;
 
+/// The contents of the `OBJECT IDENTIFIER` `id-Ed25519`, 1.3.101.112
+/// (RFC 8410 section 3).
+const ID_ED25519: &[u8] = &[0x2b, 0x65, 0x70];
+/// The octets of an Ed25519 public key (RFC 8410 section 4).
+const ED25519_KEY_OCTETS: usize = 32;
+/// The contents of the `OBJECT IDENTIFIER` `id-ecPublicKey`,
+/// 1.2.840.10045.2.1 (RFC 5480 section 2.1.1).
+const ID_EC_PUBLIC_KEY: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+/// The contents of the `OBJECT IDENTIFIER` `secp256r1` (`prime256v1`),
+/// 1.2.840.10045.3.1.7, the P-256 named curve (RFC 5480 section 2.1.1.1).
+const SECP256R1: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+/// The octets of an uncompressed P-256 point: the `04` tag, then the two
+/// 32-octet coordinates (SEC 1 section 2.3.3; RFC 5480 section 2.2).
+const P256_POINT_OCTETS: usize = 65;
+/// The first octet of an uncompressed EC point.
+const UNCOMPRESSED_POINT: u8 = 0x04;
+
 /// The canonical public identity of the key whose DER
 /// `SubjectPublicKeyInfo` is `spki_der` (see the module documentation).
 pub fn canonical_public_identity(spki_der: &[u8]) -> Result<String, IdentityError> {
@@ -223,7 +234,7 @@ pub fn canonical_public_identity(spki_der: &[u8]) -> Result<String, IdentityErro
     if spki_der.len() > MAX_SPKI_DER_BYTES {
         return Err(IdentityError::TooLarge);
     }
-    check_spki(spki_der)?;
+    check_accepted_key(&check_spki(spki_der)?)?;
     let digest = Sha256::digest(spki_der);
     let mut identity = String::with_capacity(PUBLIC_IDENTITY_PREFIX.len() + 64);
     identity.push_str(PUBLIC_IDENTITY_PREFIX);
@@ -233,6 +244,18 @@ pub fn canonical_public_identity(spki_der: &[u8]) -> Result<String, IdentityErro
         identity.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     Ok(identity)
+}
+
+/// The parts of a structurally valid `SubjectPublicKeyInfo` that
+/// [`check_accepted_key`] reads.
+struct Spki<'a> {
+    /// The contents of the algorithm `OBJECT IDENTIFIER`.
+    algorithm: &'a [u8],
+    /// The `AlgorithmIdentifier` parameters element, if there is one.
+    parameters: Option<Element<'a>>,
+    /// The key octets: the `BIT STRING` contents after the unused-bits
+    /// octet.
+    key: &'a [u8],
 }
 
 /// One DER element: its tag octet and contents.
@@ -436,7 +459,9 @@ fn check_oid(contents: &[u8]) -> Result<(), IdentityError> {
     Ok(())
 }
 
-fn check_spki(der: &[u8]) -> Result<(), IdentityError> {
+/// The structural check of "What is checked" in the module documentation;
+/// returns the parts the algorithm check reads.
+fn check_spki(der: &[u8]) -> Result<Spki<'_>, IdentityError> {
     let (spki, rest) = element(der)?;
     if spki.tag != SEQUENCE {
         return Err(IdentityError::NotSpki);
@@ -456,21 +481,60 @@ fn check_spki(der: &[u8]) -> Result<(), IdentityError> {
         return Err(IdentityError::NotSpki);
     }
     check_oid(oid.contents)?;
-    if !parameters.is_empty() {
+    let parameters = if parameters.is_empty() {
+        None
+    } else {
         let (parameters, rest) = element(parameters)?;
         if !rest.is_empty() {
             return Err(IdentityError::NotSpki);
         }
         check_element(&parameters, 1)?;
-    }
+        Some(parameters)
+    };
     // subjectPublicKey BIT STRING: an unused-bits octet, 0 for a key
     // (inferred: every public key encoding is whole octets), then the key.
     match key.contents {
-        [0, _, ..] => Ok(()),
+        [0, key @ ..] if !key.is_empty() => Ok(Spki {
+            algorithm: oid.contents,
+            parameters,
+            key,
+        }),
         _ => Err(IdentityError::NotSpki),
     }
 }
 
+/// Accepts exactly the one form of each accepted algorithm (see "One form
+/// per accepted algorithm" in the module documentation): Ed25519 with no
+/// parameters and a 32-octet key, or `id-ecPublicKey` with the P-256 named
+/// curve and a 65-octet uncompressed point. The DER framing that
+/// [`check_spki`] has checked fixes every other byte, so each is one byte
+/// layout (44 and 91 bytes). The key octets are not decoded.
+fn check_accepted_key(spki: &Spki<'_>) -> Result<(), IdentityError> {
+    let accepted = match spki.algorithm {
+        ID_ED25519 => spki.parameters.is_none() && spki.key.len() == ED25519_KEY_OCTETS,
+        ID_EC_PUBLIC_KEY => {
+            matches!(
+                spki.parameters,
+                Some(Element {
+                    tag: OBJECT_IDENTIFIER,
+                    contents: SECP256R1
+                })
+            ) && spki.key.len() == P256_POINT_OCTETS
+                && spki.key[0] == UNCOMPRESSED_POINT
+        }
+        _ => false,
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(IdentityError::UnsupportedKey)
+    }
+}
+
+/// The structural tests build most of their inputs on the RFC 8410 key with
+/// other parameters, OIDs or key lengths: such bytes "pass" the structural
+/// check when the result is [`IdentityError::UnsupportedKey`] (`UNSUPPORTED`),
+/// which only bytes that pass every structural check can have.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +546,69 @@ mod tests {
         0x09, 0x69, 0x84, 0xcd, 0xfe, 0x85, 0x41, 0xba, 0xc1, 0x67, 0xdc, 0x3b, 0x96, 0xc8, 0x50,
         0x86, 0xaa, 0x30, 0xb6, 0xb6, 0xcb, 0x0c, 0x5c, 0x38, 0xad, 0x70, 0x31, 0x66, 0xe1,
     ];
+
+    /// The P-256 public key of RFC 6979 appendix A.2.5, as the DER
+    /// `SubjectPublicKeyInfo` OpenSSL exports for it (`openssl pkey -pubin
+    /// -text` reads it as `prime256v1` and exports the same bytes): the
+    /// named curve and the uncompressed point, 91 bytes.
+    const P256: [u8; 91] = [
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08,
+        0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04, 0x60, 0xfe, 0xd4,
+        0xba, 0x25, 0x5a, 0x9d, 0x31, 0xc9, 0x61, 0xeb, 0x74, 0xc6, 0x35, 0x6d, 0x68, 0xc0, 0x49,
+        0xb8, 0x92, 0x3b, 0x61, 0xfa, 0x6c, 0xe6, 0x69, 0x62, 0x2e, 0x60, 0xf2, 0x9f, 0xb6, 0x79,
+        0x03, 0xfe, 0x10, 0x08, 0xb8, 0xbc, 0x99, 0xa4, 0x1a, 0xe9, 0xe9, 0x56, 0x28, 0xbc, 0x64,
+        0xf2, 0xf1, 0xb2, 0x0c, 0x2d, 0x7e, 0x9f, 0x51, 0x77, 0xa3, 0xc2, 0x94, 0xd4, 0x46, 0x22,
+        0x99,
+    ];
+
+    /// The `AlgorithmIdentifier` contents of the accepted Ed25519 form: the
+    /// OID, no parameters.
+    const ED25519_ALGORITHM: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+
+    /// The `AlgorithmIdentifier` contents of the accepted P-256 form:
+    /// `id-ecPublicKey`, then the `prime256v1` OID.
+    const P256_ALGORITHM: &[u8] = &[
+        0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce,
+        0x3d, 0x03, 0x01, 0x07,
+    ];
+
+    /// The result of a structurally valid `SubjectPublicKeyInfo` that is
+    /// not an accepted form.
+    const UNSUPPORTED: Result<String, IdentityError> = Err(IdentityError::UnsupportedKey);
+
+    /// An SPKI whose `AlgorithmIdentifier` holds `algorithm` and whose
+    /// `BIT STRING` holds the unused-bits octet 0 and `key`, with DER
+    /// lengths.
+    fn spki(algorithm: &[u8], key: &[u8]) -> Vec<u8> {
+        let mut contents = vec![0x30];
+        push_length(&mut contents, algorithm.len());
+        contents.extend_from_slice(algorithm);
+        contents.push(0x03);
+        push_length(&mut contents, key.len() + 1);
+        contents.push(0x00);
+        contents.extend_from_slice(key);
+        let mut der = vec![0x30];
+        push_length(&mut der, contents.len());
+        der.extend(contents);
+        der
+    }
+
+    /// `algorithm` with the `OBJECT IDENTIFIER` whose contents are `oid`
+    /// in front.
+    fn oid_then(oid: &[u8], parameters: &[u8]) -> Vec<u8> {
+        let mut algorithm = vec![0x06, u8::try_from(oid.len()).unwrap()];
+        algorithm.extend_from_slice(oid);
+        algorithm.extend_from_slice(parameters);
+        algorithm
+    }
+
+    /// The bytes of the lowercase hexadecimal `text`.
+    fn unhex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).unwrap())
+            .collect()
+    }
 
     /// The same with `05 00` (NULL) parameters, as RSA has: 46 bytes.
     fn with_null_parameters() -> Vec<u8> {
@@ -556,6 +683,10 @@ mod tests {
     #[test]
     fn the_helpers_build_der() {
         assert_eq!(with_parameters(&[]), ED25519);
+        assert_eq!(spki(ED25519_ALGORITHM, &ED25519[12..]), ED25519);
+        assert_eq!(spki(P256_ALGORITHM, &P256[26..]), P256);
+        assert_eq!(oid_then(&[0x2b, 0x65, 0x70], &[]), ED25519_ALGORITHM);
+        assert_eq!(unhex("00ff7a"), [0x00, 0xff, 0x7a]);
         assert_eq!(with_parameters(&[0x05, 0x00]), with_null_parameters());
         assert_eq!(
             nested(2, &[0x05, 0x00]),
@@ -578,36 +709,448 @@ mod tests {
         assert_eq!(canonical_public_identity(&ED25519).unwrap().len(), 76);
     }
 
-    /// The identity is per encoding: the same key with `NULL` parameters
-    /// and without has two (the requirement on the callers in the module
-    /// documentation).
+    /// Known answer: `sha256sum` of the RFC 6979 P-256 key's DER (computed
+    /// with OpenSSL's export of it and `sha256sum`; the same answer as the
+    /// `p256_rfc6979_uncompressed` case of
+    /// `tests/conformance/fixtures/_recovery/public_identity.v1.json`).
     #[test]
-    fn parameters_are_structure_only() {
-        let identity = canonical_public_identity(&with_null_parameters()).unwrap();
-        assert!(identity.starts_with(PUBLIC_IDENTITY_PREFIX));
-        assert_ne!(identity, canonical_public_identity(&ED25519).unwrap());
-        // An OID parameter (as for EC keys), and a constructed one.
-        let mut der = vec![0x30, 0x2f, 0x30, 0x0a, 0x06, 0x03, 0x2b, 0x65, 0x70];
-        der.extend([0x06, 0x03, 0x2b, 0x65, 0x71]);
-        der.extend_from_slice(&ED25519[9..]);
-        assert!(canonical_public_identity(&der).is_ok());
-        let mut der = vec![0x30, 0x2e, 0x30, 0x09, 0x06, 0x03, 0x2b, 0x65, 0x70];
-        der.extend([0x30, 0x02, 0x05, 0x00]);
-        der.extend_from_slice(&ED25519[9..]);
-        assert!(canonical_public_identity(&der).is_ok());
+    fn known_answer_for_a_p256_key() {
+        assert_eq!(
+            canonical_public_identity(&P256).unwrap(),
+            "spki-sha256:5a7a78cca4a0f420d9bc62bb669c3c2759e39f723d3ae10dcbe0f0815a07ecd4"
+        );
+    }
+
+    /// The two accepted forms are the fixed 44-byte and 91-byte layouts of
+    /// the module documentation, whatever the key octets: another Ed25519
+    /// key (all zero, as no real key) and another P-256 point (one OpenSSL
+    /// generated) pass, with an identity each.
+    #[test]
+    fn the_two_accepted_forms() {
+        let ed25519_prefix = [
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        let p256_prefix = [
+            0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
+            0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04,
+        ];
+        assert_eq!(ED25519[..12], ed25519_prefix);
+        assert_eq!(P256[..27], p256_prefix);
+        let mut zero_key = ed25519_prefix.to_vec();
+        zero_key.extend([0; 32]);
+        let generated = unhex(
+            "3059301306072a8648ce3d020106082a8648ce3d03010703420004\
+             26b98d241d13ab59f39f2f2a64971b5f5f0fc1a7fb2f98c946ab93dbf5f31677\
+             3da55d98f4e40188b207932165a2b6624aa44f1ef18d6072d1cb3d857986c9be",
+        );
+        assert_eq!(generated[..27], p256_prefix);
+        for (der, len) in [(zero_key, 44), (generated, 91)] {
+            assert_eq!(der.len(), len);
+            let identity = canonical_public_identity(&der).unwrap();
+            assert!(identity.starts_with(PUBLIC_IDENTITY_PREFIX));
+            assert_eq!(identity.len(), 76);
+        }
+        assert_ne!(
+            canonical_public_identity(&ED25519),
+            canonical_public_identity(&P256)
+        );
+    }
+
+    /// Every other algorithm, and every other form of the two accepted
+    /// ones, is [`IdentityError::UnsupportedKey`]: each case is a
+    /// structurally valid `SubjectPublicKeyInfo` that differs from an
+    /// accepted form in one rule where it can. The real keys are OpenSSL's
+    /// exports (`openssl genpkey`, `openssl pkey -pubout`, and for the
+    /// RFC 6979 point `-ec_conv_form` and `-ec_param_enc explicit`).
+    #[test]
+    fn every_other_algorithm_and_form_is_refused() {
+        let ed25519_key = &ED25519[12..];
+        let point = &P256[26..];
+        let x_coordinate = &P256[27..59];
+        let ed25519_oid: &[u8] = &[0x2b, 0x65, 0x70];
+        let ec_oid: &[u8] = &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+        let p256_curve: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+        let with_tag = |tag: u8, rest: &[u8]| {
+            let mut key = vec![tag];
+            key.extend_from_slice(rest);
+            key
+        };
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            // Ed25519 with parameters: NULL, an OID, an empty SEQUENCE, an
+            // empty OCTET STRING.
+            ("ed25519 NULL parameters", with_null_parameters()),
+            (
+                "ed25519 curve OID parameters",
+                spki(&oid_then(ed25519_oid, p256_curve), ed25519_key),
+            ),
+            (
+                "ed25519 SEQUENCE parameters",
+                spki(&oid_then(ed25519_oid, &[0x30, 0x00]), ed25519_key),
+            ),
+            (
+                "ed25519 OCTET STRING parameters",
+                spki(&oid_then(ed25519_oid, &[0x04, 0x00]), ed25519_key),
+            ),
+            // The other RFC 8410 algorithms, real keys, and with a 32-octet
+            // key.
+            (
+                "ed448",
+                unhex(
+                    "3043300506032b6571033a0082493eb1804fde456ad9187beef678838fb3519fdd\
+                     8296c50f929802ef6fb403900c31212ad1a63ca0fd775d38a440a349734f2182\
+                     6316b780",
+                ),
+            ),
+            (
+                "ed448 OID, 32-octet key",
+                spki(&oid_then(&[0x2b, 0x65, 0x71], &[]), ed25519_key),
+            ),
+            (
+                "x25519",
+                unhex(
+                    "302a300506032b656e032100e809b2be0313477f55a6895a766ff528092cc68c\
+                     3c6ad8d14d8af59fdb6e8b73",
+                ),
+            ),
+            (
+                "x448 OID, 32-octet key",
+                spki(&oid_then(&[0x2b, 0x65, 0x6f], &[]), ed25519_key),
+            ),
+            // OIDs one arc from id-Ed25519: 1.3.101 and 1.3.101.112.0.
+            ("1.3.101", spki(&oid_then(&[0x2b, 0x65], &[]), ed25519_key)),
+            (
+                "1.3.101.112.0",
+                spki(&oid_then(&[0x2b, 0x65, 0x70, 0x00], &[]), ed25519_key),
+            ),
+            // RSA: rsaEncryption with NULL parameters, and id-RSASSA-PSS
+            // with none (1024-bit keys).
+            (
+                "rsaEncryption",
+                unhex(
+                    "30819f300d06092a864886f70d010101050003818d0030818902818100c0a0738f\
+                     54294d8703d7a16446e70c5ea05c34102bae574a8581665560ac0cccccd57a70bb\
+                     e5c42395bcca654fa8759892e357dc97cd09ef379c4387b2b05861fbfd62a1ef06\
+                     fd3618ec22e3d717d4893ee72b2b87d100676348497552a8b8e8d056bb6d783509\
+                     94b74ea17be6b8858ef29597b5e111baea4931741254199b930203010001",
+                ),
+            ),
+            (
+                "id-RSASSA-PSS",
+                unhex(
+                    "30819d300b06092a864886f70d01010a03818d0030818902818100cae03004d709\
+                     efbfcba5cdda2a69fb04103838fbeb260b0b5567d77fef23ecb19f068c2c532485\
+                     1e24d86ba3a58ebb2158cc66d3c9b6115063931e9c3ff34e3ff2335303dd4a7f7f\
+                     8d5424be26b6fa9cf51bc69808b2007836f2ec070cd7b2a93de94ceb3a7221fc72\
+                     76f20644f62e4a53fc30afe86660a5241ab6f19bbacd370203010001",
+                ),
+            ),
+            // Other curves: P-384 and secp256k1 (real keys), and their
+            // OIDs with a 65-octet uncompressed point, so that only the
+            // curve differs.
+            (
+                "P-384",
+                unhex(
+                    "3076301006072a8648ce3d020106052b8104002203620004d9e8ea2657081b4f83\
+                     c3167ffdbbdc9e2e0a10a06f40e4ea33e221b2417f88dff150eadaeb9a767699a2\
+                     3513e965059e4f50d045029b7a0b3b8cf4e33c312a792b50c089a863f26f5cff43\
+                     15b92b5cac2b2ce14b072ba278aef72554980994ec",
+                ),
+            ),
+            (
+                "secp256k1",
+                unhex(
+                    "3056301006072a8648ce3d020106052b8104000a034200045b7cafa7df10c6f4cb\
+                     b83dc610682c2d843ac9a9e9592aa31d27609ecaa30ff56d36072dee84a9b38002\
+                     b07c08c2cc69b027399a746fae68780a969956070f81",
+                ),
+            ),
+            (
+                "P-384 OID, 65-octet point",
+                spki(
+                    &oid_then(ec_oid, &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22]),
+                    point,
+                ),
+            ),
+            (
+                "secp256k1 OID, 65-octet point",
+                spki(
+                    &oid_then(ec_oid, &[0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a]),
+                    point,
+                ),
+            ),
+            // Curve OIDs one arc from prime256v1: 1.2.840.10045.3.1.6
+            // (another curve of the same arc), 1.2.840.10045.3.1 and
+            // 1.2.840.10045.3.1.7.0.
+            (
+                "1.2.840.10045.3.1.6",
+                spki(
+                    &oid_then(
+                        ec_oid,
+                        &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x06],
+                    ),
+                    point,
+                ),
+            ),
+            (
+                "1.2.840.10045.3.1",
+                spki(
+                    &oid_then(
+                        ec_oid,
+                        &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01],
+                    ),
+                    point,
+                ),
+            ),
+            (
+                "1.2.840.10045.3.1.7.0",
+                spki(
+                    &oid_then(
+                        ec_oid,
+                        &[
+                            0x06, 0x09, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x00,
+                        ],
+                    ),
+                    point,
+                ),
+            ),
+            // The P-256 point with other parameters: none, NULL, explicit
+            // (OpenSSL's `specifiedCurve` export of the RFC 6979 key), the
+            // curve OID's contents under another tag (RELATIVE-OID, `[0]`
+            // primitive) or inside a SEQUENCE.
+            ("P-256 no parameters", spki(&oid_then(ec_oid, &[]), point)),
+            (
+                "P-256 NULL parameters",
+                spki(&oid_then(ec_oid, &[0x05, 0x00]), point),
+            ),
+            (
+                "P-256 explicit parameters",
+                unhex(
+                    "3082014b3082010306072a8648ce3d02013081f7020101302c06072a8648ce3d01\
+                     01022100ffffffff00000001000000000000000000000000ffffffffffffffffff\
+                     ffffff305b0420ffffffff00000001000000000000000000000000ffffffffffff\
+                     fffffffffffc04205ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63b\
+                     ce3c3e27d2604b031500c49d360886e704936a6678e1139d26b7819f7e900441046b\
+                     17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe3\
+                     42e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5022100\
+                     ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63255102\
+                     01010342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce66962\
+                     2e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294\
+                     d4462299",
+                ),
+            ),
+            (
+                "P-256 curve as RELATIVE-OID",
+                spki(&oid_then(ec_oid, &with_tag(0x0d, &p256_curve[1..])), point),
+            ),
+            (
+                "P-256 curve as [0]",
+                spki(&oid_then(ec_oid, &with_tag(0x80, &p256_curve[1..])), point),
+            ),
+            (
+                "P-256 curve in a SEQUENCE",
+                spki(&oid_then(ec_oid, &nested(1, p256_curve)), point),
+            ),
+            // The P-256 point in other forms: compressed and hybrid
+            // (OpenSSL's exports of the RFC 6979 point), compressed with
+            // either tag, and a 65-octet point with each other tag, so that
+            // only the tag differs; the point at infinity (`00`).
+            (
+                "P-256 compressed",
+                unhex(
+                    "3039301306072a8648ce3d020106082a8648ce3d0301070322000360fed4ba255a\
+                     9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6",
+                ),
+            ),
+            (
+                "P-256 compressed 02",
+                spki(P256_ALGORITHM, &with_tag(0x02, x_coordinate)),
+            ),
+            (
+                "P-256 hybrid",
+                unhex(
+                    "3059301306072a8648ce3d020106082a8648ce3d0301070342000760fed4ba255a\
+                     9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc\
+                     99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+                ),
+            ),
+            (
+                "P-256 65 octets, tag 02",
+                spki(P256_ALGORITHM, &with_tag(0x02, &point[1..])),
+            ),
+            (
+                "P-256 65 octets, tag 03",
+                spki(P256_ALGORITHM, &with_tag(0x03, &point[1..])),
+            ),
+            (
+                "P-256 65 octets, tag 06",
+                spki(P256_ALGORITHM, &with_tag(0x06, &point[1..])),
+            ),
+            (
+                "P-256 65 octets, tag 05",
+                spki(P256_ALGORITHM, &with_tag(0x05, &point[1..])),
+            ),
+            (
+                "P-256 65 octets, tag 00",
+                spki(P256_ALGORITHM, &with_tag(0x00, &point[1..])),
+            ),
+            ("P-256 point at infinity", spki(P256_ALGORITHM, &[0x00])),
+            // OIDs one arc from id-ecPublicKey with the P-256 curve and
+            // point: 1.2.840.10045.2 and 1.2.840.10045.2.1.0; and two real
+            // EC algorithms that are not id-ecPublicKey, id-ecDH
+            // (1.3.132.1.12) and id-ecMQV (1.3.132.1.13).
+            (
+                "1.2.840.10045.2",
+                spki(
+                    &oid_then(&[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02], p256_curve),
+                    point,
+                ),
+            ),
+            (
+                "1.2.840.10045.2.1.0",
+                spki(
+                    &oid_then(
+                        &[0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x00],
+                        p256_curve,
+                    ),
+                    point,
+                ),
+            ),
+            (
+                "id-ecDH",
+                spki(
+                    &oid_then(&[0x2b, 0x81, 0x04, 0x01, 0x0c], p256_curve),
+                    point,
+                ),
+            ),
+            (
+                "id-ecMQV",
+                spki(
+                    &oid_then(&[0x2b, 0x81, 0x04, 0x01, 0x0d], p256_curve),
+                    point,
+                ),
+            ),
+            // The two algorithms crossed: the Ed25519 OID with the P-256
+            // parameters and point, or with only its point; id-ecPublicKey
+            // and the curve with the Ed25519 key.
+            (
+                "ed25519 OID, P-256 parameters and point",
+                spki(&oid_then(ed25519_oid, p256_curve), point),
+            ),
+            ("ed25519 OID, P-256 point", spki(ED25519_ALGORITHM, point)),
+            (
+                "P-256 algorithm, Ed25519 key",
+                spki(P256_ALGORITHM, ed25519_key),
+            ),
+            // The curve OID as the algorithm.
+            ("prime256v1 as the algorithm", spki(p256_curve, point)),
+        ];
+        for (name, der) in cases {
+            assert_eq!(canonical_public_identity(&der), UNSUPPORTED, "{name}");
+        }
+    }
+
+    /// The key lengths one octet either side of the accepted ones, and
+    /// further out: 32 octets for Ed25519, 65 for P-256 (with the `04`
+    /// tag).
+    #[test]
+    fn key_lengths_either_side_are_refused() {
+        for len in [0usize, 1, 31, 33, 64, 65] {
+            let mut key = ED25519[12..].to_vec();
+            key.resize(len, 0x5a);
+            let der = spki(ED25519_ALGORITHM, &key);
+            if len == 0 {
+                // No key octet at all is a structural error, first.
+                assert_eq!(canonical_public_identity(&der), Err(IdentityError::NotSpki));
+            } else {
+                assert_eq!(canonical_public_identity(&der), UNSUPPORTED, "{len}");
+            }
+        }
+        assert!(canonical_public_identity(&spki(ED25519_ALGORITHM, &ED25519[12..])).is_ok());
+        for len in [1usize, 33, 64, 66, 97, 129] {
+            let mut point = P256[26..].to_vec();
+            point.resize(len, 0x5a);
+            assert_eq!(point[0], 0x04);
+            let der = spki(P256_ALGORITHM, &point);
+            assert_eq!(canonical_public_identity(&der), UNSUPPORTED, "{len}");
+        }
+        assert!(canonical_public_identity(&spki(P256_ALGORITHM, &P256[26..])).is_ok());
+    }
+
+    /// The structural errors come first, in their own order: bytes with a
+    /// structural problem have that error whether or not their algorithm
+    /// is accepted, and only bytes that pass every structural check can
+    /// be [`IdentityError::UnsupportedKey`].
+    #[test]
+    fn structural_errors_come_before_the_algorithm() {
+        let rsa = unhex(
+            "30819f300d06092a864886f70d010101050003818d0030818902818100c0a0738f\
+             54294d8703d7a16446e70c5ea05c34102bae574a8581665560ac0cccccd57a70bb\
+             e5c42395bcca654fa8759892e357dc97cd09ef379c4387b2b05861fbfd62a1ef06\
+             fd3618ec22e3d717d4893ee72b2b87d100676348497552a8b8e8d056bb6d783509\
+             94b74ea17be6b8858ef29597b5e111baea4931741254199b930203010001",
+        );
+        assert_eq!(canonical_public_identity(&rsa), UNSUPPORTED);
+        for der in [ED25519.to_vec(), P256.to_vec(), rsa] {
+            // Truncated, trailing bytes, a non-minimal outer length.
+            assert_eq!(
+                canonical_public_identity(&der[..der.len() - 1]),
+                Err(IdentityError::Truncated)
+            );
+            let mut trailing = der.clone();
+            trailing.push(0x00);
+            assert_eq!(
+                canonical_public_identity(&trailing),
+                Err(IdentityError::TrailingBytes)
+            );
+            // The outer length with a leading zero octet: 30 82 00 2a, 30
+            // 82 00 59 or 30 82 00 9f.
+            let header = if der[1] == 0x81 { 3 } else { 2 };
+            let mut long_outer = vec![0x30, 0x82, 0x00, der[header - 1]];
+            long_outer.extend_from_slice(&der[header..]);
+            assert_eq!(
+                canonical_public_identity(&long_outer),
+                Err(IdentityError::NotDer)
+            );
+        }
+        // An Ed25519 and a P-256 key whose BIT STRING is an OCTET STRING,
+        // or has unused bits.
+        for (der, at) in [(ED25519.to_vec(), 9), (P256.to_vec(), 23)] {
+            let mut octet_string = der.clone();
+            octet_string[at] = 0x04;
+            assert_eq!(
+                canonical_public_identity(&octet_string),
+                Err(IdentityError::NotSpki)
+            );
+            let mut unused_bits = der.clone();
+            unused_bits[at + 2] = 0x01;
+            assert_eq!(
+                canonical_public_identity(&unused_bits),
+                Err(IdentityError::NotSpki)
+            );
+        }
+        // Unaccepted parameters with a structural fault: a non-empty NULL
+        // after the Ed25519 OID is NotDer, not UnsupportedKey.
+        let mut der = with_null_parameters();
+        der[1] += 1;
+        der[3] += 1;
+        der[10] = 0x01;
+        der.insert(11, 0x00);
+        assert_eq!(canonical_public_identity(&der), Err(IdentityError::NotDer));
     }
 
     #[test]
     fn empty_and_oversize_are_refused() {
         assert_eq!(canonical_public_identity(&[]), Err(IdentityError::Empty));
-        // The largest structure within the bound passes; one byte more is
+        // The largest structure within the bound passes the structural
+        // check (the Ed25519 OID with a key of thousands of octets, then
+        // UnsupportedKey); one byte more is
         // TooLarge before any parsing.
         let mut len = 2;
         while large(len + 1).len() <= MAX_SPKI_DER_BYTES {
             len += 1;
         }
         assert_eq!(large(len).len(), MAX_SPKI_DER_BYTES);
-        assert!(canonical_public_identity(&large(len)).is_ok());
+        assert_eq!(canonical_public_identity(&large(len)), UNSUPPORTED);
         assert_eq!(large(len + 1).len(), MAX_SPKI_DER_BYTES + 1);
         assert_eq!(
             canonical_public_identity(&large(len + 1)),
@@ -665,7 +1208,7 @@ mod tests {
         // A length of 128 or more with a leading zero octet: the 144-byte
         // BIT STRING of `large(144)` as 03 82 00 90 instead of 03 81 90.
         let valid = large(0x90);
-        assert!(canonical_public_identity(&valid).is_ok());
+        assert_eq!(canonical_public_identity(&valid), UNSUPPORTED);
         assert_eq!(&valid[..3], [0x30, 0x81, 0x9a]);
         assert_eq!(&valid[10..13], [0x03, 0x81, 0x90]);
         let mut padded = vec![0x30, 0x81, 0x9b];
@@ -704,17 +1247,20 @@ mod tests {
     /// The edges of the long form: a length below 128 in it (`81 7f`) or
     /// with a leading zero octet (`82 00 ff`) is refused, the shortest long
     /// form of 128 (`81 80`) and of 256 (`82 01 00`) is accepted, and more
-    /// than two length octets are refused.
+    /// than two length octets are refused. An accepted framing passes the
+    /// structural check and then is [`IdentityError::UnsupportedKey`], since
+    /// no key of these lengths is an accepted form.
     #[test]
     fn long_form_length_edges() {
+        const UNSUPPORTED_KEY: Result<(), IdentityError> = Err(IdentityError::UnsupportedKey);
         let cases: [(usize, &[u8], Result<(), IdentityError>); 10] = [
-            (0x7f, &[0x7f], Ok(())),
+            (0x7f, &[0x7f], UNSUPPORTED_KEY),
             (0x7f, &[0x81, 0x7f], Err(IdentityError::NotDer)),
-            (0x80, &[0x81, 0x80], Ok(())),
+            (0x80, &[0x81, 0x80], UNSUPPORTED_KEY),
             (0x80, &[0x82, 0x00, 0x80], Err(IdentityError::NotDer)),
-            (0xff, &[0x81, 0xff], Ok(())),
+            (0xff, &[0x81, 0xff], UNSUPPORTED_KEY),
             (0xff, &[0x82, 0x00, 0xff], Err(IdentityError::NotDer)),
-            (0x100, &[0x82, 0x01, 0x00], Ok(())),
+            (0x100, &[0x82, 0x01, 0x00], UNSUPPORTED_KEY),
             (0x100, &[0x83, 0x00, 0x01, 0x00], Err(IdentityError::NotDer)),
             // Three length octets with no leading zero: 65536 bytes, which
             // would be a truncation; the octet count is refused first.
@@ -772,8 +1318,16 @@ mod tests {
             &[0x06, 0x05, 0x2b, 0x81, 0x80, 0x00, 0x70],
             &[0x06, 0x03, 0x2b, 0x65, 0x70],
         ] {
-            assert!(canonical_public_identity(&with_algorithm(oid)).is_ok());
-            assert!(canonical_public_identity(&with_parameters(oid)).is_ok());
+            let expected = if oid == ED25519_ALGORITHM {
+                Ok(canonical_public_identity(&ED25519).unwrap())
+            } else {
+                UNSUPPORTED
+            };
+            assert_eq!(canonical_public_identity(&with_algorithm(oid)), expected);
+            assert_eq!(
+                canonical_public_identity(&with_parameters(oid)),
+                UNSUPPORTED
+            );
         }
     }
 
@@ -811,8 +1365,14 @@ mod tests {
             &[0x0d, 0x03, 0x01, 0x81, 0x00],
             &[0x0d, 0x02, 0x00, 0x00],
         ] {
-            assert!(canonical_public_identity(&with_parameters(relative_oid)).is_ok());
-            assert!(canonical_public_identity(&with_parameters(&nested(1, relative_oid))).is_ok());
+            assert_eq!(
+                canonical_public_identity(&with_parameters(relative_oid)),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                canonical_public_identity(&with_parameters(&nested(1, relative_oid))),
+                UNSUPPORTED
+            );
         }
     }
 
@@ -827,8 +1387,14 @@ mod tests {
                 parameters.extend_from_slice(children);
                 with_parameters(&parameters)
             };
-            assert!(canonical_public_identity(&wrap(&[0x05, 0x00, 0x05, 0x00])).is_ok());
-            assert!(canonical_public_identity(&wrap(&[0x05, 0x00, 0x04, 0x01, 0x00])).is_ok());
+            assert_eq!(
+                canonical_public_identity(&wrap(&[0x05, 0x00, 0x05, 0x00])),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                canonical_public_identity(&wrap(&[0x05, 0x00, 0x04, 0x01, 0x00])),
+                UNSUPPORTED
+            );
             for children in [
                 // A non-empty NULL, first and second.
                 &[0x05, 0x01, 0x00, 0x05, 0x00][..],
@@ -937,8 +1503,9 @@ mod tests {
             assert_eq!(value[0], tag);
             assert_eq!(usize::from(value[1]), value.len() - 2, "{tag:02x}");
             for der in [with_parameters(value), with_parameters(&nested(1, value))] {
-                assert!(
-                    canonical_public_identity(&der).is_ok(),
+                assert_eq!(
+                    canonical_public_identity(&der),
+                    UNSUPPORTED,
                     "{tag:02x} {der:02x?}"
                 );
             }
@@ -959,8 +1526,9 @@ mod tests {
         // Constructed and primitive tags of the other classes pass.
         for tag in [0x40, 0x60, 0x80, 0xa0, 0xc0, 0xe0, 0xa3, 0x83] {
             assert_eq!(check_tag(tag), Ok(()), "{tag:02x}");
-            assert!(
-                canonical_public_identity(&with_parameters(&[tag, 0x00])).is_ok(),
+            assert_eq!(
+                canonical_public_identity(&with_parameters(&[tag, 0x00])),
+                UNSUPPORTED,
                 "{tag:02x}"
             );
         }
@@ -999,23 +1567,35 @@ mod tests {
     fn parameters_nest_at_most_eight_deep() {
         assert_eq!(MAX_PARAMETERS_DEPTH, 8);
         // Eight SEQUENCEs, the innermost empty, at depths 1 to 8.
-        assert!(canonical_public_identity(&with_parameters(&nested(8, &[]))).is_ok());
+        assert_eq!(
+            canonical_public_identity(&with_parameters(&nested(8, &[]))),
+            UNSUPPORTED
+        );
         assert_eq!(
             canonical_public_identity(&with_parameters(&nested(9, &[]))),
             Err(IdentityError::NotSpki)
         );
         // A NULL at depth 8, then 9.
-        assert!(canonical_public_identity(&with_parameters(&nested(7, &[0x05, 0x00]))).is_ok());
+        assert_eq!(
+            canonical_public_identity(&with_parameters(&nested(7, &[0x05, 0x00]))),
+            UNSUPPORTED
+        );
         assert_eq!(
             canonical_public_identity(&with_parameters(&nested(8, &[0x05, 0x00]))),
             Err(IdentityError::NotSpki)
         );
         // A primitive parameters element is at depth 1.
-        assert!(canonical_public_identity(&with_parameters(&[0x04, 0x00])).is_ok());
+        assert_eq!(
+            canonical_public_identity(&with_parameters(&[0x04, 0x00])),
+            UNSUPPORTED
+        );
         // A deep second child: the depth does not grow along a sequence.
         let mut children = nested(6, &[]);
         children.extend(nested(6, &[]));
-        assert!(canonical_public_identity(&with_parameters(&nested(1, &children))).is_ok());
+        assert_eq!(
+            canonical_public_identity(&with_parameters(&nested(1, &children))),
+            UNSUPPORTED
+        );
         // Far deeper, within the size bound: refused, no stack overflow.
         let deep = with_parameters(&nested(1000, &[]));
         assert!(deep.len() <= MAX_SPKI_DER_BYTES);
@@ -1123,6 +1703,7 @@ mod tests {
             IdentityError::NotDer,
             IdentityError::TrailingBytes,
             IdentityError::NotSpki,
+            IdentityError::UnsupportedKey,
         ] {
             for text in [error.to_string(), format!("{error:?}")] {
                 assert!(!text.contains("0x") && !text.contains("19bf"), "{text}");
@@ -1131,6 +1712,14 @@ mod tests {
         assert_eq!(
             IdentityError::NotDer.to_string(),
             "the public key is not in DER encoding"
+        );
+        assert_eq!(
+            IdentityError::UnsupportedKey.to_string(),
+            "the public key is not an accepted Ed25519 or P-256 key"
+        );
+        assert_eq!(
+            format!("{:?}", IdentityError::UnsupportedKey),
+            "UnsupportedKey"
         );
     }
 }

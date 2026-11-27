@@ -1994,7 +1994,8 @@ fn the_checker_keys_have_their_known_identities() {
 }
 
 /// A checker create or rotation whose key is not one well-formed DER
-/// `SubjectPublicKeyInfo` is `PublicKey`, after the authorization: no row,
+/// `SubjectPublicKeyInfo`, or is the fixture key in a form that is not the
+/// one accepted P-256 form, is `PublicKey`, after the authorization: no row,
 /// no event, no ID taken, the stored identity kept. A status-only update
 /// keeps the stored identity, and a valid key then applies with the next
 /// checker ID.
@@ -2010,7 +2011,14 @@ async fn a_malformed_checker_key_writes_nothing() {
         -----END PUBLIC KEY-----\n";
     let mut trailing = P256_SPKI.to_vec();
     trailing.push(0);
-    let cases: [(Vec<u8>, IdentityError); 5] = [
+    // The same P-256 key with its point compressed (`03`: its y is odd),
+    // as `openssl pkey -ec_conv_form compressed` exports it.
+    assert_eq!(P256_SPKI[90] & 1, 1);
+    let mut compressed = vec![0x30, 0x39];
+    compressed.extend_from_slice(&P256_SPKI[2..23]);
+    compressed.extend([0x03, 0x22, 0x00, 0x03]);
+    compressed.extend_from_slice(&P256_SPKI[27..59]);
+    let cases: [(Vec<u8>, IdentityError); 6] = [
         (Vec::new(), IdentityError::Empty),
         (pem.to_vec(), IdentityError::NotDer),
         (
@@ -2020,6 +2028,7 @@ async fn a_malformed_checker_key_writes_nothing() {
         (trailing, IdentityError::TrailingBytes),
         // The AlgorithmIdentifier alone: DER, but not an SPKI.
         (P256_SPKI[2..23].to_vec(), IdentityError::NotSpki),
+        (compressed, IdentityError::UnsupportedKey),
     ];
     let before = snapshot(&pool).await;
     for (der, error) in &cases {

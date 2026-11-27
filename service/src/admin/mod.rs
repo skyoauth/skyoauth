@@ -441,11 +441,13 @@
 //!   [`crate::identity::canonical_public_identity`] (bytes it refuses are
 //!   [`AdminWriteError::PublicKey`]; a status-only write keeps the stored
 //!   identity), never taking an identity string from their caller (lead
-//!   decision, 2026-11-25). The per-algorithm form rule of
-//!   [`crate::identity`] ("A hard requirement on the callers": one
-//!   `SubjectPublicKeyInfo` form per accepted algorithm) is still
-//!   outstanding, so one key can have several identities, and the checker
-//!   writers must not be exposed on any HTTP surface until it lands.
+//!   decision, 2026-11-25). That function accepts only Ed25519 and
+//!   ECDSA P-256 keys, each in its one `SubjectPublicKeyInfo` form
+//!   ([`crate::identity`], "One form per accepted algorithm"; the user,
+//!   2026-11-27), so one key has one identity. Not done: the key is not
+//!   decoded, so a point off its curve is not refused ([`crate::identity`],
+//!   "What is not checked"), and no HTTP route exposes the checker writers
+//!   yet.
 //! - A service principal create: a service principal is created
 //!   atomically with its service identity (identity-registry section 5.1),
 //!   a write of the service identity path, not of this module (lead
@@ -562,9 +564,10 @@ pub enum AdminWriteError {
     /// 2026-11-24). Checked after the authorization.
     TenantDisabled,
     /// A checker create or key rotation gave bytes that are not one
-    /// well-formed DER `SubjectPublicKeyInfo`, so no canonical public
-    /// identity ([`crate::identity::canonical_public_identity`]); checked
-    /// after the authorization and before any ID is generated.
+    /// well-formed DER `SubjectPublicKeyInfo` of an accepted Ed25519 or
+    /// P-256 key in its one accepted form, so no canonical public identity
+    /// ([`crate::identity::canonical_public_identity`]); checked after the
+    /// authorization and before any ID is generated.
     PublicKey(IdentityError),
     /// An egress entry create gave an `exact_destination` that is not an
     /// exact `https` URL in canonical form within the writer's bounds
@@ -615,7 +618,7 @@ impl fmt::Display for AdminWriteError {
                 f.write_str("this write is refused while its tenant is disabled")
             }
             Self::PublicKey(_) => {
-                f.write_str("the checker's public key is not a DER SubjectPublicKeyInfo")
+                f.write_str("the checker's public key is not an accepted DER SubjectPublicKeyInfo")
             }
             Self::InvalidDestination => {
                 f.write_str("the egress destination is not an exact https URL in canonical form")
@@ -756,12 +759,13 @@ mod tests {
             (IdentityError::Empty, "PublicKey(Empty)"),
             (IdentityError::NotDer, "PublicKey(NotDer)"),
             (IdentityError::NotSpki, "PublicKey(NotSpki)"),
+            (IdentityError::UnsupportedKey, "PublicKey(UnsupportedKey)"),
         ] {
             let err = AdminWriteError::from(key);
             assert_eq!(format!("{err:?}"), debug);
             assert_eq!(
                 err.to_string(),
-                "the checker's public key is not a DER SubjectPublicKeyInfo"
+                "the checker's public key is not an accepted DER SubjectPublicKeyInfo"
             );
             let source = std::error::Error::source(&err).map(ToString::to_string);
             assert_eq!(source, Some(key.to_string()));

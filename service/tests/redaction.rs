@@ -746,7 +746,7 @@ fn every_not_restorable_reason_is_fixed_text() {
 
 /// Every `IdentityError` (`crate::identity`): its fixed `Display`; a `Debug`
 /// that names the variant only.
-const IDENTITY_ERRORS: [(IdentityError, &str, &str); 6] = [
+const IDENTITY_ERRORS: [(IdentityError, &str, &str); 7] = [
     (IdentityError::Empty, "Empty", "the public key is empty"),
     (
         IdentityError::TooLarge,
@@ -772,6 +772,11 @@ const IDENTITY_ERRORS: [(IdentityError, &str, &str); 6] = [
         IdentityError::NotSpki,
         "NotSpki",
         "the public key is not a SubjectPublicKeyInfo",
+    ),
+    (
+        IdentityError::UnsupportedKey,
+        "UnsupportedKey",
+        "the public key is not an accepted Ed25519 or P-256 key",
     ),
 ];
 
@@ -809,13 +814,19 @@ fn a_refused_public_key_prints_none_of_its_bytes() {
     in_a_set.extend_from_slice(&key[2..]);
     let mut oversize = key.clone();
     oversize.resize(MAX_SPKI_DER_BYTES + 1, 0xc3);
-    let cases: [(&[u8], IdentityError); 6] = [
+    // The same key with NULL parameters: not the one accepted Ed25519 form.
+    let mut null_parameters = vec![
+        0x30, 0x2c, 0x30, 0x07, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x05, 0x00,
+    ];
+    null_parameters.extend_from_slice(&key[9..]);
+    let cases: [(&[u8], IdentityError); 7] = [
         (&[], IdentityError::Empty),
         (&oversize, IdentityError::TooLarge),
         (&key[..40], IdentityError::Truncated),
         (&long_form, IdentityError::NotDer),
         (&trailing, IdentityError::TrailingBytes),
         (&in_a_set, IdentityError::NotSpki),
+        (&null_parameters, IdentityError::UnsupportedKey),
     ];
     for (input, expected) in cases {
         let err = canonical_public_identity(input).unwrap_err();

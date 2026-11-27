@@ -525,7 +525,8 @@ fn every_fixture_file_and_case_is_covered() {
     );
     // Both bounds, both errors and, for each way the service refuses bytes
     // that this crate hashes, a case: truncated, not DER (an indefinite
-    // length), trailing bytes and not a SubjectPublicKeyInfo.
+    // length), trailing bytes, not a SubjectPublicKeyInfo and not an
+    // accepted Ed25519 or P-256 key.
     let lengths: BTreeSet<usize> = cases.iter().map(|c| der_bytes(&c["der"]).len()).collect();
     for length in [0, 1, MAX_SPKI_DER_BYTES, MAX_SPKI_DER_BYTES + 1] {
         assert!(lengths.contains(&length), "no case of {length} bytes");
@@ -547,6 +548,7 @@ fn every_fixture_file_and_case_is_covered() {
             "the public key is not in DER encoding",
             "the public key encoding has trailing bytes",
             "the public key is not a SubjectPublicKeyInfo",
+            "the public key is not an accepted Ed25519 or P-256 key",
         ])
     );
     for case in cases.iter().filter(|c| c.get("service_expected").is_some()) {

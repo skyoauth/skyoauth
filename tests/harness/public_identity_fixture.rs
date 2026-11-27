@@ -6,7 +6,8 @@
 //! service's cannot drift apart: the same prefix, the same bound, the same
 //! digest for every case and the same message for each error. A case with
 //! `service_expected` holds bytes that are not a strict DER
-//! `SubjectPublicKeyInfo`, which only the service checks. They test the
+//! `SubjectPublicKeyInfo`, or not the one accepted form of an Ed25519 or
+//! P-256 key, which only the service checks. They test the
 //! fixture file, not a scenario: no name here matches `a\d\d_`, and no
 //! stage of `tests/conformance/scenarios.toml` lists them (layout §3). They
 //! need no server and no database.
@@ -112,6 +113,7 @@ fn identity_cases_through_canonical_public_identity() {
         IdentityError::NotDer,
         IdentityError::TrailingBytes,
         IdentityError::NotSpki,
+        IdentityError::UnsupportedKey,
     ] {
         let message = err.to_string();
         assert!(

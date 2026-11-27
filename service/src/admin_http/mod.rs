@@ -31,8 +31,7 @@
 //!
 //! No write is exposed: none of the twenty-three audited writes of
 //! [`crate::admin`] (the twenty workload writes of S3a and the three egress
-//! allowlist writes of S2a), not the checker writes, which need the
-//! per-algorithm `SubjectPublicKeyInfo` form rule first ([`crate::admin`],
+//! allowlist writes of S2a), not the checker writes ([`crate::admin`],
 //! "Not done here"), not the tenant create, which needs the IR-034
 //! generator, and not the approve, cancel, reject or gated trust writes of
 //! [`crate::operation`] and [`crate::trust`]. Later slices add their routes
