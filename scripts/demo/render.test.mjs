@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { keepRawRecording, outputName, publishFiles } from './render.mjs';
+import { RenderError, keepRawRecording, outputName, publishFiles, refuseChapters } from './render.mjs';
 import { recordsFromBytes } from './transcript.mjs';
 import { toVtt } from './vtt.mjs';
 
@@ -112,5 +112,24 @@ describe('DEMO_KEEP_RAW', () => {
     assert.match(handler[1], /if \(env\.DEMO_KEEP_RAW\) warn\(`render: \$\{keepRawRecording\(rawDir, env\.DEMO_KEEP_RAW\)\}`\);/);
     assert.match(handler[1], /\n    throw e;$/);
     assert.doesNotMatch(handler[1], /cpSync|mkdirSync/);
+  });
+});
+
+describe('chapters are refused until the milestone render exists', () => {
+  it('refuses a record list with a chapter, and passes one without', () => {
+    assert.throws(() => refuseChapters([{ type: 'chapter', step: 0, text: 'M1a-1: A' }, { type: 'caption', step: 1, text: 'x' }]), (e) => e instanceof RenderError && /chapters are not rendered yet/.test(e.message));
+    assert.doesNotThrow(() => refuseChapters([{ type: 'caption', step: 0, text: 'x' }]));
+    assert.doesNotThrow(() => refuseChapters([]));
+  });
+
+  // render() needs Chromium, so the call is pinned in the source: the guard
+  // runs right after the transcript is read and before the tools are needed.
+  it('render() calls the guard after reading the transcript and before the tools', () => {
+    const src = readFileSync(join(HERE, 'render.mjs'), 'utf8');
+    const body = src.slice(src.indexOf('export async function render('));
+    const read = body.indexOf('recordsFromBytes(bytes');
+    const guard = body.indexOf('refuseChapters(records);');
+    const tools = body.indexOf('requireTools(env)');
+    assert.ok(read > 0 && read < guard && guard < tools, 'refuseChapters(records) must sit between recordsFromBytes and requireTools');
   });
 });

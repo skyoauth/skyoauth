@@ -48,7 +48,7 @@ export const FPS = 30;
 // page. A larger one means the recording is out of step with the VTT.
 export const MAX_DRIFT_MS = 500;
 
-class RenderError extends Error {}
+export class RenderError extends Error {}
 
 export function outputName(transcriptPath) {
   return basename(transcriptPath).replace(/\.jsonl$/, '').replace(/\.transcript$/, '');
@@ -190,6 +190,17 @@ export function keepRawRecording(rawDir, dest) {
   }
 }
 
+// Chapters are played by the player and timed by timing.js, but render()
+// does not yet build the milestone video (the chapter metadata, the joined
+// stream, check-milestone): until it does, a transcript with a chapter record
+// is refused rather than rendered as a plain video. Chapters PR 3 removes
+// this guard when render() calls checkMilestone.
+export function refuseChapters(records) {
+  if (records.some((r) => r.type === 'chapter')) {
+    throw new RenderError('this transcript has a chapter record: chapters are not rendered yet (render a milestone with --milestone once it exists)');
+  }
+}
+
 export async function render(transcriptPath, outDir, { secretEnv = [], secretFiles = [], env = process.env, log = console.log, warn = console.error } = {}) {
   const secrets = secretsFromEnv(secretEnv, env);
   for (const f of secretFiles) mergeSecrets(secrets, secretsFromFile(f));
@@ -198,6 +209,7 @@ export async function render(transcriptPath, outDir, { secretEnv = [], secretFil
   // changed during the render cannot publish unchecked bytes.
   const bytes = readFileSync(transcriptPath);
   const records = recordsFromBytes(bytes, transcriptPath, { secrets });
+  refuseChapters(records);
   const { ffmpeg, ffprobe } = requireTools(env);
   const timeline = timing.buildTimeline(records);
   const totalMs = timing.totalMs(timeline);
