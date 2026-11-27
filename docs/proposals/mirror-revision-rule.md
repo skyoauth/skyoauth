@@ -4,7 +4,8 @@ Status: reviewed; the rule is accepted. Drafted 2026-11-25 for the lead's
 review; the review of the same day accepted the rule and took the picks
 recorded under "Decisions" (O1 to O4, O6 and O7: lead decisions,
 2026-11-25, changeable through ordinary review; none touches a user
-ruling). O5 stays open for the user. Nothing is implemented: this text
+ruling). O5 is ruled by the user (2026-11-27, relayed by the lead; tasks
+section 13, D6). Nothing is implemented: this text
 changes no code, no migration and no contract. The rule itself was
 already a lead decision: "a mirror write must not bump the revision"
 (tasks section 13, "Plan splits", `docs/skyoauth-tasks.md:1025`; lead
@@ -196,7 +197,7 @@ For the S8 PR (O4 and O7 are lead decisions; the rest inferred):
   event. If the clock has gone back, a changed digest with a time not
   later than the stored one is refused by the sink-validation trigger
   (`0002`:166-193) and startup fails closed (inferred). O4 depends on D6
-  (see O5): if D6 rules the sink out of scope, it is moot.
+  (see O5).
 
 - **Order.** The mirror appends its events after the row write, taking the
   audit head last, in the order the migrations README sets
@@ -536,7 +537,7 @@ ordinary review; none touches a user ruling.
   `instance_security_policy.change_sink` for any sink-column change, so
   `instance_security_policy.mirror` stays the `single_actor_mode` event
   only (`event_actions.rs:12-15`).
-- **O4.** Taken after D6, and moot if D6 rules the sink out: validate the
+- **O4.** Taken after D6: validate the
   sink at every startup, but do not refresh `audit_sink_validated_at` when
   the digest is unchanged and validation passes; write it only when the
   digest changed (the validation time on success, `NULL` on failure) or it
@@ -558,10 +559,11 @@ ordinary review; none touches a user ruling.
 
 ## Open
 
-- **O5 (user).** The sink parts of the mirror depend on D6, which "awaits
-  a user decision on the audit sink's scope" (tasks :1022). O4 is taken
-  on the assumption that the sink stays in scope; if D6 rules it out, the
-  mirror covers `single_actor_mode` only and O4 is moot.
+- **O5 (user).** O5 is ruled by the user (2026-11-27, relayed by the lead;
+  tasks §13 D6): the sink stays in M1a scope, so the mirror covers
+  `single_actor_mode`, `audit_sink_config_digest` and
+  `audit_sink_validated_at` and O4 applies. No question of this proposal
+  is open.
 
 ## Reconciliation
 
@@ -582,8 +584,8 @@ When accepted, the S8 PR (or a docs PR before it) updates:
 - `service/src/persistence/registry/mod.rs:64-70`, whose module docs say
   every update moves the row to `expected + 1` as the `0002` guard
   requires, with the mirror writer's exception;
-- identity-registry IR-053, in the contract PR that also carries the
-  pending API-152 wording (tasks :465), with one sentence that a mirror
-  write keeps the row's revision;
+- identity-registry IR-053, in a later contract PR (the API-152 wording
+  landed in #193 without it), with one sentence that a mirror write keeps
+  the row's revision;
 - `docs/testing/conformance-layout.md:96`, when the mirror replaces
   `seed_policy`.
