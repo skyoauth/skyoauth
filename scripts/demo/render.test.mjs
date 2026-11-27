@@ -6,13 +6,13 @@
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { outputName, publishFiles } from './render.mjs';
+import { keepRawRecording, outputName, publishFiles } from './render.mjs';
 import { recordsFromBytes } from './transcript.mjs';
 import { toVtt } from './vtt.mjs';
 
@@ -59,5 +59,38 @@ describe('the transcript snapshot', () => {
   it('names the outputs after the transcript', () => {
     assert.equal(outputName('/x/m1a.transcript.jsonl'), 'm1a');
     assert.equal(outputName('m1a.jsonl'), 'm1a');
+  });
+});
+
+describe('DEMO_KEEP_RAW', () => {
+  const raw = join(TMP, 'raw');
+  mkdirSync(raw, { recursive: true });
+  writeFileSync(join(raw, 'page.webm'), 'raw recording');
+
+  it('copies the raw recording directory and says where', () => {
+    const dest = join(TMP, 'kept', 'here');
+    assert.equal(keepRawRecording(raw, dest), `kept the raw recording in ${dest}`);
+    assert.equal(readFileSync(join(dest, 'page.webm'), 'utf8'), 'raw recording');
+  });
+
+  it('never throws: a copy that fails is a line, not an exception', () => {
+    const file = join(TMP, 'a-file');
+    writeFileSync(file, 'x');
+    const dest = join(file, 'below');
+    let note;
+    assert.doesNotThrow(() => {
+      note = keepRawRecording(raw, dest);
+    });
+    assert.equal(note, `DEMO_KEEP_RAW: could not keep the raw recording in ${dest} (ENOTDIR)`);
+    assert.equal(existsSync(dest), false);
+  });
+
+  it('render() reports the copy and rethrows its own error', () => {
+    const source = readFileSync(join(HERE, 'render.mjs'), 'utf8');
+    const handler = /\} catch \(e\) \{\n([\s\S]*?)\n  \} finally \{/.exec(source.slice(source.indexOf('export async function render(')));
+    assert.ok(handler, 'render() has a catch (e) ... finally');
+    assert.match(handler[1], /if \(env\.DEMO_KEEP_RAW\) warn\(`render: \$\{keepRawRecording\(rawDir, env\.DEMO_KEEP_RAW\)\}`\);/);
+    assert.match(handler[1], /\n    throw e;$/);
+    assert.doesNotMatch(handler[1], /cpSync|mkdirSync/);
   });
 });

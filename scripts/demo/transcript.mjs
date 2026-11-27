@@ -52,7 +52,8 @@ export const MIN_SECRET_LENGTH = 8;
 
 // Allow markers: the optional fourth field `allow` of a record. The only one
 // is "hex-across-lines": it lifts the signature-sized hex rule from the
-// joined forms (below) that hold this record, for output such as two 64-digit
+// joined forms (below) that hold this record (never from a stretch of
+// unmarked records beside it), for output such as two 64-digit
 // public keys on adjacent lines, which joined look like one 128-digit
 // signature and cannot be told apart from one. Every other rule still
 // applies to the record and to its joined forms, the hex rule still applies
@@ -67,7 +68,7 @@ export const SECRET_RULES = [
   // A JOSE compact serialization: base64url header starting {" (eyJ), then
   // at least two more dot-separated segments (JWS, JWE, unsecured JWT).
   { name: 'JWT-shaped string', re: /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/ },
-  { name: 'Bearer credential', test: hasBearerCredential },
+  { name: 'Bearer credential', test: (text, joined) => hasBearerCredential(text, { joined }) },
   // A signature or private key in hexadecimal: 96 digits or more (an
   // Ed25519 signature is 128). A 64-digit run, the size of an Ed25519 or
   // other 32-byte public key and also of a seed, is allowed: only the
@@ -111,34 +112,44 @@ export function hasUnixTime(text) {
   return false;
 }
 
-const hits = (rule, text) => (rule.test ? rule.test(text) : rule.re.test(text));
+// `joined`: the text is a joined form (validateTranscript), which may glue
+// the next line or record directly to a value.
+const hits = (rule, text, joined = false) => (rule.test ? rule.test(text, joined) : rule.re.test(text));
 
 // The one value an Authorization (or Proxy-Authorization) field with the
 // Bearer scheme may show.
 export const REDACTED = '<redacted>';
 
+// The auth-param names a Bearer challenge may start with (RFC 6750 §3,
+// RFC 9728 §5.1): only these count as an auth-param after "Bearer ".
+export const BEARER_AUTH_PARAMS = ['realm', 'scope', 'error', 'error_description', 'error_uri', 'resource_metadata'];
+
 // A Bearer credential, either of:
 //   - an Authorization or Proxy-Authorization field (any case, as a header
 //     `Authorization: Bearer x` or a JSON/YAML key `"authorization": "Bearer
-//     x"`) whose Bearer value does not start with <redacted>, an empty
-//     value included: no heuristic applies there;
+//     x"`) whose Bearer value is not exactly <redacted> (the value ends at a
+//     blank, quote, comma or semicolon), an empty value included: no
+//     heuristic applies there. In a joined form (`joined`) the value need
+//     only start with <redacted>, since the join may glue the next line or
+//     record to it; each record alone was already held to the exact value;
 //   - anywhere else, the scheme name (any case), blanks, then a token68
 //     value that, once trailing sentence punctuation (. -) is dropped, holds
 //     a digit or one of _ ~ + / =, or is 16 characters or longer. Not a
 //     credential: prose ("Bearer tokens are shown as their type"), a
-//     redacted value (<redacted>), and an auth-param (RFC 9110 §11.2: a
-//     token, then "=" and a token or quoted string, as in `WWW-Authenticate:
-//     Bearer realm="skyoauth"` or `Bearer error="invalid_token"`): a name
-//     directly followed by =, or by exactly one = and then a quote or a
-//     token character.
-export function hasBearerCredential(text) {
+//     redacted value (<redacted>), and an auth-param (RFC 9110 §11.2) whose
+//     name is one of BEARER_AUTH_PARAMS (any case), as in `WWW-Authenticate:
+//     Bearer realm="skyoauth"` or `Bearer error="invalid_token"`: the name
+//     directly followed by =, or by exactly one = and then a quote (also
+//     JSON-escaped, \") or a token character. Any other name=... is a padded token
+//     (`Bearer dGhpc2lz=`, `Bearer a1b2=c3`).
+export function hasBearerCredential(text, { joined = false } = {}) {
   for (const m of text.matchAll(/\b(?:proxy-)?authorization["']?[ \t]*[:=][ \t]*["']?bearer\b[ \t]*([^\s"',;]*)/gi)) {
-    // startsWith: a joined form may glue the next record's text to it.
-    if (!m[1].startsWith(REDACTED)) return true;
+    if (joined ? !m[1].startsWith(REDACTED) : m[1] !== REDACTED) return true;
   }
   for (const m of text.matchAll(/\bbearer[ \t]+([A-Za-z0-9._~+/-]+)(=*)/gi)) {
     const rest = text.slice(m.index + m[0].length);
-    const authParam = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(m[1]) && ((m[2] === '' && /^[ \t]*=/.test(rest)) || (m[2] === '=' && /^["A-Za-z0-9!#$%&'*+.^_`|~-]/.test(rest)));
+    const authParam =
+      BEARER_AUTH_PARAMS.includes(m[1].toLowerCase()) && ((m[2] === '' && /^[ \t]*=/.test(rest)) || (m[2] === '=' && /^(?:\\?"|[A-Za-z0-9!#$%&'*+.^_`|~-])/.test(rest)));
     if (authParam) continue;
     const value = (m[1] + m[2]).replace(/[.-]+$/, '');
     if (/[0-9_~+/=]/.test(value) || value.length >= 16) return true;
@@ -269,10 +280,12 @@ export function secretVariants(value) {
 //   1. each record's text;
 //   2. each multi-line record's text with its line feeds removed, and with
 //      each line feed replaced by a space;
-//   3. each pair of adjacent records (any types), and each run of three or
-//      more consecutive output and note records: their texts, each with its
-//      line feeds removed, concatenated directly, and the same texts (line
-//      feeds replaced by spaces) joined with a space.
+//   3. each pair of adjacent records (any types), each run of three or
+//      more consecutive output and note records, and, within such a run
+//      that holds allow-marked records, each stretch of three or more
+//      unmarked records: their texts, each with its line feeds removed,
+//      concatenated directly, and the same texts (line feeds replaced by
+//      spaces) joined with a space.
 // A rule found in a form is not reported again for a larger form that
 // holds the same record. The timestamp rules apply to each line only.
 export function validateTranscript(bytes, { secrets = new Map() } = {}) {
@@ -372,7 +385,8 @@ export function validateTranscript(bytes, { secrets = new Map() } = {}) {
       ok = false;
     }
     if (body.includes('\n') && !MULTILINE_TYPES.has(type)) {
-      err(n, `a ${type} is one line: "text" holds a line feed`);
+      // Only a known type is named: an unknown one would echo the input.
+      err(n, TYPES.includes(type) ? `a ${type} is one line: "text" holds a line feed` : '"text" holds a line feed: only output and note may span lines');
       ok = false;
     }
     body.split('\n').forEach((l, i) => {
@@ -411,7 +425,7 @@ export function validateTranscript(bytes, { secrets = new Map() } = {}) {
     const forms = [e.text.replaceAll('\n', ''), e.text.replaceAll('\n', ' ')];
     for (const rule of allRules) {
       if (e.fired.has(rule.name) || (rule.marker && e.allow === rule.marker)) continue;
-      if (forms.some((f) => hits(rule, f))) fire([e], rule.name, e.line, 'in "text" with its line breaks removed');
+      if (forms.some((f) => hits(rule, f, true))) fire([e], rule.name, e.line, 'in "text" with its line breaks removed');
     }
   }
 
@@ -423,6 +437,16 @@ export function validateTranscript(bytes, { secrets = new Map() } = {}) {
     let j = i;
     while (j < entries.length && MULTILINE_TYPES.has(entries[j].type)) j++;
     if (j - i >= 3) windows.push(entries.slice(i, j));
+    // Within a run that holds marked records, the marker lifts the hex rule
+    // from the run: also check each stretch of three or more unmarked
+    // records between them, so a signature split over them is still found
+    // (shorter stretches are pairs, already windows of their own).
+    for (let k = i; k < j; ) {
+      let l = k;
+      while (l < j && entries[l].allow === null) l++;
+      if (l - k >= 3 && l - k < j - i) windows.push(entries.slice(k, l));
+      k = l > k ? l : k + 1;
+    }
     i = j > i ? j : i + 1;
   }
   for (const group of windows) {
@@ -431,7 +455,7 @@ export function validateTranscript(bytes, { secrets = new Map() } = {}) {
     for (const rule of allRules) {
       if (group.some((e) => e.fired.has(rule.name))) continue;
       if (rule.marker && group.some((e) => e.allow === rule.marker)) continue;
-      if (hits(rule, direct) || hits(rule, spaced)) {
+      if (hits(rule, direct, true) || hits(rule, spaced, true)) {
         const first = group[0].line;
         const last = group[group.length - 1].line;
         fire(group, rule.name, last, `across the records on lines ${first}-${last} (texts joined)`);
