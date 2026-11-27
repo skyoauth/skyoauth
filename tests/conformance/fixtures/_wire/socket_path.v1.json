@@ -33,7 +33,7 @@
     {
       "expect": "too_long",
       "bind": "PathTooLong",
-      "applies_when": "The path is longer than max_socket_path_bytes for the platform."
+      "applies_when": "The path, as given, is longer than max_socket_path_bytes for the platform: a // or /./ in it counts, though the path's directory and name, which the later checks use, drop it. A relative path is also checked by the client as its absolute form, the working directory joined to it, which must fit too; the service measures a relative path as given (it reaches its socket through an open directory), so the client may refuse as too_long a relative path the service binds, never the other way. The cases' paths are absolute."
     },
     {
       "expect": "unsafe_directory",
@@ -48,7 +48,8 @@
     {
       "expect": "too_many_symlinks",
       "bind": "Io",
-      "applies_when": "The lookup of the socket's directory follows more than max_symlinks symbolic links."
+      "bind_io_kind": "Other",
+      "applies_when": "The lookup of the socket's directory follows more than max_symlinks symbolic links. The service's own walk refuses it with an error of kind Other (bind_io_kind), not the kernel's: a kernel lookup that fails first (ELOOP) is walked, and the walk's limit decides."
     },
     {
       "expect": "lookup",
@@ -813,6 +814,26 @@
         {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
       ],
       "path": "d/s",
+      "pad": "over_limit",
+      "expect": "too_long"
+    },
+    {
+      "case": "path_with_a_double_slash_over_the_limit",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
+      ],
+      "path": "d//s",
+      "pad": "over_limit",
+      "expect": "too_long"
+    },
+    {
+      "case": "path_with_a_dot_over_the_limit",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "0755", "owner": "service"}
+      ],
+      "path": "d/./s",
       "pad": "over_limit",
       "expect": "too_long"
     },
