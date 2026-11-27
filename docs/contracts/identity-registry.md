@@ -721,13 +721,19 @@ digits of the SHA-256 of the key's exact DER `SubjectPublicKeyInfo`.
   uncompressed point). It MUST refuse RSA, other curves and Ed448, at
   enrollment and at the handshake (the user, 2026-11-27, relayed by the
   lead).
-- Not yet enforced: `identity.rs` is algorithm-agnostic and accepts other
-  encodings and algorithms; `bootstrap_instance` and the operator
-  identity and credential writers still take the identity string (the local
-  transport and the checker writers derive it with `canonical_public_identity`
-  before the call); `AdminPeer::from_peer_spki` is called only by tests, since
-  no acceptor builds the peer yet (S3, S5 and S7 add the per-algorithm
-  check and S6 the acceptor).
+- Enforced by `canonical_public_identity` (`service/src/identity.rs`) before
+  the hash: exactly one DER SPKI form each, Ed25519 with its parameters absent
+  and a 32-octet key, P-256 with the `prime256v1` named curve and a 65-octet
+  uncompressed point, and every other algorithm and form refused. The key MUST
+  also be valid: an Ed25519 key canonically encoded, decodable and not of small
+  order, a P-256 point with both coordinates below the field prime and on the
+  curve (ADR-013 item 7; the user, 2026-11-24, applied to every enrolled key
+  by the lead, 2026-11-27; the user, 2026-11-27: contract edits on the lead's
+  recommendation authorized). `bootstrap_instance` and the operator identity
+  and credential writers still take the identity string (the local transport
+  and the checker writers derive it with `canonical_public_identity` before
+  the call); `AdminPeer::from_peer_spki` is called only by tests, since no
+  acceptor builds the peer yet (S6 adds the acceptor).
 
 - **IR-090** A checker identity MUST be bound to one resource server and an
   explicit tenant set, registered by instance `security_admin`, and MUST NOT

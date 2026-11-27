@@ -147,7 +147,8 @@ pub struct CheckerCreate {
     /// The DER `SubjectPublicKeyInfo` of the checker's mTLS key. The write
     /// derives `public_mtls_identity` from it with
     /// [`canonical_public_identity`]; bytes that are not one well-formed
-    /// DER `SubjectPublicKeyInfo` are [`AdminWriteError::PublicKey`].
+    /// DER `SubjectPublicKeyInfo` of a valid Ed25519 or P-256 key in its one
+    /// accepted form are [`AdminWriteError::PublicKey`].
     pub public_key_der: Vec<u8>,
     pub status: Status,
 }
@@ -916,14 +917,12 @@ pub async fn disable_audience_tenant_assignment(
 /// ([`IdKind::Checker`]) and the canonical public identity of
 /// `new.public_key_der` ([`canonical_public_identity`]), and appends
 /// `resource_server_checker.create`. Key bytes that are not one well-formed
-/// DER `SubjectPublicKeyInfo` are [`AdminWriteError::PublicKey`], after the
-/// authorization and before any ID is generated; an identity another
-/// checker has is [`RegistryError::AlreadyExists`].
-///
-/// Interim: the per-algorithm form rule of [`crate::identity`] ("A hard
-/// requirement on the callers") is not enforced yet, so this write must not
-/// be exposed on any HTTP surface until it is (see the module docs, "Not
-/// done here").
+/// DER `SubjectPublicKeyInfo` of a valid Ed25519 or P-256 key in its one
+/// accepted form ([`crate::identity`], "One form per accepted algorithm")
+/// are [`AdminWriteError::PublicKey`], after the authorization and before
+/// any ID is generated; an identity another checker has is
+/// [`RegistryError::AlreadyExists`]. No HTTP route exposes this write yet
+/// (see the [`crate::admin`] module docs, "Not done here").
 pub async fn create_resource_server_checker(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,
@@ -985,12 +984,10 @@ async fn write_checker(
 /// `changes.public_key_der`, and appends `resource_server_checker.update`,
 /// or `.enable` or `.disable` for a status-only change (no key, or a key of
 /// the stored identity). Without a key the stored identity is kept. Key
-/// bytes that are not one well-formed DER `SubjectPublicKeyInfo` are
+/// bytes that [`create_resource_server_checker`] refuses are
 /// [`AdminWriteError::PublicKey`], after the authorization and before the
-/// stored row is read. Its tenant set is unchanged.
-///
-/// Interim, as [`create_resource_server_checker`]: not to be exposed on any
-/// HTTP surface until the per-algorithm form rule lands.
+/// stored row is read. Its tenant set is unchanged. No HTTP route exposes
+/// this write yet, as [`create_resource_server_checker`].
 pub async fn update_resource_server_checker(
     transaction: &mut Transaction<'_, Postgres>,
     request: &AdminRequest<'_>,

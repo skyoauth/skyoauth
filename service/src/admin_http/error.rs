@@ -195,7 +195,9 @@ pub const fn from_id(err: &IdError) -> AdminHttpError {
 }
 
 /// [`IdentityError`]: the submitted key bytes are not one DER
-/// `SubjectPublicKeyInfo`, a malformed value.
+/// `SubjectPublicKeyInfo`, or not a valid Ed25519 or P-256 key in its
+/// accepted form, a
+/// malformed value.
 pub const fn from_identity(err: &IdentityError) -> AdminHttpError {
     match err {
         IdentityError::Empty
@@ -203,7 +205,8 @@ pub const fn from_identity(err: &IdentityError) -> AdminHttpError {
         | IdentityError::Truncated
         | IdentityError::NotDer
         | IdentityError::TrailingBytes
-        | IdentityError::NotSpki => code(ErrorCode::InvalidRequest),
+        | IdentityError::NotSpki
+        | IdentityError::UnsupportedKey => code(ErrorCode::InvalidRequest),
     }
 }
 
@@ -795,8 +798,9 @@ mod tests {
                 (IdentityError::NotDer, INVALID),
                 (IdentityError::TrailingBytes, INVALID),
                 (IdentityError::NotSpki, INVALID),
+                (IdentityError::UnsupportedKey, INVALID),
             ],
-            6,
+            7,
         );
     }
 
