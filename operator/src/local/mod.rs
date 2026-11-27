@@ -9,7 +9,13 @@
 //! refusal or an unknown outcome ([`parse_reply`]); [`LocalClient`]
 //! exchanges one request for its reply over a connection, with its time
 //! limits and the classification of its outcome (see its documentation).
-//! The socket's path, owner and mode are not checked here.
+//! The socket's path, owner, mode and directories are checked before
+//! every connect by [`LocalClient::new`] ([`CheckedSocketPath`],
+//! [`check_socket`]: the service's rules for its socket file, and a
+//! stricter one for its own directory, pinned by
+//! `tests/conformance/fixtures/_wire/socket_path.v1.json`), the client a
+//! real caller uses; [`LocalClient::unchecked`] ([`SocketPath`]) connects
+//! unchecked, for tests and bridges that check otherwise.
 //!
 //! # Framing
 //!
@@ -92,6 +98,7 @@
 //! Unix only, like the service's transport (`cfg(unix)` in `lib.rs`).
 
 mod exchange;
+mod path;
 mod wire;
 
 use std::{fmt, io};
@@ -99,6 +106,10 @@ use std::{fmt, io};
 pub use exchange::{
     Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, HalfClose, LocalClient, Retry, SocketPath,
     Timeouts,
+};
+pub use path::{
+    AncestorTrust, CheckedSocket, CheckedSocketPath, MAX_SOCKET_PATH_BYTES, MAX_SYMLINKS,
+    PathError, PathProblem, SOCKET_MODE, SocketExpectations, check_socket,
 };
 pub use wire::parse_reply;
 
@@ -252,6 +263,11 @@ pub enum NotSent {
     /// The connection refused the wait of the first write, with the error's
     /// kind ([`HalfClose::set_write_wait`]); nothing was written to it.
     Setup(io::ErrorKind),
+    /// [`CheckedSocketPath`] refused the socket path, by its problem: before
+    /// the connect, or after it when the path no longer held the checked
+    /// socket ([`PathProblem::Changed`]; the connection is dropped before
+    /// anything is written to it).
+    Path(PathProblem),
 }
 
 impl fmt::Display for NotSent {
@@ -262,6 +278,7 @@ impl fmt::Display for NotSent {
             Self::Connect(_) => "no connection to the local transport could be made",
             Self::TimedOut => "the total wait ran out before anything was written",
             Self::Setup(_) => "the connection refused the time limit of the first write",
+            Self::Path(_) => "the local socket's path, owner or mode was refused",
         })
     }
 }

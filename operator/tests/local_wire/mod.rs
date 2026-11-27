@@ -1069,7 +1069,7 @@ fn the_local_module_names_no_signer() {
         files.push(path.file_name().unwrap().to_str().unwrap().to_owned());
     }
     files.sort();
-    assert_eq!(files, ["exchange.rs", "mod.rs", "wire.rs"]);
+    assert_eq!(files, ["exchange.rs", "mod.rs", "path.rs", "wire.rs"]);
 }
 
 /// The members of a fixture object.
@@ -1104,7 +1104,8 @@ fn case_names(cases: &[Value]) -> BTreeSet<String> {
 /// service side only (`tests/harness/wire_errors.rs`); `exchange.id_seed`
 /// is the service's ID generator seed, read by
 /// `tests/harness/local_transport_wire.rs` only; `default_limits` is read
-/// by `local_exchange`.
+/// by `local_exchange`. `socket_path.v1.json` is read, member by member,
+/// by `local_path`.
 #[test]
 fn every_wire_fixture_file_and_case_is_covered() {
     let mut files: Vec<String> = std::fs::read_dir(fixtures_dir().join("_wire"))
@@ -1112,7 +1113,14 @@ fn every_wire_fixture_file_and_case_is_covered() {
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     files.sort();
-    assert_eq!(files, ["errors.v1.json", WIRE_FIXTURE]);
+    assert_eq!(
+        files,
+        [
+            "errors.v1.json",
+            WIRE_FIXTURE,
+            crate::local_path::SOCKET_PATH_FIXTURE
+        ]
+    );
 
     let fixture = wire_fixture();
     assert_eq!(
