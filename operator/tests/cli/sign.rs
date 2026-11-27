@@ -6,9 +6,9 @@
 //! not at all (docs/proposals/operator-cli-artifacts.md).
 //!
 //! Every run is checked for what it must never do ([`run_sign`]): print a
-//! seed in any form, print a signature anywhere but as the response
-//! artifact of a successful run without `--out`, print anything on
-//! standard output when it fails, or end in another exit code than 0 to 3.
+//! seed or a signature in any form (the response goes to `--out` only),
+//! print anything on standard output when it fails, or end in another exit
+//! code than 0 to 3.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -85,8 +85,7 @@ fn seed_needles() -> Vec<String> {
 }
 
 /// Every signature of the signature fixture, and every test key's
-/// signature over every challenge vector, in every form: printed only as
-/// the response artifact of a successful `sign` without `--out`.
+/// signature over every challenge vector, in every form: never printed.
 fn signature_needles() -> Vec<String> {
     let mut hexes: Vec<String> = list(&recovery_fixture(SIGNATURE_FIXTURE), "cases")
         .iter()
@@ -126,11 +125,9 @@ fn library_signature(vector: &Value, name: &str) -> String {
 
 /// Runs the binary with `arguments` and no input, and checks what every
 /// `sign` run must hold: an exit code from 0 to 3 (a panic is 101), output
-/// in printable ASCII and newlines only (but for the response artifact's
-/// line, which holds no control character), an error message on standard
+/// in printable ASCII and newlines only, an error message on standard
 /// error exactly when the code is not 0 and nothing on standard output
-/// then, no seed anywhere, and a signature only on the standard output of
-/// a run that exits 0, as one response artifact line.
+/// then, and no seed and no signature anywhere.
 fn run_sign<S: AsRef<OsStr>>(arguments: &[S]) -> Run {
     let output = Command::new(BINARY)
         .args(arguments)
@@ -139,20 +136,11 @@ fn run_sign<S: AsRef<OsStr>>(arguments: &[S]) -> Run {
         .expect("the binary runs");
     let code = output.status.code().expect("the binary exits with a code");
     assert!((0..=3).contains(&code), "exit code {code}: {output:?}");
-    // The response artifact is written as it is: its operation ID may hold
-    // characters that are not ASCII (the codec escapes the controls below
-    // U+0020 only), so only its line is exempt, and only for its one line.
-    let artifact = output.status.success() && output.stdout.starts_with(b"{\"operation_id\":");
-    for (stream, exempt) in [(&output.stdout, artifact), (&output.stderr, false)] {
-        let (body, newline) = stream.split_at(stream.len().saturating_sub(1));
+    for stream in [&output.stdout, &output.stderr] {
         assert!(
-            if exempt {
-                newline == b"\n" && body.iter().all(|byte| *byte >= b' ')
-            } else {
-                stream
-                    .iter()
-                    .all(|byte| matches!(byte, b' '..=b'~' | b'\n'))
-            },
+            stream
+                .iter()
+                .all(|byte| matches!(byte, b' '..=b'~' | b'\n')),
             "a byte that is not printable ASCII: {output:?}"
         );
     }
@@ -166,24 +154,10 @@ fn run_sign<S: AsRef<OsStr>>(arguments: &[S]) -> Run {
         assert!(run.stderr.starts_with("skyoauth-operator: "), "{run:?}");
         assert_eq!(run.stdout, "", "a failed sign prints nothing: {run:?}");
     }
-    for needle in seed_needles() {
+    for needle in seed_needles().into_iter().chain(signature_needles()) {
         assert!(
             !run.stdout.contains(&needle) && !run.stderr.contains(&needle),
-            "a seed is printed: {run:?}"
-        );
-    }
-    let artifact_line = run.code == 0
-        && run.stdout.starts_with("{\"operation_id\":")
-        && run.stdout.ends_with("\"}\n")
-        && run.stdout.lines().count() == 1;
-    for needle in signature_needles() {
-        assert!(
-            !run.stderr.contains(&needle),
-            "a signature on stderr: {run:?}"
-        );
-        assert!(
-            artifact_line || !run.stdout.contains(&needle),
-            "a signature outside a response artifact: {run:?}"
+            "a seed or a signature is printed: {run:?}"
         );
     }
     run
@@ -206,26 +180,26 @@ fn set_mode(path: &Path, mode: u32) {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) {}
 
-/// The arguments of `sign` with `challenge`, `seed` and the vector's
-/// confirming flags at `now`, and `--out out` when given.
-fn sign_arguments(
-    challenge: &Path,
-    seed: &Path,
-    flags: &[String],
-    out: Option<&Path>,
-) -> Vec<OsString> {
+/// The arguments of `sign` with `challenge`, `seed`, `out` and `flags`
+/// (a vector's confirming flags).
+fn sign_arguments(challenge: &Path, seed: &Path, flags: &[String], out: &Path) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = vec![
         "sign".into(),
         "--challenge".into(),
         challenge.into(),
         "--seed-file".into(),
         seed.into(),
+        "--out".into(),
+        out.into(),
     ];
     arguments.extend(flags.iter().map(OsString::from));
-    if let Some(out) = out {
-        arguments.push("--out".into());
-        arguments.push(out.into());
-    }
+    arguments
+}
+
+/// `arguments` without the flag `flag` and its value.
+fn without(mut arguments: Vec<OsString>, flag: &str) -> Vec<OsString> {
+    let at = arguments.iter().position(|given| given == flag).unwrap();
+    arguments.drain(at..at + 2);
     arguments
 }
 
@@ -262,13 +236,8 @@ impl Op1 {
     }
 
     /// `sign` of op_1 with `seed`, the confirming flags changed by
-    /// `change`, writing to `out` when given.
-    fn sign_with(
-        &self,
-        seed: &Path,
-        change: impl FnOnce(&mut Vec<String>),
-        out: Option<&Path>,
-    ) -> Run {
+    /// `change`, writing to `out`.
+    fn sign_with(&self, seed: &Path, change: impl FnOnce(&mut Vec<String>), out: &Path) -> Run {
         let mut flags = confirming_flags(&vector("op_1"), NOW);
         change(&mut flags);
         run_sign(&sign_arguments(&self.challenge, seed, &flags, out))
@@ -284,11 +253,12 @@ impl Op1 {
 
 /// Every vector of the challenge fixture, its escapes and integer extremes
 /// included, signed with the recovery test key's seed file: the response
-/// artifact on standard output, and in a new `--out` file, is byte for
-/// byte the library's response ([`sign_challenge`], deterministic
-/// Ed25519) in the artifact's form; op_1's is the signature fixture's
-/// `valid`. Each verifies with `verify-response` and the recovery key, and
-/// not with another. The same run gives the same artifact.
+/// artifact in the new `--out` file is byte for byte the library's response
+/// ([`sign_challenge`], deterministic Ed25519) in the artifact's form, and
+/// the file is of mode 0600 at most (Unix; the umask may remove bits);
+/// op_1's is the signature fixture's `valid`. Each verifies with
+/// `verify-response` and the recovery key, and not with another. The same
+/// run gives the same artifact.
 #[test]
 fn sign_round_trip_of_every_challenge_vector() {
     let dir = TempDir::new();
@@ -305,43 +275,26 @@ fn sign_round_trip_of_every_challenge_vector() {
             response_artifact(text(vector, "id"), &library_signature(vector, "recovery"));
         let expected = String::from_utf8(expected).unwrap();
 
-        let printed = run_sign(&sign_arguments(&challenge, &seed, &flags, None));
-        assert_eq!(
-            printed,
-            Run {
-                code: 0,
-                stdout: expected.clone(),
-                stderr: String::new(),
-            },
-            "{case}"
-        );
-        assert_eq!(
-            run_sign(&sign_arguments(&challenge, &seed, &flags, None)),
-            printed,
-            "{case}"
-        );
-
-        let out = dir.0.join(format!("{case}.response"));
-        let run = run_sign(&sign_arguments(&challenge, &seed, &flags, Some(&out)));
         let operation_id = quoted(text(vector, "id"));
-        assert_eq!(
-            run,
-            Run {
-                code: 0,
-                stdout: format!("clock: --now {now}\n{}", written(&operation_id)),
-                stderr: String::new(),
-            },
-            "{case}"
-        );
-        assert_eq!(fs::read_to_string(&out).unwrap(), expected, "{case}");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
+        let out = dir.0.join(format!("{case}.response"));
+        for path in [&out, &dir.0.join(format!("{case}.again"))] {
+            let run = run_sign(&sign_arguments(&challenge, &seed, &flags, path));
             assert_eq!(
-                fs::metadata(&out).unwrap().permissions().mode() & 0o7777,
-                0o600,
+                run,
+                Run {
+                    code: 0,
+                    stdout: format!("clock: --now {now}\n{}", written(&operation_id)),
+                    stderr: String::new(),
+                },
                 "{case}"
             );
+            assert_eq!(fs::read_to_string(path).unwrap(), expected, "{case}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+                assert_eq!(mode & !0o600, 0, "{case}: {mode:o}");
+            }
         }
 
         let run = verify_response(&challenge, &out, &recovery_key);
@@ -386,24 +339,20 @@ fn every_refusal_writes_nothing() {
         };
         let out = op.out("response");
         assert_eq!(
-            op.sign_with(&op.seed, change, Some(&out)),
+            op.sign_with(&op.seed, change, &out),
             expected,
             "{refusal:?}"
         );
         assert!(fs::symlink_metadata(&out).is_err(), "{refusal:?}");
-        assert_eq!(
-            op.sign_with(&op.seed, change, None),
-            expected,
-            "{refusal:?}"
-        );
         // The seed file is not read for a refused challenge.
         let bad_seed = op.dir.file("bad_seed", b"not a seed");
         set_mode(&bad_seed, 0o644);
         assert_eq!(
-            op.sign_with(&bad_seed, change, None),
+            op.sign_with(&bad_seed, change, &out),
             expected,
             "{refusal:?}"
         );
+        assert!(fs::symlink_metadata(&out).is_err(), "{refusal:?}");
         fs::remove_file(bad_seed).unwrap();
     }
 
@@ -412,7 +361,7 @@ fn every_refusal_writes_nothing() {
     assert_eq!(test_public_key("rfc8032_test1"), NEW_KEY);
     let out = op.out("response");
     assert_eq!(
-        op.sign_with(&unchanged, |_| {}, Some(&out)),
+        op.sign_with(&unchanged, |_| {}, &out),
         Run {
             code: 1,
             stdout: String::new(),
@@ -443,7 +392,7 @@ fn every_refusal_writes_nothing() {
         ),
     ] {
         let flags = confirming_flags(&vector("op_1"), NOW);
-        let run = run_sign(&sign_arguments(challenge, &op.seed, &flags, Some(&out)));
+        let run = run_sign(&sign_arguments(challenge, &op.seed, &flags, &out));
         assert_eq!(
             run,
             Run {
@@ -458,9 +407,9 @@ fn every_refusal_writes_nothing() {
 
 /// `sign` requires every expectation: the instance, the epoch and the
 /// replacement's identity, trust anchor and new recovery key, with the
-/// challenge and the seed file. One left out is a usage error (exit 2),
-/// decided before any file is read: the challenge and the seed file named
-/// here do not exist.
+/// challenge, the seed file and the output file. One left out is a usage
+/// error (exit 2), decided before any file is read: the challenge and the
+/// seed file named here do not exist, and no output file is created.
 #[test]
 fn sign_requires_every_expectation() {
     let op = Op1::new();
@@ -468,22 +417,20 @@ fn sign_requires_every_expectation() {
         &op.dir.0.join("missing-challenge"),
         &op.dir.0.join("missing-seed"),
         &confirming_flags(&vector("op_1"), NOW),
-        None,
+        &op.out("response"),
     );
     for flag in [
         "--challenge",
         "--seed-file",
+        "--out",
         "--instance-id",
         "--epoch",
         "--replacement-identity",
         "--trust-anchor",
         "--new-recovery-key",
     ] {
-        let mut arguments = all.clone();
-        let at = arguments.iter().position(|given| given == flag).unwrap();
-        arguments.drain(at..at + 2);
         assert_eq!(
-            run_sign(&arguments),
+            run_sign(&without(all.clone(), flag)),
             Run {
                 code: 2,
                 stdout: String::new(),
@@ -491,6 +438,7 @@ fn sign_requires_every_expectation() {
             },
             "{flag}"
         );
+        assert!(fs::symlink_metadata(op.dir.0.join("response")).is_err());
     }
 }
 
@@ -504,6 +452,7 @@ fn no_flag_and_no_variable_takes_the_seed() {
     let op = Op1::new();
     let seed = seed_hex("recovery");
     let flags = confirming_flags(&vector("op_1"), NOW);
+    let out = op.out("response");
     for flag in [
         "--seed",
         "--seed-hex",
@@ -512,7 +461,7 @@ fn no_flag_and_no_variable_takes_the_seed() {
         "--secret",
         "--response",
     ] {
-        let mut arguments = sign_arguments(&op.challenge, &op.seed, &flags, None);
+        let mut arguments = sign_arguments(&op.challenge, &op.seed, &flags, &out);
         arguments.push(flag.into());
         arguments.push(seed.clone().into());
         assert_eq!(
@@ -525,7 +474,7 @@ fn no_flag_and_no_variable_takes_the_seed() {
             "{flag}"
         );
     }
-    let mut arguments = sign_arguments(&op.challenge, &op.seed, &flags, None);
+    let mut arguments = sign_arguments(&op.challenge, &op.seed, &flags, &out);
     arguments.push(seed.clone().into());
     let position = arguments.len();
     assert_eq!(
@@ -541,7 +490,7 @@ fn no_flag_and_no_variable_takes_the_seed() {
             &op.challenge,
             Path::new(&seed),
             &flags,
-            None
+            &out
         )),
         Run {
             code: 3,
@@ -552,12 +501,10 @@ fn no_flag_and_no_variable_takes_the_seed() {
             ),
         }
     );
-    let mut arguments = sign_arguments(&op.challenge, &op.seed, &flags, None);
-    let at = arguments
-        .iter()
-        .position(|given| given == "--seed-file")
-        .unwrap();
-    arguments.drain(at..at + 2);
+    let arguments = without(
+        sign_arguments(&op.challenge, &op.seed, &flags, &out),
+        "--seed-file",
+    );
     for variable in [
         "SKYOAUTH_SEED",
         "SKYOAUTH_OPERATOR_SEED",
@@ -583,6 +530,7 @@ fn no_flag_and_no_variable_takes_the_seed() {
         );
         assert!(output.stdout.is_empty());
     }
+    assert!(fs::symlink_metadata(&out).is_err());
 }
 
 /// The other usage errors of `sign`, and its help.
@@ -590,7 +538,12 @@ fn no_flag_and_no_variable_takes_the_seed() {
 fn sign_usage_errors_and_help() {
     let op = Op1::new();
     let flags = confirming_flags(&vector("op_1"), NOW);
-    let base = sign_arguments(&op.challenge, &op.seed, &flags, None);
+    let out = op.out("response");
+    // Without `--out`, so that each case can give it.
+    let base = without(
+        sign_arguments(&op.challenge, &op.seed, &flags, &out),
+        "--out",
+    );
     let with = |extra: &[&str]| {
         let mut arguments = base.clone();
         arguments.extend(extra.iter().map(OsString::from));
@@ -604,6 +557,10 @@ fn sign_usage_errors_and_help() {
         (with(&["--out"]), "--out needs a value"),
         (with(&["--out", ""]), "--out has an empty value"),
         (with(&["--out", "--now"]), "--out needs a value"),
+        (
+            with(&["--out", "x", "--out", "y"]),
+            "--out is given more than once",
+        ),
         (with(&["help"]), "argument 18 is not a flag of sign"),
     ] {
         assert_eq!(
@@ -616,14 +573,16 @@ fn sign_usage_errors_and_help() {
             "{arguments:?}"
         );
     }
+    assert!(fs::symlink_metadata(&out).is_err());
     let help = run_sign(&["--help"]);
     assert_eq!(help.code, 0);
     assert!(
         help.stdout
-            .contains("skyoauth-operator sign --challenge FILE --seed-file FILE")
+            .contains("skyoauth-operator sign --challenge FILE --seed-file FILE --out FILE")
+            && help.stdout.contains("On Windows its protection is NOT")
             && help
                 .stdout
-                .contains("On Windows its protection is\nNOT checked"),
+                .contains("never\ninstall this binary setuid or setgid"),
         "{help:?}"
     );
     for arguments in [vec!["sign", "--help"], vec!["sign", "-h"]] {
@@ -633,16 +592,17 @@ fn sign_usage_errors_and_help() {
 }
 
 /// The content of the seed file, on every platform: 64 lowercase
-/// hexadecimal digits and at most one newline. Anything else is refused,
-/// exit 1 (or exit 3 past 65 bytes), with a fixed message that repeats no
-/// byte of the file, and nothing is written.
+/// hexadecimal digits and at most one newline. Any other content of at
+/// most 128 bytes is one refusal, exit 1, "not a seed"; a larger file is
+/// exit 3, too large. Each message is fixed and repeats no byte of the
+/// file, and nothing is written.
 #[test]
 fn seed_file_content() {
     let op = Op1::new();
     let seed = seed_hex("recovery");
     let not_a_seed = "skyoauth-operator: --seed-file: the file is not a seed: 64 lowercase \
                       hexadecimal digits, optionally followed by one newline\n";
-    let too_large = "skyoauth-operator: --seed-file: the file is larger than 65 bytes\n";
+    let too_large = "skyoauth-operator: --seed-file: the file is larger than 128 bytes\n";
     let cases: Vec<(&str, Vec<u8>, &str)> = vec![
         ("empty", Vec::new(), not_a_seed),
         ("newline", b"\n".to_vec(), not_a_seed),
@@ -654,7 +614,17 @@ fn seed_file_content() {
             not_a_seed,
         ),
         ("long", format!("{seed}0").into_bytes(), not_a_seed),
-        ("longer", format!("{seed}00").into_bytes(), too_large),
+        ("longer", format!("{seed}00").into_bytes(), not_a_seed),
+        ("twice", format!("{seed}\n{seed}").into_bytes(), too_large),
+        ("doubled", format!("{seed}{seed}").into_bytes(), not_a_seed),
+        ("at_cap", vec![b'0'; 128], not_a_seed),
+        ("over_cap", vec![b'0'; 129], too_large),
+        ("bom", format!("\u{feff}{seed}").into_bytes(), not_a_seed),
+        (
+            "bom_newline",
+            format!("\u{feff}{seed}\n").into_bytes(),
+            not_a_seed,
+        ),
         (
             "uppercase",
             seed.to_ascii_uppercase().into_bytes(),
@@ -684,9 +654,9 @@ fn seed_file_content() {
         (
             "two_newlines",
             format!("{seed}\n\n").into_bytes(),
-            too_large,
+            not_a_seed,
         ),
-        ("crlf", format!("{seed}\r\n").into_bytes(), too_large),
+        ("crlf", format!("{seed}\r\n").into_bytes(), not_a_seed),
         ("cr", format!("{seed}\r").into_bytes(), not_a_seed),
         ("raw", unhex(&seed), not_a_seed),
         (
@@ -704,7 +674,7 @@ fn seed_file_content() {
     for (name, bytes, message) in cases {
         let path = seed_file(&op.dir, name, &bytes);
         let out = op.out("response");
-        let run = op.sign_with(&path, |_| {}, Some(&out));
+        let run = op.sign_with(&path, |_| {}, &out);
         let code = if message == too_large { 3 } else { 1 };
         assert_eq!(
             run,
@@ -724,16 +694,22 @@ fn seed_file_content() {
         ("with_newline", format!("{seed}\n").into_bytes()),
     ] {
         let path = seed_file(&op.dir, name, &bytes);
-        let run = op.sign_with(&path, |_| {}, None);
+        let out = op.out(&format!("{name}.response"));
+        let run = op.sign_with(&path, |_| {}, &out);
         assert_eq!(run.code, 0, "{name}: {run:?}");
+        assert_eq!(
+            fs::read(&out).unwrap(),
+            response_artifact("op_1", &fixture_signature("valid"))
+        );
     }
 }
 
 /// The seed file's checks on Unix: a regular file (not a directory, a
 /// named pipe or a device, refused without being opened), not a symbolic
 /// link (even to a good seed file), of mode 0600 exactly, owned by the
-/// effective user (tried as root, with another owner). Each is exit 3 with
-/// a fixed message, and nothing is written.
+/// effective user (tried only as root, which can give the file another
+/// owner; a NOTICE otherwise). Each is exit 3 with a fixed message, and
+/// nothing is written. Runs as root and as another user.
 #[cfg(unix)]
 #[test]
 fn seed_file_protection_on_unix() {
@@ -743,7 +719,7 @@ fn seed_file_protection_on_unix() {
     let io = |path: &Path, message: &str| {
         let out = op.out("response");
         assert_eq!(
-            op.sign_with(path, |_| {}, Some(&out)),
+            op.sign_with(path, |_| {}, &out),
             Run {
                 code: 3,
                 stdout: String::new(),
@@ -808,13 +784,13 @@ fn seed_file_protection_on_unix() {
     }
 
     // The good seed file is still accepted.
-    assert_eq!(op.sign_with(&op.seed, |_| {}, None).code, 0);
+    assert_eq!(op.sign_with(&op.seed, |_| {}, &op.out("response")).code, 0);
 }
 
 /// `--out` is created new: an existing file (left unchanged), a symbolic
 /// link and a directory (Unix; a dangling link's target is not created)
-/// are refused, exit 3, and so is a path in a directory that
-/// does not exist; the signature is not printed instead.
+/// are refused, exit 3, and so is a path in a directory that does not
+/// exist; the signature is not printed instead.
 #[test]
 fn out_is_created_new_or_not_at_all() {
     let op = Op1::new();
@@ -822,7 +798,7 @@ fn out_is_created_new_or_not_at_all() {
     let exists_message = "--out: the file already exists; it is never overwritten";
     let io = |out: &Path, message: &str| {
         assert_eq!(
-            op.sign_with(&op.seed, |_| {}, Some(out)),
+            op.sign_with(&op.seed, |_| {}, out),
             Run {
                 code: 3,
                 stdout: String::new(),
@@ -861,24 +837,25 @@ fn out_is_created_new_or_not_at_all() {
     }
     // A new path is written.
     let out = op.out("response");
-    assert_eq!(op.sign_with(&op.seed, |_| {}, Some(&out)).code, 0);
+    assert_eq!(op.sign_with(&op.seed, |_| {}, &out).code, 0);
     assert_eq!(
         fs::read(&out).unwrap(),
         response_artifact("op_1", &fixture_signature("valid"))
     );
 }
 
-/// A response that cannot be written to standard output (a pipe whose
-/// reading end is closed) is exit 3, never 0, and the signature is not
-/// shown on standard error.
+/// A summary that cannot be written to standard output (a pipe whose
+/// reading end is closed) is exit 3, never 0, after the response was
+/// written to `--out`; the signature is not shown on standard error.
 #[test]
-fn a_response_that_cannot_be_written_is_exit_3() {
+fn a_summary_that_cannot_be_written_is_exit_3() {
     let op = Op1::new();
     let flags = confirming_flags(&vector("op_1"), NOW);
+    let out = op.out("response");
     let (reader, writer) = std::io::pipe().unwrap();
     drop(reader);
     let output = Command::new(BINARY)
-        .args(sign_arguments(&op.challenge, &op.seed, &flags, None))
+        .args(sign_arguments(&op.challenge, &op.seed, &flags, &out))
         .stdin(Stdio::null())
         .stdout(writer)
         .stderr(Stdio::piped())
@@ -894,4 +871,48 @@ fn a_response_that_cannot_be_written_is_exit_3() {
     for needle in signature_needles().into_iter().chain(seed_needles()) {
         assert!(!stderr.contains(&needle), "{stderr}");
     }
+    assert_eq!(
+        fs::read(&out).unwrap(),
+        response_artifact("op_1", &fixture_signature("valid"))
+    );
+}
+
+/// A write to `--out` that fails is exit 3 with its message, and leaves an
+/// empty file (Unix: the binary runs under `ulimit -f 0`, with `SIGXFSZ`
+/// ignored, so its write of the response fails with `EFBIG`). Nothing is
+/// printed on standard output and no signature anywhere. Without `sh`, the
+/// test says so and passes.
+#[cfg(unix)]
+#[test]
+fn an_out_write_that_fails_is_exit_3() {
+    let op = Op1::new();
+    let flags = confirming_flags(&vector("op_1"), NOW);
+    let out = op.out("response");
+    let script = r#"trap "" XFSZ; ulimit -f 0 || exit 99; exec "$0" "$@""#;
+    let Ok(output) = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg(BINARY)
+        .args(sign_arguments(&op.challenge, &op.seed, &flags, &out))
+        .stdin(Stdio::null())
+        .output()
+    else {
+        eprintln!("NOTICE: no sh: the failing --out write was NOT tried");
+        return;
+    };
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(3), "{stdout}{stderr}");
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        format!(
+            "skyoauth-operator: --out: the file cannot be written ({})\n",
+            std::io::ErrorKind::FileTooLarge
+        )
+    );
+    for needle in signature_needles().into_iter().chain(seed_needles()) {
+        assert!(!stderr.contains(&needle), "{stderr}");
+    }
+    assert_eq!(fs::read(&out).unwrap(), b"");
 }

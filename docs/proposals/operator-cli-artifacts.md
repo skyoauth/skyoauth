@@ -28,13 +28,15 @@ and `verify-response` (D1a), `sign` and its seed file (D1b).
   documented and the help warning of it; the seed not wiped
   (`SoftwareSigner` has no `zeroize`), documented. Also lead: every
   expectation is required for `sign`, and exit 4 is `verify-challenge`'s
-  only.
+  only. D1b review: `--out` required (no response on standard output), the
+  file synchronized before success, the seed file read up to 128 bytes with
+  every content error one refusal, the setuid and `sudo` guidance.
 - **Implementation picks** (D1a and D1b, open to review): the byte form of
   each artifact (one line, its newline, member order, no whitespace, the
   escapes, lowercase hexadecimal), the size limits, the output lines and
   messages, `sign`'s exit codes within the lead's table (which failure is 1,
-  2 or 3), the order of `sign`'s steps, its output with and without
-  `--out`, and how the effective user is read. Each is marked
+  2 or 3), the order of `sign`'s steps, its output, and how the effective
+  user is read. Each is marked
   "(implementation pick)" below.
 
 The workstation side of offline recovery (ADR-013 items 7 and 8; the
@@ -53,9 +55,9 @@ it creates new.
 skyoauth-operator verify-challenge --challenge FILE --instance-id ID --epoch N
     [--replacement-identity ID] [--trust-anchor REF] [--new-recovery-key HEX]
     [--now MICROS]
-skyoauth-operator sign --challenge FILE --seed-file FILE --instance-id ID
-    --epoch N --replacement-identity ID --trust-anchor REF
-    --new-recovery-key HEX [--now MICROS] [--out FILE]
+skyoauth-operator sign --challenge FILE --seed-file FILE --out FILE
+    --instance-id ID --epoch N --replacement-identity ID --trust-anchor REF
+    --new-recovery-key HEX [--now MICROS]
 skyoauth-operator verify-response --challenge FILE --response FILE --key HEX
 skyoauth-operator --help
 ```
@@ -123,8 +125,9 @@ it never prints the signature, whatever the result.
 
 `sign` takes the flags of `verify-challenge`, all of the replacement's
 values required (lead pick: it signs only a confirmed replacement), the
-seed file (`--seed-file`, see [the seed file](#the-seed-file)) and an
-optional output file (`--out`). In this order (implementation pick):
+seed file (`--seed-file`, see [the seed file](#the-seed-file)) and the
+output file (`--out`, required; lead ruling). In this order
+(implementation pick):
 
 1. the command line: a flag left out is a usage error (exit 2), decided
    before any file is read. An unconfirmed replacement cannot reach the
@@ -142,15 +145,17 @@ optional output file (`--out`). In this order (implementation pick):
    signer's own (`refused (RecoveryKeyUnchanged): …`, exit 1) and checks
    its own signature (`refused (NotVerified)`, `refused (Signer(Failed))`,
    exit 1; not expected with this signer);
-5. the response artifact, written last and whole: with `--out`, to a new
-   file (below), and standard output then shows `clock:`, `operation_id:`,
-   `replacement_confirmed: yes` and `result: ok; …`, never the signature;
-   without `--out`, standard output is the response artifact and nothing
-   else, so it can be redirected to a file.
+5. the response artifact, written last to the new `--out` file (below);
+   standard output then shows `clock:`, `operation_id:`,
+   `replacement_confirmed: yes` and `result: ok; …`, never the signature.
 
-So a failed `sign` prints nothing on standard output, creates no file and
-shows no signature: the signature is shown only as the response artifact of
-a `sign` that succeeded. The artifact is built with the transport's codec
+The response never goes to standard output (lead ruling): a standard
+output that was closed when the command started is reopened on
+`/dev/null` by the Rust runtime on Unix, so a response written there would
+be lost with exit 0, and a shell redirection would bypass the checks of
+`--out` (a new file, mode 0600). So `sign` never prints a signature, and a
+failed `sign` prints nothing on standard output and creates no file. The
+artifact is built with the transport's codec
 (the `restore` request line without its `op` member), so it is byte for
 byte what a `restore` request carries. Ed25519 signing is deterministic: the
 same challenge and seed give the same artifact. (Implementation pick.)
@@ -159,10 +164,12 @@ same challenge and seed give the same artifact. (Implementation pick.)
 `CREATE_NEW` on Windows), of mode 0600 on Unix (the umask may only remove
 bits): an existing file, a directory or a symbolic link, even a dangling
 one, is never followed or overwritten, and is refused with exit 3 (`--out:
-the file already exists; it is never overwritten`). It is not synchronized
-to the disk. A write that fails after the file was created may leave a
-partial file, which is not a response artifact and is refused as one.
-(Implementation pick.)
+the file already exists; it is never overwritten`). The response is written
+and synchronized to the disk (`sync_all`) before success is reported. A
+write or synchronization that fails after the file was created is exit 3
+(`--out: the file cannot be written (<kind>)`) and may leave a partial or
+empty file, which is not a response artifact and is refused as one; remove
+it before signing again. (Implementation pick.)
 
 Results go to standard output, errors to standard error as one line
 `skyoauth-operator: <message>` (a usage error adds a line that points to
@@ -172,11 +179,12 @@ is the same for the same arguments and files, the system clock aside. A
 write to standard output that fails makes the command exit 3, whatever its
 result, and say so on standard error (`the output cannot be written
 (<kind>)`); a write to standard error that fails makes it exit 3 too. Only a
-write that fails does: a standard output or error that is not open at all
-(a closed descriptor, `EBADF`, whose writes the Rust standard library takes
-as done) keeps the command's own exit code, so it never turns a failure into
-0, but a `sign` without `--out` then exits 0 with its response lost: use
-`--out`. (Messages: implementation pick.)
+write that fails does: a standard output or error that was closed when the
+command started is reopened on `/dev/null` by the Rust runtime on Unix (on
+Windows, the standard library takes the writes to a missing handle as
+done), so its writes succeed and the command keeps its own exit code: it
+never turns a failure into 0, and no result of `sign` is lost, since its
+response is written to `--out` only. (Messages: implementation pick.)
 
 ## Exit codes
 
@@ -186,9 +194,9 @@ pick within it (D1b).
 | Code | Meaning |
 | ---- | ------- |
 | 0 | Every check passed: for `verify-challenge`, every expectation was given and passed, so the replacement is confirmed (`replacement_confirmed: yes`); for `sign`, the challenge is signed and the response artifact written; for `verify-response`, the signature verifies. Or the help was printed. |
-| 1 | Refused: a check failed (`refused (<Name>): …`, the name of the `Refusal`, `SignError` or `VerifyError`, or `OtherOperation` for a response to another operation), or an artifact is not what it must be. For `sign` also: a seed file whose bytes are not a seed (`--seed-file: the file is not a seed: …`), and the seed's public key refused (not expected). |
-| 2 | Usage: no or an unknown command, an unknown, repeated or missing flag (`--epoch` included; for `sign` every flag but `--now` and `--out`), a flag without a value, a value that does not parse, help where it is not recognised. |
-| 3 | I/O: a file is missing, not a regular file, larger than its limit or unreadable; the system clock cannot be read; a write to the output fails. For `sign` also: a seed file that is a symbolic link, larger than 65 bytes, changed between its check and its opening, or on Unix owned by another user than the effective user or not of mode 0600 exactly, or whose effective user cannot be read; an `--out` that exists or cannot be created or written. |
+| 1 | Refused: a check failed (`refused (<Name>): …`, the name of the `Refusal`, `SignError` or `VerifyError`, or `OtherOperation` for a response to another operation), or an artifact is not what it must be. For `sign` also: a seed file of at most 128 bytes that is not a seed (`--seed-file: the file is not a seed: …`, one message for every content error), and the seed's public key refused (not expected). |
+| 2 | Usage: no or an unknown command, an unknown, repeated or missing flag (`--epoch` included; for `sign` every flag but `--now`), a flag without a value, a value that does not parse, help where it is not recognised. |
+| 3 | I/O: a file is missing, not a regular file, larger than its limit or unreadable; the system clock cannot be read; a write to the output fails. For `sign` also: a seed file that is a symbolic link, larger than 128 bytes, changed between its check and its opening, or on Unix owned by another user than the effective user or not of mode 0600 exactly, or whose effective user cannot be read; an `--out` that exists or cannot be created, written or synchronized. |
 | 4 | `verify-challenge` only: every given check passed, but the replacement is not confirmed, because `--replacement-identity`, `--trust-anchor` or `--new-recovery-key` was not given (`replacement_confirmed: no (not given: …)`). Not a pass. |
 
 ## The challenge artifact
@@ -237,12 +245,14 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
   environment: no flag takes it (`--seed-file` takes a path), and the binary
   reads no variable. It is a file given with `--seed-file`.
 - Its content: 64 lowercase hexadecimal digits (the 32-byte RFC 8032 seed),
-  optionally followed by one newline, and nothing else. Uppercase digits,
-  a carriage return, a second newline, whitespace, a prefix, raw bytes and
-  any trailing byte are refused. A file of at most 65 bytes whose bytes are
-  not a seed is exit 1; a larger one is exit 3 (`the file is larger than 65
-  bytes`), as an artifact over its limit is (implementation pick: the size
-  is a file check, made before the file is read).
+  optionally followed by one newline, and nothing else (at most 65 bytes:
+  a decoding rule). Uppercase digits, a carriage return (CRLF), a byte
+  order mark, a second newline, whitespace, a `0x` prefix, raw bytes and
+  any trailing byte are refused. The file is read up to a cap of 128 bytes
+  (lead ruling), so every such content error is one refusal, exit 1, `the
+  file is not a seed`; a file larger than 128 bytes is exit 3 (`the file is
+  larger than 128 bytes`), as an artifact over its limit is (implementation
+  pick: the size is a file check, made before the file is read).
 - A regular file, not a symbolic link: the path is checked with
   `symlink_metadata` before it is opened, so a link (even to a good seed
   file), a directory, a device or a named pipe is refused without being
@@ -253,14 +263,23 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
   effective user is the owner the kernel gives a pipe the process creates
   (implementation pick: `std` has no `geteuid`, and the binary makes no
   `unsafe` call and adds no dependency; on Linux it is the file-system UID,
-  which follows the effective UID).
-- Read into a fixed buffer of 66 bytes (the cap and one byte to detect a
+  which follows the effective UID). Run `sign` as the seed file's owner:
+  under `sudo` the effective user is root, and a seed file of the operator
+  is refused as another user's.
+- Never install the binary setuid or setgid. It checks the seed file
+  against its effective user, so a setuid copy is a confused deputy: a
+  setuid-root copy run by any user signs with a root-owned seed file
+  (verified in the D1b review). The binary does not detect it (`std` reads
+  no real user ID).
+- Read into a fixed buffer of 129 bytes (the cap and one byte to detect a
   file that grew), never echoed: every message names the flag and the kind
   of the failure, never the path, the bytes or the seed; nothing in the
   seed file's reader derives or formats with `Debug`.
 - The seed is not wiped from memory: `SoftwareSigner` is built without
   `zeroize` (see its documentation), and the binary adds no wiping of its
-  own, which could not be relied on.
+  own, which could not be relied on. Wiping is the separate `zeroize` PR
+  (tasks §13), which must cover the binary's read buffer, the decoded
+  `[u8; 32]` seed and the `SigningKey` inside `SoftwareSigner`.
 
 ## Residuals
 
@@ -270,16 +289,18 @@ Lead rulings (D1b), implemented in `operator/src/bin/skyoauth-operator/seed_file
   path checked (only that both are regular files and the path is not a
   symbolic link). The operator must protect the file by other means; the
   help says so. The binary claims no protection there.
-- **The seed in memory:** not wiped (see [the seed file](#the-seed-file)).
-- **Named pipes:** a path that is replaced by a named pipe between its check
-  and its opening can block the read (no non-blocking open without a
-  platform dependency). The artifacts and the seed file are the operator's
-  own files.
-- **The response on a terminal:** without `--out`, the response artifact is
-  written to standard output as it is. Its operation ID is the challenge's,
-  escaped as the codec escapes it (control characters below U+0020 only), so
-  another character that is not ASCII reaches the terminal as is. Write it
-  to a file (`--out`, or a redirection).
+- **The seed in memory:** not wiped (see [the seed file](#the-seed-file)),
+  so it can reach a core dump or swap while the process runs and after:
+  disable core dumps (`ulimit -c 0`) and use encrypted or no swap on the
+  workstation that signs.
+- **Named pipes and devices:** a path that is replaced by a named pipe or a
+  device between its check and its opening can block the read or have
+  side effects (no non-blocking open without a platform dependency); for
+  the seed file the opened file is refused afterwards (not a regular file,
+  not the same file), but the open has happened. The artifacts and the seed
+  file are the operator's own files.
+- **Setuid or `sudo`:** see [the seed file](#the-seed-file): run as the
+  seed file's owner, never install the binary setuid or setgid.
 - **Shell redirection:** a shell that re-encodes text (Windows PowerShell
   5.1's `>` writes UTF-16) makes an artifact refused; write artifacts as
   bytes.

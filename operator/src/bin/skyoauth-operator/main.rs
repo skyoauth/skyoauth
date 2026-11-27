@@ -13,7 +13,7 @@
 //! - `sign` checks a challenge artifact as `verify-challenge` does, every
 //!   expectation required, signs it with the key of a seed file (the
 //!   library's signing, in `cmd_sign.rs` only) and writes the response
-//!   artifact to a new file (`--out`) or standard output;
+//!   artifact to a new file (`--out`, required);
 //! - `verify-response` checks a response artifact's signature over the
 //!   challenge with a recovery public key, as the service's restore checks
 //!   it ([`verify_response`](skyoauth_operator::recovery::verify_response)).
@@ -23,7 +23,7 @@
 //! which `--now` replaces). Nothing reads the environment. The only file
 //! written is `sign`'s `--out`, created new; the only private key is the
 //! seed of `sign`'s `--seed-file`, read from that file only, never shown.
-//! A signature is shown only as `sign`'s response artifact.
+//! No signature is shown: `sign` writes it to `--out` only.
 //!
 //! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`],
 //! [`EXIT_NOT_CONFIRMED`].

@@ -12,8 +12,12 @@
 //!   must be the same file (device and inode) as the path checked. On
 //!   other platforms (Windows) its protection is not checked: the operator
 //!   must protect it by other means.
-//! - At most 65 bytes are accepted; at most 66 are read, into a fixed
-//!   buffer, so a file that grows while it is read is refused all the same.
+//! - A file of more than 128 bytes is refused as too large; at most 129
+//!   bytes are read, into a fixed buffer, so a file that grows while it is
+//!   read is refused all the same. Within the cap, the bytes must decode as
+//!   a seed (at most 65 bytes): any other content, a carriage return, a
+//!   byte order mark, a prefix, a second newline or a trailing space, is
+//!   one refusal, "not a seed".
 //!
 //! No message holds the path, the file's bytes or the seed: a failure is
 //! named by the flag and its kind. Nothing here derives or implements
@@ -34,8 +38,10 @@ const FLAG: &str = "--seed-file";
 /// The seed's length, in bytes.
 const SEED_BYTES: usize = 32;
 
-/// The largest seed file: 64 digits and a newline.
-const MAX_SEED_FILE_BYTES: usize = 2 * SEED_BYTES + 1;
+/// The largest seed file read: more is refused as too large, not read.
+/// Larger than a seed (64 digits and a newline), so a file with a few bytes
+/// too many is refused as what it is, not a seed.
+const MAX_SEED_FILE_BYTES: usize = 128;
 
 /// The required mode of the file on Unix: read and write for its owner,
 /// nothing else (no special bit either).
@@ -64,8 +70,8 @@ fn too_large() -> Failure {
 /// [`Failure::Io`] when the file cannot be read, is a symbolic link or not
 /// a regular file, is not protected (Unix: owned by another user, or of
 /// another mode than 0600), changed between its check and its opening, or
-/// is larger than 65 bytes; [`Failure::Refused`] when its bytes are not a
-/// seed.
+/// is larger than 128 bytes; [`Failure::Refused`] when its bytes are not
+/// a seed.
 pub fn read(path: &Path) -> Result<[u8; SEED_BYTES], Failure> {
     let owner = effective_owner()?;
     let checked = fs::symlink_metadata(path).map_err(|err| unreadable(&err))?;

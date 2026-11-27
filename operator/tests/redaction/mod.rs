@@ -567,7 +567,8 @@ const BIN_SEED_NAMING_FILES: [&str; 4] = ["args.rs", "main.rs", BIN_SIGNING_FILE
 ///   scalar;
 /// - only [`BIN_OUT_FILE`] opens a file to write it (`OpenOptions`), and
 ///   only with `create_new(true)`: never `create(true)`, `truncate` or
-///   `append`, so no existing file is overwritten; no source writes a file
+///   `append`, so no existing file is overwritten, and synchronizes it
+///   (`sync_all`, which no test can observe); no source writes a file
 ///   otherwise (`fs::write`, `File::create`), creates a directory, removes
 ///   or renames anything or changes a permission;
 /// - [`BIN_SEED_FILE`] derives nothing and formats nothing with `Debug`,
@@ -655,13 +656,15 @@ fn the_binary_signs_and_writes_only_in_sign() {
             }
         }
         if name == BIN_SEED_FILE {
-            // The link check and the recheck of the opened file, which no
-            // test can reach without a race.
+            // The link check, the recheck of the opened file and its Unix
+            // comparison by device and inode, which no test can reach
+            // without a race.
             let code = joined_code(text);
             for token in [
                 "fs::symlink_metadata(path)",
                 "check(&opened,&owner)?;",
                 "same_file(&checked,&opened)",
+                "checked.dev()==opened.dev()&&checked.ino()==opened.ino()",
             ] {
                 assert!(code.contains(token), "{token} not in {}", path.display());
             }
@@ -671,6 +674,11 @@ fn the_binary_signs_and_writes_only_in_sign() {
             assert!(
                 code.contains(".create_new(true)"),
                 "{} creates its file new",
+                path.display()
+            );
+            assert!(
+                code.contains(".and_then(|()|file.sync_all())"),
+                "{} synchronizes its file before success",
                 path.display()
             );
             for token in [".create(true)", "truncate", "append"] {

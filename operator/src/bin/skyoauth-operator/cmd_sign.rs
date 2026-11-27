@@ -1,16 +1,18 @@
 //! `sign`: checks a challenge artifact as `verify-challenge` does, with
 //! every expectation required, then signs it with the seed file's key
 //! ([`sign_challenge`] with a [`SoftwareSigner`]) and writes the response
-//! artifact to `--out` or standard output.
+//! artifact to a new file, `--out` (required).
 //!
 //! In this order: the challenge artifact is read, then the clock, and the
 //! challenge is checked; only a challenge that passed is followed by the
 //! seed file, the signer and [`sign_challenge`] (which refuses an
 //! unconfirmed replacement and a new recovery key that is the signer's
 //! own); the response is written last. So nothing is written, and the seed
-//! is not read, for a challenge that is refused; and nothing is written but
-//! the whole response. The signature is never printed but as the artifact
-//! on standard output, without `--out`, after every check passed.
+//! is not read, for a challenge that is refused. The signature is never
+//! printed: it goes to the `--out` file only, never to standard output,
+//! whose descriptor may be closed (the Rust runtime reopens it on
+//! `/dev/null` on Unix, so the response would be lost with exit 0) or
+//! redirected to a file that is not created new nor of mode 0600.
 
 use std::fmt::Write as _;
 
@@ -62,10 +64,7 @@ fn sign(flags: &Sign) -> Result<String, Failure> {
             .map_err(|err| Failure::Refused(format!("refused ({err:?}): {err}")))?
     };
     let response = response_artifact(&signed)?;
-    let Some(out) = &flags.out else {
-        return Ok(response);
-    };
-    out_file::write_new(out, response.as_bytes())?;
+    out_file::write_new(&flags.out, response.as_bytes())?;
     let mut output = String::new();
     // Writing to a `String` cannot fail.
     let _ = write!(

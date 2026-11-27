@@ -23,9 +23,9 @@ Usage:
   skyoauth-operator verify-challenge --challenge FILE --instance-id ID --epoch N
       [--replacement-identity ID] [--trust-anchor REF] [--new-recovery-key HEX]
       [--now MICROS]
-  skyoauth-operator sign --challenge FILE --seed-file FILE --instance-id ID
-      --epoch N --replacement-identity ID --trust-anchor REF
-      --new-recovery-key HEX [--now MICROS] [--out FILE]
+  skyoauth-operator sign --challenge FILE --seed-file FILE --out FILE
+      --instance-id ID --epoch N --replacement-identity ID --trust-anchor REF
+      --new-recovery-key HEX [--now MICROS]
   skyoauth-operator verify-response --challenge FILE --response FILE --key HEX
   skyoauth-operator --help
 
@@ -40,14 +40,15 @@ which this command cannot check.
 
 sign checks the challenge as verify-challenge does, with every value
 required, then signs it with the recovery private key of the seed file and
-writes the response artifact to --out (a new file, mode 0600 on Unix; an
-existing file is never overwritten), or to standard output without --out.
-The seed file holds the 32-byte seed as 64 lowercase hex digits and at most
-one newline. On Unix it must be a regular file, not a symbolic link, owned
-by the effective user, of mode 0600 exactly. On Windows its protection is
-NOT checked: keep it where only you can read it. The seed is never taken
-from the command line or the environment, never printed, and not wiped
-from memory.
+writes the response artifact to --out, a new file (mode 0600 on Unix; an
+existing file is never overwritten). The seed file holds the 32-byte seed
+as 64 lowercase hex digits and at most one newline. On Unix it must be a
+regular file, not a symbolic link, owned by the effective user, of mode
+0600 exactly: run sign as the seed file's owner (not with sudo), and never
+install this binary setuid or setgid. On Windows its protection is NOT
+checked: keep it where only you can read it. The seed is never taken from
+the command line or the environment, never printed, and not wiped from
+memory.
 
 verify-response checks the response artifact's signature over the
 challenge with the recovery public key --key (64 lowercase hex digits).
@@ -57,11 +58,11 @@ epoch; without it the system clock is used. The clock used is printed.
 
 Exit codes: 0 every check passed (verify-challenge: the replacement is
 confirmed; sign: the response is written), or the help was printed; 1
-refused (sign: also a seed that is not 64 lowercase hex digits); 2 usage
-error; 3 a file, the clock or the output could not be read or written
-(sign: also a seed file that is not protected as above, or an --out that
-exists); 4 (verify-challenge) every given check passed, but the replacement
-is not confirmed.
+refused (sign: also a seed file of at most 128 bytes that is not a seed); 2
+usage error; 3 a file, the clock or the output could not be read or
+written (sign: also a seed file that is not protected as above or is larger
+than 128 bytes, or an --out that exists); 4 (verify-challenge) every given
+check passed, but the replacement is not confirmed.
 ";
 
 /// A command and its flags.
@@ -89,7 +90,9 @@ pub struct VerifyChallenge {
 }
 
 /// The flags of `sign`: those of `verify-challenge`, the replacement's
-/// three values required, the seed file and the output file.
+/// three values required, the seed file and the output file (required:
+/// the response is never written to standard output, where a closed or
+/// redirected descriptor would lose it or bypass the new file's checks).
 pub struct Sign {
     pub challenge: PathBuf,
     pub seed_file: PathBuf,
@@ -99,7 +102,7 @@ pub struct Sign {
     pub trust_anchor: String,
     pub new_recovery_key: RecoveryPublicKey,
     pub now: Option<i64>,
-    pub out: Option<PathBuf>,
+    pub out: PathBuf,
 }
 
 /// The flags of `verify-response`.
@@ -138,13 +141,13 @@ const VERIFY_CHALLENGE_FLAGS: [&str; 7] = [
 const SIGN_FLAGS: [&str; 9] = [
     CHALLENGE,
     SEED_FILE,
+    OUT,
     INSTANCE_ID,
     EPOCH,
     REPLACEMENT_IDENTITY,
     TRUST_ANCHOR,
     NEW_RECOVERY_KEY,
     NOW,
-    OUT,
 ];
 const VERIFY_RESPONSE_FLAGS: [&str; 3] = [CHALLENGE, RESPONSE, KEY];
 
@@ -215,6 +218,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, F
             Ok(Command::Sign(Sign {
                 challenge: given.required_path(CHALLENGE)?,
                 seed_file: given.required_path(SEED_FILE)?,
+                out: given.required_path(OUT)?,
                 instance_id: given.required_text(INSTANCE_ID)?,
                 epoch: given
                     .integer(EPOCH)?
@@ -225,7 +229,6 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, F
                     .key(NEW_RECOVERY_KEY)?
                     .ok_or_else(|| usage(format!("{NEW_RECOVERY_KEY} is required")))?,
                 now: given.integer(NOW)?,
-                out: given.take(OUT).map(PathBuf::from),
             }))
         }
         _ => Err(usage("unknown command (argument 1)")),
