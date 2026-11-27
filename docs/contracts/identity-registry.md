@@ -278,16 +278,18 @@ T00.8–T00.17 and Gate M0):
   at bootstrap is the raw 32-byte Ed25519 key of IR-058, and the registry
   refuses any other length before writing, and any key that does not decode
   to a curve point, is not canonically encoded or is of small order (ADR-013
-  item 7; the user, 2026-11-24; the checks of every recovery-key enrolment
+  item 7; the user, 2026-11-24; the checks of every recovery-key enrollment
   point). The registry trusts the deployment-local bootstrap caller for the
   rest: `bootstrap_instance` still takes `public_identity` as a string, which
   the service derives from the DER key (§7.3; tasks §13 "Canonical public
   identity"; the local transport does it before the call), while the recovery
   challenge canonicalization and signing are in `operator/src/recovery/`
-  (`skyoauth-operator`), pinned by
-  `tests/conformance/fixtures/_recovery/challenge.v1.json` and
-  `tests/conformance/fixtures/_recovery/public_identity.v1.json` (T13.1,
-  T13.10; ADR-013 items 6 and 7). The registry checks only that
+  (`skyoauth-operator`); the signing is pinned by
+  `tests/conformance/fixtures/_recovery/signature.v1.json`, the identity
+  derivation by `tests/conformance/fixtures/_recovery/public_identity.v1.json`
+  and the challenge by
+  `tests/conformance/fixtures/_recovery/challenge.v1.json` (T13.1, T13.10;
+  ADR-013 items 6 and 7). The registry checks only that
   `public_identity` and
   `trust_anchor_ref` are 1 to 2048 bytes, and that `now` lies in the years
   `0000` to `9999` the audit event can carry (IR-056), before writing.
@@ -459,7 +461,9 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   instance policy that lets one actor act where a distinct second approver is
   otherwise required: public-api API-142, API-148, API-155 and API-156,
   gateway-containment GW-116 and IR-052. In IR-052, API-156, GW-116 and
-  API-142 that actor MUST hold instance `security_admin` (Q4 of `docs/proposals/second-approver-gated-writes.md`;
+  API-142 that actor MUST hold instance `security_admin` (Q4 of `docs/proposals/second-approver-gated-writes.md`
+  for the gated-write flow of IR-052 and API-156; for GW-116 and API-142, the
+  lead decision extending Q4's rule to this flow, user-confirmed 2026-11-27;
   ADR-008 item 12); whether the condition extends to the provider paths
   API-148 and API-155 (M1b) is open (public-api OQ-API-15). It and the audit
   sink configuration are instance deployment configuration, read-only online; an online operator
@@ -722,8 +726,8 @@ digits of the SHA-256 of the key's exact DER `SubjectPublicKeyInfo`.
   identity and credential writers still take the identity string (the local
   transport and the checker writers derive it with `canonical_public_identity`
   before the call); `AdminPeer::from_peer_spki` is called only by tests, since
-  no acceptor builds the peer yet (S5, S6 and S7 add it and the per-algorithm
-  check).
+  no acceptor builds the peer yet (S3, S5 and S7 add the per-algorithm
+  check and S6 the acceptor).
 
 - **IR-090** A checker identity MUST be bound to one resource server and an
   explicit tenant set, registered by instance `security_admin`, and MUST NOT
