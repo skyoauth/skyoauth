@@ -1310,6 +1310,37 @@ fn artifacts_over_their_limits_are_exit_3_with_nothing_sent() {
     assert!(fake.finish().is_empty());
 }
 
+/// The other side of the limits: a file of exactly the limit is read, not
+/// refused as too large. It is then refused for what it holds (these are
+/// not artifacts), so nothing is sent either; the stderr must not be the
+/// size refusal.
+#[test]
+fn artifacts_of_exactly_their_limits_are_read() {
+    const RESPONSE_LIMIT: usize = 64 * 1024;
+    const CHALLENGE_LIMIT: usize = 4 * 1024 * 1024;
+    let fake = Fake::lines(&[golden_reply("previewed")]);
+    let response = fake.dir.file("response", &vec![b'0'; RESPONSE_LIMIT]);
+    let challenge = fake.dir.file("challenge", &vec![b'0'; CHALLENGE_LIMIT]);
+    let cases = [
+        ("preview", "--response", &response),
+        ("status", "--response", &response),
+        ("status", "--challenge", &challenge),
+    ];
+    for (command, flag, path) in cases {
+        let run = fake.run(command, &path_flag(flag, path));
+        assert_eq!(run.code, 1, "{command} {flag}: {run:?}");
+        assert!(
+            !run.stderr.contains("larger than"),
+            "{command} {flag}: {run:?}"
+        );
+        assert!(
+            run.stderr.contains("does not end with a newline"),
+            "{command} {flag}: {run:?}"
+        );
+    }
+    assert!(fake.finish().is_empty());
+}
+
 /// The defaults of the waits that the help states are the library's.
 #[test]
 fn the_default_waits_are_the_librarys() {
