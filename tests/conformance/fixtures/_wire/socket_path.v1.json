@@ -2,7 +2,7 @@
   "fixture_version": 1,
   "kind": "local_socket_path",
   "status": "proposed",
-  "description": "Known answers for the checks of the deployment-local transport's socket path: the service's own rules for its socket file (service/src/local_transport, module docs \"The socket file\", steps 1, 2, 5 and 8, and socket.rs: write_safe, check_directory, check_ancestors, the final check) and the operator client's copy of them (skyoauth_operator::local::check_socket), which must agree on every tree. Each case is a tree of entries created in a fresh case root, the path to check relative to it, and the expected outcome: accept, or the class of the first check that refuses it. The operator's test target `operator` (operator/tests/local_path) runs every case through check_socket; the `pg` target of skyoauth-scenarios (tests/harness/socket_path_fixture.rs) builds the same trees and binds the service's LocalTransport at the path, whose result must be the outcome's `bind` (accept iff the bind succeeds where the outcome's bind is ok, and the socket the bind makes is then a socket of the service UID with mode exactly 0600). Inferred: no contract text fixes these rules or the client's trust set; the service's code is the source, and status stays \"proposed\" until a contract states them. Modes are octal strings with the leading zero; the socket's mode is set after its owner, so a set-ID bit survives the owner's change. The client is stricter than the service in one way only: the socket's own directory may not be writable by group or others even with the sticky bit (shared_directory), where the service binds. Both sides read owners and mode bits only: Linux shows a POSIX ACL's grants in the group bits (its mask), macOS does not, and neither reads ACLs, so on macOS a directory an ACL lets others write is not seen; macOS is a client and test platform of the operator only, the service binds on Linux.",
+  "description": "Known answers for the checks of the deployment-local transport's socket path: the service's own rules for its socket file (service/src/local_transport, module docs \"The socket file\", steps 1, 2, 5 and 8, and socket.rs: write_safe, check_directory, check_ancestors, the final check) and the operator client's copy of them (skyoauth_operator::local::check_socket), which agree on every tree but where this fixture says otherwise: the outcome shared_directory (the client's stricter rule, where the service binds) and the cases with a service_expected. Each case is a tree of entries created in a fresh case root, the path to check relative to it, and the expected outcome: accept, or the class of the first check that refuses it. The operator's test target `operator` (operator/tests/local_path) runs every case through check_socket; the `pg` target of skyoauth-scenarios (tests/harness/socket_path_fixture.rs) builds the same trees and binds the service's LocalTransport at the path, whose result must be the outcome's `bind` (accept iff the bind succeeds where the outcome's bind is ok, and the socket the bind makes is then a socket of the service UID with mode exactly 0600). Inferred: no contract text fixes these rules or the client's trust set; the service's code is the source, and status stays \"proposed\" until a contract states them. Modes are octal strings with the leading zero; the socket's mode is set after its owner, so a set-ID bit survives the owner's change. A case's optional service_expected is the service's own bind result where it is not the outcome's bind: the client refuses the path for its own stricter rule before it reaches the check the service refuses it by (regular_file_in_a_shared_directory: a file at the socket path in a sticky directory, shared_directory for the client, PathOccupied for the service); both readers pin the list of such cases. The client is stricter than the service in one way only: the socket's own directory may not be writable by group or others even with the sticky bit (shared_directory), where the service binds. Both sides read owners and mode bits only: Linux shows a POSIX ACL's grants in the group bits (its mask), macOS does not, and neither reads ACLs, so on macOS a directory an ACL lets others write is not seen; macOS is a client and test platform of the operator only, the service binds on Linux.",
   "socket_mode": "0600",
   "max_symlinks": 40,
   "max_socket_path_bytes": {
@@ -18,7 +18,7 @@
     "service_or_root": "The client's AncestorTrust::ServiceOrRoot (an inferred pick: the usual case). The service's bind for its own effective UID (LocalTransport::new(.., None)), run as the service UID: it trusts root and the service UID with the directories.",
     "root_only": "The client's AncestorTrust::RootOnly (the stricter option). The service's bind by root for another service UID (LocalTransport::new(.., Some(service UID))): it trusts root alone with the directories, and the socket's directory must be root's."
   },
-  "case_root": "Each case runs in a fresh directory, the case root, owned by root with mode 0755, under the system's temporary directory with its symbolic links resolved (macOS's lives under /var, a link to private/var), so a case's own links are the only ones its lookup follows; those directories are all root's or the running UID's and not writable by group or others unless sticky. `path` and every entry's `path` are relative to the case root; a symbolic link's `target` is used as is, but for a leading `$ROOT`, which stands for the case root's absolute path. Entries are created in their order, each with its owner (lchown, not followed) and then its mode (not for a symbolic link). A `symlink_chain` of `links` links puts its first link at `path` and link i (1 to links-1) at `path` followed by `.i`, each pointing to the next by its name, and the last one to `target`. A case with `pad` extends the last component of `path` with `p` until the absolute path is exactly the platform's max_socket_path_bytes (`limit`) or one byte more (`over_limit`); an entry at the same `path` is padded the same way. Who can run what: a process that is not root cannot give an entry to root or to the other role, nor own the case root as root, so it runs only the cases whose entries are all the service's (as its own UID), and of those under root_only only the ones whose outcome is invalid_path, too_long or unsafe_directory (decided before the walk reaches the case root). The service's root_only bind needs root; as root, its service_or_root bind runs in a child process as the service UID (a local user the harness is given). A case a reader cannot run is skipped with a printed NOTICE, never passed. The cases follow Linux's kernel, which follows up to 40 symbolic links in one lookup, as the walk does; a kernel that follows fewer (32 on the BSDs and macOS) fails the lookup of an accept case's longer chain itself, so there the client's verdict is lookup (with the platform's error kind), noted with a printed NOTICE; a chain of 32 links is within both limits and accepted everywhere.",
+  "case_root": "Each case runs in a fresh directory, the case root, owned by root with mode 0755, inside a private directory (mode 0700, the running UID's: no other UID may enter it while the tree is built, and as root every create, change of owner and change of mode names a path inside the case tree, never through a symbolic link; the service UID may search it, mode 0711, only once every tree is built) under the system's temporary directory with its symbolic links resolved (macOS's lives under /var, a link to private/var), so a case's own links are the only ones its lookup follows; those directories are all root's or the running UID's and not writable by group or others unless sticky. `path` and every entry's `path` are relative to the case root; a symbolic link's `target` is used as is, but for a leading `$ROOT`, which stands for the case root's absolute path. Entries are created in their order, each with its owner (lchown, not followed) and then its mode (not for a symbolic link). A `symlink_chain` of `links` links puts its first link at `path` and link i (1 to links-1) at `path` followed by `.i`, each pointing to the next by its name, and the last one to `target`. A case with `pad` extends the last component of `path` with `p` until the absolute path is exactly the platform's max_socket_path_bytes (`limit`) or one byte more (`over_limit`); an entry at the same `path` is padded the same way. Who can run what: a process that is not root cannot give an entry to root or to the other role, nor own the case root as root, so it runs only the cases whose entries are all the service's (as its own UID), and of those under root_only only the ones whose outcome is invalid_path, too_long or unsafe_directory (decided before the walk reaches the case root). The service's root_only bind needs root; as root, its service_or_root bind runs in a child process as the service UID (a local user the harness is given). A case a reader cannot run is skipped with a printed NOTICE, never passed. The cases follow Linux's kernel, which follows up to 40 symbolic links in one lookup, as the walk does; a kernel that follows fewer (32 on the BSDs and macOS) fails the lookup of an accept case's longer chain itself, so there the client's verdict is lookup (with the platform's error kind), noted with a printed NOTICE; a chain of 32 links is within both limits and accepted everywhere.",
   "outcomes": [
     {
       "expect": "accept",
@@ -254,6 +254,17 @@
       "expect": "not_a_socket"
     },
     {
+      "case": "regular_file_in_a_shared_directory",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "d", "type": "dir", "mode": "01777", "owner": "service"},
+        {"path": "d/s", "type": "file", "mode": "0600", "owner": "service"}
+      ],
+      "path": "d/s",
+      "expect": "shared_directory",
+      "service_expected": "PathOccupied"
+    },
+    {
       "case": "directory_at_the_socket_path",
       "trust": "service_or_root",
       "entries": [
@@ -432,6 +443,17 @@
         {"path": "g/p/s", "type": "socket", "mode": "0600", "owner": "service"}
       ],
       "path": "g/p/s",
+      "expect": "unsafe_ancestor"
+    },
+    {
+      "case": "shared_directory_below_an_unsafe_ancestor",
+      "trust": "service_or_root",
+      "entries": [
+        {"path": "g", "type": "dir", "mode": "0777", "owner": "service"},
+        {"path": "g/d", "type": "dir", "mode": "01777", "owner": "service"},
+        {"path": "g/d/s", "type": "socket", "mode": "0600", "owner": "service"}
+      ],
+      "path": "g/d/s",
       "expect": "unsafe_ancestor"
     },
     {

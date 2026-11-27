@@ -10,8 +10,11 @@
 //! [`check_socket`] reads the path ([`CheckedSocketPath`] checks it before
 //! every connection; [`LocalClient::new`] is the client
 //! with these checks, the one a real caller uses). It mirrors the
-//! service's bind decision by decision, with the same constants, so the
-//! two agree on every tree: the shared fixture
+//! service's bind decision by decision, with the same constants, and adds
+//! one stricter rule (the socket's own directory may not be shared, even
+//! sticky), so the two agree on every tree but where the fixture lists
+//! otherwise (that rule's outcome, and its cases with a
+//! `service_expected`): the shared fixture
 //! `tests/conformance/fixtures/_wire/socket_path.v1.json` holds known
 //! answers that this crate's `operator` target checks against
 //! [`check_socket`] and the `pg` target of `skyoauth-scenarios`

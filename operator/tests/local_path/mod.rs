@@ -25,13 +25,13 @@
 
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{self, File},
     io::{self, Read as _, Write as _},
     os::unix::{
-        fs::{MetadataExt as _, PermissionsExt as _},
+        fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _},
         net::{UnixListener, UnixStream},
     },
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU32, Ordering},
     thread,
     time::Duration,
@@ -95,6 +95,11 @@ const KERNEL_MAX_SYMLINKS: u64 = 40;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 const KERNEL_MAX_SYMLINKS: u64 = 32;
 
+/// The cases with a `service_expected` (the service's result where it is
+/// not the outcome's bind: see the fixture's description). Pinned, so the
+/// list cannot grow silently; the harness pins the same list.
+const SERVICE_EXPECTED_CASES: [&str; 1] = ["regular_file_in_a_shared_directory"];
+
 /// The fixture, parsed.
 pub fn socket_path_fixture() -> Value {
     let path = fixtures_dir().join("_wire").join(SOCKET_PATH_FIXTURE);
@@ -103,11 +108,12 @@ pub fn socket_path_fixture() -> Value {
     serde_json::from_str(&text).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
 }
 
-/// A fresh directory under the system's temporary directory, its symbolic
-/// links resolved (the fixture's `case_root`: macOS's lives under `/var`, a
-/// link to `private/var`, which would add to a case's own links), mode
-/// 0755, removed when dropped. Its name is short: macOS's temporary
-/// directory is long and its socket paths end at 103 bytes.
+/// A fresh private directory under the system's temporary directory, its
+/// symbolic links resolved (the fixture's `case_root`: macOS's lives under
+/// `/var`, a link to `private/var`, which would add to a case's own links),
+/// mode 0700, so no other UID may enter it, removed when dropped. Its name
+/// is short: macOS's temporary directory is long and its socket paths end
+/// at 103 bytes.
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -121,8 +127,17 @@ impl TempDir {
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
         fs::create_dir(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         Self(path)
+    }
+
+    /// A fresh case root in the private directory, mode 0755: the tree of
+    /// a case is built in it.
+    fn case_root(&self) -> PathBuf {
+        let root = self.0.join("c");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        root
     }
 
     /// The owner of the directory: the process's effective UID.
@@ -232,23 +247,95 @@ fn padded(root: &Path, case: &Value, rel: &str) -> PathBuf {
     path
 }
 
-/// Gives `at` to `uid` (not followed) and, but for a symbolic link, sets
-/// `mode`, in that order, so a set-ID bit survives the change of owner.
-fn own_and_mode(at: &Path, uid: u32, mode: Option<u32>) {
-    if fs::symlink_metadata(at).unwrap().uid() != uid {
-        std::os::unix::fs::lchown(at, Some(uid), None).unwrap();
+/// Refuses a path that a privileged step of the build (a create, a change
+/// of owner or of mode) would name outside the case tree `root`, or reach
+/// through anything but the tree's own directories: `at` must be `root`
+/// followed by plain names only, and each directory between them a
+/// directory, not a symbolic link. As root, a step that strayed could
+/// change a file of the system.
+fn inside(root: &Path, at: &Path) -> Result<(), &'static str> {
+    let rest = at
+        .strip_prefix(root)
+        .map_err(|_| "not under the tree's root")?;
+    let mut names = rest.components().peekable();
+    if names.peek().is_none() {
+        return Err("the tree's root itself");
     }
-    if let Some(mode) = mode {
-        fs::set_permissions(at, fs::Permissions::from_mode(mode)).unwrap();
+    let mut walked = root.to_path_buf();
+    while let Some(component) = names.next() {
+        let Component::Normal(name) = component else {
+            return Err("not a plain name");
+        };
+        walked.push(name);
+        if names.peek().is_some()
+            && !fs::symlink_metadata(&walked).is_ok_and(|found| found.is_dir())
+        {
+            return Err("through something other than a directory of the tree");
+        }
+    }
+    Ok(())
+}
+
+/// [`inside`], or a panic.
+fn checked_inside(root: &Path, at: &Path) {
+    if let Err(why) = inside(root, at) {
+        panic!("{}: {why}", at.display());
     }
 }
 
-/// Builds the entries of `case` in `root` with the UIDs of `roles`.
+/// Gives `at`, an entry just created in the tree `root`, to `uid` and, but
+/// for a symbolic link, sets `mode`, in that order, so a set-ID bit
+/// survives the change of owner; never through a symbolic link. A file or
+/// a directory is changed through a handle opened on it, checked to be the
+/// entry looked at; a symbolic link only with `lchown`; a socket, which
+/// cannot be opened, by its path, checked to be that socket before and
+/// after. The tree is in a private directory no other UID may enter while
+/// it is built.
+fn own_and_mode(root: &Path, at: &Path, uid: u32, mode: Option<u32>) {
+    checked_inside(root, at);
+    let found = fs::symlink_metadata(at).unwrap();
+    let kind = found.file_type();
+    let same = |other: &fs::Metadata| other.dev() == found.dev() && other.ino() == found.ino();
+    if kind.is_symlink() {
+        assert!(mode.is_none(), "{}: a mode for a link", at.display());
+        if found.uid() != uid {
+            std::os::unix::fs::lchown(at, Some(uid), None).unwrap();
+        }
+        return;
+    }
+    let mode = fs::Permissions::from_mode(mode.expect("a mode"));
+    if kind.is_dir() || kind.is_file() {
+        let handle = File::open(at).unwrap();
+        assert!(same(&handle.metadata().unwrap()), "{} moved", at.display());
+        if found.uid() != uid {
+            std::os::unix::fs::fchown(&handle, Some(uid), None).unwrap();
+        }
+        handle.set_permissions(mode).unwrap();
+    } else {
+        assert!(kind.is_socket(), "{}: an unknown kind", at.display());
+        if found.uid() != uid {
+            std::os::unix::fs::lchown(at, Some(uid), None).unwrap();
+        }
+        fs::set_permissions(at, mode).unwrap();
+        let after = fs::symlink_metadata(at).unwrap();
+        assert!(
+            after.file_type().is_socket() && same(&after),
+            "{} moved",
+            at.display()
+        );
+    }
+}
+
+/// Builds the entries of `case` in `root` with the UIDs of `roles`, as the
+/// fixture's `case_root` describes them: every path a step names is
+/// checked [`inside`] the tree first, and nothing is created through a
+/// symbolic link (`create_new` for a file).
 fn build(root: &Path, case: &Value, roles: &Roles) {
     let root_text = root.to_str().expect("a UTF-8 temporary directory");
     for entry in list(case, "entries") {
         let rel = text(entry, "path");
         let at = padded(root, case, rel);
+        checked_inside(root, &at);
         let uid = roles
             .uid(text(entry, "owner"))
             .expect("a runnable case's owners");
@@ -256,20 +343,26 @@ fn build(root: &Path, case: &Value, roles: &Roles) {
         match text(entry, "type") {
             "dir" => {
                 fs::create_dir(&at).unwrap();
-                own_and_mode(&at, uid, Some(mode_of(text(entry, "mode"))));
+                own_and_mode(root, &at, uid, Some(mode_of(text(entry, "mode"))));
             }
             "file" => {
-                fs::write(&at, b"").unwrap();
-                own_and_mode(&at, uid, Some(mode_of(text(entry, "mode"))));
+                drop(
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&at)
+                        .unwrap(),
+                );
+                own_and_mode(root, &at, uid, Some(mode_of(text(entry, "mode"))));
             }
             "socket" => {
                 // A stale socket: its listener is closed at once.
                 drop(UnixListener::bind(&at).unwrap());
-                own_and_mode(&at, uid, Some(mode_of(text(entry, "mode"))));
+                own_and_mode(root, &at, uid, Some(mode_of(text(entry, "mode"))));
             }
             "symlink" => {
                 std::os::unix::fs::symlink(target(), &at).unwrap();
-                own_and_mode(&at, uid, None);
+                own_and_mode(root, &at, uid, None);
             }
             "symlink_chain" => {
                 let links = entry["links"].as_u64().expect("links is an integer");
@@ -294,8 +387,9 @@ fn build(root: &Path, case: &Value, roles: &Roles) {
                             .to_owned()
                     };
                     let link = root.join(name(index));
+                    checked_inside(root, &link);
                     std::os::unix::fs::symlink(to, &link).unwrap();
-                    own_and_mode(&link, uid, None);
+                    own_and_mode(root, &link, uid, None);
                 }
             }
             other => panic!("unknown entry type {other:?}"),
@@ -359,13 +453,16 @@ pub fn run_socket_path_cases(fixture: &Value) -> (BTreeSet<String>, BTreeSet<Str
             skipped.insert(name);
             continue;
         }
-        let root = TempDir::new();
-        build(&root.0, case, &roles);
+        // A private directory per case, no other UID may enter: the tree is
+        // built and checked in it.
+        let private = TempDir::new();
+        let root = private.case_root();
+        build(&root, case, &roles);
         let expectations = SocketExpectations {
             owner_uid: roles.service,
             ancestors: trust_of(case),
         };
-        let path = padded(&root.0, case, text(case, "path"));
+        let path = padded(&root, case, text(case, "path"));
         let result = check_socket(&path, &expectations);
         if let Ok(checked) = &result {
             assert_eq!(checked.path(), path.as_path(), "{name}");
@@ -504,6 +601,7 @@ fn every_socket_path_member_and_case_is_covered() {
     let cases = list(&fixture, "cases");
     let mut names = BTreeSet::new();
     let mut expected = BTreeSet::new();
+    let mut overridden = BTreeSet::new();
     for case in cases {
         let name = text(case, "case");
         assert!(
@@ -515,10 +613,13 @@ fn every_socket_path_member_and_case_is_covered() {
         );
         assert!(names.insert(name.to_owned()), "{name} twice");
         let mut allowed = BTreeSet::from(["case", "trust", "entries", "path", "expect"]);
-        for optional in ["pad", "io_kind"] {
+        for optional in ["pad", "io_kind", "service_expected"] {
             if case.get(optional).is_some() {
                 allowed.insert(optional);
             }
+        }
+        if case.get("service_expected").is_some() {
+            overridden.insert(name.to_owned());
         }
         assert_eq!(members(case), allowed, "{name}");
         assert_eq!(
@@ -556,9 +657,46 @@ fn every_socket_path_member_and_case_is_covered() {
         };
         assert!(of(true) && of(false), "{trust}");
     }
+    // The service's own result (`service_expected`, the harness's) differs
+    // from the outcome's bind in these cases only: a new one is a decision,
+    // not an edit of the fixture.
+    assert_eq!(
+        overridden,
+        SERVICE_EXPECTED_CASES
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    );
     let (ran, skipped) = run_socket_path_cases(&fixture);
     assert!(ran.is_disjoint(&skipped));
     assert_eq!(ran.union(&skipped).cloned().collect::<BTreeSet<_>>(), names);
+}
+
+/// A privileged step of the build names no path outside the case tree,
+/// nor one reached through anything but the tree's own directories.
+#[test]
+fn a_privileged_build_step_names_no_path_outside_the_tree() {
+    let private = TempDir::new();
+    let root = private.case_root();
+    fs::create_dir(root.join("d")).unwrap();
+    fs::write(root.join("f"), b"").unwrap();
+    std::os::unix::fs::symlink("/", root.join("l")).unwrap();
+    assert_eq!(inside(&root, &root.join("d")), Ok(()));
+    assert_eq!(inside(&root, &root.join("d/s")), Ok(()));
+    assert_eq!(inside(&root, &root.join("l")), Ok(()));
+    for outside in [
+        PathBuf::from("/etc/passwd"),
+        private.0.join("x"),
+        root.clone(),
+        root.join(".."),
+        root.join("../x"),
+        root.join("d/../../x"),
+        root.join("l/etc"),
+        root.join("f/x"),
+        root.join("missing/x"),
+    ] {
+        assert!(inside(&root, &outside).is_err(), "{}", outside.display());
+    }
 }
 
 /// A listening socket at `path`, mode 0600.
