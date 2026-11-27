@@ -34,6 +34,15 @@ Both commands take `--secret-env NAME` and `--secret-file PATH`
 any string under a `seed`, `private_key`, `secret` or `password` key of that
 JSON file (a hex value also as upper-case hex, base64 and base64url), is
 refused. CI passes every `tests/conformance/fixtures/**/*.test-key.json`.
+A message names such a value by the file and its key path
+(`recovery.test-key.json keys[0].seed`); a key name that is not plain
+`[A-Za-z0-9_]` is shown by its position in its object (`<key 2>`), never
+as itself. That position counts in JavaScript property order (as
+`Object.keys` lists the parsed object: integer-like keys such as `"1"`
+first, in ascending order, then the others in file order), not file order.
+No value is dropped: a key repeated in one object (which `JSON.parse` would
+keep only once) and a label shared by two files of the same name keep every
+value, the later ones labelled `#2`, `#3`, ...
 
 ## Transcript format
 
@@ -68,8 +77,9 @@ are what the allow marker below and the Authorization rule refer to:
 - a PEM header (`-----BEGIN ...-----`);
 - a JWT-shaped string (`eyJ...` with two more dot-separated segments);
 - a Bearer credential. In an `Authorization` or `Proxy-Authorization` field
-  (any case; a header, or a quoted JSON or YAML key) the Bearer value (up
-  to a blank, quote, comma or semicolon) must be exactly `<redacted>` in
+  (any case; a header, or a quoted JSON or YAML key, also JSON-escaped as
+  in `{\"Authorization\": \"Bearer ...\"}`) the Bearer value (up to a
+  blank, quote, backslash, comma or semicolon) must be exactly `<redacted>` in
   the record: anything else, `<redacted>x`, an empty value or `$TOKEN`
   included, is refused. Only in a joined form, which may glue the next line
   or record to it, need the value merely start with `<redacted>`.
@@ -130,11 +140,21 @@ locally, before that repaint was added, a render failed with "no black
 lead-in found" (not reproduced in a dozen later renders; the cause was not
 confirmed). Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
 render; a copy that fails is reported on stderr and never replaces the
-render's own error. `demo.yml` sets it and, when a step fails, uploads the
+render's own error, and a render that failed before the browser wrote a
+recording reports that nothing was kept. `demo.yml` sets it and, when a step fails, uploads the
 recordings as `demo-raw-recordings-N` (3 days). `render.e2e.test.mjs` checks that frame 0 is the player
 and that the caption bar changes at each cue boundary and not before;
 `vtt.test.mjs` runs the player's own script on a virtual clock and checks
 that each caption appears exactly at its cue's start.
+
+## Chapters and milestone videos (designed, not built)
+
+One video per milestone, joined from per-journey transcripts with a
+`chapter` record per journey, chapter tracks (WebVTT and mp4), a generated
+opening commit caption, staged publication and one merged `SHA256SUMS`: the
+design is section 6 of
+[the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built),
+for the lead's review. None of it is implemented yet.
 
 ## Never committed
 

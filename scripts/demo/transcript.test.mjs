@@ -8,13 +8,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { BEARER_AUTH_PARAMS, MAX_COLUMNS, MAX_RECORD_BYTES, UNIX_MAX_S, hasBearerCredential, hasLongBase64url, hasUnixTime, jsonErrorOffset, main, secretsFromFile, secretVariants, validateTranscript } from './transcript.mjs';
+import { BEARER_AUTH_PARAMS, JsonObject, MAX_COLUMNS, MAX_RECORD_BYTES, UNIX_MAX_S, hasBearerCredential, hasLongBase64url, hasUnixTime, jsonErrorOffset, main, mergeSecrets, scanJson, secretsFromFile, secretVariants, validateTranscript } from './transcript.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'transcript.mjs');
@@ -265,6 +265,24 @@ describe('Authorization fields', () => {
       rejects(rec(2, 'output', text), /^Bearer credential in "text"$/);
     }
     for (const text of ['Authorization: Bearer <redacted>', 'curl -H "Authorization: Bearer <redacted>"', '{"authorization": "Bearer <redacted>"}']) {
+      accepts(rec(2, 'output', text));
+    }
+  });
+
+  it('apply to JSON-escaped keys and values too ({\\"Authorization\\": \\"Bearer x\\"})', () => {
+    // Values the general Bearer rule alone would let through (no digit,
+    // shorter than 16): only the field rule refuses them.
+    for (const text of [
+      '{\\"Authorization\\": \\"Bearer abc\\"}',
+      '{\\"proxy-authorization\\":\\"Bearer someword\\"}',
+      'body: "{\\"authorization\\": \\"Bearer <redacted>x\\"}"',
+      '{\\"Authorization\\": \\"Bearer \\"}',
+    ]) {
+      assert.equal(hasBearerCredential(text), true, text);
+      rejects(rec(2, 'output', text), /^Bearer credential in "text"$/);
+    }
+    for (const text of ['{\\"Authorization\\": \\"Bearer <redacted>\\"}', 'body: "{\\"proxy-authorization\\":\\"Bearer <redacted>\\"}"']) {
+      assert.equal(hasBearerCredential(text), false, text);
       accepts(rec(2, 'output', text));
     }
   });
@@ -589,6 +607,160 @@ describe('diagnostics never echo the input', () => {
     const printed = r.stdout + r.stderr;
     assert.ok(printed.includes(`${path}:1:`), printed);
     for (const needle of NEEDLES) assert.ok(!printed.includes(needle), `printed ${needle}:\n${printed}`);
+  });
+
+  it('secrets whose display labels coincide are all kept (two secret files of the same name, one per directory)', () => {
+    const a = join(TMP, 'dir-a');
+    const b = join(TMP, 'dir-b');
+    mkdirSync(a);
+    mkdirSync(b);
+    const first = 'first-seed-aaaa1111';
+    const second = 'second-seed-bbbb2222';
+    writeFileSync(join(a, 'same.test-key.json'), JSON.stringify({ keys: [{ seed: first }] }));
+    writeFileSync(join(b, 'same.test-key.json'), JSON.stringify({ keys: [{ seed: second }] }));
+    const merged = new Map();
+    for (const f of [join(a, 'same.test-key.json'), join(b, 'same.test-key.json')]) mergeSecrets(merged, secretsFromFile(f));
+    assert.deepEqual([...merged.values()].sort(), [first, second].sort());
+    // the same file given twice is not duplicated
+    mergeSecrets(merged, secretsFromFile(join(a, 'same.test-key.json')));
+    assert.equal(merged.size, 2);
+    for (const [n, [seed, other]] of [[first, second], [second, first]].entries()) {
+      const leak = join(TMP, `coincide-${n}.jsonl`);
+      writeFileSync(leak, `${rec(0, 'output', `seed ${seed}`)}\n`);
+      const r = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', join(a, 'same.test-key.json'), '--secret-file', join(b, 'same.test-key.json'), leak], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+      assert.equal(r.status, 1, `${seed}: ${r.stderr}`);
+      assert.ok(!(r.stdout + r.stderr).includes(seed) && !(r.stdout + r.stderr).includes(other));
+      const render = spawnSync(process.execPath, [join(HERE, 'render.mjs'), leak, '--out', join(TMP, `coincide-out-${n}`), '--secret-file', join(a, 'same.test-key.json'), '--secret-file', join(b, 'same.test-key.json')], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+      assert.equal(render.status, 1, render.stderr);
+    }
+  });
+
+  it('an Authorization value with a backslash inside it is checked whole, not cut at the backslash', () => {
+    for (const text of ['Authorization: Bearer <redacted>\\abc', 'Authorization: Bearer <redacted>\\', 'proxy-authorization: Bearer <redacted>\\x1']) {
+      assert.ok(hasBearerCredential(text), text);
+    }
+    // an escaped quote still ends the value (JSON-escaped fields)
+    assert.ok(!hasBearerCredential('{\\"Authorization\\": \\"Bearer <redacted>\\"}'));
+  });
+
+  it('an Authorization value ends at a backslash only when it starts a JSON escape', () => {
+    // Not a JSON escape (\a): the backslash and what follows are the value.
+    assert.ok(hasBearerCredential('Authorization: Bearer <redacted>\\a1b2c3'));
+    // A JSON escape inside the quoted value continues the same string.
+    assert.ok(hasBearerCredential('{"authorization": "Bearer <redacted>\\nabc"}'));
+    assert.ok(hasBearerCredential('{"authorization": "Bearer <redacted>\\u0041bc"}'));
+    assert.ok(hasBearerCredential('{"authorization": "Bearer <redacted>\\"abc"}'));
+    assert.ok(hasBearerCredential("{'authorization': 'Bearer <redacted>\\tx'}"));
+    // The closing quote, escaped or not, ends it.
+    assert.ok(!hasBearerCredential('{\\"Authorization\\": \\"Bearer <redacted>\\"}'));
+    assert.ok(!hasBearerCredential('{"authorization": "Bearer <redacted>"}'));
+    assert.ok(!hasBearerCredential("{'authorization': 'Bearer <redacted>'}"));
+    // A blank still ends a quoted value; only a JSON escape continues it.
+    assert.ok(!hasBearerCredential('{"authorization": "Bearer <redacted> (redacted by the client)"}'));
+    // Unquoted, a JSON escape ends the value: an escaped line break in text.
+    assert.ok(!hasBearerCredential('Authorization: Bearer <redacted>\\nHost: example.test'));
+    assert.ok(!hasBearerCredential('Authorization: Bearer <redacted>\\\\'));
+    // In a record, as the checker reads it.
+    const { errors } = check(`${rec(0, 'output', '{"authorization": "Bearer <redacted>\\nabc"}')}\n`);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /Bearer/);
+    assert.equal(check(`${rec(0, 'output', '{\\"Authorization\\": \\"Bearer <redacted>\\"}')}\n`).errors.length, 0);
+  });
+
+  it('scanJson keeps every entry of an object, duplicate keys included, in file order', () => {
+    const doc = scanJson('{"seed":"one-1111aaaa","x":[1,-2.5e1,true,null,"a\\u0041\\n"],"seed":"two-2222bbbb","o":{}}');
+    assert.ok(doc instanceof JsonObject);
+    assert.deepEqual(doc.entries.map(([k]) => k), ['seed', 'x', 'seed', 'o']);
+    assert.deepEqual(doc.entries[1][1], [1, -25, true, null, 'aA\n']);
+    assert.deepEqual([doc.entries[0][1], doc.entries[2][1]], ['one-1111aaaa', 'two-2222bbbb']);
+    assert.deepEqual(doc.entries[3][1].entries, []);
+    assert.throws(() => scanJson('{"a":1,}'), (at) => at === 7);
+    assert.equal(jsonErrorOffset('{"a":1,}'), 7);
+    assert.equal(jsonErrorOffset('[1,2]'), -1);
+  });
+
+  it('a key repeated in one secret file keeps both values (JSON.parse keeps only the last)', () => {
+    const first = 'dropped-by-json-parse-1111';
+    const second = 'kept-by-json-parse-2222';
+    const dup = join(TMP, 'dup.test-key.json');
+    writeFileSync(dup, `{"keys":[{"seed":"${first}"}],"keys":[{"seed":"${second}"}],"seed":"${first}x","seed":"${second}x"}`);
+    assert.deepEqual(
+      [...secretsFromFile(dup)],
+      [
+        ['dup.test-key.json keys[0].seed', first],
+        ['dup.test-key.json keys[0].seed #2', second],
+        ['dup.test-key.json seed', `${first}x`],
+        ['dup.test-key.json seed #2', `${second}x`],
+      ],
+    );
+    const leak = join(TMP, 'dup-leak.jsonl');
+    writeFileSync(leak, `${rec(0, 'output', `seed ${first}`)}\n`);
+    const r = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', dup, leak], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /the value of dup\.test-key\.json keys\[0\]\.seed appears in the record/);
+    assert.ok(!(r.stdout + r.stderr).includes(first));
+  });
+
+  it('a dotted key and a nested path keep both seeds, whatever their labels', () => {
+    const x = 'dotted-key-seed-3333cccc';
+    const y = 'nested-path-seed-4444dddd';
+    const f = join(TMP, 'dotted.test-key.json');
+    writeFileSync(f, JSON.stringify({ 'a.b': { seed: x }, a: { b: { seed: y } } }));
+    const secrets = secretsFromFile(f);
+    assert.deepEqual([...secrets.values()].sort(), [x, y].sort());
+    assert.deepEqual([...secrets.keys()], ['dotted.test-key.json <key 1>.seed', 'dotted.test-key.json a.b.seed']);
+    for (const seed of [x, y]) {
+      const leak = join(TMP, `dotted-${seed.slice(0, 6)}.jsonl`);
+      writeFileSync(leak, `${rec(0, 'output', `seed ${seed}`)}\n`);
+      const r = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', f, leak], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+      assert.equal(r.status, 1, `${seed}: ${r.stderr}`);
+    }
+  });
+
+  it('<key N> counts in JavaScript property order, not file order', () => {
+    // "1" is integer-like: Object.keys puts it first, so the unusual key
+    // that comes first in the file is <key 2>.
+    const f = join(TMP, 'order.test-key.json');
+    writeFileSync(f, '{"z-z":{"seed":"order-seed-5555eeee"},"1":0}');
+    assert.deepEqual([...secretsFromFile(f).keys()], ['order.test-key.json <key 2>.seed']);
+  });
+
+  it('the same file name and key path from two secret files: both kept, the second as #2', () => {
+    const a = join(TMP, 'same-a');
+    const b = join(TMP, 'same-b');
+    mkdirSync(a);
+    mkdirSync(b);
+    writeFileSync(join(a, 'k.test-key.json'), JSON.stringify({ keys: [{ seed: 'same-label-one-6666' }] }));
+    writeFileSync(join(b, 'k.test-key.json'), JSON.stringify({ keys: [{ seed: 'same-label-two-7777' }] }));
+    const merged = new Map();
+    for (const d of [a, b]) mergeSecrets(merged, secretsFromFile(join(d, 'k.test-key.json')));
+    assert.deepEqual([...merged], [
+      ['k.test-key.json keys[0].seed', 'same-label-one-6666'],
+      ['k.test-key.json keys[0].seed #2', 'same-label-two-7777'],
+    ]);
+  });
+
+  it('--secret-file key names are not echoed: an unusual one is shown by its position', () => {
+    const SECRET_KEY = 'dummy-key-name-secret-55';
+    const seed = 'a1b2c3d4e5f6a7b8c9d0';
+    const named = join(TMP, 'secret-key-names.json');
+    writeFileSync(named, JSON.stringify({ keys: [{ plain_name: 1, [SECRET_KEY]: { seed } }] }));
+    assert.deepEqual([...secretsFromFile(named).keys()], ['secret-key-names.json keys[0].<key 2>.seed']);
+    const leak = join(TMP, 'key-name-leak.jsonl');
+    writeFileSync(leak, `${rec(0, 'output', `seed ${seed}`)}\n`);
+    const r = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', named, leak], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /key-name-leak\.jsonl:1: the value of secret-key-names\.json keys\[0\]\.<key 2>\.seed appears in the record/);
+    const short = join(TMP, 'secret-key-names-short.json');
+    writeFileSync(short, JSON.stringify({ [SECRET_KEY]: { seed: 'abc' } }));
+    const s2 = spawnSync(process.execPath, [SCRIPT, 'check', '--secret-file', short, SAMPLE], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(s2.status, 2);
+    assert.match(s2.stderr, /<key 1>\.seed is shorter than 8 characters/);
+    const render = spawnSync(process.execPath, [join(HERE, 'render.mjs'), leak, '--out', join(TMP, 'key-name-out'), '--secret-file', named], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(render.status, 1);
+    for (const printed of [r.stdout + r.stderr, s2.stdout + s2.stderr, render.stdout + render.stderr]) {
+      for (const needle of [SECRET_KEY, SECRET_KEY.slice(0, 12), seed]) assert.ok(!printed.includes(needle), `printed ${needle}:\n${printed}`);
+    }
   });
 
   it('a --secret-file that is not JSON is not echoed', () => {

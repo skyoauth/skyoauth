@@ -128,8 +128,8 @@ fn enrolled_state(value: &Value) -> EnrolledState {
         .unwrap_or_else(|| panic!("no enrolled state {value}"))
 }
 
-/// The request of a golden request case.
-fn request_of(case: &Value) -> Request {
+/// The request of a golden request case (also read by `local_exchange`).
+pub fn request_of(case: &Value) -> Request {
     let values = &case["values"];
     let response = || ResponseRequest {
         operation_id: owned(values, "operation_id"),
@@ -1524,7 +1524,16 @@ fn the_local_module_names_no_signer() {
         files.push(path.file_name().unwrap().to_str().unwrap().to_owned());
     }
     files.sort();
-    assert_eq!(files, ["exchange.rs", "mod.rs", "path.rs", "wire.rs"]);
+    assert_eq!(
+        files,
+        [
+            "exchange.rs",
+            "mod.rs",
+            "path.rs",
+            "reconcile.rs",
+            "wire.rs"
+        ]
+    );
 }
 
 /// The members of a fixture object.
