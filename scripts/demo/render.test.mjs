@@ -193,14 +193,52 @@ describe('the lead-in cut and its page-clock late bound', () => {
   });
 
   it('takes the black interval whose end is nearest the estimate, not the first', () => {
-    // 0.95 is nearest the estimate (900 ms); 0.30 comes first.
+    // 0.95 is nearest the estimate (900 ms); 0.30 comes first (and the
+    // earlier intervals are ignored, as a start-up flash).
     const lead = detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 0.84], [0.86, 0.95])).detect });
     assert.equal(lead.cutSeconds, 0.95);
     assert.deepEqual(lead.black, { start: 0.86, end: 0.95 });
     // Nearest, early or late: 0.97 (70 ms late) beats 0.75 (150 ms early).
     assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.75], [0.8, 0.97])).detect }).cutSeconds, 0.97);
-    // Not the last either.
-    assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 0.88], [1.5, 1.9])).detect }).cutSeconds, 0.88);
+    // Not the last either: 0.88 is nearest, and the black after it fails
+    // the render (taking the last, 0.95, would pass a cut after a flash).
+    assert.match(
+      failure(() => detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 0.88], [0.9, 0.95])).detect })),
+      /^black after the lead-in cut 0\.880 s .* first at 0\.900 s:/,
+    );
+  });
+
+  it('black before the chosen interval (a start-up flash) is ignored: the cut drops it', () => {
+    const lead = detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.04], [0.2, 0.84])).detect });
+    assert.equal(lead.cutSeconds, 0.84);
+    assert.deepEqual(lead.black, { start: 0.2, end: 0.84 });
+  });
+
+  it('any black after the chosen cut fails, with every number: the nearest endpoint was a start-up flash', () => {
+    // The reviewer's controlled recording: black ending at 0.040 s and at
+    // 5.240 s, page clock 905 ms. 0.040 is nearest and within the bound,
+    // but 5.1 s of black would follow t0 in the mp4.
+    assert.equal(
+      failure(() => detectLeadIn({ estimateMs: 905, detect: scripted(blackdetect([0, 0.04], [0.12, 5.24])).detect })),
+      "black after the lead-in cut 0.040 s (the player's frames are never black: a frozen or blank recording), first at 0.120 s: " +
+        'page-clock estimate 905 ms, late bound 985 ms (estimate + 80 ms, two 25 fps frames), delta -865 ms; ' +
+        'black intervals 0.000-0.040 s, 0.120-5.240 s',
+    );
+  });
+
+  it('a frozen tail after a valid cut fails', () => {
+    // A valid lead-in (0.10-0.84 s, page clock 900 ms), then a long black
+    // interval later in the recording.
+    assert.match(
+      failure(() => detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0.1, 0.84], [3, 7.5])).detect })),
+      /^black after the lead-in cut 0\.840 s .*first at 3\.000 s: .*delta -60 ms; black intervals 0\.100-0\.840 s, 3\.000-7\.500 s$/,
+    );
+    // Seen locally with 8 renders at once (and passed before this check):
+    // the t0 frame, then 4.2 s of black.
+    assert.match(
+      failure(() => detectLeadIn({ estimateMs: 1816, detect: scripted(blackdetect([0.28, 1.48], [1.52, 5.72])).detect })),
+      /^black after the lead-in cut 1\.480 s .*first at 1\.520 s: .*delta -336 ms; black intervals 0\.280-1\.480 s, 1\.520-5\.720 s$/,
+    );
   });
 
   it('no black interval at all fails, with the estimate', () => {

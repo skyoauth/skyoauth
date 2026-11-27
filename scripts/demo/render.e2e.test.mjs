@@ -124,14 +124,15 @@ describe('render.mjs end to end', () => {
 
   it('cuts the lead-in: the first frame already shows the player and the first caption', (t) => {
     for (const line of leadInLines) t.diagnostic(line);
-    assert.ok(first.leadInSeconds > timing.LEAD_IN_MS / 1000 - FRAME_SLACK_S, `lead-in ${first.leadInSeconds}`);
-    // The cut is within the page clock's late bound (render() enforces it;
-    // there is no early-side bound: the estimate runs late by the start-up
-    // time, which load makes as long as it likes).
+    // The cut exists and is within the page clock's late bound (render()
+    // enforces it). No minimum and no early-side bound: a recording whose
+    // first frame comes late holds less than LEAD_IN_MS of black and its
+    // cut is still t0, and the estimate runs late by the start-up time,
+    // which load makes as long as it likes. Frame 0 (below) and the caption
+    // changes at the cues check where the cut is.
     for (const r of [first, second]) {
+      assert.ok(Number.isFinite(r.leadInSeconds) && r.leadInSeconds > 0, `lead-in cut ${r.leadInSeconds}`);
       assert.ok(r.leadInDeltaMs <= LEAD_IN_LATE_SLACK_MS, `delta ${r.leadInDeltaMs} ms`);
-      // leadInEstimateMs is rounded: the delta, from the exact estimate, may differ by 1.
-      assert.ok(Math.abs(r.leadInDeltaMs - (r.leadInSeconds * 1000 - r.leadInEstimateMs)) <= 1, `delta ${r.leadInDeltaMs} ms is not the cut less the estimate`);
     }
     const r = sh(FFMPEG, ['-v', 'error', '-i', first.mp4, '-frames:v', '1', '-vf', 'crop=1280:36:0:0,format=gray', '-f', 'rawvideo', '-']);
     assert.equal(r.status, 0);

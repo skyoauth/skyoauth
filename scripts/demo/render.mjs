@@ -20,8 +20,9 @@
 // (to about a frame of the 25 fps recording, as measured; see the README:
 // a measurement, not a guarantee). Every render logs the cut, the page
 // clock's estimate of t0 and their difference, and the cut must not be
-// later than that estimate by more than two recording frames
-// (detectLeadIn); otherwise the render fails with every number. During
+// later than that estimate by more than two recording frames, nor be
+// followed by more black (detectLeadIn); otherwise the render fails with
+// every number. During
 // the lead-in the player repaints a 4px corner square in two shades that
 // blackdetect counts as black, so the screencast keeps receiving black
 // frames (twice locally, before that repaint existed, a render found no
@@ -115,11 +116,13 @@ export const LEAD_IN_FILTER = 'blackdetect=d=0.01:pix_th=0.05:pic_th=0.98';
 // recording and returns ffmpeg's stderr; `estimateMs` is the page-clock
 // estimate of t0 in the recording (an upper bound on it, to within
 // LEAD_IN_LATE_SLACK_MS). Takes the black interval whose end is nearest the
-// estimate. Returns {
-// cutSeconds, black, deltaMs }, deltaMs the cut less the estimate. Throws a
-// RenderError with every number when no black interval is found or the cut
-// is later than estimateMs + LEAD_IN_LATE_SLACK_MS: such a cut is never
-// used.
+// estimate. Returns { cutSeconds, black, deltaMs }, deltaMs the cut less
+// the estimate. Throws a RenderError with every number and every black
+// interval when no black interval is found, when the cut is later than
+// estimateMs + LEAD_IN_LATE_SLACK_MS, or when any black interval comes
+// after the cut: the player's frames are never black, so black after t0 is
+// a recording fault (frames that froze), whichever interval the cut took.
+// Such a cut is never used.
 export function detectLeadIn({ estimateMs, detect }) {
   const boundMs = estimateMs + LEAD_IN_LATE_SLACK_MS;
   const intervals = parseBlackIntervals(detect(LEAD_IN_FILTER));
@@ -129,10 +132,15 @@ export function detectLeadIn({ estimateMs, detect }) {
   const off = (black) => Math.abs(cutMsOf(black) - estimateMs);
   const black = intervals.reduce((a, b) => (off(b) < off(a) ? b : a));
   const deltaMs = Math.round(cutMsOf(black) - estimateMs);
+  const all = `black intervals ${intervals.map((i) => `${i.start.toFixed(3)}-${i.end.toFixed(3)} s`).join(', ')}`;
   if (cutMsOf(black) > boundMs) {
+    throw new RenderError(`lead-in cut ${black.end.toFixed(3)} s is later than the page clock allows: ${numbers}, delta ${deltaMs} ms; ${all}`);
+  }
+  const after = intervals.filter((i) => i !== black && i.start >= black.end);
+  if (after.length > 0) {
     throw new RenderError(
-      `lead-in cut ${black.end.toFixed(3)} s is later than the page clock allows: ${numbers}, delta ${deltaMs} ms; ` +
-        `black intervals ${intervals.map((i) => `${i.start.toFixed(3)}-${i.end.toFixed(3)} s`).join(', ')}`,
+      `black after the lead-in cut ${black.end.toFixed(3)} s (the player's frames are never black: a frozen or blank recording), ` +
+        `first at ${after[0].start.toFixed(3)} s: ${numbers}, delta ${deltaMs} ms; ${all}`,
     );
   }
   return { cutSeconds: black.end, black, deltaMs };

@@ -125,7 +125,9 @@ transcript (and the VTT made from it) is what is compared, never the mp4,
 which is only as stable as the browser and the encoder.
 
 The player holds a pure black screen for `LEAD_IN_MS` before its first frame
-(t0). The recording starts earlier, with the page load, so the renderer runs
+(t0). The recording usually starts earlier, with the page load, but its
+first frame can come late, inside the lead-in, so it may hold less than
+`LEAD_IN_MS` of black: there is no minimum lead-in. The renderer runs
 ffmpeg's `blackdetect` on the raw recording once (any black frame counts; the
 player's own frames are never black) and starts the mp4 at the end of the
 black interval nearest the page clock's estimate of t0: time 0 of the mp4 is
@@ -156,6 +158,18 @@ black interval found. What it catches was seen under load: a
 recording whose frames froze for 4.4 s after t0 (black from 0.12 to 5.24 s,
 while the page clock put t0 near 0.9 s), which used to fail later with "the
 recording holds 20.5 s after t0" and now fails at the cut with the numbers.
+
+Black after the cut also fails the render, with the same numbers: since the
+player's frames are never black, any black interval that starts after the
+chosen one is a recording fault (frames that froze or went blank), even when
+the cut itself is within the bound. A start-up flash can make that happen:
+black ending at 0.04 s and at 5.24 s with the page clock at 905 ms puts the
+cut at 0.04 s, nearest the estimate, and would have left 5.1 s of black in
+the mp4. With 8 renders at once, 1 of 16 recordings showed the t0 frame and
+then 4.2 s of black (cut at 1.48 s, black again from 1.52 to 5.72 s) and
+passed before this check. Black before the chosen interval (a start-up
+flash) is ignored: the cut drops it.
+
 A cut a frame or two late is not caught by the bound; the quiet lead-in
 below is what keeps the cut on its frame, and the e2e test checks the
 captions against the cues.
