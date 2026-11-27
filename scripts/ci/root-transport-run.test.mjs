@@ -4,7 +4,12 @@
 // It needs sh, awk, sed, sort, od and tee, as the script does, and bash for
 // one check of the fixture. It reads the workspace's Rust sources and
 // manifests (no cargo): every test target's files, for root-only notices
-// and branches outside the selections, and the selections' test counts.
+// and branches outside the selections (in tests and in test helpers), and
+// the selections' test counts, which it refuses to take where tests come
+// from what it cannot count (a test-writing macro, rstest, test_case, a
+// cfg_attr); and the files no test target compiles in, which must hold no
+// test and nothing root-only. Attributes are read from the code with its
+// comments blanked, one attribute however it is wrapped.
 // Every file it writes lives under one temporary directory, removed
 // afterwards (a scratch copy of a source lives in memory only); nothing
 // runs as root or reaches a network.
@@ -246,8 +251,15 @@ const edited = (file, from, to) => {
 function lex(src) {
   const literals = [];
   const code = src.split('');
+  // The source with its comments blanked but its literals kept, for the
+  // text of attributes (a cfg's `target_os = "linux"`, a `#[path]`).
+  const bare = src.split('');
   const blank = (from, to) => {
     for (let k = from; k < to; k++) if (code[k] !== '\n') code[k] = ' ';
+  };
+  const blankComment = (from, to) => {
+    blank(from, to);
+    for (let k = from; k < to; k++) if (bare[k] !== '\n') bare[k] = ' ';
   };
   const starts = [0];
   for (let k = 0; k < src.length; k++) if (src[k] === '\n') starts.push(k + 1);
@@ -266,7 +278,7 @@ function lex(src) {
     if (src.startsWith('//', i)) {
       const j = src.indexOf('\n', i);
       const to = j < 0 ? src.length : j;
-      blank(i, to);
+      blankComment(i, to);
       i = to;
       continue;
     }
@@ -283,7 +295,7 @@ function lex(src) {
           j += 2;
         } else j++;
       } while (depth > 0);
-      blank(i, j);
+      blankComment(i, j);
       i = j;
       continue;
     }
@@ -321,7 +333,7 @@ function lex(src) {
     }
     i++;
   }
-  return { literals, code: code.join(''), lineAt, starts };
+  return { literals, code: code.join(''), bare: bare.join(''), lineAt, starts };
 }
 const lexed = cached((file) => lex(read(file)));
 // The string literals of Rust source, each { text, line }.
@@ -396,6 +408,89 @@ const macroCalls = cached((file) => {
   return out;
 });
 
+// An attribute's text (between `#[` and `]`, comments blanked, white
+// space collapsed): { text, inner, path, cfg, pathValue, test, generator }.
+// `test` is a test attribute the scan counts (`#[test]`,
+// `#[tokio::test...]`); `generator`, one that makes tests it cannot count:
+// any other attribute with a path segment that says test (`test_case`,
+// `test_log::test`, `async_std::test`, `wasm_bindgen_test`), the attribute
+// macros of rstest and the like, or a `cfg_attr` that applies one of these.
+const COUNTED_TESTS = ['test', 'tokio::test'];
+const GENERATING = /test|^(rstest|case|values|fixture|template|apply|proptest|quickcheck|serial|parallel)$/;
+function attribute(text, inner, line) {
+  const path = /^[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*/.exec(text)?.[0].replace(/\s+/g, '') ?? '';
+  const args = text.slice(/^[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*/.exec(text)?.[0].length ?? 0).trim();
+  const test = COUNTED_TESTS.includes(path);
+  let generator = !test && path.split('::').some((segment) => GENERATING.test(segment));
+  if (path === 'cfg_attr') {
+    // The attributes it applies: after its predicate's top-level comma.
+    let depth = 0;
+    let comma = -1;
+    for (let k = 0; k < args.length && comma < 0; k++) {
+      if (args[k] === '(') depth++;
+      else if (args[k] === ')') depth--;
+      else if (args[k] === ',' && depth === 1) comma = k;
+    }
+    const applied = comma < 0 ? '' : args.slice(comma + 1, -1);
+    if (applied.split(',').some((a) => /^[A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*/.exec(a.trim())?.[0].replace(/\s+/g, '').split('::').some((segment) => segment === 'test' || GENERATING.test(segment)))) generator = true;
+  }
+  return {
+    text,
+    inner,
+    line,
+    path,
+    cfg: path === 'cfg' && /^\(.*\)$/.test(args) ? args.slice(1, -1).trim() : null,
+    pathValue: path === 'path' ? (/^=\s*"([^"]*)"$/.exec(args)?.[1] ?? null) : null,
+    test,
+    generator,
+  };
+}
+// The attributes that start a line of a file's code (after its
+// indentation): 0-based line -> { end, attrs, trailing }, `end` the line
+// the last of them closes on. Several on one line, and one written over
+// several lines (`#[cfg(\n    unix\n)]`, as rustfmt wraps a long one), are
+// one entry; comments in or after them do not count. `trailing` when code
+// follows the last of them on its line: for a cfg, a test attribute, a
+// test-generating one or a `#[path]`, that throws (rustfmt never writes
+// it), the others keep the line an attribute line as before.
+const attributeLines = cached((file) => {
+  const { code, bare, starts, lineAt } = lexed(file);
+  const codeLines = code.split('\n');
+  const out = new Map();
+  for (let k = 0; k < codeLines.length; k++) {
+    if (!/^\s*#\s*!?\s*\[/.test(codeLines[k])) continue;
+    let at = starts[k] + codeLines[k].indexOf('#');
+    const attrs = [];
+    let trailing = false;
+    for (;;) {
+      const m = /^#\s*(!?)\s*\[/.exec(code.slice(at, at + 64));
+      if (!m) {
+        trailing = true;
+        break;
+      }
+      const open = at + m[0].length - 1;
+      let depth = 0;
+      let close = open;
+      for (; close < code.length; close++) {
+        if ('([{'.includes(code[close])) depth++;
+        else if (')]}'.includes(code[close]) && --depth === 0) break;
+      }
+      if (code[close] !== ']') throw new Error(`${file}:${k + 1}: an attribute that is not closed`);
+      attrs.push(attribute(bare.slice(open + 1, close).replace(/\s+/g, ' ').trim(), m[1] === '!', lineAt(at)));
+      at = close + 1;
+      while (at < code.length && (code[at] === ' ' || code[at] === '\t' || code[at] === '\r')) at++;
+      if (at >= code.length || code[at] === '\n') break;
+    }
+    const end = lineAt(Math.min(at, code.length - 1)) - 1;
+    if (trailing && attrs.some((a) => a.cfg !== null || a.path === 'cfg' || a.path === 'cfg_attr' || a.test || a.generator || a.path === 'path')) {
+      throw new Error(`${file}:${k + 1}: #[${attrs.map((a) => a.text).join('] #[')}] and code on one line: write each attribute on lines of its own, as rustfmt does`);
+    }
+    out.set(k, { end: Math.max(end, k), attrs, trailing });
+    k = Math.max(end, k);
+  }
+  return out;
+});
+
 // The files a crate root compiles in: { file, path, cfgs }, with the module
 // path (`a::b::`) of each and the cfg predicates its module is under,
 // following `mod NAME;`, inline `mod NAME { ... }` (closed by a `}` at its
@@ -407,10 +502,10 @@ const macroCalls = cached((file) => {
 function moduleFiles(root) {
   const out = [];
   const walk = (file, dir, path, cfgs) => {
-    const lines = read(file).split('\n');
     const { code } = lexed(file);
     const codeLines = code.split('\n');
-    const inner = codeLines.flatMap((l, k) => (/^\s*#!\[cfg\(/.test(l) ? [/^\s*#!\[cfg\((.*)\)\]\s*$/.exec(lines[k])[1]] : []));
+    const items = attributeLines(file);
+    const inner = [...items.values()].flatMap(({ attrs }) => attrs.filter((a) => a.inner && a.cfg !== null).map((a) => a.cfg));
     const own = [...cfgs, ...inner];
     out.push({ file, path, cfgs: own });
     const stack = [{ indent: -1, dir, path, cfgs: own }];
@@ -418,17 +513,24 @@ function moduleFiles(root) {
     let attrCfgs = [];
     let mods = 0;
     let paths = 0;
+    let skip = -1;
     codeLines.forEach((text, k) => {
+      if (k <= skip) return;
       const trimmed = text.trimEnd();
       if (stack.length > 1 && trimmed === `${' '.repeat(stack.at(-1).indent)}}`) {
         stack.pop();
         return;
       }
-      if (/^\s*#\[/.test(text)) {
-        const p = /^\s*#\[path = "([^"]+)"\]\s*$/.exec(lines[k]);
-        if (p) pathAttr = p[1];
-        const c = /^\s*#\[cfg\((.*)\)\]\s*$/.exec(lines[k]);
-        if (c) attrCfgs.push(c[1]);
+      const item = items.get(k);
+      if (item) {
+        skip = item.end;
+        for (const a of item.attrs.filter((x) => !x.inner)) {
+          if (a.path === 'path') {
+            if (a.pathValue === null) throw new Error(`${file}:${a.line}: #[${a.text}]: a #[path] that is not one string literal`);
+            pathAttr = a.pathValue;
+          }
+          if (a.cfg !== null) attrCfgs.push(a.cfg);
+        }
         return;
       }
       if (trimmed === '') return;
@@ -473,18 +575,25 @@ function moduleFiles(root) {
 // `#[tokio::test...]`, the cfg predicates of its attributes and of the
 // inline modules around it, and those modules' path (`a::b::`).
 const functions = cached((file) => {
-  const lines = read(file).split('\n');
   const { code, starts } = lexed(file);
   const codeLines = code.split('\n');
+  const items = attributeLines(file);
   const out = [];
   const stack = [{ indent: -1, path: '', cfgs: [] }];
   let attrCfgs = [];
+  let attrTest = false;
+  let skip = -1;
   codeLines.forEach((text, k) => {
+    if (k <= skip) return;
     const trimmed = text.trimEnd();
     if (stack.length > 1 && trimmed === `${' '.repeat(stack.at(-1).indent)}}`) stack.pop();
-    if (/^\s*#\[/.test(text)) {
-      const c = /^\s*#\[cfg\((.*)\)\]\s*$/.exec(lines[k]);
-      if (c) attrCfgs.push(c[1]);
+    const item = items.get(k);
+    if (item) {
+      skip = item.end;
+      for (const a of item.attrs.filter((x) => !x.inner)) {
+        if (a.cfg !== null) attrCfgs.push(a.cfg);
+        if (a.test) attrTest = true;
+      }
       return;
     }
     if (trimmed === '') return;
@@ -492,8 +601,6 @@ const functions = cached((file) => {
     if (mod) stack.push({ indent: mod[1].length, path: `${stack.at(-1).path}${mod[2]}::`, cfgs: [...stack.at(-1).cfgs, ...attrCfgs] });
     const fn = /^(\s*)(?:pub(?:\([^)]*\))? )?(?:const )?(?:async )?(?:unsafe )?(?:extern "\s*" )?fn (\w+)/.exec(text);
     if (fn) {
-      const attrs = [];
-      for (let a = k - 1; a >= 0 && (/^\s*#\[/.test(codeLines[a]) || codeLines[a].trim() === ''); a--) if (/^\s*#\[/.test(codeLines[a])) attrs.push(lines[a]);
       const rest = code.slice(starts[k]);
       const brace = rest.indexOf('{');
       const semi = rest.indexOf(';');
@@ -502,9 +609,10 @@ const functions = cached((file) => {
         end = codeLines.findIndex((l, j) => j > k && l.trimEnd() === `${fn[1]}}`);
         if (end < 0) throw new Error(`${file}:${k + 1}: fn ${fn[2]}: no closing } at its indentation`);
       }
-      out.push({ name: fn[2], start: k, end, test: attrs.some((l) => /^\s*#\[(tokio::)?test\b/.test(l)), cfgs: [...stack.at(-1).cfgs, ...attrCfgs], mods: stack.at(-1).path });
+      out.push({ name: fn[2], start: k, end, test: attrTest, cfgs: [...stack.at(-1).cfgs, ...attrCfgs], mods: stack.at(-1).path });
     }
     attrCfgs = [];
+    attrTest = false;
   });
   return out;
 });
@@ -518,11 +626,25 @@ const functionAt = (file, line) => functions(file).filter((f) => f.start <= line
 // `autotests = false`, and each `[[test]]`. A manifest table or a
 // directory of targets this does not read (`[lib]`, `[[bin]]`, examples,
 // benches) throws, to be added here.
+// A manifest's text with each table header alone on its line (a trailing
+// `# comment` dropped), so that the line-anchored reads below see every
+// table. A line that starts with `[` and is no table header throws.
+function manifest(file) {
+  return read(file)
+    .split('\n')
+    .map((line, k) => {
+      if (!/^\s*\[/.test(line)) return line;
+      const m = /^\s*(\[\[?[^[\]#]+\]\]?)\s*(?:#.*)?$/.exec(line);
+      if (!m) throw new Error(`${file}:${k + 1}: ${line}: a line that starts with [ and is no table header the target discovery reads`);
+      return m[1];
+    })
+    .join('\n');
+}
 function workspaceTargets() {
-  const members = /^members = \[([^\]]*)\]$/m.exec(read('Cargo.toml'))[1].match(/"[^"]+"/g).map((s) => JSON.parse(s));
+  const members = /^members = \[([^\]]*)\]$/m.exec(manifest('Cargo.toml'))[1].match(/"[^"]+"/g).map((s) => JSON.parse(s));
   const out = [];
   for (const dir of members) {
-    const toml = read(join(dir, 'Cargo.toml'));
+    const toml = manifest(join(dir, 'Cargo.toml'));
     const pkg = /^\[package\]\nname = "([^"]+)"$/m.exec(toml)[1];
     for (const table of toml.match(/^\[\[?[^\]]+\]\]?$/gm)) {
       if (!['[package]', '[dependencies]', '[dev-dependencies]', '[build-dependencies]', '[features]', '[lints]', '[[test]]', '[[bin]]'].includes(table) && !/^\[(target\.|lints\.|package\.metadata)/.test(table)) throw new Error(`${dir}/Cargo.toml: ${table}: a table the target discovery does not read`);
@@ -614,6 +736,8 @@ const SCANNED = [...new Set(TARGETS.map(([bin]) => bin))].flatMap((bin) => {
 // that does not hold there (cfgOn). Every test attribute in those files
 // must be on a function it found, else it throws.
 function sourceTests(bin, prefix) {
+  const uncounted = uncountedTests(bin);
+  if (uncounted.length) throw new Error(uncounted.join('\n'));
   const root = workspaceTargets().find((t) => t.id === bin).root;
   const names = [];
   const seen = new Set();
@@ -627,6 +751,54 @@ function sourceTests(bin, prefix) {
     for (const f of fns) if ([...m.cfgs, ...f.cfgs].every(cfgOn)) names.push(`${m.path}${f.mods}${f.name}`);
   }
   return names;
+}
+
+// The macro_rules! of a file: { name, line, body }, its body as code
+// (comments and literals blanked).
+const macroRules = cached((file) => {
+  const { code, lineAt } = lexed(file);
+  const out = [];
+  for (const m of code.matchAll(/\bmacro_rules\s*!\s*([A-Za-z_]\w*)\s*([([{])/g)) {
+    const open = m.index + m[0].length - 1;
+    let depth = 0;
+    let close = open;
+    for (; close < code.length; close++) {
+      if ('([{'.includes(code[close])) depth++;
+      else if (')]}'.includes(code[close]) && --depth === 0) break;
+    }
+    out.push({ name: m[1], line: lineAt(m.index), body: code.slice(open, close + 1) });
+  }
+  return out;
+});
+// Whether code holds a test attribute or a test-generating one (a path
+// segment `test`, or one GENERATING matches), as a macro body would.
+const writesTests = (code) => [...code.matchAll(/#\s*!?\s*\[\s*((?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)/g)].some((m) => m[1].replace(/\s+/g, '').split('::').some((segment) => segment === 'test' || GENERATING.test(segment)));
+// The macros that generate tests: every macro_rules! of the workspace
+// whose body writes a test attribute, and those of other crates.
+const EXTERNAL_TEST_MACROS = ['proptest', 'quickcheck', 'test_case', 'test_matrix', 'parameterized', 'rstest_reuse'];
+const testMacrosOnce = cached(() => new Set([...EXTERNAL_TEST_MACROS, ...rustFiles().flatMap((file) => macroRules(file).filter((m) => writesTests(m.body)).map((m) => m.name))]));
+const testMacros = () => testMacrosOnce('all');
+// What would make a binary's test count wrong in sourceTests, in any file
+// it compiles in: a macro_rules! that writes a test attribute, a call of
+// a macro that generates tests, or a test-generating attribute (rstest,
+// test_case, a cfg_attr that applies a test attribute): each is a test
+// the sources do not show as a `#[test]` function, so MIN_TESTS could not
+// follow it.
+function uncountedTests(bin) {
+  const root = workspaceTargets().find((t) => t.id === bin).root;
+  const names = testMacros();
+  const out = [];
+  for (const { file } of moduleFiles(root)) {
+    for (const m of macroRules(file)) if (writesTests(m.body)) out.push(`${file}:${m.line}: macro_rules! ${m.name} writes a test attribute: the tests it generates cannot be counted (MIN_TESTS); write them as #[test] functions`);
+    const { code, lineAt } = lexed(file);
+    for (const m of code.matchAll(/\b([A-Za-z_]\w*)\s*!\s*[([{]/g)) if (m[1] !== 'macro_rules' && names.has(m[1])) out.push(`${file}:${lineAt(m.index)}: ${m[1]}! generates tests that cannot be counted (MIN_TESTS); write them as #[test] functions`);
+    for (const m of code.matchAll(/#\s*!?\s*\[\s*((?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)/g)) {
+      const path = m[1].replace(/\s+/g, '');
+      if (!COUNTED_TESTS.includes(path) && path.split('::').some((segment) => GENERATING.test(segment))) out.push(`${file}:${lineAt(m.index)}: #[${path}] generates tests that cannot be counted (MIN_TESTS); write them as #[test] functions`);
+    }
+    for (const { attrs } of attributeLines(file).values()) for (const a of attrs) if (a.path === 'cfg_attr' && a.generator) out.push(`${file}:${a.line}: #[${a.text}] applies a test attribute under a condition: tests that cannot be counted (MIN_TESTS)`);
+  }
+  return out;
 }
 
 // Every notice of SCANNED: { file, line, text, bin, path, selected, fn,
@@ -1432,6 +1604,8 @@ const ROOT_ALLOWLIST = [
 // kind, fn, source, selected }, `selected` when, in every target and module
 // the file is in, its module is in a selection's prefix or its function is
 // the test a selection names.
+const testTargetsOnce = cached(() => new Set(workspaceTargets().filter((t) => t.kind === 'test').map((t) => t.id)));
+const testTargets = () => testTargetsOnce('all');
 function rootOnlyFindings() {
   const out = [];
   for (const [file] of workspaceFiles()) {
@@ -1439,10 +1613,19 @@ function rootOnlyFindings() {
     const lines = read(file).split('\n');
     const found = new Map();
     for (const { text, line } of literals) if (rootOnlyText(text)) found.set(line, 'root-only text');
+    // A branch on root counts in test code: anywhere in a file an
+    // integration test target compiles in (its tests and its helpers), and
+    // in a library or binary in a test function, or in a function or file
+    // under a cfg that names `test` (its unit tests' helpers).
+    const entries = workspaceFiles().get(file);
+    const testFile = entries.some(({ bin, cfgs }) => testTargets().has(bin) || cfgs.some((p) => /\btest\b/.test(p)));
     code.split('\n').forEach((c, k) => {
       if (found.has(k + 1)) return;
       if (/\bPEER_USER_VAR\b/.test(c)) found.set(k + 1, 'the peer user variable');
-      else if (ROOT_BRANCH.test(c) && functionAt(file, k + 1)?.test) found.set(k + 1, 'a branch on root');
+      else if (ROOT_BRANCH.test(c)) {
+        const f = functionAt(file, k + 1);
+        if (testFile || f?.test || f?.cfgs.some((p) => /\btest\b/.test(p))) found.set(k + 1, 'a branch on root');
+      }
     });
     for (const [line, kind] of [...found].sort((a, b) => a[0] - b[0])) {
       const f = functionAt(file, line);
@@ -1571,6 +1754,29 @@ const NOT_IN_A_TARGET = {
   'operator/src/bin/skyoauth-operator/show.rs': OPERATOR_BIN,
 };
 
+// What a file no test target compiles in must not hold: a test (a test
+// or test-generating attribute, or anything under `cfg(test)`), which
+// would never run, nor root-only text, a notice, the peer user variable or
+// a branch on root, which no run would ever check.
+function notInATargetProblems() {
+  const out = [];
+  for (const file of Object.keys(NOT_IN_A_TARGET)) {
+    const { code, literals, lineAt } = lexed(file);
+    for (const m of code.matchAll(/#\s*!?\s*\[\s*((?:[A-Za-z_]\w*\s*::\s*)*[A-Za-z_]\w*)/g)) {
+      const path = m[1].replace(/\s+/g, '');
+      if (COUNTED_TESTS.includes(path) || path.split('::').some((segment) => GENERATING.test(segment))) out.push(`${file}:${lineAt(m.index)}: #[${path}] in a file no test target compiles in: that test never runs`);
+    }
+    for (const { attrs } of attributeLines(file).values()) {
+      for (const a of attrs) if ((a.cfg !== null && /\btest\b/.test(a.cfg)) || (a.path === 'cfg_attr' && a.generator)) out.push(`${file}:${a.line}: #[${a.text}] in a file no test target compiles in: that test code never runs`);
+    }
+    for (const { text, line } of literals) if (rootOnlyText(text) || text.includes('NOTICE:')) out.push(`${file}:${line}: root-only or notice text in a file no test target compiles in: ${text}`);
+    code.split('\n').forEach((c, k) => {
+      if (/\bPEER_USER_VAR\b/.test(c) || ROOT_BRANCH.test(c)) out.push(`${file}:${k + 1}: a branch on root or the peer user variable in a file no test target compiles in: ${read(file).split('\n')[k].trim()}`);
+    });
+  }
+  return out;
+}
+
 // A scratch copy of a test function's text with a line added after its
 // first line (in memory, see withSources).
 const withLineIn = (file, fnName, line) => {
@@ -1656,7 +1862,8 @@ describe('the workspace\'s Rust sources', () => {
     // A module the walk cannot follow, or a #[path] or include! it would
     // have to, fails instead of leaving a file unread.
     for (const [text, re] of [
-      ['#[cfg(test)] mod sneaky;\n', /jwk\.rs: 1 module declarations in the code, 0 followed/],
+      ['mod sneaky; mod other;\n', /jwk\.rs: 2 module declarations in the code, 0 followed/],
+      ['#[cfg(test)] mod sneaky;\n', /jwk\.rs:\d+: #\[cfg\(test\)\] and code on one line/],
       ['mod sneaky { mod inner; }\n', /module declarations in the code/],
       ['#[path = "nowhere.rs"]\nmod sneaky;\n', /mod sneaky: no file/],
       ['#[cfg_attr(unix, path = "x.rs")]\nmod sneaky;\n', /cfg_attr|no file/],
@@ -1766,6 +1973,152 @@ describe('the workspace\'s Rust sources', () => {
 
   // MIN_TESTS: exact here, a lower bound in the script (its comment says
   // why), so that it cannot fall behind the sources unnoticed.
+  // A helper (a function that is no test) that branches on root, in a
+  // file an integration test target compiles in, or in a library's unit
+  // test module, is classified like a test: in a selection, on
+  // ROOT_ALLOWLIST, or a failure. A library's own code is not test code.
+  test('a branch on root in a test helper is classified like one in a test', () => {
+    const socket = 'service/src/local_transport/socket.rs';
+    const after = (file, fnName, line) => {
+      const f = functions(file).find((x) => x.name === fnName);
+      assert.ok(f, `${file}: no fn ${fnName}`);
+      const lines = read(file).split('\n');
+      lines.splice(f.end + 1, 0, line);
+      return lines.join('\n');
+    };
+    const helper = (indent = '') => `${indent}fn as_root_helper() -> bool { rustix::process::geteuid().as_raw() == 0 }`;
+    for (const [texts, re] of [
+      // In a test target outside the selections: a helper of its own, a
+      // shared support module's, or code outside any function.
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n${helper()}\n` }, /operator\/tests\/challenge\/mod\.rs:\d+: a branch on root outside the four selections \(fn as_root_helper\)/],
+      [{ 'operator/tests/support/mod.rs': `${read('operator/tests/support/mod.rs')}\n${helper('pub ')}\n` }, /operator\/tests\/support\/mod\.rs:\d+: a branch on root outside the four selections \(fn as_root_helper\)/],
+      [{ [OTHER_TARGET]: `${read(OTHER_TARGET)}\nstatic AS_ROOT: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| rustix::process::geteuid().is_root());\n` }, /service\/tests\/jwk\.rs:\d+: a branch on root outside the four selections \(no function\)/],
+      // A helper of the file of the one test a selection names, which
+      // other tests of that file call too.
+      [{ [SIGN_FILE]: `${read(SIGN_FILE)}\n${helper()}\n` }, /operator\/tests\/cli\/sign\.rs:\d+: a branch on root outside the four selections \(fn as_root_helper\)/],
+      // A helper in a library's unit test module.
+      [{ [socket]: after(socket, 'a_leftover_directory_keeps_what_a_bind_did_not_put_there', helper('    ')) }, /local_transport\/socket\.rs:\d+: a branch on root outside the four selections \(fn as_root_helper\)/],
+      // A helper that prints a root-only notice.
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\nfn skip_note() {\n    eprintln!("NOTICE: running as root: x was NOT run");\n}\n` }, /operator\/tests\/challenge\/mod\.rs:\d+: root-only text outside the four selections \(fn skip_note\)/],
+    ]) {
+      withSources(texts, () => assert.match(rootOnlyProblems().join('\n'), re));
+    }
+    // In a selection's module, a helper is the selection's (the real
+    // `local_path` has one: `Roles::of`); in a library's own code, it is
+    // not test code.
+    const lp = 'operator/tests/local_path/mod.rs';
+    assert.ok(rootOnlyFindings().some((f) => f.file === lp && f.fn === 'of' && f.kind === 'a branch on root' && f.selected));
+    withSources({ [lp]: `${read(lp)}\n${helper()}\n` }, () => assert.deepEqual(rootOnlyProblems(), []));
+    withSources({ [socket]: `${read(socket)}\npub fn as_root_in_the_library() -> bool { rustix::process::geteuid().as_raw() == 0 }\n` }, () => assert.deepEqual(rootOnlyProblems(), []));
+  });
+
+  // Tests the sources do not show as `#[test]` functions would leave
+  // MIN_TESTS behind the binary's real count: any of them in a file of a
+  // selected binary throws, before a count is taken.
+  test('a test the scan cannot count (macro, rstest, test_case, cfg_attr) in a selected binary throws', () => {
+    for (const [bin] of TARGETS) assert.deepEqual(uncountedTests(bin), [], bin);
+    assert.deepEqual([...testMacros()].sort(), [...EXTERNAL_TEST_MACROS].sort(), 'a macro_rules! of the workspace writes a test attribute');
+    const macro = 'macro_rules! many {\n    ($name:ident) => {\n        #[test]\n        fn $name() {}\n    };\n}\n';
+    // In a file of the operator binary outside its selections (no selected
+    // test is in it), and in its shared support module.
+    for (const [texts, re] of [
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n${macro}` }, /operator\/tests\/challenge\/mod\.rs:\d+: macro_rules! many writes a test attribute/],
+      [{ 'operator/tests/support/mod.rs': `${read('operator/tests/support/mod.rs')}\n${macro.replace('#[test]', '#[tokio::test]')}` }, /support\/mod\.rs:\d+: macro_rules! many writes a test attribute/],
+      // Defined in another target, called here.
+      [{ [OTHER_TARGET]: `${read(OTHER_TARGET)}\n#[macro_export]\n${macro}`, [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\nmany!(one);\n` }, /operator\/tests\/challenge\/mod\.rs:\d+: many! generates tests/],
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\nproptest::proptest! {\n    #[test]\n    fn p(n in 0u32..9) {}\n}\n` }, /proptest! generates tests/],
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n#[rstest]\n#[case(1)]\nfn r(#[case] n: u32) {}\n` }, /#\[rstest\] generates tests/],
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n#[test_case(1)]\nfn tc(n: u32) {}\n` }, /#\[test_case\] generates tests/],
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n#[test_log::test]\nfn tl() {}\n` }, /#\[test_log::test\] generates tests/],
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n#[cfg_attr(unix, test)]\nfn c() {}\n` }, /#\[cfg_attr\(unix, test\)\] applies a test attribute under a condition/],
+      [{ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n#[cfg_attr(\n    unix,\n    tokio::test\n)]\nasync fn c() {}\n` }, /applies a test attribute under a condition/],
+      // In the selected `pg` target's harness, and in `local_transport`.
+      [{ 'tests/harness/socket_path_fixture.rs': `${read('tests/harness/socket_path_fixture.rs')}\n${macro}` }, /socket_path_fixture\.rs:\d+: macro_rules! many writes a test attribute/],
+      [{ 'service/tests/local_transport.rs': `${read('service/tests/local_transport.rs')}\n#[rstest::rstest]\nfn r() {}\n` }, /#\[rstest::rstest\] generates tests/],
+    ]) {
+      withSources(texts, () => assert.throws(() => minProblems(), re));
+    }
+    // A test-writing macro only another target defines and calls, and a
+    // cfg_attr that applies no test attribute, change no count here.
+    withSources({ [OTHER_TARGET]: `${read(OTHER_TARGET)}\n${macro}many!(one);\n` }, () => assert.deepEqual(minProblems(), []));
+    withSources({ [OPERATOR_OTHER]: `${read(OPERATOR_OTHER)}\n#[cfg_attr(test, allow(dead_code))]\nfn quiet() {}\n` }, () => assert.deepEqual(minProblems(), []));
+  });
+
+  // A cfg is read from the code with its comments blanked, as one
+  // attribute however rustfmt wraps it: a comment after it, in it, or a
+  // predicate over several lines must not make it unread (a test compiled
+  // out but still counted, or the reverse).
+  test('a cfg with a comment after or in it, or wrapped over lines, is read', () => {
+    const file = 'operator/tests/local_path/mod.rs';
+    const name = 'the_socket_must_be_the_expected_owners';
+    const f = functions(file).find((x) => x.name === name);
+    const lines = read(file).split('\n');
+    const attr = lines.slice(0, f.start).findLastIndex((l) => /^\s*#\[test\]$/.test(l));
+    const withLines = (...text) => [...lines.slice(0, attr), ...text, ...lines.slice(attr)].join('\n');
+    const base = sourceTests('skyoauth-operator::operator', 'local_path::').length;
+    const count = () => sourceTests('skyoauth-operator::operator', 'local_path::').length;
+    for (const [text, want] of [
+      [withLines('#[cfg(not(unix))] // compiled out here'), base - 1],
+      [withLines('#[cfg(any())] /* never */'), base - 1],
+      [withLines('#[cfg(/* unix */ windows)]'), base - 1],
+      [withLines('#[cfg(', '    not(unix)', ')]'), base - 1],
+      [withLines('#[cfg(all(', '    unix, // on unix', '    target_arch = "aarch64"', '))]'), base - 1],
+      [withLines('#[cfg(target_os = "linux")] // on Linux'), base],
+      [withLines('#[cfg(', '    any(target_os = "linux", target_os = "android")', ')]'), base],
+      // A test attribute wrapped over lines is still one.
+      [[...lines.slice(0, attr), '#[', '    test', ']', ...lines.slice(attr + 1)].join('\n'), base],
+      // Two attributes on one line, as rustfmt never writes them, throw.
+    ]) {
+      withSources({ [file]: text }, () => assert.equal(count(), want, text.split('\n').slice(attr, attr + 5).join('\n')));
+    }
+    withSources({ [file]: withLines('#[cfg(windows)] #[allow(unused)]') }, () => assert.equal(count(), base - 1));
+    withSources({ [file]: withLines('#[cfg(windows)] fn hidden() {}') }, () => assert.throws(() => count(), /#\[cfg\(windows\)\] and code on one line/));
+    // A module's cfg: `local_path` compiled out by a wrapped or commented
+    // cfg leaves its selection no test.
+    const root = 'operator/tests/operator.rs';
+    for (const cfg of ['#[cfg(windows)] // not here', '#[cfg(\n    windows\n)]', '#[cfg(not(unix) /* never */)]']) {
+      withSources({ [root]: edited(root, '#[cfg(unix)]\nmod local_path;', `${cfg}\nmod local_path;`) }, () => assert.equal(count(), 0, cfg));
+    }
+    withSources({ [root]: edited(root, '#[cfg(unix)]\nmod local_path;', '#[cfg(unix)] // Unix only\nmod local_path;') }, () => assert.equal(count(), base));
+    // A #[path] with a comment after it is followed.
+    withSources({ [OTHER_TARGET]: `${read(OTHER_TARGET)}\n#[path = "elsewhere/x.rs"] // moved\nmod sneaky;\n`, 'service/tests/elsewhere/x.rs': '' }, () =>
+      assert.deepEqual(workspaceFiles().get('service/tests/elsewhere/x.rs'), [{ bin: 'skyoauth-service::jwk', path: 'sneaky::', cfgs: [] }]),
+    );
+  });
+
+  // The operator binary's files (`test = false`) and the build script are
+  // compiled by no test target: a test there would never run, and a
+  // notice or root branch there would never be checked.
+  test('a file no test target compiles in holds no test and nothing root-only', () => {
+    assert.deepEqual(notInATargetProblems(), []);
+    const bin = 'operator/src/bin/skyoauth-operator/seed_file.rs';
+    for (const [text, re] of [
+      [`${read(bin)}\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn never_runs() {}\n}\n`, /seed_file\.rs:\d+: #\[test\] in a file no test target compiles in/],
+      [`${read(bin)}\n#[cfg(test)]\nmod tests {}\n`, /seed_file\.rs:\d+: #\[cfg\(test\)\] in a file no test target compiles in/],
+      [`${read(bin)}\n#[tokio::test]\nasync fn never_runs() {}\n`, /#\[tokio::test\] in a file no test target/],
+      [`${read(bin)}\n#[test_case(1)]\nfn never_runs(n: u32) {}\n`, /#\[test_case\] in a file no test target/],
+      [`${read(bin)}\nfn note() {\n    eprintln!("NOTICE: x was NOT tried");\n}\n`, /seed_file\.rs:\d+: root-only or notice text/],
+      [`${read(bin)}\nfn peer() -> Option<String> {\n    std::env::var("SKYOAUTH_IT_PEER_USER").ok()\n}\n`, /root-only or notice text/],
+      [`${read(bin)}\nfn is_root(uid: u32) -> bool {\n    uid == 0\n}\n`, /seed_file\.rs:\d+: a branch on root or the peer user variable/],
+    ]) {
+      withSources({ [bin]: text }, () => assert.match(notInATargetProblems().join('\n'), re));
+    }
+  });
+
+  // A table header with a comment after it is a table still; a line that
+  // starts with `[` and is no header the discovery reads throws.
+  test('a manifest table header with a trailing comment is read, an unreadable `[` line throws', () => {
+    const ids = workspaceTargets().map((x) => `${x.id} ${x.kind} ${x.root}`);
+    const op = 'operator/Cargo.toml';
+    const scen = 'tests/Cargo.toml';
+    withSources({ [op]: edited(op, '[[bin]]\n', '[[bin]] # the operator binary: test = false\n'), [scen]: edited(scen, '[[test]]\n', '[[test]]   # the pg target\n') }, () =>
+      assert.deepEqual(workspaceTargets().map((x) => `${x.id} ${x.kind} ${x.root}`), ids),
+    );
+    withSources({ [op]: `${read(op)}\n[lib] # a library target\npath = "src/other.rs"\n` }, () => assert.throws(() => workspaceTargets(), /\[lib\]: a table the target discovery does not read/));
+    withSources({ [op]: `${read(op)}\n[[example]] # x\nname = "x"\n` }, () => assert.throws(() => workspaceTargets(), /\[\[example\]\]: a table the target discovery does not read/));
+    withSources({ [op]: `${read(op)}\n[oops\n` }, () => assert.throws(() => workspaceTargets(), /operator\/Cargo\.toml:\d+: \[oops: a line that starts with \[ and is no table header/));
+  });
+
   test('MIN_TESTS is each selection\'s test count in the Rust sources, on Linux with all features', (t) => {
     // One entry per selection, in its order, keyed by binary ID and prefix
     // or test name.
@@ -1844,7 +2197,8 @@ describe('the workspace\'s Rust sources', () => {
     // A cfg it cannot evaluate, or a test attribute it does not see on a
     // function, throws instead of miscounting.
     withSources({ [file]: withLine(attr, '#[cfg(miri)]') }, () => assert.throws(() => minProblems(), /miri is not classified/));
-    withSources({ [file]: `${read(file)}\n#[test] fn one_line() {}\n` }, () => assert.throws(() => minProblems(), /test attributes, \d+ on functions found/));
+    withSources({ [file]: `${read(file)}\n#[test] fn one_line() {}\n` }, () => assert.throws(() => minProblems(), /#\[test\] and code on one line/));
+    withSources({ [file]: `${read(file)}\n#[test]\nfn\nsplit_name() {}\n` }, () => assert.throws(() => minProblems(), /test attributes, \d+ on functions found/));
   });
 });
 
