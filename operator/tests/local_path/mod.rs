@@ -1,6 +1,6 @@
 //! The checks of the deployment-local transport's socket path
 //! (`skyoauth_operator::local::check_socket`, [`CheckedSocketPath`],
-//! [`LocalClient::with_checked_socket`]) against the shared fixture
+//! [`LocalClient::new`]) against the shared fixture
 //! `tests/conformance/fixtures/_wire/socket_path.v1.json`, whose trees the
 //! `pg` target of `skyoauth-scenarios` binds the service's transport in
 //! (`tests/harness/socket_path_fixture.rs`), so the client's copy of the
@@ -13,7 +13,10 @@
 //!   root's owner) are skipped with a printed NOTICE;
 //! - the client with the checks connects to a safe socket, and does not
 //!   connect at all to a refused one ([`NotSent::Path`]);
-//! - the trust sets, a relative path, and that no error shows the path.
+//! - the client's own rule for the socket's directory (no sticky
+//!   exemption: a socket in the system's `/tmp` is refused), the owner
+//!   check (as root), the trust sets, a relative path, and that no error
+//!   shows the path.
 //!
 //! The comparison after the connect ([`PathProblem::Changed`]) is checked
 //! by the module's own unit tests, which can act between the check and
@@ -61,11 +64,12 @@ const PATIENT: Timeouts = Timeouts {
 
 /// Every outcome class of the fixture, with the problem it names (none
 /// for `accept`).
-const CLASSES: [&str; 11] = [
+const CLASSES: [&str; 12] = [
     "accept",
     "invalid_path",
     "too_long",
     "unsafe_directory",
+    "shared_directory",
     "unsafe_ancestor",
     "too_many_symlinks",
     "lookup",
@@ -309,6 +313,7 @@ fn class(result: Result<(), PathError>) -> (&'static str, Option<io::ErrorKind>)
         PathProblem::InvalidPath => "invalid_path",
         PathProblem::TooLong => "too_long",
         PathProblem::UnsafeDirectory => "unsafe_directory",
+        PathProblem::SharedDirectory => "shared_directory",
         PathProblem::UnsafeAncestor => "unsafe_ancestor",
         PathProblem::TooManySymlinks => "too_many_symlinks",
         PathProblem::Lookup(kind) => return ("lookup", Some(kind)),
@@ -587,7 +592,7 @@ fn the_checked_client_reaches_a_safe_socket() {
         let _ = stream.write_all(b"{\"error\":\"conflict\"}\n");
         request
     });
-    let client = LocalClient::with_checked_socket(
+    let client = LocalClient::new(
         &path,
         SocketExpectations {
             owner_uid: dir.uid(),
@@ -615,7 +620,7 @@ fn a_refused_socket_is_never_connected() {
     let listener = listen(&path);
     listener.set_nonblocking(true).unwrap();
     let own = dir.uid();
-    // Another owner than the socket's is tried in `/tmp`
+    // Another owner than the socket's is tried as root
     // (`the_socket_must_be_the_expected_owners`): here, a directory of the
     // process's own UID is not another owner's to trust.
     for (mode, problem) in [
@@ -627,7 +632,7 @@ fn a_refused_socket_is_never_connected() {
             owner_uid: own,
             ancestors: AncestorTrust::ServiceOrRoot,
         };
-        let client = LocalClient::with_checked_socket(&path, expectations, PATIENT);
+        let client = LocalClient::new(&path, expectations, PATIENT);
         assert_eq!(
             client.preview(&response()).unwrap_err(),
             CallError::NotSent(NotSent::Path(problem)),
@@ -651,7 +656,7 @@ fn a_refused_socket_is_never_connected() {
     }
     // Nothing at the path: missing, and not connected either.
     fs::remove_file(&path).unwrap();
-    let client = LocalClient::with_checked_socket(
+    let client = LocalClient::new(
         &path,
         SocketExpectations {
             owner_uid: own,
@@ -665,19 +670,22 @@ fn a_refused_socket_is_never_connected() {
     );
 }
 
-/// A socket of the process's own UID, directly in the system's `/tmp`
-/// (root's and sticky, resolved: macOS's `/tmp` is a symbolic link, which
-/// the checks refuse as the socket's directory): accepted for its owner,
-/// refused for any other expected owner, root included, without a
-/// connection. The socket is removed when the test ends.
+/// A socket of the process's own UID directly in the system's `/tmp`
+/// (root's, sticky and writable by all; resolved: macOS's `/tmp` is a
+/// symbolic link, which the checks refuse as the socket's directory):
+/// every check of the service passes, but the client requires a private
+/// directory ([`PathProblem::SharedDirectory`]) and does not connect. The
+/// socket is removed when the test ends: the guard is armed only once the
+/// bind has made it, so an entry of another process at that name is never
+/// removed.
 #[test]
-fn the_socket_must_be_the_expected_owners() {
+fn a_socket_in_the_systems_tmp_is_refused_as_shared() {
     let tmp = fs::canonicalize("/tmp").unwrap();
     let metadata = fs::symlink_metadata(&tmp).unwrap();
     if metadata.uid() != 0 || metadata.mode() & 0o1022 != 0o1022 {
         eprintln!(
-            "NOTICE: {} is not root's and sticky: the owner check was NOT tried as a process \
-             that is not root",
+            "NOTICE: {} is not root's, sticky and writable by all: the shared directory was NOT \
+             tried in it",
             tmp.display()
         );
         return;
@@ -689,29 +697,64 @@ fn the_socket_must_be_the_expected_owners() {
         }
     }
     static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let socket = Removed(tmp.join(format!(
-        "skyoauth-operator-owner-{}-{}.sock",
+    let path = tmp.join(format!(
+        "skyoauth-operator-shared-{}-{}.sock",
         std::process::id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
-    )));
-    let listener = listen(&socket.0);
+    ));
+    let listener = UnixListener::bind(&path).unwrap();
+    // Made by this bind: ours to remove from here on.
+    let socket = Removed(path);
+    fs::set_permissions(&socket.0, fs::Permissions::from_mode(0o600)).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let own = fs::symlink_metadata(&socket.0).unwrap().uid();
-    let check = |owner_uid| {
-        let expectations = SocketExpectations {
-            owner_uid,
-            ancestors: AncestorTrust::ServiceOrRoot,
-        };
-        LocalClient::with_checked_socket(&socket.0, expectations, PATIENT)
-            .preview(&response())
-            .unwrap_err()
+    let expectations = SocketExpectations {
+        owner_uid: fs::symlink_metadata(&socket.0).unwrap().uid(),
+        ancestors: AncestorTrust::ServiceOrRoot,
     };
-    for other in [own.wrapping_add(1), own ^ 1, 0] {
-        if other == own {
-            continue;
-        }
+    assert_eq!(
+        check_socket(&socket.0, &expectations)
+            .map(drop)
+            .unwrap_err()
+            .problem(),
+        PathProblem::SharedDirectory
+    );
+    assert_eq!(
+        LocalClient::new(&socket.0, expectations, PATIENT)
+            .preview(&response())
+            .unwrap_err(),
+        CallError::NotSent(NotSent::Path(PathProblem::SharedDirectory))
+    );
+    assert_eq!(
+        listener.accept().map(drop).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock,
+        "connected"
+    );
+}
+
+/// A socket in a private directory of root, given to the service UID:
+/// accepted for that owner, refused for any other expected owner, root
+/// included, without a connection. Root only (a process that is not root
+/// has no private directory of root to bind in), else a NOTICE.
+#[test]
+fn the_socket_must_be_the_expected_owners() {
+    let dir = TempDir::new();
+    if dir.uid() != 0 {
+        eprintln!("NOTICE: the owner check needs root: it was NOT tried");
+        return;
+    }
+    let path = dir.0.join("s");
+    let listener = listen(&path);
+    listener.set_nonblocking(true).unwrap();
+    std::os::unix::fs::lchown(&path, Some(SERVICE_AS_ROOT), None).unwrap();
+    let expectations = |owner_uid| SocketExpectations {
+        owner_uid,
+        ancestors: AncestorTrust::ServiceOrRoot,
+    };
+    for other in [0, OTHER_AS_ROOT, SERVICE_AS_ROOT + 1] {
         assert_eq!(
-            check(other),
+            LocalClient::new(&path, expectations(other), PATIENT)
+                .preview(&response())
+                .unwrap_err(),
             CallError::NotSent(NotSent::Path(PathProblem::WrongOwner)),
             "{other}"
         );
@@ -722,16 +765,7 @@ fn the_socket_must_be_the_expected_owners() {
         "connected"
     );
     // For its owner: accepted.
-    assert!(
-        check_socket(
-            &socket.0,
-            &SocketExpectations {
-                owner_uid: own,
-                ancestors: AncestorTrust::ServiceOrRoot,
-            }
-        )
-        .is_ok()
-    );
+    assert!(check_socket(&path, &expectations(SERVICE_AS_ROOT)).is_ok());
 }
 
 /// The service UID's own directory: trusted by
@@ -832,12 +866,13 @@ fn errors_name_no_path() {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
     let err = check_socket(&path, &expectations).unwrap_err();
     let connector = CheckedSocketPath::new(&path, expectations);
-    let client = LocalClient::with_checked_socket(&path, expectations, PATIENT);
+    let client = LocalClient::new(&path, expectations, PATIENT);
     let call = client.preview(&response()).unwrap_err();
     let problems = [
         PathProblem::InvalidPath,
         PathProblem::TooLong,
         PathProblem::UnsafeDirectory,
+        PathProblem::SharedDirectory,
         PathProblem::UnsafeAncestor,
         PathProblem::TooManySymlinks,
         PathProblem::Lookup(io::ErrorKind::NotFound),

@@ -2,7 +2,7 @@
   "fixture_version": 1,
   "kind": "local_socket_path",
   "status": "proposed",
-  "description": "Known answers for the checks of the deployment-local transport's socket path: the service's own rules for its socket file (service/src/local_transport, module docs \"The socket file\", steps 1, 2, 5 and 8, and socket.rs: write_safe, check_directory, check_ancestors, the final check) and the operator client's copy of them (skyoauth_operator::local::check_socket), which must agree on every tree. Each case is a tree of entries created in a fresh case root, the path to check relative to it, and the expected outcome: accept, or the class of the first check that refuses it. The operator's test target `operator` (operator/tests/local_path) runs every case through check_socket; the `pg` target of skyoauth-scenarios (tests/harness/socket_path_fixture.rs) builds the same trees and binds the service's LocalTransport at the path, whose result must be the outcome's `bind` (accept iff the bind succeeds where the outcome's bind is ok, and the socket the bind makes is then a socket of the service UID with mode exactly 0600). Inferred: no contract text fixes these rules or the client's trust set; the service's code is the source, and status stays \"proposed\" until a contract states them. Modes are octal strings with the leading zero; the socket's mode is set after its owner, so a set-ID bit survives the owner's change.",
+  "description": "Known answers for the checks of the deployment-local transport's socket path: the service's own rules for its socket file (service/src/local_transport, module docs \"The socket file\", steps 1, 2, 5 and 8, and socket.rs: write_safe, check_directory, check_ancestors, the final check) and the operator client's copy of them (skyoauth_operator::local::check_socket), which must agree on every tree. Each case is a tree of entries created in a fresh case root, the path to check relative to it, and the expected outcome: accept, or the class of the first check that refuses it. The operator's test target `operator` (operator/tests/local_path) runs every case through check_socket; the `pg` target of skyoauth-scenarios (tests/harness/socket_path_fixture.rs) builds the same trees and binds the service's LocalTransport at the path, whose result must be the outcome's `bind` (accept iff the bind succeeds where the outcome's bind is ok, and the socket the bind makes is then a socket of the service UID with mode exactly 0600). Inferred: no contract text fixes these rules or the client's trust set; the service's code is the source, and status stays \"proposed\" until a contract states them. Modes are octal strings with the leading zero; the socket's mode is set after its owner, so a set-ID bit survives the owner's change. The client is stricter than the service in one way only: the socket's own directory may not be writable by group or others even with the sticky bit (shared_directory), where the service binds. Both sides read owners and mode bits only: Linux shows a POSIX ACL's grants in the group bits (its mask), macOS does not, and neither reads ACLs, so on macOS a directory an ACL lets others write is not seen; macOS is a client and test platform of the operator only, the service binds on Linux.",
   "socket_mode": "0600",
   "max_symlinks": 40,
   "max_socket_path_bytes": {
@@ -39,6 +39,11 @@
       "expect": "unsafe_directory",
       "bind": "UnsafeDirectory",
       "applies_when": "The socket's directory, its path not followed, is a symbolic link or not a directory, has an owner the trust set does not hold, or is writable by group or others without the sticky bit."
+    },
+    {
+      "expect": "shared_directory",
+      "bind": "ok",
+      "applies_when": "The socket's own directory passes every check of the service but is writable by group or others, with the sticky bit (as /tmp): the service binds there; the client, stricter one way only, requires the socket's own directory to have no group or other write bit at all (the sticky exemption holds for the directories above it only), and refuses it after the walk, so a path the service refuses keeps the service's class. A deployment gives the socket a private directory."
     },
     {
       "expect": "unsafe_ancestor",
@@ -106,7 +111,7 @@
         {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
       ],
       "path": "d/s",
-      "expect": "accept"
+      "expect": "shared_directory"
     },
     {
       "case": "socket_in_a_sticky_group_writable_directory",
@@ -116,7 +121,7 @@
         {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
       ],
       "path": "d/s",
-      "expect": "accept"
+      "expect": "shared_directory"
     },
     {
       "case": "socket_in_a_sticky_directory_of_root",
@@ -126,7 +131,7 @@
         {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
       ],
       "path": "d/s",
-      "expect": "accept"
+      "expect": "shared_directory"
     },
     {
       "case": "root_only_socket_in_a_directory_of_root",
@@ -146,7 +151,7 @@
         {"path": "d/s", "type": "socket", "mode": "0600", "owner": "service"}
       ],
       "path": "d/s",
-      "expect": "accept"
+      "expect": "shared_directory"
     },
     {
       "case": "socket_mode_0644",

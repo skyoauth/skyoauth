@@ -10,12 +10,12 @@
 //! exchanges one request for its reply over a connection, with its time
 //! limits and the classification of its outcome (see its documentation).
 //! The socket's path, owner, mode and directories are checked before
-//! every connect by [`LocalClient::with_checked_socket`]
-//! ([`CheckedSocketPath`], [`check_socket`]: the service's rules for its
-//! socket file, pinned by
+//! every connect by [`LocalClient::new`] ([`CheckedSocketPath`],
+//! [`check_socket`]: the service's rules for its socket file, and a
+//! stricter one for its own directory, pinned by
 //! `tests/conformance/fixtures/_wire/socket_path.v1.json`), the client a
-//! real caller uses; [`LocalClient::new`] ([`SocketPath`]) connects
-//! unchecked.
+//! real caller uses; [`LocalClient::unchecked`] ([`SocketPath`]) connects
+//! unchecked, for tests and bridges that check otherwise.
 //!
 //! # Framing
 //!

@@ -8,7 +8,7 @@
 //! change.
 //!
 //! [`check_socket`] reads the path ([`CheckedSocketPath`] checks it before
-//! every connection; [`LocalClient::with_checked_socket`] is the client
+//! every connection; [`LocalClient::new`] is the client
 //! with these checks, the one a real caller uses). It mirrors the
 //! service's bind decision by decision, with the same constants, so the
 //! two agree on every tree: the shared fixture
@@ -22,6 +22,9 @@
 //!
 //! `Debug` and `Display` of [`PathError`] and of [`PathProblem`] name the
 //! problem only, never the path.
+//!
+//! The checks read owners and mode bits only: see [`check_socket`],
+//! "Access control lists".
 
 use std::{
     ffi::OsString,
@@ -123,6 +126,11 @@ pub enum PathProblem {
     /// others without the sticky bit; or the walk of its lookup did not end
     /// at it.
     UnsafeDirectory,
+    /// The socket's own directory passed the service's checks but is
+    /// writable by group or others, with the sticky bit (as `/tmp`): the
+    /// client requires a private directory, where the service accepts a
+    /// sticky one.
+    SharedDirectory,
     /// A directory the lookup passes through has an owner the client does
     /// not trust or is writable by group or others without the sticky bit,
     /// or a symbolic link on the way, in a sticky directory others may
@@ -163,6 +171,10 @@ impl PathProblem {
                 "the local socket's directory is a symbolic link, is not owned by a trusted UID, \
                  or is writable by group or others without the sticky bit"
             }
+            Self::SharedDirectory => {
+                "the local socket's directory is writable by group or others: the client \
+                 requires a private directory"
+            }
             Self::UnsafeAncestor => {
                 "a directory above the local socket is not owned by a trusted UID or is writable \
                  by group or others without the sticky bit, or holds a symbolic link of another \
@@ -188,6 +200,7 @@ impl PathProblem {
             Self::Lookup(kind) => kind,
             Self::Missing => io::ErrorKind::NotFound,
             Self::UnsafeDirectory
+            | Self::SharedDirectory
             | Self::UnsafeAncestor
             | Self::TooManySymlinks
             | Self::NotASocket
@@ -346,7 +359,17 @@ const fn write_safe(mode: u32) -> bool {
 ///    missing entry, a file where a directory should be) is
 ///    [`PathProblem::Lookup`]. The walk must end at the directory of step
 ///    4 (same device and inode), else [`PathProblem::UnsafeDirectory`];
-/// 6. the socket path itself, not followed: nothing there is
+/// 6. stricter than the service: the socket's own directory must have no
+///    group or other write bit at all, the sticky bit notwithstanding,
+///    else [`PathProblem::SharedDirectory`] (the sticky bit's exemption
+///    holds for the directories above it only). The service binds in a
+///    sticky directory such as `/tmp`, where any UID may create an entry
+///    at the socket's name while it is vacant; the client does not
+///    connect there, so a deployment gives the socket a private directory
+///    (owned by root or the service UID, mode 0755 or narrower). Decided
+///    after the walk, so a path the service refuses is refused for the
+///    service's reason;
+/// 7. the socket path itself, not followed: nothing there is
 ///    [`PathProblem::Missing`]; anything but a socket (a file, a directory,
 ///    a symbolic link, to a socket or not) is [`PathProblem::NotASocket`];
 ///    a socket of another owner than [`SocketExpectations::owner_uid`] is
@@ -361,6 +384,17 @@ const fn write_safe(mode: u32) -> bool {
 /// the walk reports it; the client does the same. The service's other
 /// refusals (a lock file, a live listener, a bind for another UID by a
 /// process that is not root) concern its bind only.
+///
+/// # Access control lists
+///
+/// The checks read owners and mode bits only. Linux shows a POSIX access
+/// control list's grants in a file's group bits (the list's mask), so a
+/// directory an ACL lets others write is refused like a group-writable
+/// one. macOS does not: an ACL there can let another UID write to a
+/// directory whose mode bits show no write bit, and the standard library
+/// cannot read ACLs, so the checks cannot see that. macOS is a client and
+/// test platform of the operator only; the service binds its socket on
+/// Linux.
 ///
 /// # Errors
 ///
@@ -436,6 +470,11 @@ fn check_parent(parent: &Path, expectations: &SocketExpectations) -> Result<(), 
     let walked = check_ancestors(parent, expectations)?;
     if walked.dev() != metadata.dev() || walked.ino() != metadata.ino() {
         return Err(PathProblem::UnsafeDirectory.into());
+    }
+    // The client's own rule, stricter than the service's: no sticky
+    // exemption for the socket's own directory.
+    if metadata.mode() & GROUP_OTHER_WRITE != 0 {
+        return Err(PathProblem::SharedDirectory.into());
     }
     Ok(())
 }
@@ -550,7 +589,7 @@ fn check_ancestors(
 
 /// The connection to the transport's Unix socket at a path, checked before
 /// every connect ([`check_socket`]) and compared after it: the connector a
-/// real caller uses, through [`LocalClient::with_checked_socket`]. A
+/// real caller uses, through [`LocalClient::new`]. A
 /// refused path is [`NotSent::Path`]: nothing was written.
 ///
 /// # Between the check and the connect
@@ -566,19 +605,23 @@ fn check_ancestors(
 /// again: the directories on the way are not walked again after the
 /// connect.
 ///
-/// What is left is a swap undone before that second read. In directories
-/// no other UID may write, only root or the trusted service UID could make
-/// one, and either could serve the socket anyway. In a sticky directory
-/// others may write (as `/tmp`), any UID may create an entry at a vacant
-/// name: while the service's socket is gone (a restart), another UID can
-/// bind the name, take the connection, and remove its socket before the
+/// What is left is a swap undone before that second read. The socket's own
+/// directory is private ([`PathProblem::SharedDirectory`]) and every
+/// directory above it is a trusted UID's and not writable by others (or
+/// sticky, where only an entry's owner, a trusted UID, may rename the
+/// directory on the way), so only root or the trusted service UID could
+/// make one, and either could serve the socket anyway. That is why the
+/// socket's own directory may not be sticky: in a sticky directory others
+/// may write (as `/tmp`), any UID may create an entry at a vacant name.
+/// While the service's socket is gone (a restart), another UID could bind
+/// the name, take the connection, and remove its socket before the
 /// service binds again, whose new socket may get the same inode number
 /// (file systems such as ext4 reuse a freed one readily) and has the
-/// service's owner and mode. Only the change time tells that socket from
-/// the checked one, and not when both fall within one tick of the file
-/// system's clock: a socket in a sticky directory others may write is
-/// weaker than one in a directory only root and the service UID may
-/// write. The change time also changes in the service's own publish of a
+/// service's owner and mode; the change time would tell the two apart
+/// only when they fall in different ticks of the file system's clock.
+/// Where access control lists are not shown in the mode bits (macOS, see
+/// [`check_socket`]), a directory may still be writable by others. The
+/// change time also changes in the service's own publish of a
 /// new socket (a link, then the unlink of its staged name): a connect in
 /// that window may be refused as [`PathProblem::Changed`], spuriously but
 /// safely, since nothing was sent and the call can be retried.
@@ -673,8 +716,9 @@ pub(super) fn not_sent(err: &io::Error) -> NotSent {
 impl LocalClient<CheckedSocketPath> {
     /// The client of the socket at `path`, checked before every connect
     /// and compared after it ([`CheckedSocketPath`]): the client a real
-    /// caller uses. [`LocalClient::new`] connects to a path unchecked.
-    pub fn with_checked_socket(
+    /// caller uses. [`LocalClient::unchecked`] connects to a path
+    /// unchecked.
+    pub fn new(
         path: impl Into<PathBuf>,
         expectations: SocketExpectations,
         timeouts: Timeouts,

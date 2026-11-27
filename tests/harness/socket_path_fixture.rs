@@ -11,7 +11,8 @@
 //! Each case's tree is built in a fresh case root, and the transport is
 //! bound at the case's path: the bind's result must be the `bind` of the
 //! case's outcome (`ok` for an accepted path, a stale socket of the service
-//! UID with a wrong mode and an empty socket path; `InvalidPath`,
+//! UID with a wrong mode, an empty socket path and a sticky socket
+//! directory the client alone refuses, `shared_directory`; `InvalidPath`,
 //! `PathTooLong`, `UnsafeDirectory`, `UnsafeAncestor`, `PathOccupied`, or
 //! `Io` with the error's kind: the case's `io_kind` for a failed lookup,
 //! the outcome's `bind_io_kind`, `Other`, for too many symbolic links,
@@ -34,6 +35,11 @@
 //! A case that cannot run (one that needs root, or as root the peer user)
 //! is skipped with a printed NOTICE; the CI job runs as its runner's user,
 //! so it binds the `service_or_root` cases whose entries are all its own.
+//! A case whose bind is `ok` runs only where the service binds at all
+//! ([`BINDS_SUPPORTED`]: Linux on x86_64, aarch64 and riscv64, where it
+//! knows its `open` flags); elsewhere it is skipped with the NOTICE too.
+//! The client's side of every case runs on every Unix target
+//! (`operator/tests/local_path`).
 
 use std::{
     env, fs,
@@ -80,6 +86,18 @@ const SERVICE_WITHOUT_PEER: u32 = 65_534;
 
 /// The longest wait for the child process.
 const CHILD_WAIT: Duration = Duration::from_secs(120);
+
+/// Whether the service binds on this target: Linux on x86_64, aarch64 and
+/// riscv64, the architectures whose `open` flags it knows (its
+/// `OPEN_FLAGS`); elsewhere its bind stops at the lock file.
+const BINDS_SUPPORTED: bool = cfg!(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+));
 
 fn fixture() -> Value {
     let path = concat!(
@@ -510,6 +528,12 @@ fn socket_path_fixture_cases_match_the_services_bind() {
     let cases = list(&fixture, "cases");
     for (index, case) in cases.iter().enumerate() {
         let name = text(case, "case");
+        if !BINDS_SUPPORTED && expected_bind(&fixture, case) == "ok" {
+            skipped.push(format!(
+                "{name} (a successful bind, on a target the service does not bind on)"
+            ));
+            continue;
+        }
         let side = side_of(case, &roles, peer.is_some());
         if let Side::Skipped(why) = side {
             skipped.push(format!("{name} ({why})"));
