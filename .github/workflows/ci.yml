@@ -506,9 +506,10 @@ jobs:
       # step log: nextest's summary line, which must say that exactly the
       # listed tests ran and passed and that exactly the listed others were
       # skipped (a test of a selection listed as skipped fails); per
-      # selection, how many of its listed tests passed (none listed fails),
-      # and each root-only test the script names (REQUIRED) must have run;
-      # every notice, also as an escaped warning annotation; and the step
+      # selection, how many of its listed tests passed (none listed, or
+      # fewer than the script's MIN_TESTS, fails), and each root-only test
+      # the script names (REQUIRED) must have run; every notice, also as an
+      # escaped warning annotation; and the step
       # fails on a notice that says cases did not run for want of root or of
       # the peer user (the list is in the script). It calls the run complete
       # only when it passed with no notice, and only for these selections:
