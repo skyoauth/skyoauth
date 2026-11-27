@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { MAX_COLUMNS, MAX_RECORD_BYTES, UNIX_MAX_S, hasBearerCredential, hasLongBase64url, hasUnixTime, jsonErrorOffset, main, secretsFromFile, secretVariants, validateTranscript } from './transcript.mjs';
+import { BEARER_AUTH_PARAMS, MAX_COLUMNS, MAX_RECORD_BYTES, UNIX_MAX_S, hasBearerCredential, hasLongBase64url, hasUnixTime, jsonErrorOffset, main, secretsFromFile, secretVariants, validateTranscript } from './transcript.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCRIPT = join(HERE, 'transcript.mjs');
@@ -269,6 +269,19 @@ describe('Authorization fields', () => {
     }
   });
 
+  it('hold a single record to exactly <redacted>, and accept only a joined form that starts with it', () => {
+    for (const text of ['Authorization: Bearer <redacted>abc123', 'Authorization: Bearer <redacted>x', 'Proxy-Authorization: Bearer <redacted>)', '{"authorization": "Bearer <redacted>tok"}']) {
+      assert.equal(hasBearerCredential(text), true, text);
+      rejects(rec(2, 'output', text), /^Bearer credential in "text"$/);
+    }
+    // In a joined form the next line or record is glued to the value.
+    assert.equal(hasBearerCredential('Authorization: Bearer <redacted>next', { joined: true }), false);
+    assert.equal(hasBearerCredential('Authorization: Bearer abc', { joined: true }), true);
+    accepts(rec(2, 'output', 'Authorization: Bearer <redacted>\nnext line'));
+    assert.deepEqual(errorsOf(transcript(['command', 'curl -H "Authorization: Bearer <redacted>'], ['output', 'ok'])), []);
+    assert.deepEqual(errorsOf(transcript(['output', 'Authorization: Bearer <redacted>'], ['output', 'ok'], ['note', 'n'])), []);
+  });
+
   it('leave WWW-Authenticate challenges and prose to the general rule', () => {
     accepts(rec(2, 'output', 'WWW-Authenticate: Bearer realm="skyoauth"'));
     accepts(rec(2, 'output', 'the Authorization header carries Bearer tokens'));
@@ -292,6 +305,26 @@ describe('Bearer auth-params', () => {
   it('still refuses tokens, padded tokens included', () => {
     for (const text of ['Bearer abc123', 'Bearer abc123==', 'Bearer abc123= x', 'Bearer abc123=,', 'Authorization: Bearer mF_9.B5f-4.1JqM realm="x"']) {
       assert.equal(hasBearerCredential(text), true, text);
+    }
+  });
+
+  it('takes name= as an auth-param only for the known Bearer parameter names', () => {
+    assert.deepEqual(BEARER_AUTH_PARAMS, ['realm', 'scope', 'error', 'error_description', 'error_uri', 'resource_metadata']);
+    for (const text of [
+      '{"token_type": "Bearer dGhpc2lzYXNlY3JldHRva2VuMTI="}',
+      'curl -H "X-Upstream-Auth: Bearer abc123def456ghi7="',
+      'Bearer a1b2c3d4=e5f6',
+      'Bearer token="abc"',
+      'Bearer access_token=abc',
+    ]) {
+      assert.equal(hasBearerCredential(text), true, text);
+      rejects(rec(2, 'output', text), /^Bearer credential in "text"$/);
+    }
+    for (const name of BEARER_AUTH_PARAMS) {
+      for (const text of [`WWW-Authenticate: Bearer ${name}="v"`, `Bearer ${name.toUpperCase()}=v`, `"Bearer ${name}=\\"v\\""`]) {
+        assert.equal(hasBearerCredential(text), false, text);
+      }
+      accepts(rec(2, 'output', `WWW-Authenticate: Bearer ${name}="value"`));
     }
   });
 });
@@ -409,6 +442,19 @@ describe('allow marker "hex-across-lines"', () => {
     assert.match(errorsOf(transcript(['output', PUB_HEX], ['output', PUB_HEX]))[0].message, /across the records on lines 1-2/);
   });
 
+  it('still checks a stretch of three or more unmarked records beside a marked one', () => {
+    const parts = [SIG_HEX.slice(0, 43), SIG_HEX.slice(43, 86), SIG_HEX.slice(86)];
+    // No pair of the parts reaches 96 digits; the three together do.
+    assert.ok(parts[0].length + parts[1].length < 96 && parts[1].length + parts[2].length < 96);
+    const split = parts.map((p) => ['output', p]);
+    const marked = ['output', PUB_HEX, 'hex-across-lines'];
+    assert.deepEqual(errorsOf(transcript(marked, ...split)), [{ line: 4, message: 'hex run of 96 or more digits (signature-sized) across the records on lines 2-4 (texts joined)' }]);
+    assert.deepEqual(errorsOf(transcript(...split, marked)), [{ line: 3, message: 'hex run of 96 or more digits (signature-sized) across the records on lines 1-3 (texts joined)' }]);
+    assert.deepEqual(errorsOf(transcript(marked, ...split, marked)), [{ line: 4, message: 'hex run of 96 or more digits (signature-sized) across the records on lines 2-4 (texts joined)' }]);
+    // Marked records with at most one unmarked record between them still pass.
+    assert.deepEqual(errorsOf(transcript(marked, ['output', PUB_HEX], marked, ['note', PUB_HEX], marked)), []);
+  });
+
   it('does not lift the hex rule on a single line, nor any other rule', () => {
     for (const [text, re] of [
       [SIG_HEX, /^hex run of 96 .* in "text"$/],
@@ -501,7 +547,7 @@ describe('diagnostics never echo the input', () => {
   const SECRET_BEARER = 'dummyBearer0123456789abcdef';
   const SECRET_ENV = 'dummy-env-secret-987654';
   // Pieces that must not appear: each value and a fragment of it.
-  const NEEDLES = [SECRET_JWT, SECRET_JWT.slice(0, 16), SECRET_JWT.slice(-12), SECRET_BEARER, SECRET_BEARER.slice(5, 20), SECRET_ENV, SECRET_ENV.slice(0, 12), 'not-a-real-field-name'];
+  const NEEDLES = [SECRET_JWT, SECRET_JWT.slice(0, 16), SECRET_JWT.slice(-12), SECRET_BEARER, SECRET_BEARER.slice(5, 20), SECRET_ENV, SECRET_ENV.slice(0, 12), 'not-a-real-field-name', 'dummy-type-name'];
   const LINES = [
     JSON.stringify({ step: 0, type: 'caption', text: 'c', [SECRET_JWT]: 1 }),
     JSON.stringify({ step: 0, type: 'caption', text: 'c', 'not-a-real-field-name': SECRET_BEARER }),
@@ -518,6 +564,8 @@ describe('diagnostics never echo the input', () => {
     rec(9, 'output', `${SECRET_JWT.slice(0, 20)}\n${SECRET_JWT.slice(20)}`),
     JSON.stringify({ step: 10, type: 'output', text: SECRET_ENV, [SECRET_ENV]: SECRET_JWT }),
     JSON.stringify({ step: '11', type: 'output', text: 'x' }).replace('"11"', `"${SECRET_ENV}"`),
+    // An unknown type on a multi-line text: neither message may name it.
+    JSON.stringify({ step: 12, type: 'dummy-type-name', text: 'a\nb' }),
   ];
 
   it('the check CLI prints line numbers and rule names only', () => {

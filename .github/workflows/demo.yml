@@ -12,7 +12,9 @@ name: Demo
 #
 # It publishes nothing outside this run's artifacts: no release assets yet
 # (the release job and its open questions are §5), no Pages, no push, no
-# comment, no secret. The videos are never committed.
+# comment, no secret. The videos are never committed. When a step fails,
+# the raw browser recordings of the failed renders (DEMO_KEEP_RAW) are
+# uploaded as a short-lived artifact for diagnosis.
 
 on:
   push:
@@ -67,14 +69,38 @@ jobs:
           fi
           ffmpeg -hide_banner -version | head -n 1
 
+      # The seeds of every committed test key (--secret-file), as in ci.yml's
+      # demo-transcripts job: the check and the render refuse a transcript
+      # that shows one. No test key at all fails the step.
+      - name: List the test keys
+        shell: bash
+        run: |
+          mapfile -d '' keys < <(find tests/conformance/fixtures -type f -name '*.test-key.json' -print0 | LC_ALL=C sort -z)
+          echo "test-key files: ${#keys[@]}"
+          if [ "${#keys[@]}" -eq 0 ]; then
+            echo "No *.test-key.json under tests/conformance/fixtures: nothing to check the seeds against"
+            exit 1
+          fi
+          for key in "${keys[@]}"; do printf -- '--secret-file\0%s\0' "$key"; done > "$RUNNER_TEMP/demo-secret-files"
+
       - name: Check the transcripts
-        run: node scripts/demo/transcript.mjs check scripts/demo/sample/sample.transcript.jsonl
+        shell: bash
+        run: |
+          mapfile -d '' secret_files < "$RUNNER_TEMP/demo-secret-files"
+          node scripts/demo/transcript.mjs check "${secret_files[@]}" scripts/demo/sample/sample.transcript.jsonl
 
       - name: End-to-end test of the renderer
+        env:
+          DEMO_KEEP_RAW: ${{ runner.temp }}/demo-raw
         run: node --test scripts/demo/render.e2e.test.mjs
 
       - name: Render the sample
-        run: node scripts/demo/render.mjs scripts/demo/sample/sample.transcript.jsonl --out "$RUNNER_TEMP/demo"
+        shell: bash
+        env:
+          DEMO_KEEP_RAW: ${{ runner.temp }}/demo-raw
+        run: |
+          mapfile -d '' secret_files < "$RUNNER_TEMP/demo-secret-files"
+          node scripts/demo/render.mjs scripts/demo/sample/sample.transcript.jsonl --out "$RUNNER_TEMP/demo" "${secret_files[@]}"
 
       - name: Verify the checksums
         working-directory: ${{ runner.temp }}/demo
@@ -94,3 +120,15 @@ jobs:
             ${{ runner.temp }}/demo/SHA256SUMS
           retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}
           if-no-files-found: error
+
+      # The raw recordings of failed renders (render.mjs, DEMO_KEEP_RAW), for
+      # diagnosis only; also not a conformance leg (NOT_CONFORMANCE). Absent
+      # when the failure came before any render.
+      - name: Upload the raw recordings of failed renders
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: demo-raw-recordings-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/demo-raw
+          retention-days: 3
+          if-no-files-found: ignore

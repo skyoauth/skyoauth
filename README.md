@@ -253,7 +253,8 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   Bearer scheme, a password), so golden transcripts still need review. The
   demo videos themselves are rendered by
   a separate workflow, `.github/workflows/demo.yml` (Chromium and ffmpeg),
-  and kept only as run artifacts (`demo-videos-N`); it is not part of `CI
+  and kept only as run artifacts (`demo-videos-N`, and on a failure the raw
+  recordings `demo-raw-recordings-N` for 3 days); it is not part of `CI
   passed`, so a demo failure never blocks a merge or a release. See
   `scripts/demo/README.md`.
 

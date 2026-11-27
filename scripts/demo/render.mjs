@@ -23,7 +23,8 @@
 // blackdetect counts as black, so the screencast keeps receiving black
 // frames (twice locally, before that repaint existed, a render found no
 // black interval at all; the cause was not confirmed). DEMO_KEEP_RAW=<dir>
-// keeps the raw recording of a failed render for inspection.
+// keeps the raw recording of a failed render for inspection; a copy that
+// fails is reported on stderr and never replaces the render's own error.
 //
 // Missing ffmpeg, ffprobe or browser is an error (exit 1), never a skip.
 // FFMPEG and FFPROBE override the binaries' paths.
@@ -165,7 +166,20 @@ export function publishFiles({ outDir, name, bytes, records }) {
   return { mp4: join(outDir, mp4), vtt: join(outDir, vtt), transcript: join(outDir, copy), sums: join(outDir, 'SHA256SUMS') };
 }
 
-export async function render(transcriptPath, outDir, { secretEnv = [], secretFiles = [], env = process.env, log = console.log } = {}) {
+// DEMO_KEEP_RAW=<dir>: copies the raw recording directory of a failed
+// render into `dest`. Never throws, so a failed copy cannot replace the
+// render's own error: returns a line saying what happened.
+export function keepRawRecording(rawDir, dest) {
+  try {
+    mkdirSync(dest, { recursive: true });
+    cpSync(rawDir, dest, { recursive: true });
+    return `kept the raw recording in ${dest}`;
+  } catch (e) {
+    return `DEMO_KEEP_RAW: could not keep the raw recording in ${dest} (${e.code ?? 'error'})`;
+  }
+}
+
+export async function render(transcriptPath, outDir, { secretEnv = [], secretFiles = [], env = process.env, log = console.log, warn = console.error } = {}) {
   const secrets = secretsFromEnv(secretEnv, env);
   for (const f of secretFiles) for (const [k, v] of secretsFromFile(f)) secrets.set(k, v);
   // The one read of the transcript: validation, playback, the captions, the
@@ -244,11 +258,9 @@ export async function render(transcriptPath, outDir, { secretEnv = [], secretFil
     log(`render: wrote ${result.mp4}, ${result.vtt}, ${result.transcript}, ${result.sums}`);
     return result;
   } catch (e) {
-    // DEMO_KEEP_RAW=<dir> keeps the raw recording of a failed render there.
-    if (env.DEMO_KEEP_RAW) {
-      mkdirSync(env.DEMO_KEEP_RAW, { recursive: true });
-      cpSync(rawDir, env.DEMO_KEEP_RAW, { recursive: true });
-    }
+    // DEMO_KEEP_RAW=<dir> keeps the raw recording of a failed render there;
+    // the render's error is thrown whether or not that copy works.
+    if (env.DEMO_KEEP_RAW) warn(`render: ${keepRawRecording(rawDir, env.DEMO_KEEP_RAW)}`);
     throw e;
   } finally {
     rmSync(rawDir, { recursive: true, force: true });

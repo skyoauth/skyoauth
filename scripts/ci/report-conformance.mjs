@@ -32,7 +32,8 @@
 //                     holds nothing else. Only the known artifacts of other
 //                     jobs (NOT_CONFORMANCE: service-nextest-junit-N,
 //                     service-nextest-root-junit-N, rust-coverage,
-//                     typescript-coverage and this reporter's own
+//                     typescript-coverage, demo-videos-N,
+//                     demo-raw-recordings-N and this reporter's own
 //                     conformance-report-N) may lack a `leg` file; they
 //                     are ignored. Any other artifact without one, and a
 //                     leg or junit.xml in a subdirectory, is an input error.
@@ -438,8 +439,17 @@ export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
 // that job's root-only run (the `local_transport` tests of skyoauth-service,
 // operator `local_path` and the `pg` target's `harness::socket_path_fixture`,
 // none of them a scenario test). demo-videos-N holds the demo walk-through
-// videos of demo.yml (scripts/demo), which are not evidence.
-export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^service-nextest-root-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/, /^conformance-report-[1-9]\d*$/, /^demo-videos-[1-9]\d*$/];
+// videos of demo.yml (scripts/demo), and demo-raw-recordings-N the raw
+// browser recordings of its failed renders; neither is evidence.
+export const NOT_CONFORMANCE = [
+  /^service-nextest-junit-[1-9]\d*$/,
+  /^service-nextest-root-junit-[1-9]\d*$/,
+  /^rust-coverage$/,
+  /^typescript-coverage$/,
+  /^conformance-report-[1-9]\d*$/,
+  /^demo-videos-[1-9]\d*$/,
+  /^demo-raw-recordings-[1-9]\d*$/,
+];
 
 // What a path is, without following a symbolic link: dir, file, symlink,
 // other or missing. Other file system errors are thrown.
