@@ -30,9 +30,9 @@
 //! - the walk over more than a page: 2002 credentials revoked by one
 //!   restore, one of them revoked before it at the restore's own
 //!   microsecond (the documented tie, listed and counted by the reply), and
-//!   one more revoked at that microsecond while the walk runs (between its
-//!   first and second request), so the second `status` page's count is
-//!   above the reply's and the walk restarts from `status` alone, once; it
+//!   one more revoked at that microsecond while the walk runs (before its
+//!   first `status` request, after the restore reply), so that page's count
+//!   is above the reply's and the walk restarts from `status` alone, once; it
 //!   returns every ID in byte order, the late one included, in exactly the
 //!   pages of 1000 the restart needs, and a walk from `status` alone agrees;
 //!   credentials revoked one microsecond before and after the restore are
@@ -560,7 +560,7 @@ async fn the_walk_reads_every_page_and_restarts_on_a_tie_through_the_transport()
         let runtime = tokio::runtime::Handle::current();
         Box::new(move || {
             runtime.block_on(async {
-                let id = insert_credentials(&pool, "cred_~late", 1).await.remove(0);
+                let id = insert_credentials(&pool, "cred_!late", 1).await.remove(0);
                 revoke_credential_at(&pool, &id, t0).await;
                 *late.lock().unwrap() = Some(id);
             });
@@ -575,7 +575,10 @@ async fn the_walk_reads_every_page_and_restarts_on_a_tie_through_the_transport()
     // The page after the reply's (its count above the reply's), then the
     // restart from `status` alone: three pages of 1000, 1000 and 3.
     assert_eq!(connects.load(Ordering::SeqCst), 4);
-    assert_eq!(expected.last().map(String::as_str), Some("cred_~late00001"));
+    // The late credential sorts before the reply's cursor, so the walk
+    // that only appended it to the reply's page would lose its place.
+    assert_eq!(expected[1], "cred_!late00001");
+    assert_eq!(expected[PAGE], restored.revoked_credential_ids[PAGE - 1]);
 
     // From `status` alone, with nothing changing: the same list, in its
     // three pages.

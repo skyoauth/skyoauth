@@ -112,7 +112,18 @@ mod security {
 }
 
 mod harness {
-    #[cfg(unix)]
+    // Where the service binds (Linux on x86_64, aarch64 and riscv64: the
+    // same targets as `BINDS_SUPPORTED` in `socket_path_fixture.rs`); on
+    // other targets there is no transport to talk to, so the module is not
+    // compiled.
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        )
+    ))]
     #[path = "local_client_round_trip.rs"]
     mod local_client_round_trip;
     #[cfg(unix)]
