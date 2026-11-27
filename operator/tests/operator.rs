@@ -23,7 +23,14 @@
 //! servers: `std` Unix listeners on threads, each in a fresh temporary
 //! directory, with bounded waits.
 //!
-//! Portable but for those two: no network, database, socket or clock (a
+//! `local_path` (Unix only) checks the client's checks of the socket path
+//! against `tests/conformance/fixtures/_wire/socket_path.v1.json`, trees
+//! built in fresh temporary directories, whose cases the `pg` target of
+//! `skyoauth-scenarios` binds the service's transport in
+//! (`tests/harness/socket_path_fixture.rs`); the cases that need root are
+//! skipped with a NOTICE when the test is not root.
+//!
+//! Portable but for those three: no network, database, socket or clock (a
 //! time is always injected); it runs on Linux, macOS and Windows. These are not scenario
 //! tests: no name here may match the scenario pattern `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, and the
 //! registry (`tests/conformance/scenarios.toml`) does not list them.
@@ -31,6 +38,8 @@
 mod challenge;
 #[cfg(unix)]
 mod local_exchange;
+#[cfg(unix)]
+mod local_path;
 #[cfg(unix)]
 mod local_wire;
 mod redaction;

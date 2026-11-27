@@ -34,7 +34,7 @@ use std::{
 use super::{
     BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
     MAX_REPLY_BYTES, NotSent, Op, Previewed, Reply, Request, RequestLine, ResponseRequest,
-    Restored, UnknownOutcome, parse_reply, wire::fits,
+    Restored, UnknownOutcome, parse_reply, path::not_sent, wire::fits,
 };
 use crate::recovery::{Challenge, parse_challenge};
 
@@ -160,12 +160,18 @@ pub trait Connector: Send + Sync + 'static {
     /// # Errors
     ///
     /// Why no connection was made: the call is then
-    /// [`NotSent::Connect`] with the error's kind.
+    /// [`NotSent::Connect`] with the error's kind, or [`NotSent::Path`]
+    /// for an error that carries a [`PathError`](super::PathError)
+    /// ([`CheckedSocketPath`](super::CheckedSocketPath)'s refusals).
     fn connect(&self) -> io::Result<Self::Stream>;
 }
 
 /// The connection to the transport's Unix socket at a path, made as is:
-/// the socket's owner, mode and directories are not checked here.
+/// the socket's owner, mode and directories are not checked here. A real
+/// caller uses [`CheckedSocketPath`](super::CheckedSocketPath), through
+/// [`LocalClient::new`], which checks them before every connect; this one,
+/// through [`LocalClient::unchecked`], serves tests and bridges that check
+/// otherwise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocketPath(PathBuf);
 
@@ -221,8 +227,9 @@ impl Op {
 /// # Exchange
 ///
 /// A call encodes the request (a line too large is not sent, and nothing
-/// is connected), connects once ([`Connector`]; a Unix socket path,
-/// [`SocketPath`], by default), writes the line, closes its write half
+/// is connected), connects once ([`Connector`]; a Unix socket path checked
+/// before the connect, [`CheckedSocketPath`](super::CheckedSocketPath), by
+/// default), writes the line, closes its write half
 /// ([`HalfClose`]), reads until the server closes the connection, at most
 /// one byte past [`MAX_REPLY_BYTES`], and reads the reply with
 /// [`parse_reply`].
@@ -309,7 +316,7 @@ impl Op {
 /// or a reconcile through the admin API).
 ///
 /// `Debug` shows the timeouts only.
-pub struct LocalClient<C = SocketPath> {
+pub struct LocalClient<C = super::CheckedSocketPath> {
     connector: Arc<C>,
     timeouts: Timeouts,
 }
@@ -323,8 +330,10 @@ impl<C> fmt::Debug for LocalClient<C> {
 }
 
 impl LocalClient<SocketPath> {
-    /// The client of the socket at `path`.
-    pub fn new(path: impl Into<PathBuf>, timeouts: Timeouts) -> Self {
+    /// The client of the socket at `path`, connected to unchecked
+    /// ([`SocketPath`]): for tests and bridges that check the socket
+    /// otherwise. A real caller uses [`LocalClient::new`] instead.
+    pub fn unchecked(path: impl Into<PathBuf>, timeouts: Timeouts) -> Self {
         Self::with_connector(SocketPath::new(path), timeouts)
     }
 }
@@ -531,9 +540,7 @@ fn run<C: Connector>(
     deadline: Option<Instant>,
     idle: Duration,
 ) -> Result<Received, CallError> {
-    let mut stream = connector
-        .connect()
-        .map_err(|err| NotSent::Connect(err.kind()))?;
+    let mut stream = connector.connect().map_err(|err| not_sent(&err))?;
     let first = wait(deadline, Some(idle)).map_err(|_| NotSent::TimedOut)?;
     stream
         .set_write_wait(first)
@@ -689,7 +696,111 @@ fn failed(err: io::Error) -> UnknownOutcome {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
+
+    /// A stream that counts the bytes written to it, reads the end of the
+    /// stream at once, and takes `setter` to set a write's wait (a slow
+    /// bridge, say).
+    struct Probe {
+        written: Arc<AtomicUsize>,
+        setter: Duration,
+    }
+
+    impl Read for Probe {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for Probe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.written.fetch_add(bytes.len(), Ordering::SeqCst);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl HalfClose for Probe {
+        fn close_write(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_read_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn set_write_wait(&mut self, _: Option<Duration>) -> io::Result<()> {
+            // The setting itself takes this long: a slow call, not a wait
+            // for another thread.
+            thread::sleep(self.setter);
+            Ok(())
+        }
+    }
+
+    /// Connects a [`Probe`] at once.
+    struct ProbeConnector {
+        written: Arc<AtomicUsize>,
+        setter: Duration,
+    }
+
+    impl Connector for ProbeConnector {
+        type Stream = Probe;
+
+        fn connect(&self) -> io::Result<Probe> {
+            Ok(Probe {
+                written: Arc::clone(&self.written),
+                setter: self.setter,
+            })
+        }
+    }
+
+    /// [`run`] with the phase `phase`, a write's wait that takes `setter`
+    /// to set, and `total` until the deadline: its result and the bytes
+    /// written.
+    fn probe(phase: u8, setter: Duration, total: Duration) -> (Result<(), CallError>, usize) {
+        let written = Arc::new(AtomicUsize::new(0));
+        let connector = ProbeConnector {
+            written: Arc::clone(&written),
+            setter,
+        };
+        let line = RequestLine(b"{}\n".to_vec());
+        let phase = AtomicU8::new(phase);
+        let result = run(
+            &connector,
+            &phase,
+            &line,
+            Instant::now().checked_add(total),
+            Duration::from_secs(10),
+        );
+        (result.map(drop), written.load(Ordering::SeqCst))
+    }
+
+    /// The total runs out while the first write's wait is being set (it
+    /// takes 150 ms of a 50 ms total): not sent, and nothing written.
+    #[test]
+    fn a_total_run_out_during_the_first_setting_writes_nothing() {
+        let (result, written) = probe(
+            UNSENT,
+            Duration::from_millis(150),
+            Duration::from_millis(50),
+        );
+        assert_eq!(result, Err(CallError::NotSent(NotSent::TimedOut)));
+        assert_eq!(written, 0);
+    }
+
+    /// The caller has given up before the thread would write: not sent,
+    /// and nothing written, however much of the total is left.
+    #[test]
+    fn a_call_given_up_before_the_write_writes_nothing() {
+        let (result, written) = probe(GAVE_UP, Duration::ZERO, Duration::from_secs(10));
+        assert_eq!(result, Err(CallError::NotSent(NotSent::TimedOut)));
+        assert_eq!(written, 0);
+    }
 
     /// Only the system's `EINVAL` is passed over; `std`'s own refusal and
     /// every other error are kept.
