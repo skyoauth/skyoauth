@@ -107,7 +107,12 @@ class Element {
 
 // Runs player.html's scripts against a virtual clock and returns the
 // caption changes and typed characters, with times relative to t0.
-async function playInVm(records) {
+// `without` names DemoTiming constants to delete before the player runs.
+// A timer with a delay that is not a finite number runs at once, as in a
+// browser; MAX_VM_TIMERS bounds the run, so a player that spins fails
+// instead of hanging the test.
+const MAX_VM_TIMERS = 100000;
+async function playInVm(records, { without = [] } = {}) {
   let now = 0;
   let seq = 0;
   const timers = [];
@@ -126,10 +131,14 @@ async function playInVm(records) {
   let revealedAt = null;
   let frames = 0;
   let tickChanges = 0;
+  let lastTickAt = null;
   let tickClass = 'a';
   Object.defineProperty(byId.tick, 'className', {
     set(v) {
-      if (v !== tickClass) tickChanges++;
+      if (v !== tickClass) {
+        tickChanges++;
+        lastTickAt = now;
+      }
       tickClass = v;
     },
     get() {
@@ -146,7 +155,7 @@ async function playInVm(records) {
       return this._c ?? '';
     },
   });
-  const setTimeout = (fn, ms) => timers.push({ at: now + Math.max(0, Math.ceil(ms)), seq: seq++, fn });
+  const setTimeout = (fn, ms) => timers.push({ at: now + (Number.isFinite(ms) ? Math.max(0, Math.ceil(ms)) : 0), seq: seq++, fn });
   const sandbox = {
     document,
     performance: { now: () => now },
@@ -162,6 +171,10 @@ async function playInVm(records) {
 
   assert.match(PLAYER, /<script src="timing\.js"><\/script>/);
   vm.runInContext(readFileSync(join(HERE, 'timing.js'), 'utf8'), sandbox, { filename: 'timing.js' });
+  for (const name of without) {
+    assert.ok(name in sandbox.DemoTiming, `DemoTiming has no ${name}`);
+    delete sandbox.DemoTiming[name];
+  }
   const inline = [...PLAYER.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
   assert.equal(inline.length, 1, 'player.html has one inline script');
   vm.runInContext(inline[0], sandbox, { filename: 'player.html' });
@@ -181,8 +194,10 @@ async function playInVm(records) {
   );
   const drain = () => new Promise((resolve) => setImmediate(resolve));
   await drain();
+  let ran = 0;
   while (!settled) {
     assert.ok(timers.length > 0, 'the player is waiting on nothing');
+    assert.ok(++ran <= MAX_VM_TIMERS, `the player ran ${MAX_VM_TIMERS} timers without finishing (spinning at ${now} ms)`);
     timers.sort((a, b) => a.at - b.at || a.seq - b.seq);
     const t = timers.shift();
     now = t.at;
@@ -193,7 +208,7 @@ async function playInVm(records) {
   // Objects made in the VM have that realm's prototypes: copy them out.
   result = JSON.parse(JSON.stringify(result));
   const t0 = result.t0;
-  return { t0, revealedAt, frames, tickChanges, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
+  return { t0, revealedAt, frames, tickChanges, lastTickAt, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
 }
 
 describe('player schedule (player.html in a VM with a virtual clock)', () => {
@@ -201,11 +216,18 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
     const run = await playInVm(SAMPLE);
     assert.equal(run.done, true);
     assert.ok(run.revealedAt >= timing.LEAD_IN_MS, `revealed at ${run.revealedAt}`);
-    // The lead-in repaints every frame (about LEAD_IN_MS / 16), then stops.
-    assert.ok(run.frames >= timing.LEAD_IN_MS / 16 - 2, `${run.frames} frames`);
-    assert.ok(run.frames < timing.LEAD_IN_MS / 16 + 5, `${run.frames} frames: the repaint did not stop`);
+    // The lead-in repaints every frame but its last LEAD_IN_QUIET_MS (about
+    // (LEAD_IN_MS - LEAD_IN_QUIET_MS) / 16 frames), then holds still.
+    const repainting = timing.LEAD_IN_MS - timing.LEAD_IN_QUIET_MS;
+    assert.ok(timing.LEAD_IN_QUIET_MS >= 200 && timing.LEAD_IN_QUIET_MS <= timing.LEAD_IN_MS / 2, `LEAD_IN_QUIET_MS ${timing.LEAD_IN_QUIET_MS}`);
+    assert.ok(run.frames >= repainting / 16 - 2, `${run.frames} frames`);
+    assert.ok(run.frames < repainting / 16 + 5, `${run.frames} frames: the repaint did not stop`);
     // Each of those frames changes the #tick shade, so each one is painted.
-    assert.ok(run.tickChanges >= timing.LEAD_IN_MS / 16 - 2, `${run.tickChanges} repaints`);
+    assert.ok(run.tickChanges >= repainting / 16 - 2, `${run.tickChanges} repaints`);
+    // No repaint in the quiet end: the last one is at least LEAD_IN_QUIET_MS
+    // (less one 16 ms frame) before the terminal is shown.
+    assert.ok(run.revealedAt - run.lastTickAt >= timing.LEAD_IN_QUIET_MS - 16, `last repaint ${run.revealedAt - run.lastTickAt} ms before t0`);
+    assert.ok(run.revealedAt - run.lastTickAt <= timing.LEAD_IN_QUIET_MS + 32, `last repaint ${run.revealedAt - run.lastTickAt} ms before t0`);
     const shown = run.log.filter((e) => e.id === 'caption').map((e) => ({ startMs: e.at, text: e.text }));
     const cues = parseVtt(toVtt(SAMPLE)).map((c) => ({ startMs: c.startMs, text: c.text }));
     assert.deepEqual(shown, cues);
@@ -246,6 +268,17 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
     const shown = run.log.filter((e) => e.id === 'caption').map((e) => ({ startMs: e.at, text: e.text }));
     assert.deepEqual(shown, parseVtt(toVtt(records)).map((c) => ({ startMs: c.startMs, text: c.text })));
     assert.equal(run.endAt - run.t0, timing.totalMs(tl));
+  });
+
+  it('fails, instead of spinning, when a timing.js constant it waits on is missing', async () => {
+    // waitUntil(base, NaN) never reaches its time and setTimeout(check, NaN)
+    // runs at once: without the finite check the player spins for ever.
+    for (const name of ['LEAD_IN_QUIET_MS', 'LEAD_IN_MS']) {
+      await assert.rejects(playInVm(SAMPLE, { without: [name] }), (e) => {
+        assert.match(e.message, /^waitUntil: not a finite time \(base \d+, ms NaN\)$/, name);
+        return true;
+      });
+    }
   });
 
   it('types each command character at its timing.typingOffsets time', async () => {

@@ -29,9 +29,10 @@
     font-family: "DejaVu Sans Mono", "Liberation Mono", ui-monospace, monospace;
   }
   body.playing #screen { visibility: visible; }
-  /* Repainted every frame of the black lead-in, in two shades the renderer's
-     blackdetect counts as black, so the recording receives black frames
-     however late it starts. Hidden once playback starts. */
+  /* Repainted every frame of the black lead-in but its last
+     LEAD_IN_QUIET_MS, in two shades the renderer's blackdetect counts as
+     black, so the recording receives black frames however late it starts.
+     Hidden once playback starts. */
   #tick { position: absolute; left: 0; top: 0; width: 4px; height: 4px; }
   #tick.a { background: #000000; }
   #tick.b { background: #030303; }
@@ -95,7 +96,13 @@
 
   // Resolves once performance.now() has reached base + ms. Waiting for an
   // absolute time keeps late timers from adding up over a long transcript.
+  // A time that is not a finite number (a timing.js constant missing, so
+  // undefined arithmetic gives NaN) is an error: NaN never compares as
+  // reached and setTimeout(check, NaN) runs at once, so it would spin.
   function waitUntil(base, ms) {
+    if (!Number.isFinite(base) || !Number.isFinite(ms)) {
+      return Promise.reject(new Error('waitUntil: not a finite time (base ' + base + ', ms ' + ms + ')'));
+    }
     return new Promise(function (resolve) {
       (function check() {
         var left = base + ms - performance.now();
@@ -172,8 +179,13 @@
       tick.className = tick.className === 'a' ? 'b' : 'a';
       requestAnimationFrame(repaint);
     })();
-    await waitUntil(performance.now(), T.LEAD_IN_MS);
+    // The repaint stops LEAD_IN_QUIET_MS before t0: the screencast is then
+    // idle, so the t0 frame reaches the recording without queueing behind
+    // repaint frames (timing.js).
+    var leadInStart = performance.now();
+    await waitUntil(leadInStart, T.LEAD_IN_MS - T.LEAD_IN_QUIET_MS);
     ticking = false;
+    await waitUntil(leadInStart, T.LEAD_IN_MS);
     document.body.className = 'playing';
     // t0 is the frame that first shows the terminal. Step 0 is drawn in
     // the same frame: the continuation below runs as a microtask of this

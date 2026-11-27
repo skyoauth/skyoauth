@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { FPS, HEIGHT, WIDTH, render } from './render.mjs';
+import { FPS, HEIGHT, LEAD_IN_LATE_SLACK_MS, WIDTH, leadInLine, render } from './render.mjs';
 import timing from './timing.js';
 import { readTranscript } from './transcript.mjs';
 import { parseVtt, toVtt } from './vtt.mjs';
@@ -70,6 +70,12 @@ function topLevelBoxes(path) {
 describe('render.mjs end to end', () => {
   let first;
   let second;
+  // Each render's lead-in line (cut, page-clock estimate, delta), printed
+  // as a diagnostic so a run's log keeps them.
+  const leadInLines = [];
+  const keepLeadIn = (line) => {
+    if (line.startsWith('render: lead-in cut ')) leadInLines.push(line);
+  };
   const outA = join(TMP, 'a');
   const outB = join(TMP, 'b');
 
@@ -84,8 +90,8 @@ describe('render.mjs end to end', () => {
       assert.fail(`Chromium for Playwright is required for this test and did not launch (npx playwright install --with-deps chromium): ${e.message.split('\n')[0]}`);
     });
     await browser.close();
-    first = await render(SAMPLE, outA, { log: () => {} });
-    second = await render(SAMPLE, outB, { log: () => {} });
+    first = await render(SAMPLE, outA, { log: keepLeadIn });
+    second = await render(SAMPLE, outB, { log: keepLeadIn });
   });
 
   it('writes the mp4, the VTT, the transcript copy and SHA256SUMS', () => {
@@ -116,17 +122,31 @@ describe('render.mjs end to end', () => {
     assert.ok(boxes.indexOf('moov') < boxes.indexOf('mdat'), boxes.join(','));
   });
 
-  it('cuts the lead-in: the first frame already shows the player and the first caption', () => {
-    assert.ok(first.leadInSeconds > timing.LEAD_IN_MS / 1000 - FRAME_SLACK_S, `lead-in ${first.leadInSeconds}`);
-    // The page clock estimate and the blackdetect cut agree to within a
-    // few frames.
-    assert.ok(Math.abs(first.leadInSeconds * 1000 - first.leadInEstimateMs) < 250, `${first.leadInSeconds} s vs ${first.leadInEstimateMs} ms`);
+  it('cuts the lead-in: the first frame already shows the player and the first caption', (t) => {
+    for (const line of leadInLines) t.diagnostic(line);
+    // The cut exists and is within the page clock's late bound (render()
+    // enforces it). No minimum and no early-side bound: a recording whose
+    // first frame comes late holds less than LEAD_IN_MS of black and its
+    // cut is still t0, and the estimate runs late by the start-up time,
+    // which load makes as long as it likes. Frame 0 (below) and the caption
+    // changes at the cues check where the cut is.
+    for (const r of [first, second]) {
+      assert.ok(Number.isFinite(r.leadInSeconds) && r.leadInSeconds > 0, `lead-in cut ${r.leadInSeconds}`);
+      assert.ok(r.leadInDeltaMs <= LEAD_IN_LATE_SLACK_MS, `delta ${r.leadInDeltaMs} ms`);
+    }
     const r = sh(FFMPEG, ['-v', 'error', '-i', first.mp4, '-frames:v', '1', '-vf', 'crop=1280:36:0:0,format=gray', '-f', 'rawvideo', '-']);
     assert.equal(r.status, 0);
     const titleBar = r.stdout.reduce((a, b) => a + b, 0) / r.stdout.length;
     assert.ok(titleBar > 150, `title bar mean grey ${titleBar}: frame 0 is not the player`);
     const bar = captionBar(first.mp4, 0);
     assert.ok(bar.some((p) => p > 200), 'no caption text in frame 0');
+  });
+
+  it('logs the lead-in cut, page-clock estimate and delta of each render, once', () => {
+    assert.deepEqual(
+      leadInLines,
+      [first, second].map((r) => `render: ${leadInLine({ cutSeconds: r.leadInSeconds, deltaMs: r.leadInDeltaMs }, r.leadInEstimateMs)}`),
+    );
   });
 
   it('changes the caption bar at each VTT cue boundary and not between them', () => {

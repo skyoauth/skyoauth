@@ -19,6 +19,11 @@
   // Black screen the player holds before t0 (not part of the timeline). The
   // renderer finds its end in the recording to cut the load lead-in.
   var LEAD_IN_MS = 800;
+  // The end of the lead-in that the player holds still (no repaint), so
+  // the browser's screencast is idle when t0 is painted: a screencast kept
+  // busy by a repaint every frame delivered the t0 frame 43-83 ms late
+  // (20 measured renders), which made the cut late by as much.
+  var LEAD_IN_QUIET_MS = 300;
   // Hold after the last step, inside the timeline.
   var TAIL_MS = 1500;
 
@@ -119,6 +124,7 @@
 
   return {
     LEAD_IN_MS: LEAD_IN_MS,
+    LEAD_IN_QUIET_MS: LEAD_IN_QUIET_MS,
     TAIL_MS: TAIL_MS,
     OUTPUT_LINE_MS: OUTPUT_LINE_MS,
     charDelay: charDelay,

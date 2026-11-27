@@ -125,20 +125,68 @@ transcript (and the VTT made from it) is what is compared, never the mp4,
 which is only as stable as the browser and the encoder.
 
 The player holds a pure black screen for `LEAD_IN_MS` before its first frame
-(t0). The recording starts earlier, with the page load, so the renderer runs
-ffmpeg's `blackdetect` on the raw recording (any black frame counts; the
+(t0). The recording usually starts earlier, with the page load, but its
+first frame can come late, inside the lead-in, so it may hold less than
+`LEAD_IN_MS` of black: there is no minimum lead-in. The renderer runs
+ffmpeg's `blackdetect` on the raw recording once (any black frame counts; the
 player's own frames are never black) and starts the mp4 at the end of the
-first black interval: time 0 of the mp4 is t0 and the VTT cues line up to
-about one frame of the 25 fps recording. It also prints the lead-in as the
-page's clock saw it, as a cross-check (locally, over a dozen renders: cuts
-of 0.80 to 0.92 s against estimates of 852 to 932 ms, never more than 80 ms
-apart; the estimate is later, presumably because the recording starts a
-little after the page is created). During the lead-in the player repaints a
-4px corner square every animation frame in two shades that `blackdetect`
-still counts as black, so the screencast keeps receiving black frames: twice
-locally, before that repaint was added, a render failed with "no black
-lead-in found" (not reproduced in a dozen later renders; the cause was not
-confirmed). Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
+black interval nearest the page clock's estimate of t0: time 0 of the mp4 is
+t0. In the measurements below the VTT cues lined up to about one frame of
+the 25 fps recording; that is what was measured, not a guarantee, and
+nothing in the render checks it to that precision.
+
+The cut is checked against a one-sided late bound from the page's own clock.
+The estimate is t0 (in the page's epoch time) less `Date.now()` taken just
+before `newPage()` is called. The recording cannot start before that call
+(Playwright times its frames from a recorder created inside it), so t0 in
+the recording is at most the estimate plus the time the t0 frame takes to
+reach the recording and the 25 fps frame grid: the render fails when the
+cut is later than the estimate plus `LEAD_IN_LATE_SLACK_MS`, two recording
+frames (80 ms). There is no early-side check. How much earlier than the
+estimate the cut comes depends on how long `newPage()` and the recording's
+first frame take, and that is unbounded under load: with 8 renders at once,
+`newPage()` returned 87 to 298 ms late and the video started from 177 ms
+before to 383 ms after it returned, and a two-sided check (an estimate taken
+after `newPage()`, 200 ms either side) rejected 7 correct cuts of 24. None
+is needed either: the cut is the first non-black frame after the lead-in,
+and the player shows nothing but black from its load until t0, so the cut
+cannot be early. Every render logs `lead-in cut X s, page-clock estimate Y
+ms, delta D ms (late bound +80 ms)` (D is the cut less the estimate; it is
+usually negative, by about the start-up time). A cut past the bound is never
+used: the render fails with the estimate, the bound, the delta and every
+black interval found. What it catches was seen under load: a
+recording whose frames froze for 4.4 s after t0 (black from 0.12 to 5.24 s,
+while the page clock put t0 near 0.9 s), which used to fail later with "the
+recording holds 20.5 s after t0" and now fails at the cut with the numbers.
+
+Black after the cut also fails the render, with the same numbers: since the
+player's frames are never black, any black interval that starts after the
+chosen one is a recording fault (frames that froze or went blank), even when
+the cut itself is within the bound. A start-up flash can make that happen:
+black ending at 0.04 s and at 5.24 s with the page clock at 905 ms puts the
+cut at 0.04 s, nearest the estimate, and would have left 5.1 s of black in
+the mp4. With 8 renders at once, 1 of 16 recordings showed the t0 frame and
+then 4.2 s of black (cut at 1.48 s, black again from 1.52 to 5.72 s) and
+passed before this check. Black before the chosen interval (a start-up
+flash) is ignored: the cut drops it.
+
+A cut a frame or two late is not caught by the bound; the quiet lead-in
+below is what keeps the cut on its frame, and the e2e test checks the
+captions against the cues.
+
+During the lead-in the player repaints a 4px corner square in two shades
+that `blackdetect` still counts as black, so the screencast keeps receiving
+black frames (twice locally, before that repaint was added, a render failed
+with "no black lead-in found"). The repaint stops `LEAD_IN_QUIET_MS` (300
+ms) before t0. While it ran up to t0, the screencast, busy with a frame
+every refresh, delivered the t0 frame 43 to 83 ms late (20 renders, against
+t0 measured from when each caption and output step became visible), so the
+cut was as late, every caption came that much early in the mp4, and 6 of 25
+e2e runs found the caption bar changing more than 150 ms before a cue. With
+the quiet end, the same measurement gave -17 to +15 ms (12 renders), and 35
+of 35 runs passed.
+
+Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
 render; a copy that fails is reported on stderr and never replaces the
 render's own error, and a render that failed before the browser wrote a
 recording reports that nothing was kept. `demo.yml` sets it and, when a step fails, uploads the
