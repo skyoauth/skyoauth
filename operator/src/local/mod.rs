@@ -96,18 +96,30 @@
 //! kind only, and `Display` of every error is fixed text: no ID, key,
 //! signature or challenge byte is shown.
 //!
-//! Unix only, like the service's transport (`cfg(unix)` in `lib.rs`).
+//! The client ([`LocalClient`], its connectors and the socket path checks)
+//! is Unix only, like the service's transport. The codec (the types of
+//! this module, [`Request::encode`] and [`parse_reply`]) has no I/O and is
+//! built on every platform: the offline workstation, which may run macOS
+//! or Windows, reads an `issue_challenge` reply carried to it as a file
+//! (the `skyoauth-operator` binary's challenge artifact).
 
+// Off Unix, the links of these docs to the client's items have no target.
+#![cfg_attr(not(unix), allow(rustdoc::broken_intra_doc_links))]
+
+#[cfg(unix)]
 mod exchange;
+#[cfg(unix)]
 mod path;
 mod wire;
 
 use std::{fmt, io};
 
+#[cfg(unix)]
 pub use exchange::{
     Connector, DEFAULT_IDLE_WAIT, DEFAULT_TOTAL_WAIT, HalfClose, LocalClient, Retry, SocketPath,
     Timeouts,
 };
+#[cfg(unix)]
 pub use path::{
     AncestorTrust, CheckedSocket, CheckedSocketPath, MAX_SOCKET_PATH_BYTES, MAX_SYMLINKS,
     PathError, PathProblem, SOCKET_MODE, SocketExpectations, check_socket,
@@ -274,7 +286,8 @@ pub enum NotSent {
     /// [`CheckedSocketPath`] refused the socket path, by its problem: before
     /// the connect, or after it when the path no longer held the checked
     /// socket ([`PathProblem::Changed`]; the connection is dropped before
-    /// anything is written to it).
+    /// anything is written to it). Unix only, like the client.
+    #[cfg(unix)]
     Path(PathProblem),
 }
 
@@ -286,6 +299,7 @@ impl fmt::Display for NotSent {
             Self::Connect(_) => "no connection to the local transport could be made",
             Self::TimedOut => "the total wait ran out before anything was written",
             Self::Setup(_) => "the connection refused the time limit of the first write",
+            #[cfg(unix)]
             Self::Path(_) => "the local socket's path, owner or mode was refused",
         })
     }

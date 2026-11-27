@@ -435,7 +435,9 @@ export const MAX_BYTES = { leg: 1024, 'junit.xml': 64 * 1024 * 1024 };
 // The self-test checks this list against the workflows' upload steps.
 // conformance-report-N is the JSON this reporter writes in the
 // `conformance-report` job; service-nextest-root-junit-N is the JUnit of
-// that job's root-only local transport run.
+// that job's root-only run (the `local_transport` tests of skyoauth-service,
+// operator `local_path` and the `pg` target's `harness::socket_path_fixture`,
+// none of them a scenario test).
 export const NOT_CONFORMANCE = [/^service-nextest-junit-[1-9]\d*$/, /^service-nextest-root-junit-[1-9]\d*$/, /^rust-coverage$/, /^typescript-coverage$/, /^conformance-report-[1-9]\d*$/];
 
 // What a path is, without following a symbolic link: dir, file, symlink,

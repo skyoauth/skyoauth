@@ -253,8 +253,9 @@ const ED25519_Y8: Uint =
     Uint::from_hex("7a03ac9277fdc74ec6cc392cfa53202a0f67100d760b3cba4fd84d3d706a17c7");
 
 /// Checks that `(x, y)`, big-endian coordinates of the curve's length, is
-/// a point of `curve`.
-pub(super) fn check_ec(curve: EcCurve, x: &[u8], y: &[u8]) -> Result<(), JwkError> {
+/// a point of `curve`. Also the key check of an mTLS P-256 key
+/// ([`crate::identity`]).
+pub(crate) fn check_ec(curve: EcCurve, x: &[u8], y: &[u8]) -> Result<(), JwkError> {
     let (p, b) = match curve {
         EcCurve::P256 => (P256_P, P256_B),
         EcCurve::P384 => (P384_P, P384_B),
@@ -274,8 +275,13 @@ pub(super) fn check_ec(curve: EcCurve, x: &[u8], y: &[u8]) -> Result<(), JwkErro
 
 /// Checks that `encoded`, a 32-octet Ed25519 public key, is a canonical
 /// encoding of a point outside the small-order subgroup (see the module
-/// docs: a torsion component is not refused).
-pub(super) fn check_ed25519(encoded: &[u8]) -> Result<(), JwkError> {
+/// docs: a torsion component is not refused). The mTLS Ed25519 key check
+/// ([`crate::identity`]) is instead the recovery key check
+/// (`persistence::registry::recovery_key`, through `ed25519-dalek`, about a
+/// thousand times faster in a release build); its tests use this function
+/// as the oracle and check that the two accept and refuse the same keys on
+/// their probes.
+pub(crate) fn check_ed25519(encoded: &[u8]) -> Result<(), JwkError> {
     let p = ED25519_P;
     // RFC 8032 section 5.1.3: little-endian `y` in the low 255 bits, the
     // sign of `x` in the top bit.

@@ -28,7 +28,7 @@ use std::{
     fs::{self, File},
     io::{self, Read as _, Write as _},
     os::unix::{
-        fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _},
+        fs::{DirBuilderExt as _, FileTypeExt as _, MetadataExt as _, PermissionsExt as _},
         net::{UnixListener, UnixStream},
     },
     path::{Component, Path, PathBuf},
@@ -44,10 +44,7 @@ use skyoauth_operator::local::{
     SOCKET_MODE, SocketExpectations, Timeouts, check_socket,
 };
 
-use crate::support::{fixtures_dir, list, text};
-
-/// The fixture file under `_wire/`.
-pub const SOCKET_PATH_FIXTURE: &str = "socket_path.v1.json";
+use crate::support::{SOCKET_PATH_FIXTURE, fixtures_dir, list, text};
 
 /// The service UID of the cases when the test runs as root: any UID but
 /// root's.
@@ -126,8 +123,7 @@ impl TempDir {
                 std::process::id(),
                 COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
-        fs::create_dir(&path).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
         Self(path)
     }
 
@@ -251,8 +247,11 @@ fn padded(root: &Path, case: &Value, rel: &str) -> PathBuf {
 /// of owner or of mode) would name outside the case tree `root`, or reach
 /// through anything but the tree's own directories: `at` must be `root`
 /// followed by plain names only, and each directory between them a
-/// directory, not a symbolic link. As root, a step that strayed could
-/// change a file of the system.
+/// directory, not a symbolic link, when looked at. As root, a step that
+/// strayed could change a file of the system. The look is not atomic with
+/// the step that follows it: what keeps the walk out of a symbolic link
+/// planted in between is that the tree is in a private directory, mode
+/// 0700, no other UID may enter while it is built.
 fn inside(root: &Path, at: &Path) -> Result<(), &'static str> {
     let rest = at
         .strip_prefix(root)
@@ -285,12 +284,14 @@ fn checked_inside(root: &Path, at: &Path) {
 
 /// Gives `at`, an entry just created in the tree `root`, to `uid` and, but
 /// for a symbolic link, sets `mode`, in that order, so a set-ID bit
-/// survives the change of owner; never through a symbolic link. A file or
-/// a directory is changed through a handle opened on it, checked to be the
-/// entry looked at; a symbolic link only with `lchown`; a socket, which
-/// cannot be opened, by its path, checked to be that socket before and
-/// after. The tree is in a private directory no other UID may enter while
-/// it is built.
+/// survives the change of owner. A file or a directory is changed through
+/// a handle opened on it, checked to be the entry looked at; a symbolic
+/// link only with `lchown`; a socket, which cannot be opened, by its path,
+/// checked to be that socket before and after. Neither the open nor the
+/// path refuses a symbolic link on the way by itself: the steps stay
+/// inside the tree only because it is in a private directory, mode 0700,
+/// no other UID may enter while it is built, so nothing can swap an entry
+/// between the look and the step.
 fn own_and_mode(root: &Path, at: &Path, uid: u32, mode: Option<u32>) {
     checked_inside(root, at);
     let found = fs::symlink_metadata(at).unwrap();
@@ -328,8 +329,9 @@ fn own_and_mode(root: &Path, at: &Path, uid: u32, mode: Option<u32>) {
 
 /// Builds the entries of `case` in `root` with the UIDs of `roles`, as the
 /// fixture's `case_root` describes them: every path a step names is
-/// checked [`inside`] the tree first, and nothing is created through a
-/// symbolic link (`create_new` for a file).
+/// checked [`inside`] the tree first, and no file is created through a
+/// symbolic link at its own name (`create_new`); the directories on the
+/// way are safe only by the tree's private parent, mode 0700.
 fn build(root: &Path, case: &Value, roles: &Roles) {
     let root_text = root.to_str().expect("a UTF-8 temporary directory");
     for entry in list(case, "entries") {

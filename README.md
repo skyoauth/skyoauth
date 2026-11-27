@@ -6,12 +6,12 @@
 [![TypeScript tests](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-tests.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 [![TypeScript coverage](https://github.com/skyoauth/skyoauth/raw/badges/main/typescript-coverage.svg)](https://github.com/skyoauth/skyoauth/actions/workflows/ci.yml?query=branch%3Amain)
 
-| Path                  | Description                                          |
-| --------------------- | ---------------------------------------------------- |
-| `service/`            | Rust service (`skyoauth-service`, axum + tokio)      |
-| `service/migrations/` | Versioned PostgreSQL migrations (sqlx, embedded)     |
-| `operator/`           | Workstation operator library (`skyoauth-operator`)   |
-| `clients/typescript`  | TypeScript client library (`@skyoauth/client`)       |
+| Path                  | Description                                                        |
+| --------------------- | ------------------------------------------------------------------ |
+| `service/`            | Rust service (`skyoauth-service`, axum + tokio)                    |
+| `service/migrations/` | Versioned PostgreSQL migrations (sqlx, embedded)                   |
+| `operator/`           | Workstation operator library and offline CLI (`skyoauth-operator`) |
+| `clients/typescript`  | TypeScript client library (`@skyoauth/client`)                     |
 
 ## Service
 
@@ -121,6 +121,19 @@ needs each privilege its tests need (PostgreSQL 15 or later):
 | `GRANT SET ON PARAMETER session_replication_role TO <role>` | the replica-role tests in `service/tests` (`migrations.rs` and the `schema_*.rs` files), which `SET session_replication_role` and fail with SQLSTATE 42501 without it; the `pg` scenarios do not need it |
 | `GRANT pg_signal_backend TO <role>`                         | the `pg` scenarios: each drops its database with `DROP DATABASE … WITH (FORCE)`, which may terminate only backends of roles whose privileges the role has, unless it is in `pg_signal_backend`; a backend of another role still connected (an autovacuum worker, or a session of a test's login role) otherwise makes the drop fail with SQLSTATE 42501, which the harness retries for 5 seconds before it fails the test |
 
+## Operator
+
+`skyoauth-operator` is the workstation library and the offline command line
+of the same name, which checks a recovery challenge and its signed response
+without a network, a socket or a private key. The commands, the artifact
+formats and the exit codes are in
+[the operator CLI proposal](docs/proposals/operator-cli-artifacts.md).
+
+```bash
+cargo test -p skyoauth-operator --all-features
+cargo run -p skyoauth-operator -- --help
+```
+
 ## TypeScript client
 
 Requires Node.js 22.12 or later.
@@ -168,14 +181,18 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
-  The job then runs `skyoauth-service`'s `local_transport` integration
-  tests again as root, with a second local user in `SKYOAUTH_IT_PEER_USER`
-  (`--profile ci-root`, through `scripts/ci/root-transport-run.sh`), also
-  when the first run failed: their cross-UID checks only print a notice and
-  pass without root and that user. The step fails unless every test ran
-  and passed and on a notice that the peer user is missing; the job
-  summary lists its other notices and whether the runner user (not root)
-  may create a user namespace. Its JUnit report
+  The job then runs three selections again as root, with a second local
+  user in `SKYOAUTH_IT_PEER_USER` (`--profile ci-root`, through
+  `scripts/ci/root-transport-run.sh`), also when the first run failed:
+  `skyoauth-service`'s `local_transport` integration tests, the operator's
+  `local_path` module and the scenario harness's `socket_path_fixture`
+  module, whose cross-UID and root-only checks only print a notice and
+  pass without root and that user. The step fails unless every listed
+  test ran and passed, the root-only tests the script names among them
+  included, and on a notice that the peer user is missing or that
+  root-only cases did not run; the job summary, also in the step log,
+  gives the counts, the other notices and whether the runner user (not
+  root) may create a user namespace. Its JUnit report
   (`target/nextest/ci-root/junit.xml`) is a separate artifact,
   `service-nextest-root-junit-N`, which exists only when that step got
   far enough to write the JUnit.

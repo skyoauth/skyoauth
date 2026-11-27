@@ -135,10 +135,12 @@ fn sign(seed: &[u8; 32], message: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-/// The hex DER `SubjectPublicKeyInfo` of the operator key numbered `n`
-/// (an Ed25519 key of 32 bytes `n`: only its DER framing is checked).
+/// The hex DER `SubjectPublicKeyInfo` of the operator key numbered `n`:
+/// the Ed25519 public key of the seed of 32 bytes `n`, a valid point, since
+/// the service refuses a key that is not one
+/// (`identity::canonical_public_identity`, "Key validity").
 fn spki(n: u8) -> String {
-    format!("{ED25519_SPKI_PREFIX}{}", hex(&[n; 32]))
+    format!("{ED25519_SPKI_PREFIX}{}", hex(&public_key(&[n; 32])))
 }
 
 fn identity_of(n: u8) -> String {
