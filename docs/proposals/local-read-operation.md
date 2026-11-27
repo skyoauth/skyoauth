@@ -4,9 +4,10 @@ Status: Reviewed; rulings applied (the lead, 2026-11-27): the design holds
 (A1 `status`, B2 a count with a capped list, exact absent a tie, the
 `FOR SHARE` barrier), review findings F1 to F11 and the third-round items
 (a) to (h) are applied, and Q1 to Q8 are ruled (see "Rulings"). F4 widens what a local peer reads: lead scoping, user
-informed. Not implemented: this text changes no code, no contract, no
-fixture and no test. It answers two rulings of the user (2026-11-27,
-relayed by the lead), recorded in tasks §13 under "Other rulings of the
+informed. Implementation: slice 2 (the service `status`, the restore
+reply bound, the fixture, the operator codec and the five contract
+amendments) is implemented; slice 3 (C4) is not. It answers two rulings
+of the user (2026-11-27, relayed by the lead), recorded in tasks §13 under "Other rulings of the
 user, 2026-11-27": "Read-only socket operation" (an operation that only
 reads is added to the local socket; proposal first, then the
 implementation) and "Restore reply bound" (the `restore` reply's list of
