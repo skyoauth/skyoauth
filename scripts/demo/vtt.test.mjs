@@ -5,7 +5,8 @@
 // The player test runs player.html's own scripts (timing.js and the inline
 // player) in a node:vm context with a small DOM stand-in and a virtual
 // clock, and checks that each caption appears at exactly the time of its
-// WebVTT cue.
+// WebVTT cue, and that a chapter's title card clears the terminal and the
+// caption bar for exactly its step.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -17,12 +18,28 @@ import vm from 'node:vm';
 import { MAX_DRIFT_MS } from './render.mjs';
 import timing from './timing.js';
 import { readTranscript } from './transcript.mjs';
-import { escapeCueText, formatVttTime, parseVtt, toVtt } from './vtt.mjs';
+import { escapeCueText, formatVttTime, parseVtt, toChaptersVtt, toVtt } from './vtt.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SAMPLE = readTranscript(join(HERE, 'sample', 'sample.transcript.jsonl'));
 const PLAYER = readFileSync(join(HERE, 'player.html'), 'utf8');
 const r = (step, type, text) => ({ step, type, text });
+// A joined milestone stream of two journeys and the opening lead-in before
+// it (docs/proposals/demo-walkthroughs.md 6.3, 6.4).
+const OPENING = { type: 'caption', text: 'M1a at commit 0123456789ab' };
+const JOINED = [
+  r(0, 'chapter', 'M1a-1: First journey'),
+  r(1, 'caption', 'first caption'),
+  r(2, 'command', 'ls'),
+  r(3, 'output', 'one\ntwo'),
+  r(4, 'caption', 'cut short by the next chapter'),
+  r(5, 'output', 'y'),
+  r(6, 'chapter', 'M1a-2: Second <journey> & more'),
+  r(7, 'command', 'pwd'),
+  r(8, 'caption', 'second journey caption'),
+  r(9, 'output', 'z'),
+];
+const STREAM = [OPENING, ...JOINED];
 
 describe('WebVTT', () => {
   it('formats times as HH:MM:SS.mmm and refuses bad ones', () => {
@@ -65,6 +82,23 @@ describe('WebVTT', () => {
     assert.equal(toVtt(JSON.parse(JSON.stringify(SAMPLE))), toVtt(SAMPLE));
   });
 
+  it('names the opening cue `opening` and cuts a caption cue at the next chapter', () => {
+    const cues = parseVtt(toVtt(STREAM));
+    const tl = timing.buildTimeline(STREAM);
+    assert.deepEqual(
+      cues.map((c) => [c.id, c.startMs, c.endMs, c.text]),
+      [
+        ['opening', 0, timing.OPENING_MS, OPENING.text],
+        ['step-1', tl[2].startMs, tl[5].startMs, 'first caption'],
+        ['step-4', tl[5].startMs, tl[7].startMs, 'cut short by the next chapter'],
+        ['step-8', tl[9].startMs, timing.totalMs(tl), 'second journey caption'],
+      ],
+    );
+    // A chapter title is no caption: it is not in the captions track.
+    assert.doesNotMatch(toVtt(STREAM), /journey<|Journey|M1a-[12]:/);
+    assert.equal(toVtt(JOINED).includes('opening'), false);
+  });
+
   it('writes only the header without captions', () => {
     assert.equal(toVtt([r(0, 'command', 'ls')]), 'WEBVTT\n');
     assert.deepEqual(parseVtt('WEBVTT\n'), []);
@@ -72,15 +106,53 @@ describe('WebVTT', () => {
   });
 });
 
+describe('chapters WebVTT', () => {
+  it('writes one cue per chapter, ids chapter-<n>, contiguous from 0 to totalMs, chapter 1 covering the opening', () => {
+    const tl = timing.buildTimeline(STREAM);
+    const total = timing.totalMs(tl);
+    const t = formatVttTime;
+    assert.equal(
+      toChaptersVtt(STREAM),
+      'WEBVTT\n\n' +
+        `chapter-1\n${t(0)} --> ${t(tl[7].startMs)}\nM1a-1: First journey\n\n` +
+        `chapter-2\n${t(tl[7].startMs)} --> ${t(total)}\nM1a-2: Second &lt;journey&gt; &amp; more\n`,
+    );
+    const cues = parseVtt(toChaptersVtt(STREAM));
+    assert.deepEqual(
+      cues.map(({ id, startMs, endMs }) => ({ id, startMs, endMs })),
+      timing.chapterCues(STREAM).map((c) => ({ id: `chapter-${c.n}`, startMs: c.startMs, endMs: c.endMs })),
+    );
+    assert.equal(cues[0].startMs, 0);
+    assert.equal(cues[cues.length - 1].endMs, total);
+    for (let k = 1; k < cues.length; k++) assert.equal(cues[k].startMs, cues[k - 1].endMs);
+  });
+
+  it('holds no caption, is byte-identical for the same records, and is only the header without chapters', () => {
+    assert.doesNotMatch(toChaptersVtt(STREAM), /caption|commit/);
+    assert.equal(toChaptersVtt(JSON.parse(JSON.stringify(STREAM))), toChaptersVtt(STREAM));
+    assert.equal(toChaptersVtt(SAMPLE), 'WEBVTT\n');
+    assert.equal(toChaptersVtt([]), 'WEBVTT\n');
+  });
+
+  it('matches the format of the proposal (6.4)', () => {
+    // Over a minute long: 1700 output lines.
+    const records = [r(0, 'chapter', 'M1a-1: Bootstrap the operator'), r(1, 'output', Array.from({ length: 1700 }, () => 'x').join('\n'))];
+    const total = timing.totalMs(timing.buildTimeline(records));
+    assert.equal(formatVttTime(total), '00:01:12.760');
+    assert.equal(toChaptersVtt(records), 'WEBVTT\n\nchapter-1\n00:00:00.000 --> 00:01:12.760\nM1a-1: Bootstrap the operator\n');
+  });
+});
+
 // A DOM element stand-in with just what player.html uses.
 class Element {
-  constructor(tag, onText) {
+  constructor(tag, onText, onRemove = () => {}) {
     this.tagName = tag;
     this.children = [];
     this.ownText = '';
     this.className = '';
     this.id = '';
     this.onText = onText;
+    this.onRemove = onRemove;
   }
   get firstChild() {
     return this.children[0] ?? null;
@@ -93,6 +165,7 @@ class Element {
     const i = this.children.indexOf(child);
     if (i < 0) throw new Error('removeChild: not a child');
     this.children.splice(i, 1);
+    this.onRemove(this, child);
     return child;
   }
   get textContent() {
@@ -113,15 +186,17 @@ async function playInVm(records) {
   const timers = [];
   const log = [];
   const onText = (el) => log.push({ at: now, id: el.id, cls: el.className, text: el.ownText });
+  const removed = [];
+  const onRemove = (parent, child) => removed.push({ at: now, from: parent.id, cls: child.className, text: child.textContent });
   const byId = {};
   for (const id of ['screen', 'term', 'caption', 'tick']) {
-    byId[id] = new Element('div', onText);
+    byId[id] = new Element('div', onText, onRemove);
     byId[id].id = id;
   }
   const document = {
     body: { className: '' },
     getElementById: (id) => byId[id] ?? null,
-    createElement: (tag) => new Element(tag, onText),
+    createElement: (tag) => new Element(tag, onText, onRemove),
   };
   let revealedAt = null;
   let frames = 0;
@@ -193,7 +268,18 @@ async function playInVm(records) {
   // Objects made in the VM have that realm's prototypes: copy them out.
   result = JSON.parse(JSON.stringify(result));
   const t0 = result.t0;
-  return { t0, revealedAt, frames, tickChanges, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
+  return {
+    t0,
+    revealedAt,
+    frames,
+    tickChanges,
+    endAt: now,
+    done: sandbox.__demoDone,
+    result,
+    log: log.map((e) => ({ ...e, at: e.at - t0 })),
+    removed: removed.map((e) => ({ ...e, at: e.at - t0 })),
+    term: byId.term.children.map((c) => ({ cls: c.className, text: c.textContent })),
+  };
 }
 
 describe('player schedule (player.html in a VM with a virtual clock)', () => {
@@ -266,6 +352,81 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
         [tl[3].startMs, '# n'],
       ],
     );
+  });
+});
+
+describe('player chapters (player.html in a VM with a virtual clock)', () => {
+  it('shows each chapter as a title card in a cleared terminal for exactly its step', async () => {
+    const run = await playInVm(STREAM);
+    const tl = timing.buildTimeline(STREAM);
+    const chapters = STREAM.map((x, i) => [x, i]).filter(([x]) => x.type === 'chapter');
+    // The terminal is cleared at each chapter start and nowhere else.
+    assert.deepEqual(
+      run.log.filter((e) => e.id === 'term').map((e) => [e.at, e.text]),
+      chapters.map(([, i]) => [tl[i].startMs, '']),
+    );
+    // The card shows the title from the chapter's start ...
+    assert.deepEqual(
+      run.log.filter((e) => e.cls === 'card').map((e) => [e.at, e.text]),
+      chapters.map(([x, i]) => [tl[i].startMs, x.text]),
+    );
+    // ... and is taken away exactly at its end, when the next step starts.
+    assert.deepEqual(
+      run.removed.filter((e) => e.cls === 'card').map((e) => [e.at, e.from, e.text]),
+      chapters.map(([x, i]) => [tl[i].endMs, 'term', x.text]),
+    );
+    for (const [, i] of chapters) assert.equal(tl[i].endMs - tl[i].startMs, timing.stepDuration(STREAM[i]));
+    // Nothing is drawn in the terminal while a card shows.
+    for (const [, i] of chapters) {
+      const drawn = run.log.filter((e) => e.id !== 'caption' && e.cls !== 'card' && e.at > tl[i].startMs && e.at < tl[i].endMs);
+      assert.deepEqual(drawn, []);
+    }
+    // After the second card, the terminal holds only the second journey.
+    assert.deepEqual(
+      run.term.map((l) => l.text),
+      ['$ pwd', 'z'],
+    );
+  });
+
+  it('empties the caption bar at each chapter start until the next caption: the bar follows the captions VTT exactly', async () => {
+    const run = await playInVm(STREAM);
+    const tl = timing.buildTimeline(STREAM);
+    const changes = run.log.filter((e) => e.id === 'caption').map((e) => [e.at, e.text]);
+    assert.deepEqual(changes, [
+      [0, OPENING.text],
+      [tl[1].startMs, ''],
+      [tl[2].startMs, 'first caption'],
+      [tl[5].startMs, 'cut short by the next chapter'],
+      [tl[7].startMs, ''],
+      [tl[9].startMs, 'second journey caption'],
+    ]);
+    // Each VTT cue starts at a change to its text and ends at the next
+    // change of the bar (or the end of the video): a cue cut by a chapter
+    // ends where the bar empties. Between cues the bar is empty.
+    const cues = parseVtt(toVtt(STREAM));
+    const total = timing.totalMs(tl);
+    for (const cue of cues) {
+      const k = changes.findIndex(([at, text]) => at === cue.startMs && text === cue.text);
+      assert.ok(k >= 0, `cue ${cue.id} not shown at its start`);
+      assert.equal(k + 1 < changes.length ? changes[k + 1][0] : total, cue.endMs, `cue ${cue.id}`);
+    }
+    const covered = (at) => cues.some((c) => at >= c.startMs && at < c.endMs);
+    for (const [at, text] of changes) if (text === '') assert.equal(covered(at), false, `empty bar at ${at} inside a cue`);
+    // The second journey types its command under an empty caption bar.
+    const typed = run.log.filter((e) => e.cls === 'typed' && e.text !== '' && e.at >= tl[7].startMs);
+    assert.ok(typed.length > 0 && typed.every((e) => e.at >= tl[7].endMs && e.at < tl[9].startMs));
+  });
+
+  it('plays the opening and the chapters on the timeline, and ends at totalMs', async () => {
+    const run = await playInVm(STREAM);
+    const tl = timing.buildTimeline(STREAM);
+    assert.deepEqual(
+      run.result.events.map((e) => [e.step, e.type, e.plannedMs, e.actualMs]),
+      tl.map((e, i) => [e.step, STREAM[i].type, e.startMs, e.startMs]),
+    );
+    assert.equal(run.result.events[0].step, undefined);
+    assert.equal(run.endAt - run.t0, timing.totalMs(tl));
+    assert.equal(run.result.totalMs, timing.totalMs(tl));
   });
 });
 

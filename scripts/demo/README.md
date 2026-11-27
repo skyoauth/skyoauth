@@ -145,16 +145,48 @@ recording reports that nothing was kept. `demo.yml` sets it and, when a step fai
 recordings as `demo-raw-recordings-N` (3 days). `render.e2e.test.mjs` checks that frame 0 is the player
 and that the caption bar changes at each cue boundary and not before;
 `vtt.test.mjs` runs the player's own script on a virtual clock and checks
-that each caption appears exactly at its cue's start.
+that each caption appears exactly at its cue's start, and that each title
+card (below) clears the terminal and the caption bar for exactly its step.
 
-## Chapters and milestone videos (designed, not built)
+### Chapters, the title card and the opening lead-in
 
-One video per milestone, joined from per-journey transcripts with a
-`chapter` record per journey, chapter tracks (WebVTT and mp4), a generated
-opening commit caption, staged publication and one merged `SHA256SUMS`: the
-design is section 6 of
-[the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built),
-for the lead's review. None of it is implemented yet.
+The player and the timing model know the `chapter` record of section 6.1
+of the proposal, `{"step":N,"type":"chapter","text":"M1a-2: <title>"}`
+(the checker does not yet: see below):
+
+- **Title card.** At a chapter's start the player clears the terminal and
+  the caption bar and shows the title, centred, until the chapter's step
+  ends. Its duration is the caption rule applied to the title (1200 ms plus
+  40 ms a code point), at least 1200 ms (`TITLE_CARD_MIN_MS`) and at most
+  3000 ms (`TITLE_CARD_MAX_MS`). After the card the terminal starts empty
+  and the caption bar stays empty until the next caption record.
+- **Captions track.** A chapter is not a caption and has no cue in
+  `<name>.vtt`. A caption's cue ends at the next caption's start or the
+  next chapter's start, whichever comes first (the last one at the end of
+  the video), which is when the player replaces or empties the bar.
+- **Chapters track** (`toChaptersVtt` in `vtt.mjs`, `timing.chapterCues`):
+  one cue per chapter, ids `chapter-<n>` (1-based, stream order), texts
+  escaped like captions, contiguous from 0 to the end of the video: chapter
+  1 starts at 0, every later one at its chapter record's start, and each
+  ends where the next starts. Without a chapter it is the `WEBVTT` header
+  alone.
+- **Opening lead-in.** A caption record with no `step`, allowed only as
+  the first record, lasts `OPENING_MS` (3000 ms) whatever its text: every
+  later time moves by `OPENING_MS` and no step changes (the typing speed
+  still follows each record's own step). Its captions cue has the id
+  `opening` and ends at the first chapter. It is not `LEAD_IN_MS`, the
+  black screen before t0 that the renderer cuts: the opening is inside the
+  timeline, from t0. Any other record without a step is refused.
+
+Not built yet (section 6 of
+[the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built)):
+the `chapter` record in `transcript.mjs` and `check-milestone`, the
+milestone render (`render.mjs --milestone`, `--commit`, which writes the
+opening caption and the chapters VTT, and the mp4 chapters), staged
+publication with one merged `SHA256SUMS`, and the CI steps. `render.mjs`
+renders single transcripts only and refuses a `chapter` record (its
+transcript check does not know the type); it writes no chapters VTT and no
+opening.
 
 ## Never committed
 

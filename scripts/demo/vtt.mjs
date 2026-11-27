@@ -1,6 +1,8 @@
-// WebVTT sidecar for a transcript: one cue per caption record, timed by
-// timing.js (captionCues), the same schedule the player shows the captions
-// on. Pure: no file, clock or environment access.
+// WebVTT sidecars for a transcript, timed by timing.js, the same schedule
+// the player shows the captions and title cards on: the captions track
+// (toVtt: one cue per caption record, captionCues) and the chapters track
+// (toChaptersVtt: one cue per chapter record, chapterCues). Pure: no file,
+// clock or environment access.
 
 import timing from './timing.js';
 
@@ -20,16 +22,30 @@ export function escapeCueText(text) {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// The whole file, LF line endings and a final LF.
-export function toVtt(records) {
+// The whole file, LF line endings and a final LF: [{id, startMs, endMs,
+// text}] in order.
+function writeVtt(cues) {
   const lines = ['WEBVTT', ''];
-  for (const cue of timing.captionCues(records)) {
-    lines.push(`step-${cue.step}`);
+  for (const cue of cues) {
+    lines.push(cue.id);
     lines.push(`${formatVttTime(cue.startMs)} --> ${formatVttTime(cue.endMs)}`);
     lines.push(escapeCueText(cue.text));
     lines.push('');
   }
   return lines.join('\n');
+}
+
+// The captions track: ids `step-<step>`, and `opening` for the opening
+// lead-in (the caption with no step, timing.js).
+export function toVtt(records) {
+  return writeVtt(timing.captionCues(records).map((c) => ({ ...c, id: c.step === undefined ? 'opening' : `step-${c.step}` })));
+}
+
+// The chapters track (kind="chapters"): ids `chapter-<n>`, 1-based in
+// stream order, contiguous from 0 to the end of the video. Only the header
+// when the records hold no chapter.
+export function toChaptersVtt(records) {
+  return writeVtt(timing.chapterCues(records).map((c) => ({ ...c, id: `chapter-${c.n}` })));
 }
 
 // Minimal reader for the files toVtt writes (used by the tests): the cues
