@@ -55,6 +55,16 @@ tower = { version = "0.5.3", features = ["util"] }
 # (docs/proposals/recovery-verified-response.md). The same version and
 # features as the service's.
 ed25519-dalek = { version = "3.0.0", default-features = false }
+# The workstation library, for the round trip of its local client
+# (`skyoauth_operator::local::LocalClient`, with its socket path checks,
+# reconcile verdicts and page walk, and signatures of its
+# `SoftwareSigner`) against the service's real `LocalTransport` on a Unix
+# socket (`harness/local_client_round_trip.rs`), which neither crate can
+# run alone. The edge goes from this package to the operator crate only:
+# `skyoauth-operator` keeps no dependency on `skyoauth-service`, not even
+# as a dev-dependency (its manifest), so it still builds and tests with no
+# server or database.
+skyoauth-operator = { path = "../operator" }
 serde_json = "1.0.154"
 # `rt-multi-thread` so replica races run in parallel
 # (`#[tokio::test(flavor = "multi_thread")]`).

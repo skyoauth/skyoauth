@@ -34,6 +34,15 @@ Both commands take `--secret-env NAME` and `--secret-file PATH`
 any string under a `seed`, `private_key`, `secret` or `password` key of that
 JSON file (a hex value also as upper-case hex, base64 and base64url), is
 refused. CI passes every `tests/conformance/fixtures/**/*.test-key.json`.
+A message names such a value by the file and its key path
+(`recovery.test-key.json keys[0].seed`); a key name that is not plain
+`[A-Za-z0-9_]` is shown by its position in its object (`<key 2>`), never
+as itself. That position counts in JavaScript property order (as
+`Object.keys` lists the parsed object: integer-like keys such as `"1"`
+first, in ascending order, then the others in file order), not file order.
+No value is dropped: a key repeated in one object (which `JSON.parse` would
+keep only once) and a label shared by two files of the same name keep every
+value, the later ones labelled `#2`, `#3`, ...
 
 ## Transcript format
 
@@ -68,8 +77,9 @@ are what the allow marker below and the Authorization rule refer to:
 - a PEM header (`-----BEGIN ...-----`);
 - a JWT-shaped string (`eyJ...` with two more dot-separated segments);
 - a Bearer credential. In an `Authorization` or `Proxy-Authorization` field
-  (any case; a header, or a quoted JSON or YAML key) the Bearer value (up
-  to a blank, quote, comma or semicolon) must be exactly `<redacted>` in
+  (any case; a header, or a quoted JSON or YAML key, also JSON-escaped as
+  in `{\"Authorization\": \"Bearer ...\"}`) the Bearer value (up to a
+  blank, quote, backslash, comma or semicolon) must be exactly `<redacted>` in
   the record: anything else, `<redacted>x`, an empty value or `$TOKEN`
   included, is refused. Only in a joined form, which may glue the next line
   or record to it, need the value merely start with `<redacted>`.
@@ -116,31 +126,39 @@ which is only as stable as the browser and the encoder.
 
 The player holds a pure black screen for `LEAD_IN_MS` before its first frame
 (t0). The recording starts earlier, with the page load, so the renderer runs
-ffmpeg's `blackdetect` on the raw recording (any black frame counts; the
+ffmpeg's `blackdetect` on the raw recording once (any black frame counts; the
 player's own frames are never black) and starts the mp4 at the end of the
-black interval: time 0 of the mp4 is t0 and the VTT cues line up to about
-one frame of the 25 fps recording.
+black interval nearest the page clock's estimate of t0: time 0 of the mp4 is
+t0. In the measurements below the VTT cues lined up to about one frame of
+the 25 fps recording; that is what was measured, not a guarantee, and
+nothing in the render checks it to that precision.
 
-The cut is cross-checked against the page's own clock (t0 less the time the
-page was created). That estimate runs late by `PAGE_CLOCK_OFFSET_MS` (60 ms;
-the recording's time 0 is its first frame, which comes after the page is
-created: 14 to 75 ms after, median 60, over 12 measured renders), so a cut is
-accepted within `LEAD_IN_TOLERANCE_MS` (200 ms) of the estimate less 60 ms.
-Every render logs `lead-in cut X s, page-clock estimate Y ms, delta D ms`
-(D is the cut less the estimate). A cut outside the tolerance is never used:
-`blackdetect` runs again on the same recording, at most three times in all
-(any black frame, black of 0.3 s or more, near-black of 0.3 s or more),
-taking each time the black interval whose end is nearest the expected cut,
-and the render fails with every attempt's numbers when none agrees. The
-tolerance is for errors of a quarter second and more, not for a frame or
-two: locally, over 125 renders, cuts were -101 to +86 ms off the estimate
-less 60 ms (-43 to +62 one render at a time, the wider ones two at a time on
-two cores, where the page clock scatters more: the -101 was a correct cut
-with an estimate 137 ms late), so 200 ms is about twice the worst seen. What
-it catches was seen under that load: a recording whose frames froze for 4.4
-s after t0 (black from 0.12 to 5.24 s, while the page clock put t0 near 0.9
-s), which used to fail later with "the recording holds 20.5 s after t0" and
-now fails at the cut with the numbers.
+The cut is checked against a one-sided late bound from the page's own clock.
+The estimate is t0 (in the page's epoch time) less `Date.now()` taken just
+before `newPage()` is called. The recording cannot start before that call
+(Playwright times its frames from a recorder created inside it), so t0 in
+the recording is at most the estimate plus the time the t0 frame takes to
+reach the recording and the 25 fps frame grid: the render fails when the
+cut is later than the estimate plus `LEAD_IN_LATE_SLACK_MS`, two recording
+frames (80 ms). There is no early-side check. How much earlier than the
+estimate the cut comes depends on how long `newPage()` and the recording's
+first frame take, and that is unbounded under load: with 8 renders at once,
+`newPage()` returned 87 to 298 ms late and the video started from 177 ms
+before to 383 ms after it returned, and a two-sided check (an estimate taken
+after `newPage()`, 200 ms either side) rejected 7 correct cuts of 24. None
+is needed either: the cut is the first non-black frame after the lead-in,
+and the player shows nothing but black from its load until t0, so the cut
+cannot be early. Every render logs `lead-in cut X s, page-clock estimate Y
+ms, delta D ms (late bound +80 ms)` (D is the cut less the estimate; it is
+usually negative, by about the start-up time). A cut past the bound is never
+used: the render fails with the estimate, the bound, the delta and every
+black interval found. What it catches was seen under load: a
+recording whose frames froze for 4.4 s after t0 (black from 0.12 to 5.24 s,
+while the page clock put t0 near 0.9 s), which used to fail later with "the
+recording holds 20.5 s after t0" and now fails at the cut with the numbers.
+A cut a frame or two late is not caught by the bound; the quiet lead-in
+below is what keeps the cut on its frame, and the e2e test checks the
+captions against the cues.
 
 During the lead-in the player repaints a 4px corner square in two shades
 that `blackdetect` still counts as black, so the screencast keeps receiving
@@ -156,11 +174,21 @@ of 35 runs passed.
 
 Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
 render; a copy that fails is reported on stderr and never replaces the
-render's own error. `demo.yml` sets it and, when a step fails, uploads the
+render's own error, and a render that failed before the browser wrote a
+recording reports that nothing was kept. `demo.yml` sets it and, when a step fails, uploads the
 recordings as `demo-raw-recordings-N` (3 days). `render.e2e.test.mjs` checks that frame 0 is the player
 and that the caption bar changes at each cue boundary and not before;
 `vtt.test.mjs` runs the player's own script on a virtual clock and checks
 that each caption appears exactly at its cue's start.
+
+## Chapters and milestone videos (designed, not built)
+
+One video per milestone, joined from per-journey transcripts with a
+`chapter` record per journey, chapter tracks (WebVTT and mp4), a generated
+opening commit caption, staged publication and one merged `SHA256SUMS`: the
+design is section 6 of
+[the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built),
+for the lead's review. None of it is implemented yet.
 
 ## Never committed
 

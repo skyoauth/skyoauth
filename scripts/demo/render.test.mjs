@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { LEAD_IN_DETECTIONS, detectLeadIn, keepRawRecording, leadInLine, outputName, parseBlackIntervals, publishFiles } from './render.mjs';
+import { LEAD_IN_FILTER, LEAD_IN_LATE_SLACK_MS, RECORDING_FRAME_MS, detectLeadIn, keepRawRecording, leadInLine, outputName, parseBlackIntervals, publishFiles } from './render.mjs';
 import { recordsFromBytes } from './transcript.mjs';
 import { toVtt } from './vtt.mjs';
 
@@ -85,6 +85,26 @@ describe('DEMO_KEEP_RAW', () => {
     assert.equal(existsSync(dest), false);
   });
 
+  it('keeps nothing, and creates nothing, when no recording was written', () => {
+    const empty = join(TMP, 'raw-empty');
+    mkdirSync(empty);
+    const dest = join(TMP, 'kept-nothing');
+    assert.equal(keepRawRecording(empty, dest), 'DEMO_KEEP_RAW: no raw recording was written, nothing kept');
+    assert.equal(keepRawRecording(join(TMP, 'raw-missing'), dest), 'DEMO_KEEP_RAW: no raw recording was written, nothing kept');
+    assert.equal(existsSync(dest), false);
+  });
+
+  it('a raw directory that cannot be read is reported as that, not as an empty one', () => {
+    // A file where the directory should be: readdir fails with ENOTDIR (a
+    // permission error, EACCES, takes the same path; as root it cannot be
+    // provoked with chmod).
+    const notADir = join(TMP, 'raw-is-a-file');
+    writeFileSync(notADir, 'x');
+    const dest = join(TMP, 'kept-unreadable');
+    assert.equal(keepRawRecording(notADir, dest), 'DEMO_KEEP_RAW: could not read the raw recording directory (ENOTDIR), nothing kept');
+    assert.equal(existsSync(dest), false);
+  });
+
   it('render() reports the copy and rethrows its own error', () => {
     const source = readFileSync(join(HERE, 'render.mjs'), 'utf8');
     const handler = /\} catch \(e\) \{\n([\s\S]*?)\n  \} finally \{/.exec(source.slice(source.indexOf('export async function render(')));
@@ -98,21 +118,29 @@ describe('DEMO_KEEP_RAW', () => {
 // blackdetect's stderr for the given [start, end] intervals in seconds.
 const blackdetect = (...intervals) =>
   ['Input #0, matroska,webm, from raw.webm:', ...intervals.map(([s, e]) => `[blackdetect @ 0x5] black_start:${s} black_end:${e} black_duration:${(e - s).toFixed(3)}`), 'video:0kB'].join('\n');
-// A detect() that answers the k-th call with answers[k] and records the filters.
-function scripted(...answers) {
+// A detect() that answers its one call with `answer` and records the filters.
+function scripted(answer) {
   const filters = [];
   const detect = (filter) => {
     filters.push(filter);
-    assert.ok(filters.length <= answers.length, `detect() called ${filters.length} times, scripted ${answers.length}`);
-    return answers[filters.length - 1];
+    assert.equal(filters.length, 1, 'detect() called more than once');
+    return answer;
   };
   return { detect, filters };
 }
-const FILTERS = LEAD_IN_DETECTIONS.map((d) => d.filter);
+const failure = (fn) => {
+  let error;
+  assert.throws(fn, (e) => {
+    error = e;
+    return true;
+  });
+  assert.equal(error.constructor.name, 'RenderError');
+  return error.message;
+};
 
-describe('the lead-in cut and its page-clock cross-check', () => {
-  // A page-clock estimate of 900 ms expects the cut at 840 ms (the page
-  // clock runs 60 ms late), and accepts 640 to 1040 ms.
+describe('the lead-in cut and its page-clock late bound', () => {
+  // A page-clock estimate of 900 ms accepts a cut up to 980 ms (two 40 ms
+  // frames of the 25 fps recording later), and any cut before that.
   it('parses every black interval, in order', () => {
     assert.deepEqual(parseBlackIntervals(blackdetect([0, 0.84], [3.2, 3.24])), [
       { start: 0, end: 0.84 },
@@ -121,85 +149,93 @@ describe('the lead-in cut and its page-clock cross-check', () => {
     assert.deepEqual(parseBlackIntervals('no black here'), []);
   });
 
-  it('tries three different detections, the first finding any black frame', () => {
-    assert.equal(FILTERS.length, 3);
-    assert.equal(new Set(FILTERS).size, 3);
-    assert.match(FILTERS[0], /^blackdetect=d=0\.01:/);
-    for (const f of FILTERS) assert.match(f, /^blackdetect=d=[\d.]+:pix_th=[\d.]+:pic_th=[\d.]+$/);
+  it('the late slack is two frames of the 25 fps recording', () => {
+    assert.equal(RECORDING_FRAME_MS, 40);
+    assert.equal(LEAD_IN_LATE_SLACK_MS, 80);
   });
 
-  it('in tolerance: takes the first detection, runs it once and logs the delta', () => {
+  it('runs one detection, any black frame, and logs the cut, the estimate and the delta', () => {
     const { detect, filters } = scripted(blackdetect([0, 0.84]));
     const lead = detectLeadIn({ estimateMs: 900.4, detect });
-    assert.deepEqual(filters, [FILTERS[0]]);
+    assert.deepEqual(filters, [LEAD_IN_FILTER]);
+    assert.match(LEAD_IN_FILTER, /^blackdetect=d=0\.01:pix_th=[\d.]+:pic_th=[\d.]+$/);
     assert.equal(lead.cutSeconds, 0.84);
+    assert.deepEqual(lead.black, { start: 0, end: 0.84 });
     assert.equal(lead.deltaMs, -60);
-    assert.equal(lead.detection, 1);
-    assert.equal(leadInLine(lead, 900.4), 'lead-in cut 0.840 s, page-clock estimate 900 ms, delta -60 ms (detection 1: any black frame)');
+    assert.equal(leadInLine(lead, 900.4), 'lead-in cut 0.840 s, page-clock estimate 900 ms, delta -60 ms (late bound +80 ms)');
   });
 
-  it('accepts a cut 200 ms either side of the expected one, and not 201 ms', () => {
-    for (const end of [0.64, 1.04]) assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, end])).detect }).cutSeconds, end);
-    for (const end of [0.639, 1.041]) {
-      const { detect, filters } = scripted(blackdetect([0, end]), blackdetect([0, end]), blackdetect([0, end]));
-      assert.throws(() => detectLeadIn({ estimateMs: 900, detect }), /fails the page-clock cross-check/);
-      assert.equal(filters.length, 3);
+  it('accepts a cut up to two frames after the estimate, and fails one a millisecond later', () => {
+    assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.98])).detect }).deltaMs, 80);
+    assert.match(failure(() => detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.981])).detect })), /^lead-in cut 0\.981 s is later than the page clock allows: .* delta 81 ms;/);
+  });
+
+  it('a late cut fails, with every number', () => {
+    const message = failure(() => detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 1.2])).detect }));
+    assert.equal(
+      message,
+      'lead-in cut 1.200 s is later than the page clock allows: page-clock estimate 900 ms, late bound 980 ms ' +
+        '(estimate + 80 ms, two 25 fps frames), delta 300 ms; black intervals 0.000-0.300 s, 0.500-1.200 s',
+    );
+  });
+
+  it('a cut far before the estimate passes: there is no early-side check', () => {
+    // newPage() returning late under load puts the estimate hundreds of ms
+    // after t0 in the recording; the cut is still correct.
+    for (const [end, estimateMs, deltaMs] of [
+      [0.84, 1300, -460],
+      [0.12, 2000, -1880],
+    ]) {
+      const lead = detectLeadIn({ estimateMs, detect: scripted(blackdetect([0, end])).detect });
+      assert.equal(lead.cutSeconds, end);
+      assert.equal(lead.deltaMs, deltaMs);
     }
   });
 
-  it('takes the black interval whose end is nearest the expected cut, not the first', () => {
-    // 0.84 is the expected cut; 0.95 is nearer the raw estimate (900 ms),
-    // and 0.30 comes first.
-    const lead = detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 0.95], [0.6, 0.84])).detect });
-    assert.equal(lead.cutSeconds, 0.84);
-    assert.deepEqual(lead.black, { start: 0.6, end: 0.84 });
-    // A first interval of 0.08 s (outside the tolerance) loses to the next.
-    assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.08], [0.1, 0.8])).detect }).cutSeconds, 0.8);
+  it('takes the black interval whose end is nearest the estimate, not the first', () => {
+    // 0.95 is nearest the estimate (900 ms); 0.30 comes first.
+    const lead = detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 0.84], [0.86, 0.95])).detect });
+    assert.equal(lead.cutSeconds, 0.95);
+    assert.deepEqual(lead.black, { start: 0.86, end: 0.95 });
+    // Nearest, early or late: 0.97 (70 ms late) beats 0.75 (150 ms early).
+    assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.75], [0.8, 0.97])).detect }).cutSeconds, 0.97);
+    // Not the last either.
+    assert.equal(detectLeadIn({ estimateMs: 900, detect: scripted(blackdetect([0, 0.3], [0.5, 0.88], [1.5, 1.9])).detect }).cutSeconds, 0.88);
   });
 
-  it('out then in: retries on the same recording with the next detection', () => {
-    const { detect, filters } = scripted(blackdetect([0, 0.08]), blackdetect([0.1, 0.86]));
-    const lead = detectLeadIn({ estimateMs: 900, detect });
-    assert.deepEqual(filters, FILTERS.slice(0, 2));
-    assert.equal(lead.cutSeconds, 0.86);
-    assert.equal(lead.deltaMs, -40);
-    assert.equal(lead.detection, 2);
-    assert.deepEqual(lead.tried, ['1. any black frame: cut 0.080 s, delta -820 ms', '2. black of 0.3 s or more: cut 0.860 s, delta -40 ms']);
-    assert.match(leadInLine(lead, 900), /^lead-in cut 0\.860 s, page-clock estimate 900 ms, delta -40 ms \(detection 2: black of 0\.3 s or more\)$/);
-  });
-
-  it('a detection that finds no black at all counts as out of tolerance', () => {
-    const { detect, filters } = scripted('nothing', blackdetect([0, 0.84]));
-    assert.equal(detectLeadIn({ estimateMs: 900, detect }).detection, 2);
-    assert.equal(filters.length, 2);
+  it('no black interval at all fails, with the estimate', () => {
+    assert.equal(
+      failure(() => detectLeadIn({ estimateMs: 900, detect: scripted('nothing').detect })),
+      'no black lead-in found in the recording: page-clock estimate 900 ms, late bound 980 ms (estimate + 80 ms, two 25 fps frames)',
+    );
   });
 
   it('a recording whose frames froze after t0 fails instead of being cut seconds late', () => {
     // Seen under load: black from 0.12 to 5.24 s in a recording whose page
-    // clock put t0 near 0.9 s. Every detection finds the same interval.
-    const frozen = blackdetect([0.12, 5.24]);
-    const { detect, filters } = scripted(frozen, frozen, frozen);
-    assert.throws(() => detectLeadIn({ estimateMs: 905, detect }), /page-clock estimate 905 ms, expected cut 845 ms .*cut 5\.240 s, delta 4335 ms$/);
-    assert.equal(filters.length, 3);
+    // clock put t0 near 0.9 s.
+    assert.match(
+      failure(() => detectLeadIn({ estimateMs: 905, detect: scripted(blackdetect([0.12, 5.24])).detect })),
+      /^lead-in cut 5\.240 s is later than the page clock allows: page-clock estimate 905 ms, late bound 985 ms .*, delta 4335 ms; black intervals 0\.120-5\.240 s$/,
+    );
+  });
+});
+
+describe('render() and its page clock', () => {
+  const source = readFileSync(join(HERE, 'render.mjs'), 'utf8');
+  const record = source.slice(source.indexOf('async function record('), source.indexOf('export function publishFiles('));
+  const body = source.slice(source.indexOf('export async function render('), source.indexOf('const USAGE'));
+
+  it('takes the page-clock start before newPage() is called, and estimates t0 from it', () => {
+    const start = /\n    const (\w+) = Date\.now\(\);\n(?:    \/\/.*\n)*    const page = await context\.newPage\(\);\n/.exec(record);
+    assert.ok(start, 'Date.now() taken on the line before await context.newPage()');
+    assert.equal(record.match(/Date\.now\(\)/g).length, 1, 'one Date.now() in record()');
+    assert.match(record, new RegExp(`leadInEstimateMs: report\\.t0Epoch - ${start[1]} \\}`));
   });
 
-  it('always out: fails after three detections, with every number', () => {
-    const { detect, filters } = scripted(blackdetect([0, 1.2]), 'nothing', blackdetect([0, 0.5], [1, 1.3]));
-    let error;
-    assert.throws(
-      () => detectLeadIn({ estimateMs: 900, detect }),
-      (e) => {
-        error = e;
-        return true;
-      },
-    );
-    assert.deepEqual(filters, FILTERS);
-    assert.equal(
-      error.message,
-      'lead-in cut fails the page-clock cross-check after 3 detections: page-clock estimate 900 ms, expected cut 840 ms +/- 200 ms; ' +
-        '1. any black frame: cut 1.200 s, delta 300 ms; 2. black of 0.3 s or more: no black interval; ' +
-        '3. near-black of 0.3 s or more: cut 0.500 s, delta -400 ms',
-    );
-    assert.equal(error.constructor.name, 'RenderError');
+  it('logs the lead-in cut line of every render, once, after the cut is found', () => {
+    const logged = body.match(/\blog\(`render: \$\{leadInLine\(lead, leadInEstimateMs\)\}`\);/g);
+    assert.equal(logged?.length, 1, 'render() logs leadInLine(lead, leadInEstimateMs)');
+    assert.ok(body.indexOf(logged[0]) > body.indexOf('lead = detectLeadIn('), 'logged after detectLeadIn');
+    assert.ok(body.indexOf(logged[0]) < body.indexOf("'ffmpeg encode'"), 'logged before the encode');
   });
 });

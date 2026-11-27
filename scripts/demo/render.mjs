@@ -14,34 +14,35 @@
 // Playwright, records player.html (recordVideo, 1280x720) while it plays the
 // records; ffmpeg cuts the load lead-in and encodes. The player holds a pure
 // black screen for timing.js LEAD_IN_MS before its first frame (t0); the
-// renderer finds the end of the first black interval of the recording with
-// ffmpeg's blackdetect filter and starts the mp4 there, so time 0 of the
-// mp4 is t0 of the timeline and the VTT cues line up (to a frame of the
-// 25 fps recording). Every render logs the cut, the page clock's own
-// estimate of t0 and their difference, and the cut must agree with that
-// estimate (detectLeadIn); otherwise blackdetect runs again on the same
-// recording with other settings, and the render fails with every number
-// when none agrees. During the lead-in the player repaints a 4px corner
-// square in two shades that blackdetect counts as black, so the screencast
-// keeps receiving black frames (twice locally, before that repaint existed,
-// a render found no black interval at all), and stops LEAD_IN_QUIET_MS
-// before t0: a screencast busy with that repaint delivered the t0 frame
-// late and the cut with it (see the README). DEMO_KEEP_RAW=<dir>
-// keeps the raw recording of a failed render for inspection; a copy that
-// fails is reported on stderr and never replaces the render's own error.
+// renderer runs ffmpeg's blackdetect filter on the recording and starts the
+// mp4 at the end of the black interval nearest the page clock's estimate of
+// t0, so time 0 of the mp4 is t0 of the timeline and the VTT cues line up
+// (to about a frame of the 25 fps recording, as measured; see the README:
+// a measurement, not a guarantee). Every render logs the cut, the page
+// clock's estimate of t0 and their difference, and the cut must not be
+// later than that estimate by more than two recording frames
+// (detectLeadIn); otherwise the render fails with every number. During
+// the lead-in the player repaints a 4px corner square in two shades that
+// blackdetect counts as black, so the screencast keeps receiving black
+// frames (twice locally, before that repaint existed, a render found no
+// black interval at all), and stops LEAD_IN_QUIET_MS before t0: a
+// screencast busy with that repaint delivered the t0 frame late and the
+// cut with it (see the README). DEMO_KEEP_RAW=<dir> keeps the raw
+// recording of a failed render for inspection; a copy that fails is
+// reported on stderr and never replaces the render's own error.
 //
 // Missing ffmpeg, ffprobe or browser is an error (exit 1), never a skip.
 // FFMPEG and FFPROBE override the binaries' paths.
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import timing from './timing.js';
-import { recordsFromBytes, secretsFromEnv, secretsFromFile } from './transcript.mjs';
+import { mergeSecrets, recordsFromBytes, secretsFromEnv, secretsFromFile } from './transcript.mjs';
 import { toVtt } from './vtt.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -84,72 +85,62 @@ export function parseBlackIntervals(stderr) {
   return [...String(stderr).matchAll(/black_start:\s*([\d.]+)\s+black_end:\s*([\d.]+)/g)].map((m) => ({ start: Number(m[1]), end: Number(m[2]) }));
 }
 
-// The page-clock cross-check of the lead-in cut. The page's own estimate of
-// t0 (its t0 in epoch time less the time the page was created) runs later
-// than t0 in the recording by about PAGE_CLOCK_OFFSET_MS, because the
-// recording's time 0 is its first frame, which comes after the page is
-// created (14 to 75 ms after, median 60, over 12 renders measured against
-// the visible steps). A cut is accepted within LEAD_IN_TOLERANCE_MS of
-// estimate - PAGE_CLOCK_OFFSET_MS. Locally, over 125 renders, the cut was
-// -101 to +86 ms off that (-43 to +62 one render at a time; the rest two
-// at a time on two cores), in 40 ms steps (the 25 fps recording). The page
-// clock scatters more the busier the machine: the -101 was a correct cut
-// (25 ms from t0 found from the visible steps) with an estimate 137 ms
-// late. 200 ms, twice the worst seen, leaves room for a slower runner. The
-// check is for errors of a quarter second and more (a recording whose
-// frames froze for 4.4 s after t0 under load, a wrong black interval); a
-// cut a frame or two off is within the page clock's own scatter, and the
-// quiet lead-in, checked by the e2e test, is what keeps the cut on its
-// frame.
-export const PAGE_CLOCK_OFFSET_MS = 60;
-export const LEAD_IN_TOLERANCE_MS = 200;
-// The detections tried, in order, on the same raw recording (never a new
-// recording), until one gives a cut that passes the cross-check: any black
-// frame; only black intervals of 0.3 s or more; and near-black ones of
-// 0.3 s or more. In each, the interval whose end is nearest the expected
-// cut is taken.
-export const LEAD_IN_DETECTIONS = [
-  { name: 'any black frame', filter: 'blackdetect=d=0.01:pix_th=0.05:pic_th=0.98' },
-  { name: 'black of 0.3 s or more', filter: 'blackdetect=d=0.3:pix_th=0.05:pic_th=0.98' },
-  { name: 'near-black of 0.3 s or more', filter: 'blackdetect=d=0.3:pix_th=0.10:pic_th=0.95' },
-];
+// Playwright's recordVideo writes 25 fps (its FfmpegVideoRecorder, -r 25).
+export const RECORDING_FPS = 25;
+export const RECORDING_FRAME_MS = 1000 / RECORDING_FPS;
+// The page-clock check of the lead-in cut is a one-sided late bound. The
+// estimate is t0 in the page's epoch time less Date.now() taken just before
+// newPage() is called (both wall clock). The recording cannot start before
+// that call: Playwright times its frames from a recorder created inside
+// newPage(), and time 0 of the webm is no earlier than that. So t0 in the
+// recording is at most the estimate, plus the time the t0 frame takes to
+// reach the screencast and the 25 fps frame grid: LEAD_IN_LATE_SLACK_MS,
+// two recording frames. How much earlier than the estimate the cut is
+// depends on how long newPage() and the first frame take, which is
+// unbounded under load (with 8 renders at once newPage() returned 87 to
+// 298 ms late, and the video started from 177 ms before to 383 ms after
+// it returned), so there is no early-side check. None is needed: the cut
+// is the end of the lead-in's black interval, the first non-black frame,
+// and the player shows nothing but black from its load until t0. The bound
+// catches a cut seconds late (a recording whose frames froze for 4.4 s
+// after t0 under load, black from 0.12 to 5.24 s). A cut a frame or two
+// off is caught by nothing here; the quiet lead-in, checked by the e2e
+// test, is what keeps the cut on its frame.
+export const LEAD_IN_LATE_SLACK_MS = 2 * RECORDING_FRAME_MS;
+// The one blackdetect run: any black frame counts (the player's own frames
+// are never black).
+export const LEAD_IN_FILTER = 'blackdetect=d=0.01:pix_th=0.05:pic_th=0.98';
 
-// Finds the lead-in cut. `detect(filter)` runs one blackdetect filter on
-// the raw recording and returns ffmpeg's stderr; `estimateMs` is the page
-// clock estimate of t0 in the recording. Returns { cutSeconds, black,
-// deltaMs, detection, tried }: deltaMs is the cut less the estimate,
-// detection the 1-based index in LEAD_IN_DETECTIONS. Throws a RenderError
-// with every measurement when no detection passes: a cut outside the
-// cross-check is never used.
+// Finds the lead-in cut. `detect(filter)` runs blackdetect on the raw
+// recording and returns ffmpeg's stderr; `estimateMs` is the page-clock
+// estimate of t0 in the recording (an upper bound on it, to within
+// LEAD_IN_LATE_SLACK_MS). Takes the black interval whose end is nearest the
+// estimate. Returns {
+// cutSeconds, black, deltaMs }, deltaMs the cut less the estimate. Throws a
+// RenderError with every number when no black interval is found or the cut
+// is later than estimateMs + LEAD_IN_LATE_SLACK_MS: such a cut is never
+// used.
 export function detectLeadIn({ estimateMs, detect }) {
-  const expectedMs = estimateMs - PAGE_CLOCK_OFFSET_MS;
-  const off = (black) => Math.abs(Math.round(black.end * 1000) - expectedMs);
-  const tried = [];
-  for (const [i, detection] of LEAD_IN_DETECTIONS.entries()) {
-    const intervals = parseBlackIntervals(detect(detection.filter));
-    if (intervals.length === 0) {
-      tried.push(`${i + 1}. ${detection.name}: no black interval`);
-      continue;
-    }
-    const black = intervals.reduce((a, b) => (off(b) < off(a) ? b : a));
-    const deltaMs = Math.round(Math.round(black.end * 1000) - estimateMs);
-    tried.push(`${i + 1}. ${detection.name}: cut ${black.end.toFixed(3)} s, delta ${deltaMs} ms`);
-    if (off(black) <= LEAD_IN_TOLERANCE_MS) {
-      return { cutSeconds: black.end, black, deltaMs, detection: i + 1, tried };
-    }
+  const boundMs = estimateMs + LEAD_IN_LATE_SLACK_MS;
+  const intervals = parseBlackIntervals(detect(LEAD_IN_FILTER));
+  const numbers = `page-clock estimate ${Math.round(estimateMs)} ms, late bound ${Math.round(boundMs)} ms (estimate + ${LEAD_IN_LATE_SLACK_MS} ms, two ${RECORDING_FPS} fps frames)`;
+  if (intervals.length === 0) throw new RenderError(`no black lead-in found in the recording: ${numbers}`);
+  const cutMsOf = (black) => Math.round(black.end * 1000);
+  const off = (black) => Math.abs(cutMsOf(black) - estimateMs);
+  const black = intervals.reduce((a, b) => (off(b) < off(a) ? b : a));
+  const deltaMs = Math.round(cutMsOf(black) - estimateMs);
+  if (cutMsOf(black) > boundMs) {
+    throw new RenderError(
+      `lead-in cut ${black.end.toFixed(3)} s is later than the page clock allows: ${numbers}, delta ${deltaMs} ms; ` +
+        `black intervals ${intervals.map((i) => `${i.start.toFixed(3)}-${i.end.toFixed(3)} s`).join(', ')}`,
+    );
   }
-  throw new RenderError(
-    `lead-in cut fails the page-clock cross-check after ${LEAD_IN_DETECTIONS.length} detections: page-clock estimate ${Math.round(estimateMs)} ms, ` +
-      `expected cut ${Math.round(expectedMs)} ms +/- ${LEAD_IN_TOLERANCE_MS} ms; ${tried.join('; ')}`,
-  );
+  return { cutSeconds: black.end, black, deltaMs };
 }
 
 // The line every render logs for its lead-in cut.
 export function leadInLine(lead, estimateMs) {
-  return (
-    `lead-in cut ${lead.cutSeconds.toFixed(3)} s, page-clock estimate ${Math.round(estimateMs)} ms, delta ${lead.deltaMs} ms ` +
-    `(detection ${lead.detection}: ${LEAD_IN_DETECTIONS[lead.detection - 1].name})`
-  );
+  return `lead-in cut ${lead.cutSeconds.toFixed(3)} s, page-clock estimate ${Math.round(estimateMs)} ms, delta ${lead.deltaMs} ms (late bound +${LEAD_IN_LATE_SLACK_MS} ms)`;
 }
 
 function probeDurationSeconds(ffprobe, file) {
@@ -201,8 +192,10 @@ async function record(records, rawDir) {
       blocked.push(url);
       return route.abort();
     });
+    // Taken before newPage(): the recording cannot start earlier, so the
+    // estimate below is an upper bound on t0 in the recording (detectLeadIn).
+    const newPageCalledAt = Date.now();
     const page = await context.newPage();
-    const recordingStartedAt = Date.now();
     const pageErrors = [];
     page.on('pageerror', (e) => pageErrors.push(e.message));
     await page.goto(pathToFileURL(join(HERE, 'player.html')).href);
@@ -217,7 +210,7 @@ async function record(records, rawDir) {
     if (pageErrors.length) throw new RenderError(`the player threw: ${pageErrors.join('; ')}`);
     if (blocked.length) throw new RenderError(`the player tried to reach the network: ${blocked.join(', ')}`);
     if (report.done !== true) throw new RenderError('the player did not set window.__demoDone');
-    return { rawPath, report, leadInEstimateMs: report.t0Epoch - recordingStartedAt };
+    return { rawPath, report, leadInEstimateMs: report.t0Epoch - newPageCalledAt };
   } finally {
     await browser.close();
   }
@@ -239,8 +232,19 @@ export function publishFiles({ outDir, name, bytes, records }) {
 
 // DEMO_KEEP_RAW=<dir>: copies the raw recording directory of a failed
 // render into `dest`. Never throws, so a failed copy cannot replace the
-// render's own error: returns a line saying what happened.
+// render's own error: returns a line saying what happened. A render that
+// failed before the browser wrote a recording (an empty or missing raw
+// directory) keeps nothing and does not create `dest`; a raw directory
+// that cannot be read is reported as such, never as an empty one.
 export function keepRawRecording(rawDir, dest) {
+  let written;
+  try {
+    written = readdirSync(rawDir);
+  } catch (e) {
+    if (e.code !== 'ENOENT') return `DEMO_KEEP_RAW: could not read the raw recording directory (${e.code ?? 'error'}), nothing kept`;
+    written = [];
+  }
+  if (written.length === 0) return 'DEMO_KEEP_RAW: no raw recording was written, nothing kept';
   try {
     mkdirSync(dest, { recursive: true });
     cpSync(rawDir, dest, { recursive: true });
@@ -252,7 +256,7 @@ export function keepRawRecording(rawDir, dest) {
 
 export async function render(transcriptPath, outDir, { secretEnv = [], secretFiles = [], env = process.env, log = console.log, warn = console.error } = {}) {
   const secrets = secretsFromEnv(secretEnv, env);
-  for (const f of secretFiles) for (const [k, v] of secretsFromFile(f)) secrets.set(k, v);
+  for (const f of secretFiles) mergeSecrets(secrets, secretsFromFile(f));
   // The one read of the transcript: validation, playback, the captions, the
   // published copy and its checksum all use this snapshot, so a file
   // changed during the render cannot publish unchecked bytes.
@@ -270,8 +274,9 @@ export async function render(transcriptPath, outDir, { secretEnv = [], secretFil
 
     // The player's frames are never black (its light title bar alone is
     // over 2 % of the picture), so the end of the lead-in's black interval
-    // is t0 however late the recording started. detectLeadIn cross-checks
-    // it against the page clock and fails rather than use a doubtful cut.
+    // is t0 however late the recording started. detectLeadIn checks it
+    // against the page clock's late bound and fails rather than use a cut
+    // later than that.
     const rawSeconds = probeDurationSeconds(ffprobe, rawPath);
     let lead;
     try {
@@ -319,7 +324,6 @@ export async function render(transcriptPath, outDir, { secretEnv = [], secretFil
       leadInSeconds: leadIn,
       leadInEstimateMs: Math.round(leadInEstimateMs),
       leadInDeltaMs: lead.deltaMs,
-      leadInDetection: lead.detection,
       maxDriftMs: Math.round(drift),
       captions: records.filter((r) => r.type === 'caption').length,
     };

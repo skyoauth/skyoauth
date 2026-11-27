@@ -7,8 +7,9 @@
 //! a scenario: no name here matches `a\d\d_`, and no stage of
 //! `tests/conformance/scenarios.toml` lists them (layout §3).
 //!
-//! The workstation crate is not a dependency of this package: the fixture
-//! is the bridge. The operator's tests pin that its `sign_challenge` of the
+//! These tests do not use the workstation crate (a dev-dependency of this
+//! package for `harness::local_client_round_trip` alone): the fixture is
+//! the bridge. The operator's tests pin that its `sign_challenge` of the
 //! challenge fixture's op_1 returns the fixture's `valid` signature; here,
 //! an independent signer (`ed25519-dalek`'s `SigningKey`) re-makes every
 //! real signature of the fixture, and the service, which issued that op_1

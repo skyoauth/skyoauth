@@ -11,13 +11,13 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { FPS, HEIGHT, WIDTH, render } from './render.mjs';
+import { FPS, HEIGHT, LEAD_IN_LATE_SLACK_MS, WIDTH, leadInLine, render } from './render.mjs';
 import timing from './timing.js';
 import { readTranscript } from './transcript.mjs';
 import { parseVtt, toVtt } from './vtt.mjs';
@@ -125,15 +125,27 @@ describe('render.mjs end to end', () => {
   it('cuts the lead-in: the first frame already shows the player and the first caption', (t) => {
     for (const line of leadInLines) t.diagnostic(line);
     assert.ok(first.leadInSeconds > timing.LEAD_IN_MS / 1000 - FRAME_SLACK_S, `lead-in ${first.leadInSeconds}`);
-    // The page clock estimate and the blackdetect cut agree to within a
-    // few frames.
-    assert.ok(Math.abs(first.leadInSeconds * 1000 - first.leadInEstimateMs) < 250, `${first.leadInSeconds} s vs ${first.leadInEstimateMs} ms`);
+    // The cut is within the page clock's late bound (render() enforces it;
+    // there is no early-side bound: the estimate runs late by the start-up
+    // time, which load makes as long as it likes).
+    for (const r of [first, second]) {
+      assert.ok(r.leadInDeltaMs <= LEAD_IN_LATE_SLACK_MS, `delta ${r.leadInDeltaMs} ms`);
+      // leadInEstimateMs is rounded: the delta, from the exact estimate, may differ by 1.
+      assert.ok(Math.abs(r.leadInDeltaMs - (r.leadInSeconds * 1000 - r.leadInEstimateMs)) <= 1, `delta ${r.leadInDeltaMs} ms is not the cut less the estimate`);
+    }
     const r = sh(FFMPEG, ['-v', 'error', '-i', first.mp4, '-frames:v', '1', '-vf', 'crop=1280:36:0:0,format=gray', '-f', 'rawvideo', '-']);
     assert.equal(r.status, 0);
     const titleBar = r.stdout.reduce((a, b) => a + b, 0) / r.stdout.length;
     assert.ok(titleBar > 150, `title bar mean grey ${titleBar}: frame 0 is not the player`);
     const bar = captionBar(first.mp4, 0);
     assert.ok(bar.some((p) => p > 200), 'no caption text in frame 0');
+  });
+
+  it('logs the lead-in cut, page-clock estimate and delta of each render, once', () => {
+    assert.deepEqual(
+      leadInLines,
+      [first, second].map((r) => `render: ${leadInLine({ cutSeconds: r.leadInSeconds, deltaMs: r.leadInDeltaMs }, r.leadInEstimateMs)}`),
+    );
   });
 
   it('changes the caption bar at each VTT cue boundary and not between them', () => {
@@ -175,7 +187,49 @@ describe('render.mjs end to end', () => {
 });
 
 describe('render.mjs failures', () => {
-  const cli = (args, env = {}) => sh(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
+  // DEMO_KEEP_RAW is unset unless a test sets it: demo.yml sets it for the
+  // whole e2e step, and these failures must not report on it by accident.
+  const cli = (args, env = {}) => {
+    const childEnv = { ...process.env };
+    delete childEnv.DEMO_KEEP_RAW;
+    return sh(process.execPath, [SCRIPT, ...args], { encoding: 'utf8', env: { ...childEnv, ...env } });
+  };
+  // An ffmpeg that passes render.mjs's tool checks and fails at blackdetect,
+  // after the browser has written the raw recording: a real failed render.
+  // Returns the environment to run the render with. The real ffmpeg's path
+  // reaches the shell only as an argument ($1) and an environment variable,
+  // never inside the script's source, so any path works.
+  const failingFfmpeg = (ffmpeg = FFMPEG) => {
+    const real = sh('sh', ['-c', 'command -v -- "$1"', 'sh', ffmpeg], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(real, 'ffmpeg not found');
+    const fake = join(TMP, 'ffmpeg-fails-at-blackdetect');
+    writeFileSync(fake, '#!/bin/sh\ncase "$*" in *blackdetect*) echo "fake ffmpeg: no blackdetect" >&2; exit 1;; esac\nexec "$DEMO_TEST_REAL_FFMPEG" "$@"\n', { mode: 0o755 });
+    return { FFMPEG: fake, DEMO_TEST_REAL_FFMPEG: real };
+  };
+  // A one-caption transcript: a few seconds of recording.
+  const short = () => {
+    const path = join(TMP, 'short.transcript.jsonl');
+    writeFileSync(path, '{"step":0,"type":"caption","text":"SAMPLE: a failed render"}\n');
+    return path;
+  };
+  const re = (s) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+
+  it('the failing ffmpeg works from a path with a space and quotes in it', () => {
+    const real = sh('sh', ['-c', 'command -v -- "$1"', 'sh', FFMPEG], { encoding: 'utf8' }).stdout.trim();
+    assert.ok(real, 'ffmpeg not found');
+    const odd = join(TMP, `dir with space 'single' "double" $HOME`);
+    mkdirSync(odd);
+    const linked = join(odd, "ff'mpeg");
+    symlinkSync(real, linked);
+    const env = failingFfmpeg(linked);
+    assert.equal(env.DEMO_TEST_REAL_FFMPEG, linked);
+    const ok = sh(env.FFMPEG, ['-version'], { encoding: 'utf8', env: { ...process.env, ...env } });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /^ffmpeg version/);
+    const fails = sh(env.FFMPEG, ['-vf', 'blackdetect'], { encoding: 'utf8', env: { ...process.env, ...env } });
+    assert.equal(fails.status, 1);
+    assert.match(fails.stderr, /fake ffmpeg: no blackdetect/);
+  });
 
   it('fails with a clear message when ffmpeg is missing', () => {
     const out = join(TMP, 'noffmpeg');
@@ -191,25 +245,37 @@ describe('render.mjs failures', () => {
     assert.equal(r.status, 1);
     assert.match(r.stderr, /render: cannot launch Chromium for Playwright/);
     assert.match(r.stderr, /npx playwright install --with-deps chromium/);
+    assert.doesNotMatch(r.stderr, /DEMO_KEEP_RAW|raw recording/);
     assert.equal(existsSync(join(out, 'sample.mp4')), false);
   });
 
-  it('keeps the raw recording of a failed render in DEMO_KEEP_RAW', () => {
-    const keep = join(TMP, 'keep-raw');
+  it('with no recording written, DEMO_KEEP_RAW says so and keeps nothing', () => {
+    const keep = join(TMP, 'keep-raw-none');
     const r = cli([SAMPLE, '--out', join(TMP, 'nobrowser-keep')], { PLAYWRIGHT_BROWSERS_PATH: mkdtempSync(join(TMP, 'no-browsers-')), DEMO_KEEP_RAW: keep });
     assert.equal(r.status, 1);
-    assert.match(r.stderr, new RegExp(`render: kept the raw recording in ${keep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    assert.match(r.stderr, /render: DEMO_KEEP_RAW: no raw recording was written, nothing kept/);
+    assert.doesNotMatch(r.stderr, /kept the raw recording/);
     assert.match(r.stderr, /render: cannot launch Chromium for Playwright/);
-    assert.equal(existsSync(keep), true);
+    assert.equal(existsSync(keep), false);
+  });
+
+  it('keeps the raw recording of a render that failed after recording', () => {
+    const keep = join(TMP, 'keep-raw');
+    const r = cli([short(), '--out', join(TMP, 'failed-keep')], { ...failingFfmpeg(), DEMO_KEEP_RAW: keep });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, re(`render: kept the raw recording in ${keep}`));
+    assert.match(r.stderr, /render: ffmpeg blackdetect failed \(exit 1\)/);
+    const kept = readdirSync(keep);
+    assert.ok(kept.length > 0 && kept.every((f) => f.endsWith('.webm')), JSON.stringify(kept));
   });
 
   it('a DEMO_KEEP_RAW that cannot be written does not hide the render error', () => {
     const blocker = join(TMP, 'keep-raw-is-a-file');
     writeFileSync(blocker, 'x');
-    const r = cli([SAMPLE, '--out', join(TMP, 'nobrowser-nokeep')], { PLAYWRIGHT_BROWSERS_PATH: mkdtempSync(join(TMP, 'no-browsers-')), DEMO_KEEP_RAW: join(blocker, 'raw') });
+    const r = cli([short(), '--out', join(TMP, 'failed-nokeep')], { ...failingFfmpeg(), DEMO_KEEP_RAW: join(blocker, 'raw') });
     assert.equal(r.status, 1);
     assert.match(r.stderr, /render: DEMO_KEEP_RAW: could not keep the raw recording in .* \(ENOTDIR\)/);
-    assert.match(r.stderr, /render: cannot launch Chromium for Playwright/);
+    assert.match(r.stderr, /render: ffmpeg blackdetect failed \(exit 1\)/);
   });
 
   it('refuses an invalid transcript before recording anything', () => {

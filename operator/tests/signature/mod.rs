@@ -63,7 +63,7 @@ pub fn seed(name: &str) -> [u8; 32] {
 
 /// The signer of the key `name` of the test-key fixture.
 pub fn signer(name: &str) -> SoftwareSigner {
-    SoftwareSigner::from_seed(seed(name)).expect("a test key is valid")
+    SoftwareSigner::from_seed(&mut seed(name)).expect("a test key is valid")
 }
 
 /// The signature of the key `name` of the test-key fixture over any bytes,
@@ -138,7 +138,9 @@ pub fn run_test_keys(fixture: &Value) -> Vec<String> {
     for key in list(fixture, "keys") {
         let name = text(key, "name");
         let seed: [u8; 32] = unhex(text(key, "seed")).try_into().expect("32 bytes");
-        let signer = SoftwareSigner::from_seed(seed).unwrap();
+        let mut lent = seed;
+        let signer = SoftwareSigner::from_seed(&mut lent).unwrap();
+        assert_eq!(lent, [0_u8; 32], "{name}: the seed lent is not wiped");
         assert_eq!(
             signer.public_key().to_hex(),
             text(key, "public_key"),
@@ -587,7 +589,7 @@ fn a_signer_cannot_present_a_weak_key() {
     for first in 0..=u8::MAX {
         let mut seed = [first; 32];
         seed[31] = first.wrapping_mul(7);
-        let signer = SoftwareSigner::from_seed(seed).unwrap();
+        let signer = SoftwareSigner::from_seed(&mut seed).unwrap();
         assert_eq!(
             RecoveryPublicKey::from_bytes(signer.public_key().as_bytes()),
             Ok(signer.public_key())

@@ -107,7 +107,12 @@ class Element {
 
 // Runs player.html's scripts against a virtual clock and returns the
 // caption changes and typed characters, with times relative to t0.
-async function playInVm(records) {
+// `without` names DemoTiming constants to delete before the player runs.
+// A timer with a delay that is not a finite number runs at once, as in a
+// browser; MAX_VM_TIMERS bounds the run, so a player that spins fails
+// instead of hanging the test.
+const MAX_VM_TIMERS = 100000;
+async function playInVm(records, { without = [] } = {}) {
   let now = 0;
   let seq = 0;
   const timers = [];
@@ -150,7 +155,7 @@ async function playInVm(records) {
       return this._c ?? '';
     },
   });
-  const setTimeout = (fn, ms) => timers.push({ at: now + Math.max(0, Math.ceil(ms)), seq: seq++, fn });
+  const setTimeout = (fn, ms) => timers.push({ at: now + (Number.isFinite(ms) ? Math.max(0, Math.ceil(ms)) : 0), seq: seq++, fn });
   const sandbox = {
     document,
     performance: { now: () => now },
@@ -166,6 +171,10 @@ async function playInVm(records) {
 
   assert.match(PLAYER, /<script src="timing\.js"><\/script>/);
   vm.runInContext(readFileSync(join(HERE, 'timing.js'), 'utf8'), sandbox, { filename: 'timing.js' });
+  for (const name of without) {
+    assert.ok(name in sandbox.DemoTiming, `DemoTiming has no ${name}`);
+    delete sandbox.DemoTiming[name];
+  }
   const inline = [...PLAYER.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
   assert.equal(inline.length, 1, 'player.html has one inline script');
   vm.runInContext(inline[0], sandbox, { filename: 'player.html' });
@@ -185,8 +194,10 @@ async function playInVm(records) {
   );
   const drain = () => new Promise((resolve) => setImmediate(resolve));
   await drain();
+  let ran = 0;
   while (!settled) {
     assert.ok(timers.length > 0, 'the player is waiting on nothing');
+    assert.ok(++ran <= MAX_VM_TIMERS, `the player ran ${MAX_VM_TIMERS} timers without finishing (spinning at ${now} ms)`);
     timers.sort((a, b) => a.at - b.at || a.seq - b.seq);
     const t = timers.shift();
     now = t.at;
@@ -257,6 +268,17 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
     const shown = run.log.filter((e) => e.id === 'caption').map((e) => ({ startMs: e.at, text: e.text }));
     assert.deepEqual(shown, parseVtt(toVtt(records)).map((c) => ({ startMs: c.startMs, text: c.text })));
     assert.equal(run.endAt - run.t0, timing.totalMs(tl));
+  });
+
+  it('fails, instead of spinning, when a timing.js constant it waits on is missing', async () => {
+    // waitUntil(base, NaN) never reaches its time and setTimeout(check, NaN)
+    // runs at once: without the finite check the player spins for ever.
+    for (const name of ['LEAD_IN_QUIET_MS', 'LEAD_IN_MS']) {
+      await assert.rejects(playInVm(SAMPLE, { without: [name] }), (e) => {
+        assert.match(e.message, /^waitUntil: not a finite time \(base \d+, ms NaN\)$/, name);
+        return true;
+      });
+    }
   });
 
   it('types each command character at its timing.typingOffsets time', async () => {
