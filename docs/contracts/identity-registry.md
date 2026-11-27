@@ -65,7 +65,7 @@ RFC 8174) when they appear in capitals. Requirement IDs use `IR-nnn`.
   and tenant. For a principal the entity type is its kind (human, workload or
   service), so principal names are unique per (tenant, kind); tenant names are
   non-unique labels. Names MUST NOT be accepted as exchange selectors and are
-  not globally reserved. (design §7.4; tasks A49, §13 D2; U4 ruling)
+  not globally reserved. (design §7.4; tasks A49, §13 D2; the user, 2026-11-27, relayed by the lead)
 - **IR-022** Creation omits the ID and returns the generated ID and revision.
   Updates MUST specify the existing ID and expected revision within the
   authorized tenant. (design §7.4)
@@ -154,7 +154,7 @@ Grant modes (design §5.6):
 
 A stored impersonation grant never changes after the transaction that
 creates it: no update of the grant, and no change of its allowed bindings or
-audiences (lead decision, 2026-11-21; ADR-006 items 7 and 8, design C06;
+audiences (lead decision, 2026-11-21; ADR-006 items 7 and 8 and Consequences (C06);
 design §5.6; T10.11). Since migration
 `0009` the database enforces this, and since `0006` such a grant is never
 deleted (`service/migrations/README.md`, "What 0009 adds").
@@ -276,11 +276,19 @@ T00.8–T00.17 and Gate M0):
   an empty database is adopted by it, not a false closure.
 - **Recovery key at bootstrap.** The offline recovery public key enrolled
   at bootstrap is the raw 32-byte Ed25519 key of IR-058, and the registry
-  refuses any other length before writing; it does not check the bytes
-  further. The registry trusts the deployment-local bootstrap caller for
-  the rest: canonicalization and signing are in the `skyoauth-operator`
-  crate, pinned by the shared fixtures (T13.1, T13.10; ADR-013 items 6 and
-  7), and the registry checks only that `public_identity` and
+  refuses any other length before writing, and any key that does not decode
+  to a curve point, is not canonically encoded or is of small order (ADR-013
+  item 7; the user, 2026-11-24; the checks of every recovery-key enrolment
+  point). The registry trusts the deployment-local bootstrap caller for the
+  rest: `bootstrap_instance` still takes `public_identity` as a string, which
+  the service derives from the DER key (§7.3; tasks §13 "Canonical public
+  identity"; the local transport does it before the call), while the recovery
+  challenge canonicalization and signing are in `operator/src/recovery/`
+  (`skyoauth-operator`), pinned by
+  `tests/conformance/fixtures/_recovery/challenge.v1.json` and
+  `tests/conformance/fixtures/_recovery/public_identity.v1.json` (T13.1,
+  T13.10; ADR-013 items 6 and 7). The registry checks only that
+  `public_identity` and
   `trust_anchor_ref` are 1 to 2048 bytes, and that `now` lies in the years
   `0000` to `9999` the audit event can carry (IR-056), before writing.
   Bootstrap is closed exactly when the `RecoveryState` row exists; no
@@ -318,8 +326,9 @@ change (ADRs ratified directionally, maintainer, 2026-11-24):
   approves: `admin_id`, `credential_id`, `binding_id`, `public_identity`,
   `trust_anchor_ref` and `new_recovery_public_key` (the new key as 64
   lowercase hexadecimal digits). The issue checks their types; the
-  restoration compares each with its request after the consume and
-  refuses any difference, with nothing written (lead ruling).
+  restoration takes the replacement from the consumed plan, never from its
+  caller, whose request carries only the audit event IDs and `now`, and
+  checks it as the issue does (lead ruling).
 - **Single use.** The consume statement is the only single-use
   mechanism, and only the restoration runs it (lead ruling: no consume
   function of its own). One statement marks the challenge consumed only
@@ -348,21 +357,14 @@ change (ADRs ratified directionally, maintainer, 2026-11-24):
   registry getter returns the operation row (lead ruling). The restoration
   runs the consume inside the same savepoint as its writes (inferred), so a
   failed restoration leaves the challenge unconsumed.
-- **The challenge and the signature.** The service issues the challenge
-  as the bytes `M`: the ASCII prefix `skyoauth.recovery_challenge.v1` and
-  a line feed, then `C`, the RFC 8785 canonical JSON of the
-  seven-member challenge request (`actor_id`, `expected_revision`,
-  `expires_at` in microseconds, `id`, `kind`, `plan` and `tenant_id`,
-  members sorted byte-wise at both levels, no whitespace). The recovery key
-  signs `M` itself, not its hash: Ed25519, pure (RFC 8032), 64 bytes,
-  checked with `verify_strict`. `challenge_hash` is the SHA-256 of `M`, and
-  the request digest, under a prefix of its own, is over `C`. The bytes are
-  pinned by `tests/conformance/fixtures/_recovery/challenge.v1.json` and
-  `tests/conformance/fixtures/_recovery/signature.v1.json`, checked on both
-  sides, and are defined by
+- **The challenge and the signature.** The challenge the service issues, the
+  bytes the recovery key signs and the signature are defined by
   `service/src/persistence/registry/recovery.rs` ("What is signed") and
-  `operator/src/recovery/`; they are not restated here (ADR-013 items 7 and
-  8; provisional lead pick, 2026-11-24, as `recovery.rs` records it).
+  `operator/src/recovery/`, and pinned, on both sides, by
+  `tests/conformance/fixtures/_recovery/challenge.v1.json` and
+  `tests/conformance/fixtures/_recovery/signature.v1.json`; they are not
+  restated here (ADR-013 items 7 and 8; provisional lead pick, 2026-11-24, as
+  `recovery.rs` records it).
 - **Restoration.** One transaction enrolls the replacement instance
   `security_admin` (identity, credential and role assignment, under IDs that
   are not reserved), revokes every unrevoked operator credential, the
@@ -450,24 +452,25 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   `acknowledge_widening`, whatever the current value, with or without a
   second approver and under `single_actor_mode` too; turning it on does not
   need it. (design §7.2; tasks §3 "Instance security policy"; ADR-008 item
-  12 and OQ-ADR008-3, Q4 (the user, 2026-11-23) and the toggle-off ruling
-  (the user, 2026-11-24); Decided (lead decision, 2026-11-20), OQ-IR-12;
+  12 and OQ-ADR008-3, Q4 of `docs/proposals/second-approver-gated-writes.md` (the user, 2026-11-23) and the toggle-off
+  ruling (the user, 2026-11-24, relayed by the lead; ADR-008 item 12); Decided (lead decision, 2026-11-20), OQ-IR-12;
   public-api API-156)
 - **IR-053** `single_actor_mode` (default false) is the explicit audited
   instance policy that lets one actor act where a distinct second approver is
   otherwise required: public-api API-142, API-148, API-155 and API-156,
-  gateway-containment GW-116 and IR-052. That actor MUST hold instance
-  `security_admin` (Q4; ADR-008 item 12), in every one of those cases. It and
-  the audit sink configuration
-  are instance deployment configuration, read-only online; an online operator
+  gateway-containment GW-116 and IR-052. In IR-052, API-156, GW-116 and
+  API-142 that actor MUST hold instance `security_admin` (Q4 of `docs/proposals/second-approver-gated-writes.md`;
+  ADR-008 item 12); whether the condition extends to the provider paths
+  API-148 and API-155 (M1b) is open (public-api OQ-API-15). It and the audit
+  sink configuration are instance deployment configuration, read-only online; an online operator
   write MUST NOT change them. `single_actor_mode` is set at install, and the
   row mirrors it. A change is deployment configuration, applied at restart
   and recorded in an audit event at startup; it is not an online write, and
   setting it is not a break-glass kind (OQ-IR-13, Decided: the interim
   reading of the lead, 2026-11-20, confirmed by the user, 2026-11-24;
   ADR-008 item 12; public-api API-152). The sink endpoint, protocol and TLS
-  trust or credential reference are not stored in the database: the row holds only
-  `audit_sink_config_digest` and `audit_sink_validated_at`, and observed sink
+  trust or credential reference are not stored in the database: the row holds
+  only `audit_sink_config_digest` and `audit_sink_validated_at`, and observed sink
   health is a metric and health signal, not a revisioned row. A sink
   configuration change takes effect only on restart and first emits a sink
   changed event to the old sink, plus an audit event. "Configured" means set
@@ -571,12 +574,12 @@ The instance security policy is one `InstanceSecurityPolicy` row per instance
   them as actors of their own: it has no variant for them, so they are
   written as operator actors with those IDs. Adding such a variant would
   not change the hash of an existing event, since the actor JSON of
-  existing events is unchanged. The break-glass recovery challenge is to be
-  signed with Ed25519, with the raw 32-byte public key in
+  existing events is unchanged. The break-glass recovery challenge is signed
+  with Ed25519 (ADR-013 item 7), with the raw 32-byte public key in
   `recovery_state.recovery_public_key` (lead pick, 2026-11-21; provisional).
   The registry stores and rotates that key and verifies the signature in
-  `restore_operator` (section 5.2; ADR-013 item 7); the offline signing is
-  in the operator crate (`skyoauth-operator`).
+  `restore_operator` (section 5.2); the offline signing is in the operator
+  crate (`skyoauth-operator`).
 - **IR-059** `AuditEvent.action` is a dotted lowercase `<resource>.<verb>`
   name, such as `tenant.create`. `<resource>` is the audited entity's name
   in lowercase snake case: `Tenant` gives `tenant`,
@@ -702,15 +705,25 @@ allowed_tenant_ids, status, revision)` (tasks §3).
 
 `public_mtls_identity`, like an operator credential's `public_identity`
 (§5.2), is `spki-sha256:<hex>`: the prefix and the 64 lowercase hexadecimal
-digits of the SHA-256 of the key's exact DER `SubjectPublicKeyInfo`. The
-service derives it from the DER key, at enrollment and at the mTLS handshake,
-and never accepts a precomputed identity string from a client
-(`service/src/identity.rs`, `service/src/admin_http/peer.rs`; tasks §13
-"Canonical public identity"). The identity names one DER encoding, so exactly
-one DER SPKI form is accepted per accepted algorithm, and only these two
-algorithms are accepted: Ed25519 (parameters absent) and ECDSA P-256
-(`id-ecPublicKey`, named curve, uncompressed point). RSA, other curves and
-Ed448 are refused at enrollment and at the handshake (U6 ruling).
+digits of the SHA-256 of the key's exact DER `SubjectPublicKeyInfo`.
+
+- The service MUST derive it from the DER key, at enrollment and at the mTLS
+  handshake, and MUST NOT accept a precomputed identity string from a client
+  (`service/src/identity.rs`, `service/src/admin_http/peer.rs`; tasks §13
+  "Canonical public identity").
+- The identity names one DER encoding, so the service MUST accept exactly one
+  DER SPKI form per accepted algorithm, and MUST accept only Ed25519
+  (parameters absent) and ECDSA P-256 (`id-ecPublicKey`, named curve,
+  uncompressed point). It MUST refuse RSA, other curves and Ed448, at
+  enrollment and at the handshake (the user, 2026-11-27, relayed by the
+  lead).
+- Not yet enforced: `identity.rs` is algorithm-agnostic and accepts other
+  encodings and algorithms; `bootstrap_instance` and the operator
+  identity and credential writers still take the identity string (the local
+  transport and the checker writers derive it with `canonical_public_identity`
+  before the call); `AdminPeer::from_peer_spki` is called only by tests, since
+  no acceptor builds the peer yet (S5, S6 and S7 add it and the per-algorithm
+  check).
 
 - **IR-090** A checker identity MUST be bound to one resource server and an
   explicit tenant set, registered by instance `security_admin`, and MUST NOT
