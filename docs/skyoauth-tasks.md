@@ -1035,8 +1035,10 @@ Status: lead decision, 2026-11-24, changeable through ordinary review; a change 
 - **Read-only socket operation.** A read-only operation is added to the local socket. It changes the service and the contract, so a proposal under `docs/proposals/` comes first, then the implementation.
 - **Restore reply bound.** The `restore` reply's list of revoked IDs is bounded by a service change, either a count cap with the full list available elsewhere or paginated IDs, worked out in the same proposal.
 - **`zeroize` on `ed25519-dalek`.** Its own small PR, once it is verified that the feature adds no crate.
-- **Recovery artifacts (interim, until the contracts define them).** The challenge artifact is the `issue_challenge` reply, verbatim; the response artifact is `{operation_id, signature}`, with `signature` hex-encoded. The details layered on it (byte form, size limits, flags, exit codes and the seed file) are lead and implementation picks, not part of this ruling: see [the operator CLI proposal](proposals/operator-cli-artifacts.md).
+- **Recovery artifacts (interim, until the contracts define them).** The challenge artifact is the `issue_challenge` reply, verbatim; the response artifact is `{operation_id, signature}`, with `signature` hex-encoded.
 - **Operator publication.** `skyoauth-operator` stays `publish = false`.
 - **Pod access to the local socket.** The question of how a client reaches a socket inside a pod stays open.
 - **Re-scope proposals.** Declined; nothing is promoted.
 - **Test dependencies.** `axum` 0.8.9 and `tower` 0.5.3 (feature `util`) as dev-dependencies of the tests crate: accepted, recorded for information only.
+
+**Lead note** (2026-11-27, not a ruling of the user): the details layered on the recovery artifacts (their byte form, size limits, flags, exit codes and the seed file) are lead and implementation picks, not part of the user's ruling: see [the operator CLI proposal](proposals/operator-cli-artifacts.md).

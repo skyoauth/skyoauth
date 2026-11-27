@@ -2,7 +2,7 @@
 //! artifact formats and exit codes are in
 //! `docs/proposals/operator-cli-artifacts.md`).
 //!
-//! Two commands, both offline and read-only:
+//! Three commands, all offline:
 //!
 //! - `verify-challenge` reads a challenge artifact (the `issue_challenge`
 //!   reply line, verbatim), checks it with
@@ -10,16 +10,20 @@
 //!   [`check_challenge`](skyoauth_operator::recovery::check_challenge)
 //!   against the flags given, and prints the restoration plan for the
 //!   operator to compare, with whether the replacement was confirmed;
+//! - `sign` checks a challenge artifact as `verify-challenge` does, every
+//!   expectation required, signs it with the key of a seed file (the
+//!   library's signing, in `cmd_sign.rs` only) and writes the response
+//!   artifact to a new file (`--out`) or standard output;
 //! - `verify-response` checks a response artifact's signature over the
 //!   challenge with a recovery public key, as the service's restore checks
 //!   it ([`verify_response`](skyoauth_operator::recovery::verify_response)).
 //!
-//! `sign` is not implemented yet: it is a usage error (exit 2).
-//!
 //! Results go to standard output, errors to standard error, both
 //! deterministic for the same arguments and files (the system clock aside,
-//! which `--now` replaces). Nothing reads the environment, writes a file or
-//! shows a signature; no command takes a private key.
+//! which `--now` replaces). Nothing reads the environment. The only file
+//! written is `sign`'s `--out`, created new; the only private key is the
+//! seed of `sign`'s `--seed-file`, read from that file only, never shown.
+//! A signature is shown only as `sign`'s response artifact.
 //!
 //! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`],
 //! [`EXIT_NOT_CONFIRMED`].
@@ -28,9 +32,12 @@
 
 mod args;
 mod artifact;
+mod cmd_sign;
 mod cmd_verify_challenge;
 mod cmd_verify_response;
 mod input;
+mod out_file;
+mod seed_file;
 mod show;
 
 use std::{
@@ -41,11 +48,12 @@ use std::{
 use args::Command;
 
 /// Every check passed (for `verify-challenge`, the replacement is
-/// confirmed), or the help was printed.
+/// confirmed; for `sign`, the response is written), or the help was
+/// printed.
 const EXIT_OK: u8 = 0;
 
-/// An artifact was refused: a check failed, or an artifact is not what it
-/// must be.
+/// An artifact was refused: a check failed, an artifact is not what it
+/// must be, `sign` refused to sign, or a seed file's bytes are not a seed.
 const EXIT_REFUSED: u8 = 1;
 
 /// The command line is wrong: an unknown command or flag, a flag missing,
@@ -53,8 +61,10 @@ const EXIT_REFUSED: u8 = 1;
 const EXIT_USAGE: u8 = 2;
 
 /// A file could not be read (missing, not a regular file, too large,
-/// unreadable), the system clock could not be read, or the output could not
-/// be written (whatever the command's result was).
+/// unreadable; for a seed file also a symbolic link, or on Unix not owned
+/// by the effective user or not of mode 0600), the system clock could not
+/// be read, `--out` exists or could not be created or written, or the
+/// output could not be written (whatever the command's result was).
 const EXIT_IO: u8 = 3;
 
 /// `verify-challenge`: every given check passed, but the replacement is not
@@ -63,8 +73,8 @@ const EXIT_IO: u8 = 3;
 const EXIT_NOT_CONFIRMED: u8 = 4;
 
 /// Why a command did not succeed, with its fixed message. The message
-/// never holds a signature, a key given on the command line or a value of
-/// an artifact.
+/// never holds a signature, a seed, a key given on the command line, a
+/// file's bytes or a value of an artifact.
 #[derive(Debug, PartialEq, Eq)]
 enum Failure {
     /// [`EXIT_REFUSED`].
@@ -120,6 +130,7 @@ fn run(command: Command) -> Outcome {
             result: Ok(()),
         },
         Command::VerifyChallenge(flags) => cmd_verify_challenge::run(&flags),
+        Command::Sign(flags) => cmd_sign::run(&flags),
         Command::VerifyResponse(flags) => cmd_verify_response::run(&flags),
     }
 }

@@ -5,14 +5,16 @@
 //! artifact of every case of `signature.v1.json`, every refusal, every
 //! usage error, the file errors and their size limits, and malformed
 //! artifacts that must be refused without a panic
-//! (docs/proposals/operator-cli-artifacts.md).
+//! (docs/proposals/operator-cli-artifacts.md). `sign` is in [`sign`].
 //!
 //! Every run is checked for what it must never do: end in another exit
-//! code than 0 to 3 (a panic is 101), print a byte that is not printable
+//! code than 0 to 4 (a panic is 101), print a byte that is not printable
 //! ASCII or a newline (an artifact's control character must not reach the
 //! terminal), or print a signature or a seed.
 //!
 //! Portable: the Unix-only cases are gated.
+
+mod sign;
 
 use std::{
     ffi::{OsStr, OsString},
@@ -657,10 +659,10 @@ fn usage_errors_are_exit_2() {
         (vec![], "no command given"),
         (vec!["verify"], "unknown command (argument 1)"),
         (vec!["VERIFY-CHALLENGE"], "unknown command (argument 1)"),
-        (vec!["sign"], "the sign command is not implemented yet"),
+        (vec!["sign"], "--challenge is required"),
         (
             vec!["sign", "--challenge", missing],
-            "the sign command is not implemented yet",
+            "--seed-file is required",
         ),
         (vec!["verify-challenge"], "--challenge is required"),
         (
@@ -685,14 +687,16 @@ fn usage_errors_are_exit_2() {
             ],
             "--instance-id needs a value",
         ),
+        // `help` is a command only.
         (
-            vec!["sign", "--help"],
-            "the sign command is not implemented yet",
+            vec!["verify-challenge", "help"],
+            "argument 2 is not a flag of verify-challenge",
         ),
         (
-            vec!["sign", "-h"],
-            "the sign command is not implemented yet",
+            vec!["verify-response", "--challenge", missing, "help"],
+            "argument 4 is not a flag of verify-response",
         ),
+        (vec!["sign", "help"], "argument 2 is not a flag of sign"),
         (vec!["bogus", "-h"], "unknown command (argument 1)"),
         (vec!["bogus", "--help"], "unknown command (argument 1)"),
         (
@@ -998,8 +1002,9 @@ fn non_utf8_arguments() {
     }
 }
 
-/// `--help` and `help`, alone or after a command: the usage on standard
-/// output, exit 0, always the same text.
+/// `--help`, `-h` or `help` alone, and `--help` or `-h` where a flag of a
+/// command is expected: the usage on standard output, exit 0, always the
+/// same text (`help` is a command only: see [`usage_errors_are_exit_2`]).
 #[test]
 fn help_is_exit_0() {
     let help = run(&["--help"]);
@@ -1007,6 +1012,7 @@ fn help_is_exit_0() {
     assert!(help.stdout.starts_with("skyoauth-operator: "), "{help:?}");
     for command in [
         "verify-challenge --challenge",
+        "sign --challenge",
         "verify-response --challenge",
         "Exit codes: 0",
     ] {
@@ -1019,6 +1025,8 @@ fn help_is_exit_0() {
         vec!["verify-challenge", "--challenge", "x", "-h"],
         vec!["verify-response", "--challenge", "x", "-h"],
         vec!["verify-response", "--help", "--bogus"],
+        vec!["sign", "--help"],
+        vec!["sign", "--challenge", "x", "-h"],
     ] {
         assert_eq!(run(&arguments), help, "{arguments:?}");
     }
