@@ -19,12 +19,18 @@
 //! `every_wire_fixture_file_and_case_is_covered` fails for a `_wire` file,
 //! member or case no test reads.
 //!
-//! Portable: no network, database, socket or clock (a time is always
-//! injected); it runs on Linux, macOS and Windows. These are not scenario
+//! `local_exchange` (Unix only) runs the transport's client against fake
+//! servers: `std` Unix listeners on threads, each in a fresh temporary
+//! directory, with bounded waits.
+//!
+//! Portable but for those two: no network, database, socket or clock (a
+//! time is always injected); it runs on Linux, macOS and Windows. These are not scenario
 //! tests: no name here may match the scenario pattern `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, and the
 //! registry (`tests/conformance/scenarios.toml`) does not list them.
 
 mod challenge;
+#[cfg(unix)]
+mod local_exchange;
 #[cfg(unix)]
 mod local_wire;
 mod redaction;

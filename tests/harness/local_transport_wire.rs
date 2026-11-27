@@ -8,8 +8,9 @@
 //! §3).
 //!
 //! - the constants and the closed set of codes against the service's
-//!   [`MAX_REQUEST_BYTES`], [`ErrorCode::ALL`] and the default challenge
-//!   TTL (no server needed);
+//!   [`MAX_REQUEST_BYTES`], [`ErrorCode::ALL`], the default challenge
+//!   TTL and the default time limits, whose sum is the operator client's
+//!   default total wait (no server needed);
 //! - every golden request line through a real transport whose store is
 //!   unreachable: it passes the transport's parsing and value checks, so
 //!   it reaches the store and is answered with the golden
@@ -127,6 +128,22 @@ fn local_wire_fixture_constants_are_the_services() {
     assert_eq!(
         fixture["exchange"]["challenge_ttl_seconds"],
         Settings::default().challenge_ttl.as_secs()
+    );
+    // The default time limits, and their sum: the operator client's
+    // default total wait, which `operator/tests/local_exchange` pins to the
+    // same member.
+    let limits = &fixture["default_limits"];
+    let seconds = |name: &str| Duration::from_secs(limits[name].as_u64().unwrap());
+    let settings = Settings::default();
+    assert_eq!(seconds("deadline_seconds"), settings.deadline);
+    assert_eq!(
+        seconds("transaction_timeout_seconds"),
+        settings.transaction_timeout
+    );
+    assert_eq!(seconds("idle_timeout_seconds"), settings.idle_timeout);
+    assert_eq!(
+        seconds("client_total_wait_seconds"),
+        settings.deadline + settings.transaction_timeout + settings.idle_timeout
     );
 }
 

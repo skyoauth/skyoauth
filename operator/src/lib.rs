@@ -29,8 +29,9 @@
 //! `operator` test target checks every case, and the `pg` target of
 //! `skyoauth-scenarios` feeds the same cases to the service.
 //!
-//! No I/O, clock or random source is used: a time is always the caller's,
-//! and Ed25519 signing is deterministic.
+//! Outside `local`, no I/O, clock or random source is used: a time is
+//! always the caller's, and Ed25519 signing is deterministic. `local`
+//! connects to a socket and bounds its waits with the monotonic clock.
 
 #![forbid(unsafe_code)]
 

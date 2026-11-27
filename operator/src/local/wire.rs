@@ -13,8 +13,9 @@
 //! the client cannot read exactly is never taken as a success or a refusal.
 
 use super::{
-    Bootstrapped, CallError, ErrorCode, Issued, MAX_REPLY_BYTES, MAX_REQUEST_BYTES, NotSent, Op,
-    Previewed, Reply, Request, RequestLine, Restored, UnknownOutcome,
+    BootstrapRequest, Bootstrapped, CallError, ErrorCode, IssueChallengeRequest, Issued,
+    MAX_REPLY_BYTES, MAX_REQUEST_BYTES, NotSent, Op, Previewed, Reply, Request, RequestLine,
+    ResponseRequest, Restored, UnknownOutcome,
 };
 use crate::text::{decode_hex, encode_hex};
 
@@ -41,9 +42,7 @@ impl Request {
     /// longer than that is refused before anything is built, so an
     /// oversized credential is never expanded to hexadecimal.
     pub fn encode(&self) -> Result<RequestLine, NotSent> {
-        if self.encoded_len_lower_bound() > MAX_REQUEST_BYTES {
-            return Err(NotSent::TooLarge);
-        }
+        fits(self.encoded_len_lower_bound())?;
         let mut line = String::with_capacity(256);
         line.push('{');
         push_name(&mut line, OP_MEMBER);
@@ -98,18 +97,52 @@ impl Request {
     /// fit is built and measured.
     fn encoded_len_lower_bound(&self) -> usize {
         match self {
-            Self::Bootstrap(request) => request
-                .instance_id
-                .len()
-                .saturating_add(request.credential_spki.len().saturating_mul(2))
-                .saturating_add(request.trust_anchor_ref.len()),
-            Self::IssueChallenge(request) => request
-                .credential_spki
-                .len()
-                .saturating_mul(2)
-                .saturating_add(request.trust_anchor_ref.len()),
-            Self::Preview(request) | Self::Restore(request) => request.operation_id.len(),
+            Self::Bootstrap(request) => request.encoded_len_lower_bound(),
+            Self::IssueChallenge(request) => request.encoded_len_lower_bound(),
+            Self::Preview(request) | Self::Restore(request) => request.encoded_len_lower_bound(),
         }
+    }
+}
+
+/// [`NotSent::TooLarge`] when a line at least `lower_bound` long is longer
+/// than [`MAX_REQUEST_BYTES`]. Also checked by the client's typed calls
+/// before they copy the caller's values into a [`Request`], so an oversized
+/// value is refused without being copied.
+pub(super) const fn fits(lower_bound: usize) -> Result<(), NotSent> {
+    if lower_bound > MAX_REQUEST_BYTES {
+        Err(NotSent::TooLarge)
+    } else {
+        Ok(())
+    }
+}
+
+impl BootstrapRequest {
+    /// The lower bound of its request line's length (see
+    /// [`Request::encoded_len_lower_bound`]).
+    pub(super) const fn encoded_len_lower_bound(&self) -> usize {
+        self.instance_id
+            .len()
+            .saturating_add(self.credential_spki.len().saturating_mul(2))
+            .saturating_add(self.trust_anchor_ref.len())
+    }
+}
+
+impl IssueChallengeRequest {
+    /// The lower bound of its request line's length (see
+    /// [`Request::encoded_len_lower_bound`]).
+    pub(super) const fn encoded_len_lower_bound(&self) -> usize {
+        self.credential_spki
+            .len()
+            .saturating_mul(2)
+            .saturating_add(self.trust_anchor_ref.len())
+    }
+}
+
+impl ResponseRequest {
+    /// The lower bound of its request line's length (see
+    /// [`Request::encoded_len_lower_bound`]).
+    pub(super) const fn encoded_len_lower_bound(&self) -> usize {
+        self.operation_id.len()
     }
 }
 
