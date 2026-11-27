@@ -487,10 +487,14 @@ fn every_socket_path_member_and_case_is_covered() {
         BTreeSet::from(["service_or_root", "root_only"])
     );
     for outcome in list(&fixture, "outcomes") {
-        assert_eq!(
-            members(outcome),
-            BTreeSet::from(["expect", "bind", "applies_when"])
-        );
+        // `bind_io_kind`, the service's error kind, is the harness's: here
+        // only its place is checked.
+        let mut allowed = BTreeSet::from(["expect", "bind", "applies_when"]);
+        if outcome.get("bind_io_kind").is_some() {
+            assert_eq!(text(outcome, "bind"), "Io", "{outcome}");
+            allowed.insert("bind_io_kind");
+        }
+        assert_eq!(members(outcome), allowed, "{outcome}");
     }
     let cases = list(&fixture, "cases");
     let mut names = BTreeSet::new();
@@ -785,9 +789,19 @@ fn a_relative_path_is_checked_as_its_absolute_form() {
             .problem(),
         PathProblem::TooLong
     );
-    // The same name, short enough once absolute, is not refused for its
-    // length.
-    let short = PathBuf::from("x-skyoauth-operator-missing/s");
+    // A name short enough once absolute is not refused for its length:
+    // its directory's name is cut to what the working directory leaves.
+    let room = MAX_SOCKET_PATH_BYTES.saturating_sub(cwd.as_os_str().len() + "/".len() + "/s".len());
+    if room == 0 {
+        eprintln!(
+            "NOTICE: the working directory is too long for a relative socket path that fits \
+             once absolute: that half was NOT tried"
+        );
+        return;
+    }
+    let name = &"x-skyoauth-operator-missing"[..room.min("x-skyoauth-operator-missing".len())];
+    let short = PathBuf::from(format!("{name}/s"));
+    assert!(cwd.join(&short).as_os_str().len() <= MAX_SOCKET_PATH_BYTES);
     let problem = check_socket(&short, &expectations)
         .map(drop)
         .unwrap_err()
@@ -839,6 +853,7 @@ fn errors_name_no_path() {
         call.to_string(),
         format!("{call:?}"),
         format!("{client:?}"),
+        format!("{connector:?}"),
         connector.connect().unwrap_err().to_string(),
     ];
     for problem in problems {
@@ -853,6 +868,7 @@ fn errors_name_no_path() {
         assert!(!text.contains('/'), "{text}");
     }
     assert_eq!(format!("{err:?}"), "PathError(WrongMode)");
+    assert_eq!(format!("{connector:?}"), "CheckedSocketPath(..)");
     assert_eq!(
         err.to_string(),
         "the local socket's permission bits are not exactly 0600"

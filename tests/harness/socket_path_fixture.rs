@@ -13,9 +13,11 @@
 //! case's outcome (`ok` for an accepted path, a stale socket of the service
 //! UID with a wrong mode and an empty socket path; `InvalidPath`,
 //! `PathTooLong`, `UnsafeDirectory`, `UnsafeAncestor`, `PathOccupied`, or
-//! `Io` for a failed lookup, with its kind, and for too many symbolic
-//! links), and a bound socket must be a socket of the service UID with
-//! mode exactly 0600, the one the client accepts.
+//! `Io` with the error's kind: the case's `io_kind` for a failed lookup,
+//! the outcome's `bind_io_kind`, `Other`, for too many symbolic links,
+//! which the service's walk refuses itself), and a bound socket must be a
+//! socket of the service UID with mode exactly 0600, the one the client
+//! accepts.
 //!
 //! The binds run where the case's trust says the service runs them:
 //!
@@ -302,7 +304,8 @@ fn build(root: &Path, case: &Value, roles: &Roles) {
 }
 
 /// The bind result the fixture expects for `case`: its outcome's `bind`,
-/// with the kind of a failed lookup.
+/// and for `Io` the error's kind, the case's `io_kind` or the outcome's
+/// `bind_io_kind` (exactly one of them): never `Io` of any kind.
 fn expected_bind(fixture: &Value, case: &Value) -> String {
     let expect = text(case, "expect");
     let outcome = list(fixture, "outcomes")
@@ -310,19 +313,17 @@ fn expected_bind(fixture: &Value, case: &Value) -> String {
         .find(|outcome| text(outcome, "expect") == expect)
         .unwrap_or_else(|| panic!("no outcome {expect}"));
     let bind = text(outcome, "bind");
-    match case.get("io_kind") {
-        Some(kind) => {
+    match (case.get("io_kind"), outcome.get("bind_io_kind")) {
+        (Some(kind), None) | (None, Some(kind)) => {
             assert_eq!(bind, "Io", "{case}");
             format!("Io:{}", kind.as_str().unwrap())
         }
-        None => bind.to_owned(),
+        (None, None) => {
+            assert_ne!(bind, "Io", "{case}: an Io bind without its kind");
+            bind.to_owned()
+        }
+        (Some(_), Some(_)) => panic!("{case}: two kinds of its Io bind"),
     }
-}
-
-/// Whether the bind's result `got` is the fixture's `expected`: `Io`
-/// without a kind stands for any kind.
-fn agrees(got: &str, expected: &str) -> bool {
-    got == expected || (expected == "Io" && got.starts_with("Io:"))
 }
 
 /// Binds the transport at `path` for `service` (`None`: this process's
@@ -523,7 +524,7 @@ fn socket_path_fixture_cases_match_the_services_bind() {
             Side::Here(service) => {
                 let got = runtime.block_on(bind_outcome(&path, service));
                 let expected = expected_bind(&fixture, case);
-                assert!(agrees(&got, &expected), "{name}: {got} for {expected}");
+                assert_eq!(got, expected, "{name}");
                 ran += 1;
             }
             Side::Child => in_child.push((index, path)),
@@ -540,11 +541,7 @@ fn socket_path_fixture_cases_match_the_services_bind() {
         for (index, got) in results {
             let case = &cases[index];
             let expected = expected_bind(&fixture, case);
-            assert!(
-                agrees(&got, &expected),
-                "{} (as {user}): {got} for {expected}",
-                text(case, "case")
-            );
+            assert_eq!(got, expected, "{} (as {user})", text(case, "case"));
             ran += 1;
         }
     }

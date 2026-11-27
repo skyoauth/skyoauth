@@ -130,9 +130,12 @@ pub enum PathProblem {
     UnsafeAncestor,
     /// The lookup follows more than [`MAX_SYMLINKS`] symbolic links.
     TooManySymlinks,
-    /// A lookup on the way failed, with the error's kind: a missing entry,
-    /// a file where a directory should be, a directory that may not be
-    /// searched, or no working directory for a relative path.
+    /// A lookup on the way failed, with the error's kind: of the socket's
+    /// directory or of a directory above it (a missing entry, a file where
+    /// a directory should be, a directory that may not be searched), of
+    /// the socket path itself (anything but a missing entry, which is
+    /// [`PathProblem::Missing`]), or of the working directory for a
+    /// relative path.
     Lookup(io::ErrorKind),
     /// Nothing is at the socket path.
     Missing,
@@ -168,7 +171,7 @@ impl PathProblem {
             Self::TooManySymlinks => {
                 "the lookup of the local socket's directory follows too many symbolic links"
             }
-            Self::Lookup(_) => "the lookup of the local socket's directory failed",
+            Self::Lookup(_) => "a lookup on the way to the local socket failed",
             Self::Missing => "nothing is at the local socket path",
             Self::NotASocket => "the local socket path holds something other than a socket",
             Self::WrongOwner => "the local socket is not owned by the service UID",
@@ -239,11 +242,51 @@ fn lookup(err: &io::Error) -> PathError {
 #[derive(Clone, PartialEq, Eq)]
 pub struct CheckedSocket {
     path: PathBuf,
+    identity: Identity,
+}
+
+/// What the read of the socket path after the connect compares with the
+/// checked socket (see [`CheckedSocketPath`], "Between the check and the
+/// connect"): every field must be equal.
+#[derive(Clone, Copy)]
+struct Identity {
+    socket: bool,
     dev: u64,
     ino: u64,
     uid: u32,
     mode: u32,
+    ctime: i64,
+    ctime_nsec: i64,
 }
+
+impl Identity {
+    /// The identity of `metadata`, of a path not followed.
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            socket: metadata.file_type().is_socket(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            uid: metadata.uid(),
+            mode: metadata.mode() & PERMISSION_BITS,
+            ctime: metadata.ctime(),
+            ctime_nsec: metadata.ctime_nsec(),
+        }
+    }
+}
+
+impl PartialEq for Identity {
+    fn eq(&self, other: &Self) -> bool {
+        self.socket == other.socket
+            && self.dev == other.dev
+            && self.ino == other.ino
+            && self.uid == other.uid
+            && self.mode == other.mode
+            && self.ctime == other.ctime
+            && self.ctime_nsec == other.ctime_nsec
+    }
+}
+
+impl Eq for Identity {}
 
 impl fmt::Debug for CheckedSocket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -258,14 +301,10 @@ impl CheckedSocket {
     }
 
     /// Whether `metadata`, of the socket path not followed, is still the
-    /// checked socket: the same device, inode, file type, owner and
-    /// permission bits.
+    /// checked socket: the same file type, device, inode, owner,
+    /// permission bits and change time.
     fn is(&self, metadata: &fs::Metadata) -> bool {
-        metadata.file_type().is_socket()
-            && metadata.dev() == self.dev
-            && metadata.ino() == self.ino
-            && metadata.uid() == self.uid
-            && metadata.mode() & PERMISSION_BITS == self.mode
+        Identity::of(metadata) == self.identity
     }
 }
 
@@ -361,6 +400,7 @@ pub fn check_socket(
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Err(PathProblem::Missing.into());
         }
+        // The socket path itself could not be read (not its directory).
         Err(err) => return Err(lookup(&err)),
     };
     if !metadata.file_type().is_socket() {
@@ -374,10 +414,7 @@ pub fn check_socket(
     }
     Ok(CheckedSocket {
         path: socket,
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-        uid: metadata.uid(),
-        mode: metadata.mode() & PERMISSION_BITS,
+        identity: Identity::of(&metadata),
     })
 }
 
@@ -521,20 +558,42 @@ fn check_ancestors(
 /// The client has no `unsafe` code, no `libc` and no peer credentials of
 /// the listener (`SO_PEERCRED`), and the standard library opens no
 /// directory without following it, so it checks by path: it checks the
-/// path, connects to the same absolute path, then reads the socket path again (not followed) and refuses the
-/// connection, dropped before a byte is written ([`NotSent::Path`]), unless
-/// it is still the checked socket: the same device, inode, file type,
-/// owner and permission bits. A swap that is undone before the second read
-/// is not seen. That residue is the one the service accepts where it has
-/// no `/proc/self/fd`: every directory on the way is owned by a trusted
-/// UID and not writable by others (or sticky, where only an entry's owner
-/// may rename it, and every link on the way is trusted), so only root or
-/// the trusted service UID could swap the socket or its directories, and
-/// either could serve the socket anyway.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// path, connects to the same absolute path, then reads the socket path
+/// again (not followed) and refuses the connection, dropped before a byte
+/// is written ([`NotSent::Path`]), unless it is still the checked socket:
+/// the same file type, device, inode, owner, permission bits and change
+/// time (`ctime`, seconds and nanoseconds). Only the socket path is read
+/// again: the directories on the way are not walked again after the
+/// connect.
+///
+/// What is left is a swap undone before that second read. In directories
+/// no other UID may write, only root or the trusted service UID could make
+/// one, and either could serve the socket anyway. In a sticky directory
+/// others may write (as `/tmp`), any UID may create an entry at a vacant
+/// name: while the service's socket is gone (a restart), another UID can
+/// bind the name, take the connection, and remove its socket before the
+/// service binds again, whose new socket may get the same inode number
+/// (file systems such as ext4 reuse a freed one readily) and has the
+/// service's owner and mode. Only the change time tells that socket from
+/// the checked one, and not when both fall within one tick of the file
+/// system's clock: a socket in a sticky directory others may write is
+/// weaker than one in a directory only root and the service UID may
+/// write. The change time also changes in the service's own publish of a
+/// new socket (a link, then the unlink of its staged name): a connect in
+/// that window may be refused as [`PathProblem::Changed`], spuriously but
+/// safely, since nothing was sent and the call can be retried.
+///
+/// `Debug` prints `CheckedSocketPath(..)`, not the path.
+#[derive(Clone, PartialEq, Eq)]
 pub struct CheckedSocketPath {
     path: PathBuf,
     expectations: SocketExpectations,
+}
+
+impl fmt::Debug for CheckedSocketPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CheckedSocketPath(..)")
+    }
 }
 
 impl CheckedSocketPath {
@@ -629,6 +688,7 @@ mod tests {
     use std::{
         os::unix::{fs::PermissionsExt as _, net::UnixListener},
         sync::atomic::{AtomicU32, Ordering},
+        time::{Duration, Instant},
     };
 
     use super::*;
@@ -692,7 +752,8 @@ mod tests {
 
     /// The socket replaced between the check and the connect (another
     /// inode, renamed over it while the first still exists, so its number
-    /// cannot be reused), or given another mode, or removed: the
+    /// cannot be reused), or given another mode, or removed, or changed in
+    /// its change time alone (the same inode, owner and mode): the
     /// connection is dropped unwritten and the call is not sent, as
     /// [`NotSent::Path`].
     #[test]
@@ -700,7 +761,7 @@ mod tests {
         let dir = Scratch::new();
         let path = dir.0.join("s");
         let expectations = own(&dir.0);
-        let swaps: [&Swap; 3] = [
+        let swaps: [&Swap; 4] = [
             &|at: &Path| {
                 let other = at.with_file_name("s2");
                 let listener = listen(&other);
@@ -713,6 +774,24 @@ mod tests {
             },
             &|at: &Path| {
                 fs::remove_file(at).unwrap();
+                None
+            },
+            &|at: &Path| {
+                // A mode changed and changed back, until the file system's
+                // clock has ticked (bounded): only the change time moves.
+                let before = fs::symlink_metadata(at).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    fs::set_permissions(at, fs::Permissions::from_mode(0o644)).unwrap();
+                    fs::set_permissions(at, fs::Permissions::from_mode(0o600)).unwrap();
+                    let now = fs::symlink_metadata(at).unwrap();
+                    if (now.ctime(), now.ctime_nsec()) != (before.ctime(), before.ctime_nsec()) {
+                        assert_eq!(now.ino(), before.ino());
+                        assert_eq!(now.mode(), before.mode());
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "the change time did not move");
+                }
                 None
             },
         ];
@@ -738,6 +817,37 @@ mod tests {
             assert!(read.is_empty(), "{index}");
             drop(replacement);
             let _ = fs::remove_file(&path);
+        }
+    }
+
+    /// The read after the connect compares every field of the identity: a
+    /// change in any one of them is another socket.
+    #[test]
+    fn the_recheck_compares_every_field() {
+        let checked = Identity {
+            socket: true,
+            dev: 1,
+            ino: 2,
+            uid: 3,
+            mode: SOCKET_MODE,
+            ctime: 4,
+            ctime_nsec: 5,
+        };
+        let same = checked;
+        assert!(checked == same);
+        let changes: [fn(&mut Identity); 7] = [
+            |id| id.socket = false,
+            |id| id.dev += 1,
+            |id| id.ino += 1,
+            |id| id.uid += 1,
+            |id| id.mode = 0o644,
+            |id| id.ctime += 1,
+            |id| id.ctime_nsec += 1,
+        ];
+        for (index, change) in changes.into_iter().enumerate() {
+            let mut found = checked;
+            change(&mut found);
+            assert!(checked != found, "{index}");
         }
     }
 
