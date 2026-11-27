@@ -107,7 +107,9 @@
 //!   ([`StatusRequest::reconciling_restore`]), decided by
 //!   [`RestoreVerdict::of`]. `restored`: it committed; the reply has the
 //!   replacement's IDs, and the revoked IDs page by `revoked_after`
-//!   ([`LocalClient::revoked_credential_ids`]). `retired`, `revoked`: it
+//!   ([`LocalClient::revoked_credential_ids`]). The verdict is decided by the state alone: the
+//!   replacement's IDs are not part of the reconcile decision, they are
+//!   reported, not checked. `retired`, `revoked`: it
 //!   did not commit and never will; issue a new challenge. `issued`:
 //!   repeat the same restore, which is single use: it restores, or is
 //!   `not_restorable` because the first one committed, which the next
