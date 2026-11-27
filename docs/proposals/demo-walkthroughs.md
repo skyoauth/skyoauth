@@ -1,9 +1,17 @@
 # Proposal: demo walk-throughs of the critical user journeys, one video per milestone
 
-Status: Draft, plan only. Nothing here is implemented: this text changes no
-code, no contract and no test, adds no crate and no dependency (the extra
-dependencies of the plan itself are listed in section 2 and need the lead's
-approval when it is implemented), and publishes no video. It answers a request
+Status: Draft; the pipeline is implemented, the journeys are not. Implemented
+(`scripts/demo/`, see its README): the static player, the Playwright and
+`ffmpeg` renderer with its WebVTT sidecar, the transcript format and its
+check (schema, timestamps, secret shapes and the committed test-key seeds),
+an invented sample transcript, the `demo-transcripts` job of `ci.yml` (in
+`CI passed`), the separate `demo.yml` workflow that renders the sample into
+run artifacts, and the Dependabot entry for its one npm dependency,
+`playwright`. Not implemented: the journey runner and every journey of
+section 1, the golden transcripts (`tests/demo/golden/` is empty), the
+redaction at the source (section 2, item 2), chapter markers, and the
+release assets of section 5. The rest of this text is the plan as
+proposed. It answers a request
 of the user (2026-11-27): "a demo walk-through video for the CUJs (no need to
 show every permutation) of each milestone". Each choice is labelled **lead
 pick** (an implementation choice open to ordinary review) or **open user
@@ -305,8 +313,12 @@ The user asked (2026-11-27) that the videos be part of the release artifacts
     repository setting was not read);
   - whether the runner image carries Chrome and `ffmpeg`, or the job installs
     them (unverified).
-- **Not in this PR:** no workflow or CI code; the demo and release jobs are
-  built after these questions are ruled.
+- **Not built yet:** the release job and release assets, which wait for
+  these questions. Built: the pipeline only, without journeys (the status
+  line above): `demo.yml` renders the sample transcript into run artifacts
+  (`demo-videos-N`, 7 days on a pull request, 90 otherwise) and is not in
+  `CI passed`; the `demo-transcripts` job of `ci.yml` checks the committed
+  transcripts and is.
 
 ## Decisions requested
 

@@ -1,0 +1,10 @@
+{"step":0,"type":"caption","text":"SAMPLE transcript, invented to test the player: no real system, ID or secret"}
+{"step":1,"type":"note","text":"This walk-through is a throwaway sample for scripts/demo. It shows no SkyOAuth behaviour."}
+{"step":2,"type":"command","text":"example-operator status --instance sample-1"}
+{"step":3,"type":"output","text":"instance: sample-1\nstate: ready\nrevision: 3"}
+{"step":4,"type":"caption","text":"A token is shown by its type, audience and scope, never by its value"}
+{"step":5,"type":"command","text":"example-operator token show --audience sample-api"}
+{"step":6,"type":"output","text":"type: access token\naudience: sample-api\nscope: read\nvalue: <redacted>"}
+{"step":7,"type":"note","text":"library call: sample::denied_write(\"other-tenant\") (captioned, no command exists)"}
+{"step":8,"type":"output","text":"error: forbidden (403)"}
+{"step":9,"type":"caption","text":"End of the SAMPLE walk-through"}

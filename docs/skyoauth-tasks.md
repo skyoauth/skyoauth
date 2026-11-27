@@ -71,7 +71,9 @@ tests/                Existing skyoauth-scenarios member (unpublished conformanc
   conformance/        Versioned wire/profile and migration fixtures; scenario registry
   security/           JWT/OIDC/CSRF/admin/tenant/audience/replay/gateway tests
   integration/        PostgreSQL, mock OIDC, two clusters, Envoy and ConnectRPC
+  demo/golden/        Golden demo walk-through transcripts (none yet; checked by scripts/demo)
 scripts/ci/           Existing docs-only detection; expand checks with new code
+scripts/demo/         Demo walk-through player, renderer and transcript check (docs/proposals/demo-walkthroughs.md)
 docs/
   skyoauth-design.md
   skyoauth-tasks.md
