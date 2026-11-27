@@ -2,8 +2,9 @@
 
 The player, the transcript checker and the render script of
 [the demo walk-through proposal](../../docs/proposals/demo-walkthroughs.md)
-(§2 "The mechanism", §5). No journey exists yet: the only transcript is
-`sample/sample.transcript.jsonl`, an invented sample. A walk-through is not
+(§2 "The mechanism", §5, §6). No journey exists yet: the only transcripts
+are invented samples, `sample/sample.transcript.jsonl` and the sample
+milestone `sample/m1a/` (two short journeys). A walk-through is not
 evidence; only the conformance scenarios gate a release.
 
 ## Run
@@ -18,9 +19,10 @@ npx playwright install --with-deps chromium   # rendering only
 cd ../..
 
 node scripts/demo/transcript.mjs check scripts/demo/sample/sample.transcript.jsonl
+node scripts/demo/transcript.mjs check-milestone scripts/demo/sample/m1a
 node scripts/demo/render.mjs scripts/demo/sample/sample.transcript.jsonl --out scripts/demo/out
 
-node --test scripts/demo/transcript.test.mjs scripts/demo/timing.test.mjs scripts/demo/vtt.test.mjs scripts/demo/workflows.test.mjs
+node --test scripts/demo/transcript.test.mjs scripts/demo/milestone.test.mjs scripts/demo/timing.test.mjs scripts/demo/vtt.test.mjs scripts/demo/workflows.test.mjs
 node --test scripts/demo/render.e2e.test.mjs   # needs Chromium and ffmpeg; fails without them
 ```
 
@@ -50,8 +52,9 @@ UTF-8 JSON lines, each exactly `{"step":N,"type":T,"text":S}` as
 `JSON.stringify` writes it (that key order, no spaces), optionally with a
 fourth key `"allow":"hex-across-lines"` (below), with a final line feed.
 `type` is `caption` (the caption bar), `command` (typed at the prompt),
-`output` or `note` (dim annotation lines, such as a captioned library call);
-only `output` and `note` may hold `\n`. `step` counts from 0 with no gap.
+`output` or `note` (dim annotation lines, such as a captioned library call),
+or `chapter` (a journey's title, below); only `output` and `note` may hold
+`\n`. `step` counts from 0 with no gap.
 Errors are `file:line:` messages that name the rule or the expected field,
 type or JSON position, and never repeat the record's text, its values or
 unknown key names (so a rejected secret is not printed into a CI log); exit
@@ -78,11 +81,18 @@ are what the allow marker below and the Authorization rule refer to:
 - a JWT-shaped string (`eyJ...` with two more dot-separated segments);
 - a Bearer credential. In an `Authorization` or `Proxy-Authorization` field
   (any case; a header, or a quoted JSON or YAML key, also JSON-escaped as
-  in `{\"Authorization\": \"Bearer ...\"}`) the Bearer value (up to a
-  blank, quote, backslash, comma or semicolon) must be exactly `<redacted>` in
-  the record: anything else, `<redacted>x`, an empty value or `$TOKEN`
-  included, is refused. Only in a joined form, which may glue the next line
-  or record to it, need the value merely start with `<redacted>`.
+  in `{\"Authorization\": \"Bearer ...\"}`) the Bearer value must be
+  exactly `<redacted>` in the record: anything else, `<redacted>x`, an
+  empty value or `$TOKEN` included, is refused. The value ends at a blank,
+  a quote, a comma or a semicolon, or at an escape that decodes to a blank
+  or a quote: `\n`, `\r`, `\t`, `\"` or `\'`, lower case only. Any other
+  backslash is part of the value, so `<redacted>\\abc`, `<redacted>\/abc`,
+  `<redacted>\b`, `<redacted>\f`, `<redacted>A` and an upper-case
+  `<redacted>\N` or `<redacted>\U1b2c3` are refused. When the value is
+  quoted (`"Bearer ...`), an escape after it other than its closing quote
+  continues the string and is refused. Only in a joined form, which may
+  glue the next line or record to it, need the value merely start with
+  `<redacted>`.
   Elsewhere, `Bearer` and a token68 value with a digit or one of `_~+/=`,
   or of 16 characters or more; prose (`Bearer tokens are...`) and
   `<redacted>` pass, and so does an auth-param whose name is `realm`,
@@ -147,14 +157,73 @@ and that the caption bar changes at each cue boundary and not before;
 `vtt.test.mjs` runs the player's own script on a virtual clock and checks
 that each caption appears exactly at its cue's start.
 
-## Chapters and milestone videos (designed, not built)
+## Chapters and milestone directories
 
-One video per milestone, joined from per-journey transcripts with a
-`chapter` record per journey, chapter tracks (WebVTT and mp4), a generated
-opening commit caption, staged publication and one merged `SHA256SUMS`: the
-design is section 6 of
-[the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built),
-for the lead's review. None of it is implemented yet.
+A `chapter` record, `{"step":0,"type":"chapter","text":"M1a-2: Recover the
+operator"}`, is a journey's title: one line of at most 80 code points, a
+journey id (`M1a-2`, matching `^M[1-5][ab]?-[1-9][0-9]*$`), a colon, a space
+and a title; no `allow` marker. Its text is transcript text: every rule
+above and the `--secret-env` and `--secret-file` values apply to it. In a
+single file (`check`) there is at most one, and only as the first record, at
+step 0. The sample transcript holds none.
+
+A milestone directory holds `milestone.json` and one transcript per
+journey:
+
+```text
+<m>/milestone.json   {"milestone":"M1a","journeys":["M1a-1","M1a-2"]}
+<m>/<journey>.jsonl  m1a-1.jsonl, m1a-2.jsonl, ...
+```
+
+`check-milestone <dir>...` (the same `--secret-env` and `--secret-file`
+options) checks, for each directory:
+
+1. the names: the milestone id matches `^M[1-5][ab]?$` and the directory is
+   named its lower case (`m1a`); the manifest has exactly the keys
+   `milestone` and `journeys` (each once), a non-empty list of journey ids
+   of that milestone (`M1a-...`), each once; each listed journey has its
+   file, named `<lower-case journey id>.jsonl`; the directory holds nothing
+   else. Every entry is checked with `lstat`: a symlink (the directory
+   itself, the manifest or a journey file) or a nested directory is an
+   error, and no symlink is followed;
+2. each journey file alone, with every rule, plus its chapter as the first
+   record, at step 0, naming the file's journey;
+3. the joined stream, the journeys in manifest order (each step renumbered
+   to the records of the earlier journeys plus its step in its file), built
+   from every parsed record of every file, also the ones with errors: the
+   pair of the last record of one journey and the next journey's chapter;
+4. the same records without the chapters, each keeping its file and line:
+   the pair of the last record of one journey and the first record of the
+   next, so a value split over a journey boundary is found;
+5. every chapter's text joined, in manifest order (directly and with a
+   space).
+
+A run of `output` and `note` records never spans a journey boundary, so
+the passes 3 and 4 add only the pairs across it; every other window is one
+file's, already checked alone. Errors are printed at a file and line, never
+at a joined line (`m1a-2.jsonl:1: JWT-shaped string across the records on
+m1a-1.jsonl:14 - m1a-2.jsonl:1 (texts joined)`); an error already reported
+for a file alone is not repeated, and allow markers carry over. A name that
+is not plain `[A-Za-z0-9._-]` is shown as `<entry N>` (its place in the
+sorted listing), never as itself. With a bad manifest every `.jsonl` file
+of the directory is still checked alone, the joined checks are skipped
+(said on stderr), and the command goes on to the next directory. Exit 1
+when anything failed, 2 on a usage error, including no directory at all,
+so a glob that matched nothing fails.
+
+`validateTranscript(bytes, { milestone: true })` is the milestone mode for
+a joined stream: it opens with a chapter at step 0 and allows a chapter at
+a later step; `check` never uses it.
+
+Not built yet (section 6 of
+[the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built)):
+the title card in the player and the chapter timing, the chapters VTT, the
+milestone render (`render.mjs --milestone`, `--commit`), and the CI steps
+that run `check-milestone`. Until the player knows the `chapter` type,
+`render.mjs` refuses a transcript that holds one (the timing model throws
+on the unknown type). The sample milestone is invented but its id is
+`M1a`: it is rendered only by the e2e test, never into a published
+directory.
 
 ## Never committed
 

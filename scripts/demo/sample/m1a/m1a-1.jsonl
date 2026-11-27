@@ -1,0 +1,5 @@
+{"step":0,"type":"chapter","text":"M1a-1: SAMPLE first journey; key=value"}
+{"step":1,"type":"caption","text":"SAMPLE milestone, invented to test chapters: no real system, ID or secret"}
+{"step":2,"type":"command","text":"example-operator status --instance sample-1"}
+{"step":3,"type":"output","text":"instance: sample-1\nstate: ready"}
+{"step":4,"type":"caption","text":"End of the first SAMPLE journey"}

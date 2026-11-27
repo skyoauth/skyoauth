@@ -1,0 +1,5 @@
+{"step":0,"type":"chapter","text":"M1a-2: SAMPLE second journey #2, path a\\b"}
+{"step":1,"type":"caption","text":"The second SAMPLE journey: a captioned library call"}
+{"step":2,"type":"note","text":"library call: sample::read(\"sample-1\") (captioned, no command exists)"}
+{"step":3,"type":"output","text":"revision: 3"}
+{"step":4,"type":"caption","text":"End of the SAMPLE milestone"}
