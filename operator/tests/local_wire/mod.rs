@@ -643,6 +643,38 @@ fn the_request_limit_is_64_kib_with_the_newline() {
     assert_eq!(spki(bytes + 1).encode(), Err(NotSent::TooLarge));
 }
 
+/// A bootstrap whose credential fills the line to the limit (some 32 KiB
+/// of DER, twice that in hexadecimal) is encoded; one byte more of DER is
+/// [`NotSent::TooLarge`]. The bootstrap twin of the credential case of
+/// `the_request_limit_is_64_kib_with_the_newline`.
+#[test]
+fn a_bootstrap_credential_up_to_the_request_limit_is_encoded() {
+    let key = RecoveryPublicKey::from_hex(
+        "c050c5637a44fa8629fff3cccce2300cb362a63d99d95fc54145266f4332445a",
+    )
+    .unwrap();
+    // The DER's hexadecimal counts twice its bytes.
+    let spki = |length: usize| {
+        Request::Bootstrap(BootstrapRequest {
+            instance_id: "i".into(),
+            credential_spki: vec![0xab; length],
+            trust_anchor_ref: "t".into(),
+            recovery_public_key: key,
+        })
+    };
+    let base = spki(0).encode().unwrap().as_bytes().len();
+    let bytes = (MAX_REQUEST_BYTES - base) / 2;
+    assert!(bytes > 30_000, "{bytes}");
+    let largest = spki(bytes).encode().unwrap().as_bytes().len();
+    assert_eq!(largest, base + 2 * bytes);
+    assert_eq!(
+        spki(bytes - 1).encode().unwrap().as_bytes().len(),
+        largest - 2
+    );
+    assert!(largest + 1 >= MAX_REQUEST_BYTES, "{largest}");
+    assert_eq!(spki(bytes + 1).encode(), Err(NotSent::TooLarge));
+}
+
 /// A request whose values alone are longer than [`MAX_REQUEST_BYTES`] is
 /// [`NotSent::TooLarge`] (the encoder refuses it before building its line;
 /// the hexadecimal of the largest credential here would be 32 times the
@@ -1037,7 +1069,7 @@ fn the_local_module_names_no_signer() {
         files.push(path.file_name().unwrap().to_str().unwrap().to_owned());
     }
     files.sort();
-    assert_eq!(files, ["mod.rs", "wire.rs"]);
+    assert_eq!(files, ["exchange.rs", "mod.rs", "wire.rs"]);
 }
 
 /// The members of a fixture object.
@@ -1071,7 +1103,8 @@ fn case_names(cases: &[Value]) -> BTreeSet<String> {
 /// added. `errors.v1.json` is the admin HTTP catalogue, read by the
 /// service side only (`tests/harness/wire_errors.rs`); `exchange.id_seed`
 /// is the service's ID generator seed, read by
-/// `tests/harness/local_transport_wire.rs` only.
+/// `tests/harness/local_transport_wire.rs` only; `default_limits` is read
+/// by `local_exchange`.
 #[test]
 fn every_wire_fixture_file_and_case_is_covered() {
     let mut files: Vec<String> = std::fs::read_dir(fixtures_dir().join("_wire"))
@@ -1090,6 +1123,7 @@ fn every_wire_fixture_file_and_case_is_covered() {
             "status",
             "description",
             "framing",
+            "default_limits",
             "op_member",
             "ops",
             "replies",
@@ -1103,6 +1137,16 @@ fn every_wire_fixture_file_and_case_is_covered() {
     assert_eq!(
         members(&fixture["framing"]),
         BTreeSet::from(["line_end", "max_request_bytes", "max_reply_bytes"])
+    );
+    // Read by `local_exchange` (`default_timeouts_are_the_servers_defaults`).
+    assert_eq!(
+        members(&fixture["default_limits"]),
+        BTreeSet::from([
+            "deadline_seconds",
+            "transaction_timeout_seconds",
+            "idle_timeout_seconds",
+            "client_total_wait_seconds",
+        ])
     );
     for (name, op) in SHAPES {
         let expected: BTreeSet<&str> = if op.is_some() {
