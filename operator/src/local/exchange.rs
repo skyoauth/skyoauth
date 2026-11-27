@@ -198,7 +198,7 @@ impl Connector for SocketPath {
 /// Whether to retry a call of an operation whose outcome is unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Retry {
-    /// A retry is safe: a `preview` writes nothing.
+    /// A retry is safe: a `preview` or a `status` writes nothing.
     Safe,
     /// Reconcile an uncertain outcome first: the write may have committed
     /// or not, and a retry does not tell which. A retried `bootstrap` or
@@ -211,11 +211,14 @@ pub enum Retry {
 
 impl Op {
     /// Whether to retry a call of this operation whose outcome is unknown
-    /// ([`CallError::Unknown`]): only a `preview` may be retried without
-    /// reconciling. The client never retries on its own.
+    /// ([`CallError::Unknown`]): only a `preview` or a `status` may be
+    /// retried without reconciling. An `issue_challenge` stays
+    /// [`Retry::ReconcileFirst`] (it writes a row and an audit event), though
+    /// no reconcile is possible for it: issue again (lead ruling, Q5). The
+    /// client never retries on its own.
     pub const fn retry(self) -> Retry {
         match self {
-            Self::Preview => Retry::Safe,
+            Self::Preview | Self::Status => Retry::Safe,
             Self::Bootstrap | Self::IssueChallenge | Self::Restore => Retry::ReconcileFirst,
         }
     }
@@ -305,15 +308,16 @@ impl Op {
 /// `auth_unavailable` or `server_error`, whose outcome may be unknown, so
 /// these two codes after a write (`bootstrap`, `issue_challenge`,
 /// `restore`) are [`UnknownOutcome::UncertainCommit`], carrying the code;
-/// after a `preview` they stay refusals. Not sent means nothing was
+/// after a `preview` or a `status` they stay refusals. Not sent means nothing was
 /// written. Everything else is [`CallError::Unknown`]: **do not proceed;
 /// reconcile first** ([`Op::retry`]). The client never retries on its
 /// own.
 ///
-/// The transport has no operation that reads state, so this crate cannot
-/// reconcile: the only readers are the admin HTTP API and the database
-/// (open question Q18 of the T13.10 plan: a read operation on the socket,
-/// or a reconcile through the admin API).
+/// The transport's `status` operation reads the state a reconcile needs
+/// (`docs/proposals/local-read-operation.md`); this client has no typed
+/// call for it yet, nor the paging of its revoked IDs (the operator slice
+/// C4), so the codec ([`Request::Status`], [`parse_reply`]) is all this
+/// crate offers for it today.
 ///
 /// `Debug` shows the timeouts only.
 pub struct LocalClient<C = super::CheckedSocketPath> {
@@ -467,15 +471,16 @@ impl<C: Connector> LocalClient<C> {
 ///
 /// A `COMMIT` that fails is answered as a store failure, `auth_unavailable`
 /// or `server_error`, and its outcome may be unknown (the service's
-/// "Transactions"). Every operation but `preview` writes: a `bootstrap` or
-/// a `restore` may have committed what a retry cannot tell, and a retried
+/// "Transactions"). The three writes are listed: a `bootstrap` or a
+/// `restore` may have committed what a retry cannot tell, and a retried
 /// `issue_challenge` after a lost commit makes a second live challenge. So
 /// these two codes are [`UnknownOutcome::UncertainCommit`], carrying the
-/// code, after a write, and refusals after a `preview`; every other code is
-/// a refusal after every operation. The `writes` line alone decides which
-/// operations this applies to.
+/// code, after a write, and refusals after a `preview` or a `status`, which
+/// change no row; every other code is a refusal after every operation. The
+/// `writes` line alone decides which operations this applies to: a list of
+/// the writes, so an operation added later is not taken as one.
 const fn refusal(op: Op, code: ErrorCode) -> CallError {
-    let writes = !matches!(op, Op::Preview);
+    let writes = matches!(op, Op::Bootstrap | Op::IssueChallenge | Op::Restore);
     let store_failure = matches!(code, ErrorCode::AuthUnavailable | ErrorCode::ServerError);
     if writes && store_failure {
         CallError::Unknown(UnknownOutcome::UncertainCommit(code))
@@ -841,6 +846,35 @@ mod tests {
                 .set_write_wait(Some(Duration::ZERO))
                 .map_err(|err| err.kind()),
             Err(io::ErrorKind::InvalidInput)
+        );
+    }
+
+    /// A store failure is an uncertain commit after each of the three
+    /// writes, and a refusal after `preview` and `status`, which change no
+    /// row; every other code is a refusal after every operation. `status`
+    /// has no typed call yet, so this is its one check (mutant M9).
+    #[test]
+    fn only_the_three_writes_make_a_store_failure_uncertain() {
+        for op in Op::ALL {
+            let writes = matches!(op, Op::Bootstrap | Op::IssueChallenge | Op::Restore);
+            for code in ErrorCode::ALL {
+                let store_failure =
+                    matches!(code, ErrorCode::AuthUnavailable | ErrorCode::ServerError);
+                let expected = if writes && store_failure {
+                    CallError::Unknown(UnknownOutcome::UncertainCommit(code))
+                } else {
+                    CallError::Refused(code)
+                };
+                assert_eq!(refusal(op, code), expected, "{op:?} {code:?}");
+            }
+        }
+        assert_eq!(
+            refusal(Op::Status, ErrorCode::AuthUnavailable),
+            CallError::Refused(ErrorCode::AuthUnavailable)
+        );
+        assert_eq!(
+            refusal(Op::Status, ErrorCode::ServerError),
+            CallError::Refused(ErrorCode::ServerError)
         );
     }
 }
