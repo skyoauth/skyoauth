@@ -82,6 +82,23 @@ describe('WebVTT', () => {
     assert.equal(toVtt(JSON.parse(JSON.stringify(SAMPLE))), toVtt(SAMPLE));
   });
 
+  it('keeps the sample captions track byte for byte (no chapter, no opening)', () => {
+    assert.equal(
+      toVtt(SAMPLE),
+      'WEBVTT\n\n' +
+        'step-0\n00:00:00.000 --> 00:00:09.223\nSAMPLE transcript, invented to test the player: no real system, ID or secret\n\n' +
+        'step-4\n00:00:09.223 --> 00:00:19.315\nA token is shown by its type, audience and scope, never by its value\n\n' +
+        'step-9\n00:00:19.315 --> 00:00:23.215\nEnd of the SAMPLE walk-through\n',
+    );
+  });
+
+  it('ends the `opening` cue at OPENING_MS when step 0 is output, a command or a note', () => {
+    for (const type of ['output', 'command', 'note']) {
+      const vtt = toVtt([OPENING, r(0, type, 'ready')]);
+      assert.equal(vtt, `WEBVTT\n\nopening\n00:00:00.000 --> ${formatVttTime(timing.OPENING_MS)}\n${OPENING.text}\n`, type);
+    }
+  });
+
   it('names the opening cue `opening` and cuts a caption cue at the next chapter', () => {
     const cues = parseVtt(toVtt(STREAM));
     const tl = timing.buildTimeline(STREAM);
@@ -427,6 +444,59 @@ describe('player chapters (player.html in a VM with a virtual clock)', () => {
     assert.equal(run.result.events[0].step, undefined);
     assert.equal(run.endAt - run.t0, timing.totalMs(tl));
     assert.equal(run.result.totalMs, timing.totalMs(tl));
+  });
+});
+
+describe('player opening lead-in (player.html in a VM with a virtual clock)', () => {
+  it('empties the caption bar at OPENING_MS when step 0 is output, a command or a note', async () => {
+    for (const type of ['output', 'command', 'note']) {
+      const records = [OPENING, r(0, type, 'ready'), r(1, 'output', 'more')];
+      const run = await playInVm(records);
+      const tl = timing.buildTimeline(records);
+      const changes = run.log.filter((e) => e.id === 'caption').map((e) => [e.at, e.text]);
+      assert.deepEqual(changes, [
+        [0, OPENING.text],
+        [timing.OPENING_MS, ''],
+      ], type);
+      // The bar matches the captions track: the cue ends where the bar empties.
+      const [cue] = parseVtt(toVtt(records));
+      assert.equal(cue.endMs, timing.OPENING_MS, type);
+      assert.ok(timing.totalMs(tl) > timing.OPENING_MS);
+      assert.equal(run.endAt - run.t0, timing.totalMs(tl), type);
+    }
+  });
+
+  it('leaves a step-0 caption or chapter to replace the opening at OPENING_MS, with no extra change', async () => {
+    const withCaption = [OPENING, r(0, 'caption', 'a'), r(1, 'output', 'o')];
+    const run = await playInVm(withCaption);
+    assert.deepEqual(
+      run.log.filter((e) => e.id === 'caption').map((e) => [e.at, e.text]),
+      [
+        [0, OPENING.text],
+        [timing.OPENING_MS, 'a'],
+      ],
+    );
+    const withChapter = [OPENING, r(0, 'chapter', 'M1a-1: A'), r(1, 'output', 'o')];
+    const run2 = await playInVm(withChapter);
+    assert.deepEqual(
+      run2.log.filter((e) => e.id === 'caption').map((e) => [e.at, e.text]),
+      [
+        [0, OPENING.text],
+        [timing.OPENING_MS, ''],
+      ],
+    );
+  });
+
+  it('empties the bar at OPENING_MS when the opening is the only record', async () => {
+    const run = await playInVm([OPENING]);
+    assert.deepEqual(
+      run.log.filter((e) => e.id === 'caption').map((e) => [e.at, e.text]),
+      [
+        [0, OPENING.text],
+        [timing.OPENING_MS, ''],
+      ],
+    );
+    assert.equal(run.endAt - run.t0, timing.OPENING_MS + timing.TAIL_MS);
   });
 });
 

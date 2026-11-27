@@ -174,9 +174,13 @@ of the proposal, `{"step":N,"type":"chapter","text":"M1a-2: <title>"}`
   the first record, lasts `OPENING_MS` (3000 ms) whatever its text: every
   later time moves by `OPENING_MS` and no step changes (the typing speed
   still follows each record's own step). Its captions cue has the id
-  `opening` and ends at the first chapter. It is not `LEAD_IN_MS`, the
-  black screen before t0 that the renderer cuts: the opening is inside the
-  timeline, from t0. Any other record without a step is refused.
+  `opening` and always ends at `OPENING_MS`, its own step's end: a step-0
+  caption or chapter replaces or empties the bar at that instant, and
+  before any other step 0 (output, a command or a note) the player
+  empties the bar itself, so the commit is never shown past the lead-in.
+  It is not `LEAD_IN_MS`, the black screen before t0 that the renderer
+  cuts: the opening is inside the timeline, from t0. Any other record
+  without a step is refused.
 
 Not built yet (section 6 of
 [the proposal](../../docs/proposals/demo-walkthroughs.md#6-chapters-and-one-video-per-milestone-design-not-built)):

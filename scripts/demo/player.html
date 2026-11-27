@@ -225,6 +225,12 @@
         await playLines(record, base, record.type);
       }
       await waitUntil(t0, timeline[i].endMs);
+      // The opening's caption ends with its step (timing.js captionCues):
+      // empty the bar unless the next record replaces it at this instant.
+      var next = records[i + 1];
+      if (T.isOpening(record) && !(next && (next.type === 'caption' || next.type === 'chapter'))) {
+        byId('caption').textContent = '';
+      }
     }
     await waitUntil(t0, total);
     window.__demoDone = true;

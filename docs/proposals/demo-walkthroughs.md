@@ -454,7 +454,9 @@ M1a-1: Bootstrap the operator
 ```
 
 The captions VTT keeps its format (`step-<joined step>` ids), plus an
-`opening` cue for the lead-in when there is one.
+`opening` cue for the lead-in when there is one. That cue always ends at
+`OPENING_MS`, the end of the lead-in: when step 0 is neither a caption nor
+a chapter, the player empties the caption bar there.
 
 **6.5 Outputs, chapters in the mp4, staged publication.**
 `render.mjs --milestone <dir>... [--commit <sha>] --out <dir>` writes per

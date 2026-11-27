@@ -190,6 +190,38 @@ describe('caption cues with chapters', () => {
     ]);
   });
 
+  it('ends the opening cue at OPENING_MS when step 0 is output, a command or a note, even with a later caption', () => {
+    for (const type of ['output', 'command', 'note']) {
+      const records = [OPENING, r(0, type, 'ready'), r(1, 'output', 'more')];
+      const tl = timing.buildTimeline(records);
+      assert.ok(timing.totalMs(tl) > timing.OPENING_MS);
+      assert.deepEqual(timing.captionCues(records), [{ step: undefined, startMs: 0, endMs: timing.OPENING_MS, text: OPENING.text }], type);
+      const later = [OPENING, r(0, type, 'ready'), r(1, 'caption', 'late')];
+      const tlLater = timing.buildTimeline(later);
+      assert.deepEqual(
+        timing.captionCues(later).map((c) => [c.step, c.startMs, c.endMs]),
+        [
+          [undefined, 0, timing.OPENING_MS],
+          [1, tlLater[2].startMs, timing.totalMs(tlLater)],
+        ],
+        type,
+      );
+    }
+    assert.deepEqual(timing.captionCues([OPENING]), [{ step: undefined, startMs: 0, endMs: timing.OPENING_MS, text: OPENING.text }]);
+  });
+
+  it('ends the opening cue where a step-0 caption starts, at OPENING_MS', () => {
+    const records = [OPENING, r(0, 'caption', 'a'), r(1, 'output', 'o')];
+    const tl = timing.buildTimeline(records);
+    assert.deepEqual(
+      timing.captionCues(records).map((c) => [c.step, c.startMs, c.endMs]),
+      [
+        [undefined, 0, timing.OPENING_MS],
+        [0, timing.OPENING_MS, timing.totalMs(tl)],
+      ],
+    );
+  });
+
   it('gives the opening a cue with no step, cut at the first chapter', () => {
     const tl = timing.buildTimeline([OPENING, ...JOINED]);
     const cues = timing.captionCues([OPENING, ...JOINED]);

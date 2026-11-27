@@ -134,12 +134,14 @@
     return (timeline.length ? timeline[timeline.length - 1].endMs : 0) + TAIL_MS;
   }
 
-  // One cue per caption record (the opening included, with an undefined
-  // step): from its step's start until the next caption's or the next
-  // chapter's start, whichever comes first, or until the end of the video
-  // for the last one. A chapter is not a caption and has no cue here: the
-  // player clears the caption bar at its start. The player shows each
-  // caption over exactly its cue.
+  // One cue per caption record: from its step's start until the next
+  // caption's or the next chapter's start, whichever comes first, or until
+  // the end of the video for the last one. The opening's cue (undefined
+  // step) always ends at its own step's end, OPENING_MS: where step 0 is
+  // neither a caption nor a chapter the player empties the bar then. A
+  // chapter is not a caption and has no cue here: the player clears the
+  // caption bar at its start. The player shows each caption over exactly
+  // its cue.
   function captionCues(records) {
     var timeline = buildTimeline(records);
     var end = totalMs(timeline);
@@ -151,8 +153,10 @@
       if (open) open.endMs = timeline[i].startMs;
       open = null;
       if (type === 'chapter') continue;
-      open = { step: records[i].step, startMs: timeline[i].startMs, endMs: end, text: records[i].text };
-      cues.push(open);
+      var cue = { step: records[i].step, startMs: timeline[i].startMs, endMs: end, text: records[i].text };
+      cues.push(cue);
+      if (isOpening(records[i])) cue.endMs = timeline[i].endMs;
+      else open = cue;
     }
     return cues;
   }
@@ -190,5 +194,6 @@
     totalMs: totalMs,
     captionCues: captionCues,
     chapterCues: chapterCues,
+    isOpening: isOpening,
   };
 });
