@@ -77,7 +77,7 @@ use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use skyoauth_service::{
     identity::canonical_public_identity,
-    ids::{IdGenerator, IdKind, test_support::SequentialIds},
+    ids::{IdError, IdGenerator, IdKind, test_support::SequentialIds},
     local_transport::{
         BindError, LocalListener, LocalTransport, MAX_REQUEST_BYTES, MAX_SOCKET_PATH_BYTES,
         SHUTDOWN_GRACE, Settings,
@@ -86,8 +86,8 @@ use skyoauth_service::{
     persistence::{
         self, PgPool,
         registry::{
-            AdminRole, ChainVerdict, OperatorRequest, OperatorScope, authorize_operator,
-            get_recovery_state, verify_audit_chain,
+            self, AdminRole, AuditActor, ChainVerdict, NewAuditEvent, NewTenant, OperatorRequest,
+            OperatorScope, authorize_operator, get_recovery_state, verify_audit_chain,
         },
     },
 };
@@ -4604,34 +4604,97 @@ async fn stop_shared(server: Arc<Server>) {
     server.stop().await;
 }
 
+/// A [`SequentialIds`] that counts the IDs it gives, by kind, so a test
+/// sees what a request drew of every kind, the audit event's included,
+/// which never reaches the wire.
+struct CountingIds {
+    ids: SequentialIds,
+    drawn: Mutex<[u64; IdKind::ALL.len()]>,
+}
+
+impl CountingIds {
+    fn with_seed(seed: u64) -> Arc<Self> {
+        Arc::new(Self {
+            ids: SequentialIds::with_seed(seed),
+            drawn: Mutex::new([0; IdKind::ALL.len()]),
+        })
+    }
+
+    /// The IDs given so far of each kind, in [`IdKind::ALL`]'s order.
+    fn drawn(&self) -> Vec<(IdKind, u64)> {
+        IdKind::ALL
+            .into_iter()
+            .zip(*self.drawn.lock().unwrap())
+            .collect()
+    }
+}
+
+impl IdGenerator for CountingIds {
+    fn new_id(&self, kind: IdKind) -> Result<String, IdError> {
+        let id = self.ids.new_id(kind)?;
+        let index = IdKind::ALL.iter().position(|each| *each == kind).unwrap();
+        self.drawn.lock().unwrap()[index] += 1;
+        Ok(id)
+    }
+}
+
+/// `server.call(request)` for a `status` request, checked to write
+/// nothing (every row of every table unchanged, the audit chain's head
+/// included) and to draw no ID of any kind.
+async fn read(server: &Server, pool: &PgPool, counter: &CountingIds, request: Value) -> Value {
+    let rows = snapshot(pool).await;
+    let drawn = counter.drawn();
+    let reply = server.call(request).await;
+    assert_eq!(snapshot(pool).await, rows, "{reply}");
+    assert_eq!(counter.drawn(), drawn, "{reply}");
+    reply
+}
+
 /// Every state of a challenge from a real sequence, in the order of the
 /// recovery module's "Reading the state": `not_found` (an unknown ID, an
-/// approval, and rows with a challenge hash and an expiry that are not an
-/// `operator_restoration` by `deployment_operator`), `issued`, `expiring`
+/// approval, rows with a challenge hash and an expiry that are not an
+/// `operator_restoration` by `deployment_operator` of no tenant, and a row
+/// with an expiry but no challenge hash), `issued`, `expiring`
 /// from `expires_at` with `settles_at` the transaction timeout later,
 /// `expired` from `settles_at`, `retired` once another challenge is
 /// restored, and `restored` with the replacement and the revoked
 /// credentials, revoked afterwards or not (F1). The replies hold nothing
-/// of `M`, the signature or the replacement's key, and the reads write
-/// nothing.
+/// of `M`, the signature or the replacement's key, and every read, the
+/// first included, writes nothing and draws no ID of any kind (`read`).
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
 async fn status_reports_each_challenge_state() {
     let (db, pool) = migrated().await;
     let dir = TempDir::new();
     let clock = TestClock::new();
-    let server = serve(&dir, "a.sock", &pool, &clock, 1).await;
+    let counter = CountingIds::with_seed(1);
+    let server = Server::bind(
+        LocalTransport::new(
+            pool.clone(),
+            Arc::<TestClock>::clone(&clock),
+            Arc::<CountingIds>::clone(&counter),
+            None,
+        )
+        .with_settings(settings())
+        .unwrap(),
+        &dir.0.join("a.sock"),
+    )
+    .await;
     let t0 = UNIX_EPOCH + T0;
 
     // Before bootstrap: nothing, and an unknown ID is not found.
     assert_eq!(
-        server.call(status_request(None, None, None)).await,
+        read(&server, &pool, &counter, status_request(None, None, None)).await,
         status_reply(t0, &[])
     );
     assert_eq!(
-        server
-            .call(status_request(Some("oper_unknown"), None, None))
-            .await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some("oper_unknown"), None, None)
+        )
+        .await,
         status_reply(t0, &[("operation_state", json!("not_found"))])
     );
 
@@ -4647,7 +4710,13 @@ async fn status_reports_each_challenge_state() {
         ],
     );
     assert_eq!(
-        server.call(status_request(Some(&first), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
         status_reply(t0, &issued)
     );
 
@@ -4688,14 +4757,76 @@ async fn status_reports_each_challenge_state() {
         "issued",
     )
     .await;
+    // An `operator_restoration` by `deployment_operator` with the first's
+    // challenge hash and expiry, but of a tenant (its audit event of that
+    // tenant, as the `0005` guard requires), and one with the first's
+    // expiry but no challenge hash, as `0005` allows.
+    registry::test_support::create_tenant(
+        &pool,
+        &NewTenant {
+            id: "ten_a".into(),
+            name: "Tenant A".into(),
+            secret_namespace: "ns_a".into(),
+            status: registry::Status::Enabled,
+        },
+    )
+    .await
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    registry::test_support::append_audit_event(
+        &mut transaction,
+        &NewAuditEvent {
+            id: "evt_tenant".into(),
+            tenant_id: Some("ten_a".into()),
+            timestamp: t0,
+            actor: AuditActor::Operator("deployment_operator".into()),
+            action: "administrative_operation.create".into(),
+            object_id: "oper_tenant".into(),
+            previous_revision: None,
+            new_revision: Some(1),
+            outcome: "success".into(),
+        },
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    for (id, tenant, hash, audit) in [
+        ("oper_tenant", Some("ten_a"), true, Some("evt_tenant")),
+        ("oper_no_hash", None, false, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO administrative_operation (id, tenant_id, actor_id, kind, \
+             request_digest, expected_revision, immutable_plan, challenge_hash, expires_at, \
+             outcome, audit_id) SELECT $2, $3, actor_id, kind, request_digest, \
+             expected_revision, immutable_plan, CASE WHEN $4 THEN challenge_hash END, \
+             expires_at, outcome, coalesce($5, audit_id) \
+             FROM administrative_operation WHERE id = $1",
+        )
+        .bind(&first)
+        .bind(id)
+        .bind(tenant)
+        .bind(hash)
+        .bind(audit)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
     for id in [
         "oper_unknown",
         "oper_approval",
         "oper_other_kind",
         "oper_other_actor",
+        "oper_tenant",
+        "oper_no_hash",
     ] {
         assert_eq!(
-            server.call(status_request(Some(id), None, None)).await,
+            read(
+                &server,
+                &pool,
+                &counter,
+                status_request(Some(id), None, None)
+            )
+            .await,
             status_reply(
                 t0,
                 &state_and(1, &SEED, &[("operation_state", json!("not_found"))])
@@ -4721,19 +4852,37 @@ async fn status_reports_each_challenge_state() {
     };
     clock.advance(TTL);
     assert_eq!(
-        server.call(status_request(Some(&first), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
         expiring(expires)
     );
     clock.advance(SETTLE - Duration::from_micros(1));
     assert_eq!(
-        server.call(status_request(Some(&first), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
         expiring(expires + SETTLE - Duration::from_micros(1))
     );
     // From `settles_at`: expired.
     clock.advance(Duration::from_micros(1));
     let settled = expires + SETTLE;
     assert_eq!(
-        server.call(status_request(Some(&first), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
         status_reply(
             settled,
             &state_and(
@@ -4766,7 +4915,13 @@ async fn status_reports_each_challenge_state() {
         ),
     );
     assert_eq!(
-        server.call(status_request(Some(&first), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, None)
+        )
+        .await,
         retired
     );
     let second_plan = plan_of(&second_m);
@@ -4791,24 +4946,34 @@ async fn status_reports_each_challenge_state() {
     };
     let full = restored(json!([bootstrap_credential]));
     assert_eq!(
-        server.call(status_request(Some(&second), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&second), None, None)
+        )
+        .await,
         full
     );
     assert_eq!(
-        server
-            .call(status_request(
-                Some(&second),
-                None,
-                Some(&bootstrap_credential)
-            ))
-            .await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&second), None, Some(&bootstrap_credential))
+        )
+        .await,
         restored(json!([]))
     );
     // `revoked_after` is ignored unless restored.
     assert_eq!(
-        server
-            .call(status_request(Some(&first), None, Some("cred_z")))
-            .await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&first), None, Some("cred_z"))
+        )
+        .await,
         retired
     );
 
@@ -4835,12 +5000,17 @@ async fn status_reports_each_challenge_state() {
     // Revoked after its consume, it stays restored (F1).
     revoke_operation(&pool, &second, settled).await;
     assert_eq!(
-        server.call(status_request(Some(&second), None, None)).await,
+        read(
+            &server,
+            &pool,
+            &counter,
+            status_request(Some(&second), None, None)
+        )
+        .await,
         full
     );
 
-    // No read writes anything, the audit chain's head included.
-    let before = snapshot(&pool).await;
+    // With a credential asked too: each read is checked by `read`.
     for request in [
         status_request(None, None, None),
         status_request(Some(&first), Some(1), None),
@@ -4848,10 +5018,27 @@ async fn status_reports_each_challenge_state() {
         status_request(Some(&second), Some(9), Some(&bootstrap_credential)),
         status_request(Some("oper_approval"), None, Some("cred_a")),
     ] {
-        let reply = server.call(request).await;
+        let reply = read(&server, &pool, &counter, request).await;
         assert!(reply["server_time"].is_i64(), "{reply}");
     }
-    assert_eq!(snapshot(&pool).await, before);
+    // What the writes drew, of every kind: the bootstrap an admin, a
+    // credential and a binding, each issue those of its replacement and an
+    // operation, and an audit event per write (two of the restore's: the
+    // restoration and the key rotation); the reads nothing.
+    let mut expected = vec![0; IdKind::ALL.len()];
+    for (kind, count) in [
+        (IdKind::AuditEvent, 5),
+        (IdKind::AdminIdentity, 3),
+        (IdKind::AdminCredential, 3),
+        (IdKind::AdminRoleBinding, 3),
+        (IdKind::AdministrativeOperation, 2),
+    ] {
+        expected[IdKind::ALL.iter().position(|each| *each == kind).unwrap()] = count;
+    }
+    assert_eq!(
+        counter.drawn(),
+        IdKind::ALL.into_iter().zip(expected).collect::<Vec<_>>()
+    );
     server.stop().await;
     db.drop([pool]).await;
 }
@@ -4957,7 +5144,8 @@ fn matches_bootstrap(reply: &Value, request: &Value) -> bool {
 /// it; after it the instance, the recovery key, the enrolled key and the
 /// digest of the exact `trust_anchor_ref` match the request sent, and not
 /// a request with another recovery key, another anchor or another mTLS
-/// key; after a restore the old key is `revoked` and still found, and the
+/// key; a credential disabled but not revoked is `disabled`; after a
+/// restore the old key is `revoked` and still found, and the
 /// replacement's digest is of its own anchor's UTF-8 bytes.
 #[tokio::test]
 #[ignore = "requires SKYOAUTH_IT_DATABASE_URL"]
@@ -5007,6 +5195,39 @@ async fn status_reconciles_a_bootstrap() {
     let mut other_anchor = request.clone();
     other_anchor["trust_anchor_ref"] = json!("deployment/other-ca");
     assert!(!matches_bootstrap(&after, &other_anchor));
+    // A credential of the operator disabled but not revoked, written by
+    // other means: `disabled`, with its own anchor's digest.
+    sqlx::query(
+        "INSERT INTO admin_credential (id, admin_id, public_identity, trust_anchor_ref, status) \
+         VALUES ('cred_disabled', $1, $2, 'deployment/disabled', 'disabled')",
+    )
+    .bind(ids(1, IdKind::AdminIdentity, 1).remove(0))
+    .bind(identity_of(5))
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        server.call(status_request(None, Some(5), None)).await,
+        status_reply(
+            t0,
+            &state_and(
+                1,
+                &SEED,
+                &[
+                    ("enrolled_state", json!("disabled")),
+                    (
+                        "enrolled_admin_id",
+                        json!(ids(1, IdKind::AdminIdentity, 1)[0])
+                    ),
+                    ("enrolled_credential_id", json!("cred_disabled")),
+                    (
+                        "enrolled_trust_anchor_sha256",
+                        json!(sha256_hex("deployment/disabled"))
+                    ),
+                ],
+            ),
+        )
+    );
     let not_enrolled = server.call(status_request(None, Some(9), None)).await;
     assert_eq!(not_enrolled["enrolled_state"], "not_found");
     assert!(!matches_bootstrap(

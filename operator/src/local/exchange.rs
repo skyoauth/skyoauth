@@ -213,9 +213,12 @@ impl Op {
     /// Whether to retry a call of this operation whose outcome is unknown
     /// ([`CallError::Unknown`]): only a `preview` or a `status` may be
     /// retried without reconciling. An `issue_challenge` stays
-    /// [`Retry::ReconcileFirst`] (it writes a row and an audit event), though
-    /// no reconcile is possible for it: issue again (lead ruling, Q5). The
-    /// client never retries on its own.
+    /// [`Retry::ReconcileFirst`] (it writes a row and an audit event, so it
+    /// is not safe to repeat blindly), though it cannot be reconciled (the
+    /// client never received its operation ID): after an unknown outcome
+    /// the operator issues again, and the first challenge, if it committed,
+    /// expires unused (lead ruling, Q5). The client never retries on its
+    /// own.
     pub const fn retry(self) -> Retry {
         match self {
             Self::Preview | Self::Status => Retry::Safe,

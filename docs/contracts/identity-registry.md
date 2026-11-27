@@ -356,10 +356,12 @@ change (ADRs ratified directionally, maintainer, 2026-11-24):
   signing, and the operator's checks of a challenge before it signs, are in
   the operator crate (`skyoauth-operator`), which does not depend on the
   service; the bytes are in the challenge and signature bullet below. The
-  recovery read never returns the operation row: one registry function,
-  beside the restoration's own check of the row, returns only the closed
-  state of a recovery challenge and the projection of "Reading the recovery
-  state" (lead ruling, 2026-11-27). The registry's operation getters,
+  recovery read never returns the operation row: beside the restoration's
+  own check of the row, two registry functions read it, one returning only
+  the closed state of a recovery challenge and the projection of "Reading
+  the recovery state", the other, for the restoration's own reply, only the
+  count and first page of the credentials a restoration revoked, by the
+  same predicate (lead ruling, 2026-11-27). The registry's operation getters,
   `get_administrative_operation` (by the kinds its caller names) and
   `lock_administrative_operation` (by ID), return the full row; no caller
   exposes an `operator_restoration` row (the D4 reads name only the five

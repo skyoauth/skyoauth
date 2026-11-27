@@ -85,8 +85,12 @@
 //! `not_restorable` (the service's docs, "Transactions"): the repeat's
 //! answer looks like a refusal and hides the first call's success. Once a
 //! first issue committed, a repeat of it makes a second live challenge
-//! (the first expires unused). No write is safe to repeat without
-//! reconciling first, `issue_challenge` included.
+//! (the first expires unused). No write is safe to repeat blindly
+//! ([`Op::retry`]): a bootstrap or a restore is reconciled first; an
+//! `issue_challenge` cannot be reconciled (the client never received its
+//! operation ID), so after an unknown outcome the operator issues again,
+//! and the first challenge, if it committed, expires unused (lead ruling,
+//! Q5).
 //!
 //! # Key material
 //!

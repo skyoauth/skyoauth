@@ -470,7 +470,7 @@ change and goes to the user; the user is informed, as for the nonce.
 
 ## Contract and code impact
 
-### Contract amendments (proposed wording; not edited here)
+### Contract amendments (now in identity-registry.md, 1 to 3, and public-api.md, 4 and 5)
 
 The break-glass points of identity-registry §5.2 carry no IR number
 (checked); the lead places the text or numbers it. The contract names a
