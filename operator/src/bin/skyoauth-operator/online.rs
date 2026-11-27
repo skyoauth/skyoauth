@@ -51,7 +51,9 @@ pub fn client(flags: &SocketFlags) -> LocalClient<CheckedSocketPath> {
 /// table: refused by the service, or a request too large to send, is 1;
 /// not sent is 6; an unknown outcome is 6 after an operation that changes
 /// no row (`Retry::Safe`: `preview`, `status`) and 5 after a write
-/// (`Retry::ReconcileFirst`).
+/// (`Retry::ReconcileFirst`). After an `issue_challenge`, which cannot be
+/// reconciled (lead ruling Q5), the cause of exit 5 leaves out the
+/// library's "reconcile first": the next line says to issue again.
 pub fn failure(op: Op, err: CallError) -> Failure {
     match err {
         CallError::NotSent(NotSent::TooLarge) => Failure::Refused(format!(
@@ -67,6 +69,9 @@ pub fn failure(op: Op, err: CallError) -> Failure {
                 "the reply cannot be believed ({why}); {} changes nothing",
                 op.as_str()
             )),
+            Retry::ReconcileFirst if op == Op::IssueChallenge => {
+                Failure::Unknown(format!("the outcome of the request is unknown ({why})"))
+            }
             Retry::ReconcileFirst => Failure::Unknown(err.to_string()),
         },
     }
@@ -84,18 +89,16 @@ pub fn write_failure(op: Op, err: CallError, next: &str) -> Failure {
     }
 }
 
-/// What a refusal that may hide an earlier restore adds to its message: a
-/// `not_restorable` from `restore` and a `conflict` from `issue-challenge`
-/// (lead ruling (c)). The proposal adds it "after any retry"; a command
-/// cannot know whether it is one, so it is added to every such refusal.
-pub const AFTER_A_RETRY: &str = "if an earlier restore of this challenge may have committed, run \
-                                 status --reconcile restore on the original response";
-
-/// `failure` with [`AFTER_A_RETRY`] added to its message when it is a
-/// refusal (exit 1).
-pub fn after_a_retry(failure: Failure) -> Failure {
+/// `failure` with `hint` added to its message when it is a refusal
+/// (exit 1): what a refusal that may hide an earlier write that committed
+/// adds, the step that finds out. A `not_restorable` from `restore` and a
+/// `conflict` from `issue-challenge` may hide an earlier restore (lead
+/// ruling (c)), a `conflict` from `bootstrap` an earlier bootstrap. The
+/// proposal adds the hint "after any retry"; a command cannot know whether
+/// it is one, so it is added to every such refusal.
+pub fn after_a_retry(failure: Failure, hint: &str) -> Failure {
     match failure {
-        Failure::Refused(message) => Failure::Refused(format!("{message}; {AFTER_A_RETRY}")),
+        Failure::Refused(message) => Failure::Refused(format!("{message}; {hint}")),
         other => other,
     }
 }

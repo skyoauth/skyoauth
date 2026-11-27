@@ -35,6 +35,10 @@ use crate::{
 const RECONCILE: &str = "run skyoauth-operator status --reconcile restore --response FILE with \
                          the same socket flags";
 
+/// What a `not_restorable` adds to its message (lead ruling (c)).
+const AFTER_A_RETRY: &str = "if an earlier restore of this challenge may have committed, run \
+                             status --reconcile restore on the original response";
+
 pub fn run(flags: &Restore) -> Outcome {
     match restore(flags) {
         Ok(output) => Outcome {
@@ -61,7 +65,7 @@ fn restore(flags: &Restore) -> Result<String, Failure> {
             let not_restorable = err == CallError::Refused(ErrorCode::NotRestorable);
             let failure = online::write_failure(Op::Restore, err, RECONCILE);
             if not_restorable {
-                online::after_a_retry(failure)
+                online::after_a_retry(failure, AFTER_A_RETRY)
             } else {
                 failure
             }

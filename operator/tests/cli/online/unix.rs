@@ -1277,8 +1277,8 @@ fn file_errors_are_exit_3_with_nothing_sent() {
 }
 
 /// An artifact one byte over its limit is exit 3, named by its flag and
-/// the limit, with no connection: a response artifact (`preview` and
-/// `status --response`) over 64 KiB, a challenge artifact
+/// the limit, with no connection: a response artifact (`preview`,
+/// `restore` and `status --response`) over 64 KiB, a challenge artifact
 /// (`status --challenge`) over 4 MiB. The limits are written out here, not
 /// taken from the library, so a change of either is seen.
 #[test]
@@ -1290,6 +1290,7 @@ fn artifacts_over_their_limits_are_exit_3_with_nothing_sent() {
     let challenge = fake.dir.file("challenge", &vec![b'0'; CHALLENGE_LIMIT + 1]);
     let cases = [
         ("preview", "--response", &response, RESPONSE_LIMIT),
+        ("restore", "--response", &response, RESPONSE_LIMIT),
         ("status", "--response", &response, RESPONSE_LIMIT),
         ("status", "--challenge", &challenge, CHALLENGE_LIMIT),
     ];
@@ -1323,6 +1324,7 @@ fn artifacts_of_exactly_their_limits_are_read() {
     let challenge = fake.dir.file("challenge", &vec![b'0'; CHALLENGE_LIMIT]);
     let cases = [
         ("preview", "--response", &response),
+        ("restore", "--response", &response),
         ("status", "--response", &response),
         ("status", "--challenge", &challenge),
     ];
@@ -1397,10 +1399,17 @@ const ISSUE_NEXT: &str =
 /// The last line of every failure of `issue-challenge` once `--out` exists.
 const LEFT_EMPTY: &str = "--out was created and is left empty: remove it";
 
-/// What a `not_restorable` from `restore` and a `conflict` from
-/// `issue-challenge` add to their message (lead ruling (c)).
-const AFTER_A_RETRY: &str = "; if an earlier restore of this challenge may have committed, run \
-                             status --reconcile restore on the original response";
+/// What a refusal that may hide an earlier write that committed adds to
+/// its message: a `not_restorable` from `restore` and a `conflict` from
+/// `issue-challenge` (lead ruling (c)), a `conflict` from `bootstrap`.
+const RESTORE_AFTER_A_RETRY: &str = "; if an earlier restore of this challenge may have \
+                                     committed, run status --reconcile restore on the original \
+                                     response";
+const ISSUE_AFTER_A_RETRY: &str = "; if a restore of an earlier challenge for this replacement \
+                                   key may have committed, run status --reconcile restore on \
+                                   the original response";
+const BOOTSTRAP_AFTER_A_RETRY: &str = "; if an earlier bootstrap may have committed, run status \
+                                       --reconcile bootstrap with the same flags";
 
 /// The ends of the successes of the writes.
 const BOOTSTRAP_OK: &str = "result: ok; the bootstrap committed; keep this output: \
@@ -1442,6 +1451,27 @@ impl Write {
             Self::Bootstrap => (golden_request("bootstrap"), golden_reply("bootstrapped")),
             Self::Issue => (golden_request("issue_challenge"), golden_reply("issued")),
             Self::Restore => (golden_request("restore"), golden_reply("restored")),
+        }
+    }
+
+    /// The cause of exit 5 after this write: the library's text, but
+    /// after an issue, which cannot be reconciled, without its "reconcile
+    /// first" (the next line says to issue again).
+    fn unknown(self, why: UnknownOutcome) -> String {
+        match self {
+            Self::Issue => format!("the outcome of the request is unknown ({why})"),
+            Self::Bootstrap | Self::Restore => CallError::Unknown(why).to_string(),
+        }
+    }
+
+    /// The sentence a refusal with `code` adds to its message after this
+    /// write, if any.
+    const fn after_a_retry(self, code: ErrorCode) -> &'static str {
+        match (self, code) {
+            (Self::Restore, ErrorCode::NotRestorable) => RESTORE_AFTER_A_RETRY,
+            (Self::Issue, ErrorCode::Conflict) => ISSUE_AFTER_A_RETRY,
+            (Self::Bootstrap, ErrorCode::Conflict) => BOOTSTRAP_AFTER_A_RETRY,
+            _ => "",
         }
     }
 
@@ -1783,9 +1813,10 @@ fn issue_challenge_sends_nothing_without_a_new_out() {
 /// Each refusal code after each write: `forbidden`, `invalid_request`,
 /// `conflict` and `not_restorable` are exit 1 with the library's text
 /// (`not_restorable` from `restore` and `conflict` from `issue-challenge`
-/// with the sentence of lead ruling (c), the others without it); the store
-/// failures `auth_unavailable` and `server_error` are an unknown outcome,
-/// exit 5, with what to run. One connection each; an issue's `--out` is
+/// with the sentence of lead ruling (c), `conflict` from `bootstrap` with
+/// its reconcile, the others without one); the store failures
+/// `auth_unavailable` and `server_error` are an unknown outcome, exit 5,
+/// with what to run. One connection each; an issue's `--out` is
 /// left empty and named.
 #[test]
 fn each_refusal_of_a_write_is_exit_1_or_5() {
@@ -1798,26 +1829,18 @@ fn each_refusal_of_a_write_is_exit_1_or_5() {
             }
             assert_eq!(fake.finish(), [write.golden().0], "{write:?} {code:?}");
             let (exit, cause) = match code {
-                ErrorCode::AuthUnavailable | ErrorCode::ServerError => (
-                    5,
-                    CallError::Unknown(UnknownOutcome::UncertainCommit(code)).to_string(),
-                ),
-                _ => {
-                    let retry = matches!(
-                        (write, code),
-                        (Write::Restore, ErrorCode::NotRestorable)
-                            | (Write::Issue, ErrorCode::Conflict)
-                    );
-                    (
-                        1,
-                        format!(
-                            "refused ({}): {}{}",
-                            code.as_str(),
-                            CallError::Refused(code),
-                            if retry { AFTER_A_RETRY } else { "" }
-                        ),
-                    )
+                ErrorCode::AuthUnavailable | ErrorCode::ServerError => {
+                    (5, write.unknown(UnknownOutcome::UncertainCommit(code)))
                 }
+                _ => (
+                    1,
+                    format!(
+                        "refused ({}): {}{}",
+                        code.as_str(),
+                        CallError::Refused(code),
+                        write.after_a_retry(code)
+                    ),
+                ),
             };
             assert_eq!(
                 run,
@@ -1829,6 +1852,77 @@ fn each_refusal_of_a_write_is_exit_1_or_5() {
                 "{write:?} {code:?}"
             );
         }
+    }
+}
+
+/// The texts of an issue's exit 5 and of the refusals that may hide an
+/// earlier write that committed, written out whole: an issue of unknown
+/// outcome is never told to reconcile (it cannot be), only to issue again;
+/// its `conflict` names a restore of an earlier challenge for the same
+/// replacement key; a `bootstrap`'s `conflict` names the bootstrap's
+/// reconcile.
+#[test]
+fn the_reissue_and_retry_texts_are_exact() {
+    let left_empty = "--out was created and is left empty: remove it\n";
+    let conflict = "skyoauth-operator: refused (conflict): the local transport refused the \
+                    request: conflict: the stored state refuses the request; ";
+    let cases = [
+        (
+            Write::Issue,
+            "error_server_error",
+            5,
+            format!(
+                "skyoauth-operator: the outcome of the request is unknown (a write failed in \
+                 the store, maybe in its commit)\nno reconcile is possible: issue again; the \
+                 first challenge, if it was issued, expires unused\n{left_empty}"
+            ),
+        ),
+        (
+            Write::Issue,
+            "error_conflict",
+            1,
+            format!(
+                "{conflict}if a restore of an earlier challenge for this replacement key may \
+                 have committed, run status --reconcile restore on the original \
+                 response\n{left_empty}"
+            ),
+        ),
+        (
+            Write::Bootstrap,
+            "error_conflict",
+            1,
+            format!(
+                "{conflict}if an earlier bootstrap may have committed, run status --reconcile \
+                 bootstrap with the same flags\n"
+            ),
+        ),
+        (
+            Write::Restore,
+            "error_not_restorable",
+            1,
+            "skyoauth-operator: refused (not_restorable): the local transport refused the \
+             request: not_restorable: the signed response does not authorize a restoration; \
+             if an earlier restore of this challenge may have committed, run status \
+             --reconcile restore on the original response\n"
+                .to_owned(),
+        ),
+    ];
+    for (write, reply, code, stderr) in cases {
+        let fake = Fake::lines(&[golden_reply(reply)]);
+        let (run, out) = run_write(&fake, write, &[]);
+        if let Some(out) = &out {
+            assert_left_empty(out);
+        }
+        assert_eq!(fake.finish(), [write.golden().0], "{write:?} {reply}");
+        assert_eq!(
+            run,
+            Run {
+                code,
+                stdout: String::new(),
+                stderr,
+            },
+            "{write:?} {reply}"
+        );
     }
 }
 
@@ -1874,7 +1968,7 @@ fn every_unknown_reply_of_a_write_is_exit_5() {
                 Run {
                     code: 5,
                     stdout: String::new(),
-                    stderr: write_stderr(write, 5, &CallError::Unknown(why).to_string()),
+                    stderr: write_stderr(write, 5, &write.unknown(why)),
                 },
                 "{write:?} {name}"
             );
@@ -1934,7 +2028,7 @@ fn a_write_cut_off_after_it_was_sent_is_exit_5() {
                 Run {
                     code: 5,
                     stdout: String::new(),
-                    stderr: write_stderr(write, 5, &CallError::Unknown(why).to_string()),
+                    stderr: write_stderr(write, 5, &write.unknown(why)),
                 },
                 "{write:?} {waits:?}"
             );
@@ -2199,6 +2293,54 @@ fn a_write_whose_output_fails_is_exit_3() {
             ),
             "{write:?}"
         );
+    }
+}
+
+/// Runs `write` against `fake` with its golden flags, standard output a
+/// pipe whose reading end is closed, and standard error one too: its exit
+/// code.
+fn run_write_unheard(fake: &Fake, write: Write) -> (Option<i32>, Option<PathBuf>) {
+    let (rest, out) = write.flags(fake);
+    let (stdout_reader, stdout_writer) = io::pipe().unwrap();
+    let (stderr_reader, stderr_writer) = io::pipe().unwrap();
+    drop(stdout_reader);
+    drop(stderr_reader);
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_skyoauth-operator"))
+        .arg(write.command())
+        .args(fake.flags())
+        .args(rest)
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout_writer)
+        .stderr(stderr_writer)
+        .status()
+        .unwrap();
+    (status.code(), out)
+}
+
+/// A write that committed, but whose output and error output both cannot
+/// be written (pipes whose reading ends are closed), is exit 5, never 3:
+/// no message could say what it committed, so it must not be repeated
+/// (an issue's `--out` is complete). And a write of unknown outcome keeps
+/// its 5 when its error output cannot be written.
+#[test]
+fn a_write_unheard_on_both_outputs_is_exit_5() {
+    for write in Write::ALL {
+        let (request, reply) = write.golden();
+        let fake = Fake::lines(std::slice::from_ref(&reply));
+        let (code, out) = run_write_unheard(&fake, write);
+        if let Some(out) = out {
+            assert_eq!(fs::read(&out).unwrap(), reply, "{write:?}");
+        }
+        assert_eq!(fake.finish(), [request], "{write:?}");
+        assert_eq!(code, Some(5), "{write:?} committed");
+
+        let fake = Fake::lines(&[golden_reply("error_server_error")]);
+        let (code, out) = run_write_unheard(&fake, write);
+        if let Some(out) = &out {
+            assert_left_empty(out);
+        }
+        assert_eq!(fake.finish(), [write.golden().0], "{write:?}");
+        assert_eq!(code, Some(5), "{write:?} unknown");
     }
 }
 

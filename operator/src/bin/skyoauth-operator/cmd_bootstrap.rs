@@ -8,16 +8,22 @@
 //! instance ID is the one given: no randomness or clock here, so a rerun
 //! with the same flags is the same request, which `status --reconcile
 //! bootstrap` compares. A bootstrap whose outcome is unknown is exit 5,
-//! with the command that reconciles it; it is never repeated here.
+//! with the command that reconciles it; it is never repeated here. A
+//! `conflict` may hide an earlier bootstrap that committed, so its message
+//! says how to find out.
 
 use std::fmt::Write as _;
 
-use skyoauth_operator::local::{BootstrapRequest, Op};
+use skyoauth_operator::local::{BootstrapRequest, CallError, ErrorCode, Op};
 
 use crate::{Failure, Outcome, args::Bootstrap, online, show::quoted};
 
 /// What to run after a bootstrap whose outcome is unknown.
 const RECONCILE: &str = "run skyoauth-operator status --reconcile bootstrap with the same flags";
+
+/// What a `conflict` adds to its message.
+const AFTER_A_RETRY: &str = "if an earlier bootstrap may have committed, run status \
+                             --reconcile bootstrap with the same flags";
 
 pub fn run(flags: &Bootstrap) -> Outcome {
     match bootstrap(flags) {
@@ -38,7 +44,15 @@ fn bootstrap(flags: &Bootstrap) -> Result<String, Failure> {
     };
     let bootstrapped = online::client(&flags.socket)
         .bootstrap(&request)
-        .map_err(|err| online::write_failure(Op::Bootstrap, err, RECONCILE))?;
+        .map_err(|err| {
+            let conflict = err == CallError::Refused(ErrorCode::Conflict);
+            let failure = online::write_failure(Op::Bootstrap, err, RECONCILE);
+            if conflict {
+                online::after_a_retry(failure, AFTER_A_RETRY)
+            } else {
+                failure
+            }
+        })?;
     let mut output = String::new();
     // Writing to a `String` cannot fail.
     let _ = write!(

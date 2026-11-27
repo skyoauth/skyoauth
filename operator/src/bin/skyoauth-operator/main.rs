@@ -103,8 +103,8 @@ const EXIT_USAGE: u8 = 2;
 /// unreadable; for a seed file also a symbolic link, or on Unix not owned
 /// by the effective user or not of mode 0600), the system clock could not
 /// be read, `--out` exists or could not be created or written, or the
-/// output could not be written (whatever the command's result was; after a
-/// write that succeeded, the message says what was committed).
+/// output could not be written (whatever the command's result was but 5;
+/// after a write that succeeded, the message says what was committed).
 const EXIT_IO: u8 = 3;
 
 /// `verify-challenge`: every given check passed, but the replacement is not
@@ -114,8 +114,11 @@ const EXIT_NOT_CONFIRMED: u8 = 4;
 
 /// The outcome of an online write is unknown: the service may have
 /// committed it (`bootstrap`, `issue-challenge`, `restore`). Do not repeat
-/// it: the message's next line says what to run first. `preview` and
-/// `status` never exit 5.
+/// a `bootstrap` or a `restore`: the message's next line says what to run
+/// first; an `issue-challenge` cannot be reconciled, so the next line says
+/// to issue again. Also a write that committed but whose output and error
+/// output both could not be written: no message can say what it
+/// committed. `preview` and `status` never exit 5.
 const EXIT_UNKNOWN: u8 = 5;
 
 /// Nothing was changed by this command: the request was not sent, or the
@@ -295,6 +298,8 @@ fn main() -> ExitCode {
         }
     }
     // The result was not delivered: exit 3, whatever it was, and say why.
+    // A write that committed says so on standard error.
+    let mut says_committed = false;
     if let Err(err) = write_output(&outcome.output) {
         code = EXIT_IO;
         errors.push_str(&format!(
@@ -304,18 +309,25 @@ fn main() -> ExitCode {
         if let (Ok(()), Some(committed)) = (&outcome.result, committed) {
             errors.push_str(committed);
             errors.push('\n');
+            says_committed = true;
         }
     }
     if !errors.is_empty() {
         let mut stderr = io::stderr().lock();
         // Standard error is the last channel: its failure is reported by the
-        // exit code alone.
+        // exit code alone. It never lowers a 5; and a write that committed,
+        // which no channel could then say, is 5: its outcome is unknown to
+        // the operator, who must not repeat it.
         if stderr
             .write_all(errors.as_bytes())
             .and_then(|()| stderr.flush())
             .is_err()
         {
-            code = EXIT_IO;
+            if says_committed {
+                code = EXIT_UNKNOWN;
+            } else if code != EXIT_UNKNOWN {
+                code = EXIT_IO;
+            }
         }
     }
     ExitCode::from(code)

@@ -148,12 +148,14 @@ before anything is sent); 2 usage error; 3 a file, the clock or the output
 could not be read or written (sign: also a seed file that is not protected
 as above or is larger than 128 bytes; sign, issue-challenge: also an --out
 that exists; after a write that succeeded, the message says what was
-committed); 4 (verify-challenge) every given check passed, but the
-replacement is not confirmed; 5 the outcome of a write (bootstrap,
-issue-challenge, restore) is unknown: do not repeat it, reconcile first as
-the message says; 6 nothing was changed: the request was not sent, or the
-reply of preview or status cannot be believed; the same command may be run
-again.
+committed; a 5 stays 5, and a write that succeeded whose standard error
+cannot be written either is 5); 4 (verify-challenge) every given check
+passed, but the replacement is not confirmed; 5 the outcome of a write
+(bootstrap, issue-challenge, restore) is unknown: do not repeat a
+bootstrap or a restore, reconcile first as the message says; an
+issue-challenge cannot be reconciled: issue again; 6 nothing was changed:
+the request was not sent, or the reply of preview or status cannot be
+believed; the same command may be run again.
 ";
 
 /// A command and its flags.

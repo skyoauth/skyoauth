@@ -387,7 +387,8 @@ fn online_usage_errors_are_exit_2() {
 }
 
 /// The help names the five online commands, Unix only, their socket flags
-/// and the exit codes 5 and 6; it is printed for `--help` or `-h` where a
+/// and the exit codes 5 and 6 (an issue-challenge of unknown outcome is
+/// issued again, never reconciled); it is printed for `--help` or `-h` where a
 /// flag of any is expected (never as a value).
 #[test]
 fn the_help_names_the_online_commands() {
@@ -412,7 +413,11 @@ fn the_help_names_the_online_commands() {
         "issue-challenge creates --out, a new\nfile",
         "revoked_credential_ids_complete: yes or no",
         "On a\nplatform without Unix sockets, the online commands exit 2.",
-        "; 5 the outcome of a write (bootstrap,\nissue-challenge, restore) is unknown",
+        "; 5 the outcome of a write\n(bootstrap, issue-challenge, restore) is unknown: do not \
+         repeat a\nbootstrap or a restore, reconcile first as the message says; an\n\
+         issue-challenge cannot be reconciled: issue again;",
+        "; a 5 stays 5, and a write that succeeded whose standard error\ncannot be written \
+         either is 5)",
         "; 6 nothing was changed",
     ] {
         assert!(help.stdout.contains(text), "{text}: {help:?}");

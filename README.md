@@ -136,7 +136,8 @@ to the service over its deployment-local Unix socket, on the service's host
 (not on Windows). `bootstrap`, `issue-challenge` (which writes the
 challenge to a new `--out`) and `restore` write, each with one request
 that is never repeated: a write whose outcome is unknown exits 5 with the
-command that reconciles it; `preview` and `status` only read and change
+command that reconciles it (for `issue-challenge`, which cannot be
+reconciled: issue again); `preview` and `status` only read and change
 nothing. They are in
 [the online commands proposal](docs/proposals/operator-cli-online.md).
 

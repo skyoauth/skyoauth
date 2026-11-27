@@ -2,7 +2,7 @@
 //! never an existing one. `sign` creates and writes it at once
 //! ([`write_new`]); `issue-challenge` creates it before its request is sent
 //! ([`create_new`]) and writes it only after the challenge was issued
-//! ([`write`]), so an existing `--out` sends nothing, and a request that
+//! ([`write()`]), so an existing `--out` sends nothing, and a request that
 //! does not succeed leaves the file empty.
 //!
 //! The file is created with `create_new` (`O_CREAT | O_EXCL` on Unix,

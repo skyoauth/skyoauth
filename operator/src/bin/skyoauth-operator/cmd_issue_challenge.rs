@@ -35,6 +35,13 @@ use crate::{Failure, Outcome, args::IssueChallenge, online, out_file, show::quot
 const REISSUE: &str =
     "no reconcile is possible: issue again; the first challenge, if it was issued, expires unused";
 
+/// What a `conflict` adds to its message (lead ruling (c)): the conflict
+/// may come from a restore, already committed, of an earlier challenge for
+/// the same replacement key.
+const AFTER_A_RETRY: &str = "if a restore of an earlier challenge for this replacement key may \
+                             have committed, run status --reconcile restore on the original \
+                             response";
+
 /// The last line of the message of every failure once `--out` was created.
 const LEFT_EMPTY: &str = "--out was created and is left empty: remove it";
 
@@ -68,7 +75,7 @@ fn issue(flags: &IssueChallenge) -> Result<String, Failure> {
             let conflict = err == CallError::Refused(ErrorCode::Conflict);
             let failure = online::write_failure(Op::IssueChallenge, err, REISSUE);
             let failure = if conflict {
-                online::after_a_retry(failure)
+                online::after_a_retry(failure, AFTER_A_RETRY)
             } else {
                 failure
             };

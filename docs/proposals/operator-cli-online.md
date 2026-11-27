@@ -205,7 +205,7 @@ D1's table, its meanings for 0 to 4 kept exactly, extended (proposed: Q2).
 | 2 | As D1: usage. Online also: a missing socket flag, a `--trust-ancestors` or wait out of its set, and an online command on a platform without Unix sockets (Q7). |
 | 3 | As D1: I/O. Online also: `--credential-spki`, `--challenge` or `--response` missing, unreadable or over its limit; `--out` that exists or cannot be created, written or synchronized. After a success the message says what succeeded (below). |
 | 4 | Unchanged: `verify-challenge` only; no online command exits 4. |
-| 5 | New. The outcome of a write is unknown (`CallError::Unknown` after `bootstrap`, `issue-challenge` or `restore`, `UncertainCommit` included): the service may have committed it. Do not repeat it: reconcile first (`Retry::ReconcileFirst`). |
+| 5 | New. The outcome of a write is unknown (`CallError::Unknown` after `bootstrap`, `issue-challenge` or `restore`, `UncertainCommit` included): the service may have committed it. Do not repeat a `bootstrap` or a `restore`: reconcile first (`Retry::ReconcileFirst`); an `issue-challenge` cannot be reconciled: issue again (Q5). Also a write that committed whose output and error output both cannot be written. |
 | 6 | New. Nothing was changed by this command: the request was not sent (`CallError::NotSent`: the socket path refused, no connection, the total wait ran out before a byte was written), for every command; or `preview` or `status` got no reply that can be believed (`CallError::Unknown`, `PageMismatch` included), which change no row. The same command may be run again. |
 
 So 5 is `Retry::ReconcileFirst` and 6 is "nothing happened or nothing
@@ -229,8 +229,9 @@ text of the cause and the next command, by flag names only:
 - `restore`: `run skyoauth-operator status --reconcile restore --response
   FILE with the same socket flags`.
 - `issue-challenge`: `no reconcile is possible: issue again; the first
-  challenge, if it was issued, expires unused` (Q5). An `--out` left empty
-  is named.
+  challenge, if it was issued, expires unused` (Q5), after a cause without
+  the library's `reconcile first` (`the outcome of the request is unknown
+  (<why>)`). An `--out` left empty is named.
 
 Why not reconcile automatically: an unknown outcome is mostly a timeout or
 a failed store, and a `status` sent at once meets the same service and
@@ -255,10 +256,15 @@ procedure decides it:
 | `expired` | `expired` | issue a new challenge; not final |
 | `not_found`, none | `unknown` | do not proceed |
 
-After any retry (lead ruling (c)), a `not_restorable` from `restore` or a
-`conflict` from `issue-challenge` adds to its exit-1 message: `if an
-earlier restore of this challenge may have committed, run status
---reconcile restore on the original response`.
+After any retry (lead ruling (c)), a `not_restorable` from `restore` adds
+to its exit-1 message: `if an earlier restore of this challenge may have
+committed, run status --reconcile restore on the original response`; a
+`conflict` from `issue-challenge`: `if a restore of an earlier challenge
+for this replacement key may have committed, run status --reconcile
+restore on the original response`. A `conflict` from `bootstrap` adds `if
+an earlier bootstrap may have committed, run status --reconcile bootstrap
+with the same flags`. A command cannot know whether it is a retry, so each
+adds its sentence to every such refusal.
 
 `status --reconcile bootstrap` prints `BootstrapVerdict::of`: `matches
 (enabled: yes|no)` with `next: do not repeat; the credential is usable
@@ -288,7 +294,10 @@ As D1 (proposed where D1 did not decide it):
   error says what succeeded, so the operator does not repeat a committed
   write: `the restore committed, but its output cannot be written: run
   status --reconcile restore`; `the challenge was issued, but --out cannot
-  be written: issue again`.
+  be written: issue again`. A write to standard error that then fails too
+  makes such a write exit 5, not 3: no message could say what it
+  committed, so it must not be repeated. A failed write to standard error
+  never lowers a 5.
 
 ## Idempotence
 
