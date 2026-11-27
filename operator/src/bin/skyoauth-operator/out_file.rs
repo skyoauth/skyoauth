@@ -1,4 +1,9 @@
-//! The output file of `sign` (`--out`): a new file, never an existing one.
+//! The output file of `sign` and `issue-challenge` (`--out`): a new file,
+//! never an existing one. `sign` creates and writes it at once
+//! ([`write_new`]); `issue-challenge` creates it before its request is sent
+//! ([`create_new`]) and writes it only after the challenge was issued
+//! ([`write`]), so an existing `--out` sends nothing, and a request that
+//! does not succeed leaves the file empty.
 //!
 //! The file is created with `create_new` (`O_CREAT | O_EXCL` on Unix,
 //! `CREATE_NEW` on Windows), so an existing file, or a symbolic link
@@ -18,7 +23,11 @@
 //! the ACL entries of its directory, which its mode does not show, so the
 //! help tells the operator to remove the ACLs of the `--out` directory.
 
-use std::{fs::OpenOptions, io::Write as _, path::Path};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Write as _},
+    path::Path,
+};
 
 use crate::Failure;
 
@@ -32,6 +41,17 @@ const FLAG: &str = "--out";
 /// [`Failure::Io`] when the file exists or cannot be created, written or
 /// synchronized.
 pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
+    let mut file = create_new(path)?;
+    write(&mut file, bytes)
+        .map_err(|kind| Failure::Io(format!("{FLAG}: the file cannot be written ({kind})")))
+}
+
+/// Creates a new, empty file at `path` (mode 0600 on Unix).
+///
+/// # Errors
+///
+/// [`Failure::Io`] when the file exists or cannot be created.
+pub fn create_new(path: &Path) -> Result<File, Failure> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -39,19 +59,22 @@ pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(|err| {
-        Failure::Io(if err.kind() == std::io::ErrorKind::AlreadyExists {
+    options.open(path).map_err(|err| {
+        Failure::Io(if err.kind() == io::ErrorKind::AlreadyExists {
             format!("{FLAG}: the file already exists; it is never overwritten")
         } else {
             format!("{FLAG}: the file cannot be created ({})", err.kind())
         })
-    })?;
+    })
+}
+
+/// Writes `bytes` to `file` and synchronizes it to the disk.
+///
+/// # Errors
+///
+/// The kind of the error of the write or the synchronization that failed.
+pub fn write(file: &mut File, bytes: &[u8]) -> Result<(), io::ErrorKind> {
     file.write_all(bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|err| {
-            Failure::Io(format!(
-                "{FLAG}: the file cannot be written ({})",
-                err.kind()
-            ))
-        })
+        .map_err(|err| err.kind())
 }

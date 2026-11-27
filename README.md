@@ -131,9 +131,13 @@ file's owner and never install it setuid or setgid. The commands, the
 artifact formats, the seed file's rules (on Windows its protection is not
 checked) and the exit codes are in
 [the operator CLI proposal](docs/proposals/operator-cli-artifacts.md).
-Two online commands, `preview` and `status`, only read: they ask the
-service over its deployment-local Unix socket and change nothing (not on
-Windows); the commands that write are not in this build. They are in
+Those offline commands read no socket. Five online commands do: they talk
+to the service over its deployment-local Unix socket, on the service's host
+(not on Windows). `bootstrap`, `issue-challenge` (which writes the
+challenge to a new `--out`) and `restore` write, each with one request
+that is never repeated: a write whose outcome is unknown exits 5 with the
+command that reconciles it; `preview` and `status` only read and change
+nothing. They are in
 [the online commands proposal](docs/proposals/operator-cli-online.md).
 
 ```bash

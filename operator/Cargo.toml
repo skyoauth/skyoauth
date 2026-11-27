@@ -37,7 +37,8 @@ zeroize = { version = "1.9.2", default-features = false }
 # Reads the fixture files.
 serde_json = "1.0.154"
 
-# The offline operator command line (docs/proposals/operator-cli-artifacts.md).
+# The operator command line: offline (docs/proposals/operator-cli-artifacts.md)
+# and online, over the local socket (docs/proposals/operator-cli-online.md).
 # No unit-test target of its own (one test target per CI job): the
 # `operator` target runs the built binary.
 [[bin]]

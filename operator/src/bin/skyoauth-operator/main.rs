@@ -19,11 +19,20 @@
 //!   it ([`verify_response`](skyoauth_operator::recovery::verify_response)).
 //!
 //!
-//! And two online, which read the service's state over its
-//! deployment-local Unix socket and change nothing there (Unix only:
-//! elsewhere they are parsed, then refused with exit 2; slice 1 of the
-//! proposal, whose writes `bootstrap`, `issue-challenge` and `restore` are
-//! not implemented and are refused with exit 2):
+//! The offline commands read no socket. Five more are online: they talk to
+//! the service over its deployment-local Unix socket, on the service's host
+//! (Unix only: elsewhere they are parsed, then refused with exit 2). Three
+//! write, each with one request, never repeated:
+//!
+//! - `bootstrap` sends the first operator and the recovery key of a new
+//!   instance and prints what the service wrote;
+//! - `issue-challenge` asks for a recovery challenge and writes the reply
+//!   line, verbatim, to a new file (`--out`, created before the request is
+//!   sent): the challenge artifact;
+//! - `restore` sends a response artifact and prints the replacement it
+//!   enrolled and the credential IDs it revoked;
+//!
+//! and two read and change nothing there:
 //!
 //! - `preview` sends a response artifact and prints what its restore would
 //!   enroll;
@@ -35,11 +44,12 @@
 //! Results go to standard output, errors to standard error, both
 //! deterministic for the same arguments and files (the system clock aside,
 //! which `--now` replaces, and the service's answers). Nothing reads the
-//! environment. The only file written is `sign`'s `--out`, created new; the
-//! only private key is the seed of `sign`'s `--seed-file`, read from that
-//! file only, never shown. No signature is shown: `sign` writes it to
-//! `--out` only, and `preview` sends it to the socket only. No message names
-//! a path, the socket's included.
+//! environment. The only files written are the `--out` of `sign` and of
+//! `issue-challenge`, each created new; the only private key is the seed of
+//! `sign`'s `--seed-file`, read from that file only, never shown. No
+//! signature is shown: `sign` writes it to `--out` only, and `preview` and
+//! `restore` send it to the socket only. No message names a path, the
+//! socket's included.
 //!
 //! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`],
 //! [`EXIT_NOT_CONFIRMED`], [`EXIT_UNKNOWN`], [`EXIT_UNCHANGED`].
@@ -49,7 +59,13 @@
 mod args;
 mod artifact;
 #[cfg(unix)]
+mod cmd_bootstrap;
+#[cfg(unix)]
+mod cmd_issue_challenge;
+#[cfg(unix)]
 mod cmd_preview;
+#[cfg(unix)]
+mod cmd_restore;
 mod cmd_sign;
 #[cfg(unix)]
 mod cmd_status;
@@ -80,15 +96,15 @@ const EXIT_REFUSED: u8 = 1;
 
 /// The command line is wrong: an unknown command or flag, a flag missing,
 /// repeated or without a value, a value that does not parse; an online
-/// write this build does not implement; an online command on a platform
-/// without Unix sockets.
+/// command on a platform without Unix sockets.
 const EXIT_USAGE: u8 = 2;
 
 /// A file could not be read (missing, not a regular file, too large,
 /// unreadable; for a seed file also a symbolic link, or on Unix not owned
 /// by the effective user or not of mode 0600), the system clock could not
 /// be read, `--out` exists or could not be created or written, or the
-/// output could not be written (whatever the command's result was).
+/// output could not be written (whatever the command's result was; after a
+/// write that succeeded, the message says what was committed).
 const EXIT_IO: u8 = 3;
 
 /// `verify-challenge`: every given check passed, but the replacement is not
@@ -97,8 +113,9 @@ const EXIT_IO: u8 = 3;
 const EXIT_NOT_CONFIRMED: u8 = 4;
 
 /// The outcome of an online write is unknown: the service may have
-/// committed it. Do not repeat it: reconcile first. No command of this
-/// build writes, so none exits 5 yet; `preview` and `status` never do.
+/// committed it (`bootstrap`, `issue-challenge`, `restore`). Do not repeat
+/// it: the message's next line says what to run first. `preview` and
+/// `status` never exit 5.
 const EXIT_UNKNOWN: u8 = 5;
 
 /// Nothing was changed by this command: the request was not sent, or the
@@ -152,6 +169,20 @@ impl Failure {
             | Self::Unchanged(message) => message,
         }
     }
+
+    /// The same failure, `line` added to its message on a line of its own.
+    #[cfg(unix)]
+    fn with_line(mut self, line: &str) -> Self {
+        let (Self::Refused(message)
+        | Self::Usage(message)
+        | Self::Io(message)
+        | Self::NotConfirmed(message)
+        | Self::Unknown(message)
+        | Self::Unchanged(message)) = &mut self;
+        message.push('\n');
+        message.push_str(line);
+        self
+    }
 }
 
 /// What a command prints on standard output, and how it ended. The output
@@ -180,11 +211,46 @@ fn run(command: Command) -> Outcome {
         Command::Sign(flags) => cmd_sign::run(&flags),
         Command::VerifyResponse(flags) => cmd_verify_response::run(&flags),
         #[cfg(unix)]
+        Command::Bootstrap(flags) => cmd_bootstrap::run(&flags),
+        #[cfg(unix)]
+        Command::IssueChallenge(flags) => cmd_issue_challenge::run(&flags),
+        #[cfg(unix)]
         Command::Preview(flags) => cmd_preview::run(&flags),
+        #[cfg(unix)]
+        Command::Restore(flags) => cmd_restore::run(&flags),
         #[cfg(unix)]
         Command::Status(flags) => cmd_status::run(&flags),
         #[cfg(not(unix))]
-        online @ (Command::Preview(_) | Command::Status(_)) => no_socket(&online),
+        online @ (Command::Bootstrap(_)
+        | Command::IssueChallenge(_)
+        | Command::Preview(_)
+        | Command::Restore(_)
+        | Command::Status(_)) => no_socket(&online),
+    }
+}
+
+/// What a write that succeeded committed, said after its output could not
+/// be written, so the operator does not repeat it
+/// (`docs/proposals/operator-cli-online.md`, "Output and redaction").
+const fn committed(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Bootstrap(_) => Some(
+            "the bootstrap committed, but its output cannot be written: run status --reconcile \
+             bootstrap",
+        ),
+        Command::IssueChallenge(_) => {
+            Some("the challenge was issued and --out is complete, but its output cannot be written")
+        }
+        Command::Restore(_) => Some(
+            "the restore committed, but its output cannot be written: run status --reconcile \
+             restore",
+        ),
+        Command::Help
+        | Command::VerifyChallenge(_)
+        | Command::Sign(_)
+        | Command::VerifyResponse(_)
+        | Command::Preview(_)
+        | Command::Status(_) => None,
     }
 }
 
@@ -208,9 +274,12 @@ fn write_output(output: &str) -> io::Result<()> {
 }
 
 fn main() -> ExitCode {
-    let outcome = match args::parse(std::env::args_os().skip(1)) {
-        Ok(command) => run(command),
-        Err(failure) => failure.into(),
+    let (outcome, committed) = match args::parse(std::env::args_os().skip(1)) {
+        Ok(command) => {
+            let committed = committed(&command);
+            (run(command), committed)
+        }
+        Err(failure) => (failure.into(), None),
     };
     let mut code = match &outcome.result {
         Ok(()) => EXIT_OK,
@@ -232,6 +301,10 @@ fn main() -> ExitCode {
             "skyoauth-operator: the output cannot be written ({})\n",
             err.kind()
         ));
+        if let (Ok(()), Some(committed)) = (&outcome.result, committed) {
+            errors.push_str(committed);
+            errors.push('\n');
+        }
     }
     if !errors.is_empty() {
         let mut stderr = io::stderr().lock();

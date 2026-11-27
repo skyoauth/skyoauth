@@ -72,6 +72,34 @@ pub fn failure(op: Op, err: CallError) -> Failure {
     }
 }
 
+/// The failure of a call of the write `op` (`bootstrap`, `issue-challenge`,
+/// `restore`), as [`failure`] gives it; an unknown outcome (exit 5) is
+/// followed, on its own line, by `next`, the fixed text of what to run
+/// instead of repeating the write (`docs/proposals/operator-cli-online.md`,
+/// "Unknown outcomes and reconciling").
+pub fn write_failure(op: Op, err: CallError, next: &str) -> Failure {
+    match failure(op, err) {
+        Failure::Unknown(message) => Failure::Unknown(format!("{message}\n{next}")),
+        other => other,
+    }
+}
+
+/// What a refusal that may hide an earlier restore adds to its message: a
+/// `not_restorable` from `restore` and a `conflict` from `issue-challenge`
+/// (lead ruling (c)). The proposal adds it "after any retry"; a command
+/// cannot know whether it is one, so it is added to every such refusal.
+pub const AFTER_A_RETRY: &str = "if an earlier restore of this challenge may have committed, run \
+                                 status --reconcile restore on the original response";
+
+/// `failure` with [`AFTER_A_RETRY`] added to its message when it is a
+/// refusal (exit 1).
+pub fn after_a_retry(failure: Failure) -> Failure {
+    match failure {
+        Failure::Refused(message) => Failure::Refused(format!("{message}; {AFTER_A_RETRY}")),
+        other => other,
+    }
+}
+
 /// Why a request was not sent: the library's fixed text, a refused socket
 /// path named by its flag and its problem, an error by its kind.
 fn not_sent(why: NotSent) -> String {

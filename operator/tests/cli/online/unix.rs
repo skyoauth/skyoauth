@@ -11,7 +11,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
     thread,
@@ -95,6 +95,26 @@ enum Answer {
     Stall(Vec<u8>),
 }
 
+/// A file the fake service looks at when it accepts a connection (an
+/// `--out`), and what it saw each time: `None` when there was no file,
+/// else its length and its permission bits.
+#[derive(Default)]
+struct Watch {
+    path: Mutex<Option<PathBuf>>,
+    seen: Mutex<Vec<Option<(u64, u32)>>>,
+}
+
+impl Watch {
+    fn look(&self) {
+        if let Some(path) = self.path.lock().unwrap().as_ref() {
+            let seen = fs::symlink_metadata(path)
+                .ok()
+                .map(|metadata| (metadata.len(), metadata.mode() & 0o7777));
+            self.seen.lock().unwrap().push(seen);
+        }
+    }
+}
+
 /// A fake service: a listener at `s`, mode 0600, in a [`Private`]
 /// directory, that answers its connections in order with its answers and
 /// keeps every request it read. A connection after the last answer is
@@ -103,6 +123,7 @@ struct Fake {
     dir: Private,
     socket: PathBuf,
     done: Arc<AtomicBool>,
+    watch: Arc<Watch>,
     server: Option<thread::JoinHandle<Vec<Vec<u8>>>>,
 }
 
@@ -114,13 +135,27 @@ impl Fake {
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
         let done = Arc::new(AtomicBool::new(false));
         let server_done = Arc::clone(&done);
-        let server = thread::spawn(move || serve(&listener, answers, &server_done));
+        let watch = Arc::new(Watch::default());
+        let server_watch = Arc::clone(&watch);
+        let server = thread::spawn(move || serve(&listener, answers, &server_done, &server_watch));
         Self {
             dir,
             socket,
             done,
+            watch,
             server: Some(server),
         }
+    }
+
+    /// Looks at `path` each time a connection is accepted, before its
+    /// request is read.
+    fn watch(&self, path: &Path) {
+        *self.watch.path.lock().unwrap() = Some(path.to_owned());
+    }
+
+    /// What [`Fake::watch`] saw, once per connection.
+    fn seen(&self) -> Vec<Option<(u64, u32)>> {
+        self.watch.seen.lock().unwrap().clone()
     }
 
     /// A fake service that answers each of `lines` in order.
@@ -175,7 +210,12 @@ impl Drop for Fake {
 /// The fake service's thread: accepts until the run is over (bounded),
 /// reads each request to the end of its stream (the client closes its
 /// write half) and answers it.
-fn serve(listener: &UnixListener, answers: Vec<Answer>, done: &AtomicBool) -> Vec<Vec<u8>> {
+fn serve(
+    listener: &UnixListener,
+    answers: Vec<Answer>,
+    done: &AtomicBool,
+    watch: &Watch,
+) -> Vec<Vec<u8>> {
     listener.set_nonblocking(true).unwrap();
     let mut answers = answers.into_iter();
     let mut received = Vec::new();
@@ -183,6 +223,7 @@ fn serve(listener: &UnixListener, answers: Vec<Answer>, done: &AtomicBool) -> Ve
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                watch.look();
                 stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(TEST_WAIT)).unwrap();
                 stream.set_write_timeout(Some(TEST_WAIT)).unwrap();
@@ -1298,4 +1339,873 @@ fn no_value_given_is_printed() {
     assert_eq!(run.code, 6, "{run:?}");
     assert!(!run.stderr.contains("SENTINEL"), "{run:?}");
     assert!(fake.finish().is_empty());
+}
+
+// The writes: `bootstrap`, `issue-challenge` and `restore`.
+
+/// The values of the fixture's golden `issue_challenge` request: the
+/// replacement's key (its DER in hexadecimal, never printed), the new
+/// recovery key, and the public identity of that key, which the challenge
+/// of the golden `issued` reply names.
+const REPLACEMENT_SPKI_HEX: &str =
+    "302a300506032b65700321000606060606060606060606060606060606060606060606060606060606060606";
+const NEW_KEY: &str = "2012cb90ca60e8e5d8daf66e2272d2233e0486d557e8c66141ed8920177d7eb7";
+const REPLACEMENT_IDENTITY: &str =
+    "spki-sha256:85b477f03212efe014a2d764ff841ab5b464d939b39c0f044c57c74c278e4944";
+
+/// The fixed texts of what to run after a write of unknown outcome
+/// (docs/proposals/operator-cli-online.md, "Unknown outcomes and
+/// reconciling"), written here, not read from the binary.
+const BOOTSTRAP_NEXT: &str =
+    "run skyoauth-operator status --reconcile bootstrap with the same flags";
+const RESTORE_NEXT: &str =
+    "run skyoauth-operator status --reconcile restore --response FILE with the same socket flags";
+const ISSUE_NEXT: &str =
+    "no reconcile is possible: issue again; the first challenge, if it was issued, expires unused";
+
+/// The last line of every failure of `issue-challenge` once `--out` exists.
+const LEFT_EMPTY: &str = "--out was created and is left empty: remove it";
+
+/// What a `not_restorable` from `restore` and a `conflict` from
+/// `issue-challenge` add to their message (lead ruling (c)).
+const AFTER_A_RETRY: &str = "; if an earlier restore of this challenge may have committed, run \
+                             status --reconcile restore on the original response";
+
+/// The ends of the successes of the writes.
+const BOOTSTRAP_OK: &str = "result: ok; the bootstrap committed; keep this output: \
+                            verify-challenge needs the instance ID and the epoch\n";
+const ISSUE_OK: &str = "result: ok; the challenge was issued and written to --out; check it on \
+                        the workstation with verify-challenge\n";
+const RESTORE_OK: &str = "result: ok; the restore committed; do not repeat it\n";
+
+/// A write command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    Bootstrap,
+    Issue,
+    Restore,
+}
+
+impl Write {
+    const ALL: [Self; 3] = [Self::Bootstrap, Self::Issue, Self::Restore];
+
+    const fn command(self) -> &'static str {
+        match self {
+            Self::Bootstrap => "bootstrap",
+            Self::Issue => "issue-challenge",
+            Self::Restore => "restore",
+        }
+    }
+
+    const fn op(self) -> Op {
+        match self {
+            Self::Bootstrap => Op::Bootstrap,
+            Self::Issue => Op::IssueChallenge,
+            Self::Restore => Op::Restore,
+        }
+    }
+
+    /// The fixture's golden request and reply of this write.
+    fn golden(self) -> (Vec<u8>, Vec<u8>) {
+        match self {
+            Self::Bootstrap => (golden_request("bootstrap"), golden_reply("bootstrapped")),
+            Self::Issue => (golden_request("issue_challenge"), golden_reply("issued")),
+            Self::Restore => (golden_request("restore"), golden_reply("restored")),
+        }
+    }
+
+    const fn next(self) -> &'static str {
+        match self {
+            Self::Bootstrap => BOOTSTRAP_NEXT,
+            Self::Issue => ISSUE_NEXT,
+            Self::Restore => RESTORE_NEXT,
+        }
+    }
+
+    /// The files of this write's golden request, in `fake`'s directory, and
+    /// its flags but the socket's; for an issue also its `--out` (not yet
+    /// created).
+    fn flags(self, fake: &Fake) -> (Vec<OsString>, Option<PathBuf>) {
+        match self {
+            Self::Bootstrap => {
+                let spki = fake.dir.file("spki", &unhex(SPKI_HEX));
+                let mut rest: Vec<OsString> = vec!["--instance-id".into(), INSTANCE.into()];
+                rest.extend(path_flag("--credential-spki", &spki));
+                rest.extend(
+                    ["--trust-anchor", ANCHOR, "--recovery-key", RECOVERY_KEY].map(OsString::from),
+                );
+                (rest, None)
+            }
+            Self::Issue => {
+                let spki = fake.dir.file("spki", &unhex(REPLACEMENT_SPKI_HEX));
+                let out = fake.dir.0.join("challenge");
+                let mut rest = path_flag("--credential-spki", &spki);
+                rest.extend(
+                    ["--trust-anchor", ANCHOR, "--new-recovery-key", NEW_KEY].map(OsString::from),
+                );
+                rest.extend(path_flag("--out", &out));
+                (rest, Some(out))
+            }
+            Self::Restore => {
+                let response = fake.dir.file("response", &golden_response());
+                (path_flag("--response", &response), None)
+            }
+        }
+    }
+}
+
+/// What a write's run must never print, besides what [`online`] checks:
+/// the values given on the command line or in its files (the keys, the
+/// trust anchor, the replacement's DER) and the challenge's bytes.
+fn write_hidden(fake: &Fake) -> Vec<String> {
+    let issued = golden_values("issued");
+    let challenge = text(&issued, "challenge");
+    let mut hidden = fake.hidden();
+    hidden.extend(
+        [
+            RECOVERY_KEY,
+            NEW_KEY,
+            ANCHOR,
+            REPLACEMENT_SPKI_HEX,
+            &challenge[..32],
+            &challenge[challenge.len() - 32..],
+        ]
+        .map(String::from),
+    );
+    hidden
+}
+
+/// Runs `write` against `fake` with its golden flags and `extra`.
+fn run_write(fake: &Fake, write: Write, extra: &[&str]) -> (Run, Option<PathBuf>) {
+    let (mut rest, out) = write.flags(fake);
+    rest.extend(extra.iter().map(OsString::from));
+    let mut arguments: Vec<OsString> = vec![write.command().into()];
+    arguments.extend(fake.flags());
+    arguments.extend(rest);
+    (online(&arguments, &write_hidden(fake)), out)
+}
+
+/// The standard error of a write that did not succeed with exit `code`:
+/// the cause, then for exit 5 what to run, for an issue the `--out` left
+/// empty, for exit 6 the line that it may be run again.
+fn write_stderr(write: Write, code: i32, cause: &str) -> String {
+    let mut stderr = format!("skyoauth-operator: {cause}\n");
+    if code == 5 {
+        stderr.push_str(write.next());
+        stderr.push('\n');
+    }
+    if write == Write::Issue {
+        stderr.push_str(LEFT_EMPTY);
+        stderr.push('\n');
+    }
+    if code == 6 {
+        stderr.push_str(UNCHANGED_NEXT);
+    }
+    stderr
+}
+
+/// An `--out` that the issue created and left empty: a file of mode 0600.
+fn assert_left_empty(out: &Path) {
+    let metadata = fs::symlink_metadata(out).expect("--out was created");
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 0);
+    assert_eq!(metadata.mode() & 0o7777, 0o600);
+}
+
+/// The reply line of a `restore` that revoked `count` credentials and lists
+/// `ids`, the golden `restored` otherwise: its members in the service's
+/// order, each as `serde_json` writes it.
+fn restored_line(count: usize, ids: &[String]) -> Vec<u8> {
+    let mut values = golden_values("restored");
+    values["revoked_credential_count"] = Value::from(count);
+    values["revoked_credential_ids"] = Value::from(ids.to_vec());
+    let members: Vec<String> = list(&wire_fixture()["replies"]["restored"], "members")
+        .iter()
+        .map(|member| {
+            let name = member[0].as_str().unwrap();
+            format!(
+                "\"{name}\":{}",
+                serde_json::to_string(&values[name]).unwrap()
+            )
+        })
+        .collect();
+    format!("{{{}}}\n", members.join(",")).into_bytes()
+}
+
+/// The output of a `restore` whose reply is the golden `restored` with
+/// `count` revoked and `ids` listed.
+fn restore_output(count: usize, ids: &[String], complete: bool) -> String {
+    let mut out = format!(
+        "admin_id: \"adm_0000000000000g000000000002\"\n\
+         credential_id: \"cred_0000000000000g000000000002\"\n\
+         binding_id: \"role_0000000000000g000000000002\"\n\
+         revoked_credential_count: {count}\n\
+         revoked_credential_ids: {}\n",
+        ids.len()
+    );
+    for id in ids {
+        out.push_str(&format!("revoked_credential_id: {}\n", shown(id)));
+    }
+    out.push_str(&format!(
+        "revoked_credential_ids_complete: {}\nrecovery_key_epoch: 2\nrecovery_state_revision: 2\n",
+        if complete { "yes" } else { "no" }
+    ));
+    if complete {
+        out.push_str(RESTORE_OK);
+    } else {
+        out.push_str(
+            "result: ok; the restore committed; do not repeat it; not every revoked ID is \
+             listed: skyoauth-operator status --response FILE with the same socket flags lists \
+             every one\n",
+        );
+    }
+    out
+}
+
+/// The builder of `restore` replies writes the golden line.
+#[test]
+fn the_restored_line_built_here_is_the_golden_one() {
+    assert_eq!(
+        restored_line(1, &["cred_0000000000000g000000000001".to_owned()]),
+        golden_reply("restored")
+    );
+}
+
+/// Each write sends its golden request, byte for byte, over one connection,
+/// and prints the golden reply's members in their order, then its result:
+/// exit 0. `bootstrap` prints what it wrote; `restore` the replacement, the
+/// revoked IDs and that the list is complete.
+#[test]
+fn each_write_sends_its_golden_request_and_prints_the_reply() {
+    for write in Write::ALL {
+        let (request, reply) = write.golden();
+        let fake = Fake::lines(&[reply]);
+        let (run, _) = run_write(&fake, write, &[]);
+        assert_eq!(fake.finish(), [request], "{write:?}");
+        let stdout = match write {
+            Write::Bootstrap => format!(
+                "instance_id: \"{INSTANCE}\"\n\
+                 admin_id: \"adm_0000000000000g000000000001\"\n\
+                 credential_id: \"cred_0000000000000g000000000001\"\n\
+                 binding_id: \"role_0000000000000g000000000001\"\n\
+                 recovery_key_epoch: 1\n{BOOTSTRAP_OK}"
+            ),
+            Write::Issue => format!(
+                "operation_id: \"{OPERATION}\"\n\
+                 expires_at: 1790000300000000\n\
+                 expected_revision: 1\n\
+                 replacement_identity: \"{REPLACEMENT_IDENTITY}\"\n{ISSUE_OK}"
+            ),
+            Write::Restore => {
+                restore_output(1, &["cred_0000000000000g000000000001".to_owned()], true)
+            }
+        };
+        assert_eq!(
+            run,
+            Run {
+                code: 0,
+                stdout,
+                stderr: String::new(),
+            },
+            "{write:?}"
+        );
+    }
+}
+
+/// `issue-challenge` creates `--out` before it sends its request (the
+/// service sees an empty file of mode 0600 when it accepts the
+/// connection), and writes to it the reply line exactly as served, its
+/// newline included; `verify-challenge` accepts that file with the
+/// printed `replacement_identity`. The request of a trust anchor that needs
+/// escapes is the fixture's golden one too.
+#[test]
+fn issue_challenge_writes_the_reply_line_verbatim() {
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let out = fake.dir.0.join("challenge");
+    fake.watch(&out);
+    let (run, _) = run_write(&fake, Write::Issue, &[]);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(fs::read(&out).unwrap(), golden_reply("issued"));
+    assert_eq!(fs::symlink_metadata(&out).unwrap().mode() & 0o7777, 0o600);
+    let identity = run
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("replacement_identity: "))
+        .unwrap()
+        .trim_matches('"')
+        .to_owned();
+    let mut arguments: Vec<OsString> = vec!["verify-challenge".into()];
+    arguments.extend(path_flag("--challenge", &out));
+    arguments.extend(
+        [
+            "--instance-id",
+            INSTANCE,
+            "--epoch",
+            "1",
+            "--replacement-identity",
+            &identity,
+            "--trust-anchor",
+            ANCHOR,
+            "--new-recovery-key",
+            NEW_KEY,
+            "--now",
+            "1790000000000000",
+        ]
+        .map(OsString::from),
+    );
+    let verified = online(&arguments, &[]);
+    assert_eq!(verified.code, 0, "{verified:?}");
+    assert!(
+        verified.stdout.contains("replacement_confirmed: yes"),
+        "{verified:?}"
+    );
+    let seen = fake.seen();
+    assert_eq!(fake.finish(), [golden_request("issue_challenge")]);
+    assert_eq!(seen, [Some((0, 0o600))], "--out before the request");
+
+    // The golden request whose trust anchor needs escapes.
+    let case = golden_case("golden_requests", "issue_challenge_escapes");
+    let values = &case["values"];
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let spki = fake
+        .dir
+        .file("spki", &unhex(text(values, "credential_spki")));
+    let out = fake.dir.0.join("challenge");
+    let mut rest = path_flag("--credential-spki", &spki);
+    rest.extend(
+        [
+            "--trust-anchor",
+            text(values, "trust_anchor_ref"),
+            "--new-recovery-key",
+            text(values, "new_recovery_public_key"),
+        ]
+        .map(OsString::from),
+    );
+    rest.extend(path_flag("--out", &out));
+    let run = fake.run("issue-challenge", &rest);
+    assert_eq!(run.code, 0, "{run:?}");
+    assert_eq!(fs::read(&out).unwrap(), golden_reply("issued"));
+    assert_eq!(fake.finish(), [golden_request("issue_challenge_escapes")]);
+}
+
+/// An `--out` that exists is exit 3 with nothing sent (no connection at
+/// all), and its bytes are kept; so is one that cannot be created (its
+/// directory missing). A missing `--credential-spki` is exit 3 before
+/// `--out` is created.
+#[test]
+fn issue_challenge_sends_nothing_without_a_new_out() {
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let out = fake.dir.file("challenge", b"kept");
+    let (run, _) = run_write(&fake, Write::Issue, &[]);
+    assert_eq!(
+        run,
+        Run {
+            code: 3,
+            stdout: String::new(),
+            stderr: "skyoauth-operator: --out: the file already exists; it is never \
+                     overwritten\n"
+                .into(),
+        }
+    );
+    assert_eq!(fs::read(&out).unwrap(), b"kept");
+    assert!(fake.finish().is_empty());
+
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let (mut rest, _) = Write::Issue.flags(&fake);
+    let missing = fake.dir.0.join("missing").join("challenge");
+    let at = rest.iter().position(|flag| flag == "--out").unwrap();
+    rest[at + 1] = missing.clone().into();
+    let run = fake.run("issue-challenge", &rest);
+    assert_eq!(
+        (run.code, run.stderr),
+        (
+            3,
+            format!(
+                "skyoauth-operator: --out: the file cannot be created ({})\n",
+                io::ErrorKind::NotFound
+            )
+        )
+    );
+    assert!(fake.finish().is_empty());
+
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let (mut rest, out) = Write::Issue.flags(&fake);
+    rest[1] = fake.dir.0.join("no-spki").into();
+    let run = fake.run("issue-challenge", &rest);
+    assert_eq!(
+        (run.code, run.stderr),
+        (
+            3,
+            format!(
+                "skyoauth-operator: --credential-spki: the file cannot be read ({})\n",
+                io::ErrorKind::NotFound
+            )
+        )
+    );
+    assert!(
+        !out.unwrap().exists(),
+        "--out created before the key was read"
+    );
+    assert!(fake.finish().is_empty());
+}
+
+/// Each refusal code after each write: `forbidden`, `invalid_request`,
+/// `conflict` and `not_restorable` are exit 1 with the library's text
+/// (`not_restorable` from `restore` and `conflict` from `issue-challenge`
+/// with the sentence of lead ruling (c), the others without it); the store
+/// failures `auth_unavailable` and `server_error` are an unknown outcome,
+/// exit 5, with what to run. One connection each; an issue's `--out` is
+/// left empty and named.
+#[test]
+fn each_refusal_of_a_write_is_exit_1_or_5() {
+    for write in Write::ALL {
+        for code in ErrorCode::ALL {
+            let fake = Fake::lines(&[golden_reply(&format!("error_{}", code.as_str()))]);
+            let (run, out) = run_write(&fake, write, &[]);
+            if let Some(out) = &out {
+                assert_left_empty(out);
+            }
+            assert_eq!(fake.finish(), [write.golden().0], "{write:?} {code:?}");
+            let (exit, cause) = match code {
+                ErrorCode::AuthUnavailable | ErrorCode::ServerError => (
+                    5,
+                    CallError::Unknown(UnknownOutcome::UncertainCommit(code)).to_string(),
+                ),
+                _ => {
+                    let retry = matches!(
+                        (write, code),
+                        (Write::Restore, ErrorCode::NotRestorable)
+                            | (Write::Issue, ErrorCode::Conflict)
+                    );
+                    (
+                        1,
+                        format!(
+                            "refused ({}): {}{}",
+                            code.as_str(),
+                            CallError::Refused(code),
+                            if retry { AFTER_A_RETRY } else { "" }
+                        ),
+                    )
+                }
+            };
+            assert_eq!(
+                run,
+                Run {
+                    code: exit,
+                    stdout: String::new(),
+                    stderr: write_stderr(write, exit, &cause),
+                },
+                "{write:?} {code:?}"
+            );
+        }
+    }
+}
+
+/// Every unknown reply of the fixture that the library reads as unknown
+/// after a write, sent after each write: exit 5 (never 6: the write may
+/// have committed), the library's reason and what to run, nothing on
+/// standard output, one connection; an issue's `--out` left empty. Also an
+/// issue whose reply does not match its challenge (`ChallengeMismatch`):
+/// nothing is written to `--out`.
+#[test]
+fn every_unknown_reply_of_a_write_is_exit_5() {
+    let mut tried = std::collections::BTreeSet::new();
+    let mut mismatch = golden_values("issued");
+    mismatch["expected_revision"] = Value::from(2);
+    let mismatch = format!(
+        "{{\"operation_id\":\"{OPERATION}\",\"expires_at\":1790000300000000,\
+         \"expected_revision\":2,\"challenge\":\"{}\"}}\n",
+        text(&mismatch, "challenge")
+    )
+    .into_bytes();
+    let mut replies: Vec<(String, Vec<u8>)> = list(&wire_fixture(), "unknown_replies")
+        .iter()
+        .map(|case| (text(case, "case").to_owned(), parts(case)))
+        .collect();
+    replies.push(("challenge_mismatch".to_owned(), mismatch));
+    for write in Write::ALL {
+        for (name, reply) in &replies {
+            let why = match parse_reply(write.op(), reply) {
+                Err(CallError::Unknown(why)) => why,
+                Ok(_) if name == "challenge_mismatch" && write == Write::Issue => {
+                    UnknownOutcome::ChallengeMismatch
+                }
+                _ => continue,
+            };
+            let fake = Fake::lines(std::slice::from_ref(reply));
+            let (run, out) = run_write(&fake, write, &[]);
+            if let Some(out) = &out {
+                assert_left_empty(out);
+            }
+            assert_eq!(fake.finish(), [write.golden().0], "{write:?} {name}");
+            assert_eq!(
+                run,
+                Run {
+                    code: 5,
+                    stdout: String::new(),
+                    stderr: write_stderr(write, 5, &CallError::Unknown(why).to_string()),
+                },
+                "{write:?} {name}"
+            );
+            tried.insert((write.command(), name.clone()));
+        }
+    }
+    for write in Write::ALL {
+        let count = tried
+            .iter()
+            .filter(|(command, _)| *command == write.command())
+            .count();
+        assert!(count >= 20, "{write:?}: {count}");
+    }
+    assert!(tried.contains(&("issue-challenge", "challenge_mismatch".to_owned())));
+    assert!(tried.contains(&("restore", "empty".to_owned())));
+}
+
+/// The waits after a write: a service that reads the request and never
+/// answers is unknown at `--total-wait`, one whose reply stops after its
+/// first bytes at `--idle-wait`, and one that closes the connection
+/// without a reply at once: exit 5 with what to run, after one connection.
+#[test]
+fn a_write_cut_off_after_it_was_sent_is_exit_5() {
+    for write in Write::ALL {
+        let (request, reply) = write.golden();
+        for (answer, waits, why) in [
+            (
+                Answer::Stall(Vec::new()),
+                ["--total-wait", "1", "--idle-wait", "30"],
+                UnknownOutcome::TimedOut,
+            ),
+            (
+                Answer::Stall(reply[..5].to_vec()),
+                ["--total-wait", "30", "--idle-wait", "1"],
+                UnknownOutcome::TimedOut,
+            ),
+            (
+                Answer::Line(Vec::new()),
+                ["--total-wait", "30", "--idle-wait", "30"],
+                UnknownOutcome::Truncated,
+            ),
+        ] {
+            let fake = Fake::new(vec![answer]);
+            let start = Instant::now();
+            let (run, out) = run_write(&fake, write, &waits);
+            let took = start.elapsed();
+            if let Some(out) = &out {
+                assert_left_empty(out);
+            }
+            assert_eq!(
+                fake.finish(),
+                std::slice::from_ref(&request),
+                "{write:?} {waits:?}"
+            );
+            assert_eq!(
+                run,
+                Run {
+                    code: 5,
+                    stdout: String::new(),
+                    stderr: write_stderr(write, 5, &CallError::Unknown(why).to_string()),
+                },
+                "{write:?} {waits:?}"
+            );
+            assert!(took < TEST_WAIT, "{write:?} {waits:?}: {took:?}");
+        }
+    }
+}
+
+/// A write that is not sent is exit 6, nothing received: a socket path the
+/// client refuses (mode 0666), and a connection refused (a socket file with
+/// no listener). An issue's `--out` was created and is left empty, and the
+/// message says so.
+#[test]
+fn a_write_not_sent_is_exit_6() {
+    for write in Write::ALL {
+        let fake = Fake::lines(&[write.golden().1]);
+        fs::set_permissions(&fake.socket, fs::Permissions::from_mode(0o666)).unwrap();
+        let (run, out) = run_write(&fake, write, &[]);
+        if let Some(out) = &out {
+            assert_left_empty(out);
+        }
+        assert!(fake.finish().is_empty(), "{write:?}");
+        assert_eq!(
+            run,
+            Run {
+                code: 6,
+                stdout: String::new(),
+                stderr: write_stderr(
+                    write,
+                    6,
+                    &format!(
+                        "the request was not sent: --socket: {}",
+                        path_problem("WrongMode")
+                    )
+                ),
+            },
+            "{write:?}"
+        );
+
+        let fake = Fake::lines(&[]);
+        let stale = fake.dir.0.join("stale");
+        drop(UnixListener::bind(&stale).unwrap());
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o600)).unwrap();
+        let (mut rest, out) = write.flags(&fake);
+        let mut arguments: Vec<OsString> = vec![write.command().into()];
+        let mut flags = fake.flags();
+        flags[1] = stale.into();
+        arguments.extend(flags);
+        arguments.append(&mut rest);
+        let run = online(&arguments, &write_hidden(&fake));
+        if let Some(out) = &out {
+            assert_left_empty(out);
+        }
+        assert!(fake.finish().is_empty(), "{write:?}");
+        assert_eq!(
+            run,
+            Run {
+                code: 6,
+                stdout: String::new(),
+                stderr: write_stderr(
+                    write,
+                    6,
+                    &format!(
+                        "the request was not sent: no connection to the local transport could \
+                         be made ({})",
+                        io::ErrorKind::ConnectionRefused
+                    )
+                ),
+            },
+            "{write:?}"
+        );
+    }
+}
+
+/// Refused before any connection, exit 1: a `restore` whose signature is
+/// not 64 bytes (63 or 65; never padded or cut), a `restore` and an
+/// `issue-challenge` whose request is over 64 KiB (the issue's `--out` is
+/// then not created), and a response artifact that is not one. The file
+/// errors of the writes are exit 3, also with no connection.
+#[test]
+fn write_inputs_refused_before_any_connection() {
+    let too_large = "refused (TooLarge): the request was not sent: the request line is larger \
+                     than 64 KiB";
+    let long_id = "o".repeat(64 * 1024 - 163);
+    for (artifact, cause) in [
+        (
+            response_artifact(OPERATION, &SIGNATURE[..126]),
+            "refused (Length): the signature is not 64 bytes",
+        ),
+        (
+            response_artifact(OPERATION, &format!("{SIGNATURE}00")),
+            "refused (Length): the signature is not 64 bytes",
+        ),
+        (response_artifact(&long_id, SIGNATURE), too_large),
+        (
+            b"{}\n".to_vec(),
+            "the response artifact is malformed: it is not {\"operation_id\":\"...\",\
+             \"signature\":\"...\"}",
+        ),
+    ] {
+        let fake = Fake::lines(&[golden_reply("restored")]);
+        let response = fake.dir.file("response", &artifact);
+        let run = fake.run("restore", &path_flag("--response", &response));
+        assert!(fake.finish().is_empty(), "{cause}");
+        assert_eq!(
+            run,
+            Run {
+                code: 1,
+                stdout: String::new(),
+                stderr: format!("skyoauth-operator: {cause}\n"),
+            }
+        );
+    }
+
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let (mut rest, out) = Write::Issue.flags(&fake);
+    let at = rest
+        .iter()
+        .position(|flag| flag == "--trust-anchor")
+        .unwrap();
+    rest[at + 1] = "a".repeat(64 * 1024).into();
+    let run = fake.run("issue-challenge", &rest);
+    assert_eq!(
+        (run.code, run.stderr),
+        (1, format!("skyoauth-operator: {too_large}\n"))
+    );
+    assert!(
+        !out.unwrap().exists(),
+        "--out created for a request too large"
+    );
+    assert!(fake.finish().is_empty());
+
+    let fake = Fake::lines(&[golden_reply("bootstrapped")]);
+    let not_found = io::ErrorKind::NotFound;
+    let empty = fake.dir.file("empty", b"");
+    let large = fake.dir.file("large", &vec![0x30; 4097]);
+    for (write, flag, path, cause) in [
+        (
+            Write::Bootstrap,
+            "--credential-spki",
+            fake.dir.0.join("missing"),
+            format!("--credential-spki: the file cannot be read ({not_found})"),
+        ),
+        (
+            Write::Bootstrap,
+            "--credential-spki",
+            empty,
+            "--credential-spki: the file is empty".to_owned(),
+        ),
+        (
+            Write::Issue,
+            "--credential-spki",
+            large,
+            "--credential-spki: the file is larger than 4096 bytes".to_owned(),
+        ),
+        (
+            Write::Restore,
+            "--response",
+            fake.dir.0.clone(),
+            "--response: not a regular file".to_owned(),
+        ),
+    ] {
+        let (mut rest, out) = write.flags(&fake);
+        let at = rest.iter().position(|given| given == flag).unwrap();
+        rest[at + 1] = path.into();
+        let run = fake.run(write.command(), &rest);
+        assert_eq!(
+            run,
+            Run {
+                code: 3,
+                stdout: String::new(),
+                stderr: format!("skyoauth-operator: {cause}\n"),
+            },
+            "{write:?} {cause}"
+        );
+        if let Some(out) = out {
+            assert!(!out.exists(), "{cause}");
+        }
+    }
+    assert!(fake.finish().is_empty());
+}
+
+/// `restore` sends one request only and says whether the reply lists every
+/// revoked ID: `yes` exactly when the list's length equals the count (none
+/// revoked included), else `no` and the command that lists the rest. A
+/// reply of 2500 revoked IDs lists the first 1000, each printed once.
+#[test]
+fn restore_says_whether_every_revoked_id_is_listed() {
+    let all = ids(2500);
+    for (count, listed, complete) in [
+        (0, 0, true),
+        (1000, 1000, true),
+        (2500, 1000, false),
+        (2, 1, false),
+    ] {
+        let fake = Fake::lines(&[restored_line(count, &all[..listed])]);
+        let (run, _) = run_write(&fake, Write::Restore, &[]);
+        assert_eq!(fake.finish(), [golden_request("restore")], "{count}");
+        assert_eq!(
+            run,
+            Run {
+                code: 0,
+                stdout: restore_output(count, &all[..listed], complete),
+                stderr: String::new(),
+            },
+            "{count} {listed}"
+        );
+        assert_eq!(
+            run.stdout.matches("revoked_credential_id: ").count(),
+            listed
+        );
+    }
+}
+
+/// A write that succeeded but whose output cannot be written (standard
+/// output a pipe whose reading end is closed) is exit 3, and standard
+/// error says what was committed, so it is not repeated; an issue's `--out`
+/// is complete. No signature or key is printed.
+#[test]
+fn a_write_whose_output_fails_is_exit_3() {
+    for (write, committed) in [
+        (
+            Write::Bootstrap,
+            "the bootstrap committed, but its output cannot be written: run status --reconcile \
+             bootstrap",
+        ),
+        (
+            Write::Issue,
+            "the challenge was issued and --out is complete, but its output cannot be written",
+        ),
+        (
+            Write::Restore,
+            "the restore committed, but its output cannot be written: run status --reconcile \
+             restore",
+        ),
+    ] {
+        let (request, reply) = write.golden();
+        let fake = Fake::lines(std::slice::from_ref(&reply));
+        let (rest, out) = write.flags(&fake);
+        let (reader, writer) = io::pipe().unwrap();
+        drop(reader);
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_skyoauth-operator"))
+            .arg(write.command())
+            .args(fake.flags())
+            .args(rest)
+            .stdin(std::process::Stdio::null())
+            .stdout(writer)
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .unwrap();
+        if let Some(out) = out {
+            assert_eq!(fs::read(&out).unwrap(), reply);
+        }
+        assert_eq!(fake.finish(), [request], "{write:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(3), "{write:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "skyoauth-operator: the output cannot be written ({})\n{committed}\n",
+                io::ErrorKind::BrokenPipe
+            ),
+            "{write:?}"
+        );
+    }
+}
+
+/// A write to `--out` that fails after the challenge was issued is exit 3,
+/// and says that the challenge was issued and to issue again (the binary
+/// runs under `ulimit -f 0`, with `SIGXFSZ` ignored, so its write fails
+/// with `EFBIG`). Nothing is printed on standard output.
+#[test]
+fn an_out_write_that_fails_after_the_issue_is_exit_3() {
+    let fake = Fake::lines(&[golden_reply("issued")]);
+    let (rest, out) = Write::Issue.flags(&fake);
+    let script = r#"trap "" XFSZ; ulimit -f 0 || exit 99; exec "$0" "$@""#;
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .arg(env!("CARGO_BIN_EXE_skyoauth-operator"))
+        .arg("issue-challenge")
+        .args(fake.flags())
+        .args(rest)
+        .stdin(std::process::Stdio::null())
+        // A coverage build writes its profile at exit, which `ulimit -f 0`
+        // would fail and report on standard error.
+        .env("LLVM_PROFILE_FILE", "/dev/null")
+        .output()
+        .expect("sh runs");
+    assert_eq!(fs::read(out.unwrap()).unwrap(), b"");
+    assert_eq!(fake.finish(), [golden_request("issue_challenge")]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(3), "{stdout}{stderr}");
+    assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        format!(
+            "skyoauth-operator: --out: the file cannot be written ({})\nthe challenge was \
+             issued, but --out cannot be written: issue again; --out may hold part of the \
+             challenge: remove it\n",
+            io::ErrorKind::FileTooLarge
+        )
+    );
 }

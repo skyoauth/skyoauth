@@ -1,7 +1,8 @@
 # Proposal: the online operator commands over the deployment-local socket (D2)
 
 Status: Ruled by the lead 2026-11-27 (all eight recommendations accepted);
-slice 1: status and preview implemented. This document changes no contract under `docs/contracts/` and no code. It
+slices 1 and 2 implemented: status and preview (slice 1), bootstrap,
+issue-challenge and restore (slice 2). This document changes no contract under `docs/contracts/` and no code. It
 extends [the offline command line](operator-cli-artifacts.md) (D1) with the
 commands that talk to the service's deployment-local transport. "D2" here
 names this slice of the operator command line, not the entry "D2 names" of
@@ -170,10 +171,10 @@ before any connection (exit 1, `refused (Length)`, as `verify_response`
 names it; proposed). `preview` prints `admin_id`, `credential_id`,
 `binding_id`, `new_recovery_key_epoch` and `expires_at`, and writes
 nothing on the service. `restore` prints `admin_id`, `credential_id`,
-`binding_id`, `recovery_key_epoch`, `recovery_state_revision`,
-`revoked_credential_count`, the reply's revoked IDs one per line, and
-`revoked_credential_ids_complete: yes|no` (complete exactly when the list's
-length equals the count). When it is `no`, it names the command that lists
+`binding_id`, `revoked_credential_count`, the reply's revoked IDs one per
+line, `revoked_credential_ids_complete: yes|no` (complete exactly when the
+list's length equals the count), `recovery_key_epoch` and
+`recovery_state_revision`, in the reply's member order. When it is `no`, it names the command that lists
 the rest (`status --response FILE`); `restore` itself sends one request
 only (proposed).
 
