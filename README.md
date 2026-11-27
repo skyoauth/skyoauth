@@ -184,13 +184,14 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
-  The job then runs three selections again as root, with a second local
+  The job then runs four selections again as root, with a second local
   user in `SKYOAUTH_IT_PEER_USER` (`--profile ci-root`, through
   `scripts/ci/root-transport-run.sh`), also when the first run failed:
   `skyoauth-service`'s `local_transport` integration tests, the operator's
-  `local_path` module and the scenario harness's `socket_path_fixture`
-  module, whose cross-UID and root-only checks only print a notice and
-  pass without root and that user. The step fails unless every listed
+  `local_path` module and its CLI test
+  `cli::sign::seed_file_protection_on_unix`, and the scenario harness's
+  `socket_path_fixture` module, whose cross-UID and root-only checks only
+  print a notice and pass without root and that user. The step fails unless every listed
   test ran and passed, the root-only tests the script names among them
   included, and on a notice that the peer user is missing or that
   root-only cases did not run; the job summary, also in the step log,
