@@ -261,6 +261,16 @@
 //!   identity, the trust anchor and the new key. The TTL is the
 //!   transport's setting ([`Settings::challenge_ttl`], default 5 minutes,
 //!   1 second to 15 minutes, OQ-LT-17), not the request's.
+//! - The `restore` reply lists at most [`MAX_REVOKED_IDS_PER_REPLY`]
+//!   revoked credential IDs, the first in byte order, with their exact
+//!   count (absent a tie): the list is complete when its length is the
+//!   count, and `status` pages through the rest. Both come from the
+//!   credentials whose `revoked_at` is the challenge's `consumed_at`, read
+//!   by the restore's transaction after the restore and before its
+//!   commit (the recovery module, "Membership by timestamp"); a failure of
+//!   that read rolls the restore back. The registry's `Restored` keeps
+//!   every ID; only the reply is bounded, so every reply is at most about
+//!   1.56 MB (1000 IDs of 255 escaped control characters).
 //! - `M` is returned only by `issue_challenge`: the workstation checks
 //!   it (the instance, the replacement, the expiry) and signs it. A
 //!   `restore` sends back the operation ID and the signature; the

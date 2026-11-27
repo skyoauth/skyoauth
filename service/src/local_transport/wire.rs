@@ -393,6 +393,52 @@ mod tests {
         );
     }
 
+    /// The worst `restore` reply: a full page of the longest IDs the
+    /// database allows (255 characters), each a control character that
+    /// serializes as a six-byte escape, with the other members at their
+    /// longest, stays far under the operator client's 4 MiB.
+    #[test]
+    fn a_full_page_of_the_worst_ids_is_under_the_clients_reply_limit() {
+        let worst = "\u{1}".repeat(255);
+        let ids = vec![worst.clone(); crate::local_transport::MAX_REVOKED_IDS_PER_REPLY];
+        let restored = Reply::Restored {
+            admin_id: worst.clone(),
+            credential_id: worst.clone(),
+            binding_id: worst.clone(),
+            revoked_credential_count: i64::MAX,
+            revoked_credential_ids: ids.clone(),
+            recovery_key_epoch: i64::MAX,
+            recovery_state_revision: i64::MAX,
+        };
+        let line = restored.line();
+        assert!(line.len() > 1000 * 6 * 255, "{}", line.len());
+        assert!(line.len() < 4 << 20, "{}", line.len());
+        let status = Reply::Status(Box::new(StatusReply {
+            server_time: i64::MIN,
+            instance_id: Some(worst.clone()),
+            recovery_key_epoch: Some(i64::MIN),
+            recovery_state_revision: Some(i64::MIN),
+            // The database allows a recovery key of 8192 bytes.
+            recovery_public_key: Some("ff".repeat(8192)),
+            operation_state: Some("not_found"),
+            expires_at: Some(i64::MIN),
+            settles_at: Some(i64::MIN),
+            restored_at: Some(i64::MIN),
+            admin_id: Some(worst.clone()),
+            credential_id: Some(worst.clone()),
+            binding_id: Some(worst.clone()),
+            revoked_credential_count: Some(i64::MIN),
+            revoked_credential_ids: Some(ids),
+            enrolled_state: Some("disabled"),
+            enrolled_admin_id: Some(worst.clone()),
+            enrolled_credential_id: Some(worst),
+            enrolled_trust_anchor_sha256: Some("ff".repeat(32)),
+        }));
+        let line = status.line();
+        assert!(line.len() < 1_600_000, "{}", line.len());
+        assert!(line.len() < 4 << 20, "{}", line.len());
+    }
+
     #[test]
     fn a_reply_is_one_line_of_its_members() {
         assert_eq!(

@@ -31,7 +31,7 @@ use crate::persistence::registry::{
     PLAN_TRUST_ANCHOR_REF, RecoveryChallenge, RecoveryStatus, RestoreRequest,
     SignedRecoveryResponse, StatusQuery, bootstrap_instance, get_recovery_state,
     is_lowercase_uuid_v7, issue_recovery_challenge, preview_recovery_response,
-    read_recovery_status, recovery_key, restore_operator,
+    read_recovery_status, recovery_key, restore_operator, revoked_by_restoration,
 };
 
 /// Every transaction of the transport: `restore_operator` runs only at
@@ -491,7 +491,12 @@ async fn preview(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Resu
     })
 }
 
-/// `restore`: [`restore_operator`], which verifies the signature itself.
+/// `restore`: [`restore_operator`], which verifies the signature itself,
+/// then, in the same transaction before the commit, the count and the
+/// first page of the credentials it revoked by the predicate `status` uses
+/// ([`revoked_by_restoration`]: a plain statement, no barrier), so the
+/// reply and a later `status` agree (absent a tie). A failure of that read
+/// rolls the restore back.
 async fn restore(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Result<Reply, Stop> {
     let signature = signature(&wire)?;
     let audit_event_id = new_id(shared, IdKind::AuditEvent)?;
@@ -511,23 +516,26 @@ async fn restore(shared: &Shared, wire: ResponseWire, deadline: Instant) -> Resu
                 rotation_audit_event_id: &rotation_audit_event_id,
                 now: shared.clock.now(),
             };
-            let result = restore_operator(&mut transaction, &response, &request)
-                .await
-                .map_err(|err| from_restore(&err));
+            let result = match restore_operator(&mut transaction, &response, &request).await {
+                Ok(restored) => revoked_by_restoration(&mut transaction, &wire.operation_id)
+                    .await
+                    .map(|revoked| (restored, revoked))
+                    .map_err(|err| from_status(&err)),
+                Err(err) => Err(from_restore(&err)),
+            };
             finish(transaction, result).await
         })
         .await
     }
     .await;
     settle(link, &restored);
-    let restored = restored?;
+    let (restored, revoked) = restored?;
     Ok(Reply::Restored {
         admin_id: restored.admin_id,
         credential_id: restored.credential_id,
         binding_id: restored.binding_id,
-        revoked_credential_count: i64::try_from(restored.revoked_credential_ids.len())
-            .map_err(|_| ErrorCode::ServerError)?,
-        revoked_credential_ids: restored.revoked_credential_ids,
+        revoked_credential_count: revoked.count,
+        revoked_credential_ids: revoked.ids,
         recovery_key_epoch: restored.recovery_key_epoch,
         recovery_state_revision: restored.recovery_state_revision,
     })
