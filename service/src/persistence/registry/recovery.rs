@@ -8,7 +8,10 @@
 //! verifies the signature, consumes the challenge once and, in the same
 //! savepoint, enrolls the replacement `security_admin` the challenge names,
 //! revokes every operator credential, rotates the recovery key and records
-//! the audit events.
+//! the audit events. [`read_recovery_status`] reports, without writing,
+//! the recovery state, a challenge's state and an mTLS key's enrollment
+//! for the reconcile of an uncertain commit, and [`revoked_by_restoration`]
+//! the credentials a restoration revoked (see "Reading the state").
 //!
 //! The maintainer ratified the ADRs directionally on 2026-11-24. The lead
 //! picks and inferred rulings below stay implementation choices that
@@ -422,6 +425,63 @@
 //! unconsumed, and the binary issues a new challenge. A retry of an issue
 //! that committed fails with `AlreadyExists` on `audit_event_pkey`.
 //!
+//! # Reading the state
+//!
+//! [`read_recovery_status`] backs the local transport's `status` operation
+//! (`docs/proposals/local-read-operation.md`, lead rulings of 2026-11-27):
+//! it changes no row, appends no audit event, and returns only the closed
+//! [`ChallengeStatus`] and the projection of [`RecoveryStatus`], never the
+//! operation row. In the caller's `READ COMMITTED` transaction:
+//!
+//! 1. **the barrier**: in a savepoint, the `recovery_state` row
+//!    `FOR SHARE`, then the savepoint rolled back, which releases the lock.
+//!    `FOR SHARE` conflicts with the `FOR NO KEY UPDATE` a restore holds
+//!    from its step 2 to its commit, so the read waits for any restore that
+//!    has locked the state, from any process, and sees its outcome; held
+//!    for the whole read instead, overlapping reads could starve a restore.
+//!    The wait is bounded by the caller's `lock_timeout`. A row lock needs
+//!    a read-write transaction (never `READ ONLY`, never a standby);
+//! 2. the caller's clock, read after the barrier: the reply's
+//!    `server_time`, against which the expiry is compared;
+//! 3. **one plain statement**, one snapshot, with no lock: the state row,
+//!    the challenge row by ID, the credential by public identity, and the
+//!    count and a page of the revoked credentials. No lock after the
+//!    barrier: a restore locks every unrevoked credential at its step 1
+//!    before it waits for the state at its step 2, so a read that held the
+//!    state and then locked a credential would close a cycle (`40P01`).
+//!
+//! The challenge's state is decided in this order: asked against a state
+//! row whose `bootstrap_closed` is false, [`StatusError::Inconsistent`];
+//! no row, or one that fails the filter of step 3 of "Restore" (an
+//! `operator_restoration` of no tenant by `deployment_operator` with
+//! `challenge_hash` and `expires_at` set, one helper for both),
+//! [`ChallengeStatus::NotFound`]; consumed with outcome `restored`
+//! (whatever `revoked_at` holds: `0005` lets a consumed row be revoked
+//! later), [`ChallengeStatus::Restored`]; unconsumed and revoked,
+//! [`ChallengeStatus::Revoked`]; unconsumed, unrevoked, outcome `issued`
+//! and no longer bound to the state's instance, epoch or revision,
+//! [`ChallengeStatus::Retired`]; else by the caller's time:
+//! [`ChallengeStatus::Issued`] before `expires_at`,
+//! [`ChallengeStatus::Expiring`] until `expires_at` plus the caller's
+//! `settle` (its transaction timeout: a restore that took its `now` before
+//! the expiry has ended by then), [`ChallengeStatus::Expired`] after.
+//! Anything else (a consumed row whose outcome is not `restored`, an
+//! unconsumed one whose outcome is not `issued`, no state row to bind to)
+//! is [`StatusError::Inconsistent`]. Only `NotFound`, `Restored`, `Revoked`
+//! and `Retired` are final; `Expired` is not (a later call with an earlier
+//! `now` can still consume, "Time").
+//!
+//! **Membership by timestamp** (lead ruling (a), F5): the credentials a
+//! restoration revoked are those whose `revoked_at` equals the operation's
+//! `consumed_at`, which the restore writes from its one `now`. The count is
+//! exact and the pages stable absent a tie: a clock that repeats a
+//! microsecond can add another revocation's credentials (over-inclusion
+//! only). A page holds at most [`REVOKED_IDS_PAGE_SIZE`] IDs in byte order
+//! (`COLLATE "C"`), after the caller's `revoked_after`.
+//! [`revoked_by_restoration`] runs the same statement, without the
+//! barrier, in the restore's own transaction after [`restore_operator`],
+//! so the restore's reply and a later read agree by construction.
+//!
 //! [`bootstrap_instance`]: super::bootstrap_instance
 
 use std::{
@@ -445,7 +505,7 @@ use super::{
     create_admin_role_binding,
     events::{YEAR_OUT_OF_RANGE, in_envelope_years},
     is_reserved_actor_id, micros,
-    model::{Origin, json, required_timestamp, since_epoch},
+    model::{Origin, json, required_timestamp, since_epoch, timestamp},
     recovery_key_actor,
 };
 use crate::operation::{DigestEnvelope, NotCanonical};
@@ -518,6 +578,11 @@ const FIRST_REVISION: i64 = 1;
 
 /// The longest `public_identity` and `trust_anchor_ref`, in bytes (`0005`).
 const MAX_EXACT_STRING: usize = 2048;
+
+/// The most revoked credential IDs one page holds: the local transport's
+/// restore reply and each `status` reply (pinned by the wire fixture as
+/// `framing.max_revoked_ids_per_reply`; lead ruling F8).
+pub const REVOKED_IDS_PAGE_SIZE: usize = 1000;
 
 /// The encode error of a key that is not 32 bytes.
 const KEY_LENGTH: &str = "recovery public key is not a 32-byte Ed25519 key";
@@ -625,6 +690,46 @@ const ROTATE_RECOVERY_KEY: &str = "UPDATE recovery_state \
 /// Step 9 of a restore.
 const MARK_RESTORED: &str = "UPDATE administrative_operation \
      SET outcome = $2, revision = revision + 1 WHERE id = $1 RETURNING revision";
+
+/// The barrier of a status read, in a savepoint rolled back right after
+/// (see the module docs, "Reading the state").
+const STATUS_BARRIER: &str = "SELECT FROM recovery_state FOR SHARE";
+
+/// The one statement of a status read, no lock: the state row, the
+/// operation row `$1`, the credential of public identity `$2`, and, when
+/// the operation is consumed, the count of the credentials revoked at its
+/// `consumed_at` and the page of their IDs after `$3` (none: from the
+/// first), at most `$4`, in byte order. Each of the three tables has at
+/// most one row here (`recovery_state`'s unique index on `true`, the
+/// operation's key, `public_identity`'s unique key), so the statement
+/// returns exactly one row.
+const READ_STATUS: &str = concat!(
+    "SELECT s.instance_id AS state_instance_id, s.bootstrap_closed, s.recovery_public_key, \
+     s.recovery_key_epoch, s.revision AS state_revision, \
+     o.id, o.tenant_id, o.actor_id, o.kind, o.expected_revision, o.immutable_plan, \
+     o.has_challenge_hash, o.consumed, o.revoked, o.outcome, o.expires_at_us, \
+     o.consumed_at_us, \
+     c.id AS enrolled_credential_id, c.admin_id AS enrolled_admin_id, \
+     c.status AS enrolled_status, c.revoked_at IS NOT NULL AS enrolled_revoked, \
+     c.trust_anchor_ref AS enrolled_trust_anchor_ref, \
+     CASE WHEN o.consumed THEN (SELECT count(*) FROM admin_credential r \
+       WHERE r.revoked_at = o.consumed_at) END AS revoked_count, \
+     CASE WHEN o.consumed THEN ARRAY(SELECT r.id FROM admin_credential r \
+       WHERE r.revoked_at = o.consumed_at \
+         AND ($3::text IS NULL OR r.id > $3::text COLLATE \"C\") \
+       ORDER BY r.id COLLATE \"C\" LIMIT $4) END AS revoked_page \
+     FROM (SELECT) AS one \
+     LEFT JOIN recovery_state s ON true \
+     LEFT JOIN (SELECT id, tenant_id, actor_id, kind, expected_revision, immutable_plan, \
+       challenge_hash IS NOT NULL AS has_challenge_hash, \
+       consumed_at IS NOT NULL AS consumed, revoked_at IS NOT NULL AS revoked, outcome, \
+       consumed_at, ",
+    micros!("expires_at"),
+    ", ",
+    micros!("consumed_at"),
+    " FROM administrative_operation WHERE id = $1::text) AS o ON true \
+     LEFT JOIN admin_credential c ON c.public_identity = $2::text"
+);
 
 /// The `recovery_state` row (`0005`), written by bootstrap and rotated by
 /// [`restore_operator`].
@@ -937,6 +1042,181 @@ impl From<sqlx::Error> for RestoreError {
 impl From<NotRestorableReason> for RestoreError {
     fn from(reason: NotRestorableReason) -> Self {
         Self::NotRestorable(reason)
+    }
+}
+
+/// The input of [`read_recovery_status`]: what the caller asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusQuery<'a> {
+    /// The recovery challenge to report; `None`: none.
+    pub operation_id: Option<&'a str>,
+    /// The public identity of the mTLS key to report; `None`: none.
+    pub public_identity: Option<&'a str>,
+    /// The last revoked credential ID the caller holds: the page starts
+    /// after it, in byte order; `None`: from the first. Ignored unless the
+    /// challenge is [`ChallengeStatus::Restored`].
+    pub revoked_after: Option<&'a str>,
+    /// How long after `expires_at` a restore that took its `now` before it
+    /// may still commit: the caller's transaction timeout (see the module
+    /// docs, "Reading the state").
+    pub settle: Duration,
+}
+
+/// What [`read_recovery_status`] read, in one snapshot after the barrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryStatus {
+    /// The caller's clock, read after the barrier and truncated to the
+    /// microsecond.
+    pub server_time: SystemTime,
+    /// The `recovery_state` row, closed or not; `None` before bootstrap.
+    pub state: Option<RecoveryState>,
+    /// The state of [`StatusQuery::operation_id`]; `None` when none was
+    /// asked.
+    pub challenge: Option<ChallengeStatus>,
+    /// The credential of [`StatusQuery::public_identity`]; `None` when none
+    /// was asked.
+    pub enrolled: Option<Enrollment>,
+}
+
+/// The state of a recovery challenge (see the module docs, "Reading the
+/// state"): a closed set, and the members each state reports. `NotFound`,
+/// `Restored`, `Revoked` and `Retired` are final.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChallengeStatus {
+    /// No row with that ID, or one that is no recovery challenge.
+    NotFound,
+    /// Consumed with outcome `restored`, whether revoked since or not.
+    Restored {
+        expires_at: SystemTime,
+        restoration: Restoration,
+    },
+    /// Unconsumed and revoked: never consumed afterwards.
+    Revoked { expires_at: SystemTime },
+    /// Unconsumed and unrevoked, but no longer bound to the state's
+    /// instance, epoch or revision: the consume never matches again.
+    Retired { expires_at: SystemTime },
+    /// Bound, before `expires_at`.
+    Issued { expires_at: SystemTime },
+    /// Bound, from `expires_at` until `settles_at` (`expires_at` plus
+    /// [`StatusQuery::settle`]): a restore may still be running.
+    Expiring {
+        expires_at: SystemTime,
+        settles_at: SystemTime,
+    },
+    /// Bound, from `settles_at` on. Not final: a later call with an earlier
+    /// `now` can still consume.
+    Expired { expires_at: SystemTime },
+}
+
+/// What a restoration enrolled and revoked, as [`ChallengeStatus::Restored`]
+/// reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restoration {
+    /// The challenge's `consumed_at`.
+    pub restored_at: SystemTime,
+    /// The replacement the consumed plan names.
+    pub admin_id: String,
+    pub credential_id: String,
+    pub binding_id: String,
+    /// The credentials it revoked: their count and a page of their IDs.
+    pub revoked: RevokedPage,
+}
+
+/// The credentials whose `revoked_at` equals a restoration's
+/// `consumed_at` (see the module docs, "Membership by timestamp").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedPage {
+    /// How many there are, in all.
+    pub count: i64,
+    /// At most [`REVOKED_IDS_PAGE_SIZE`] of their IDs, in byte order, after
+    /// the caller's `revoked_after`.
+    pub ids: Vec<String>,
+}
+
+/// The credential with a public identity, as [`read_recovery_status`]
+/// reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enrollment {
+    /// No credential has that public identity.
+    NotFound,
+    /// The credential that has it.
+    Found(EnrolledCredential),
+}
+
+/// A credential found by its public identity. Neither the operator's
+/// status nor its role is reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnrolledCredential {
+    pub state: EnrolledState,
+    pub admin_id: String,
+    pub credential_id: String,
+    /// The SHA-256 of the exact UTF-8 bytes of the stored
+    /// `trust_anchor_ref`, computed at read time.
+    pub trust_anchor_sha256: [u8; 32],
+}
+
+/// A found credential's state: `Revoked` when `revoked_at` is set (which
+/// `0005` makes imply `disabled`), else its `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrolledState {
+    Enabled,
+    Disabled,
+    Revoked,
+}
+
+/// Why [`read_recovery_status`] or [`revoked_by_restoration`] did not
+/// answer. Never a missing row: that is a state.
+///
+/// `Display` is fixed text and holds no ID. A `Store` value never compares
+/// equal.
+#[derive(Debug)]
+pub enum StatusError {
+    /// The rows are in no state of the module docs: an operation asked
+    /// against a state row whose `bootstrap_closed` is false, a consumed
+    /// challenge whose outcome is not `restored`, an unconsumed one whose
+    /// outcome is not `issued`, a challenge with no state row to bind to,
+    /// a restored plan without the replacement's IDs, or, after a restore,
+    /// no consumed challenge.
+    Inconsistent,
+    /// Invalid input (a time out of range, say) or a store failure, the
+    /// barrier's `lock_timeout` included. [`RegistryError::Retry`] means
+    /// retry the whole transaction.
+    Store(RegistryError),
+}
+
+impl PartialEq for StatusError {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((self, other), (Self::Inconsistent, Self::Inconsistent))
+    }
+}
+
+impl fmt::Display for StatusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inconsistent => f.write_str("the recovery rows are in no reportable state"),
+            Self::Store(err) => write!(f, "recovery status read failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for StatusError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Inconsistent => None,
+            Self::Store(err) => Some(err),
+        }
+    }
+}
+
+impl From<RegistryError> for StatusError {
+    fn from(err: RegistryError) -> Self {
+        Self::Store(err)
+    }
+}
+
+impl From<sqlx::Error> for StatusError {
+    fn from(err: sqlx::Error) -> Self {
+        Self::Store(err.into())
     }
 }
 
@@ -1333,6 +1613,27 @@ impl FromRow<'_, PgRow> for ChallengeRow {
     }
 }
 
+/// The filter of step 3: whether an operation row is a recovery
+/// challenge at all, an `operator_restoration` of no tenant by
+/// `deployment_operator` with a challenge hash and an expiry (`0005`
+/// requires an expiry with a challenge hash; a row without one is no
+/// challenge either). Shared by the restore, the preview and
+/// [`read_recovery_status`], which reports any other row as
+/// [`ChallengeStatus::NotFound`].
+fn is_restoration_challenge(
+    kind: &str,
+    tenant_id: Option<&str>,
+    actor_id: &str,
+    has_challenge_hash: bool,
+    has_expiry: bool,
+) -> bool {
+    has_challenge_hash
+        && has_expiry
+        && kind == OPERATOR_RESTORATION
+        && tenant_id.is_none()
+        && actor_id == DEPLOYMENT_OPERATOR_ACTOR
+}
+
 /// The checks of step 3 against the state and the challenge row, in the
 /// order of the module docs; shared by the restore and the preview. Returns
 /// the checked expiry, in whole microseconds.
@@ -1342,18 +1643,18 @@ fn check_challenge(
     signature: &[u8],
     now: PgInterval,
 ) -> Result<i64, NotRestorableReason> {
-    let Some(challenge_hash) = row.challenge_hash.as_deref() else {
+    let (Some(challenge_hash), Some(expires_at_us)) =
+        (row.challenge_hash.as_deref(), row.expires_at_us)
+    else {
         return Err(NotRestorableReason::WrongKind);
     };
-    // `0005` requires an expiry with a challenge hash; a row without one is
-    // no challenge either.
-    let Some(expires_at_us) = row.expires_at_us else {
-        return Err(NotRestorableReason::WrongKind);
-    };
-    if row.kind != OPERATOR_RESTORATION
-        || row.tenant_id.is_some()
-        || row.actor_id != DEPLOYMENT_OPERATOR_ACTOR
-    {
+    if !is_restoration_challenge(
+        &row.kind,
+        row.tenant_id.as_deref(),
+        &row.actor_id,
+        true,
+        true,
+    ) {
         return Err(NotRestorableReason::WrongKind);
     }
     if row.consumed {
@@ -1387,6 +1688,238 @@ fn check_challenge(
     }
     verify_signature(&state.recovery_public_key, &encoded.challenge, signature)?;
     Ok(expires_at_us)
+}
+
+/// Reports the recovery state, the state of [`StatusQuery::operation_id`]
+/// and the credential of [`StatusQuery::public_identity`], without
+/// writing (see the module docs, "Reading the state"): the barrier in a
+/// savepoint rolled back at once, then `now`, then one plain statement.
+/// Never commits or rolls back the caller's transaction, which must be a
+/// read-write `READ COMMITTED` one; the caller rolls it back.
+pub async fn read_recovery_status(
+    transaction: &mut Transaction<'_, Postgres>,
+    query: &StatusQuery<'_>,
+    now: impl FnOnce() -> SystemTime,
+) -> Result<RecoveryStatus, StatusError> {
+    let settle_us = i64::try_from(query.settle.as_micros())
+        .map_err(|_| encode_error("settle time out of range"))?;
+    // 1. The barrier: waits for any restore holding the state, then
+    // releases the shared lock with the savepoint. The wait's error says
+    // more than a failed savepoint rollback.
+    let mut barrier = transaction.begin().await?;
+    let waited = sqlx::query(STATUS_BARRIER).execute(&mut *barrier).await;
+    let released = barrier.rollback().await;
+    waited?;
+    released?;
+    // 2. The clock, after the barrier.
+    let server_us = since_epoch(now())?.microseconds;
+    let server_time =
+        from_micros(server_us).ok_or_else(|| encode_error("timestamp out of range"))?;
+    // 3. One plain statement, no lock.
+    let row = read_status_row(
+        transaction,
+        query.operation_id,
+        query.public_identity,
+        query.revoked_after,
+    )
+    .await?;
+    let state = recovery_state_of(&row)?;
+    let challenge = match query.operation_id {
+        None => None,
+        Some(_) => Some(challenge_status(
+            &row,
+            state.as_ref(),
+            server_us,
+            settle_us,
+        )?),
+    };
+    let enrolled = match query.public_identity {
+        None => None,
+        Some(_) => Some(enrollment_of(&row)?),
+    };
+    Ok(RecoveryStatus {
+        server_time,
+        state,
+        challenge,
+        enrolled,
+    })
+}
+
+/// The count of the credentials the restoration `operation_id` revoked and
+/// the first page of their IDs, by the predicate of [`read_recovery_status`]
+/// (see the module docs, "Membership by timestamp"). For the restore's own
+/// transaction, after [`restore_operator`] returned: a plain statement, no
+/// barrier. [`StatusError::Inconsistent`] unless the operation is consumed.
+pub async fn revoked_by_restoration(
+    transaction: &mut Transaction<'_, Postgres>,
+    operation_id: &str,
+) -> Result<RevokedPage, StatusError> {
+    let row = read_status_row(transaction, Some(operation_id), None, None).await?;
+    if row.try_get::<Option<bool>, _>("consumed")? != Some(true) {
+        return Err(StatusError::Inconsistent);
+    }
+    revoked_page_of(&row)
+}
+
+/// Runs [`READ_STATUS`], which returns exactly one row.
+async fn read_status_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    operation_id: Option<&str>,
+    public_identity: Option<&str>,
+    revoked_after: Option<&str>,
+) -> Result<PgRow, sqlx::Error> {
+    // A small constant: the conversion never saturates.
+    let page_size = i64::try_from(REVOKED_IDS_PAGE_SIZE).unwrap_or(i64::MAX);
+    sqlx::query(READ_STATUS)
+        .bind(operation_id)
+        .bind(public_identity)
+        .bind(revoked_after)
+        .bind(page_size)
+        .fetch_one(&mut **transaction)
+        .await
+}
+
+/// The `recovery_state` columns of a [`READ_STATUS`] row.
+fn recovery_state_of(row: &PgRow) -> Result<Option<RecoveryState>, sqlx::Error> {
+    let Some(instance_id) = row.try_get::<Option<String>, _>("state_instance_id")? else {
+        return Ok(None);
+    };
+    Ok(Some(RecoveryState {
+        instance_id,
+        bootstrap_closed: row.try_get("bootstrap_closed")?,
+        recovery_public_key: row.try_get("recovery_public_key")?,
+        recovery_key_epoch: row.try_get("recovery_key_epoch")?,
+        revision: row.try_get("state_revision")?,
+    }))
+}
+
+/// The count and page columns of a [`READ_STATUS`] row of a consumed
+/// operation.
+fn revoked_page_of(row: &PgRow) -> Result<RevokedPage, StatusError> {
+    let (Some(count), Some(ids)) = (
+        row.try_get::<Option<i64>, _>("revoked_count")?,
+        row.try_get::<Option<Vec<String>>, _>("revoked_page")?,
+    ) else {
+        return Err(StatusError::Inconsistent);
+    };
+    Ok(RevokedPage { count, ids })
+}
+
+/// The state of the operation of a [`READ_STATUS`] row, in the order of
+/// the module docs, at `server_us`.
+fn challenge_status(
+    row: &PgRow,
+    state: Option<&RecoveryState>,
+    server_us: i64,
+    settle_us: i64,
+) -> Result<ChallengeStatus, StatusError> {
+    if state.is_some_and(|state| !state.bootstrap_closed) {
+        return Err(StatusError::Inconsistent);
+    }
+    if row.try_get::<Option<String>, _>("id")?.is_none() {
+        return Ok(ChallengeStatus::NotFound);
+    }
+    let tenant_id: Option<String> = row.try_get("tenant_id")?;
+    let actor_id: String = row.try_get("actor_id")?;
+    let kind: String = row.try_get("kind")?;
+    let has_challenge_hash: bool = row.try_get("has_challenge_hash")?;
+    let expires_at_us: Option<i64> = row.try_get("expires_at_us")?;
+    if !is_restoration_challenge(
+        &kind,
+        tenant_id.as_deref(),
+        &actor_id,
+        has_challenge_hash,
+        expires_at_us.is_some(),
+    ) {
+        return Ok(ChallengeStatus::NotFound);
+    }
+    let origin = Origin::new("administrative_operation");
+    let (Some(expires_us), Some(expires_at)) =
+        (expires_at_us, timestamp(row, origin, "expires_at")?)
+    else {
+        return Err(StatusError::Inconsistent);
+    };
+    let outcome: String = row.try_get("outcome")?;
+    let plan: JsonObject = json(row, "immutable_plan")?;
+    // Consumed before revoked: `0005` lets a consumed row be revoked later.
+    if row.try_get::<bool, _>("consumed")? {
+        if outcome != RESTORED {
+            return Err(StatusError::Inconsistent);
+        }
+        let (Some(admin_id), Some(credential_id), Some(binding_id), Some(restored_at)) = (
+            plan_text(&plan, PLAN_ADMIN_ID),
+            plan_text(&plan, PLAN_CREDENTIAL_ID),
+            plan_text(&plan, PLAN_BINDING_ID),
+            timestamp(row, origin, "consumed_at")?,
+        ) else {
+            return Err(StatusError::Inconsistent);
+        };
+        return Ok(ChallengeStatus::Restored {
+            expires_at,
+            restoration: Restoration {
+                restored_at,
+                admin_id: admin_id.into(),
+                credential_id: credential_id.into(),
+                binding_id: binding_id.into(),
+                revoked: revoked_page_of(row)?,
+            },
+        });
+    }
+    if row.try_get::<bool, _>("revoked")? {
+        return Ok(ChallengeStatus::Revoked { expires_at });
+    }
+    if outcome != ISSUED {
+        return Err(StatusError::Inconsistent);
+    }
+    let Some(state) = state else {
+        return Err(StatusError::Inconsistent);
+    };
+    let expected_revision: i64 = row.try_get("expected_revision")?;
+    if plan_binding(&plan) != Some((&state.instance_id[..], state.recovery_key_epoch))
+        || expected_revision != state.revision
+    {
+        return Ok(ChallengeStatus::Retired { expires_at });
+    }
+    if server_us < expires_us {
+        return Ok(ChallengeStatus::Issued { expires_at });
+    }
+    let settles_us = expires_us
+        .checked_add(settle_us)
+        .ok_or_else(|| encode_error("timestamp out of range"))?;
+    if server_us < settles_us {
+        let settles_at =
+            from_micros(settles_us).ok_or_else(|| encode_error("timestamp out of range"))?;
+        Ok(ChallengeStatus::Expiring {
+            expires_at,
+            settles_at,
+        })
+    } else {
+        Ok(ChallengeStatus::Expired { expires_at })
+    }
+}
+
+/// The credential columns of a [`READ_STATUS`] row.
+fn enrollment_of(row: &PgRow) -> Result<Enrollment, StatusError> {
+    let Some(credential_id) = row.try_get::<Option<String>, _>("enrolled_credential_id")? else {
+        return Ok(Enrollment::NotFound);
+    };
+    let status: String = row.try_get("enrolled_status")?;
+    let state = if row.try_get::<bool, _>("enrolled_revoked")? {
+        EnrolledState::Revoked
+    } else {
+        match status.parse::<Status>() {
+            Ok(Status::Enabled) => EnrolledState::Enabled,
+            Ok(Status::Disabled) => EnrolledState::Disabled,
+            Err(_) => return Err(StatusError::Inconsistent),
+        }
+    };
+    let trust_anchor_ref: String = row.try_get("enrolled_trust_anchor_ref")?;
+    Ok(Enrollment::Found(EnrolledCredential {
+        state,
+        admin_id: row.try_get("enrolled_admin_id")?,
+        credential_id,
+        trust_anchor_sha256: Sha256::digest(trust_anchor_ref.as_bytes()).into(),
+    }))
 }
 
 /// Checks a signed response as [`restore_operator`] would, at `now`,

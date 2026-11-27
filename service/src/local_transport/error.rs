@@ -6,7 +6,7 @@
 
 use crate::ids::IdError;
 use crate::persistence::registry::{
-    BootstrapError, ChallengeError, InvariantKind, RegistryError, RestoreError,
+    BootstrapError, ChallengeError, InvariantKind, RegistryError, RestoreError, StatusError,
 };
 
 /// SQLSTATE class 08, `connection_exception`.
@@ -156,6 +156,29 @@ pub(super) fn from_restore(err: &RestoreError) -> ErrorCode {
         // The transport begins every transaction at `READ COMMITTED`.
         RestoreError::UnsupportedIsolation => ErrorCode::ServerError,
         RestoreError::Store(err) => from_registry(err),
+    }
+}
+
+/// [`StatusError`], for `status` and for the count and page a `restore`
+/// reads before its commit. Never `conflict` or `not_restorable`: a
+/// missing row is a state, not an error, and the read writes nothing, so
+/// a uniqueness, foreign key, guard or revision failure (none of which it
+/// can meet) is the server's.
+pub(super) fn from_status(err: &StatusError) -> ErrorCode {
+    match err {
+        StatusError::Inconsistent => ErrorCode::ServerError,
+        StatusError::Store(err) => match err {
+            RegistryError::Retry(_) => ErrorCode::AuthUnavailable,
+            RegistryError::Other(err) => from_store_failure(err),
+            RegistryError::NotFound
+            | RegistryError::StaleRevision
+            | RegistryError::AlreadyExists { .. }
+            | RegistryError::Guard
+            | RegistryError::Invariant { .. }
+            | RegistryError::UnreadableTimestamp { .. }
+            | RegistryError::ReservedActorId
+            | RegistryError::RequiredPredicate { .. } => ErrorCode::ServerError,
+        },
     }
 }
 
@@ -380,6 +403,53 @@ mod tests {
             from_restore(&RestoreError::Store(RegistryError::Guard)),
             ErrorCode::Conflict
         );
+        assert_eq!(
+            from_status(&StatusError::Inconsistent),
+            ErrorCode::ServerError
+        );
+        for (err, code) in [
+            (
+                RegistryError::Retry(database("40P01")),
+                ErrorCode::AuthUnavailable,
+            ),
+            (
+                RegistryError::Other(database("55P03")),
+                ErrorCode::AuthUnavailable,
+            ),
+            (
+                RegistryError::Other(sqlx::Error::PoolClosed),
+                ErrorCode::AuthUnavailable,
+            ),
+            (
+                RegistryError::Other(sqlx::Error::Encode("x".into())),
+                ErrorCode::ServerError,
+            ),
+            (RegistryError::NotFound, ErrorCode::ServerError),
+            (RegistryError::StaleRevision, ErrorCode::ServerError),
+            (
+                RegistryError::AlreadyExists { constraint: "c" },
+                ErrorCode::ServerError,
+            ),
+            (RegistryError::Guard, ErrorCode::ServerError),
+            (
+                RegistryError::Invariant {
+                    kind: InvariantKind::ForeignKey,
+                    constraint: None,
+                },
+                ErrorCode::ServerError,
+            ),
+            (
+                RegistryError::UnreadableTimestamp {
+                    table: "t",
+                    column: "c",
+                    id: "x".into(),
+                },
+                ErrorCode::ServerError,
+            ),
+            (RegistryError::ReservedActorId, ErrorCode::ServerError),
+        ] {
+            assert_eq!(from_status(&StatusError::Store(err)), code);
+        }
         assert_eq!(from_id(&IdError::SourceFailed), ErrorCode::ServerError);
         assert_eq!(from_id(&IdError::Exhausted), ErrorCode::ServerError);
     }

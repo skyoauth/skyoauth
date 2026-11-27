@@ -3055,6 +3055,7 @@ async fn a_challenge_is_issued_answered_and_consumed_once() {
             "admin_id": replacement[0],
             "credential_id": replacement[1],
             "binding_id": replacement[2],
+            "revoked_credential_count": 1,
             "revoked_credential_ids": [ids(1, IdKind::AdminCredential, 1)[0]],
             "recovery_key_epoch": 2,
             "recovery_state_revision": 2,

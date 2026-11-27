@@ -2,8 +2,9 @@
 //! design section 7.2; ADR-013 items 5 and 7; OQ-TM-9): a Unix-domain
 //! socket owned by the service UID with mode 0600 that carries one request
 //! per connection to the registry's [`bootstrap_instance`],
-//! [`issue_recovery_challenge`], [`preview_recovery_response`] and
-//! [`restore_operator`], each in a transaction of its own.
+//! [`issue_recovery_challenge`], [`preview_recovery_response`],
+//! [`restore_operator`] and [`read_recovery_status`], each in a transaction
+//! of its own.
 //!
 //! It is the binary's transport of the recovery module's "Flow"
 //! (`persistence::registry::recovery`) and of
@@ -17,6 +18,7 @@
 //! [`issue_recovery_challenge`]: crate::persistence::registry::issue_recovery_challenge
 //! [`preview_recovery_response`]: crate::persistence::registry::preview_recovery_response
 //! [`restore_operator`]: crate::persistence::registry::restore_operator
+//! [`read_recovery_status`]: crate::persistence::registry::read_recovery_status
 //!
 //! # Not done here
 //!
@@ -44,7 +46,9 @@
 //! - **No logging and no alert.** A refused peer, a `server_error`, and a
 //!   successful bootstrap or restore are neither logged nor alerted on here
 //!   (TM-15, design section 7.2); only a failed `accept` is logged. The
-//!   audit chain records what the registry writes.
+//!   audit chain records what the registry writes; a `status` writes
+//!   nothing and is not audited (lead ruling Q7, 2026-11-27: revisited
+//!   when the transport gets logging).
 //!
 //! # Use
 //!
@@ -234,7 +238,8 @@
 //! | `bootstrap` | `instance_id`, `credential_spki`, `trust_anchor_ref`, `recovery_public_key` | [`bootstrap_instance`] | `instance_id`, `admin_id`, `credential_id`, `binding_id`, `recovery_key_epoch` |
 //! | `issue_challenge` | `credential_spki`, `trust_anchor_ref`, `new_recovery_public_key` | [`get_recovery_state`](crate::persistence::registry::get_recovery_state), then [`issue_recovery_challenge`] | `operation_id`, `expires_at`, `expected_revision`, `challenge` (`M`) |
 //! | `preview` | `operation_id`, `signature` | [`preview_recovery_response`] | `admin_id`, `credential_id`, `binding_id`, `new_recovery_key_epoch`, `expires_at` |
-//! | `restore` | `operation_id`, `signature` | [`restore_operator`] | `admin_id`, `credential_id`, `binding_id`, `revoked_credential_ids`, `recovery_key_epoch`, `recovery_state_revision` |
+//! | `restore` | `operation_id`, `signature` | [`restore_operator`] | `admin_id`, `credential_id`, `binding_id`, `revoked_credential_count`, `revoked_credential_ids`, `recovery_key_epoch`, `recovery_state_revision` |
+//! | `status` | `operation_id`, `credential_spki`, `revoked_after`, each a string or `null` | [`read_recovery_status`] | every member of "Status", `null` where it has nothing to say |
 //!
 //! - The transport generates every ID with the [`IdGenerator`] (the
 //!   operator, credential, binding and event IDs of a bootstrap; the
@@ -274,6 +279,38 @@
 //!   service UID's and root's only, so the lookup tells it nothing it could
 //!   not read).
 //!
+//! # Status
+//!
+//! `status` changes no row, appends no audit event, draws no ID, and
+//! consumes, extends and grants nothing (`docs/proposals/local-read-operation.md`,
+//! lead rulings of 2026-11-27). Every request member is present, `null`
+//! when not asked; `revoked_after` without `operation_id` is
+//! `invalid_request`, and `credential_spki` is the DER key the transport
+//! derives the public identity from, as for bootstrap. The reply has every
+//! member, in this order:
+//!
+//! | Member | Value |
+//! | ------ | ----- |
+//! | `server_time` | the [`Clock`]'s `now`, read after the barrier |
+//! | `instance_id`, `recovery_key_epoch`, `recovery_state_revision`, `recovery_public_key` | the recovery state row's, closed or not; `null` before bootstrap |
+//! | `operation_state` | `null` when no `operation_id` was asked; else `not_found`, `restored`, `revoked`, `retired`, `issued`, `expiring` or `expired` (the recovery module, "Reading the state") |
+//! | `expires_at` | the challenge's, unless `not_found` |
+//! | `settles_at` | when `expiring`: `expires_at` plus [`Settings::transaction_timeout`], after which a restore of this transport that took its `now` before the expiry has ended |
+//! | `restored_at`, `admin_id`, `credential_id`, `binding_id` | when `restored`: its `consumed_at` and the replacement it enrolled |
+//! | `revoked_credential_count`, `revoked_credential_ids` | when `restored`: how many credentials it revoked, and the next [`MAX_REVOKED_IDS_PER_REPLY`] of their IDs in byte order, after `revoked_after` |
+//! | `enrolled_state` | `null` when no `credential_spki` was asked; else `not_found`, `enabled`, `disabled` or `revoked` |
+//! | `enrolled_admin_id`, `enrolled_credential_id`, `enrolled_trust_anchor_sha256` | when found: that credential's operator, ID, and the SHA-256 of the exact UTF-8 bytes of its stored `trust_anchor_ref` |
+//!
+//! Its transaction is read-write `READ COMMITTED`, always rolled back, as a
+//! `preview`'s. It first takes the barrier, the `recovery_state` row
+//! `FOR SHARE` in a savepoint rolled back at once, so it waits (within
+//! `lock_timeout`, `auth_unavailable`) for any restore that holds the
+//! state, from any process, and sees its outcome; then reads the clock;
+//! then runs one plain statement and takes no other lock. Only `not_found`,
+//! `restored`, `revoked` and `retired` are final, and a non-null
+//! `instance_id`: `expired` is not (a later call with an earlier `now` can
+//! still consume), and a request still in the listen queue is invisible.
+//!
 //! # Transactions
 //!
 //! Each request is exactly one transaction, begun with `BEGIN ISOLATION
@@ -284,7 +321,7 @@
 //! functions run in a savepoint of their own and never commit; the
 //! transport commits only on `Ok` and rolls back on every refusal, so a
 //! refusal, a store failure or a failed audit append writes nothing. A
-//! `preview` writes nothing and is always rolled back. A commit that fails
+//! `preview` or a `status` writes nothing and is always rolled back. A commit that fails
 //! is mapped as a store failure (`auth_unavailable` for a lost connection,
 //! see "Errors"); a commit that does not end within the transaction
 //! timeout, or that shutdown cuts, gets no response (see "Time limits").
@@ -295,11 +332,15 @@
 //! timed out, the write failed or timed out, the transaction timeout or
 //! shutdown cut the request during its commit) cannot be told apart, by the
 //! client, from a request that was not served: it must reconcile before it
-//! retries. A retried bootstrap is `conflict` once the first one committed
-//! (read the recovery state and the operator); a retried restore of the
-//! same challenge is `not_restorable` once it committed (the operator's
-//! credential and the key epoch show it); a retried issue makes a second
-//! challenge, and the first expires unused.
+//! retries. It reconciles with `status` (see "Status"): a bootstrap by the
+//! `credential_spki` it sent (the instance, the recovery key, the mTLS key
+//! and its trust anchor's digest all match what it sent, or not), a
+//! restore by its `operation_id` (`restored`, or a state that says
+//! whether it can still commit). A retried bootstrap is `conflict` once
+//! the first one committed; a retried restore of the same challenge is
+//! `not_restorable` once it committed; a retried issue makes a second
+//! challenge, and the first expires unused (no reconcile is possible: the
+//! client never received the operation ID).
 //!
 //! # Serialization
 //!
@@ -308,9 +349,8 @@
 //! it) and held until its transaction has ended, committed or rolled back,
 //! or was cut by the transaction timeout or at shutdown (its connection
 //! discarded), also past the connection's deadline (see "Time limits"), so
-//! one process runs one bootstrap, issue, preview or restore at a time and
-//! holds one
-//! database connection for it. It is not what makes bootstrap and a
+//! one process runs one bootstrap, issue, preview, restore or status at a
+//! time and holds one database connection for it. It is not what makes bootstrap and a
 //! challenge one-shot: the database is (`bootstrap_instance`'s "Closure":
 //! the policy row lock and the `recovery_state` unique keys;
 //! `restore_operator`'s locks and its single consume, which the
@@ -397,8 +437,8 @@
 //! consume it until then, from a new [`LocalTransport`] on the same
 //! database: the restore reads the row, not the transport. If the
 //! `issue_challenge` response was lost, the client never received `M` and
-//! the operation ID; no operation reads them back, so the row simply
-//! expires unconsumed, and the client issues a new challenge (several open
+//! the operation ID; no operation reads `M` back (and `status` needs the
+//! operation ID), so the row simply expires unconsumed, and the client issues a new challenge (several open
 //! challenges may exist; a restore of any one advances the key epoch and
 //! the recovery state revision, which retires the others: their restore is
 //! `not_restorable`). An expired row is never removed; it stays as the
@@ -425,7 +465,7 @@
 //! | ----- | ---- |
 //! | the peer's UID is neither the service UID nor 0, or has no credentials | `forbidden` |
 //! | a malformed or oversized request (see "Protocol") | `invalid_request` |
-//! | a value the transport's checks refuse: not lowercase hexadecimal, an `instance_id` that is not a lowercase UUIDv7, a key that is not a canonical Ed25519 point of large order, a DER that is not one `SubjectPublicKeyInfo`, a bad `trust_anchor_ref`, an operation ID with a NUL | `invalid_request` |
+//! | a value the transport's checks refuse: not lowercase hexadecimal, an `instance_id` that is not a lowercase UUIDv7, a key that is not a canonical Ed25519 point of large order, a DER that is not one `SubjectPublicKeyInfo`, a bad `trust_anchor_ref`, an operation ID or `revoked_after` with a NUL, a `status` with `revoked_after` but no `operation_id` | `invalid_request` |
 //! | idle timeout, deadline before the transaction began, no end of stream after the line | (closed, no response, nothing written) |
 //! | the transaction not ended within the transaction timeout, or cut at shutdown (the database connection is discarded; nothing written unless the commit was sent, whose outcome is then unknown) | (closed, no response) |
 //! | an issue whose replacement key a credential (live or revoked) already has | `conflict` |
@@ -439,6 +479,12 @@
 //! | `Invariant` `SameTenantOperation`, `DistinctApprover`; `UnreadableTimestamp` | `server_error` |
 //! | `Retry` (`40001`, `40P01`); `Other`: `Io`, `Tls`, `PoolTimedOut`, `PoolClosed`, SQLSTATE class `08`, `53`, `57P0x`, `55P03`, `57014`; a failed `BEGIN` or `COMMIT` of those | `auth_unavailable` |
 //! | `Other`: anything else, an encode error included (the transport checks every value it submits first, so the registry's own checks refuse only the server's: its clock, the audit chain's sequence) | `server_error` |
+//! | [`StatusError`](crate::persistence::registry::StatusError) `Inconsistent` (an `operation_id` asked against a recovery state whose `bootstrap_closed` is false, a challenge row in no state, no consumed challenge after a restore) | `server_error` |
+//! | `StatusError::Store`: `Retry` and the `Other` failures above (the barrier's `lock_timeout` included) | `auth_unavailable` |
+//! | `StatusError::Store`: any other [`RegistryError`](crate::persistence::registry::RegistryError) (a read never meets `conflict`'s causes) or `Other` failure | `server_error` |
+//!
+//! `status` never answers `conflict` or `not_restorable`: a missing row is
+//! a state, not an error.
 //!
 //! Every reason of `NotRestorable` is one code: the local client learns
 //! that the response does not restore, not which check refused it.
@@ -483,6 +529,10 @@ use tokio::{
     task::JoinSet,
 };
 
+/// The most revoked credential IDs one reply lists, the `restore` reply's
+/// and each `status` page's (see the module docs, "Operations"); the wire
+/// fixture pins it as `framing.max_revoked_ids_per_reply`.
+pub use crate::persistence::registry::REVOKED_IDS_PAGE_SIZE as MAX_REVOKED_IDS_PER_REPLY;
 pub use connection::MAX_REQUEST_BYTES;
 pub use error::ErrorCode;
 pub use socket::BindError;
