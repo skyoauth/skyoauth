@@ -62,17 +62,25 @@ Refused in each line of a record's text:
 Refused in a record's text, in that text with its line feeds removed (and
 with them replaced by spaces), in each pair of adjacent records of any type,
 and in each run of three or more consecutive `output` and `note` records
-(texts concatenated directly, and joined with spaces):
+(texts concatenated directly, and joined with spaces); these joined forms
+are what the allow marker below and the Authorization rule refer to:
 
 - a PEM header (`-----BEGIN ...-----`);
 - a JWT-shaped string (`eyJ...` with two more dot-separated segments);
 - a Bearer credential. In an `Authorization` or `Proxy-Authorization` field
-  (any case; a header, or a quoted JSON or YAML key) the Bearer value must
-  be exactly `<redacted>`: anything else, an empty value or `$TOKEN`
-  included, is refused. Elsewhere, `Bearer` and a token68 value with a digit
-  or one of `_~+/=`, or of 16 characters or more; prose (`Bearer tokens
-  are...`), `<redacted>` and auth-params (`WWW-Authenticate: Bearer
-  realm="skyoauth"`, `Bearer error="invalid_token"`) pass;
+  (any case; a header, or a quoted JSON or YAML key) the Bearer value (up
+  to a blank, quote, comma or semicolon) must be exactly `<redacted>` in
+  the record: anything else, `<redacted>x`, an empty value or `$TOKEN`
+  included, is refused. Only in a joined form, which may glue the next line
+  or record to it, need the value merely start with `<redacted>`.
+  Elsewhere, `Bearer` and a token68 value with a digit or one of `_~+/=`,
+  or of 16 characters or more; prose (`Bearer tokens are...`) and
+  `<redacted>` pass, and so does an auth-param whose name is `realm`,
+  `scope`, `error`, `error_description`, `error_uri` or
+  `resource_metadata` (any case: `WWW-Authenticate: Bearer
+  realm="skyoauth"`, `Bearer error="invalid_token"`, also with JSON-escaped
+  quotes). Any other `name=` after `Bearer` is a padded token and refused
+  (`Bearer dGhpc2lz...MTI=` in a JSON value, `Bearer a1b2c3d4=e5f6`);
 - a hex run of 96 digits or more (an Ed25519 signature is 128). A 64-digit
   run, a public key or a hash, passes: it cannot be told from a seed, so
   only the seeds given with `--secret-file` are refused at that size;
@@ -84,6 +92,10 @@ and in each run of three or more consecutive `output` and `note` records
 forms that hold the marked record, for output such as two bare public keys
 on adjacent lines. The hex rule still applies to each line, every other
 rule still applies, and secret values are refused with the marker too.
+Within a run of `output` and `note` records that holds marked records, each
+stretch of three or more unmarked records between them is checked as its
+own joined form, so a signature split over them is still refused (shorter
+stretches are already covered as pairs).
 
 This is a check for known shapes and known values, not a proof that a
 transcript holds no secret. Not found: a credential of another shape; a
@@ -117,7 +129,9 @@ still counts as black, so the screencast keeps receiving black frames: twice
 locally, before that repaint was added, a render failed with "no black
 lead-in found" (not reproduced in a dozen later renders; the cause was not
 confirmed). Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
-render. `render.e2e.test.mjs` checks that frame 0 is the player
+render; a copy that fails is reported on stderr and never replaces the
+render's own error. `demo.yml` sets it and, when a step fails, uploads the
+recordings as `demo-raw-recordings-N` (3 days). `render.e2e.test.mjs` checks that frame 0 is the player
 and that the caption bar changes at each cue boundary and not before;
 `vtt.test.mjs` runs the player's own script on a virtual clock and checks
 that each caption appears exactly at its cue's start.
@@ -125,6 +139,7 @@ that each caption appears exactly at its cue's start.
 ## Never committed
 
 The mp4 files and `out/` (in `.gitignore`). The videos are run artifacts of
-`.github/workflows/demo.yml`, which is not part of `CI passed`; the
-`demo-transcripts` job of `ci.yml` checks the committed transcripts on every
-change.
+`.github/workflows/demo.yml`, which is not part of `CI passed`; it checks
+and renders against the seeds of every committed `*.test-key.json`
+(`--secret-file`, failing when there is none), as the `demo-transcripts`
+job of `ci.yml` does for the committed transcripts on every change.
