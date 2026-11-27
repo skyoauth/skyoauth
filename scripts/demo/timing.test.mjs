@@ -51,6 +51,11 @@ describe('timeline', () => {
     assert.equal(timing.stepDuration(r(0, 'caption', 'x'.repeat(500))), 6000);
     assert.equal(timing.stepDuration(r(0, 'output', 'a\nb\nc')), 3 * 40 + 900);
     assert.equal(timing.stepDuration(r(0, 'note', 'anything at all')), 1600);
+    // A long note is printed line by line like output: its duration covers
+    // every line.
+    const long = Array.from({ length: 60 }, (_, i) => `note line ${i}`).join('\n');
+    assert.equal(timing.stepDuration(r(0, 'note', long)), 60 * 40 + 900);
+    assert.equal(timing.stepDuration(r(0, 'note', 'a\nb\nc')), 1600);
     const cmd = r(4, 'command', 'echo hi');
     const offsets = timing.typingOffsets(cmd);
     assert.equal(offsets.length, 7);

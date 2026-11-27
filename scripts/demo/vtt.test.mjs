@@ -14,6 +14,7 @@ import { describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
+import { MAX_DRIFT_MS } from './render.mjs';
 import timing from './timing.js';
 import { readTranscript } from './transcript.mjs';
 import { escapeCueText, formatVttTime, parseVtt, toVtt } from './vtt.mjs';
@@ -113,7 +114,7 @@ async function playInVm(records) {
   const log = [];
   const onText = (el) => log.push({ at: now, id: el.id, cls: el.className, text: el.ownText });
   const byId = {};
-  for (const id of ['screen', 'term', 'caption']) {
+  for (const id of ['screen', 'term', 'caption', 'tick']) {
     byId[id] = new Element('div', onText);
     byId[id].id = id;
   }
@@ -123,6 +124,18 @@ async function playInVm(records) {
     createElement: (tag) => new Element(tag, onText),
   };
   let revealedAt = null;
+  let frames = 0;
+  let tickChanges = 0;
+  let tickClass = 'a';
+  Object.defineProperty(byId.tick, 'className', {
+    set(v) {
+      if (v !== tickClass) tickChanges++;
+      tickClass = v;
+    },
+    get() {
+      return tickClass;
+    },
+  });
   const body = document.body;
   Object.defineProperty(body, 'className', {
     set(v) {
@@ -138,7 +151,10 @@ async function playInVm(records) {
     document,
     performance: { now: () => now },
     setTimeout,
-    requestAnimationFrame: (fn) => setTimeout(() => fn(now), 16),
+    requestAnimationFrame: (fn) => {
+      frames++;
+      setTimeout(() => fn(now), 16);
+    },
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;
@@ -177,7 +193,7 @@ async function playInVm(records) {
   // Objects made in the VM have that realm's prototypes: copy them out.
   result = JSON.parse(JSON.stringify(result));
   const t0 = result.t0;
-  return { t0, revealedAt, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
+  return { t0, revealedAt, frames, tickChanges, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
 }
 
 describe('player schedule (player.html in a VM with a virtual clock)', () => {
@@ -185,6 +201,11 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
     const run = await playInVm(SAMPLE);
     assert.equal(run.done, true);
     assert.ok(run.revealedAt >= timing.LEAD_IN_MS, `revealed at ${run.revealedAt}`);
+    // The lead-in repaints every frame (about LEAD_IN_MS / 16), then stops.
+    assert.ok(run.frames >= timing.LEAD_IN_MS / 16 - 2, `${run.frames} frames`);
+    assert.ok(run.frames < timing.LEAD_IN_MS / 16 + 5, `${run.frames} frames: the repaint did not stop`);
+    // Each of those frames changes the #tick shade, so each one is painted.
+    assert.ok(run.tickChanges >= timing.LEAD_IN_MS / 16 - 2, `${run.tickChanges} repaints`);
     const shown = run.log.filter((e) => e.id === 'caption').map((e) => ({ startMs: e.at, text: e.text }));
     const cues = parseVtt(toVtt(SAMPLE)).map((c) => ({ startMs: c.startMs, text: c.text }));
     assert.deepEqual(shown, cues);
@@ -202,6 +223,29 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
       run.result.events.map((e) => [e.step, e.plannedMs, e.actualMs]),
       tl.map((e) => [e.step, e.startMs, e.startMs]),
     );
+  });
+
+  it('keeps to the timeline through a 60-line note: every line within its step, captions on their cues', async () => {
+    const note = Array.from({ length: 60 }, (_, i) => `library call line ${i}`).join('\n');
+    const records = [r(0, 'caption', 'before'), r(1, 'note', note), r(2, 'caption', 'after'), r(3, 'output', 'done')];
+    const run = await playInVm(records);
+    const tl = timing.buildTimeline(records);
+    assert.deepEqual(
+      run.result.events.map((e) => [e.step, e.plannedMs, e.actualMs]),
+      tl.map((e) => [e.step, e.startMs, e.startMs]),
+    );
+    // The renderer refuses a recording whose steps drift more than
+    // MAX_DRIFT_MS from the timeline; on the virtual clock the drift is 0.
+    const drift = Math.max(...run.result.events.map((e) => Math.abs(e.actualMs - e.plannedMs)));
+    assert.ok(drift <= MAX_DRIFT_MS, `drift ${drift} ms`);
+    assert.equal(drift, 0);
+    const noteLines = run.log.filter((e) => e.cls === 'line note');
+    assert.equal(noteLines.length, 60);
+    assert.equal(noteLines[59].at, tl[1].startMs + 59 * timing.OUTPUT_LINE_MS);
+    assert.ok(noteLines.every((e) => e.at >= tl[1].startMs && e.at < tl[1].endMs), 'a note line outside its step');
+    const shown = run.log.filter((e) => e.id === 'caption').map((e) => ({ startMs: e.at, text: e.text }));
+    assert.deepEqual(shown, parseVtt(toVtt(records)).map((c) => ({ startMs: c.startMs, text: c.text })));
+    assert.equal(run.endAt - run.t0, timing.totalMs(tl));
   });
 
   it('types each command character at its timing.typingOffsets time', async () => {
@@ -239,7 +283,23 @@ describe('player.html is static and offline', () => {
     for (const d of ["default-src 'none'", "connect-src 'none'", "img-src 'none'", "font-src 'none'"]) assert.ok(csp[1].includes(d), d);
   });
 
+  it('writes text only through textContent: no HTML parsing of transcript text', () => {
+    assert.doesNotMatch(PLAYER, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser|\beval\(|new Function/);
+  });
+
   it('is laid out at 1280x720', () => {
     assert.match(PLAYER, /width: 1280px;\s*height: 720px;/);
+  });
+
+  it('repaints the lead-in only in shades the renderer counts as black, and hides the repaint during playback', () => {
+    const render = readFileSync(join(HERE, 'render.mjs'), 'utf8');
+    const pixTh = Number(/blackdetect=[^']*pix_th=([0-9.]+)/.exec(render)[1]);
+    const shades = [...PLAYER.matchAll(/#tick\.[ab] \{ background: #([0-9a-f]{6}); \}/g)].map((m) => m[1]);
+    assert.equal(shades.length, 2, 'two #tick shades');
+    assert.notEqual(shades[0], shades[1], 'the shades differ, so every frame changes');
+    for (const hex of shades) {
+      for (let i = 0; i < 6; i += 2) assert.ok(parseInt(hex.slice(i, i + 2), 16) / 255 < pixTh, `#${hex} is not black for pix_th=${pixTh}`);
+    }
+    assert.match(PLAYER, /body\.playing #tick \{ display: none; \}/);
   });
 });

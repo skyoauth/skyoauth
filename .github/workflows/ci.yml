@@ -147,15 +147,20 @@ jobs:
   # Demo walk-through transcripts (docs/proposals/demo-walkthroughs.md §2
   # and §5, scripts/demo/README.md): the pure self-tests of scripts/demo
   # (every *.test.mjs but *.e2e.test.mjs: no browser, no ffmpeg) and the
-  # transcript check over every committed transcript, which refuses
-  # secret shapes (PEM blocks, JWT-shaped strings, Bearer credentials),
-  # wall-clock values and control characters, so a leaked credential in a
-  # golden transcript fails the merge. Like docs-check it runs for every
-  # change, docs-only ones included, so it does not need `changes`. The
-  # rendering (Chromium, ffmpeg) is in demo.yml, which `ci-passed` does
-  # not need. `npm ci` installs playwright from the scripts/demo lockfile
-  # without lifecycle scripts and fails if package.json and the lockfile
-  # disagree; no browser is downloaded.
+  # transcript check over every committed transcript. The check refuses
+  # known shapes and known values only: PEM headers, JWT-shaped strings,
+  # Bearer credentials, hex runs of 96 or more digits, base64url runs of 86
+  # or more characters, and the seeds of the committed *.test-key.json
+  # fixtures, each also across line breaks and adjacent records; plus
+  # wall-clock values and control characters per line. It does not find a
+  # credential of another shape (a 64-digit hex key or seed not in a
+  # fixture, a short opaque token without the Bearer scheme, a password),
+  # so a reviewer still reads every golden transcript. Like docs-check it
+  # runs for every change, docs-only ones included, so it does not need
+  # `changes`. The rendering (Chromium, ffmpeg) is in demo.yml, which
+  # `ci-passed` does not need. `npm ci` installs playwright from the
+  # scripts/demo lockfile without lifecycle scripts and fails if
+  # package.json and the lockfile disagree; no browser is downloaded.
   demo-transcripts:
     name: Demo transcripts
     runs-on: ubuntu-24.04
@@ -187,18 +192,26 @@ jobs:
           node --test "${tests[@]}"
 
       # The golden transcripts under tests/demo (none yet: the directory
-      # holds only .gitkeep) and the sample. The checker refuses an empty
+      # holds only .gitkeep) and the sample, against the seeds of every
+      # committed test key (--secret-file). The checker refuses an empty
       # file list (exit 2); the sample keeps the list non-empty, and the
-      # golden count is printed, so no golden is a visible state, not a
-      # vacuous pass.
+      # golden and key counts are printed, so no golden is a visible state,
+      # not a vacuous pass. No test key at all fails the step.
       - name: Check the committed transcripts
         if: success() || failure()
         shell: bash
         run: |
           test -d tests/demo/golden
           mapfile -d '' goldens < <(find tests/demo -type f -name '*.jsonl' -print0 | LC_ALL=C sort -z)
-          echo "Golden transcripts under tests/demo: ${#goldens[@]}"
-          node scripts/demo/transcript.mjs check scripts/demo/sample/sample.transcript.jsonl "${goldens[@]}"
+          mapfile -d '' keys < <(find tests/conformance/fixtures -type f -name '*.test-key.json' -print0 | LC_ALL=C sort -z)
+          echo "Golden transcripts under tests/demo: ${#goldens[@]}; test-key files: ${#keys[@]}"
+          if [ "${#keys[@]}" -eq 0 ]; then
+            echo "No *.test-key.json under tests/conformance/fixtures: nothing to check the seeds against"
+            exit 1
+          fi
+          secret_files=()
+          for key in "${keys[@]}"; do secret_files+=(--secret-file "$key"); done
+          node scripts/demo/transcript.mjs check "${secret_files[@]}" scripts/demo/sample/sample.transcript.jsonl "${goldens[@]}"
 
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})

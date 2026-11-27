@@ -2,7 +2,7 @@
 // Renders a demo transcript to a video (docs/proposals/demo-walkthroughs.md
 // §2 "Rendering").
 //
-//   node scripts/demo/render.mjs <transcript.jsonl> --out <dir> [--secret-env NAME]...
+//   node scripts/demo/render.mjs <transcript.jsonl> --out <dir> [--secret-env NAME]... [--secret-file PATH]...
 //
 // Writes into <dir>, for <name>.transcript.jsonl or <name>.jsonl:
 //   <name>.mp4               H.264, yuv420p, 1280x720, 30 fps, no audio, faststart
@@ -18,20 +18,25 @@
 // ffmpeg's blackdetect filter and starts the mp4 there, so time 0 of the
 // mp4 is t0 of the timeline and the VTT cues line up (to a frame of the
 // 25 fps recording). It also prints a second estimate of the lead-in from
-// the page's own clock, as a cross-check.
+// the page's own clock, as a cross-check. During the lead-in the player
+// repaints a 4px corner square every frame, alternating two shades that
+// blackdetect counts as black, so the screencast keeps receiving black
+// frames (twice locally, before that repaint existed, a render found no
+// black interval at all; the cause was not confirmed). DEMO_KEEP_RAW=<dir>
+// keeps the raw recording of a failed render for inspection.
 //
 // Missing ffmpeg, ffprobe or browser is an error (exit 1), never a skip.
 // FFMPEG and FFPROBE override the binaries' paths.
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import timing from './timing.js';
-import { readTranscript, secretsFromEnv } from './transcript.mjs';
+import { recordsFromBytes, secretsFromEnv, secretsFromFile } from './transcript.mjs';
 import { toVtt } from './vtt.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -146,8 +151,28 @@ async function record(records, rawDir) {
   }
 }
 
-export async function render(transcriptPath, outDir, { secretEnv = [], env = process.env, log = console.log } = {}) {
-  const records = readTranscript(transcriptPath, { secrets: secretsFromEnv(secretEnv, env) });
+// Writes the VTT, the transcript copy and SHA256SUMS beside <name>.mp4 in
+// outDir, from the snapshot `bytes` and its `records` (never from the input
+// path). Returns the four paths.
+export function publishFiles({ outDir, name, bytes, records }) {
+  const mp4 = `${name}.mp4`;
+  const vtt = `${name}.vtt`;
+  const copy = `${name}.transcript.jsonl`;
+  writeFileSync(join(outDir, vtt), toVtt(records));
+  writeFileSync(join(outDir, copy), bytes);
+  const sums = [copy, mp4, vtt].sort().map((f) => `${sha256(join(outDir, f))}  ${f}\n`).join('');
+  writeFileSync(join(outDir, 'SHA256SUMS'), sums);
+  return { mp4: join(outDir, mp4), vtt: join(outDir, vtt), transcript: join(outDir, copy), sums: join(outDir, 'SHA256SUMS') };
+}
+
+export async function render(transcriptPath, outDir, { secretEnv = [], secretFiles = [], env = process.env, log = console.log } = {}) {
+  const secrets = secretsFromEnv(secretEnv, env);
+  for (const f of secretFiles) for (const [k, v] of secretsFromFile(f)) secrets.set(k, v);
+  // The one read of the transcript: validation, playback, the captions, the
+  // published copy and its checksum all use this snapshot, so a file
+  // changed during the render cannot publish unchecked bytes.
+  const bytes = readFileSync(transcriptPath);
+  const records = recordsFromBytes(bytes, transcriptPath, { secrets });
   const { ffmpeg, ffprobe } = requireTools(env);
   const timeline = timing.buildTimeline(records);
   const totalMs = timing.totalMs(timeline);
@@ -185,8 +210,6 @@ export async function render(transcriptPath, outDir, { secretEnv = [], env = pro
     mkdirSync(outDir, { recursive: true });
     const name = outputName(transcriptPath);
     const mp4 = `${name}.mp4`;
-    const vtt = `${name}.vtt`;
-    const copy = `${name}.transcript.jsonl`;
     run(
       ffmpeg,
       [
@@ -203,16 +226,10 @@ export async function render(transcriptPath, outDir, { secretEnv = [], env = pro
       ],
       'ffmpeg encode',
     );
-    writeFileSync(join(outDir, vtt), toVtt(records));
-    copyFileSync(transcriptPath, join(outDir, copy));
-    const sums = [copy, mp4, vtt].sort().map((f) => `${sha256(join(outDir, f))}  ${f}\n`).join('');
-    writeFileSync(join(outDir, 'SHA256SUMS'), sums);
+    const files = publishFiles({ outDir, name, bytes, records });
 
     const result = {
-      mp4: join(outDir, mp4),
-      vtt: join(outDir, vtt),
-      transcript: join(outDir, copy),
-      sums: join(outDir, 'SHA256SUMS'),
+      ...files,
       totalMs,
       leadInSeconds: leadIn,
       leadInEstimateMs: Math.round(leadInEstimateMs),
@@ -226,21 +243,30 @@ export async function render(transcriptPath, outDir, { secretEnv = [], env = pro
     );
     log(`render: wrote ${result.mp4}, ${result.vtt}, ${result.transcript}, ${result.sums}`);
     return result;
+  } catch (e) {
+    // DEMO_KEEP_RAW=<dir> keeps the raw recording of a failed render there.
+    if (env.DEMO_KEEP_RAW) {
+      mkdirSync(env.DEMO_KEEP_RAW, { recursive: true });
+      cpSync(rawDir, env.DEMO_KEEP_RAW, { recursive: true });
+    }
+    throw e;
   } finally {
     rmSync(rawDir, { recursive: true, force: true });
   }
 }
 
-const USAGE = 'usage: node scripts/demo/render.mjs <transcript.jsonl> --out <dir> [--secret-env NAME]...';
+const USAGE = 'usage: node scripts/demo/render.mjs <transcript.jsonl> --out <dir> [--secret-env NAME]... [--secret-file PATH]...';
 
 export async function main(argv) {
   let transcript;
   let out;
   const secretEnv = [];
+  const secretFiles = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--out' && i + 1 < argv.length) out = argv[++i];
     else if (a === '--secret-env' && i + 1 < argv.length) secretEnv.push(argv[++i]);
+    else if (a === '--secret-file' && i + 1 < argv.length) secretFiles.push(resolve(argv[++i]));
     else if (a === '-h' || a === '--help') {
       console.log(USAGE);
       return 0;
@@ -255,7 +281,7 @@ export async function main(argv) {
     return 2;
   }
   try {
-    await render(resolve(transcript), resolve(out), { secretEnv });
+    await render(resolve(transcript), resolve(out), { secretEnv, secretFiles });
     return 0;
   } catch (e) {
     console.error(`render: ${e.message}`);

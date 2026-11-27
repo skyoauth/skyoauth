@@ -11,10 +11,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { before, describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { FPS, HEIGHT, WIDTH, render } from './render.mjs';
@@ -28,6 +28,7 @@ const SAMPLE = join(HERE, 'sample', 'sample.transcript.jsonl');
 const RECORDS = readTranscript(SAMPLE);
 const TOTAL_MS = timing.totalMs(timing.buildTimeline(RECORDS));
 const TMP = mkdtempSync(join(tmpdir(), 'demo-render-e2e-'));
+after(() => rmSync(TMP, { recursive: true, force: true }));
 const FFMPEG = process.env.FFMPEG || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE || 'ffprobe';
 // One frame of the 25 fps recording plus one of the 30 fps output, rounded up.

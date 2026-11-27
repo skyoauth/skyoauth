@@ -237,10 +237,17 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   `JOB_RUNNER` decision, or its self-test fails. See
   `tests/conformance/README.md`.
 - Demo transcripts also run on every change, and `CI passed` requires them to
-  pass: the pure self-tests of `scripts/demo` and `node
-  scripts/demo/transcript.mjs check` over the sample and every committed
-  transcript under `tests/demo`, which refuses secret shapes, wall-clock
-  values and control characters. The demo videos themselves are rendered by
+  pass: the pure self-tests of `scripts/demo` (the CI wiring included) and
+  `node scripts/demo/transcript.mjs check` over the sample and every
+  committed transcript under `tests/demo`. The check refuses known shapes and
+  known values, also across line breaks and adjacent records: PEM headers,
+  JWT-shaped strings, Bearer credentials, hex runs of 96 digits or more,
+  base64url runs of 86 characters or more, and the seeds of the committed
+  `*.test-key.json` fixtures; and, per line, wall-clock values and control
+  characters. It does not find a credential of another shape (a 64-digit
+  hex key or seed that is not a fixture's, a short opaque token without the
+  Bearer scheme, a password), so golden transcripts still need review. The
+  demo videos themselves are rendered by
   a separate workflow, `.github/workflows/demo.yml` (Chromium and ffmpeg),
   and kept only as run artifacts (`demo-videos-N`); it is not part of `CI
   passed`, so a demo failure never blocks a merge or a release. See

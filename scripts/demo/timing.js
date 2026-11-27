@@ -34,7 +34,7 @@
   // output: printed line by line, then a pause to read it.
   var OUTPUT_LINE_MS = 40;
   var OUTPUT_PAUSE_MS = 900;
-  // note: a dim annotation line.
+  // note: dim annotation lines, printed like output, held at least this long.
   var NOTE_MS = 1600;
 
   function codePoints(text) {
@@ -76,8 +76,10 @@
       }
       case 'output':
         return OUTPUT_LINE_MS * outputLines(record).length + OUTPUT_PAUSE_MS;
+      // A note is printed line by line like output, and held at least
+      // NOTE_MS.
       case 'note':
-        return NOTE_MS;
+        return Math.max(NOTE_MS, OUTPUT_LINE_MS * outputLines(record).length + OUTPUT_PAUSE_MS);
       default:
         throw new Error('timing: unknown record type ' + JSON.stringify(record.type) + ' at step ' + record.step);
     }

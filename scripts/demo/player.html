@@ -29,6 +29,13 @@
     font-family: "DejaVu Sans Mono", "Liberation Mono", ui-monospace, monospace;
   }
   body.playing #screen { visibility: visible; }
+  /* Repainted every frame of the black lead-in, in two shades the renderer's
+     blackdetect counts as black, so the recording receives black frames
+     however late it starts. Hidden once playback starts. */
+  #tick { position: absolute; left: 0; top: 0; width: 4px; height: 4px; }
+  #tick.a { background: #000000; }
+  #tick.b { background: #030303; }
+  body.playing #tick { display: none; }
   #titlebar {
     flex: 0 0 36px;
     display: flex;
@@ -69,6 +76,7 @@
 <script src="timing.js"></script>
 </head>
 <body>
+<div id="tick" class="a"></div>
 <div id="screen">
   <div id="titlebar"><span class="dots">&#9679;&#9679;&#9679;</span>SkyOAuth walk-through</div>
   <div id="term"></div>
@@ -157,7 +165,15 @@
     window.__demoTotalMs = total;
     window.__demoEvents = events;
 
+    var ticking = true;
+    var tick = byId('tick');
+    (function repaint() {
+      if (!ticking) return;
+      tick.className = tick.className === 'a' ? 'b' : 'a';
+      requestAnimationFrame(repaint);
+    })();
     await waitUntil(performance.now(), T.LEAD_IN_MS);
+    ticking = false;
     document.body.className = 'playing';
     // t0 is the frame that first shows the terminal. Step 0 is drawn in
     // the same frame: the continuation below runs as a microtask of this
