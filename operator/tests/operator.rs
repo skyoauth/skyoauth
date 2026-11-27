@@ -11,8 +11,7 @@
 //! key, signature or challenge value is shown, and that no source writes a
 //! file.
 //!
-//! `local_wire` (Unix only, with the client's tests it shares helpers
-//! with; the codec itself is built on every platform) checks the
+//! `local_wire` (portable, like the codec) checks the
 //! deployment-local transport's wire codec against
 //! `tests/conformance/fixtures/_wire/local_transport.v1.json`, which the
 //! `pg` target of `skyoauth-scenarios` checks against the service
@@ -37,10 +36,10 @@
 //! mutated artifacts (docs/proposals/operator-cli-artifacts.md). Portable,
 //! with its Unix-only cases gated.
 //!
-//! Portable but for those three: no network, database or socket, and no
-//! clock (a time is always injected) but in
-//! `cli::without_now_the_system_clock_is_used_and_printed`, which checks the
-//! binary's default clock; it runs on Linux, macOS and Windows. These are not scenario
+//! Portable but for `local_exchange` and `local_path`: no network,
+//! database or socket, and no clock (a time is always injected) but in
+//! `cli::without_now_the_system_clock_is_used_and_printed`, which checks
+//! the binary's default clock; it runs on Linux, macOS and Windows. These are not scenario
 //! tests: no name here may match the scenario pattern `(^|::)a[0-9]{2}(_[0-9]{2})?_(pos|neg)_`, and the
 //! registry (`tests/conformance/scenarios.toml`) does not list them.
 
@@ -50,7 +49,6 @@ mod cli;
 mod local_exchange;
 #[cfg(unix)]
 mod local_path;
-#[cfg(unix)]
 mod local_wire;
 mod redaction;
 mod signature;

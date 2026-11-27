@@ -18,17 +18,20 @@ pub const HELP: &str = "\
 skyoauth-operator: offline checks of a recovery challenge and its signed response
 
 Usage:
-  skyoauth-operator verify-challenge --challenge FILE --instance-id ID
-      [--epoch N] [--replacement-identity ID] [--trust-anchor REF]
-      [--new-recovery-key HEX] [--now MICROS]
+  skyoauth-operator verify-challenge --challenge FILE --instance-id ID --epoch N
+      [--replacement-identity ID] [--trust-anchor REF] [--new-recovery-key HEX]
+      [--now MICROS]
   skyoauth-operator verify-response --challenge FILE --response FILE --key HEX
   skyoauth-operator --help
 
 verify-challenge reads the challenge artifact (the issue_challenge reply
 line, verbatim), checks it against the given values and the clock, and
-prints the restoration plan to compare. A signature is allowed only when
---replacement-identity, --trust-anchor and --new-recovery-key are all given
-and match (replacement_confirmed: yes).
+prints the restoration plan to compare. The replacement is confirmed
+(replacement_confirmed: yes, exit 0) only when --replacement-identity,
+--trust-anchor and --new-recovery-key are all given and match; when one of
+them is not given, the output names it and the exit code is 4. Signing
+also needs the signer's key to differ from the plan's new recovery key,
+which this command cannot check.
 
 verify-response checks the response artifact's signature over the
 challenge with the recovery public key --key (64 lowercase hex digits).
@@ -36,13 +39,16 @@ challenge with the recovery public key --key (64 lowercase hex digits).
 --now MICROS is the time to check against, in microseconds since the Unix
 epoch; without it the system clock is used. The clock used is printed.
 
-Exit codes: 0 every check passed; 1 refused; 2 usage error; 3 a file, the
-clock or the output could not be read or written.
+Exit codes: 0 every check passed (verify-challenge: the replacement is
+confirmed), or the help was printed; 1 refused; 2 usage error; 3 a file,
+the clock or the output could not be read or written; 4 (verify-challenge)
+every given check passed, but the replacement is not confirmed.
 ";
 
 /// A command and its flags.
 pub enum Command {
-    /// `--help`, `-h` or `help`, alone or after a command.
+    /// `--help`, `-h` or `help` alone, or `--help` or `-h` where a flag of
+    /// `verify-challenge` or `verify-response` is expected.
     Help,
     /// `verify-challenge`.
     VerifyChallenge(VerifyChallenge),
@@ -54,7 +60,7 @@ pub enum Command {
 pub struct VerifyChallenge {
     pub challenge: PathBuf,
     pub instance_id: String,
-    pub epoch: Option<i64>,
+    pub epoch: i64,
     pub replacement_identity: Option<String>,
     pub trust_anchor: Option<String>,
     pub new_recovery_key: Option<RecoveryPublicKey>,
@@ -114,18 +120,24 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, F
         return Err(usage("no command given"));
     };
     if is_help(command) || command == "help" {
-        return Ok(Command::Help);
-    }
-    if flags.iter().any(is_help) {
-        return Ok(Command::Help);
+        return if flags.is_empty() {
+            Ok(Command::Help)
+        } else {
+            Err(usage("the help takes no other argument"))
+        };
     }
     match command.to_str() {
         Some(VERIFY_CHALLENGE) => {
-            let mut given = Given::read(VERIFY_CHALLENGE, &VERIFY_CHALLENGE_FLAGS, flags)?;
+            let Some(mut given) = Given::read(VERIFY_CHALLENGE, &VERIFY_CHALLENGE_FLAGS, flags)?
+            else {
+                return Ok(Command::Help);
+            };
             Ok(Command::VerifyChallenge(VerifyChallenge {
                 challenge: given.required_path(CHALLENGE)?,
                 instance_id: given.required_text(INSTANCE_ID)?,
-                epoch: given.integer(EPOCH)?,
+                epoch: given
+                    .integer(EPOCH)?
+                    .ok_or_else(|| usage(format!("{EPOCH} is required")))?,
                 replacement_identity: given.text(REPLACEMENT_IDENTITY)?,
                 trust_anchor: given.text(TRUST_ANCHOR)?,
                 new_recovery_key: given.key(NEW_RECOVERY_KEY)?,
@@ -133,7 +145,10 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, F
             }))
         }
         Some(VERIFY_RESPONSE) => {
-            let mut given = Given::read(VERIFY_RESPONSE, &VERIFY_RESPONSE_FLAGS, flags)?;
+            let Some(mut given) = Given::read(VERIFY_RESPONSE, &VERIFY_RESPONSE_FLAGS, flags)?
+            else {
+                return Ok(Command::Help);
+            };
             Ok(Command::VerifyResponse(VerifyResponse {
                 challenge: given.required_path(CHALLENGE)?,
                 response: given.required_path(RESPONSE)?,
@@ -154,16 +169,21 @@ struct Given {
 
 impl Given {
     /// Reads `arguments` as pairs of a flag of `allowed` and its value.
+    /// `None` when `--help` or `-h` comes where a flag is expected (never
+    /// as a value: `--challenge -h` names a file `-h`).
     fn read(
         command: &str,
         allowed: &[&'static str],
         arguments: &[OsString],
-    ) -> Result<Self, Failure> {
+    ) -> Result<Option<Self>, Failure> {
         let mut values: Vec<(&'static str, OsString)> = Vec::new();
         let mut rest = arguments.iter().enumerate();
         while let Some((index, argument)) = rest.next() {
             // Positions count from 1 at the command.
             let position = index + 2;
+            if is_help(argument) {
+                return Ok(None);
+            }
             let Some(flag) = allowed.iter().copied().find(|flag| argument == *flag) else {
                 return Err(usage(match argument.to_str() {
                     Some(text) if text.starts_with("--") && is_flag_shaped(text) => {
@@ -187,7 +207,7 @@ impl Given {
             };
             values.push((flag, value));
         }
-        Ok(Self { values })
+        Ok(Some(Self { values }))
     }
 
     /// The value of `flag`, taken out, if given.

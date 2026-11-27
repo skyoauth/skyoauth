@@ -7,10 +7,7 @@
 //! reply the client must take as an unknown outcome, the size limits, the
 //! escapes against `serde_json`'s, and the redaction of every type.
 //!
-//! Unix only, with `local_path` and `local_exchange`, whose helpers it
-//! reads (the codec itself is built on every platform and also reached, off
-//! Unix, through the binary's tests in `cli`). No socket: the codec has no
-//! I/O.
+//! Portable, like the codec: no socket, the codec has no I/O.
 
 use std::collections::BTreeSet;
 
@@ -1121,7 +1118,7 @@ fn every_wire_fixture_file_and_case_is_covered() {
         [
             "errors.v1.json",
             WIRE_FIXTURE,
-            crate::local_path::SOCKET_PATH_FIXTURE
+            crate::support::SOCKET_PATH_FIXTURE
         ]
     );
 

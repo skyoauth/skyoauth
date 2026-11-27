@@ -21,7 +21,8 @@
 //! which `--now` replaces). Nothing reads the environment, writes a file or
 //! shows a signature; no command takes a private key.
 //!
-//! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`].
+//! Exit codes: [`EXIT_OK`], [`EXIT_REFUSED`], [`EXIT_USAGE`], [`EXIT_IO`],
+//! [`EXIT_NOT_CONFIRMED`].
 
 #![forbid(unsafe_code)]
 
@@ -39,7 +40,8 @@ use std::{
 
 use args::Command;
 
-/// Every check passed.
+/// Every check passed (for `verify-challenge`, the replacement is
+/// confirmed), or the help was printed.
 const EXIT_OK: u8 = 0;
 
 /// An artifact was refused: a check failed, or an artifact is not what it
@@ -52,8 +54,13 @@ const EXIT_USAGE: u8 = 2;
 
 /// A file could not be read (missing, not a regular file, too large,
 /// unreadable), the system clock could not be read, or the output could not
-/// be written.
+/// be written (whatever the command's result was).
 const EXIT_IO: u8 = 3;
+
+/// `verify-challenge`: every given check passed, but the replacement is not
+/// confirmed, since its identity, trust anchor or new recovery key was not
+/// given. Never 0: an omitted value is not a passed check.
+const EXIT_NOT_CONFIRMED: u8 = 4;
 
 /// Why a command did not succeed, with its fixed message. The message
 /// never holds a signature, a key given on the command line or a value of
@@ -66,6 +73,8 @@ enum Failure {
     Usage(String),
     /// [`EXIT_IO`].
     Io(String),
+    /// [`EXIT_NOT_CONFIRMED`].
+    NotConfirmed(String),
 }
 
 impl Failure {
@@ -74,12 +83,16 @@ impl Failure {
             Self::Refused(_) => EXIT_REFUSED,
             Self::Usage(_) => EXIT_USAGE,
             Self::Io(_) => EXIT_IO,
+            Self::NotConfirmed(_) => EXIT_NOT_CONFIRMED,
         }
     }
 
     fn message(&self) -> &str {
         match self {
-            Self::Refused(message) | Self::Usage(message) | Self::Io(message) => message,
+            Self::Refused(message)
+            | Self::Usage(message)
+            | Self::Io(message)
+            | Self::NotConfirmed(message) => message,
         }
     }
 }
@@ -111,6 +124,13 @@ fn run(command: Command) -> Outcome {
     }
 }
 
+/// Writes `output` to standard output, flushed.
+fn write_output(output: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(output.as_bytes())?;
+    stdout.flush()
+}
+
 fn main() -> ExitCode {
     let outcome = match args::parse(std::env::args_os().skip(1)) {
         Ok(command) => run(command),
@@ -120,21 +140,32 @@ fn main() -> ExitCode {
         Ok(()) => EXIT_OK,
         Err(failure) => failure.code(),
     };
-    let mut stdout = io::stdout().lock();
-    if stdout
-        .write_all(outcome.output.as_bytes())
-        .and_then(|()| stdout.flush())
-        .is_err()
-    {
-        code = code.max(EXIT_IO);
-    }
+    let mut errors = String::new();
     if let Err(failure) = &outcome.result {
-        let mut text = format!("skyoauth-operator: {}\n", failure.message());
+        errors.push_str(&format!("skyoauth-operator: {}\n", failure.message()));
         if matches!(failure, Failure::Usage(_)) {
-            text.push_str("Run `skyoauth-operator --help` for the usage.\n");
+            errors.push_str("Run `skyoauth-operator --help` for the usage.\n");
         }
-        // Nothing more can be reported when standard error fails.
-        let _ = io::stderr().lock().write_all(text.as_bytes());
+    }
+    // The result was not delivered: exit 3, whatever it was, and say why.
+    if let Err(err) = write_output(&outcome.output) {
+        code = EXIT_IO;
+        errors.push_str(&format!(
+            "skyoauth-operator: the output cannot be written ({})\n",
+            err.kind()
+        ));
+    }
+    if !errors.is_empty() {
+        let mut stderr = io::stderr().lock();
+        // Standard error is the last channel: its failure is reported by the
+        // exit code alone.
+        if stderr
+            .write_all(errors.as_bytes())
+            .and_then(|()| stderr.flush())
+            .is_err()
+        {
+            code = EXIT_IO;
+        }
     }
     ExitCode::from(code)
 }
