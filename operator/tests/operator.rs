@@ -8,8 +8,9 @@
 //! (`tests/harness/`). Every case of every file is run, and a test fails
 //! when a file, a member or a case is not
 //! (`every_fixture_file_and_case_is_covered`). `redaction` checks that no
-//! key, signature or challenge value is shown, and that no source writes a
-//! file.
+//! key, signature or challenge value is shown, that no source writes a
+//! file but the binary's `sign` (its new `--out`), and that only `sign`
+//! names the signer.
 //!
 //! `local_wire` (portable, like the codec) checks the
 //! deployment-local transport's wire codec against
@@ -33,8 +34,10 @@
 //! `cli` runs the package's binary, `skyoauth-operator`, as a process on
 //! temporary files: the challenge and response artifacts of the
 //! `_recovery` fixtures, every refusal, usage error and file error, and
-//! mutated artifacts (docs/proposals/operator-cli-artifacts.md). Portable,
-//! with its Unix-only cases gated.
+//! mutated artifacts; `cli::sign` signs every challenge vector with the
+//! recovery test key's seed file and checks the seed file's and the output
+//! file's rules (docs/proposals/operator-cli-artifacts.md). Portable, with
+//! its Unix-only cases gated.
 //!
 //! Portable but for `local_exchange` and `local_path`: no network,
 //! database or socket, and no clock (a time is always injected) but in

@@ -14,13 +14,13 @@ use skyoauth_operator::{
 use crate::{Failure, Outcome, args::VerifyChallenge, artifact, input, show::quoted};
 
 /// The time to check against, and where it came from.
-struct Clock {
-    source: &'static str,
-    now_micros: i64,
+pub struct Clock {
+    pub source: &'static str,
+    pub now_micros: i64,
 }
 
-/// `--now` when given, else the system clock.
-fn clock(now: Option<i64>) -> Result<Clock, Failure> {
+/// `--now` when given, else the system clock (also `sign`'s).
+pub fn clock(now: Option<i64>) -> Result<Clock, Failure> {
     if let Some(now_micros) = now {
         return Ok(Clock {
             source: "--now",

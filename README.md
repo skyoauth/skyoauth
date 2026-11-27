@@ -124,9 +124,12 @@ needs each privilege its tests need (PostgreSQL 15 or later):
 ## Operator
 
 `skyoauth-operator` is the workstation library and the offline command line
-of the same name, which checks a recovery challenge and its signed response
-without a network, a socket or a private key. The commands, the artifact
-formats and the exit codes are in
+of the same name, which checks a recovery challenge, signs it with the
+recovery key of a seed file into a new response file (`--out`), and checks
+the signed response, without a network or a socket. Run it as the seed
+file's owner and never install it setuid or setgid. The commands, the
+artifact formats, the seed file's rules (on Windows its protection is not
+checked) and the exit codes are in
 [the operator CLI proposal](docs/proposals/operator-cli-artifacts.md).
 
 ```bash
@@ -181,13 +184,14 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   profile in `.config/nextest.toml` (no retries, no fail-fast). Its JUnit
   report (`target/nextest/ci/junit.xml`) is uploaded as a workflow artifact
   even when tests fail. nextest skips doctests; the Rust job runs them.
-  The job then runs three selections again as root, with a second local
+  The job then runs four selections again as root, with a second local
   user in `SKYOAUTH_IT_PEER_USER` (`--profile ci-root`, through
   `scripts/ci/root-transport-run.sh`), also when the first run failed:
   `skyoauth-service`'s `local_transport` integration tests, the operator's
-  `local_path` module and the scenario harness's `socket_path_fixture`
-  module, whose cross-UID and root-only checks only print a notice and
-  pass without root and that user. The step fails unless every listed
+  `local_path` module and its CLI test
+  `cli::sign::seed_file_protection_on_unix`, and the scenario harness's
+  `socket_path_fixture` module, whose cross-UID and root-only checks only
+  print a notice and pass without root and that user. The step fails unless every listed
   test ran and passed, the root-only tests the script names among them
   included, and on a notice that the peer user is missing or that
   root-only cases did not run; the job summary, also in the step log,
@@ -236,6 +240,22 @@ GitHub Actions runs on pushes to `main` and on pull requests:
   reporter's `NOT_CONFORMANCE` list, and a new layout job needs a
   `JOB_RUNNER` decision, or its self-test fails. See
   `tests/conformance/README.md`.
+- Demo transcripts also run on every change, and `CI passed` requires them to
+  pass: the pure self-tests of `scripts/demo` (the CI wiring included) and
+  `node scripts/demo/transcript.mjs check` over the sample and every
+  committed transcript under `tests/demo`. The check refuses known shapes and
+  known values, also across line breaks and adjacent records: PEM headers,
+  JWT-shaped strings, Bearer credentials, hex runs of 96 digits or more,
+  base64url runs of 86 characters or more, and the seeds of the committed
+  `*.test-key.json` fixtures; and, per line, wall-clock values and control
+  characters. It does not find a credential of another shape (a 64-digit
+  hex key or seed that is not a fixture's, a short opaque token without the
+  Bearer scheme, a password), so golden transcripts still need review. The
+  demo videos themselves are rendered by
+  a separate workflow, `.github/workflows/demo.yml` (Chromium and ffmpeg),
+  and kept only as run artifacts (`demo-videos-N`); it is not part of `CI
+  passed`, so a demo failure never blocks a merge or a release. See
+  `scripts/demo/README.md`.
 
 Coverage reports are uploaded as workflow artifacts and summarized on the run
 page. On pushes to `main`, CI generates separate Rust and TypeScript tests and

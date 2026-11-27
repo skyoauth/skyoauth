@@ -915,7 +915,9 @@ fn the_socket_must_be_the_expected_owners() {
 fn root_only_refuses_a_directory_of_the_service() {
     let dir = TempDir::new();
     let sub = dir.0.join("d");
-    fs::create_dir(&sub).unwrap();
+    // An explicit mode: `create_dir` follows the umask, and a directory
+    // writable by group or others is refused under either trust.
+    fs::DirBuilder::new().mode(0o700).create(&sub).unwrap();
     let path = sub.join("s");
     drop(UnixListener::bind(&path).unwrap());
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
@@ -993,7 +995,9 @@ fn errors_name_no_path() {
     let dir = TempDir::new();
     // Short names: the socket path must fit macOS's 103 bytes too.
     let sentinel = dir.0.join("SENTINEL-D");
-    fs::create_dir(&sentinel).unwrap();
+    // An explicit mode: `create_dir` follows the umask, and a directory
+    // writable by group or others would refuse the first check.
+    fs::DirBuilder::new().mode(0o700).create(&sentinel).unwrap();
     let path = sentinel.join("SENTINEL-S");
     let listener = listen(&path);
     let expectations = SocketExpectations {

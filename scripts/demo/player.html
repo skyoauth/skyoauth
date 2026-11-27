@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- Static player of a demo transcript (scripts/demo/README.md). No
+     framework and no network: the policy below allows only this file's
+     inline script and style and timing.js beside it. The records are
+     injected by the renderer: window.playTranscript(records). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' file:; style-src 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; media-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=1280, height=720">
+<title>SkyOAuth walk-through</title>
+<style>
+  html, body {
+    margin: 0;
+    width: 1280px;
+    height: 720px;
+    overflow: hidden;
+    /* Pure black until playback starts: the renderer cuts the recording
+       at the end of this black lead-in (timing.js LEAD_IN_MS). */
+    background: #000;
+  }
+  #screen {
+    visibility: hidden;
+    width: 1280px;
+    height: 720px;
+    display: flex;
+    flex-direction: column;
+    background: #161b22;
+    font-family: "DejaVu Sans Mono", "Liberation Mono", ui-monospace, monospace;
+  }
+  body.playing #screen { visibility: visible; }
+  /* Repainted every frame of the black lead-in, in two shades the renderer's
+     blackdetect counts as black, so the recording receives black frames
+     however late it starts. Hidden once playback starts. */
+  #tick { position: absolute; left: 0; top: 0; width: 4px; height: 4px; }
+  #tick.a { background: #000000; }
+  #tick.b { background: #030303; }
+  body.playing #tick { display: none; }
+  #titlebar {
+    flex: 0 0 36px;
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    background: #d0d7de;
+    color: #24292f;
+    font: 600 15px/36px "DejaVu Sans", "Liberation Sans", sans-serif;
+  }
+  #titlebar .dots { margin-right: 14px; letter-spacing: 4px; color: #8c959f; }
+  #term {
+    flex: 1 1 auto;
+    padding: 12px 24px;
+    overflow: hidden;
+    color: #e6edf3;
+    font-size: 16px;
+    line-height: 22px;
+  }
+  .line { white-space: pre; overflow: hidden; height: 22px; }
+  .prompt { color: #3fb950; }
+  .note { color: #8b949e; font-style: italic; }
+  .output { color: #c9d1d9; }
+  .cursor { background: #e6edf3; color: #161b22; }
+  #caption {
+    flex: 0 0 112px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 48px;
+    background: #0b0e13;
+    border-top: 2px solid #30363d;
+    color: #ffffff;
+    text-align: center;
+    font: 500 26px/34px "DejaVu Sans", "Liberation Sans", sans-serif;
+  }
+</style>
+<script src="timing.js"></script>
+</head>
+<body>
+<div id="tick" class="a"></div>
+<div id="screen">
+  <div id="titlebar"><span class="dots">&#9679;&#9679;&#9679;</span>SkyOAuth walk-through</div>
+  <div id="term"></div>
+  <div id="caption"></div>
+</div>
+<script>
+(function () {
+  'use strict';
+  var T = window.DemoTiming;
+  // Lines the terminal keeps: (720 - 36 - 112 - 24) / 22.
+  var MAX_LINES = 24;
+  var playing = false;
+  window.__demoDone = false;
+
+  function byId(id) { return document.getElementById(id); }
+
+  // Resolves once performance.now() has reached base + ms. Waiting for an
+  // absolute time keeps late timers from adding up over a long transcript.
+  function waitUntil(base, ms) {
+    return new Promise(function (resolve) {
+      (function check() {
+        var left = base + ms - performance.now();
+        if (left <= 0) resolve();
+        else setTimeout(check, left);
+      })();
+    });
+  }
+
+  function nextFrame() {
+    return new Promise(function (resolve) { requestAnimationFrame(function () { resolve(performance.now()); }); });
+  }
+
+  function span(cls, text) {
+    var el = document.createElement('span');
+    el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+
+  function addLine(cls) {
+    var term = byId('term');
+    var line = document.createElement('div');
+    line.className = 'line ' + cls;
+    term.appendChild(line);
+    while (term.children.length > MAX_LINES) term.removeChild(term.firstChild);
+    return line;
+  }
+
+  async function playCommand(record, base) {
+    var line = addLine('command');
+    line.appendChild(span('prompt', '$ '));
+    var typed = span('typed', '');
+    var cursor = span('cursor', ' ');
+    line.appendChild(typed);
+    line.appendChild(cursor);
+    var chars = Array.from(record.text);
+    var offsets = T.typingOffsets(record);
+    for (var i = 0; i < chars.length; i++) {
+      await waitUntil(base, offsets[i]);
+      typed.textContent = chars.slice(0, i + 1).join('');
+    }
+    var end = T.stepDuration(record);
+    await waitUntil(base, end - 1);
+    line.removeChild(cursor);
+  }
+
+  async function playLines(record, base, cls) {
+    var lines = T.outputLines(record);
+    for (var i = 0; i < lines.length; i++) {
+      await waitUntil(base, i * T.OUTPUT_LINE_MS);
+      var line = addLine(cls);
+      line.textContent = cls === 'note' ? '# ' + lines[i] : lines[i];
+    }
+  }
+
+  // Plays the records (already validated by transcript.mjs) on the
+  // schedule of timing.js and resolves when the last frame has been held
+  // for TAIL_MS. Sets window.__demoDone at the end.
+  window.playTranscript = async function (records) {
+    if (playing) throw new Error('playTranscript: already playing');
+    playing = true;
+    var timeline = T.buildTimeline(records);
+    var total = T.totalMs(timeline);
+    var events = [];
+    window.__demoTimeline = timeline;
+    window.__demoTotalMs = total;
+    window.__demoEvents = events;
+
+    var ticking = true;
+    var tick = byId('tick');
+    (function repaint() {
+      if (!ticking) return;
+      tick.className = tick.className === 'a' ? 'b' : 'a';
+      requestAnimationFrame(repaint);
+    })();
+    await waitUntil(performance.now(), T.LEAD_IN_MS);
+    ticking = false;
+    document.body.className = 'playing';
+    // t0 is the frame that first shows the terminal. Step 0 is drawn in
+    // the same frame: the continuation below runs as a microtask of this
+    // animation frame callback, before the frame is painted.
+    var t0 = await nextFrame();
+    for (var i = 0; i < records.length; i++) {
+      var record = records[i];
+      var base = t0 + timeline[i].startMs;
+      await waitUntil(base, 0);
+      events.push({ step: record.step, type: record.type, plannedMs: timeline[i].startMs, actualMs: performance.now() - t0 });
+      if (record.type === 'caption') {
+        byId('caption').textContent = record.text;
+      } else if (record.type === 'command') {
+        await playCommand(record, base);
+      } else {
+        await playLines(record, base, record.type);
+      }
+      await waitUntil(t0, timeline[i].endMs);
+    }
+    await waitUntil(t0, total);
+    window.__demoDone = true;
+    return { t0: t0, totalMs: total, events: events };
+  };
+})();
+</script>
+</body>
+</html>

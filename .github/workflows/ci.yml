@@ -144,6 +144,75 @@ jobs:
         if: success() || failure()
         run: node --test scripts/ci/root-transport-run.test.mjs
 
+  # Demo walk-through transcripts (docs/proposals/demo-walkthroughs.md §2
+  # and §5, scripts/demo/README.md): the pure self-tests of scripts/demo
+  # (every *.test.mjs but *.e2e.test.mjs: no browser, no ffmpeg) and the
+  # transcript check over every committed transcript. The check refuses
+  # known shapes and known values only: PEM headers, JWT-shaped strings,
+  # Bearer credentials, hex runs of 96 or more digits, base64url runs of 86
+  # or more characters, and the seeds of the committed *.test-key.json
+  # fixtures, each also across line breaks and adjacent records; plus
+  # wall-clock values and control characters per line. It does not find a
+  # credential of another shape (a 64-digit hex key or seed not in a
+  # fixture, a short opaque token without the Bearer scheme, a password),
+  # so a reviewer still reads every golden transcript. Like docs-check it
+  # runs for every change, docs-only ones included, so it does not need
+  # `changes`. The rendering (Chromium, ffmpeg) is in demo.yml, which
+  # `ci-passed` does not need. `npm ci` installs playwright from the
+  # scripts/demo lockfile without lifecycle scripts and fails if
+  # package.json and the lockfile disagree; no browser is downloaded.
+  demo-transcripts:
+    name: Demo transcripts
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: scripts/demo/package-lock.json
+
+      - name: Install demo dependencies
+        working-directory: scripts/demo
+        run: npm ci --ignore-scripts
+
+      - name: Self-test the transcript checker, timing and WebVTT
+        shell: bash
+        run: |
+          mapfile -d '' tests < <(find scripts/demo -maxdepth 1 -type f -name '*.test.mjs' ! -name '*.e2e.test.mjs' -print0 | LC_ALL=C sort -z)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "No pure self-tests found in scripts/demo"
+            exit 1
+          fi
+          node --test "${tests[@]}"
+
+      # The golden transcripts under tests/demo (none yet: the directory
+      # holds only .gitkeep) and the sample, against the seeds of every
+      # committed test key (--secret-file). The checker refuses an empty
+      # file list (exit 2); the sample keeps the list non-empty, and the
+      # golden and key counts are printed, so no golden is a visible state,
+      # not a vacuous pass. No test key at all fails the step.
+      - name: Check the committed transcripts
+        if: success() || failure()
+        shell: bash
+        run: |
+          test -d tests/demo/golden
+          mapfile -d '' goldens < <(find tests/demo -type f -name '*.jsonl' -print0 | LC_ALL=C sort -z)
+          mapfile -d '' keys < <(find tests/conformance/fixtures -type f -name '*.test-key.json' -print0 | LC_ALL=C sort -z)
+          echo "Golden transcripts under tests/demo: ${#goldens[@]}; test-key files: ${#keys[@]}"
+          if [ "${#keys[@]}" -eq 0 ]; then
+            echo "No *.test-key.json under tests/conformance/fixtures: nothing to check the seeds against"
+            exit 1
+          fi
+          secret_files=()
+          for key in "${keys[@]}"; do secret_files+=(--secret-file "$key"); done
+          node scripts/demo/transcript.mjs check "${secret_files[@]}" scripts/demo/sample/sample.transcript.jsonl "${goldens[@]}"
+
   rust:
     name: Rust format, lint, test, docs (${{ matrix.arch }})
     needs: changes
@@ -479,12 +548,15 @@ jobs:
         run: cargo nextest run --locked --workspace --exclude skyoauth-scenarios --all-features --profile ci --run-ignored all
 
       # The tests that need root and a second local user
-      # (`SKYOAUTH_IT_PEER_USER`), in three selections: the `local_transport`
+      # (`SKYOAUTH_IT_PEER_USER`), in four selections: the `local_transport`
       # integration test target of skyoauth-service (the cross-UID peer
       # check, the bind for another UID, the swap and rename races, the
       # unlistable directory); the `local_path` module of skyoauth-operator's
       # `operator` target (the client's socket path checks on the cases with
-      # entries of root or of another UID, and the owner checks); and the
+      # entries of root or of another UID, and the owner checks); the one
+      # test `cli::sign::seed_file_protection_on_unix` of that target (the
+      # seed file of another owner, which only root can make; the rest of
+      # `cli::sign` is not selected); and the
       # `harness::socket_path_fixture` module of skyoauth-scenarios' `pg`
       # target (the same cases bound by the service, root's binds for another
       # UID and, in a child process run as the peer user, the service UID's;
@@ -536,12 +608,12 @@ jobs:
           unshare --user --map-root-user --mount true || userns=$?
           as_root=(sudo env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
             "CARGO_TERM_COLOR=never" "SKYOAUTH_IT_DATABASE_URL=$SKYOAUTH_IT_DATABASE_URL" "SKYOAUTH_IT_PEER_USER=$peer")
-          # The three selections (SELECTIONS in root-transport-run.sh): the
+          # The four selections (SELECTIONS in root-transport-run.sh): the
           # packages and targets to build, and the filterset that keeps only
           # these tests of them.
           selection=(--locked -p skyoauth-service -p skyoauth-operator -p skyoauth-scenarios
             --test local_transport --test operator --test pg --all-features --profile ci-root --run-ignored all
-            -E '(package(skyoauth-service) & binary(local_transport)) | (package(skyoauth-operator) & binary(operator) & test(/^local_path::/)) | (package(skyoauth-scenarios) & binary(pg) & test(/^harness::socket_path_fixture::/))')
+            -E '(package(skyoauth-service) & binary(local_transport)) | (package(skyoauth-operator) & binary(operator) & test(/^local_path::/)) | (package(skyoauth-operator) & binary(operator) & test(/^cli::sign::seed_file_protection_on_unix$/)) | (package(skyoauth-scenarios) & binary(pg) & test(/^harness::socket_path_fixture::/))')
           status=0
           sh scripts/ci/root-transport-run.sh run "$log" \
             "${as_root[@]}" cargo nextest run "${selection[@]}" --no-capture \
@@ -1255,8 +1327,9 @@ jobs:
   # docs-only change satisfies a required check, except a matrix job: it
   # reports under its unexpanded name, so requiring one would never
   # arrive. This job passes when every job it needs passed or was skipped,
-  # except docs-check and conformance-registry: they have no condition, so
-  # they must have passed; a skip there would mean they never ran.
+  # except docs-check, conformance-registry and demo-transcripts: they have
+  # no condition, so they must have passed; a skip there would mean they
+  # never ran.
   ci-passed:
     name: CI passed
     if: always()
@@ -1264,6 +1337,7 @@ jobs:
       - changes
       - docs-check
       - conformance-registry
+      - demo-transcripts
       - rust
       - rust-coverage
       - service-nextest
@@ -1281,6 +1355,7 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
           DOCS_CHECK: ${{ needs.docs-check.result }}
           REGISTRY: ${{ needs.conformance-registry.result }}
+          DEMO_TRANSCRIPTS: ${{ needs.demo-transcripts.result }}
         run: |
           echo "Job results: $RESULTS"
           if [ "$DOCS_CHECK" != success ]; then
@@ -1289,6 +1364,10 @@ jobs:
           fi
           if [ "$REGISTRY" != success ]; then
             echo "Conformance registry did not pass: '$REGISTRY'"
+            exit 1
+          fi
+          if [ "$DEMO_TRANSCRIPTS" != success ]; then
+            echo "Demo transcripts did not pass: '$DEMO_TRANSCRIPTS'"
             exit 1
           fi
           for result in $RESULTS; do
