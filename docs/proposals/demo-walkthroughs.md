@@ -117,7 +117,7 @@ M3 has no transcript source: the SPA is recorded with Playwright (section 2).
 | M4-1 | Native login with an explicit confirmation | A27, A52, A59 | T40 | the CLI showing a port and a code, the page asking for the matching acknowledgement, the token |
 | M4-2 | A malicious concurrent native request | A59, A27 | T40 | the legitimate CLI unaffected; no silent replacement |
 | M4-3 | Refresh rotation, a replay revokes, the opt-in exact retry | A34, A57 | T40 | the rotated successor, the replay and the revoked family, the retry inside 30 s returning one successor |
-| M4-4 | The CLI with no server dependency, walked through on one OS (Linux; the user asked for no permutations, section 6.2) | A41 | T40; `native-3os` covers the three OSes | the run on Linux, no plaintext keychain fallback |
+| M4-4 | The CLI with no server dependency, walked through on one OS (Linux; the user said there is "no need to show every permutation", section 6.2) | A41 | T40; `native-3os` covers the three OSes | the run on Linux, no plaintext keychain fallback |
 | M4-5 | A human CLI token accepted by a backend, a forged one refused | A44, A55 | T40, T41 | the explicit human profile accepted, a WIF token in a human shape denied |
 
 ### M5: deployment, migration and v0.1
@@ -328,9 +328,11 @@ The user asked (2026-11-27) that the videos be part of the release artifacts
 ## 6. Chapters and one video per milestone (design, not built)
 
 **Lead pick** (the lead's design and rulings; written down here for review
-before any code). Not built: everything below is the specification of the
-implementation PRs of 6.11. The checks of `scripts/demo/transcript.mjs` stay
-as they are; this section adds to them.
+before any code). Built: item 1 of 6.11, the checker (the `chapter` record,
+the milestone mode, `check-milestone` and the sample milestone; see
+`scripts/demo/README.md`). Not built: the rest, which is the specification
+of the implementation PRs 2 to 4 of 6.11. The checks of
+`scripts/demo/transcript.mjs` stay as they are; this section adds to them.
 
 **6.1 The `chapter` record.** A fifth record type,
 `{"step":N,"type":"chapter","text":S}`, canonical like the others. The
@@ -396,19 +398,38 @@ tests/demo/golden/<m>/<journey>.jsonl  one golden transcript per journey (writte
 2. each journey file alone, with every rule (as `check` does) plus the
    chapter at step 0 with the matching journey id;
 3. the **joined stream**: the journey files in manifest order, each record
-   with `step` = (records in the earlier journeys) + (its step in its file),
-   validated in milestone mode. It is built from **every parsed record** of
-   every file, never only the valid ones, so a record that fails a rule in its
-   file still takes part in the windows. The pair windows cross journey
-   boundaries (the last record of one journey with the next chapter, and that
-   chapter with the next journey's first record).
+   with `step` = (records in the earlier journeys) + (its step in its file).
+   As built (PR 1, after the lead's review of #219): when every journey file
+   is valid, the joined stream is serialized and validated in milestone
+   mode with every rule and the secret values, so a rule that depends on the
+   renumbered step is applied (a record at the 16 KiB cap in its file can
+   exceed it once its step has more digits), and each error is mapped back
+   to its file and line. When a file has errors, its records are not all
+   valid, so the stream is not serialized: the pair windows across each
+   journey boundary (the last record of one journey with the next chapter)
+   are checked over **every parsed record** of every file, never only the
+   valid ones, so a record that fails a rule in its file still takes part.
+   Every other window of the joined stream is one file's (the chapter with
+   its journey's first record included), already checked in step 2.
+   "Every parsed record" includes a record refused for its fields (an
+   unknown key, a missing `step` or `type`) whose `text` is a string: it is
+   never a valid record, but it keeps its place in every window;
 4. a **chapter-stripped pass** over the same records without the chapters,
    so a value split over the last record of one journey and the first of the
-   next is found. It does not renumber: each record keeps its file and line.
-   Chapters stay hard boundaries for the runs of `output` and `note` records,
-   so a run window never spans a journey boundary; only the pair windows do;
+   next is found. It does not renumber: each record keeps its file and line,
+   and its messages end `(chapters removed)` where the joined pass's end
+   `(texts joined)`. Chapters stay hard boundaries for the runs of `output`
+   and `note` records, so a run window never spans a journey boundary; only
+   the pair windows do;
 5. one window over all the chapter titles joined (direct and with a space),
-   in manifest order.
+   in manifest order, reported as `(titles joined)`.
+
+**Known gap (accepted by the lead):** a value split over three or more
+records across a journey boundary is not found: the last record of one
+journey, the next chapter and the next journey's first record, or two
+records on one side and one on the other. Only pairs cross a boundary. The
+title card clears the terminal and the caption bar, so the pieces are never
+on screen together.
 
 Errors are reported at a file and line, never at a joined line
 (`m1a-2.jsonl:1: JWT-shaped string across the records on m1a-1.jsonl:14 -
@@ -419,6 +440,18 @@ of that directory is still checked alone (steps 1 and 2) before the next
 directory. Exit status 1 when anything failed. With no directory at all it
 is a usage error (exit 2), like `check` with no file, so a glob that matched
 nothing fails.
+
+Limits and names, as built: the directory's own name is taken from the
+resolved path (`.` and `m1a/` work). A manifest over 64 KiB is refused
+unread; one too deeply nested to read is reported as such; at most 20 bad
+`journeys` entries and 20 listed journeys with no file are reported, then
+`... and N more`. A file is read after an `lstat` and must be the same file
+(device and inode) once open; `O_NOFOLLOW` is added where Node has it (not
+on Windows). No name is echoed as given: a directory entry is printed only
+when it is `milestone.json` or a journey file name and matches no secret
+rule or value (else `<entry N>`), a path argument that matches one is
+`<argument N>`, and every printed name has its control and bidirectional
+characters escaped (`<U+001B>`).
 
 **6.4 Timing and the opening commit caption.** The milestone video plays
 the joined stream: every time comes from `timing.buildTimeline(joined
@@ -437,7 +470,20 @@ with the stream's first record, with every rule and the secret values. In
 `demo.yml` the value is the first 12 characters of
 `github.event.pull_request.head.sha` on a `pull_request` run (where
 `GITHUB_SHA` is the merge commit, not the PR's head) and of `github.sha`
-otherwise.
+otherwise. **The rendered tree is the named commit** (lead condition on
+#212, a PR 4 item): on a `pull_request` run `demo.yml` checks out
+`github.event.pull_request.head.sha` (`actions/checkout` with `ref:`), not
+the default merge commit, so the caption never names a commit other than
+the one rendered. The alternative, naming the merge commit, is not taken: a
+`pull_request` merge commit is temporary and is not on any branch after the
+run. The head is the same pull request's code as the merge commit, so the
+job's trust is unchanged (`pull_request`, not `pull_request_target`,
+read-only token, `persist-credentials: false`).
+
+In the single-transcript mode (`render.mjs <file> --commit <sha>`) there is
+no milestone id, and the lead-in text never comes from a path: it is the
+fixed `Demo walk-through at commit <sha>`, validated and timed like the
+milestone lead-in, with the same `opening` cue.
 
 Chapter *k* starts at its chapter record's `startMs`, except chapter 1,
 which starts at 0 and covers the lead-in; chapter *k* ends where *k+1*
@@ -520,6 +566,16 @@ sample's titles contain each of `\ = ; #`.
   `tests/demo/golden/*/` directory, all with the test keys. The sample
   milestone is always passed, so the list is never empty. A `.jsonl` under
   `tests/demo/golden/` that is not in a milestone directory is an error.
+- **The sample milestone is never published** (lead condition on #212). It
+  is invented but its id is `M1a`, so a render of it would publish an
+  invented `m1a.mp4`. It is rendered only by the e2e test, into the test's
+  own temporary directory; `demo.yml` passes only `tests/demo/golden/*/` to
+  `render.mjs --milestone`, never `scripts/demo/sample/`, and
+  `workflows.test.mjs` pins that. (The other option, a reserved sample id
+  accepted only on the sample path, is not taken: it would add an id rule
+  that depends on a path, against "every output name derives from the
+  validated milestone id, never from a path", and a second code path to
+  test; the e2e-only rule adds no rule to `transcript.mjs`.)
 - `demo.yml` (not in `CI passed`):
   - The e2e test stays its own step. The render steps are separate and run
     with `if: ${{ !cancelled() }}`, so a failed e2e run does not stop them.
@@ -601,10 +657,12 @@ transcript lands before PR 4, which puts `check-milestone` in CI.
 3. `render.mjs`: `--milestone`, `--commit` and the lead-in with the
    final-stream validation, the ffmpeg chapter metadata (`-map_metadata 1`),
    staged publication with rollback, the deadlines, the merged `SHA256SUMS`,
-   the e2e test.
+   the single-transcript lead-in text (6.4), the e2e test, which is the only
+   place the sample milestone is rendered (6.7).
 4. CI: the `ci.yml` `check-milestone` step, the `demo.yml` render, verify and
-   upload steps, the `--commit` value, the timeout, the wiring tests and the
-   docs. The journeys and their golden files are separate later PRs, as in
+   upload steps, the `--commit` value and the head-SHA checkout on
+   `pull_request` (6.4), no render of the sample milestone (6.7), the
+   timeout, the wiring tests and the docs. The journeys and their golden files are separate later PRs, as in
    section 2.
 
 ## Decisions requested

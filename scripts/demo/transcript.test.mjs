@@ -82,7 +82,7 @@ describe('structure', () => {
   });
 
   it('rejects unknown types', () => {
-    rejects(rec(2, 'stdout', 'x'), /^"type" must be one of caption, command, output, note$/);
+    rejects(rec(2, 'stdout', 'x'), /^"type" must be one of caption, command, output, note, chapter$/);
     rejects(rec(2, 'Caption', 'x'), /^"type" must be one of/);
     rejects(JSON.stringify({ step: 2, type: 1, text: 'x' }), /^"type" must be one of/);
   });
@@ -657,14 +657,49 @@ describe('diagnostics never echo the input', () => {
     assert.ok(!hasBearerCredential("{'authorization': 'Bearer <redacted>'}"));
     // A blank still ends a quoted value; only a JSON escape continues it.
     assert.ok(!hasBearerCredential('{"authorization": "Bearer <redacted> (redacted by the client)"}'));
-    // Unquoted, a JSON escape ends the value: an escaped line break in text.
+    // Unquoted, an escape that decodes to a blank ends the value: an escaped
+    // line break in text.
     assert.ok(!hasBearerCredential('Authorization: Bearer <redacted>\\nHost: example.test'));
-    assert.ok(!hasBearerCredential('Authorization: Bearer <redacted>\\\\'));
     // In a record, as the checker reads it.
     const { errors } = check(`${rec(0, 'output', '{"authorization": "Bearer <redacted>\\nabc"}')}\n`);
     assert.equal(errors.length, 1);
     assert.match(errors[0].message, /Bearer/);
     assert.equal(check(`${rec(0, 'output', '{\\"Authorization\\": \\"Bearer <redacted>\\"}')}\n`).errors.length, 0);
+  });
+
+  it('an Authorization value ends only at an escape that decodes to a blank or a quote: \\n \\r \\t \\" \\\'', () => {
+    // An unquoted header inside a JSON string (`"Authorization: Bearer ..."`):
+    // the escapes that decode to a terminator end the value.
+    for (const esc of ['\\n', '\\r', '\\t', '\\"', "\\'"]) {
+      const text = `{"h": "Authorization: Bearer <redacted>${esc}rest"}`;
+      assert.equal(hasBearerCredential(text), false, text);
+    }
+    // Every other escape decodes to a character of the value: refused.
+    for (const esc of ['\\/', '\\\\', '\\b', '\\f', '\\u0041']) {
+      for (const text of [`Authorization: Bearer <redacted>${esc}abc`, `{"h": "Authorization: Bearer <redacted>${esc}abc"}`]) {
+        assert.equal(hasBearerCredential(text), true, text);
+        assert.equal(check(`${rec(0, 'output', text)}\n`).errors.length, 1, text);
+      }
+    }
+    // An escaped backslash at the very end is part of the value too.
+    assert.ok(hasBearerCredential('Authorization: Bearer <redacted>\\\\'));
+    // `\\n` is an escaped backslash then n: the backslash is in the value.
+    assert.ok(hasBearerCredential('Authorization: Bearer <redacted>\\\\nabc'));
+  });
+
+  it('an upper-case escape letter does not end an Authorization value (no case-insensitive escape check)', () => {
+    for (const esc of ['\\U1b2c3', '\\N', '\\R', '\\T', '\\B', '\\F', '\\U0041']) {
+      const text = `Authorization: Bearer <redacted>${esc}`;
+      assert.equal(hasBearerCredential(text), true, text);
+      rejects(rec(2, 'output', text), /^Bearer credential in "text"$/);
+    }
+    // The field and scheme names still match in any case.
+    for (const text of ['AUTHORIZATION: BEARER abc', 'Proxy-AUTHORIZATION: bEaReR abc', 'pRoXy-authorization: Bearer x']) {
+      assert.equal(hasBearerCredential(text), true, text);
+    }
+    for (const text of ['AUTHORIZATION: BEARER <redacted>', 'PROXY-AUTHORIZATION: bearer <redacted>\\nnext']) {
+      assert.equal(hasBearerCredential(text), false, text);
+    }
   });
 
   it('scanJson keeps every entry of an object, duplicate keys included, in file order', () => {

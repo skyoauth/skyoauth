@@ -11,8 +11,10 @@
 // `npm ci --ignore-scripts`, the check and the render against the
 // committed test keys, DEMO_KEEP_RAW on the e2e and render steps, a video
 // upload that errors on no files, a raw-recording upload only on failure
-// (its own artifact name, 3 days, no error when empty), and it is not
-// wired into ci.yml.
+// (its own artifact name, 3 days, no error when empty), no render of the
+// sample milestone (scripts/demo/sample/m1a: invented, but its id is M1a,
+// so a render would publish an invented m1a.mp4; proposal 6.7), and it is
+// not wired into ci.yml.
 //
 // The workflows are read as text with strict line patterns (the layout
 // ci.yml uses: two-space indents, block lists), not with a YAML library;
@@ -118,6 +120,12 @@ export function demoProblems(demo) {
     if (npm.demoInstalls === 0 && /\bnpm ci\b/.test(body)) out.push(`demo.yml job ${id} runs npm ci outside scripts/demo`);
   }
   if (!/^ {10}if-no-files-found: error$/m.test(text)) out.push('demo.yml upload does not error on no files');
+  // A render line (render.mjs) naming anything under scripts/demo/sample/
+  // but the single sample transcript. Only the line that holds render.mjs
+  // is read: a continuation line is not, so the review still reads it.
+  if (lines.some((l) => /render\.mjs/.test(l) && /scripts\/demo\/sample\/(?!sample\.transcript\.jsonl\b)/.test(l))) {
+    out.push('demo.yml renders the sample milestone: it is rendered only by the e2e test');
+  }
   if (!/^ {10}retention-days: \$\{\{ github\.event_name == 'pull_request' && 7 \|\| 90 \}\}$/m.test(text)) out.push('demo.yml retention is not 7 days on pull requests, 90 otherwise');
   // The test keys: listed once (failing when there are none), then passed
   // to both the check and the render.
@@ -211,6 +219,8 @@ describe('the wiring checks catch their mutants', () => {
     ['raw upload under the video name', (t) => t.replace('name: demo-raw-recordings-${{ github.run_attempt }}', 'name: demo-videos-${{ github.run_attempt }}'), /raw recordings only on failure/],
     ['raw upload kept long', (t) => t.replace('          retention-days: 3\n', '          retention-days: 90\n'), /raw recordings only on failure/],
     ['raw upload errors when empty', (t) => t.replace('if-no-files-found: ignore', 'if-no-files-found: error'), /raw recordings only on failure/],
+    ['sample milestone rendered', (t) => t.replace('node scripts/demo/render.mjs scripts/demo/sample/sample.transcript.jsonl ', 'node scripts/demo/render.mjs --milestone scripts/demo/sample/m1a '), /renders the sample milestone/],
+    ['sample milestone rendered beside the sample', (t) => t.replace('render.mjs scripts/demo/sample/sample.transcript.jsonl ', 'render.mjs scripts/demo/sample/sample.transcript.jsonl --milestone scripts/demo/sample/m1a/ '), /renders the sample milestone/],
   ];
   for (const [name, mutate, expected] of demoMutants) {
     it(`demo.yml: ${name}`, () => {
