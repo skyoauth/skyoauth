@@ -21,7 +21,7 @@ after(() => rmSync(TOP, { recursive: true, force: true }));
 let n = 0;
 const fresh = (name) => join(TOP, `${++n}-${name}`);
 
-// The step's two calls; `sh` is the shell the step's `sh` resolves to.
+// The step's calls; `sh` is the shell the step's `sh` resolves to.
 const sh = (args, opts = {}) => spawnSync('sh', [SCRIPT, ...args], { encoding: 'utf8', timeout: 60_000, killSignal: 'SIGKILL', maxBuffer: 64 * 1024 * 1024, ...opts });
 
 // The listing `summarize` reads by default: the stdout of `cargo nextest
@@ -46,6 +46,11 @@ const listLine = (t, skipped = false) => {
 };
 const listing = (selected = SELECTED, leftOut = LEFT_OUT) => [...selected.map((t) => listLine(t)), ...leftOut.map((t) => listLine(t, true))].map((l) => `${l}\n`).join('');
 const LISTING = listing();
+// The command the step lists the selection with, through `run`: `sh -c
+// LIST_WRAPPER sh LIST COMMAND...` sends COMMAND's stdout (the listing) to
+// LIST and leaves its stderr to `run`, which copies it to its log and to
+// the step log with workflow commands stopped.
+const LIST_WRAPPER = 'out=$1; shift; exec "$@" > "$out"';
 
 // Runs `summarize` on a log with this text (null: no log file) and a
 // listing (null: no listing file) and returns { status, stdout, stderr,
@@ -628,6 +633,39 @@ describe('run', () => {
     assert.equal(r.stderr, '');
   });
 
+  // The step's listing: COMMAND through LIST_WRAPPER, as in ci.yml. Its
+  // stderr is copied with workflow commands stopped; its stdout is the
+  // listing file, byte for byte, and in neither the log nor the step log.
+  test('a listing through the step\'s wrapper: stderr copied with commands stopped, stdout untouched in the listing, the command\'s status', () => {
+    const listing = `${LISTING}::error::a test name\nno final newline`;
+    for (const exit of [0, 3]) {
+      const cmd = fresh('list.sh');
+      writeFileSync(cmd, `printf '%s' "$LISTING_TEXT"\necho "warning: a manifest line ::error::x" >&2\necho "::set-output name=a::b" >&2\nprintf '##[error]y' >&2\nexit ${exit}\n`);
+      const listPath = fresh('run.list');
+      const logPath = fresh('list.log');
+      const r = sh(['run', logPath, 'sh', '-c', LIST_WRAPPER, 'sh', listPath, 'sh', cmd], { env: { ...process.env, LISTING_TEXT: listing } });
+      assert.equal(r.status, exit, r.stdout + r.stderr);
+      assert.equal(readFileSync(listPath, 'utf8'), listing);
+      const diagnostics = 'warning: a manifest line ::error::x\n::set-output name=a::b\n##[error]y';
+      assert.equal(readFileSync(logPath, 'utf8'), diagnostics);
+      const lines = r.stdout.split('\n');
+      const token = TOKEN.exec(lines[0])?.[1];
+      assert.ok(token, r.stdout);
+      assert.deepEqual(lines.slice(1), [...diagnostics.split('\n'), `::${token}::`, '']);
+      assert.equal(r.stderr, '');
+    }
+  });
+
+  test('a listing through the step\'s wrapper that cannot write the listing file fails, with the reason in the log', () => {
+    const listPath = join(TOP, 'missing-dir', 'run.list');
+    const logPath = fresh('list.log');
+    const r = sh(['run', logPath, 'sh', '-c', LIST_WRAPPER, 'sh', listPath, 'sh', '-c', 'echo listed; echo "::error::x" >&2']);
+    assert.notEqual(r.status, 0, r.stdout);
+    assert.match(readFileSync(logPath, 'utf8'), /run\.list/);
+    assert.ok(!existsSync(listPath));
+    assert.ok(!r.stdout.includes('::error::x'), r.stdout);
+  });
+
   test('a passing command exits 0; each run has a new token', () => {
     const a = runWith('echo ok\n');
     const b = runWith('echo ok\n');
@@ -898,7 +936,16 @@ const problems = (ci) => {
   if (!/^ {10}sh scripts\/ci\/root-transport-run\.sh summarize "\$log" "\$userns" "\$status" "\$list" "\$listed" \|\| status=\$\?$/m.test(run)) out.push('the root step does not call root-transport-run.sh summarize with the run\'s status and the listing');
   if (!/"CARGO_TERM_COLOR=never"/.test(run) || /CARGO_TERM_COLOR=\$/.test(run)) out.push('the root run does not set CARGO_TERM_COLOR=never');
   if (!/^ {12}"\$\{as_root\[@\]\}" cargo nextest run "\$\{selection\[@\]\}" --no-capture \\$/m.test(run)) out.push('the root run is not the selection, as root, with --no-capture');
-  if (!/^ {10}"\$\{as_root\[@\]\}" cargo nextest list "\$\{selection\[@\]\}" --message-format oneline --verbose > "\$list" \|\| listed=\$\?$/m.test(run)) out.push('the selection is not listed as root, one test per line, into $list');
+  const listCall = [
+    '          sh scripts/ci/root-transport-run.sh run "$list_log" \\',
+    `            sh -c '${LIST_WRAPPER}' sh "$list" \\`,
+    '            "${as_root[@]}" cargo nextest list "${selection[@]}" --message-format oneline --verbose \\',
+    '            || listed=$?',
+  ].join('\n');
+  if (!run.includes(`\n          listed=0\n${listCall}\n`)) out.push('the selection is not listed as root, one test per line, its stdout into $list and its stderr through root-transport-run.sh run into $list_log');
+  if ((run.match(/cargo nextest list/g) ?? []).length !== 1) out.push('the selection is listed more than once, or outside root-transport-run.sh run');
+  const assigned = (name) => new RegExp(`^ {10}${name}="([^"]*)"$`, 'm').exec(run)?.[1];
+  if (!assigned('list_log') || [assigned('log'), assigned('list')].includes(assigned('list_log'))) out.push("the listing's log is not a file of its own");
   if (!/^ {10}as_root=\(sudo env .*"SKYOAUTH_IT_PEER_USER=\$peer"\)$/m.test(run.replace(/\n {12}(?=")/g, ' '))) out.push('as_root does not run as root with SKYOAUTH_IT_PEER_USER');
   const selection = selectionOf(run);
   if (!selection) out.push('no selection array');
@@ -955,6 +1002,16 @@ describe('the service-nextest job in ci.yml', () => {
       [(b) => b.replace('"${as_root[@]}" cargo nextest list', 'cargo nextest list'), /listed as root/],
       [(b) => b.replace(' --message-format oneline --verbose', ''), /one test per line/],
       [(b) => b.replace(' "SKYOAUTH_IT_PEER_USER=$peer")', ')'), /SKYOAUTH_IT_PEER_USER/],
+      // The listing as it was: run bare, its stderr reaching the runner
+      // with workflow commands live.
+      [(b) => b.replace(/^ {10}sh scripts\/ci\/root-transport-run\.sh run "\$list_log" \\\n {12}sh -c '[^']*' sh "\$list" \\\n {12}("\$\{as_root\[@\]\}" cargo nextest list .*) \\\n {12}\|\| listed=\$\?$/m, '          $1 > "$list" || listed=$?'), /its stderr through root-transport-run\.sh run/],
+      // Its stderr into the listing, or its stdout into the copy.
+      [(b) => b.replace('exec "$@" > "$out"\'', 'exec "$@" > "$out" 2>&1\''), /its stdout into \$list/],
+      [(b) => b.replace(`sh -c '${LIST_WRAPPER}' sh "$list" \\\n            `, ''), /its stdout into \$list/],
+      [(b) => b.replace('root-transport-run.sh run "$list_log"', 'root-transport-run.sh run "$log"'), /into \$list_log/],
+      [(b) => b.replace('list_log="$RUNNER_TEMP/local-transport-root-list.log"', 'list_log="$RUNNER_TEMP/local-transport-root.log"'), /a file of its own/],
+      [(b) => b.replace('            || listed=$?\n', '            || status=$?\n'), /listed as root/],
+      [(b) => b.replace(/^( {10}sudo chown .*)$/m, '$1\n          "${as_root[@]}" cargo nextest list "${selection[@]}" > /dev/null'), /listed more than once/],
     ];
     for (const [f, re] of cases) {
       const changed = inJob(f);

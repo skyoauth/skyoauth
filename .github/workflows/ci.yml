@@ -500,7 +500,9 @@ jobs:
       # the output to that log with workflow commands stopped (no test line is
       # read as one). The same selection is then listed (`cargo nextest
       # list`, one test per line, the tests outside the filterset marked
-      # skipped), and the script writes the job summary, also printed to the
+      # skipped; its stdout goes to its own file, and its diagnostics, on
+      # stderr, are copied by the script with workflow commands stopped
+      # too), and the script writes the job summary, also printed to the
       # step log: nextest's summary line, which must say that exactly the
       # listed tests ran and passed and that exactly the listed others were
       # skipped (a test of a selection listed as skipped fails); per
@@ -527,6 +529,7 @@ jobs:
           sudo useradd --no-create-home --shell /usr/sbin/nologin "$peer"
           log="$RUNNER_TEMP/local-transport-root.log"
           list="$RUNNER_TEMP/local-transport-root.list"
+          list_log="$RUNNER_TEMP/local-transport-root-list.log"
           userns=0
           unshare --user --map-root-user --mount true || userns=$?
           as_root=(sudo env "PATH=$PATH" "HOME=$HOME" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}"
@@ -542,7 +545,10 @@ jobs:
             "${as_root[@]}" cargo nextest run "${selection[@]}" --no-capture \
             || status=$?
           listed=0
-          "${as_root[@]}" cargo nextest list "${selection[@]}" --message-format oneline --verbose > "$list" || listed=$?
+          sh scripts/ci/root-transport-run.sh run "$list_log" \
+            sh -c 'out=$1; shift; exec "$@" > "$out"' sh "$list" \
+            "${as_root[@]}" cargo nextest list "${selection[@]}" --message-format oneline --verbose \
+            || listed=$?
           # The files the root run wrote belong to root; give them back.
           sudo chown -R "$(id -u):$(id -g)" target
           sh scripts/ci/root-transport-run.sh summarize "$log" "$userns" "$status" "$list" "$listed" || status=$?
