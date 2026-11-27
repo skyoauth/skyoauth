@@ -52,16 +52,16 @@ built.
 
 | # | Journey | Maps to | Needs | The viewer sees |
 | --- | --- | --- | --- | --- |
-| M1a-1 | Provision an empty installation with no SQL: bootstrap the first `security_admin`, then tenant, audience, principal, trust source and grant through the operator | A48 (workload chain), A32, A64 | S3a and the trust writes (merged, library); S2a egress entry (merged) or an uploaded keyset; S3b (service identity and grants; D3 is ruled by the lead) and S3c (not merged); the S4 write router (only the S4a reads are merged; the IR-034 ruling is needed before `create_tenant` is exposed on HTTP); S5 (nothing else can enrol a tenant `trust_admin`, and roles do not inherit); S6; S7 (the key algorithm set is ruled by the lead); S9 (the remote mTLS client) and the T13.3 workstation binary; the local-transport binding path; S10a and S10b if they are the T13.8 chain | an empty database, then each object created with a generated ID and a revision; a final read of the chain; no `psql` anywhere |
-| M1a-2 | Two tenants, the same labels, crossed references | A49, A29, A43 (the write side; the exchange side is M2) | S3a and the trust writes (library); on the wire the S4 write router and S5 | identical names in two tenants get distinct IDs; a write that names the other tenant's object is denied and reveals nothing |
-| M1a-3 | Several grants for one audience: the generated selector picks the actor, an override or the wrong tenant denies | A25, A50 (A45 is M2) | grant selection (library, registry API) | the selector the server generated, the authorized choice, and the denials |
+| M1a-1 | Provision an empty installation with no SQL: bootstrap the first `security_admin`, then tenant, audience, principal, trust source and grant through the operator | A48 (workload chain), A32, A64 | S3a and the trust writes (merged, library); S2a egress entry (merged) or an uploaded keyset; S3b (service identity and grants; D3 ruled by the user, 2026-11-27, relayed by the lead; to be recorded in tasks §13) and S3c (not merged); the S4 write router (only the S4a reads are merged; the IR-034 interim rule (lead decision, 2026-11-24) keeps `create_tenant` off every HTTP surface until the `secret_namespace` generator is ruled); S5 (nothing else can enrol a tenant `trust_admin`, and roles do not inherit); S6; S7 (the key algorithm set ruled by the user, 2026-11-27, relayed by the lead; to be recorded in tasks §13); S9 (the remote mTLS client) and the T13.3 workstation binary; the local-transport binding path; S10a and S10b if they are the T13.8 chain | an empty database, then each object created with a generated ID and a revision; a final read of the chain; no `psql` anywhere |
+| M1a-2 | Two tenants, the same labels, crossed references | A49, A29, A43 (the write side; the exchange side is M2) | S3a and the trust writes (library); on the wire the S4 write router, S5 and S6 | identical names in two tenants get distinct IDs; a write that names the other tenant's object is denied and reveals nothing |
+| M1a-3 | Several grants for one audience: the generated selector picks the actor, an override or the wrong tenant denies | A25, A50 (A45 is M2) | grant selection (library, registry API); served: S3b grant writes, S4 and S6 (selection itself is served by the M2 exchange) | the selector the server generated, the authorized choice, and the denials |
 | M1a-4 | A widening write needs a second approver: the toggle, a gated keyset version and a gated trust source | A48, A04, A05 (not A37, which is the predicate row) | library level now (#114 to #118, #136, #161, the S4a reads); on the wire the S4 approve and cancel, S5, S6 and S7; not S8 | the first actor's write returns a pending operation and changes nothing; a distinct `security_admin` approves; one transaction applies it; the audit event |
 | M1a-5 | Recovery: the operator signs a challenge offline, the registry verifies, a replacement credential is enrolled, a replay is refused | A32, A64 (the Linux leg) | library level now (#139, #188, #170) plus `skyoauth-operator` as a scenarios dev-dependency; through the socket C2 (#191), C3 (#192) and C4; served: the binding subcommand and S7 | the instance-bound challenge on one side, the signature produced on the workstation (the private key never shown), the restore, the same response refused a second time |
-| M1a-6 | Fail closed: a missing role, a token or claim in place of a registered credential, a closed bootstrap | A22, A32, A48 | library level and the admin read router now; the roles of S4 to S7 on the wire | each denial with its typed error and the same 401 or 403 for every lever; no write left behind |
-| M1a-7 | The audit trail: each admin write leaves an event, forwarded to the external sink | no A-ID of its own (Gate M1a text, T13.3, OQ-TM-12) | the D6 forwarder (ruled by the lead) and its configuration check at startup; the operations and audit reads (S4a, merged) | one write, the hash-chained event in the stream, a sink outage raising an alert and a local record |
+| M1a-6 | Fail closed: a missing role, a token or claim in place of a registered credential, a closed bootstrap | A22, A32, A48 (partial) | library level and the admin read router now; the roles of S4 to S7 on the wire | each denial with its typed error and the same 401 or 403 for every lever; no write left behind |
+| M1a-7 | The audit trail (partial): an admin write leaves an event; the audit sink fields cannot be written online; no public key is enrolled without a sink | A48 (the M1a negative: an online write to the audit sink fields; no test is listed for it yet), A19 (the M2 negative: refusing to enrol a public key without a sink), as partial evidence; Gate M1a text, T13.3, OQ-TM-12 | the D6 forwarder (ruled by the user, 2026-11-27, relayed by the lead; to be recorded in tasks §13) and its configuration check at startup. The admin router serves only the four operation GETs (`service/src/admin_http/mod.rs`): there is no audit read, so an event is shown only through library calls | one write and its event (library level), the refused online write to the sink fields, and a sink outage raising an alert and a local record once the forwarder exists |
 | M1a-8 | Optional: the replay primitive: one single-use proof, two replicas, one issuance | A24 | the replica harness (merged, library) | two replicas, one winner, the loser refused |
-| M1a-9 | Optional: a workload library renews with a rotated token | A54 | the workload library (M1a stage at library level) | a reused then a rotated token both validated afresh; `single_use` refused |
-| M1a-10 | Optional: the local socket refuses another UID | T13.4 (the root-only local transport tests, #178) | the local transport (merged, library) | a second UID refused at the socket; the service UID served |
+| M1a-9 | Optional: `single_use` refused (A54, partial) | A54 (the M1a stage `single_use rejection`; the renewal with a reused then a rotated token is the M2 stage, T21.6, T23.1, T23.5 and T23.6, and there is no workload library in M1a) | the registry writes (library) | a reusable TokenReview source accepted, a `single_use` enrollment or import refused |
+| M1a-10 | Optional: the local socket refuses another UID | T13.4 (the root-only local transport tests, #178) | the local transport (merged, library); it needs root and a second local user, so it runs in the root step of `service-nextest` (profile `ci-root`), not in `scenarios-pg` | a second UID refused at the socket; the service UID served |
 
 ### M1b: human authority and state
 
@@ -80,8 +80,8 @@ no M1b test exists.
 
 | # | Journey | Maps to | Needs | The viewer sees |
 | --- | --- | --- | --- | --- |
-| M2-1 | A GitHub Actions push gets a scoped token | A01, A02, A30 | T20 to T22, or T23, with the mock GitHub and TokenReview (planned layout §1.2 mocks) or `envoy_k3s`; real GitHub only in the live push-to-main leg | a simulated push proof (captioned "simulated"), the token's audience and scope, the PR, dispatch and wrong-ref contexts denied |
-| M2-2 | A k3s workload gets a scoped token through TokenReview | A06, A07, A28 | T20 to T22 or T23, with the mock TokenReview (planned) or `envoy_k3s` | the service-account proof (simulated), the token for the selected tenant and cluster, a wrong cluster denied |
+| M2-1 | A GitHub Actions push gets a scoped token | A01, A02, A30 | T20, T21, T22 with the mock GitHub issuer (planned, layout §1.2) or `envoy_k3s`; real GitHub only in the live push-to-main leg | a simulated push proof (captioned "simulated"), the token's audience and scope, the PR, dispatch and wrong-ref contexts denied |
+| M2-2 | A k3s workload gets a scoped token through TokenReview | A06, A07, A28 | T20, T21, T23 with the mock TokenReview (planned) or `envoy_k3s` | the service-account proof (simulated), the token for the selected tenant and cluster, a wrong cluster denied |
 | M2-3 | The same token through Envoy to a backend; spoofed and direct paths denied | A36, A13 | T20 to T23, T25, T26, the test-only reference backend, `envoy_k3s` | the positive bearer path, then the spoof, the outage and the direct-backend attacks |
 | M2-4 | Issuer key rotation without a client change | A19, A04 | T20, T24 | the overlap window, the same client config before and after |
 | M2-5 | Disable a grant with a token outstanding | A21, A23 | T20, T21, T26 | no new issuance, the residual TTL stated, a live check denying where one is committed |
@@ -118,7 +118,7 @@ M3 has no transcript source: the SPA is recorded with Playwright (section 2).
 | M5-1 | A provider switch with unchanged artifacts | A14, A42 | T51 | the same SPA and CLI artifact hashes and endpoints before and after, human re-authentication only |
 | M5-2 | Migration keeps IDs, modes and revisions | A15, A16 | T51 | the before and after of the preserved objects, dormant impersonation still disabled |
 | M5-3 | A rollback after an independent change | A17, A35 | T51, T21.8 | the independent policy change untouched, no resurrected state, consumed proofs still consumed |
-| M5-4 | Signer compromise and standby promotion | A62 (the M3 stage), A19 | T32.14, T50.3, T52.5 | the audited promotion, the denial of unpromoted-standby evidence |
+| M5-4 | Signer compromise and standby promotion | A62 (the M3 and M5 stages), A19 | T32.14, T50.3, T52.5 | the audited promotion, the denial of unpromoted-standby evidence |
 | M5-5 | Rotate a provider secret versus change the issuer | A63 (the M1b, M3 and M4 stages) | T13.9, T30.9, T52.5 | the credential-only revision keeping sessions, the semantic change needing the guarded transition |
 
 ## 2. The mechanism
@@ -187,8 +187,14 @@ mp4, is what is compared. The hazards to name before any journey is written:
 existing `pg` target of `skyoauth-scenarios` (layout §1.2 allows up to four
 targets, so no `demo` target is added), in a new layer directory declared with
 `#[path]` like the existing ones. They always run in the `scenarios-pg` job
-and compare their transcript with the committed **golden transcript**; when
-`SKYOAUTH_DEMO_OUT` names a directory they also write the transcript there. A
+(except a journey that needs root, below) and compare their transcript with the committed **golden transcript**; when
+`SKYOAUTH_DEMO_OUT` names a directory they also write the transcript there. **Required-check effect:** `scenarios-pg` is in `ci-passed`, so a golden-transcript
+mismatch blocks a merge. That is intended (a changed transcript is a reviewed
+change); it does not block a release. M1a-10 needs root and a second user, which
+`scenarios-pg` does not have: it runs in the root step of `service-nextest`
+(profile `ci-root`, which a separate root-step CI PR extends), not in
+`scenarios-pg`. A later PR must also amend `docs/testing/conformance-layout.md`
+§1.2 for the new directory and modules. A
 `SKYOAUTH_DEMO_OUT`-gated silent skip is ruled out: the targets "never pass
 vacuously" (layout §1.2). Test names must not match `a\d\d_` (the "no
 orphans" rule of the registry check would otherwise demand that a stage claim
@@ -221,13 +227,15 @@ several M1a journeys run today in the scenarios, as follows (a stage marked
 | Journey | Library level today | Served or on the wire | Unblocked by |
 | --- | --- | --- | --- |
 | M1a-1 | pieces only: the audited workload writes and the egress writer | none | S3b, S3c, S4 writes, S5, S6, S7, S9 and the workstation binary, the binding path |
-| M1a-2 | write side: A29 (implemented), A49 and A43 (partial), the `a49_wire` reads | the admin read router with an already-verified peer | S4 writes, S5 |
-| M1a-3 | A25 and A50 (implemented) | none | S5 |
+| M1a-2 | write side: A29 (implemented), A49 and A43 (partial), the `a49_wire` reads | the admin read router with an already-verified peer | S4 writes, S5, S6 |
+| M1a-3 | A25 and A50 (implemented) | none | S3b grant writes, S4, S6 |
 | M1a-4 | A48, A04, A05 (partial tests) | the S4a reads only | S4 approve and cancel, S5, S6, S7 |
 | M1a-5 | A32 (partial tests), the operator signer, the local transport codec and library | none | C2, C3, C4, the binding subcommand, S7 |
-| M1a-6 | A22 (and `a22_wire`), A32 and A48 negatives | the admin read router with a verified peer | S4 to S7 |
-| M1a-7 | audit events written at library level (A29, A32) | no sink | the D6 forwarder |
-| M1a-8 to M1a-10 | A24 (implemented); A54 (partial); the cross-UID root step | none | none beyond the journey scripts |
+| M1a-6 (partial) | A22 (and `a22_wire`), A32 and A48 negatives | the admin read router with a verified peer | S4 to S7 |
+| M1a-7 (partial) | audit events written at library level (A29, A32); no audit read exists | no sink; the router serves only the four operation GETs | the D6 forwarder, an audit read |
+| M1a-8 | A24 (implemented) | none | none beyond the journey script |
+| M1a-9 | A54 `single_use` rejection (partial) | none | none beyond the journey script (renewal is M2) |
+| M1a-10 | the root-only local transport tests (#178) | none | the root-step CI PR that extends the root run |
 
 | Milestone | Today | Unblocked by |
 | --- | --- | --- |
@@ -266,6 +274,7 @@ The user asked (2026-11-27) that the videos be part of the release artifacts
   `main` listed in `gates_passed`, not tags, and the first tagged release is
   the first beta (OQ-ADR024-1 is open). (b) On a tagged release they are
   release assets.
+- **Retention.** `retention-days` is capped at 90 days on public repositories (unverified), so gate artifacts may expire before the first beta; hence the golden transcripts are also kept in git.
 - **What is published:** one mp4 per milestone that the release contains (a
   release without M3 has no M3 video), the committed golden transcripts they
   were rendered from (for M3, whatever rule replaces them), and a SHA-256
@@ -315,13 +324,13 @@ Open user questions:
    the videos, and GitHub release assets as the place. The retained-artifact
    delivery of the non-tagged gates is also a lead pick. An external host
    stays open only if the user wants a second copy.
-
-Open to the lead (defaults given):
-
 4. Simulated or real GitHub, k3s and IdP: **default** simulated, captioned
    "simulated", using the layout §1.2 mocks; real GitHub only in the live
    push-to-main leg.
 5. Player style: **default** terminal player at 1280x720.
+
+Open to the lead (defaults given):
+
 6. Which slice delivers the portable operator binary of T13.3 (section 4), and
    whether M1a may show library calls before it exists: **default** yes,
    captioned.
@@ -348,12 +357,8 @@ Cost: recording is real time, about five minutes per milestone plus setup.
   #114 to #118, #136, #139, #161, #170 and #188 in `git log`, and `ci.yml`
   (unpinned `stable`, the PostgreSQL pin check, `contents: write` only on the
   badge job).
-- Taken from the lead's review and not found in the repository: the rulings of
-  D3 (S3b), of the key algorithm set (S7) and of the D6 forwarder (tasks §13
-  still records the algorithm set and D6 as awaiting a user decision, and has
-  no D3), the IR-034 ruling, the slice names S3b to S10b beyond the splits
-  tasks §13 states, and the slices C2 (#191), C3 (#192) and C4. This text
-  depends on them being recorded in tasks §13.
+- Rulings relayed by the lead and not yet in the repository: D3 (S3b), D6 (the forwarder) and the key algorithm set (S7), user rulings of 2026-11-27 that tasks §13 does not yet record (it still lists the algorithm set and D6 as awaiting a user decision, and has no D3); and the `secret_namespace` generator ruling (the IR-034 interim rule itself is in the repository, `service/src/admin/mod.rs`, lead decision 2026-11-24). Also not found: the slice names S3b to S10b beyond the splits tasks §13 states, and the slices C2 (#191), C3 (#192) and C4. This text depends on these being recorded in tasks §13.
+- The 90-day cap of `retention-days` on public repositories is from memory, not read.
 - Whether each journey needs exactly the slices listed was not checked slice
   by slice beyond the above.
 - The "demoable now" tables list what the repository has at `a6a75e5` as read;
