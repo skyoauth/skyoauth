@@ -357,7 +357,7 @@ Cost: recording is real time, about five minutes per milestone plus setup.
   #114 to #118, #136, #139, #161, #170 and #188 in `git log`, and `ci.yml`
   (unpinned `stable`, the PostgreSQL pin check, `contents: write` only on the
   badge job).
-- Rulings relayed by the lead and not yet in the repository: D3 (S3b), D6 (the forwarder) and the key algorithm set (S7), user rulings of 2026-11-27 that tasks §13 does not yet record (it still lists the algorithm set and D6 as awaiting a user decision, and has no D3); and the `secret_namespace` generator ruling (the IR-034 interim rule itself is in the repository, `service/src/admin/mod.rs`, lead decision 2026-11-24). Also not found: the slice names S3b to S10b beyond the splits tasks §13 states, and the slices C2 (#191), C3 (#192) and C4. This text depends on these being recorded in tasks §13.
+- Recorded: D6 and the key algorithm set (S7) are recorded in tasks §13 (#195); D3 is the widening rule there. Not yet in the repository: the `secret_namespace` generator ruling (the IR-034 interim rule itself is in the repository, `service/src/admin/mod.rs`, lead decision 2026-11-24). Also not found: the slice names S3b to S10b beyond the splits tasks §13 states, and the slices C2 (#191), C3 (#192) and C4. This text depends on these being recorded in tasks §13.
 - The 90-day cap of `retention-days` on public repositories is from memory, not read.
 - Whether each journey needs exactly the slices listed was not checked slice
   by slice beyond the above.

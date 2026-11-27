@@ -1220,7 +1220,7 @@ writes the versions of one keyset only (`keyset.rs:215-224`). Under
   Widened by the user, 2026-11-27, relayed by the lead (tasks §13): while
   `widening_second_approver` is on, every online operator role grant and
   credential enrollment is gated, and the gate lands before
-  `/admin/v1/operator-roles` is wired.
+  `/admin/v1/operator-roles` is wired (the online limit is scoping by the lead).
 - An approver sees the service checks' verdict at the request, not the
   database constraints', which run only at approve (section 3).
 
@@ -1579,7 +1579,7 @@ ruling, no longer wait on it: a change to any of them goes back to the user, whi
    Widened by the user, 2026-11-27, relayed by the lead (tasks §13): while
    `widening_second_approver` is on, every online operator role grant and
    credential enrollment is gated, and the gate lands before
-   `/admin/v1/operator-roles` is wired.
+   `/admin/v1/operator-roles` is wired (the online limit is scoping by the lead).
 
 ## Open
 
