@@ -500,21 +500,23 @@ jobs:
       # the output to that log with workflow commands stopped (no test line is
       # read as one). The same selection is then listed (`cargo nextest
       # list`, one test per line, the tests outside the filterset marked
-      # skipped), and the script writes the job summary: nextest's summary
-      # line, which must say that exactly the listed tests ran and passed and
-      # that exactly the listed others were skipped; per selection, how many
-      # of its listed tests passed (none listed fails); every notice, also as
-      # an escaped warning annotation; and the step fails on a notice that
-      # says cases did not run for want of root or of the peer user (the
-      # list is in the script). It calls the run complete only when it passed
-      # with no notice, and only for these selections: the library's own
-      # root-only tests (in service/src) are not part of it. As root, the user
-      # namespace test runs its namespace as root, which ubuntu-24.04's
-      # AppArmor restriction on unprivileged user namespaces does not cover,
-      # so it cannot show that restriction: the step probes it as the runner
-      # user (`unshare`, the test's own probe) and reports allowed or denied,
-      # with the exit status, in the job summary. The colour is off so that
-      # the summary holds no escape sequences.
+      # skipped), and the script writes the job summary, also printed to the
+      # step log: nextest's summary line, which must say that exactly the
+      # listed tests ran and passed and that exactly the listed others were
+      # skipped (a test of a selection listed as skipped fails); per
+      # selection, how many of its listed tests passed (none listed fails);
+      # every notice, also as an escaped warning annotation; and the step
+      # fails on a notice that says cases did not run for want of root or of
+      # the peer user (the list is in the script). It calls the run complete
+      # only when it passed with no notice, and only for these selections:
+      # the library's own root-only tests (in service/src) are not part of
+      # it. As root, the user namespace test runs its namespace as root,
+      # which ubuntu-24.04's AppArmor restriction on unprivileged user
+      # namespaces does not cover, so it cannot show that restriction: the
+      # step probes it as the runner user (`unshare`, the test's own probe)
+      # and reports allowed or denied, with the exit status, in the job
+      # summary. The colour is off so that the summary holds no escape
+      # sequences.
       - name: Run the root-only local transport tests
         id: root
         if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}

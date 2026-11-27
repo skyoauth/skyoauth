@@ -32,12 +32,22 @@
 #       every distinct line holding `NOTICE:` (a test that could not run
 #       its check prints one). Each notice is also a `::warning::`
 #       annotation, escaped (`%`, CR, LF) so that it cannot end the
-#       annotation and start another workflow command. Exits 1, with an
+#       annotation and start another workflow command. After the
+#       annotations it prints the same section to stdout, so that the step
+#       log holds it too, between a line `Root-only tests summary:` and a
+#       line `End of the root-only tests summary.`, each of its lines
+#       prefixed with `| `, CR shown as `^M` and `##[` as `# #[`: the
+#       runner splits lines at CR as well as LF and takes a line that
+#       starts with `::` after leading white space, or that holds `##[`, as
+#       a workflow command, and notices, test names and the summary line
+#       come from test output. Exits 1, with an
 #       `::error::` annotation and a summary line each, when RUN_STATUS or
 #       LIST_STATUS is not 0; when the log or the listing is missing or
 #       empty; when a listing line is not `BINARY-ID TEST ...`; when the
 #       listing selects a test outside SELECTIONS, or no test of one of
-#       them; when the log holds no nextest summary line; when that line
+#       them; when it marks a test of SELECTIONS as skipped (the filterset
+#       leaves out a test it should run; such a test is not counted as
+#       left out); when the log holds no nextest summary line; when that line
 #       does not say that every test ran and passed (`N tests run: N
 #       passed`, N > 0, not `M/N tests run`); when its N is not the number
 #       of tests the listing selects, or its skipped count (none: 0) is not
@@ -250,9 +260,12 @@ summarize() {
     fi
     # The listing, against SELECTIONS, as `|`-separated lines (no binary
     # ID or test name holds one): `selected|N`, `excluded|N`, one
-    # `selection|BINARY-ID|PREFIX|LISTED|PASSED` each, and `bad|LINE` and
-    # `outside|BINARY-ID TEST` for a listing line that is not a test and
-    # for a selected test outside SELECTIONS.
+    # `selection|BINARY-ID|PREFIX|LISTED|PASSED` each, and `bad|LINE`,
+    # `outside|BINARY-ID TEST` and `skippedmatch|BINARY-ID TEST` for a
+    # listing line that is not a test, for a selected test outside
+    # SELECTIONS and for a test of SELECTIONS marked skipped (not counted
+    # in `excluded`: only the tests outside SELECTIONS are left out as
+    # expected).
     selected=
     if [ ! -s "$list" ]; then
         fail "the listing of the root run's selection is missing or empty ($list)"
@@ -274,7 +287,11 @@ summarize() {
                 return 0
             }
             $0 !~ /^[A-Za-z0-9_-]+::[A-Za-z0-9_-]+ [^ ]/ { print "bad|" $0; next }
-            $NF == "(skipped)" { excluded++; next }
+            $NF == "(skipped)" {
+                if (which($1, $2)) print "skippedmatch|" $1 " " $2
+                else excluded++
+                next
+            }
             {
                 all++
                 i = which($1, $2)
@@ -294,6 +311,10 @@ summarize() {
         outside=$(awk '/^outside\|/ { n++; if (n <= 5) names = names (n > 1 ? ", " : "") substr($0, 9) } END { if (n) print n " (" names (n > 5 ? ", ..." : "") ")" }' "$tmp/listing")
         if [ -n "$outside" ]; then
             fail "the filterset selects tests outside the three selections: $outside"
+        fi
+        skippedmatch=$(awk '/^skippedmatch\|/ { n++; if (n <= 5) names = names (n > 1 ? ", " : "") substr($0, 14) } END { if (n) print n " tests of the selections as skipped (" names (n > 5 ? ", ..." : "") ")" }' "$tmp/listing")
+        if [ -n "$skippedmatch" ]; then
+            fail "the listing marks $skippedmatch: the filterset leaves out tests it should run"
         fi
         selected=$(sed -n 's/^selected|//p' "$tmp/listing")
         excluded=$(sed -n 's/^excluded|//p' "$tmp/listing")
@@ -355,8 +376,14 @@ summarize() {
         elif [ "$failed" -eq 0 ]; then
             echo "- Every selected test ran as root and passed, and none printed a notice: each root-only check of the \`local_transport\` integration target, of operator \`local_path\` and of \`harness::socket_path_fixture\` ran."
         fi
-    } >> "$summary"
+    } > "$tmp/section"
+    cat "$tmp/section" >> "$summary"
     awk '{ gsub(/%/, "%25"); gsub(/\r/, "%0D"); print "::warning::" $0 }' "$tmp/notices"
+    # The section again, for the step log: no line of it can be read as a
+    # workflow command (the header comment says why).
+    echo "Root-only tests summary:"
+    awk '{ gsub(/\r/, "^M"); gsub(/##\[/, "# #["); print "| " $0 }' "$tmp/section"
+    echo "End of the root-only tests summary."
     return "$failed"
 }
 

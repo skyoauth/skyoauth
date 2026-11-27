@@ -49,7 +49,8 @@ const LISTING = listing();
 
 // Runs `summarize` on a log with this text (null: no log file) and a
 // listing (null: no listing file) and returns { status, stdout, stderr,
-// summary, lines }: `lines` are stdout's lines.
+// summary, lines }: `lines` are stdout's lines (its annotations, then the
+// summary's section between SECTION_START and SECTION_END).
 function summarize(text, userns = '0', status = '0', list = LISTING, listStatus = '0') {
   const log = fresh('run.log');
   if (text !== null) writeFileSync(log, text);
@@ -77,6 +78,24 @@ const log = (...lines) => `${START}${passLines()}${lines.map((l) => `${l}\n`).jo
 const withSummary = (line) => `${START}${passLines()}     ${line}\n`;
 const errors = (r) => r.lines.filter((l) => l.startsWith('::error::'));
 const warnings = (r) => r.lines.filter((l) => l.startsWith('::warning::'));
+// The script's own workflow commands: stdout's lines that start with `::`.
+const annotations = (r) => r.lines.filter((l) => l.startsWith('::'));
+const SECTION_START = 'Root-only tests summary:';
+const SECTION_END = 'End of the root-only tests summary.';
+// What `summarize` appended to GITHUB_STEP_SUMMARY (after the earlier
+// step's line the helper writes there).
+const EARLIER = '# earlier step\n';
+const appended = (r) => {
+  assert.ok(r.summary.startsWith(EARLIER), r.summary);
+  return r.summary.slice(EARLIER.length);
+};
+// The lines of the step log that the Actions runner reads as workflow
+// commands (actions/runner, ActionCommandManager.TryProcessCommand): it
+// reads stdout a line at a time with .NET's ReadLine, which ends a line at
+// LF, CR or CR LF; a line is a command when it starts with `::` once its
+// leading white space is trimmed (ActionCommand.TryParseV2), or when it
+// holds `##[` anywhere (TryParse, the old syntax).
+const commands = (stdout) => stdout.split(/\r\n|\r|\n/).filter((l) => l.trimStart().startsWith('::') || l.includes('##['));
 const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const HEADING = '### Root-only tests: `local_transport`, operator `local_path`, `harness::socket_path_fixture`';
 const COUNTS =
@@ -88,7 +107,7 @@ describe('summarize', () => {
   test('no notices and every test passed: passes, and the summary says so', () => {
     const r = summarize(log('147 private directories swapped during 400 binds, 398 served'));
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.deepEqual(r.lines, []);
+    assert.deepEqual(annotations(r), []);
     assert.equal(
       r.summary,
       `# earlier step\n${HEADING}\n\n` +
@@ -179,16 +198,122 @@ describe('summarize', () => {
     const evil = 'NOTICE: x %0A::error::injected %25 50% \r::error::cr';
     const r = summarize(log(evil));
     assert.equal(r.status, 0, r.stdout);
-    assert.deepEqual(r.lines, ['::warning::NOTICE: x %250A::error::injected %2525 50%25 %0D::error::cr']);
-    // Every stdout line is one annotation: no other workflow command.
-    assert.ok(r.stdout.split('\n').every((l) => l === '' || l.startsWith('::warning::')));
+    assert.deepEqual(annotations(r), ['::warning::NOTICE: x %250A::error::injected %2525 50%25 %0D::error::cr']);
+    // That annotation is the only workflow command on stdout.
+    assert.deepEqual(commands(r.stdout), annotations(r));
     assert.ok(!r.stdout.includes('\r'));
   });
 
   test('an error that quotes the log is escaped too', () => {
     const r = summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed %0A::error::injected 50% \r::warning::cr'));
     assert.equal(r.status, 1);
-    assert.deepEqual(r.lines, ['::error::not every root-only test ran and passed: Summary [   1.000s] 5 tests run: 4 passed %250A::error::injected 50%25 %0D::warning::cr']);
+    assert.deepEqual(annotations(r), ['::error::not every root-only test ran and passed: Summary [   1.000s] 5 tests run: 4 passed %250A::error::injected 50%25 %0D::warning::cr']);
+    assert.deepEqual(commands(r.stdout), annotations(r));
+  });
+
+  // The section `summarize` appends to GITHUB_STEP_SUMMARY is printed to
+  // stdout too, after the annotations, so that the step log holds it.
+  const expectedStdout = (r) => {
+    const section = appended(r);
+    assert.ok(section.endsWith('\n'), section);
+    return [...annotations(r), SECTION_START, ...section.slice(0, -1).split('\n').map((l) => `| ${l}`), SECTION_END, ''].join('\n');
+  };
+  const PEER_FIXTURE = () => summarize(log(PEER));
+
+  test('stdout holds the annotations, then the summary\'s section, line by line, each line prefixed', () => {
+    const cases = [
+      [summarize(log()), 0],
+      [summarize(log(PROC)), 0],
+      [summarize(log(PROC, PEER)), 1],
+      [PEER_FIXTURE(), 1],
+      [summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed, 1 failed, 3 skipped')), 1],
+      [summarize(null, '1', '101', null, '101'), 1],
+    ];
+    for (const [r, status] of cases) {
+      assert.equal(r.status, status, r.stdout);
+      assert.equal(r.stdout, expectedStdout(r));
+      assert.match(appended(r), new RegExp(`^${escapeRe(HEADING)}\n`));
+      // Each line of the section is on stdout as `| LINE`, in order.
+      const start = r.lines.indexOf(SECTION_START);
+      assert.deepEqual(r.stdout.split('\n').slice(start + 1, -2), appended(r).split('\n').slice(0, -1).map((l) => `| ${l}`));
+      assert.equal(r.stderr, '');
+    }
+    // The passing run: its counts are in the step log.
+    const pass = cases[0][0];
+    for (const line of COUNTS.split('\n').filter(Boolean)) assert.ok(pass.lines.includes(`| ${line}`), line);
+    assert.ok(pass.lines.includes(`| - nextest: ${SUMMARY} (the listing selects 5 tests and leaves out 3 of the same binaries)`));
+  });
+
+  test('no line of the section on stdout is a workflow command, whatever a notice, a test name or the summary line holds', () => {
+    const evil = [
+      '::error::x',
+      '::set-output name=a::b',
+      '  ::error::indented',
+      '\t::warning::tab',
+      'a \r::error::after a CR',
+      'a \r  ::set-output name=c::d',
+      'old ##[error]syntax ##[set-output name=e;]f',
+      '###[error]three',
+      '%0A::error::escaped',
+    ];
+    const notices = evil.map((e) => `NOTICE: ${e}`);
+    // A test name: its listing line quoted in the error for a test outside
+    // the selections, and for a line that is not `BINARY-ID TEST ...`.
+    const names = ['skyoauth-scenarios::pg ::error::name', 'skyoauth-scenarios::pg ##[error]name', 'skyoauth-scenarios::pg x\r::error::name'];
+    const runs = [
+      summarize(log(...notices)),
+      summarize(`${START}${passLines([...SELECTED, ...names])}${notices.join('\n')}\n     Summary [   1.000s] 8 tests run: 8 passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...names])),
+      summarize(log(), '0', '0', `::error::listing\n  ::set-output name=g::h\n##[error]listing\n${LISTING}`),
+      summarize(withSummary('Summary [   1.000s] 5 tests run: 4 passed ::error::s \r::set-output name=i::j ##[error]k')),
+    ];
+    for (const r of runs) {
+      // The section went to GITHUB_STEP_SUMMARY unchanged ...
+      assert.ok(appended(r).includes('::error::'), appended(r));
+      // ... and the only workflow commands on stdout are the script's own
+      // annotations, all before the section.
+      const own = annotations(r);
+      assert.ok(own.length > 0, r.stdout);
+      assert.deepEqual(commands(r.stdout), own);
+      assert.ok(own.every((l) => l.startsWith('::error::') || l.startsWith('::warning::')), own.join('\n'));
+      assert.ok(own.every((l) => !l.includes('\r')), own.join('\n'));
+      const start = r.lines.indexOf(SECTION_START);
+      assert.ok(start >= own.length, r.stdout);
+      assert.deepEqual(r.lines.slice(0, own.length), own);
+      const section = r.lines.slice(start + 1, -1);
+      assert.equal(r.lines.at(-1), SECTION_END);
+      assert.ok(section.length > 0);
+      assert.ok(section.every((l) => l.startsWith('| ') && !l.includes('\r') && !l.includes('##[')), section.join('\n'));
+      // Line by line, the summary's section with CR shown as `^M` and `##[`
+      // as `# #[`.
+      assert.deepEqual(section, appended(r).split('\n').slice(0, -1).map((l) => `| ${l.replaceAll('\r', '^M').replaceAll('##[', '# #[')}`));
+    }
+    // The notices are in the section on stdout, readable.
+    assert.ok(runs[0].lines.includes('| - NOTICE: ::error::x'));
+    assert.ok(runs[0].lines.includes('| - NOTICE: a ^M::error::after a CR'));
+    assert.ok(runs[0].lines.includes('| - NOTICE: old # #[error]syntax # #[set-output name=e;]f'));
+  });
+
+  test('printing the section does not change the exit status or the annotations', () => {
+    for (const [r, status, errorCount, warningCount] of [
+      [summarize(log()), 0, 0, 0],
+      [summarize(log(PROC)), 0, 0, 1],
+      [PEER_FIXTURE(), 1, 1, 1],
+      [summarize(log(), '0', '4'), 1, 1, 0],
+      [summarize(log('NOTICE: ::error::x')), 0, 0, 1],
+      [summarize('', '0', '0', '', '0'), 1, 2, 0],
+    ]) {
+      assert.equal(r.status, status, r.stdout);
+      assert.equal(errors(r).length, errorCount, r.stdout);
+      assert.equal(warnings(r).length, warningCount, r.stdout);
+      assert.equal(annotations(r).length, errorCount + warningCount, r.stdout);
+      assert.equal(r.lines.filter((l) => l === SECTION_START).length, 1, r.stdout);
+      assert.equal(r.lines.at(-1), SECTION_END, r.stdout);
+    }
+    // A usage error prints no section.
+    const usage = summarize(log(), 'x');
+    assert.equal(usage.status, 2);
+    assert.equal(usage.stdout, '');
+    assert.equal(appended(usage), '');
   });
 
   test('more than 64 KiB of notices: the peer notice is still found (no SIGPIPE false negative)', () => {
@@ -359,6 +484,49 @@ describe('summarize', () => {
     const many = Array.from({ length: 7 }, (_, i) => `skyoauth-scenarios::pg a0${i}_x`);
     const r = summarize(`${START}${passLines([...SELECTED, ...many])}     Summary [   1.000s] 12 tests run: 12 passed, 3 skipped\n`, '0', '0', listing([...SELECTED, ...many]));
     assert.deepEqual(errors(r), [`::error::the filterset selects tests outside the three selections: 7 (${many.slice(0, 5).join(', ')}, ...)`]);
+  });
+
+  // A profile or filterset change that leaves out a test of a selection:
+  // the listing marks it skipped and nextest counts it as skipped, so the
+  // totals alone would still agree; it is a failure of its own, and it is
+  // not counted as an expected exclusion.
+  test('a test of a selection that the listing marks skipped fails, though its siblings pass', () => {
+    for (const dropped of [
+      'skyoauth-operator::operator local_path::the_socket_must_be_the_expected_owners',
+      'skyoauth-scenarios::pg harness::socket_path_fixture::socket_path_fixture_cases_match_the_services_bind',
+      'skyoauth-service::local_transport the_service_uid_cannot_redirect_a_bind',
+    ]) {
+      // The harness selection has one test: give it a sibling that runs.
+      const sibling = 'skyoauth-scenarios::pg harness::socket_path_fixture::a_sibling';
+      const selected = [...SELECTED.filter((t) => t !== dropped), ...(dropped.startsWith('skyoauth-scenarios') ? [sibling] : [])];
+      const leftOut = [...LEFT_OUT, dropped];
+      const line = `Summary [   1.000s] ${selected.length} tests run: ${selected.length} passed, ${leftOut.length} skipped`;
+      const r = summarize(`${START}${passLines(selected)}     ${line}\n`, '0', '0', listing(selected, leftOut));
+      assert.equal(r.status, 1, dropped);
+      assert.deepEqual(errors(r), [
+        `::error::the listing marks 1 tests of the selections as skipped (${dropped}): the filterset leaves out tests it should run`,
+        // The dropped test is not an expected exclusion, so nextest's
+        // skipped count is one more than the tests the listing leaves out.
+        `::error::nextest ran ${selected.length} tests and skipped ${leftOut.length}, but the listing selects ${selected.length} and leaves out ${LEFT_OUT.length}: ${line}`,
+      ]);
+      assert.match(r.summary, /^- \*\*Failed:\*\* the listing marks 1 tests of the selections as skipped /m);
+      assert.doesNotMatch(r.summary, COMPLETE);
+    }
+    // More than five: the first five names, then `...`.
+    const many = Array.from({ length: 6 }, (_, i) => `skyoauth-operator::operator local_path::dropped_${i}`);
+    const r = summarize(log(), '0', '0', listing(SELECTED, [...LEFT_OUT, ...many]));
+    assert.equal(r.status, 1);
+    assert.equal(errors(r)[0], `::error::the listing marks 6 tests of the selections as skipped (${many.slice(0, 5).join(', ')}, ...): the filterset leaves out tests it should run`);
+  });
+
+  test('a skipped test of a selection\'s binary outside its prefix is an expected exclusion', () => {
+    const leftOut = [...LEFT_OUT, 'skyoauth-operator::operator redaction::x', 'skyoauth-operator::operator local_pathology::y', 'skyoauth-scenarios::pg harness::socket_path_fixture_more::z'];
+    const line = `Summary [   1.000s] ${SELECTED.length} tests run: ${SELECTED.length} passed, ${leftOut.length} skipped`;
+    const r = summarize(`${START}${passLines()}     ${line}\n`, '0', '0', listing(SELECTED, leftOut));
+    assert.equal(r.status, 0, r.stdout);
+    assert.deepEqual(annotations(r), []);
+    assert.match(r.summary, new RegExp(`^- nextest: ${escapeRe(line)} \\(the listing selects 5 tests and leaves out 6 of the same binaries\\)$`, 'm'));
+    assert.match(r.summary, COMPLETE);
   });
 
   test('a failed, missing, empty or malformed listing fails', () => {
