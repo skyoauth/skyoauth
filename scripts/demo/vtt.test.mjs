@@ -126,10 +126,14 @@ async function playInVm(records) {
   let revealedAt = null;
   let frames = 0;
   let tickChanges = 0;
+  let lastTickAt = null;
   let tickClass = 'a';
   Object.defineProperty(byId.tick, 'className', {
     set(v) {
-      if (v !== tickClass) tickChanges++;
+      if (v !== tickClass) {
+        tickChanges++;
+        lastTickAt = now;
+      }
       tickClass = v;
     },
     get() {
@@ -193,7 +197,7 @@ async function playInVm(records) {
   // Objects made in the VM have that realm's prototypes: copy them out.
   result = JSON.parse(JSON.stringify(result));
   const t0 = result.t0;
-  return { t0, revealedAt, frames, tickChanges, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
+  return { t0, revealedAt, frames, tickChanges, lastTickAt, endAt: now, done: sandbox.__demoDone, result, log: log.map((e) => ({ ...e, at: e.at - t0 })) };
 }
 
 describe('player schedule (player.html in a VM with a virtual clock)', () => {
@@ -201,11 +205,18 @@ describe('player schedule (player.html in a VM with a virtual clock)', () => {
     const run = await playInVm(SAMPLE);
     assert.equal(run.done, true);
     assert.ok(run.revealedAt >= timing.LEAD_IN_MS, `revealed at ${run.revealedAt}`);
-    // The lead-in repaints every frame (about LEAD_IN_MS / 16), then stops.
-    assert.ok(run.frames >= timing.LEAD_IN_MS / 16 - 2, `${run.frames} frames`);
-    assert.ok(run.frames < timing.LEAD_IN_MS / 16 + 5, `${run.frames} frames: the repaint did not stop`);
+    // The lead-in repaints every frame but its last LEAD_IN_QUIET_MS (about
+    // (LEAD_IN_MS - LEAD_IN_QUIET_MS) / 16 frames), then holds still.
+    const repainting = timing.LEAD_IN_MS - timing.LEAD_IN_QUIET_MS;
+    assert.ok(timing.LEAD_IN_QUIET_MS >= 200 && timing.LEAD_IN_QUIET_MS <= timing.LEAD_IN_MS / 2, `LEAD_IN_QUIET_MS ${timing.LEAD_IN_QUIET_MS}`);
+    assert.ok(run.frames >= repainting / 16 - 2, `${run.frames} frames`);
+    assert.ok(run.frames < repainting / 16 + 5, `${run.frames} frames: the repaint did not stop`);
     // Each of those frames changes the #tick shade, so each one is painted.
-    assert.ok(run.tickChanges >= timing.LEAD_IN_MS / 16 - 2, `${run.tickChanges} repaints`);
+    assert.ok(run.tickChanges >= repainting / 16 - 2, `${run.tickChanges} repaints`);
+    // No repaint in the quiet end: the last one is at least LEAD_IN_QUIET_MS
+    // (less one 16 ms frame) before the terminal is shown.
+    assert.ok(run.revealedAt - run.lastTickAt >= timing.LEAD_IN_QUIET_MS - 16, `last repaint ${run.revealedAt - run.lastTickAt} ms before t0`);
+    assert.ok(run.revealedAt - run.lastTickAt <= timing.LEAD_IN_QUIET_MS + 32, `last repaint ${run.revealedAt - run.lastTickAt} ms before t0`);
     const shown = run.log.filter((e) => e.id === 'caption').map((e) => ({ startMs: e.at, text: e.text }));
     const cues = parseVtt(toVtt(SAMPLE)).map((c) => ({ startMs: c.startMs, text: c.text }));
     assert.deepEqual(shown, cues);

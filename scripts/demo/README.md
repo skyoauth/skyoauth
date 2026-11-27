@@ -118,17 +118,43 @@ The player holds a pure black screen for `LEAD_IN_MS` before its first frame
 (t0). The recording starts earlier, with the page load, so the renderer runs
 ffmpeg's `blackdetect` on the raw recording (any black frame counts; the
 player's own frames are never black) and starts the mp4 at the end of the
-first black interval: time 0 of the mp4 is t0 and the VTT cues line up to
-about one frame of the 25 fps recording. It also prints the lead-in as the
-page's clock saw it, as a cross-check (locally, over a dozen renders: cuts
-of 0.80 to 0.92 s against estimates of 852 to 932 ms, never more than 80 ms
-apart; the estimate is later, presumably because the recording starts a
-little after the page is created). During the lead-in the player repaints a
-4px corner square every animation frame in two shades that `blackdetect`
-still counts as black, so the screencast keeps receiving black frames: twice
-locally, before that repaint was added, a render failed with "no black
-lead-in found" (not reproduced in a dozen later renders; the cause was not
-confirmed). Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
+black interval: time 0 of the mp4 is t0 and the VTT cues line up to about
+one frame of the 25 fps recording.
+
+The cut is cross-checked against the page's own clock (t0 less the time the
+page was created). That estimate runs late by `PAGE_CLOCK_OFFSET_MS` (60 ms;
+the recording's time 0 is its first frame, which comes after the page is
+created: 14 to 75 ms after, median 60, over 12 measured renders), so a cut is
+accepted within `LEAD_IN_TOLERANCE_MS` (200 ms) of the estimate less 60 ms.
+Every render logs `lead-in cut X s, page-clock estimate Y ms, delta D ms`
+(D is the cut less the estimate). A cut outside the tolerance is never used:
+`blackdetect` runs again on the same recording, at most three times in all
+(any black frame, black of 0.3 s or more, near-black of 0.3 s or more),
+taking each time the black interval whose end is nearest the expected cut,
+and the render fails with every attempt's numbers when none agrees. The
+tolerance is for errors of a quarter second and more, not for a frame or
+two: locally, over 125 renders, cuts were -101 to +86 ms off the estimate
+less 60 ms (-43 to +62 one render at a time, the wider ones two at a time on
+two cores, where the page clock scatters more: the -101 was a correct cut
+with an estimate 137 ms late), so 200 ms is about twice the worst seen. What
+it catches was seen under that load: a recording whose frames froze for 4.4
+s after t0 (black from 0.12 to 5.24 s, while the page clock put t0 near 0.9
+s), which used to fail later with "the recording holds 20.5 s after t0" and
+now fails at the cut with the numbers.
+
+During the lead-in the player repaints a 4px corner square in two shades
+that `blackdetect` still counts as black, so the screencast keeps receiving
+black frames (twice locally, before that repaint was added, a render failed
+with "no black lead-in found"). The repaint stops `LEAD_IN_QUIET_MS` (300
+ms) before t0. While it ran up to t0, the screencast, busy with a frame
+every refresh, delivered the t0 frame 43 to 83 ms late (20 renders, against
+t0 measured from when each caption and output step became visible), so the
+cut was as late, every caption came that much early in the mp4, and 6 of 25
+e2e runs found the caption bar changing more than 150 ms before a cue. With
+the quiet end, the same measurement gave -17 to +15 ms (12 renders), and 35
+of 35 runs passed.
+
+Set `DEMO_KEEP_RAW=<dir>` to keep the raw recording of a failed
 render; a copy that fails is reported on stderr and never replaces the
 render's own error. `demo.yml` sets it and, when a step fails, uploads the
 recordings as `demo-raw-recordings-N` (3 days). `render.e2e.test.mjs` checks that frame 0 is the player

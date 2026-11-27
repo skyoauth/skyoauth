@@ -70,6 +70,12 @@ function topLevelBoxes(path) {
 describe('render.mjs end to end', () => {
   let first;
   let second;
+  // Each render's lead-in line (cut, page-clock estimate, delta), printed
+  // as a diagnostic so a run's log keeps them.
+  const leadInLines = [];
+  const keepLeadIn = (line) => {
+    if (line.startsWith('render: lead-in cut ')) leadInLines.push(line);
+  };
   const outA = join(TMP, 'a');
   const outB = join(TMP, 'b');
 
@@ -84,8 +90,8 @@ describe('render.mjs end to end', () => {
       assert.fail(`Chromium for Playwright is required for this test and did not launch (npx playwright install --with-deps chromium): ${e.message.split('\n')[0]}`);
     });
     await browser.close();
-    first = await render(SAMPLE, outA, { log: () => {} });
-    second = await render(SAMPLE, outB, { log: () => {} });
+    first = await render(SAMPLE, outA, { log: keepLeadIn });
+    second = await render(SAMPLE, outB, { log: keepLeadIn });
   });
 
   it('writes the mp4, the VTT, the transcript copy and SHA256SUMS', () => {
@@ -116,7 +122,8 @@ describe('render.mjs end to end', () => {
     assert.ok(boxes.indexOf('moov') < boxes.indexOf('mdat'), boxes.join(','));
   });
 
-  it('cuts the lead-in: the first frame already shows the player and the first caption', () => {
+  it('cuts the lead-in: the first frame already shows the player and the first caption', (t) => {
+    for (const line of leadInLines) t.diagnostic(line);
     assert.ok(first.leadInSeconds > timing.LEAD_IN_MS / 1000 - FRAME_SLACK_S, `lead-in ${first.leadInSeconds}`);
     // The page clock estimate and the blackdetect cut agree to within a
     // few frames.
