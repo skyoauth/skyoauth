@@ -517,7 +517,9 @@ remains necessary (design §4.2; tasks T50.4).
   apply or observe it; application-origin assignments MUST NOT grant that
   scope. Instance `security_admin` owns and prepares the `issuer_system`
   bundle, and a distinct second `security_admin` MUST approve it unless an
-  explicit audited instance policy lets one actor do both. Its admin endpoints
+  explicit audited instance policy (`single_actor_mode`, identity-registry
+  IR-053) lets one actor do both, who holds `security_admin` as the
+  preparer. Its admin endpoints
   and issuer-host `begin` and `cleanup_to_closed` semantics are open
   (OQ-GW-15). (design §4.2; tasks T14.5, T14.9; lead decision, OQ-GW-12)
 
@@ -1087,7 +1089,8 @@ later task. All other items are not resolved by this contract.
   `gateway_apply` enables it (GW-236). The system bundle is
   `RouteBundle.kind=issuer_system`, owned and prepared by instance
   `security_admin` and approved by a distinct second `security_admin` or one
-  actor under an explicit audited instance policy (GW-116). Design §4.2 and
+  actor under an explicit audited instance policy (GW-116), that actor holding
+  `security_admin`. Design §4.2 and
   T14.5/T14.9 state these (#15); the tasks §3 schema does not yet show `RouteBundle.kind` or the `RouteControllerIdentity` issuer-host
   scope. Original sub-questions: (a) a route bundle is owned by exactly one
   `ApplicationOrigin` (GW-115) and the issuer host is not one, so which
