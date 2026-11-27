@@ -79,20 +79,25 @@
 //! Weak, non-canonical and undecodable keys are refused at every enrollment
 //! point (ADR-013 item 7; the user, 2026-11-24), and this function is the
 //! enrollment and handshake check of an mTLS key (the lead, 2026-11-27). A
-//! key of an accepted form is then checked with the point validation of
-//! `crate::jwk::point` (hand-written arithmetic, no elliptic-curve
-//! dependency), and refused as [`IdentityError::UnsupportedKey`]:
+//! key of an accepted form is then checked as below, and refused as
+//! [`IdentityError::UnsupportedKey`]:
 //!
-//! - Ed25519 (`check_ed25519`): the RFC 8032 section 5.1.3 decoding, so a
-//!   `y` at or above `p = 2^255 - 19`, a `y` that does not decode to a
-//!   point and `x = 0` with the sign bit set are refused, and so are the
-//!   eight points of small order (the identity, the point of order 2 and
-//!   those of order 4 and 8): some verifiers accept a fixed signature for
-//!   any message under such a key, so it would prove no possession. A
-//!   point with a torsion component (a prime-order point plus a small-order
-//!   one) is accepted, as the recovery key check (`ed25519-dalek`'s
-//!   `is_weak`) accepts it; the tests check that the two agree.
-//! - P-256 (`check_ec`): each coordinate below the field prime and
+//! - Ed25519: the recovery key check (`recovery_key` of
+//!   `crate::persistence::registry`, through `ed25519-dalek`): decoding,
+//!   the canonical re-encoding and `is_weak`. So a `y` at or above
+//!   `p = 2^255 - 19`, a `y` that does not decode to a point and `x = 0`
+//!   with the sign bit set are refused, and so are the eight points of
+//!   small order (the identity, the point of order 2 and those of order 4
+//!   and 8): some verifiers accept a fixed signature for any message under
+//!   such a key, so it would prove no possession. A point with a torsion
+//!   component (a prime-order point plus a small-order one) is accepted.
+//!   About 10 microseconds a key in a release build, where the hand-written
+//!   RFC 8032 section 5.1.3 decoding of `crate::jwk::point`
+//!   (`check_ed25519`, the JWK check) takes about 9 milliseconds; the tests
+//!   check that the two accept and refuse the same keys.
+//! - P-256 (`check_ec` of `crate::jwk::point`, hand-written arithmetic, no
+//!   elliptic-curve dependency, about 20 microseconds a key in a release
+//!   build): each coordinate below the field prime and
 //!   `y^2 = x^3 - 3x + b (mod p)`. The curve has cofactor 1, so a point on
 //!   it is in the prime-order group; the point at infinity has no
 //!   uncompressed form (its `00` encoding is refused by the form check).
@@ -166,7 +171,8 @@ use std::fmt;
 use sha2::{Digest as _, Sha256};
 
 use crate::jwk::EcCurve;
-use crate::jwk::point::{check_ec, check_ed25519};
+use crate::jwk::point::check_ec;
+use crate::persistence::registry::recovery_key;
 
 /// The largest accepted DER `SubjectPublicKeyInfo`: 4 KiB covers RSA keys
 /// up to 16384 bits (about 2.1 KB) and ML-DSA-87 keys (about 2.6 KB)
@@ -541,14 +547,14 @@ fn check_spki(der: &[u8]) -> Result<Spki<'_>, IdentityError> {
 /// curve and a 65-octet uncompressed point. The DER framing that
 /// [`check_spki`] has checked fixes every other byte, so each is one byte
 /// layout (44 and 91 bytes). Then the key itself (see "Key validity"):
-/// [`check_ed25519`] and [`check_ec`], whose refusals are all
-/// [`IdentityError::UnsupportedKey`].
+/// [`recovery_key`] for Ed25519 and [`check_ec`] for P-256, whose refusals
+/// are all [`IdentityError::UnsupportedKey`].
 fn check_accepted_key(spki: &Spki<'_>) -> Result<(), IdentityError> {
     let accepted = match spki.algorithm {
         ID_ED25519 => {
             spki.parameters.is_none()
                 && spki.key.len() == ED25519_KEY_OCTETS
-                && check_ed25519(spki.key).is_ok()
+                && recovery_key(spki.key).is_ok()
         }
         ID_EC_PUBLIC_KEY => {
             matches!(
@@ -577,6 +583,7 @@ fn check_accepted_key(spki: &Spki<'_>) -> Result<(), IdentityError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwk::point::check_ed25519;
 
     /// The Ed25519 public key of RFC 8410 section 10.1, as DER
     /// (`MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=`).
@@ -1264,14 +1271,15 @@ mod tests {
         }
     }
 
-    /// The Ed25519 check here ([`check_ed25519`]) and the recovery key
-    /// check (`recovery_key`, through `ed25519-dalek`: decoding,
-    /// re-encoding, `is_weak`) accept and refuse the same keys: the probes
-    /// above, the keys of 32 equal octets 00 to 1f, and `y` from 0 to 15
-    /// with either sign. (Few, since the hand-written arithmetic is slow
-    /// in a debug build.)
+    /// The Ed25519 check here (the recovery key check, through
+    /// `ed25519-dalek`: decoding, re-encoding, `is_weak`) and the
+    /// hand-written RFC 8032 decoding of the JWK check
+    /// ([`check_ed25519`], the oracle) accept and refuse the same keys: the
+    /// probes above, the keys of 32 equal octets 00 to 1f, and `y` from 0
+    /// to 15 with either sign. (Few, since the hand-written arithmetic is
+    /// slow in a debug build.)
     #[test]
-    fn the_ed25519_check_agrees_with_the_recovery_key_check() {
+    fn the_ed25519_check_agrees_with_the_hand_written_decoding() {
         let mut keys: Vec<Vec<u8>> = ED25519_PROBES
             .iter()
             .map(|(_, key, _)| unhex(key))
@@ -1288,8 +1296,8 @@ mod tests {
         let mut accepted = 0;
         for key in &keys {
             let here = canonical_public_identity(&spki(ED25519_ALGORITHM, key)).is_ok();
-            let recovery = crate::persistence::registry::recovery_key(key).is_ok();
-            assert_eq!(here, recovery, "{key:02x?}");
+            let oracle = check_ed25519(key).is_ok();
+            assert_eq!(here, oracle, "{key:02x?}");
             accepted += usize::from(here);
         }
         // Both outcomes occur.

@@ -275,10 +275,11 @@ pub(crate) fn check_ec(curve: EcCurve, x: &[u8], y: &[u8]) -> Result<(), JwkErro
 
 /// Checks that `encoded`, a 32-octet Ed25519 public key, is a canonical
 /// encoding of a point outside the small-order subgroup (see the module
-/// docs: a torsion component is not refused). Also the key check of an mTLS
-/// Ed25519 key ([`crate::identity`]), whose tests check that it accepts and
-/// refuses the same keys as the recovery key check
-/// (`persistence::registry::recovery_key`, through `ed25519-dalek`) on
+/// docs: a torsion component is not refused). The mTLS Ed25519 key check
+/// ([`crate::identity`]) is instead the recovery key check
+/// (`persistence::registry::recovery_key`, through `ed25519-dalek`, about a
+/// thousand times faster in a release build); its tests use this function
+/// as the oracle and check that the two accept and refuse the same keys on
 /// their probes.
 pub(crate) fn check_ed25519(encoded: &[u8]) -> Result<(), JwkError> {
     let p = ED25519_P;
