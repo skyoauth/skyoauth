@@ -803,8 +803,8 @@ fn a_connection_that_cannot_be_made_is_not_sent() {
             assert_eq!(connects.load(Ordering::SeqCst), 1);
         }
     }
-    // Through the default connector too.
-    let client = LocalClient::new(dir.join("missing"), Timeouts::default());
+    // Through the unchecked connector too.
+    let client = LocalClient::unchecked(dir.join("missing"), Timeouts::default());
     assert!(matches!(
         client.preview(&ResponseRequest {
             operation_id: "o".into(),
@@ -1642,7 +1642,7 @@ fn default_timeouts_are_the_servers_defaults() {
             idle: DEFAULT_IDLE_WAIT,
         }
     );
-    let client = LocalClient::new("/nonexistent", Timeouts::default());
+    let client = LocalClient::unchecked("/nonexistent", Timeouts::default());
     assert_eq!(client.timeouts(), Timeouts::default());
     assert_eq!(SocketPath::new("/a/b").path(), Path::new("/a/b"));
     let retry: Vec<(Op, Retry)> = Op::ALL.iter().map(|op| (*op, op.retry())).collect();
@@ -1673,7 +1673,7 @@ fn debug_and_display_show_no_value() {
         "skyoauth-operator-exchange",
     ];
     let dir = TempDir::new();
-    let client = LocalClient::new(dir.join("SENTINEL-PATH"), Timeouts::default());
+    let client = LocalClient::unchecked(dir.join("SENTINEL-PATH"), Timeouts::default());
     assert_eq!(
         format!("{client:?}"),
         "LocalClient { timeouts: Timeouts { total: 100s, idle: 10s }, .. }"
