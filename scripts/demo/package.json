@@ -3,6 +3,6 @@
   "private": true,
   "description": "Demo walk-through player and renderer in scripts/demo (install with npm ci --ignore-scripts).",
   "dependencies": {
-    "playwright": "1.63.0"
+    "playwright": "1.65.1"
   }
 }
