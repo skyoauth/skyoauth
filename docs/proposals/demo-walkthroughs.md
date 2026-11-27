@@ -346,8 +346,8 @@ others. Rules, on top of every existing rule:
   a file name).
 
 The player shows a chapter as a title card: it clears the terminal, shows the
-title, and clears the caption bar, for `CHAPTER_MS` (a new `timing.js`
-constant, 2000 ms). It is not a caption, so it is not in the captions VTT.
+title, and clears the caption bar, for a duration derived from its title by
+the caption timing rule, floored at 1200 ms and capped at 3000 ms (6.9). It is not a caption, so it is not in the captions VTT.
 
 **6.2 Layout and manifest.**
 
@@ -471,25 +471,30 @@ test, and a mutant the test kills:
 - CI: the wiring test (`workflows.test.mjs`) pins the `check-milestone` step
   and the demo.yml milestone render.
 
-**6.9 Open questions for the lead.**
+**6.9 Decisions on the open questions** (the lead's picks, not user rulings).
 
-1. When one milestone fails to render, do the others still render and upload
-   (the step fails at the end), or does the job stop at the first failure?
-   Section 5 says a failure publishes no video for that milestone, which
-   suggests the first.
-2. Is the chapter title card (2 s) wanted, or only the markers?
-3. Is `CHAPTER_MS` fixed, or derived from the title length like a caption?
-4. Should the milestone video start with a SAMPLE-style caption naming the
-   commit, or is that a wall-clock-free caption the runner writes?
-5. M3 (browser recordings, no transcript) cannot use this join; its chapters
-   need another source (section 2, item 3).
+1. When one milestone fails to render, every milestone is still rendered and
+   what rendered is uploaded; the step fails at the end and lists the
+   failures.
+2. A title card is shown at each chapter start, kept short.
+3. Its duration is derived from the title like a caption (the caption timing
+   rule), with a floor of 1200 ms and a ceiling of 3000 ms; it is not the
+   fixed duration the first draft proposed.
+4. A milestone video opens with one caption naming the milestone and the short
+   commit SHA. The renderer injects it at render time from the environment
+   (`GITHUB_SHA`); it is NOT written in a golden transcript (it would change on
+   every commit). It passes the same secret rules as any caption.
+5. M3 (browser recordings, no transcript) is deferred: nothing is built for it
+   now. It is expected to get its chapters from a small `chapters.json` beside
+   its recordings (a title and a page-clock offset); the format is decided when
+   M3 is scheduled.
 
 **6.10 Implementation breakdown.** Four PRs, each with its tests:
 
 1. `transcript.mjs`: the `chapter` type, the manifest, `check-milestone`, the
    join and the error mapping.
-2. `timing.js`, `player.html`, `vtt.mjs`: `CHAPTER_MS`, the title card, the
-   chapters VTT.
+2. `timing.js`, `player.html`, `vtt.mjs`: the chapter-card duration rule, the title
+   card, the chapters VTT and the injected opening caption.
 3. `render.mjs`: `--milestone`, the ffmpeg chapter metadata, the merged
    `SHA256SUMS`, the e2e test.
 4. CI: the `ci.yml` golden step, the `demo.yml` milestone render and timeout,
